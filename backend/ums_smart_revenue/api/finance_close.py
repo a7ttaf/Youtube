@@ -14,6 +14,10 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.finance.month_close import FinanceMonthCloseEntry, SqlAlchemyFinanceMonthCloseRepository
+from ums_smart_revenue.finance.month_close_readiness import (
+    FinanceCloseReadiness,
+    SqlAlchemyFinanceCloseReadinessService,
+)
 
 
 router = APIRouter(prefix="/finance-close", tags=["finance-close"])
@@ -36,6 +40,12 @@ def current_finance_month_close_repository(
     return SqlAlchemyFinanceMonthCloseRepository(session)
 
 
+def current_finance_close_readiness_service(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyFinanceCloseReadinessService:
+    return SqlAlchemyFinanceCloseReadinessService(session)
+
+
 @router.get("/{month}")
 def get_finance_month_close(
     month: str,
@@ -50,17 +60,37 @@ def get_finance_month_close(
     return close.to_api()
 
 
+@router.get("/{month}/readiness")
+def get_finance_close_readiness(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    readiness_service: Annotated[
+        SqlAlchemyFinanceCloseReadinessService,
+        Depends(current_finance_close_readiness_service),
+    ],
+) -> dict[str, object]:
+    _validate_month(month)
+    _require_permission(user, Permission.LOCK_FINANCE_MONTH, AccessScope.finance_month(month))
+    return readiness_service.check_month(month).to_api()
+
+
 @router.post("/{month}/lock")
 def lock_finance_month(
     month: str,
     payload: FinanceCloseReasonRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
+    readiness_service: Annotated[
+        SqlAlchemyFinanceCloseReadinessService,
+        Depends(current_finance_close_readiness_service),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     _validate_month(month)
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.LOCK_FINANCE_MONTH, scope)
+    readiness = readiness_service.check_month(month)
+    _reject_unready_month(readiness)
     try:
         close = repository.lock_month(month=month, actor_user_id=user.user_id)
     except ValueError as exc:
@@ -154,6 +184,14 @@ def _validate_month(month: str) -> None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="month must use YYYY-MM with a calendar month from 01 to 12",
+        )
+
+
+def _reject_unready_month(readiness: FinanceCloseReadiness) -> None:
+    if not readiness.ready:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=readiness.to_lock_error_detail(),
         )
 
 

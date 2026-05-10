@@ -1,11 +1,17 @@
-from uuid import UUID
+from decimal import Decimal
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
-from ums_smart_revenue.db.finance_models import FinanceBase, FinanceMonthCloseORM
+from ums_smart_revenue.db.finance_models import (
+    FinanceBase,
+    FinanceMonthCloseORM,
+    MonthlyChannelRevenueFactORM,
+    RevenueManualOverrideORM,
+)
 from ums_smart_revenue.db.org_models import OrgBase
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
@@ -109,6 +115,102 @@ def test_finance_admin_cannot_lock_already_locked_month(tmp_path):
 
     assert response.status_code == 409
     assert response.json()["detail"] == "Finance month cannot be locked from its current state"
+
+
+def test_finance_admin_cannot_lock_month_with_pending_manual_override(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            RevenueManualOverrideORM(
+                id=uuid4(),
+                month="2026-03",
+                youtube_channel_id="channel-tv-a",
+                adjustment_revenue_usd=Decimal("125.50"),
+                reason="Pending source correction",
+                created_by=USER_ID,
+            )
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/finance-close/2026-03/lock",
+        headers=auth_headers("finance_admin"),
+        json={"reason": "Should wait for approval"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "message": "Finance month has unresolved close blockers",
+        "blockers": [
+            {
+                "blocker_type": "PENDING_MANUAL_OVERRIDES",
+                "severity": "HIGH",
+                "count": 1,
+                "message": "1 pending manual override requires approval before locking 2026-03.",
+            }
+        ],
+    }
+
+
+def test_finance_close_readiness_reports_reconciliation_variance(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-a",
+                    source_kind="YOUTUBE_CMS",
+                    gross_revenue_usd=Decimal("1000.00"),
+                    views=250000,
+                    watch_time_minutes=Decimal("7200.50"),
+                    confidence_score=Decimal("0.9800"),
+                    imported_by=USER_ID,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-a",
+                    source_kind="ADSENSE",
+                    gross_revenue_usd=Decimal("930.00"),
+                    views=0,
+                    watch_time_minutes=Decimal("0"),
+                    confidence_score=Decimal("0.9000"),
+                    imported_by=USER_ID,
+                ),
+            ]
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    readiness = client.get("/finance-close/2026-03/readiness", headers=auth_headers("finance_admin"))
+    lock_response = client.post(
+        "/finance-close/2026-03/lock",
+        headers=auth_headers("finance_admin"),
+        json={"reason": "Should wait for reconciliation"},
+    )
+
+    assert readiness.status_code == 200
+    assert readiness.json() == {
+        "month": "2026-03",
+        "ready": False,
+        "blockers": [
+            {
+                "blocker_type": "RECONCILIATION_ISSUES",
+                "severity": "HIGH",
+                "count": 1,
+                "message": "1 channel has unresolved reconciliation issues for 2026-03.",
+            }
+        ],
+    }
+    assert lock_response.status_code == 409
+    assert lock_response.json()["detail"]["message"] == "Finance month has unresolved close blockers"
 
 
 def test_finance_viewer_cannot_lock_month(tmp_path):
