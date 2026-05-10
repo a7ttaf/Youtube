@@ -24,10 +24,11 @@ class SqlAlchemyChannelGroupRegistry:
         return self._to_entry(row)
 
     def create_group(self, *, name: str, group_type: str, channel_ids: list[str]) -> ChannelGroupEntry:
+        channel_rows = self._channel_rows_by_external_ids(channel_ids)
         row = ChannelGroupORM(id=uuid4(), name=name, group_type=group_type, active=True)
         self._session.add(row)
         self._session.flush()
-        self._replace_members(row.id, channel_ids)
+        self._replace_member_rows(row.id, channel_rows)
         self._session.flush()
         return self._to_entry(row)
 
@@ -67,12 +68,19 @@ class SqlAlchemyChannelGroupRegistry:
         return self._to_entry(row)
 
     def _replace_members(self, group_id: UUID, channel_ids: list[str]) -> None:
+        self._replace_member_rows(group_id, self._channel_rows_by_external_ids(channel_ids))
+
+    def _replace_member_rows(self, group_id: UUID, channel_rows: list[YouTubeChannelORM]) -> None:
         self._session.execute(delete(ChannelGroupMemberORM).where(ChannelGroupMemberORM.group_id == group_id))
-        for channel in self._channel_rows_by_external_ids(channel_ids):
+        for channel in channel_rows:
             self._session.add(ChannelGroupMemberORM(group_id=group_id, channel_id=channel.id))
 
     def _get_group_row(self, group_id: str) -> ChannelGroupORM | None:
-        return self._session.get(ChannelGroupORM, UUID(group_id))
+        try:
+            group_uuid = UUID(group_id)
+        except (TypeError, ValueError):
+            return None
+        return self._session.get(ChannelGroupORM, group_uuid)
 
     def _require_group_row(self, group_id: str) -> ChannelGroupORM:
         row = self._get_group_row(group_id)

@@ -25,6 +25,7 @@ def test_user_role_assignments_model_has_scope_and_revocation_controls():
         table.columns.keys()
     )
     assert any(index.name == "uq_active_user_role_scope" for index in table.indexes)
+    assert any(index.name == "ix_user_role_assignments_user_id" for index in table.indexes)
 
 
 def test_postgresql_ddl_contains_sensitive_audit_and_connector_tables():

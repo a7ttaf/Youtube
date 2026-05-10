@@ -23,5 +23,14 @@ class FinanceMonthCloseORM(FinanceBase):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
     __table_args__ = (
+        CheckConstraint(
+            "length(month) = 7 AND substr(month, 5, 1) = '-' "
+            "AND substr(month, 1, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 2, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 3, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 4, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
+            name="ck_finance_month_close_month_format",
+        ),
         CheckConstraint("status IN ('OPEN', 'LOCKED')", name="ck_finance_month_close_status"),
     )

@@ -57,6 +57,7 @@ class SqlAlchemyConnectorCredentialRepository:
         encrypted_secret_ref: str,
         actor_user_id: str,
     ) -> ConnectorCredentialEntry:
+        actor_uuid = _parse_uuid(actor_user_id)
         existing = self._session.scalars(
             select(ApiConnectorCredentialORM).where(
                 ApiConnectorCredentialORM.connector_key == connector_key,
@@ -72,8 +73,8 @@ class SqlAlchemyConnectorCredentialRepository:
             account_id=account_id,
             encrypted_secret_ref=encrypted_secret_ref,
             status="active",
-            created_by=_parse_uuid(actor_user_id),
-            updated_by=_parse_uuid(actor_user_id),
+            created_by=actor_uuid,
+            updated_by=actor_uuid,
         )
         self._session.add(row)
         try:
@@ -100,8 +101,8 @@ def is_external_secret_ref(value: str) -> bool:
     return value.startswith(SECRET_REF_PREFIXES)
 
 
-def _parse_uuid(value: str) -> UUID | None:
+def _parse_uuid(value: str) -> UUID:
     try:
         return UUID(value)
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise ValueError("actor_user_id must be a valid UUID") from exc

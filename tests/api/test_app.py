@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.config.version_baseline import STACK_VERSION_BASELINE
 
 
 def test_health_exposes_latest_stable_backend_baseline():
@@ -13,9 +14,9 @@ def test_health_exposes_latest_stable_backend_baseline():
         "status": "ok",
         "service": "ums-smart-revenue",
         "runtime": {
-            "python": "3.14.4",
-            "fastapi": "0.136.1",
-            "pydantic": "2.13.4",
+            "python": STACK_VERSION_BASELINE["runtime"]["python"],
+            "fastapi": STACK_VERSION_BASELINE["backend"]["fastapi"],
+            "pydantic": STACK_VERSION_BASELINE["backend"]["pydantic"],
         },
     }
 
@@ -28,6 +29,7 @@ def test_security_metadata_endpoints_are_available_for_frontend():
         "x-user-email": "user@example.com",
         "x-role": "super_owner",
         "x-scope-type": "global",
+        "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
     }
     roles = client.get("/security/roles", headers=headers)
     permissions = client.get("/security/permissions", headers=headers)

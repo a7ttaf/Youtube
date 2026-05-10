@@ -104,7 +104,7 @@ def create_channel(
             revenue_required=payload.revenue_required,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise _channel_registry_error(exc) from exc
     return channel.to_api()
 
 
@@ -131,10 +131,13 @@ def update_channel_mapping(
             detail=f"Missing permission: {Permission.MANAGE_ORG_MAPPING.value}",
         )
 
-    updated = registry.update_mapping(
-        youtube_channel_id=youtube_channel_id,
-        primary_company_id=payload.primary_company_id,
-    )
+    try:
+        updated = registry.update_mapping(
+            youtube_channel_id=youtube_channel_id,
+            primary_company_id=payload.primary_company_id,
+        )
+    except ValueError as exc:
+        raise _channel_registry_error(exc) from exc
     record = record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -151,3 +154,8 @@ def update_channel_mapping(
     response = updated.to_api()
     response["audit_event"] = audit_record_to_api(record)
     return response
+
+
+def _channel_registry_error(exc: ValueError) -> HTTPException:
+    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT if "valid UUID" in str(exc) else status.HTTP_409_CONFLICT
+    return HTTPException(status_code=status_code, detail=str(exc))

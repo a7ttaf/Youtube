@@ -12,12 +12,13 @@ from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM, Audi
 USER_ID = UUID("00000000-0000-0000-0000-000000004001")
 
 
-def auth_headers(role: str, scope_type: str = "connector", scope_id: str | None = None) -> dict[str, str]:
+def auth_headers(role: str, scope_type: str = "global", scope_id: str | None = None) -> dict[str, str]:
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "connector-user@example.com",
         "x-role": role,
         "x-scope-type": scope_type,
+        "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
     }
     if scope_id is not None:
         headers["x-scope-id"] = scope_id
@@ -114,7 +115,7 @@ def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
 
     response = client.post(
         "/connectors/jobs",
-        headers=auth_headers("revenue_operations_admin", scope_id="youtube_reporting"),
+        headers=auth_headers("revenue_operations_admin", "connector", "youtube_reporting"),
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",

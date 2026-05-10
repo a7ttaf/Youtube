@@ -51,7 +51,10 @@ def record_audit_event(
     request_id: str | None = None,
 ) -> AuditRecord:
     definition = AUDIT_EVENT_DEFINITIONS.get(event_type)
-    if definition and definition.reason_required and not reason:
+    normalized_reason = reason.strip() if reason is not None else None
+    if normalized_reason == "":
+        normalized_reason = None
+    if definition and definition.reason_required and not normalized_reason:
         raise ValueError(f"Audit event {event_type.value} requires a reason")
 
     permission = definition.permission if definition else None
@@ -64,7 +67,7 @@ def record_audit_event(
         scope_type=scope.type.value if scope else None,
         scope_id=scope.id if scope else None,
         request_id=request_id,
-        reason=reason,
+        reason=normalized_reason,
         details=normalized_details,
         sensitive=bool(permission in SENSITIVE_PERMISSIONS),
         permission=permission.value if permission else None,

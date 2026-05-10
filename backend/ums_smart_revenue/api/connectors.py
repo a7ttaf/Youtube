@@ -46,7 +46,7 @@ def list_connector_credentials(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     repository: Annotated[SqlAlchemyConnectorCredentialRepository, Depends(current_connector_repository)],
 ) -> list[dict[str, object]]:
-    _require_connector_permission(user, Permission.MANAGE_CONNECTORS, AccessScope.connector())
+    _require_connector_permission(user, Permission.MANAGE_CONNECTORS, AccessScope.global_scope())
     return [credential.to_api() for credential in repository.list_credentials()]
 
 

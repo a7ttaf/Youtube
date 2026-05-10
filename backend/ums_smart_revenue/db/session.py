@@ -1,4 +1,5 @@
 from collections.abc import Callable, Iterator
+from threading import Lock
 from typing import Optional
 
 from sqlalchemy import Engine, create_engine
@@ -8,6 +9,7 @@ from sqlalchemy.orm import Session, sessionmaker
 SessionFactory = sessionmaker[Session]
 
 _engine_cache: dict[str, Engine] = {}
+_engine_cache_lock = Lock()
 
 
 def build_engine(database_url: str) -> Engine:
@@ -16,9 +18,10 @@ def build_engine(database_url: str) -> Engine:
 
 def build_session_factory(database_url: str, engine: Optional[Engine] = None) -> SessionFactory:
     if engine is None:
-        if database_url not in _engine_cache:
-            _engine_cache[database_url] = build_engine(database_url)
-        engine = _engine_cache[database_url]
+        with _engine_cache_lock:
+            if database_url not in _engine_cache:
+                _engine_cache[database_url] = build_engine(database_url)
+            engine = _engine_cache[database_url]
     return sessionmaker(bind=engine, autoflush=True, expire_on_commit=False)
 
 

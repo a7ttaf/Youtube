@@ -3,7 +3,7 @@
 
 INSERT INTO access_scopes (scope_type, scope_id, label)
 VALUES ('global', NULL, 'Global')
-ON CONFLICT (scope_type, scope_id) DO NOTHING;
+ON CONFLICT DO NOTHING;
 
 INSERT INTO roles (key, label, description, service_only)
 VALUES

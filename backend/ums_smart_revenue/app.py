@@ -34,7 +34,7 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
         description="Numbers-first internal revenue control API for UMS.",
     )
 
-    if resolved_database_url is not None:
+    if resolved_database_url:
         session_factory = build_session_factory(resolved_database_url)
         app.dependency_overrides[current_db_session] = session_dependency(session_factory)
         app.dependency_overrides[current_channel_registry] = sql_channel_registry_from_session

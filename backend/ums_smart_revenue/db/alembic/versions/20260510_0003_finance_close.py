@@ -28,7 +28,15 @@ def upgrade() -> None:
         sa.Column("unlocked_by", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("unlocked_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.CheckConstraint("month ~ '^\\d{4}-\\d{2}$'", name="ck_finance_month_close_month_format"),
+        sa.CheckConstraint(
+            "length(month) = 7 AND substr(month, 5, 1) = '-' "
+            "AND substr(month, 1, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 2, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 3, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 4, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
+            name="ck_finance_month_close_month_format",
+        ),
         sa.CheckConstraint("status IN ('OPEN', 'LOCKED')", name="ck_finance_month_close_status"),
     )
 

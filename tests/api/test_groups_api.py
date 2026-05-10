@@ -25,6 +25,7 @@ def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dic
         "x-user-email": "groups-user@example.com",
         "x-role": role,
         "x-scope-type": scope_type,
+        "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
     }
     if scope_id is not None:
         headers["x-scope-id"] = scope_id
@@ -144,17 +145,18 @@ def test_corporate_admin_can_add_and_remove_group_members_with_audit(tmp_path):
         headers=auth_headers("corporate_admin", "global"),
         json={"channel_ids": ["group-channel-news"], "reason": "Add news channel for corporate group review"},
     )
-    remove_response = client.request(
-        "DELETE",
+    remove_response = client.delete(
         f"/groups/{GROUP_TV_ID}/members/group-channel-tv",
         headers=auth_headers("corporate_admin", "global"),
-        json={"reason": "Remove TV channel after review"},
+        params={"reason": "Remove TV channel after review"},
     )
 
     engine = create_engine(database_url)
     with Session(engine) as session:
         audit_events = session.scalars(
-            select(AuditLogORM).where(AuditLogORM.entity_id == str(GROUP_TV_ID)).order_by(AuditLogORM.created_at)
+            select(AuditLogORM)
+            .where(AuditLogORM.entity_id == str(GROUP_TV_ID))
+            .order_by(AuditLogORM.created_at, AuditLogORM.reason)
         ).all()
         member_channel_ids = session.scalars(
             select(YouTubeChannelORM.youtube_channel_id)
@@ -172,3 +174,18 @@ def test_corporate_admin_can_add_and_remove_group_members_with_audit(tmp_path):
         "Add news channel for corporate group review",
         "Remove TV channel after review",
     ]
+
+
+def test_malformed_group_id_returns_not_found(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.delete(
+        "/groups/not-a-uuid/members/group-channel-tv",
+        headers=auth_headers("corporate_admin", "global"),
+        params={"reason": "Reject malformed group id"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Group not found"

@@ -13,15 +13,16 @@ class UserORM(SecurityBase):
     __tablename__ = "users"
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
-    email: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    email: Mapped[str] = mapped_column(Text, nullable=False)
     display_name: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'active'"))
     is_service_account: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
         CheckConstraint("status IN ('active', 'disabled', 'service')", name="ck_users_status"),
+        Index("uq_users_email_lower", func.lower(email), unique=True),
     )
 
 
@@ -114,6 +115,7 @@ class UserRoleAssignmentORM(SecurityBase):
             unique=True,
             postgresql_where=text("active = true"),
         ),
+        Index("ix_user_role_assignments_user_id", "user_id"),
     )
 
 
@@ -144,6 +146,7 @@ class UserPermissionGrantORM(SecurityBase):
             unique=True,
             postgresql_where=text("active = true"),
         ),
+        Index("ix_user_permission_grants_user_id", "user_id"),
     )
 
 
@@ -159,7 +162,7 @@ class AuditLogORM(SecurityBase):
     scope_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     request_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    details: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False, default=dict)
+    details: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False, default=dict, server_default=text("'{}'"))
     sensitive: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
 
@@ -181,7 +184,7 @@ class ApiConnectorCredentialORM(SecurityBase):
     created_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     updated_by: Mapped[UUID | None] = mapped_column(ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
     __table_args__ = (
         CheckConstraint("status IN ('active', 'disabled', 'rotating', 'failed_auth')", name="ck_connector_status"),

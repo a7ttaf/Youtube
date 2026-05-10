@@ -1,3 +1,4 @@
+import re
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -16,6 +17,7 @@ from ums_smart_revenue.finance.month_close import FinanceMonthCloseEntry, SqlAlc
 
 
 router = APIRouter(prefix="/finance-close", tags=["finance-close"])
+MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
 class FinanceCloseReasonRequest(BaseModel):
@@ -40,6 +42,7 @@ def get_finance_month_close(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
 ) -> dict[str, object]:
+    _validate_month(month)
     _require_permission(user, Permission.VIEW_REVENUE, AccessScope.finance_month(month))
     return repository.get_or_create(month).to_api()
 
@@ -52,9 +55,13 @@ def lock_finance_month(
     repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    _validate_month(month)
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.LOCK_FINANCE_MONTH, scope)
-    close = repository.lock_month(month=month, actor_user_id=user.user_id)
+    try:
+        close = repository.lock_month(month=month, actor_user_id=user.user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     record = _audit_finance_close(
         audit_sink=audit_sink,
         user=user,
@@ -74,9 +81,13 @@ def unlock_finance_month(
     repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    _validate_month(month)
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.UNLOCK_FINANCE_MONTH, scope)
-    close = repository.unlock_month(month=month, actor_user_id=user.user_id)
+    try:
+        close = repository.unlock_month(month=month, actor_user_id=user.user_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     record = _audit_finance_close(
         audit_sink=audit_sink,
         user=user,
@@ -96,6 +107,7 @@ def record_allocation_rule(
     repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    _validate_month(month)
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, scope)
     close = repository.record_allocation_rule(
@@ -119,6 +131,14 @@ def _require_permission(user: UserPrincipal, permission: Permission, scope: Acce
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Missing permission: {permission.value}",
+        )
+
+
+def _validate_month(month: str) -> None:
+    if not MONTH_PATTERN.fullmatch(month):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="month must use YYYY-MM with a calendar month from 01 to 12",
         )
 
 

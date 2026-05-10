@@ -9,6 +9,7 @@ def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dic
         "x-user-email": "user@example.com",
         "x-role": role,
         "x-scope-type": scope_type,
+        "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
     }
     if scope_id is not None:
         headers["x-scope-id"] = scope_id
@@ -62,4 +63,27 @@ def test_guarded_route_requires_auth_headers():
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Missing authentication headers"
+
+
+def test_guarded_route_rejects_untrusted_identity_headers():
+    client = TestClient(create_app())
+
+    headers = auth_headers("super_owner", "global")
+    headers.pop("x-ums-trusted-gateway-token")
+    response = client.get("/revenue/channels/channel-tv-a/authorization-check", headers=headers)
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid trusted gateway token"
+
+
+def test_guarded_route_rejects_non_global_scope_without_id():
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/revenue/channels/channel-tv-a/authorization-check",
+        headers=auth_headers("finance_viewer", "company"),
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "scope_id is required for scope type: company"
 

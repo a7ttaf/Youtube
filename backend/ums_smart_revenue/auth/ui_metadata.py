@@ -4,6 +4,10 @@ from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 
 
 def role_metadata() -> list[dict[str, object]]:
+    missing_role_permissions = set(ROLE_DEFINITIONS) - set(ROLE_PERMISSIONS)
+    if missing_role_permissions:
+        missing = sorted(role.value for role in missing_role_permissions)
+        raise RuntimeError(f"Missing role permission mappings: {missing}")
     return [
         {
             "key": role.value,

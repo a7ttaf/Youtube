@@ -40,6 +40,8 @@ class SqlAlchemyFinanceMonthCloseRepository:
 
     def lock_month(self, *, month: str, actor_user_id: str) -> FinanceMonthCloseEntry:
         row = self._get_or_create_row(month)
+        if row.status == "LOCKED":
+            raise ValueError(f"Finance month is already locked: {month}")
         row.status = "LOCKED"
         row.locked_by = _parse_uuid(actor_user_id)
         row.locked_at = datetime.now(UTC)
@@ -49,6 +51,8 @@ class SqlAlchemyFinanceMonthCloseRepository:
 
     def unlock_month(self, *, month: str, actor_user_id: str) -> FinanceMonthCloseEntry:
         row = self._get_or_create_row(month)
+        if row.status != "LOCKED":
+            raise ValueError(f"Finance month is not locked: {month}")
         row.status = "OPEN"
         row.unlocked_by = _parse_uuid(actor_user_id)
         row.unlocked_at = datetime.now(UTC)

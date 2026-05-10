@@ -63,20 +63,30 @@ def build_org_access_index(
 def load_org_access_index_from_session(session: Session) -> OrgAccessIndex:
     org_units = [
         OrgUnitRow(
-            id=str(unit.id),
-            parent_id=str(unit.parent_id) if unit.parent_id is not None else None,
-            type=unit.type,
-            name=unit.name,
-            active=unit.active,
+            id=str(row.id),
+            parent_id=str(row.parent_id) if row.parent_id is not None else None,
+            type=row.type,
+            name=row.name,
+            active=row.active,
         )
-        for unit in session.scalars(select(OrgUnitORM)).all()
+        for row in session.execute(
+            select(OrgUnitORM.id, OrgUnitORM.parent_id, OrgUnitORM.type, OrgUnitORM.name, OrgUnitORM.active).where(
+                OrgUnitORM.active.is_(True)
+            )
+        ).all()
     ]
     channels = [
         ChannelRegistryRow(
-            youtube_channel_id=channel.youtube_channel_id,
-            primary_org_unit_id=str(channel.primary_org_unit_id) if channel.primary_org_unit_id is not None else None,
-            active=channel.active,
+            youtube_channel_id=row.youtube_channel_id,
+            primary_org_unit_id=str(row.primary_org_unit_id) if row.primary_org_unit_id is not None else None,
+            active=row.active,
         )
-        for channel in session.scalars(select(YouTubeChannelORM)).all()
+        for row in session.execute(
+            select(
+                YouTubeChannelORM.youtube_channel_id,
+                YouTubeChannelORM.primary_org_unit_id,
+                YouTubeChannelORM.active,
+            ).where(YouTubeChannelORM.active.is_(True), YouTubeChannelORM.primary_org_unit_id.is_not(None))
+        ).all()
     ]
     return build_org_access_index(org_units=org_units, channels=channels)

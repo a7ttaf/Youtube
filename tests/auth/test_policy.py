@@ -8,6 +8,8 @@ from ums_smart_revenue.auth.policy import (
     can_export_finance_report,
     can_lock_month,
     can_manage_connectors,
+    can_run_connector_job,
+    can_unlock_month,
     can_view_channel_analytics,
     can_view_channel_revenue,
     can_view_company_revenue,
@@ -118,15 +120,25 @@ def test_finance_admin_can_lock_month_and_change_allocation_rules():
     user = principal(assigned(RoleKey.FINANCE_ADMIN, AccessScope.global_scope()))
 
     assert can_lock_month(user, "2026-03")
+    assert can_unlock_month(user, "2026-03")
     assert can_change_allocation_rule(user, "2026-03")
 
 
 def test_connector_admin_can_manage_connectors_but_revenue_ops_can_only_run_jobs():
-    connector_admin = principal(assigned(RoleKey.CONNECTOR_ADMIN, AccessScope.connector("youtube")))
+    connector_admin = principal(assigned(RoleKey.CONNECTOR_ADMIN, AccessScope.global_scope()))
     revenue_ops = principal(assigned(RoleKey.REVENUE_OPERATIONS_ADMIN, AccessScope.global_scope()))
+    assistant = principal(assigned(RoleKey.ASSISTANT_ANALYST, AccessScope.global_scope()))
 
     assert can_manage_connectors(connector_admin)
     assert not can_manage_connectors(revenue_ops)
+    assert can_run_connector_job(revenue_ops, "youtube")
+    assert not can_run_connector_job(assistant, "youtube")
+
+
+def test_narrow_connector_scope_does_not_grant_global_connector_admin():
+    connector_admin = principal(assigned(RoleKey.CONNECTOR_ADMIN, AccessScope.connector("youtube")))
+
+    assert not can_manage_connectors(connector_admin)
 
 
 def test_graph_finance_view_requires_graph_permission_and_underlying_finance_scope(org_index):

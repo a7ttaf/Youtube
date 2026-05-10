@@ -29,8 +29,8 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.CheckConstraint("status IN ('active', 'disabled', 'service')", name="ck_users_status"),
-        sa.UniqueConstraint("email"),
     )
+    op.create_index("uq_users_email_lower", "users", [sa.text("lower(email)")], unique=True)
 
     op.create_table(
         "roles",
@@ -61,6 +61,10 @@ def upgrade() -> None:
             "scope_type IN ('global', 'sector', 'company', 'channel', 'finance-month', 'export', 'connector', 'graph-read')",
             name="ck_access_scopes_scope_type",
         ),
+        sa.CheckConstraint(
+            "(scope_type = 'global' AND scope_id IS NULL) OR (scope_type <> 'global' AND scope_id IS NOT NULL)",
+            name="ck_access_scopes_scope_id_required_by_type",
+        ),
     )
     op.create_index(
         "uq_access_scopes_scope_type_scope_id",
@@ -70,11 +74,11 @@ def upgrade() -> None:
         postgresql_where=sa.text("scope_id IS NOT NULL"),
     )
     op.create_index(
-        "uq_access_scopes_scope_type_null_scope_id",
+        "uq_access_scopes_global_singleton",
         "access_scopes",
         ["scope_type"],
         unique=True,
-        postgresql_where=sa.text("scope_id IS NULL"),
+        postgresql_where=sa.text("scope_type = 'global' AND scope_id IS NULL"),
     )
 
     op.create_table(
@@ -118,6 +122,7 @@ def upgrade() -> None:
         unique=True,
         postgresql_where=sa.text("active = true"),
     )
+    op.create_index("ix_user_role_assignments_user_id", "user_role_assignments", ["user_id"])
 
     op.create_table(
         "user_permission_grants",
@@ -148,6 +153,7 @@ def upgrade() -> None:
         unique=True,
         postgresql_where=sa.text("active = true"),
     )
+    op.create_index("ix_user_permission_grants_user_id", "user_permission_grants", ["user_id"])
 
     op.create_table(
         "audit_logs",
@@ -196,15 +202,18 @@ def downgrade() -> None:
     op.drop_index("ix_audit_logs_event_created", table_name="audit_logs")
     op.drop_index("ix_audit_logs_user_created", table_name="audit_logs")
     op.drop_table("audit_logs")
+    op.drop_index("ix_user_permission_grants_user_id", table_name="user_permission_grants")
     op.drop_index("uq_active_user_permission_scope", table_name="user_permission_grants")
     op.drop_table("user_permission_grants")
+    op.drop_index("ix_user_role_assignments_user_id", table_name="user_role_assignments")
     op.drop_index("uq_active_user_role_scope", table_name="user_role_assignments")
     op.drop_table("user_role_assignments")
     op.drop_table("role_permission_assignments")
-    op.drop_index("uq_access_scopes_scope_type_null_scope_id", table_name="access_scopes")
+    op.drop_index("uq_access_scopes_global_singleton", table_name="access_scopes")
     op.drop_index("uq_access_scopes_scope_type_scope_id", table_name="access_scopes")
     op.drop_table("access_scopes")
     op.drop_table("permissions")
     op.drop_table("roles")
+    op.drop_index("uq_users_email_lower", table_name="users")
     op.drop_table("users")
 

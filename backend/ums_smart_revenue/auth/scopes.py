@@ -63,13 +63,8 @@ class OrgAccessIndex:
         if target_scope.type == ScopeType.GLOBAL:
             return False
         if granted_scope.type == target_scope.type:
-            if granted_scope.id is None and target_scope.id is not None:
-                if granted_scope.type in (ScopeType.SECTOR, ScopeType.COMPANY, ScopeType.CHANNEL):
-                    return False
-            if granted_scope.id is None:
-                return True
-            if target_scope.id is None:
-                return True
+            if granted_scope.id is None or target_scope.id is None:
+                return granted_scope.id is None and target_scope.id is None
             return granted_scope.id == target_scope.id
         if granted_scope.type == ScopeType.SECTOR and target_scope.type == ScopeType.COMPANY:
             return self.company_sector.get(target_scope.id or "") == granted_scope.id

@@ -208,3 +208,9 @@ SENSITIVE_PERMISSIONS = frozenset(
     if definition.sensitive
 )
 
+
+if set(PERMISSION_DEFINITIONS) != set(Permission):
+    missing = sorted(permission.value for permission in set(Permission) - set(PERMISSION_DEFINITIONS))
+    extra = sorted(permission.value for permission in set(PERMISSION_DEFINITIONS) - set(Permission))
+    raise RuntimeError(f"Permission definition coverage mismatch. missing={missing} extra={extra}")
+

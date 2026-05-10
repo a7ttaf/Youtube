@@ -29,3 +29,9 @@ def test_channel_group_members_have_composite_primary_key():
 
     assert {column.name for column in table.primary_key.columns} == {"group_id", "channel_id"}
 
+
+def test_channel_groups_track_updated_at():
+    table = OrgBase.metadata.tables["channel_groups"]
+
+    assert "updated_at" in table.columns
+

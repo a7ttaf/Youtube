@@ -23,8 +23,12 @@ class PermissionGrant:
 class UserPrincipal:
     user_id: str
     email: str
-    role_assignments: list[RoleAssignment] = field(default_factory=list)
-    direct_permissions: list[PermissionGrant] = field(default_factory=list)
+    role_assignments: tuple[RoleAssignment, ...] = field(default_factory=tuple)
+    direct_permissions: tuple[PermissionGrant, ...] = field(default_factory=tuple)
     is_service_account: bool = False
     disabled: bool = False
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "role_assignments", tuple(self.role_assignments))
+        object.__setattr__(self, "direct_permissions", tuple(self.direct_permissions))
 

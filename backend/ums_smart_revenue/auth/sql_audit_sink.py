@@ -11,10 +11,11 @@ class SqlAlchemyAuditSink:
         self._session = session
 
     def append(self, record: AuditRecord) -> None:
+        user_id = _parse_uuid(record.user_id)
         self._session.add(
             AuditLogORM(
                 id=uuid4(),
-                user_id=_parse_uuid(record.user_id),
+                user_id=user_id,
                 event_type=record.event_type,
                 entity_type=record.entity_type,
                 entity_id=record.entity_id,
@@ -30,8 +31,8 @@ class SqlAlchemyAuditSink:
         self._session.flush()
 
 
-def _parse_uuid(value: str) -> UUID | None:
+def _parse_uuid(value: str) -> UUID:
     try:
         return UUID(value)
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise ValueError(f"Invalid audit user_id: {value!r}") from exc

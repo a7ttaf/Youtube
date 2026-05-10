@@ -101,7 +101,7 @@ def can_view_neo4j_graph(
 
 
 def can_manage_connectors(user: UserPrincipal) -> bool:
-    return has_permission(user, Permission.MANAGE_CONNECTORS, AccessScope.connector())
+    return has_permission(user, Permission.MANAGE_CONNECTORS, AccessScope.global_scope())
 
 
 def can_run_connector_job(user: UserPrincipal, connector_id: str) -> bool:

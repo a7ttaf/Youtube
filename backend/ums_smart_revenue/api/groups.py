@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
@@ -137,8 +137,8 @@ def add_group_members(
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     group = _require_group(registry, group_id)
-    channel_ids = [*group.channel_ids, *payload.channel_ids]
-    _require_manage_group_channels(user=user, channel_ids=list(channel_ids), org_index=org_index)
+    channel_ids = list(dict.fromkeys([*group.channel_ids, *payload.channel_ids]))
+    _require_manage_group_channels(user=user, channel_ids=channel_ids, org_index=org_index)
     updated = registry.add_members(group_id=group_id, channel_ids=payload.channel_ids)
     record = _audit_group_change(
         audit_sink=audit_sink,
@@ -156,7 +156,7 @@ def add_group_members(
 def remove_group_member(
     group_id: str,
     channel_id: str,
-    payload: GroupUpdateRequest,
+    reason: Annotated[str, Query(min_length=1)],
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     registry: Annotated[ChannelGroupRegistryStore, Depends(current_group_registry)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
@@ -169,7 +169,7 @@ def remove_group_member(
         audit_sink=audit_sink,
         user=user,
         group=updated,
-        reason=payload.reason,
+        reason=reason,
         action="member_removed",
     )
     response = updated.to_api()

@@ -5,7 +5,7 @@ CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS users (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-    email text NOT NULL UNIQUE,
+    email text NOT NULL,
     display_name text NOT NULL,
     status text NOT NULL DEFAULT 'active'
         CHECK (status IN ('active', 'disabled', 'service')),
@@ -13,6 +13,9 @@ CREATE TABLE IF NOT EXISTS users (
     created_at timestamptz NOT NULL DEFAULT now(),
     updated_at timestamptz NOT NULL DEFAULT now()
 );
+
+CREATE UNIQUE INDEX IF NOT EXISTS uq_users_email_lower
+    ON users(lower(email));
 
 CREATE TABLE IF NOT EXISTS roles (
     key text PRIMARY KEY,
@@ -89,6 +92,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_active_user_role_scope
     ON user_role_assignments(user_id, role_key, scope_id)
     WHERE active = true;
 
+CREATE INDEX IF NOT EXISTS ix_user_role_assignments_user_id
+    ON user_role_assignments(user_id);
+
 CREATE TABLE IF NOT EXISTS user_permission_grants (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
     user_id uuid NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -109,6 +115,9 @@ CREATE TABLE IF NOT EXISTS user_permission_grants (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_active_user_permission_scope
     ON user_permission_grants(user_id, permission_key, scope_id)
     WHERE active = true;
+
+CREATE INDEX IF NOT EXISTS ix_user_permission_grants_user_id
+    ON user_permission_grants(user_id);
 
 CREATE TABLE IF NOT EXISTS audit_logs (
     id uuid PRIMARY KEY DEFAULT gen_random_uuid(),

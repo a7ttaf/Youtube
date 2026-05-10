@@ -10,6 +10,7 @@ def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dic
         "x-user-email": "user@example.com",
         "x-role": role,
         "x-scope-type": scope_type,
+        "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
     }
     if scope_id is not None:
         headers["x-scope-id"] = scope_id

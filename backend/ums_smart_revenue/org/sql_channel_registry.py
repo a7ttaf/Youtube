@@ -1,6 +1,7 @@
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
@@ -13,7 +14,9 @@ class SqlAlchemyChannelRegistry:
 
     def list_channels(self) -> list[ChannelRegistryEntry]:
         rows = self._session.scalars(
-            select(YouTubeChannelORM).order_by(YouTubeChannelORM.youtube_channel_id)
+            select(YouTubeChannelORM)
+            .where(YouTubeChannelORM.active.is_(True))
+            .order_by(YouTubeChannelORM.youtube_channel_id)
         ).all()
         return [self._to_entry(row) for row in rows]
 
@@ -39,13 +42,17 @@ class SqlAlchemyChannelRegistry:
             id=uuid4(),
             youtube_channel_id=youtube_channel_id,
             channel_name=channel_name,
-            primary_org_unit_id=UUID(primary_company_id) if primary_company_id is not None else None,
+            primary_org_unit_id=_parse_optional_uuid(primary_company_id, "primary_company_id"),
             cms_status=cms_status,
             revenue_required=revenue_required,
             active=True,
         )
         self._session.add(row)
-        self._session.flush()
+        try:
+            self._session.flush()
+        except IntegrityError as exc:
+            self._session.rollback()
+            raise ValueError(f"Channel already exists: {youtube_channel_id}") from exc
         return self._to_entry(row)
 
     def update_mapping(self, *, youtube_channel_id: str, primary_company_id: str | None) -> ChannelRegistryEntry:
@@ -53,7 +60,7 @@ class SqlAlchemyChannelRegistry:
         if row is None:
             raise KeyError(f"Channel not found: {youtube_channel_id}")
 
-        row.primary_org_unit_id = UUID(primary_company_id) if primary_company_id is not None else None
+        row.primary_org_unit_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
         self._session.flush()
         return self._to_entry(row)
 
@@ -72,3 +79,12 @@ class SqlAlchemyChannelRegistry:
             revenue_required=row.revenue_required,
             active=row.active,
         )
+
+
+def _parse_optional_uuid(value: str | None, field_name: str) -> UUID | None:
+    if value is None:
+        return None
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise ValueError(f"{field_name} must be a valid UUID") from exc

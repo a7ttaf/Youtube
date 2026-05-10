@@ -74,6 +74,7 @@ def upgrade() -> None:
         sa.Column("group_type", sa.Text(), nullable=False),
         sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.CheckConstraint(
             "group_type IN ("
             "'HOLDING', 'SECTOR', 'COMPANY', 'TV_BRAND', 'NEWS_BRAND', "

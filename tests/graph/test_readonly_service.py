@@ -3,6 +3,7 @@ import pytest
 from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
 from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
+from ums_smart_revenue.graph.cypher import READ_ONLY_CYPHER, assert_query_is_read_only
 from ums_smart_revenue.graph.readonly_service import GraphAccessDenied, Neo4jReadOnlyService
 
 
@@ -12,13 +13,19 @@ class FakeGraphClient:
 
     def execute_read(self, query_name, parameters):
         assert query_name == "revenue_flow"
-        assert "MERGE" not in query_name
+        assert "MERGE" not in READ_ONLY_CYPHER[query_name].upper()
         return [
             {
                 "company_id": "company-tv-a",
                 "channel_id": "channel-tv-a",
                 "month": parameters["month"],
                 "gross_revenue_usd": 1000,
+            },
+            {
+                "company_id": "company-news-a",
+                "channel_id": "channel-tv-a",
+                "month": parameters["month"],
+                "gross_revenue_usd": 7000,
             },
             {
                 "company_id": "company-news-a",
@@ -83,4 +90,14 @@ def test_revenue_flow_rejects_assistant_without_finance_visibility(org_index):
 
     with pytest.raises(GraphAccessDenied):
         service.revenue_flow(user, AccessScope.company("company-tv-a"), month="2026-03")
+
+
+def test_cypher_read_only_guard_blocks_write_tokens_with_non_space_separators():
+    with pytest.raises(ValueError, match="MERGE"):
+        assert_query_is_read_only("MATCH (n)\nMERGE\t(m:Tmp {id: 1}) RETURN n")
+
+
+def test_cypher_read_only_guard_blocks_procedure_calls():
+    with pytest.raises(ValueError, match="CALL"):
+        assert_query_is_read_only("CALL dbms.components() YIELD name RETURN name")
 

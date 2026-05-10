@@ -58,16 +58,28 @@ class Neo4jReadOnlyService:
 
     def _row_in_scope(self, row: dict[str, object], scope: AccessScope) -> bool:
         channel_id = row.get("channel_id")
-        if isinstance(channel_id, str) and self._org_index.contains(scope, AccessScope.channel(channel_id)):
-            return True
-
         company_id = row.get("company_id")
-        if isinstance(company_id, str) and self._org_index.contains(scope, AccessScope.company(company_id)):
+        sector_id = row.get("sector_id")
+
+        if isinstance(channel_id, str):
+            if not self._org_index.contains(scope, AccessScope.channel(channel_id)):
+                return False
+            expected_company = self._org_index.channel_company.get(channel_id)
+            expected_sector = self._org_index.channel_sector.get(channel_id)
+            if isinstance(company_id, str) and company_id != expected_company:
+                return False
+            if isinstance(sector_id, str) and sector_id != expected_sector:
+                return False
             return True
 
-        sector_id = row.get("sector_id")
-        if isinstance(sector_id, str) and self._org_index.contains(scope, AccessScope.sector(sector_id)):
-            return True
+        if isinstance(company_id, str):
+            if not self._org_index.contains(scope, AccessScope.company(company_id)):
+                return False
+            expected_sector = self._org_index.company_sector.get(company_id)
+            return not isinstance(sector_id, str) or sector_id == expected_sector
+
+        if isinstance(sector_id, str):
+            return self._org_index.contains(scope, AccessScope.sector(sector_id))
 
         return scope.type.value == "global"
 

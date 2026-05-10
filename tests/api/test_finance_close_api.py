@@ -20,6 +20,7 @@ def auth_headers(role: str, scope_type: str = "finance-month", scope_id: str = "
         "x-role": role,
         "x-scope-type": scope_type,
         "x-scope-id": scope_id,
+        "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
     }
 
 
@@ -61,6 +62,39 @@ def test_finance_admin_can_lock_month_with_audit(tmp_path):
     assert audit_log.reason == "Final payment reconciliation completed"
 
 
+def test_finance_close_rejects_invalid_month_path(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/finance-close/2026-19",
+        headers=auth_headers("finance_admin", scope_id="2026-19"),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "month must use YYYY-MM with a calendar month from 01 to 12"
+
+
+def test_finance_admin_cannot_lock_already_locked_month(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(FinanceMonthCloseORM(month="2026-03", status="LOCKED", locked_by=USER_ID))
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/finance-close/2026-03/lock",
+        headers=auth_headers("finance_admin"),
+        json={"reason": "Should be rejected"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Finance month is already locked: 2026-03"
+
+
 def test_finance_viewer_cannot_lock_month(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -99,6 +133,21 @@ def test_finance_approver_can_unlock_month_with_audit(tmp_path):
     assert response.json()["status"] == "OPEN"
     assert close.unlocked_by == USER_ID
     assert audit_log.event_type == "MONTH_UNLOCKED"
+
+
+def test_finance_approver_cannot_unlock_open_month(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/finance-close/2026-03/unlock",
+        headers=auth_headers("finance_approver"),
+        json={"reason": "Should be rejected"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Finance month is not locked: 2026-03"
 
 
 def test_export_operator_cannot_change_allocation_rule(tmp_path):

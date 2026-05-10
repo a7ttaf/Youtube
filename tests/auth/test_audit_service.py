@@ -32,6 +32,42 @@ def test_sensitive_audit_event_requires_reason_when_policy_requires_it():
     assert sink.records == []
 
 
+def test_sensitive_audit_event_rejects_whitespace_reason():
+    sink = InMemoryAuditSink()
+
+    with pytest.raises(ValueError, match="requires a reason"):
+        record_audit_event(
+            sink=sink,
+            actor=principal(),
+            event_type=AuditEventType.MANUAL_OVERRIDE_CREATED,
+            entity_type="channel",
+            entity_id="channel-tv-a",
+            scope=AccessScope.finance_month("2026-03"),
+            reason="   ",
+            details={"field_name": "manual_adjustment_usd"},
+        )
+
+    assert sink.records == []
+
+
+def test_record_audit_event_stores_trimmed_reason():
+    sink = InMemoryAuditSink()
+
+    record = record_audit_event(
+        sink=sink,
+        actor=principal(),
+        event_type=AuditEventType.CHANNEL_UPDATED,
+        entity_type="youtube_channel",
+        entity_id="channel-tv-a",
+        scope=AccessScope.company("company-tv-a"),
+        reason="  Correct ownership mapping  ",
+        details={"field_name": "primary_company_id"},
+    )
+
+    assert record.reason == "Correct ownership mapping"
+    assert sink.records == [record]
+
+
 def test_record_audit_event_marks_sensitive_event_and_scope():
     sink = InMemoryAuditSink()
 

@@ -1,5 +1,7 @@
 """Named read-only Cypher query templates for dashboard graph views."""
 
+import re
+
 
 READ_ONLY_CYPHER: dict[str, str] = {
     "hierarchy": """
@@ -21,9 +23,17 @@ READ_ONLY_CYPHER: dict[str, str] = {
 
 
 def assert_query_is_read_only(query: str) -> None:
-    blocked_tokens = ("CREATE ", "MERGE ", "SET ", "DELETE ", "REMOVE ", "DROP ", "CALL dbms")
-    upper_query = query.upper()
-    for token in blocked_tokens:
-        if token in upper_query:
-            raise ValueError(f"Graph dashboard query is not read-only: found {token.strip()}")
+    blocked_patterns = (
+        r"\bCREATE\b",
+        r"\bMERGE\b",
+        r"\bSET\b",
+        r"\bDELETE\b",
+        r"\bREMOVE\b",
+        r"\bDROP\b",
+        r"\bCALL\b",
+    )
+    for pattern in blocked_patterns:
+        if re.search(pattern, query, flags=re.IGNORECASE):
+            token = pattern.replace(r"\b", "")
+            raise ValueError(f"Graph dashboard query is not read-only: found {token}")
 

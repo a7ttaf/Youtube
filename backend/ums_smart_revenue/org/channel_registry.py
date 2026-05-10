@@ -61,7 +61,7 @@ class ChannelRegistry:
         *,
         youtube_channel_id: str,
         channel_name: str,
-        primary_company_id: str,
+        primary_company_id: str | None,
         cms_status: str,
         revenue_required: bool,
     ) -> ChannelRegistryEntry:
@@ -77,7 +77,7 @@ class ChannelRegistry:
         self._channels[youtube_channel_id] = channel
         return channel
 
-    def update_mapping(self, *, youtube_channel_id: str, primary_company_id: str) -> ChannelRegistryEntry:
+    def update_mapping(self, *, youtube_channel_id: str, primary_company_id: str | None) -> ChannelRegistryEntry:
         existing = self._channels.get(youtube_channel_id)
         if existing is None:
             raise KeyError(youtube_channel_id)
