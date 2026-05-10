@@ -1,7 +1,37 @@
 from fastapi.testclient import TestClient
 
+from ums_smart_revenue.api.channels import current_channel_registry
 from ums_smart_revenue.app import create_app
-from ums_smart_revenue.org.channel_registry import bootstrap_channel_registry
+from ums_smart_revenue.org.bootstrap_registry import BOOTSTRAP_COMPANY_NEWS_ID, BOOTSTRAP_COMPANY_TV_ID
+from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry, bootstrap_channel_registry
+
+
+class StaleUpdateRegistry:
+    def list_channels(self) -> list[ChannelRegistryEntry]:
+        return []
+
+    def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
+        return ChannelRegistryEntry(
+            youtube_channel_id=youtube_channel_id,
+            channel_name="TV A",
+            primary_company_id=BOOTSTRAP_COMPANY_TV_ID,
+            cms_status="UNKNOWN",
+            revenue_required=True,
+        )
+
+    def create_channel(
+        self,
+        *,
+        youtube_channel_id: str,
+        channel_name: str,
+        primary_company_id: str | None,
+        cms_status: str,
+        revenue_required: bool,
+    ) -> ChannelRegistryEntry:
+        raise NotImplementedError
+
+    def update_mapping(self, *, youtube_channel_id: str, primary_company_id: str | None) -> ChannelRegistryEntry:
+        raise KeyError(youtube_channel_id)
 
 
 def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
@@ -22,7 +52,7 @@ def test_company_manager_lists_only_company_channels():
     app.dependency_overrides.clear()
     client = TestClient(app)
 
-    response = client.get("/channels", headers=auth_headers("company_manager", "company", "company-tv-a"))
+    response = client.get("/channels", headers=auth_headers("company_manager", "company", BOOTSTRAP_COMPANY_TV_ID))
 
     assert response.status_code == 200
     assert [channel["youtube_channel_id"] for channel in response.json()] == ["channel-tv-a"]
@@ -33,11 +63,11 @@ def test_assistant_cannot_create_channel():
 
     response = client.post(
         "/channels",
-        headers=auth_headers("assistant_analyst", "company", "company-tv-a"),
+        headers=auth_headers("assistant_analyst", "company", BOOTSTRAP_COMPANY_TV_ID),
         json={
             "youtube_channel_id": "channel-new",
             "channel_name": "New Channel",
-            "primary_company_id": "company-tv-a",
+            "primary_company_id": BOOTSTRAP_COMPANY_TV_ID,
             "cms_status": "UNKNOWN",
             "revenue_required": True,
         },
@@ -52,11 +82,11 @@ def test_data_steward_can_create_channel_inside_assigned_company():
 
     response = client.post(
         "/channels",
-        headers=auth_headers("data_steward", "company", "company-tv-a"),
+        headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
         json={
             "youtube_channel_id": "channel-new",
             "channel_name": "New Channel",
-            "primary_company_id": "company-tv-a",
+            "primary_company_id": BOOTSTRAP_COMPANY_TV_ID,
             "cms_status": "UNKNOWN",
             "revenue_required": True,
         },
@@ -64,7 +94,7 @@ def test_data_steward_can_create_channel_inside_assigned_company():
 
     assert response.status_code == 201
     assert response.json()["youtube_channel_id"] == "channel-new"
-    assert response.json()["primary_company_id"] == "company-tv-a"
+    assert response.json()["primary_company_id"] == BOOTSTRAP_COMPANY_TV_ID
 
 
 def test_data_steward_cannot_create_channel_in_other_company():
@@ -72,11 +102,11 @@ def test_data_steward_cannot_create_channel_in_other_company():
 
     response = client.post(
         "/channels",
-        headers=auth_headers("data_steward", "company", "company-tv-a"),
+        headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
         json={
             "youtube_channel_id": "channel-news-new",
             "channel_name": "News New Channel",
-            "primary_company_id": "company-news-a",
+            "primary_company_id": BOOTSTRAP_COMPANY_NEWS_ID,
             "cms_status": "UNKNOWN",
             "revenue_required": True,
         },
@@ -91,13 +121,13 @@ def test_mapping_change_requires_reason_and_permission():
 
     missing_reason = client.patch(
         "/channels/channel-tv-a/mapping",
-        headers=auth_headers("data_steward", "company", "company-tv-a"),
-        json={"primary_company_id": "company-tv-a"},
+        headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
+        json={"primary_company_id": BOOTSTRAP_COMPANY_TV_ID},
     )
     denied = client.patch(
         "/channels/channel-news-a/mapping",
-        headers=auth_headers("data_steward", "company", "company-tv-a"),
-        json={"primary_company_id": "company-tv-a", "reason": "Fix wrong owner"},
+        headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
+        json={"primary_company_id": BOOTSTRAP_COMPANY_TV_ID, "reason": "Fix wrong owner"},
     )
 
     assert missing_reason.status_code == 422
@@ -111,11 +141,11 @@ def test_mapping_change_is_audited_for_corporate_admin():
     response = client.patch(
         "/channels/channel-tv-a/mapping",
         headers=auth_headers("corporate_admin", "global"),
-        json={"primary_company_id": "company-news-a", "reason": "Corporate remap after ownership transfer"},
+        json={"primary_company_id": BOOTSTRAP_COMPANY_NEWS_ID, "reason": "Corporate remap after ownership transfer"},
     )
 
     assert response.status_code == 200
-    assert response.json()["primary_company_id"] == "company-news-a"
+    assert response.json()["primary_company_id"] == BOOTSTRAP_COMPANY_NEWS_ID
     assert response.json()["audit_event"]["event_type"] == "CHANNEL_UPDATED"
     assert response.json()["audit_event"]["reason"] == "Corporate remap after ownership transfer"
 
@@ -127,10 +157,25 @@ def test_registry_factory_returns_fresh_state_per_app():
     registry_one.create_channel(
         youtube_channel_id="channel-temp",
         channel_name="Temp",
-        primary_company_id="company-tv-a",
+        primary_company_id=BOOTSTRAP_COMPANY_TV_ID,
         cms_status="UNKNOWN",
         revenue_required=True,
     )
 
     assert registry_two.get_channel("channel-temp") is None
+
+
+def test_mapping_change_preserves_404_if_channel_disappears_before_update():
+    app = create_app()
+    app.dependency_overrides[current_channel_registry] = lambda: StaleUpdateRegistry()
+    client = TestClient(app)
+
+    response = client.patch(
+        "/channels/channel-tv-a/mapping",
+        headers=auth_headers("corporate_admin", "global"),
+        json={"primary_company_id": BOOTSTRAP_COMPANY_NEWS_ID, "reason": "Concurrent registry cleanup"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Channel not found"
 

@@ -144,6 +144,8 @@ def update_channel_mapping(
             youtube_channel_id=youtube_channel_id,
             primary_company_id=payload.primary_company_id,
         )
+    except KeyError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found") from exc
     except ChannelRegistryValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
     except ChannelRegistryConflictError as exc:

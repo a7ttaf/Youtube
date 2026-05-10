@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from typing import Protocol
+from uuid import UUID
 
 from ums_smart_revenue.org.bootstrap_registry import BOOTSTRAP_CHANNELS
 
@@ -77,12 +78,13 @@ class ChannelRegistry:
         cms_status: str,
         revenue_required: bool,
     ) -> ChannelRegistryEntry:
+        normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
         if youtube_channel_id in self._channels:
             raise ChannelRegistryConflictError(f"Channel already exists: {youtube_channel_id}")
         channel = ChannelRegistryEntry(
             youtube_channel_id=youtube_channel_id,
             channel_name=channel_name,
-            primary_company_id=primary_company_id,
+            primary_company_id=normalized_company_id,
             cms_status=cms_status,
             revenue_required=revenue_required,
         )
@@ -90,13 +92,14 @@ class ChannelRegistry:
         return channel
 
     def update_mapping(self, *, youtube_channel_id: str, primary_company_id: str | None) -> ChannelRegistryEntry:
+        normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
         existing = self._channels.get(youtube_channel_id)
         if existing is None:
             raise KeyError(youtube_channel_id)
         updated = ChannelRegistryEntry(
             youtube_channel_id=existing.youtube_channel_id,
             channel_name=existing.channel_name,
-            primary_company_id=primary_company_id,
+            primary_company_id=normalized_company_id,
             cms_status=existing.cms_status,
             revenue_required=existing.revenue_required,
             active=existing.active,
@@ -118,3 +121,12 @@ def bootstrap_channel_registry() -> ChannelRegistry:
         for channel in BOOTSTRAP_CHANNELS
     ]
     return ChannelRegistry(channels)
+
+
+def _parse_optional_uuid(value: str | None, field_name: str) -> str | None:
+    if value is None:
+        return None
+    try:
+        return str(UUID(value))
+    except ValueError as exc:
+        raise ChannelRegistryValidationError(f"{field_name} must be a valid UUID") from exc

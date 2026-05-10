@@ -16,6 +16,7 @@ SECRET_REF_PREFIXES = (
     "vault://",
     "kms://",
 )
+CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT = "uq_api_connector_credentials_connector_account"
 
 
 @dataclass(frozen=True)
@@ -81,9 +82,11 @@ class SqlAlchemyConnectorCredentialRepository:
             self._session.flush()
         except IntegrityError as exc:
             self._session.rollback()
-            raise ValueError(
-                f"Connector credential already exists: {connector_key}/{account_id}"
-            ) from exc
+            if _is_duplicate_credential_integrity_error(exc):
+                raise ValueError(
+                    f"Connector credential already exists: {connector_key}/{account_id}"
+                ) from exc
+            raise
         return self._to_entry(row)
 
     @staticmethod
@@ -106,3 +109,17 @@ def _parse_uuid(value: str) -> UUID:
         return UUID(value)
     except ValueError as exc:
         raise ValueError("actor_user_id must be a valid UUID") from exc
+
+
+def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:
+    diag = getattr(getattr(exc, "orig", None), "diag", None)
+    constraint_name = getattr(diag, "constraint_name", None)
+    if constraint_name == CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT:
+        return True
+
+    error_text = f"{exc.orig!s} {exc!s}"
+    return (
+        CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT in error_text
+        or "UNIQUE constraint failed: api_connector_credentials.connector_key, api_connector_credentials.account_id"
+        in error_text
+    )

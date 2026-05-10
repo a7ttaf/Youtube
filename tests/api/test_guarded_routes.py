@@ -1,6 +1,7 @@
 from fastapi.testclient import TestClient
 
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.org.bootstrap_registry import BOOTSTRAP_COMPANY_TV_ID
 
 
 def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
@@ -21,7 +22,7 @@ def test_guarded_revenue_route_rejects_assistant_without_finance_access():
 
     response = client.get(
         "/revenue/channels/channel-tv-a/authorization-check",
-        headers=auth_headers("assistant_analyst", "company", "company-tv-a"),
+        headers=auth_headers("assistant_analyst", "company", BOOTSTRAP_COMPANY_TV_ID),
     )
 
     assert response.status_code == 403
@@ -33,7 +34,7 @@ def test_guarded_revenue_route_allows_scoped_finance_viewer():
 
     response = client.get(
         "/revenue/channels/channel-tv-a/authorization-check",
-        headers=auth_headers("finance_viewer", "company", "company-tv-a"),
+        headers=auth_headers("finance_viewer", "company", BOOTSTRAP_COMPANY_TV_ID),
     )
 
     assert response.status_code == 200
@@ -49,7 +50,7 @@ def test_guarded_revenue_route_rejects_finance_viewer_outside_scope():
 
     response = client.get(
         "/revenue/channels/channel-news-a/authorization-check",
-        headers=auth_headers("finance_viewer", "company", "company-tv-a"),
+        headers=auth_headers("finance_viewer", "company", BOOTSTRAP_COMPANY_TV_ID),
     )
 
     assert response.status_code == 403

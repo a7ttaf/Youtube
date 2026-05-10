@@ -2,9 +2,11 @@ from uuid import UUID
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.connectors.credentials import _is_duplicate_credential_integrity_error
 from ums_smart_revenue.db.org_models import OrgBase
 from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM, AuditLogORM, SecurityBase, UserORM
 
@@ -152,3 +154,17 @@ def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
     assert audit_log.event_type == "CONNECTOR_JOB_RUN"
     assert audit_log.scope_type == "connector"
     assert audit_log.scope_id == "youtube_reporting"
+
+
+def test_connector_credential_integrity_error_classifier_uses_duplicate_constraint_only():
+    class DuplicateDiag:
+        constraint_name = "uq_api_connector_credentials_connector_account"
+
+    class DuplicateOrig(Exception):
+        diag = DuplicateDiag()
+
+    duplicate_error = IntegrityError("insert", {}, DuplicateOrig("duplicate credential"))
+    foreign_key_error = IntegrityError("insert", {}, Exception("FOREIGN KEY constraint failed"))
+
+    assert _is_duplicate_credential_integrity_error(duplicate_error)
+    assert not _is_duplicate_credential_integrity_error(foreign_key_error)
