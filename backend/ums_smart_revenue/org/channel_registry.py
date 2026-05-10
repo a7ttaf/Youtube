@@ -67,7 +67,10 @@ class ChannelRegistry:
         self._channels = {channel.youtube_channel_id: channel for channel in channels or []}
 
     def list_channels(self) -> list[ChannelRegistryEntry]:
-        return sorted(self._channels.values(), key=lambda channel: channel.youtube_channel_id)
+        return sorted(
+            [channel for channel in self._channels.values() if channel.active],
+            key=lambda channel: channel.youtube_channel_id,
+        )
 
     def list_channels_by_ids(self, youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
         return sorted(

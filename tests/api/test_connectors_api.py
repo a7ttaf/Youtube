@@ -109,6 +109,28 @@ def test_connector_credentials_reject_blank_required_strings(tmp_path):
     assert response.status_code == 422
 
 
+def test_connector_credentials_reject_malformed_actor_id(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers("connector_admin")
+    headers["x-user-id"] = "not-a-uuid"
+
+    response = client.post(
+        "/connectors/credentials",
+        headers=headers,
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "encrypted_secret_ref": "secret-manager://ums/youtube-reporting/content-owner-1",
+            "reason": "Register OAuth credential reference",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "actor_user_id must be a valid UUID"
+
+
 def test_assistant_cannot_create_connector_credential(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

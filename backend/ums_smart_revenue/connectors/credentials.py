@@ -37,6 +37,18 @@ class ConnectorCredentialEntry:
         }
 
 
+class ConnectorCredentialError(ValueError):
+    pass
+
+
+class ConnectorCredentialConflictError(ConnectorCredentialError):
+    pass
+
+
+class ConnectorCredentialValidationError(ConnectorCredentialError):
+    pass
+
+
 class SqlAlchemyConnectorCredentialRepository:
     def __init__(self, session: Session):
         self._session = session
@@ -66,7 +78,9 @@ class SqlAlchemyConnectorCredentialRepository:
             )
         ).one_or_none()
         if existing is not None:
-            raise ValueError(f"Connector credential already exists: {connector_key}/{account_id}")
+            raise ConnectorCredentialConflictError(
+                f"Connector credential already exists: {connector_key}/{account_id}"
+            )
 
         row = ApiConnectorCredentialORM(
             id=uuid4(),
@@ -83,7 +97,7 @@ class SqlAlchemyConnectorCredentialRepository:
         except IntegrityError as exc:
             self._session.rollback()
             if _is_duplicate_credential_integrity_error(exc):
-                raise ValueError(
+                raise ConnectorCredentialConflictError(
                     f"Connector credential already exists: {connector_key}/{account_id}"
                 ) from exc
             raise
@@ -108,7 +122,7 @@ def _parse_uuid(value: str) -> UUID:
     try:
         return UUID(value)
     except ValueError as exc:
-        raise ValueError("actor_user_id must be a valid UUID") from exc
+        raise ConnectorCredentialValidationError("actor_user_id must be a valid UUID") from exc
 
 
 def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:

@@ -14,6 +14,8 @@ from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.connectors.credentials import (
     ConnectorCredentialEntry,
+    ConnectorCredentialConflictError,
+    ConnectorCredentialValidationError,
     SqlAlchemyConnectorCredentialRepository,
     is_external_secret_ref,
 )
@@ -83,7 +85,9 @@ def create_connector_credential(
             encrypted_secret_ref=payload.encrypted_secret_ref,
             actor_user_id=user.user_id,
         )
-    except ValueError as exc:
+    except ConnectorCredentialValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    except ConnectorCredentialConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Connector credential already exists") from exc
 
     record = _audit_connector_change(
