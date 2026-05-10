@@ -21,6 +21,8 @@ Define initial API endpoints for the UMS Smart Revenue Control Center.
 /audit
 ```
 
+The `/connectors` group is part of the implemented API surface and is detailed in the Connectors section below.
+
 ## Example endpoints
 
 ### Channels
@@ -91,7 +93,12 @@ Connector credential responses expose metadata only, never raw credential materi
 POST /reports/youtube/sync
 GET /reports/youtube/runs
 GET /reports/youtube/runs/{run_id}
+POST /reports/raw-files
+GET /reports/raw-files?source=youtube_reporting&report_month=2026-03&limit=50&offset=0
+GET /reports/raw-files/{raw_file_id}
 ```
+
+Raw report metadata records the immutable file reference before parsing. `POST /reports/raw-files` requires `source`, `report_type`, `report_month`, `storage_uri`, `checksum`, `parse_status`, and `reason`; responses include `id`, `source`, `report_type`, `report_month`, `storage_uri`, `checksum`, `parse_status`, `downloaded_by`, `downloaded_at`, and `audit_event`. `GET /reports/raw-files` is offset-paginated with `limit` capped at `100`, optional `source`, `report_type`, and `report_month` filters, and returns `items` plus `pagination.limit`, `pagination.offset`, `pagination.returned`, and `pagination.has_more`.
 
 ### Exports
 
@@ -123,7 +130,7 @@ GET /audit/events?page=1&page_size=50
 
 Audit event reads require `audit.view`. Sensitive audit `details` are masked unless the caller also has `audit.view_sensitive_payloads`. Audit reads are themselves recorded as `AUDIT_LOG_VIEWED`.
 
-`GET /audit/events` follows the same pagination contract as `GET /exports`: `page` defaults to `1`, `page_size` defaults to `50`, and `page_size` is capped at `100`. Older unpaginated examples are outdated; clients must iterate `next_link` or increment `page` until no next page is returned.
+`GET /audit/events` uses offset pagination: `limit` defaults to `50`, `offset` defaults to `0`, and `limit` is capped at `100`. Older unpaginated examples are outdated; clients must keep incrementing `offset` by the returned item count while `pagination.has_more` is true. `AUDIT_LOG_VIEWED` records created by audit reads are stored, but this listing excludes them from the paginated result set so read-generated audit entries cannot shift the pages a client is iterating. `audit.view` and `audit.view_sensitive_payloads` only affect visibility within that filtered result set.
 
 ### Graph
 

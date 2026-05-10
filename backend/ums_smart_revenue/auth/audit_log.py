@@ -70,6 +70,7 @@ class SqlAlchemyAuditLogRepository:
         event_type: str | None = None,
         entity_type: str | None = None,
         entity_id: str | None = None,
+        exclude_event_type: str | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> AuditLogPage:
@@ -81,6 +82,10 @@ class SqlAlchemyAuditLogRepository:
         statement = select(AuditLogORM).order_by(AuditLogORM.created_at.desc(), AuditLogORM.id.desc())
         if event_type is not None:
             statement = statement.where(AuditLogORM.event_type == _normalize_required_string(event_type, "event_type"))
+        if exclude_event_type is not None:
+            statement = statement.where(
+                AuditLogORM.event_type != _normalize_required_string(exclude_event_type, "exclude_event_type")
+            )
         if entity_type is not None:
             statement = statement.where(AuditLogORM.entity_type == _normalize_required_string(entity_type, "entity_type"))
         if entity_id is not None:

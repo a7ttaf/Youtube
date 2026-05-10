@@ -74,6 +74,20 @@ def test_revenue_fact_repository_rejects_invalid_metric_ranges():
                 actor_user_id=USER_ID,
             )
 
+        with pytest.raises(RevenueFactValidationError, match="confidence_score must be between 0 and 1"):
+            repository.record_fact(
+                month="2026-03",
+                youtube_channel_id="channel-tv-a",
+                source_kind="YOUTUBE_CMS",
+                source_report_id=None,
+                gross_revenue_usd=Decimal("1000.00"),
+                net_revenue_usd=None,
+                views=1,
+                watch_time_minutes=Decimal("0"),
+                confidence_score=Decimal("-0.0001"),
+                actor_user_id=USER_ID,
+            )
+
 
 def test_revenue_fact_repository_rejects_invalid_amounts_and_non_finite_metrics():
     engine = create_engine("sqlite+pysqlite:///:memory:")

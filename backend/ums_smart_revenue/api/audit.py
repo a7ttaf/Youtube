@@ -46,6 +46,7 @@ def list_audit_events(
             event_type=event_type,
             entity_type=entity_type,
             entity_id=entity_id,
+            exclude_event_type=AuditEventType.AUDIT_LOG_VIEWED.value,
             limit=limit,
             offset=offset,
         )

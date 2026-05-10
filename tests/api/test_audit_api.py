@@ -85,6 +85,10 @@ def test_audit_viewer_lists_audit_events_with_sensitive_details_masked(tmp_path)
     assert response.json()["audit_event"]["event_type"] == "AUDIT_LOG_VIEWED"
     assert audit_events[-1].event_type == "AUDIT_LOG_VIEWED"
 
+    next_response = client.get("/audit/events?limit=10&offset=0", headers=auth_headers("audit_viewer"))
+
+    assert [item["event_type"] for item in next_response.json()["items"]] == ["REVENUE_VIEWED", "LOGIN"]
+
 
 def test_super_owner_can_view_sensitive_audit_details(tmp_path):
     database_url = build_database_url(tmp_path)
