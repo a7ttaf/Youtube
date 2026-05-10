@@ -210,7 +210,16 @@ def test_finance_close_readiness_reports_reconciliation_variance(tmp_path):
         ],
     }
     assert lock_response.status_code == 409
-    assert lock_response.json()["detail"]["message"] == "Finance month has unresolved close blockers"
+    lock_detail = lock_response.json()["detail"]
+    assert lock_detail["message"] == "Finance month has unresolved close blockers"
+    assert lock_detail["blockers"] == [
+        {
+            "blocker_type": "RECONCILIATION_ISSUES",
+            "severity": "HIGH",
+            "count": 1,
+            "message": "1 channel has unresolved reconciliation issues for 2026-03.",
+        }
+    ]
 
 
 def test_finance_viewer_cannot_lock_month(tmp_path):

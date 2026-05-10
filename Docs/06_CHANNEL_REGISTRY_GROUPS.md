@@ -22,6 +22,7 @@ primary_sector_id
 cms_status
 content_owner_id
 revenue_required
+revenue_source_status
 active
 last_metadata_sync_at
 last_revenue_sync_at

@@ -43,16 +43,22 @@ def build_adjusted_revenue_summary(
     fact_list = sorted(facts, key=lambda fact: (SOURCE_PRIORITY.get(fact.source_kind, 99), fact.source_kind))
     override_list = list(manual_overrides)
     if fact_list:
-        primary = fact_list[0]
-        resolved_month = primary.month
-        resolved_channel_id = primary.youtube_channel_id
-        primary_source_kind = primary.source_kind
-        baseline = primary.gross_revenue_usd
+        resolved_month = month or fact_list[0].month
+        resolved_channel_id = youtube_channel_id or fact_list[0].youtube_channel_id
     else:
         if month is None or youtube_channel_id is None:
             raise ValueError("month and youtube_channel_id are required when no revenue facts are provided")
         resolved_month = month
         resolved_channel_id = youtube_channel_id
+
+    _validate_same_period_and_channel(fact_list, month=resolved_month, youtube_channel_id=resolved_channel_id)
+    _validate_same_period_and_channel(override_list, month=resolved_month, youtube_channel_id=resolved_channel_id)
+
+    if fact_list:
+        primary = fact_list[0]
+        primary_source_kind = primary.source_kind
+        baseline = primary.gross_revenue_usd
+    else:
         primary_source_kind = None
         baseline = Decimal("0")
 
@@ -60,7 +66,7 @@ def build_adjusted_revenue_summary(
     pending = [override for override in override_list if override.status == "PENDING"]
     approved_total = sum((override.adjustment_revenue_usd for override in approved), Decimal("0"))
     adjusted = baseline + approved_total
-    if approved_total != 0:
+    if approved:
         summary_status = "ADJUSTED"
     elif pending:
         summary_status = "PENDING_OVERRIDE_REVIEW"
@@ -86,3 +92,14 @@ def _decimal_to_api(value: Decimal) -> str:
     if normalized == normalized.to_integral():
         return format(normalized, "f")
     return format(normalized, "f").rstrip("0").rstrip(".")
+
+
+def _validate_same_period_and_channel(
+    entries: Iterable[RevenueFactEntry | RevenueManualOverrideEntry],
+    *,
+    month: str,
+    youtube_channel_id: str,
+) -> None:
+    for entry in entries:
+        if entry.month != month or entry.youtube_channel_id != youtube_channel_id:
+            raise ValueError("Cannot aggregate revenue summary with inconsistent month/channel")

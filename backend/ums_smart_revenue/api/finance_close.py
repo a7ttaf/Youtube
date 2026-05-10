@@ -13,9 +13,12 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
-from ums_smart_revenue.finance.month_close import FinanceMonthCloseEntry, SqlAlchemyFinanceMonthCloseRepository
+from ums_smart_revenue.finance.month_close import (
+    FinanceMonthCloseEntry,
+    FinanceMonthCloseReadinessError,
+    SqlAlchemyFinanceMonthCloseRepository,
+)
 from ums_smart_revenue.finance.month_close_readiness import (
-    FinanceCloseReadiness,
     SqlAlchemyFinanceCloseReadinessService,
 )
 
@@ -80,19 +83,18 @@ def lock_finance_month(
     payload: FinanceCloseReasonRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
-    readiness_service: Annotated[
-        SqlAlchemyFinanceCloseReadinessService,
-        Depends(current_finance_close_readiness_service),
-    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     _validate_month(month)
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.LOCK_FINANCE_MONTH, scope)
-    readiness = readiness_service.check_month(month)
-    _reject_unready_month(readiness)
     try:
         close = repository.lock_month(month=month, actor_user_id=user.user_id)
+    except FinanceMonthCloseReadinessError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=exc.readiness.to_lock_error_detail(),
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -184,14 +186,6 @@ def _validate_month(month: str) -> None:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="month must use YYYY-MM with a calendar month from 01 to 12",
-        )
-
-
-def _reject_unready_month(readiness: FinanceCloseReadiness) -> None:
-    if not readiness.ready:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=readiness.to_lock_error_detail(),
         )
 
 

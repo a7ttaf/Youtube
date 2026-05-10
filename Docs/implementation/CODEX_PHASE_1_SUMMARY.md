@@ -158,6 +158,8 @@ Fourteenth continuation update:
 - `backend/ums_smart_revenue/db/alembic/versions/20260510_0001_security_foundation.py`
 - `backend/ums_smart_revenue/db/alembic/versions/20260510_0002_org_registry.py`
 - `backend/ums_smart_revenue/db/alembic/versions/20260510_0003_finance_close.py`
+- `backend/ums_smart_revenue/db/alembic/versions/20260510_0004_revenue_facts.py`
+- `backend/ums_smart_revenue/db/alembic/versions/20260510_0005_manual_overrides.py`
 - `backend/ums_smart_revenue/db/alembic/versions/20260510_0006_raw_report_files.py`
 - `backend/ums_smart_revenue/db/alembic/versions/20260510_0007_number_explanations.py`
 - `backend/ums_smart_revenue/db/alembic/versions/20260510_0008_export_jobs.py`

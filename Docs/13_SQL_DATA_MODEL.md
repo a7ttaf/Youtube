@@ -43,9 +43,11 @@ channel_group_members (
 
 ## Revenue tables
 
+Canonical persisted month values use `text` in `YYYY-MM` format across operational, revenue, explanation, raw-report, and export tables. API payloads use the same representation.
+
 ```sql
 revenue_monthly_channel (
-  month date,
+  month text,
   channel_id uuid,
   gross_revenue_usd numeric,
   adjustments_usd numeric,
@@ -59,7 +61,7 @@ revenue_monthly_channel (
 );
 
 tax_monthly_channel (
-  month date,
+  month text,
   channel_id uuid,
   tax_withheld_usd numeric,
   tax_rate numeric,
@@ -70,7 +72,7 @@ tax_monthly_channel (
 
 adsense_payments (
   id uuid primary key,
-  month date,
+  month text,
   payment_name text,
   payment_date date,
   payment_amount numeric,
@@ -80,7 +82,7 @@ adsense_payments (
 );
 
 finance_month_close (
-  month date primary key,
+  month text primary key,
   adsense_payment_amount_usd numeric,
   bank_received_amount numeric,
   bank_currency text,
@@ -101,7 +103,7 @@ finance_month_close (
 -- close-control API.
 
 channel_net_revenue (
-  month date,
+  month text,
   channel_id uuid,
   gross_revenue_usd numeric,
   tax_usd numeric,
@@ -120,7 +122,7 @@ channel_net_revenue (
 ```sql
 number_explanations (
   id uuid primary key,
-  month date,
+  month text,
   entity_type text,
   entity_id text,
   metric text,
@@ -135,7 +137,7 @@ number_explanations (
 
 manual_overrides (
   id uuid primary key,
-  month date,
+  month text,
   entity_type text,
   entity_id text,
   field_name text,
@@ -168,7 +170,7 @@ raw_report_files (
   id uuid primary key,
   source text,
   report_type text,
-  report_month date,
+  report_month text,
   file_url text,
   checksum text,
   downloaded_at timestamp,

@@ -21,7 +21,16 @@ def upgrade() -> None:
         "revenue_manual_overrides",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
         sa.Column("month", sa.Text(), nullable=False),
-        sa.Column("youtube_channel_id", sa.Text(), nullable=False),
+        sa.Column(
+            "youtube_channel_id",
+            sa.Text(),
+            sa.ForeignKey(
+                "youtube_channels.youtube_channel_id",
+                name="fk_revenue_manual_overrides_youtube_channel_id",
+                ondelete="RESTRICT",
+            ),
+            nullable=False,
+        ),
         sa.Column("adjustment_revenue_usd", sa.Numeric(18, 6), nullable=False),
         sa.Column("reason", sa.Text(), nullable=False),
         sa.Column("status", sa.Text(), nullable=False, server_default=sa.text("'PENDING'")),

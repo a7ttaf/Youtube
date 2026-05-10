@@ -21,8 +21,10 @@ Dashboard users must call backend `/graph/*` APIs. The backend:
 | `neo4j_admin` | Technical administration only. Not used by application request handlers. |
 
 ## Query Rules
-- Dashboard query names must resolve to vetted read-only Cypher templates.
-- Query text must reject write tokens such as `CREATE`, `MERGE`, `SET`, `DELETE`, `REMOVE`, and `DROP`.
+- Dashboard query names must resolve only to pre-approved, allowlisted, named Cypher templates.
+- Dashboard requests must never submit freeform Cypher text.
+- Backend code must reject any dashboard query path that attempts procedure execution, including `CALL` or procedure-style template content.
+- Backend template validation must reject write tokens such as `CREATE`, `MERGE`, `SET`, `DELETE`, `REMOVE`, and `DROP`.
 - Scope parameters are mandatory for organization-specific graph views.
 - Finance graph views cannot be served to users who only have analytics permissions.
 - Backend filtering remains required even when Cypher includes scope filters.

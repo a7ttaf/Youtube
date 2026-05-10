@@ -1,6 +1,8 @@
 # UMS Latest Stable Version Baseline
 
 ## Policy
+Baseline verified: `2026-05-10T20:34:52Z` by Codex review agent.
+
 Use latest stable/LTS runtime versions and current stable package releases at the time this baseline was checked. Do not use preview, alpha, beta, release-candidate, canary, or experimental releases for production foundations.
 
 For this project:
@@ -48,6 +50,8 @@ For this project:
 | Playwright | `1.59.1` |
 
 ## Checked Sources
+Checked on: `2026-05-10T20:34:52Z` (UTC)
+
 - Python downloads page: `https://www.python.org/downloads/`
 - Node.js releases page: `https://nodejs.org/en/about/releases/`
 - PostgreSQL home/releases page: `https://www.postgresql.org/`

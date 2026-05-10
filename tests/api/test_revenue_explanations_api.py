@@ -105,7 +105,7 @@ def test_finance_viewer_gets_adjusted_revenue_explanation_with_audit_and_snapsho
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
 
-    response = client.get(
+    response = client.post(
         "/revenue/channels/channel-tv-a/months/2026-03/explain?metric=adjusted_gross_revenue_usd",
         headers=auth_headers("finance_viewer", scope_id=str(COMPANY_ID)),
     )
@@ -154,7 +154,7 @@ def test_assistant_cannot_get_revenue_explanation(tmp_path):
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
 
-    response = client.get(
+    response = client.post(
         "/revenue/channels/channel-tv-a/months/2026-03/explain?metric=adjusted_gross_revenue_usd",
         headers=auth_headers("assistant_analyst", scope_id=str(COMPANY_ID)),
     )
@@ -168,7 +168,7 @@ def test_revenue_explanation_rejects_unsupported_metric(tmp_path):
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
 
-    response = client.get(
+    response = client.post(
         "/revenue/channels/channel-tv-a/months/2026-03/explain?metric=net_revenue_usd",
         headers=auth_headers("finance_viewer", scope_id=str(COMPANY_ID)),
     )

@@ -30,9 +30,10 @@
   - `ba95abf Add adjusted revenue summary`
   - `abe884c Add finance close readiness gate`
   - `545e20c Restore UMS planning docs and mockups`
-- Full suite with workspace temp before this stabilization pass: `121 passed`.
-- Full suite after the focused hardening pass: `125 passed`.
-- Default temp pytest run fails from `PermissionError` on `C:\Users\Mrmah\AppData\Local\Temp\pytest-of-Mrmah`, not from application assertions.
+- Historical snapshot before this stabilization pass: `121 passed` on 2026-05-10 before the focused hardening pass.
+- Historical snapshot after the focused hardening pass: `125 passed` on 2026-05-10.
+- Latest documented full suite after audit-log APIs: `154 passed` on 2026-05-10.
+- Default temp pytest run fails from `PermissionError` on `%TEMP%\pytest-of-<USER>`, not from application assertions.
 
 ## Files Under Review
 

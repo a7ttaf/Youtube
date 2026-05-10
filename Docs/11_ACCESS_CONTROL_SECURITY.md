@@ -52,6 +52,8 @@ neo4j_admin           # technical admin only
 
 ## Audit events
 
+The catalog below mirrors the current emitted event constants in `backend/ums_smart_revenue/auth/audit.py`.
+
 ```text
 LOGIN
 LOGOUT
@@ -64,8 +66,16 @@ MONTH_CLOSE_UPDATED
 MONTH_LOCKED
 MONTH_UNLOCKED
 MANUAL_OVERRIDE_CREATED
+MANUAL_OVERRIDE_APPROVED
+ALLOCATION_RULE_CHANGED
 EXPORT_CREATED
 USER_ROLE_CHANGED
+CONNECTOR_JOB_RUN
+CONNECTOR_SETTINGS_CHANGED
+RAW_FILE_VIEWED
+REVENUE_VIEWED
+GRAPH_FINANCE_VIEWED
+AUDIT_LOG_VIEWED
 ```
 
 ## Acceptance checks

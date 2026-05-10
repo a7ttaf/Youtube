@@ -13,4 +13,5 @@ def test_revenue_fact_migration_creates_monthly_fact_table():
     assert 'down_revision = "20260510_0003"' in migration
     assert '"monthly_channel_revenue_facts"' in migration
     assert '"gross_revenue_usd"' in migration
+    assert "fk_monthly_channel_revenue_facts_youtube_channel_id" in migration
     assert '"uq_monthly_channel_revenue_source"' in migration

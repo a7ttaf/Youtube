@@ -13,4 +13,5 @@ def test_manual_override_migration_creates_revenue_override_table():
     assert 'down_revision = "20260510_0004"' in migration
     assert '"revenue_manual_overrides"' in migration
     assert '"adjustment_revenue_usd"' in migration
+    assert "fk_revenue_manual_overrides_youtube_channel_id" in migration
     assert "ck_revenue_manual_overrides_status" in migration

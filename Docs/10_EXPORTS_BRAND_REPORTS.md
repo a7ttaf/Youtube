@@ -89,8 +89,12 @@ currency
 requested_by
 status
 file_url
+month_lock_status
+include_confidence_notes
+include_manual_override_notes
 created_at
 completed_at
+updated_at
 ```
 
 Implementation note:

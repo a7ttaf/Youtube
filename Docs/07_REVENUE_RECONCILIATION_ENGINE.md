@@ -24,6 +24,8 @@ deduction_amount = gross_revenue - net_revenue
 deduction_percentage = deduction_amount / gross_revenue * 100
 ```
 
+When `gross_revenue` is `0`, `deduction_amount` is still `gross_revenue - net_revenue`, but `deduction_percentage` must be returned as `0.0000` because the percentage is not computable from a zero denominator. Persist and return money values as fixed-precision decimals and round percentages to four fractional digits.
+
 ## Monthly reconciliation formula
 
 ```text
@@ -87,9 +89,11 @@ old_value
 new_value
 reason
 created_by
-approved_by
+approved_by (required when status == APPROVED)
 created_at
 ```
+
+Pending overrides do not require `approved_by`; approval identity and approval timestamp become mandatory only when the override status transitions to `APPROVED`.
 
 ## Outputs
 

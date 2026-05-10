@@ -11,6 +11,7 @@ Define initial API endpoints for the UMS Smart Revenue Control Center.
 /org-units
 /channels
 /groups
+/connectors
 /reports
 /revenue
 /finance-close
@@ -48,7 +49,7 @@ DELETE /groups/{group_id}/members/{channel_id}
 ```http
 GET /revenue/monthly?month=2026-03&scope_type=company&scope_id=123&currency=USD
 GET /revenue/channels?month=2026-03&group_id=abc&currency=USD
-GET /revenue/explain?month=2026-03&entity_type=channel&entity_id=UCxxxx&metric=net_revenue
+POST /revenue/channels/{channel_id}/months/{month}/explain?metric=net_revenue
 POST /revenue/recalculate
 ```
 
@@ -92,17 +93,33 @@ GET /reports/youtube/runs/{run_id}
 
 ```http
 POST /exports
-GET /exports
+GET /exports?page=1&page_size=50
 GET /exports/{export_id}
+```
+
+`GET /exports` is paginated. Query parameters are `page` (default `1`) and `page_size` (default `50`, maximum `100`). Requests above the maximum are rejected with `422`. Responses include paging metadata:
+
+```json
+{
+  "items": [],
+  "pagination": {
+    "total_count": 0,
+    "page": 1,
+    "page_size": 50,
+    "next_link": null
+  }
+}
 ```
 
 ### Audit
 
 ```http
-GET /audit/events
+GET /audit/events?page=1&page_size=50
 ```
 
 Audit event reads require `audit.view`. Sensitive audit `details` are masked unless the caller also has `audit.view_sensitive_payloads`. Audit reads are themselves recorded as `AUDIT_LOG_VIEWED`.
+
+`GET /audit/events` follows the same pagination contract as `GET /exports`: `page` defaults to `1`, `page_size` defaults to `50`, and `page_size` is capped at `100`. Older unpaginated examples are outdated; clients must iterate `next_link` or increment `page` until no next page is returned.
 
 ### Graph
 
@@ -125,11 +142,13 @@ GET /graph/outside-cms
 
 ```json
 {
-  "value": 184250.0,
+  "value": "184250.00",
   "currency": "USD",
   "confidence": "B_RECONCILED",
   "source": "reconciliation_engine",
   "locked": true,
-  "explain_url": "/revenue/explain?..."
+  "explain_url": "/revenue/channels/{channel_id}/months/{month}/explain?metric=net_revenue"
 }
 ```
+
+Money `value` fields are fixed-precision decimal strings with two fractional digits unless an endpoint documents a higher scale. Outdated floating-number examples such as `184250.0` must be migrated by clients before using finance values for reconciliation or exports.

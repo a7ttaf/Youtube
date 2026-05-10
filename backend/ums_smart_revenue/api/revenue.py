@@ -306,7 +306,7 @@ def list_month_reconciliation_issues(
     return queue.to_api()
 
 
-@router.get("/channels/{channel_id}/months/{month}/explain")
+@router.post("/channels/{channel_id}/months/{month}/explain")
 def explain_channel_month_revenue_metric(
     channel_id: str,
     month: str,

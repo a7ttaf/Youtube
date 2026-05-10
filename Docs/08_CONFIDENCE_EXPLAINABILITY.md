@@ -7,11 +7,13 @@ Make every number understandable and trustworthy.
 
 | Code | Label | Meaning |
 |---|---|---|
-| A | Official | Direct from official YouTube/CMS/system report |
-| B | Reconciled | Official gross + payment/deduction reconciliation |
-| C | Allocated | Payment is real, but channel split uses allocation rule |
-| D | Estimated | Based on estimated report, not finalized/locked |
-| E | Missing | Required source missing or unresolved |
+| A_OFFICIAL | Official | Direct from official YouTube/CMS/system report |
+| B_RECONCILED | Reconciled | Official gross + payment/deduction reconciliation |
+| C_ALLOCATED | Allocated | Payment is real, but channel split uses allocation rule |
+| D_ESTIMATED | Estimated | Based on estimated report, not finalized/locked |
+| E_MISSING | Missing | Required source missing or unresolved |
+
+Legacy short labels map as `A -> A_OFFICIAL`, `B -> B_RECONCILED`, `C -> C_ALLOCATED`, `D -> D_ESTIMATED`, and `E -> E_MISSING`. New API payloads and stored examples should use the expanded wire tokens.
 
 ## Number explanation object
 
@@ -21,14 +23,14 @@ Make every number understandable and trustworthy.
   "entity_type": "channel",
   "entity_id": "UCxxxx",
   "month": "2026-03",
-  "value": 184250.00,
+  "value": "184250.00",
   "currency": "USD",
   "confidence": "B_RECONCILED",
   "formula": "gross + adjustments - tax - allocated_deductions",
   "components": [
-    {"name": "gross_revenue", "value": 195000.00, "source": "youtube_report", "confidence": "A_OFFICIAL"},
-    {"name": "tax", "value": -7200.00, "source": "tax_report", "confidence": "A_OFFICIAL"},
-    {"name": "fx_transfer_allocation", "value": -3550.00, "source": "allocation_engine", "confidence": "B_RECONCILED"}
+    {"name": "gross_revenue", "value": "195000.00", "source": "youtube_report", "confidence": "A_OFFICIAL"},
+    {"name": "tax", "value": "-7200.00", "source": "tax_report", "confidence": "A_OFFICIAL"},
+    {"name": "fx_transfer_allocation", "value": "-3550.00", "source": "allocation_engine", "confidence": "B_RECONCILED"}
   ],
   "warnings": []
 }

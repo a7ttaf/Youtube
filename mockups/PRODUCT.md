@@ -1,9 +1,5 @@
 # Product
 
-## Register
-
-product
-
 ## Users
 
 Internal UMS finance, revenue operations, sector leadership, company managers, audit viewers, and analysts. They use the platform during monthly close, reconciliation, export preparation, and issue investigation for 300+ YouTube channels.

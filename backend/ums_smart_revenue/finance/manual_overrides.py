@@ -7,8 +7,9 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM, RevenueManualOverrideORM
+from ums_smart_revenue.db.finance_models import RevenueManualOverrideORM
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
+from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -119,8 +120,8 @@ class SqlAlchemyManualOverrideRepository:
     ) -> RevenueManualOverrideEntry:
         actor_uuid = _parse_uuid(actor_user_id)
         normalized_reason = _normalize_reason(reason)
-        row = self._get_row(override_id)
-        self._require_month_open(row.month)
+        row = self._get_row(override_id, for_update=True)
+        self._require_month_open(row.month, for_update=True)
         if row.status != "PENDING":
             raise ManualOverrideConflictError("Manual override cannot be approved from its current state")
         if row.created_by == actor_uuid:
@@ -134,9 +135,12 @@ class SqlAlchemyManualOverrideRepository:
         self._session.flush()
         return self._to_entry(row)
 
-    def _get_row(self, override_id: str) -> RevenueManualOverrideORM:
+    def _get_row(self, override_id: str, *, for_update: bool = False) -> RevenueManualOverrideORM:
         override_uuid = _parse_uuid(override_id, field_name="manual_override_id")
-        row = self._session.get(RevenueManualOverrideORM, override_uuid)
+        statement = select(RevenueManualOverrideORM).where(RevenueManualOverrideORM.id == override_uuid)
+        if for_update:
+            statement = statement.with_for_update()
+        row = self._session.scalars(statement).one_or_none()
         if row is None:
             raise ManualOverrideNotFoundError("Manual override not found")
         return row
@@ -151,9 +155,9 @@ class SqlAlchemyManualOverrideRepository:
         if row is None:
             raise ManualOverrideValidationError("youtube_channel_id must reference an active channel")
 
-    def _require_month_open(self, month: str) -> None:
-        close = self._session.get(FinanceMonthCloseORM, month)
-        if close is not None and close.status == "LOCKED":
+    def _require_month_open(self, month: str, *, for_update: bool = True) -> None:
+        close = get_or_create_month_close_row(self._session, month, for_update=for_update)
+        if close.status == "LOCKED":
             raise ManualOverrideLockedMonthError("Finance month is locked for manual overrides")
 
     @staticmethod

@@ -21,7 +21,16 @@ def upgrade() -> None:
         "monthly_channel_revenue_facts",
         sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
         sa.Column("month", sa.Text(), nullable=False),
-        sa.Column("youtube_channel_id", sa.Text(), nullable=False),
+        sa.Column(
+            "youtube_channel_id",
+            sa.Text(),
+            sa.ForeignKey(
+                "youtube_channels.youtube_channel_id",
+                name="fk_monthly_channel_revenue_facts_youtube_channel_id",
+                ondelete="RESTRICT",
+            ),
+            nullable=False,
+        ),
         sa.Column("source_kind", sa.Text(), nullable=False),
         sa.Column("source_report_id", sa.Text(), nullable=True),
         sa.Column("gross_revenue_usd", sa.Numeric(18, 6), nullable=False),

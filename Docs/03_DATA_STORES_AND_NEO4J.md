@@ -43,7 +43,9 @@ Graph projection job
     ↓
 Upsert nodes and relationships into Neo4j
     ↓
-Read-only graph user queries Neo4j
+Dashboard calls backend /graph/* APIs
+    ↓
+Backend queries Neo4j with a read-only credential
 ```
 
 ## Sync frequency
@@ -58,7 +60,8 @@ Read-only graph user queries Neo4j
 
 ## Read-only enforcement
 
-- Dashboard should use a read-only Neo4j user.
+- Dashboard code must not connect to Neo4j directly; all graph reads go through backend `/graph/*` APIs.
+- Backend graph APIs should use a read-only Neo4j user and enforce permissions, auditing, and scope filtering.
 - Only the sync service should have write privileges.
 - Users should not directly edit graph data.
 - Graph changes must come from source tables.
@@ -69,7 +72,7 @@ Neo4j is the right default for this project. The better setup is not replacing N
 
 ```text
 Neo4j Bloom/Explore = internal graph exploration
-Neo4j Visualization Library = embedded custom graph inside UMS dashboard
+Neo4j Visualization Library = embedded custom graph fed by backend /graph/* APIs
 ```
 
 Use Bloom/Explore for analysts and admins. Use custom embedded graph views for management pages.

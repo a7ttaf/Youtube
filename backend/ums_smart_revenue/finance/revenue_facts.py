@@ -8,8 +8,9 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM, MonthlyChannelRevenueFactORM
+from ums_smart_revenue.db.finance_models import MonthlyChannelRevenueFactORM
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
+from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -169,8 +170,8 @@ class SqlAlchemyRevenueFactRepository:
         return [self._to_entry(row) for row in self._session.scalars(statement).all()]
 
     def _require_month_open(self, month: str) -> None:
-        close = self._session.get(FinanceMonthCloseORM, month)
-        if close is not None and close.status == "LOCKED":
+        close = get_or_create_month_close_row(self._session, month, for_update=True)
+        if close.status == "LOCKED":
             raise RevenueFactLockedMonthError("Finance month is locked for revenue fact imports")
 
     def _require_active_channel_for_import(self, youtube_channel_id: str) -> None:
