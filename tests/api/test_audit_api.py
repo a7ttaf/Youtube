@@ -70,7 +70,7 @@ def test_audit_viewer_lists_audit_events_with_sensitive_details_masked(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
 
-    response = client.get("/audit/events?limit=10&offset=0", headers=auth_headers("audit_viewer"))
+    response = client.get("/audit/events?limit=10", headers=auth_headers("audit_viewer"))
 
     engine = create_engine(database_url)
     with Session(engine) as session:
