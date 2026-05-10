@@ -8,7 +8,7 @@ import pytest
 BACKEND_PATH = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND_PATH))
 
-os.environ["UMS_TRUSTED_GATEWAY_TOKEN"] = "-".join(("pytest", "trusted", "gateway", "token"))
+os.environ["UMS_TRUSTED_GATEWAY_TOKEN"] = "pytest-trusted-gateway-token"  # noqa: S105
 
 
 @pytest.fixture(autouse=True)

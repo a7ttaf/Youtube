@@ -36,17 +36,21 @@ def build_database_url(tmp_path) -> str:
 
 def seed_database(database_url: str) -> None:
     engine = create_engine(database_url)
-    OrgBase.metadata.create_all(engine)
-    SecurityBase.metadata.create_all(engine)
-    with Session(engine) as session:
-        session.add(UserORM(id=USER_ID, email="connector-user@example.com", display_name="Connector User"))
-        session.commit()
+    try:
+        OrgBase.metadata.create_all(engine)
+        SecurityBase.metadata.create_all(engine)
+        with Session(engine) as session:
+            session.add(UserORM(id=USER_ID, email="connector-user@example.com", display_name="Connector User"))
+            session.commit()
+    finally:
+        engine.dispose()
 
 
 def test_connector_admin_can_create_credential_reference_without_exposing_secret_ref(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
+    external_ref = "secret-manager://ums/youtube-reporting/content-owner-1"
 
     response = client.post(
         "/connectors/credentials",
@@ -54,7 +58,7 @@ def test_connector_admin_can_create_credential_reference_without_exposing_secret
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
-            "encrypted_secret_ref": "secret-manager://ums/youtube-reporting/content-owner-1",
+            "encrypted_secret_ref": external_ref,
             "reason": "Register OAuth credential reference",
         },
     )
@@ -68,7 +72,7 @@ def test_connector_admin_can_create_credential_reference_without_exposing_secret
     assert response.json()["connector_key"] == "youtube_reporting"
     assert response.json()["has_secret_ref"] is True
     assert "encrypted_secret_ref" not in response.json()
-    assert credential.encrypted_secret_ref == "secret-manager://ums/youtube-reporting/content-owner-1"
+    assert credential.encrypted_secret_ref == external_ref
     assert audit_log.event_type == "CONNECTOR_SETTINGS_CHANGED"
     assert audit_log.reason == "Register OAuth credential reference"
 

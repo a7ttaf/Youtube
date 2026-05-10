@@ -158,6 +158,8 @@ def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:
     if constraint_name == CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT:
         return True
 
+    # PostgreSQL exposes the named constraint via diag.constraint_name; SQLite does not,
+    # so keep an explicit fallback for its unique-constraint error text.
     error_text = f"{exc.orig!s} {exc!s}"
     return (
         CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT in error_text
