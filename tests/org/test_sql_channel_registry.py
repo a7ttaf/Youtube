@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.org.access_index import load_org_access_index_from_session
+from ums_smart_revenue.org.channel_registry import ChannelRegistryValidationError
 from ums_smart_revenue.org.sql_channel_registry import SqlAlchemyChannelRegistry
 
 
@@ -13,6 +14,7 @@ SECTOR_TV_ID = UUID("00000000-0000-0000-0000-000000000101")
 COMPANY_TV_ID = UUID("00000000-0000-0000-0000-000000000201")
 COMPANY_NEWS_ID = UUID("00000000-0000-0000-0000-000000000202")
 COMPANY_INACTIVE_ID = UUID("00000000-0000-0000-0000-000000000203")
+COMPANY_MISSING_ID = UUID("00000000-0000-0000-0000-000000000204")
 CHANNEL_TV_ROW_ID = UUID("00000000-0000-0000-0000-000000000301")
 CHANNEL_INACTIVE_ROW_ID = UUID("00000000-0000-0000-0000-000000000302")
 
@@ -104,6 +106,38 @@ def test_sql_channel_registry_rejects_malformed_primary_company_id():
             cms_status="UNKNOWN",
             revenue_required=False,
         )
+
+
+def test_sql_channel_registry_rejects_missing_company_id_on_create():
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    with pytest.raises(ChannelRegistryValidationError, match="primary_company_id must reference an existing org unit"):
+        registry.create_channel(
+            youtube_channel_id="channel-missing-company",
+            channel_name="Missing Company",
+            primary_company_id=str(COMPANY_MISSING_ID),
+            cms_status="UNKNOWN",
+            revenue_required=False,
+        )
+
+
+def test_sql_channel_registry_rejects_missing_company_id_on_update_and_rolls_back():
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    with pytest.raises(ChannelRegistryValidationError, match="primary_company_id must reference an existing org unit"):
+        registry.update_mapping(
+            youtube_channel_id="channel-tv-a",
+            primary_company_id=str(COMPANY_MISSING_ID),
+        )
+
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(YouTubeChannelORM.youtube_channel_id == "channel-tv-a")
+    ).one()
+    assert persisted.primary_org_unit_id == COMPANY_TV_ID
 
 
 def test_load_org_access_index_from_session_uses_active_sql_rows():
