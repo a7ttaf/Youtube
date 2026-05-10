@@ -1,3 +1,4 @@
+from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -35,8 +36,9 @@ def list_audit_events(
     event_type: str | None = None,
     entity_type: str | None = None,
     entity_id: str | None = None,
+    cursor_created_at: datetime | None = None,
+    cursor_id: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_AUDIT_LOG_PAGE_SIZE)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, object]:
     audit_scope = AccessScope.global_scope()
     _require_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope)
@@ -47,12 +49,14 @@ def list_audit_events(
             entity_type=entity_type,
             entity_id=entity_id,
             exclude_event_type=AuditEventType.AUDIT_LOG_VIEWED.value,
+            cursor_created_at=cursor_created_at,
+            cursor_id=cursor_id,
             limit=limit,
-            offset=offset,
         )
     except AuditLogValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
+    details_redacted = not include_sensitive_details and any(item.sensitive for item in page.items)
     record = record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -65,16 +69,16 @@ def list_audit_events(
             "entity_type": entity_type,
             "entity_id": entity_id,
             "returned": len(page.items),
-            "details_redacted": not include_sensitive_details,
+            "details_redacted": details_redacted,
         },
     )
     return {
         "items": [item.to_api(include_sensitive_details=include_sensitive_details) for item in page.items],
         "pagination": {
             "limit": page.limit,
-            "offset": page.offset,
             "returned": len(page.items),
             "has_more": page.has_more,
+            "next_cursor": page.next_cursor,
         },
         "audit_event": audit_record_to_api(record),
     }

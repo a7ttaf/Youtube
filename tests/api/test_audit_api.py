@@ -82,12 +82,59 @@ def test_audit_viewer_lists_audit_events_with_sensitive_details_masked(tmp_path)
     assert response.json()["items"][0]["details_redacted"] is True
     assert response.json()["items"][1]["details"] == {"ip": "127.0.0.1"}
     assert response.json()["items"][1]["details_redacted"] is False
+    assert response.json()["pagination"] == {
+        "limit": 10,
+        "returned": 2,
+        "has_more": False,
+        "next_cursor": None,
+    }
     assert response.json()["audit_event"]["event_type"] == "AUDIT_LOG_VIEWED"
     assert audit_events[-1].event_type == "AUDIT_LOG_VIEWED"
 
-    next_response = client.get("/audit/events?limit=10&offset=0", headers=auth_headers("audit_viewer"))
+    next_response = client.get("/audit/events?limit=10", headers=auth_headers("audit_viewer"))
 
     assert [item["event_type"] for item in next_response.json()["items"]] == ["REVENUE_VIEWED", "LOGIN"]
+
+
+def test_audit_event_cursor_pagination_is_stable_when_new_events_arrive(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    first_page = client.get("/audit/events?limit=1", headers=auth_headers("audit_viewer"))
+    next_cursor = first_page.json()["pagination"]["next_cursor"]
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            AuditLogORM(
+                id=uuid4(),
+                user_id=USER_ID,
+                event_type="CONNECTOR_JOB_RUN",
+                entity_type="api_connector",
+                entity_id="youtube_reporting",
+                scope_type="connector",
+                scope_id="youtube_reporting",
+                reason=None,
+                details={},
+                sensitive=False,
+                created_at=datetime(2026, 5, 10, 13, 0, tzinfo=UTC),
+            )
+        )
+        session.commit()
+
+    second_page = client.get(
+        "/audit/events",
+        headers=auth_headers("audit_viewer"),
+        params={
+            "limit": 1,
+            "cursor_created_at": next_cursor["created_at"],
+            "cursor_id": next_cursor["id"],
+        },
+    )
+
+    assert [item["event_type"] for item in first_page.json()["items"]] == ["REVENUE_VIEWED"]
+    assert [item["event_type"] for item in second_page.json()["items"]] == ["LOGIN"]
 
 
 def test_super_owner_can_view_sensitive_audit_details(tmp_path):
