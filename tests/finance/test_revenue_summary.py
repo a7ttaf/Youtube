@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntry
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_summary
@@ -87,7 +89,7 @@ def test_adjusted_revenue_summary_marks_net_zero_approved_override_as_adjusted()
 
 
 def test_adjusted_revenue_summary_rejects_mixed_months_or_channels():
-    try:
+    with pytest.raises(ValueError, match="inconsistent month/channel"):
         build_adjusted_revenue_summary(
             facts=[
                 revenue_fact(source_kind="YOUTUBE_CMS", gross_revenue_usd="1000.00"),
@@ -95,19 +97,11 @@ def test_adjusted_revenue_summary_rejects_mixed_months_or_channels():
             ],
             manual_overrides=[],
         )
-    except ValueError as exc:
-        assert "inconsistent month/channel" in str(exc)
-    else:
-        raise AssertionError("Expected mixed fact months to be rejected")
 
-    try:
+    with pytest.raises(ValueError, match="inconsistent month/channel"):
         build_adjusted_revenue_summary(
             facts=[revenue_fact(source_kind="YOUTUBE_CMS", gross_revenue_usd="1000.00")],
             manual_overrides=[
                 manual_override(status="APPROVED", adjustment_revenue_usd="25.00", youtube_channel_id="channel-tv-b")
             ],
         )
-    except ValueError as exc:
-        assert "inconsistent month/channel" in str(exc)
-    else:
-        raise AssertionError("Expected mixed override channels to be rejected")

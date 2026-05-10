@@ -3,11 +3,13 @@
 ## Purpose
 Generate management-ready Excel, PDF, and branded slide reports.
 
-## Export types
+Current backend behavior: the foundation records queued export-job metadata only. It does not generate workbook, PDF, CSV, or slide files yet.
 
-### 1. Finance Excel workbook
+## Planned export outputs
 
-Sheets:
+### 1. Finance Excel workbook (`FINANCE_EXCEL`)
+
+Planned sheets:
 
 ```text
 Executive Summary
@@ -21,9 +23,9 @@ Confidence Notes
 Raw Appendix
 ```
 
-### 2. Executive PDF
+### 2. Executive PDF (`EXECUTIVE_PDF`)
 
-Sections:
+Planned sections:
 
 ```text
 Cover
@@ -36,9 +38,9 @@ Problem Summary
 Recommendations
 ```
 
-### 3. Branded slide pack
+### 3. Branded slide pack (`BRANDED_SLIDE_PACK`)
 
-Slides:
+Planned slides:
 
 ```text
 1. Cover
@@ -52,6 +54,10 @@ Slides:
 9. Outside-CMS issues
 10. Action items
 ```
+
+### 4. Analytics summary CSV (`ANALYTICS_SUMMARY_CSV`)
+
+Planned CSV output for non-financial analytics exports that export operators can request without finance visibility.
 
 ## Template system
 
@@ -71,11 +77,11 @@ pdf_header_footer
 
 ## Export controls
 
-- Finance exports require finance or owner role.
-- Every export is logged.
-- Export should show month lock status.
-- Export should include confidence notes.
-- Export should include manual override notes.
+- Finance export requests require finance or owner role.
+- Every export request is logged.
+- Queued export metadata records month lock status.
+- Queued export metadata records confidence-note inclusion.
+- Queued export metadata records manual-override-note inclusion.
 
 ## Export job fields
 
@@ -98,11 +104,11 @@ updated_at
 ```
 
 Implementation note:
-The backend foundation currently records queued export-job metadata only. It supports finance export requests for `FINANCE_EXCEL`, `EXECUTIVE_PDF`, and `BRANDED_SLIDE_PACK`, plus non-financial `ANALYTICS_SUMMARY_CSV` requests for export operators. Finance exports require both revenue export permission and revenue visibility for the requested scope. Group exports are checked against every member channel. Currency is restricted to USD until an exchange-rate source is implemented.
+The backend foundation supports finance export requests for `FINANCE_EXCEL`, `EXECUTIVE_PDF`, and `BRANDED_SLIDE_PACK`, plus non-financial `ANALYTICS_SUMMARY_CSV` requests for export operators. Finance exports require both revenue export permission and revenue visibility for the requested scope. Group exports are checked against every member channel. Currency is currently restricted to USD until an exchange-rate source is implemented.
 
 ## Acceptance checks
 
 - User can export by holding, sector, company, group, or channel.
-- Export output matches selected currency.
-- Finance workbook includes formulas/explanations.
+- Queued export metadata uses USD because currency selection is currently restricted to USD.
+- Planned finance workbook output includes formulas/explanations.
 - Export log records who created each report.

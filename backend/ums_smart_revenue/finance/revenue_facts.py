@@ -93,6 +93,11 @@ class SqlAlchemyRevenueFactRepository:
         actor_user_id: str,
     ) -> RevenueFactEntry:
         _validate_month(month)
+        _validate_metrics(
+            views=views,
+            watch_time_minutes=watch_time_minutes,
+            confidence_score=confidence_score,
+        )
         normalized_source_kind = _normalize_source_kind(source_kind)
         actor_uuid = _parse_uuid(actor_user_id)
         self._require_active_channel_for_import(youtube_channel_id)
@@ -144,6 +149,8 @@ class SqlAlchemyRevenueFactRepository:
         *,
         month: str,
         youtube_channel_ids: set[str] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
     ) -> list[RevenueFactEntry]:
         _validate_month(month)
         if youtube_channel_ids == set():
@@ -166,6 +173,10 @@ class SqlAlchemyRevenueFactRepository:
         )
         if youtube_channel_ids is not None:
             statement = statement.where(MonthlyChannelRevenueFactORM.youtube_channel_id.in_(youtube_channel_ids))
+        if offset:
+            statement = statement.offset(offset)
+        if limit is not None:
+            statement = statement.limit(limit)
 
         return [self._to_entry(row) for row in self._session.scalars(statement).all()]
 
@@ -225,6 +236,15 @@ def _parse_uuid(value: str) -> UUID:
         return UUID(value)
     except ValueError as exc:
         raise RevenueFactValidationError("actor_user_id must be a valid UUID") from exc
+
+
+def _validate_metrics(*, views: int, watch_time_minutes: Decimal, confidence_score: Decimal) -> None:
+    if views < 0:
+        raise RevenueFactValidationError("views must be >= 0")
+    if watch_time_minutes < 0:
+        raise RevenueFactValidationError("watch_time_minutes must be >= 0")
+    if confidence_score < 0 or confidence_score > 1:
+        raise RevenueFactValidationError("confidence_score must be between 0 and 1")
 
 
 def _decimal_to_api(value: Decimal | None) -> str | None:

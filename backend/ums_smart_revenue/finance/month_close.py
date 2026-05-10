@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM
@@ -127,7 +128,11 @@ def get_or_create_month_close_row(
         statement = statement.with_for_update()
     row = session.scalars(statement).one_or_none()
     if row is None:
-        row = FinanceMonthCloseORM(month=month, status="OPEN", allocation_rule_payload={})
-        session.add(row)
-        session.flush()
+        try:
+            with session.begin_nested():
+                row = FinanceMonthCloseORM(month=month, status="OPEN", allocation_rule_payload={})
+                session.add(row)
+                session.flush()
+        except IntegrityError:
+            row = session.scalars(statement).one()
     return row

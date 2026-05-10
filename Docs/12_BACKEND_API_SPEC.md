@@ -49,7 +49,7 @@ DELETE /groups/{group_id}/members/{channel_id}
 ```http
 GET /revenue/monthly?month=2026-03&scope_type=company&scope_id=123&currency=USD
 GET /revenue/channels?month=2026-03&group_id=abc&currency=USD
-POST /revenue/channels/{channel_id}/months/{month}/explain?metric=net_revenue
+POST /revenue/channels/{channel_id}/months/{month}/explain?metric=adjusted_gross_revenue_usd
 POST /revenue/recalculate
 ```
 
@@ -78,6 +78,8 @@ GET /connectors/credentials
 POST /connectors/credentials
 POST /connectors/jobs
 ```
+
+`/connectors` is an implemented API group in this draft and owns credential-reference metadata plus connector job requests.
 
 Connector credential responses expose metadata only, never raw credential material or secret references.
 
@@ -147,7 +149,7 @@ GET /graph/outside-cms
   "confidence": "B_RECONCILED",
   "source": "reconciliation_engine",
   "locked": true,
-  "explain_url": "/revenue/channels/{channel_id}/months/{month}/explain?metric=net_revenue"
+  "explain_url": "/revenue/channels/{channel_id}/months/{month}/explain?metric=adjusted_gross_revenue_usd"
 }
 ```
 

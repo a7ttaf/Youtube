@@ -1,5 +1,5 @@
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -18,7 +18,9 @@ from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, User
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000009101")
 COMPANY_ID = UUID("00000000-0000-0000-0000-000000009201")
+OTHER_COMPANY_ID = UUID("00000000-0000-0000-0000-000000009202")
 CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-000000009301")
+OTHER_CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-000000009302")
 FINANCE_ADMIN_ID = UUID("00000000-0000-0000-0000-000000009401")
 FINANCE_APPROVER_ID = UUID("00000000-0000-0000-0000-000000009402")
 
@@ -50,11 +52,21 @@ def seed_database(database_url: str, *, locked_month: bool = False) -> None:
             [
                 OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True),
                 OrgUnitORM(id=COMPANY_ID, parent_id=SECTOR_ID, type="COMPANY", name="TV Company", active=True),
+                OrgUnitORM(id=OTHER_COMPANY_ID, parent_id=SECTOR_ID, type="COMPANY", name="News Company", active=True),
                 YouTubeChannelORM(
                     id=CHANNEL_ROW_ID,
                     youtube_channel_id="channel-tv-a",
                     channel_name="TV A",
                     primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                YouTubeChannelORM(
+                    id=OTHER_CHANNEL_ROW_ID,
+                    youtube_channel_id="channel-news-a",
+                    channel_name="News A",
+                    primary_org_unit_id=OTHER_COMPANY_ID,
                     cms_status="INSIDE_CMS",
                     revenue_required=True,
                     active=True,
@@ -209,6 +221,34 @@ def test_user_without_approval_permission_cannot_probe_manual_override_ids(tmp_p
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: finance.approve_manual_override"
+
+
+def test_scoped_finance_approver_gets_not_found_for_out_of_scope_override(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        override = RevenueManualOverrideORM(
+            id=uuid4(),
+            month="2026-03",
+            youtube_channel_id="channel-tv-a",
+            adjustment_revenue_usd=Decimal("125.50"),
+            reason="Correct CMS transfer-fee allocation",
+            created_by=FINANCE_ADMIN_ID,
+        )
+        session.add(override)
+        session.commit()
+        override_id = str(override.id)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        f"/revenue/manual-overrides/{override_id}/approve",
+        headers=auth_headers("finance_approver", FINANCE_APPROVER_ID, scope_id=str(OTHER_COMPANY_ID)),
+        json={"reason": "Should not reveal another company's override"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Manual override not found"
 
 
 def test_finance_viewer_reads_adjusted_revenue_summary_with_approved_overrides_only(tmp_path):

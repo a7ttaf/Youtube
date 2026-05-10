@@ -116,13 +116,16 @@ class RevenueManualOverrideORM(FinanceBase):
             "AND substr(month, 2, 1) BETWEEN '0' AND '9' "
             "AND substr(month, 3, 1) BETWEEN '0' AND '9' "
             "AND substr(month, 4, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 6, 1) BETWEEN '0' AND '1' "
+            "AND substr(month, 7, 1) BETWEEN '0' AND '9' "
             "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
             name="ck_revenue_manual_overrides_month_format",
         ),
         CheckConstraint("adjustment_revenue_usd <> 0", name="ck_revenue_manual_overrides_adjustment_nonzero"),
         CheckConstraint("status IN ('PENDING', 'APPROVED', 'REJECTED')", name="ck_revenue_manual_overrides_status"),
         CheckConstraint(
-            "(status = 'APPROVED' AND approved_by IS NOT NULL AND approved_at IS NOT NULL) OR status <> 'APPROVED'",
+            "(status = 'APPROVED' AND approved_by IS NOT NULL AND approved_at IS NOT NULL) "
+            "OR (status <> 'APPROVED' AND approved_by IS NULL AND approved_at IS NULL)",
             name="ck_revenue_manual_overrides_approval_fields",
         ),
         Index("ix_revenue_manual_overrides_month_status", "month", "status"),

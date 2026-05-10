@@ -298,6 +298,12 @@ def test_finance_viewer_reads_month_reconciliation_issue_queue_for_allowed_compa
     assert response.json()["month"] == "2026-03"
     assert response.json()["issue_count"] == 1
     assert [item["youtube_channel_id"] for item in response.json()["items"]] == ["channel-tv-a"]
+    assert response.json()["pagination"] == {
+        "limit": 100,
+        "offset": 0,
+        "next_offset": None,
+        "has_more": False,
+    }
     assert audit_log.entity_type == "revenue_reconciliation_issue_queue"
     assert audit_log.sensitive is True
 

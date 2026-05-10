@@ -1,7 +1,7 @@
 from typing import Annotated
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
@@ -273,6 +273,8 @@ def list_month_reconciliation_issues(
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     repository: Annotated[SqlAlchemyRevenueFactRepository, Depends(current_revenue_fact_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
 ) -> dict[str, object]:
     revenue_channel_ids = _authorized_channel_ids_for_permission(user, Permission.VIEW_REVENUE, org_index)
     confidence_channel_ids = _authorized_channel_ids_for_permission(user, Permission.VIEW_CONFIDENCE, org_index)
@@ -286,11 +288,19 @@ def list_month_reconciliation_issues(
         _raise_missing_permission(Permission.VIEW_REVENUE)
 
     try:
-        facts = repository.list_month_facts(month=month, youtube_channel_ids=visible_channel_ids)
+        page_size = limit + 1
+        facts = repository.list_month_facts(
+            month=month,
+            youtube_channel_ids=visible_channel_ids,
+            limit=page_size,
+            offset=offset,
+        )
     except RevenueFactValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
-    queue = build_revenue_reconciliation_issue_queue(facts, month=month)
+    page_facts = facts[:limit]
+    has_more = len(facts) > limit
+    queue = build_revenue_reconciliation_issue_queue(page_facts, month=month)
     record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -300,10 +310,19 @@ def list_month_reconciliation_issues(
         scope=AccessScope.finance_month(month),
         details={
             "issue_count": len(queue.items),
+            "page_fact_count": len(page_facts),
+            "has_more": has_more,
             "scoped_channel_count": len(visible_channel_ids) if visible_channel_ids is not None else None,
         },
     )
-    return queue.to_api()
+    response = queue.to_api()
+    response["pagination"] = {
+        "limit": limit,
+        "offset": offset,
+        "next_offset": offset + limit if has_more else None,
+        "has_more": has_more,
+    }
+    return response
 
 
 @router.post("/channels/{channel_id}/months/{month}/explain")
@@ -407,20 +426,23 @@ def approve_manual_override(
         _raise_missing_permission(Permission.APPROVE_MANUAL_OVERRIDE)
 
     try:
-        existing = repository.get_override(manual_override_id)
+        target_channel_id = repository.get_override_channel_id(manual_override_id)
     except ManualOverrideValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
-    except ManualOverrideNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    if target_channel_id is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Manual override not found")
 
-    target_scope = AccessScope.channel(existing.youtube_channel_id)
-    _require_permission(user, Permission.APPROVE_MANUAL_OVERRIDE, target_scope, org_index)
+    target_scope = AccessScope.channel(target_channel_id)
+    if not has_permission(user, Permission.APPROVE_MANUAL_OVERRIDE, target_scope, org_index):
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Manual override not found")
     try:
         override = repository.approve_override(
             override_id=manual_override_id,
             actor_user_id=user.user_id,
             reason=payload.reason,
         )
+    except ManualOverrideNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except ManualOverrideConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ManualOverrideLockedMonthError as exc:

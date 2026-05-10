@@ -12,22 +12,20 @@ Maintain a single master registry for all UMS YouTube channels and flexible grou
 - Support revenue-required flag.
 - Support confidence/source status.
 
-## Channel status fields
+## Persisted channel status fields
 
 ```text
 youtube_channel_id
 channel_name
-primary_company_id
-primary_sector_id
+primary_org_unit_id
 cms_status
 content_owner_id
 revenue_required
 revenue_source_status
 active
-last_metadata_sync_at
-last_revenue_sync_at
-notes
 ```
+
+`primary_company_id` and `primary_sector_id` are derived UI/access-index fields from `primary_org_unit_id`, not persisted channel columns.
 
 ## CMS status values
 

@@ -99,6 +99,12 @@ class SqlAlchemyManualOverrideRepository:
         row = self._get_row(override_id)
         return self._to_entry(row)
 
+    def get_override_channel_id(self, override_id: str) -> str | None:
+        override_uuid = _parse_uuid(override_id, field_name="manual_override_id")
+        return self._session.scalar(
+            select(RevenueManualOverrideORM.youtube_channel_id).where(RevenueManualOverrideORM.id == override_uuid)
+        )
+
     def list_channel_month_overrides(self, *, month: str, youtube_channel_id: str) -> list[RevenueManualOverrideEntry]:
         _validate_month(month)
         rows = self._session.scalars(

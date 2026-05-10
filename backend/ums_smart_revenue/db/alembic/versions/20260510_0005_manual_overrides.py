@@ -41,18 +41,14 @@ def upgrade() -> None:
         sa.Column("approval_reason", sa.Text(), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.CheckConstraint(
-            "length(month) = 7 AND substr(month, 5, 1) = '-' "
-            "AND substr(month, 1, 1) BETWEEN '0' AND '9' "
-            "AND substr(month, 2, 1) BETWEEN '0' AND '9' "
-            "AND substr(month, 3, 1) BETWEEN '0' AND '9' "
-            "AND substr(month, 4, 1) BETWEEN '0' AND '9' "
-            "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
+            "month ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'",
             name="ck_revenue_manual_overrides_month_format",
         ),
         sa.CheckConstraint("adjustment_revenue_usd <> 0", name="ck_revenue_manual_overrides_adjustment_nonzero"),
         sa.CheckConstraint("status IN ('PENDING', 'APPROVED', 'REJECTED')", name="ck_revenue_manual_overrides_status"),
         sa.CheckConstraint(
-            "(status = 'APPROVED' AND approved_by IS NOT NULL AND approved_at IS NOT NULL) OR status <> 'APPROVED'",
+            "(status = 'APPROVED' AND approved_by IS NOT NULL AND approved_at IS NOT NULL) "
+            "OR (status <> 'APPROVED' AND approved_by IS NULL AND approved_at IS NULL)",
             name="ck_revenue_manual_overrides_approval_fields",
         ),
     )

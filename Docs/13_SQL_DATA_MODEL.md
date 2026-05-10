@@ -21,6 +21,7 @@ youtube_channels (
   cms_status text,
   content_owner_id text null,
   revenue_required boolean,
+  revenue_source_status text,
   active boolean,
   created_at timestamp,
   updated_at timestamp
@@ -83,17 +84,14 @@ adsense_payments (
 
 finance_month_close (
   month text primary key,
-  adsense_payment_amount_usd numeric,
-  bank_received_amount numeric,
-  bank_currency text,
-  fx_rate numeric,
-  transfer_fee_usd numeric,
-  manual_adjustment_usd numeric,
-  unresolved_gap_usd numeric,
-  allocation_method text,
   status text,
+  allocation_method text,
+  allocation_rule_payload jsonb,
   locked_by uuid null,
-  locked_at timestamp null
+  locked_at timestamp null,
+  unlocked_by uuid null,
+  unlocked_at timestamp null,
+  updated_at timestamp
 );
 
 -- Phase 1 control-plane implementation note:
@@ -135,18 +133,19 @@ number_explanations (
   created_at timestamp
 );
 
-manual_overrides (
+revenue_manual_overrides (
   id uuid primary key,
   month text,
-  entity_type text,
-  entity_id text,
-  field_name text,
-  old_value text,
-  new_value text,
+  youtube_channel_id text,
+  adjustment_revenue_usd numeric,
   reason text,
+  status text,
   created_by uuid,
   approved_by uuid null,
-  created_at timestamp
+  approved_at timestamp null,
+  approval_reason text null,
+  created_at timestamp,
+  updated_at timestamp
 );
 
 audit_logs (
@@ -198,7 +197,8 @@ export_jobs (
   include_confidence_notes boolean,
   include_manual_override_notes boolean,
   created_at timestamp,
-  completed_at timestamp null
+  completed_at timestamp null,
+  updated_at timestamp
 );
 ```
 

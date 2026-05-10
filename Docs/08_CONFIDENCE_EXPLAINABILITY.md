@@ -19,18 +19,17 @@ Legacy short labels map as `A -> A_OFFICIAL`, `B -> B_RECONCILED`, `C -> C_ALLOC
 
 ```json
 {
-  "metric": "net_revenue",
+  "metric": "adjusted_gross_revenue_usd",
   "entity_type": "channel",
   "entity_id": "UCxxxx",
   "month": "2026-03",
   "value": "184250.00",
   "currency": "USD",
   "confidence": "B_RECONCILED",
-  "formula": "gross + adjustments - tax - allocated_deductions",
+  "formula": "baseline_gross_revenue_usd + approved_manual_override_total_usd",
   "components": [
-    {"name": "gross_revenue", "value": "195000.00", "source": "youtube_report", "confidence": "A_OFFICIAL"},
-    {"name": "tax", "value": "-7200.00", "source": "tax_report", "confidence": "A_OFFICIAL"},
-    {"name": "fx_transfer_allocation", "value": "-3550.00", "source": "allocation_engine", "confidence": "B_RECONCILED"}
+    {"name": "baseline_gross_revenue_usd", "value": "184000.00", "source": "youtube_report", "confidence": "A_OFFICIAL"},
+    {"name": "approved_manual_override_total_usd", "value": "250.00", "source": "manual_override", "confidence": "B_RECONCILED"}
   ],
   "warnings": []
 }
