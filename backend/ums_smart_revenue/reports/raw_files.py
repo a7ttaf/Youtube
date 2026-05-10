@@ -1,0 +1,217 @@
+from dataclasses import dataclass
+from datetime import UTC, datetime
+import re
+from uuid import UUID, uuid4
+
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
+
+from ums_smart_revenue.db.report_models import RawReportFileORM
+
+
+MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+ALLOWED_PARSE_STATUSES = frozenset({"DOWNLOADED", "PARSED", "FAILED", "QUARANTINED"})
+ALLOWED_STORAGE_PREFIXES = ("s3://", "gs://", "azure://", "blob://", "file-store://")
+MAX_RAW_REPORT_FILE_PAGE_SIZE = 100
+
+
+@dataclass(frozen=True)
+class RawReportFileEntry:
+    id: str
+    source: str
+    report_type: str
+    report_month: str
+    storage_uri: str
+    checksum: str
+    parse_status: str
+    downloaded_by: str | None
+    downloaded_at: datetime
+
+    def to_api(self) -> dict[str, object]:
+        return {
+            "id": self.id,
+            "source": self.source,
+            "report_type": self.report_type,
+            "report_month": self.report_month,
+            "storage_uri": self.storage_uri,
+            "checksum": self.checksum,
+            "parse_status": self.parse_status,
+            "downloaded_by": self.downloaded_by,
+            "downloaded_at": self.downloaded_at.isoformat(),
+        }
+
+
+@dataclass(frozen=True)
+class RawReportFilePage:
+    items: list[RawReportFileEntry]
+    limit: int
+    offset: int
+    has_more: bool
+
+
+class RawReportFileError(ValueError):
+    pass
+
+
+class RawReportFileConflictError(RawReportFileError):
+    pass
+
+
+class RawReportFileNotFoundError(RawReportFileError):
+    pass
+
+
+class RawReportFileValidationError(RawReportFileError):
+    pass
+
+
+class SqlAlchemyRawReportFileRepository:
+    def __init__(self, session: Session):
+        self._session = session
+
+    def register_file(
+        self,
+        *,
+        source: str,
+        report_type: str,
+        report_month: str,
+        storage_uri: str,
+        checksum: str,
+        parse_status: str,
+        actor_user_id: str,
+    ) -> RawReportFileEntry:
+        normalized_source = _normalize_required_string(source, "source")
+        normalized_report_type = _normalize_required_string(report_type, "report_type")
+        _validate_month(report_month)
+        normalized_storage_uri = _normalize_storage_uri(storage_uri)
+        normalized_checksum = _normalize_required_string(checksum, "checksum")
+        normalized_parse_status = _normalize_parse_status(parse_status)
+        actor_uuid = _parse_uuid(actor_user_id)
+
+        row = RawReportFileORM(
+            id=uuid4(),
+            source=normalized_source,
+            report_type=normalized_report_type,
+            report_month=report_month,
+            file_url=normalized_storage_uri,
+            checksum=normalized_checksum,
+            parse_status=normalized_parse_status,
+            downloaded_by=actor_uuid,
+            updated_at=datetime.now(UTC),
+        )
+        self._session.add(row)
+        try:
+            self._session.flush()
+        except IntegrityError as exc:
+            if _is_duplicate_raw_report_file_integrity_error(exc):
+                raise RawReportFileConflictError("Raw report file metadata already exists") from exc
+            raise
+        return self._to_entry(row)
+
+    def get_file(self, raw_file_id: str) -> RawReportFileEntry:
+        row = self._get_row(raw_file_id)
+        return self._to_entry(row)
+
+    def list_files(
+        self,
+        *,
+        source: str | None = None,
+        report_type: str | None = None,
+        report_month: str | None = None,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> RawReportFilePage:
+        if limit < 1 or limit > MAX_RAW_REPORT_FILE_PAGE_SIZE:
+            raise RawReportFileValidationError(f"limit must be between 1 and {MAX_RAW_REPORT_FILE_PAGE_SIZE}")
+        if offset < 0:
+            raise RawReportFileValidationError("offset must be greater than or equal to 0")
+        if report_month is not None:
+            _validate_month(report_month)
+
+        statement = select(RawReportFileORM).order_by(
+            RawReportFileORM.downloaded_at.desc(),
+            RawReportFileORM.id.desc(),
+        )
+        if source is not None:
+            statement = statement.where(RawReportFileORM.source == _normalize_required_string(source, "source"))
+        if report_type is not None:
+            statement = statement.where(
+                RawReportFileORM.report_type == _normalize_required_string(report_type, "report_type")
+            )
+        if report_month is not None:
+            statement = statement.where(RawReportFileORM.report_month == report_month)
+
+        rows = self._session.scalars(statement.limit(limit + 1).offset(offset)).all()
+        return RawReportFilePage(
+            items=[self._to_entry(row) for row in rows[:limit]],
+            limit=limit,
+            offset=offset,
+            has_more=len(rows) > limit,
+        )
+
+    def _get_row(self, raw_file_id: str) -> RawReportFileORM:
+        raw_file_uuid = _parse_uuid(raw_file_id, field_name="raw_report_file_id")
+        row = self._session.get(RawReportFileORM, raw_file_uuid)
+        if row is None:
+            raise RawReportFileNotFoundError("Raw report file not found")
+        return row
+
+    @staticmethod
+    def _to_entry(row: RawReportFileORM) -> RawReportFileEntry:
+        return RawReportFileEntry(
+            id=str(row.id),
+            source=row.source,
+            report_type=row.report_type,
+            report_month=row.report_month,
+            storage_uri=row.file_url,
+            checksum=row.checksum,
+            parse_status=row.parse_status,
+            downloaded_by=str(row.downloaded_by) if row.downloaded_by else None,
+            downloaded_at=row.downloaded_at,
+        )
+
+
+def _validate_month(month: str) -> None:
+    if not MONTH_PATTERN.fullmatch(month):
+        raise RawReportFileValidationError("report_month must use YYYY-MM with a calendar month from 01 to 12")
+
+
+def _normalize_required_string(value: str, field_name: str) -> str:
+    normalized = value.strip()
+    if not normalized:
+        raise RawReportFileValidationError(f"{field_name} must not be blank")
+    return normalized
+
+
+def _normalize_storage_uri(value: str) -> str:
+    normalized = _normalize_required_string(value, "storage_uri")
+    if not normalized.startswith(ALLOWED_STORAGE_PREFIXES):
+        raise RawReportFileValidationError(
+            "storage_uri must point to approved object storage, not raw inline report content"
+        )
+    return normalized
+
+
+def _normalize_parse_status(value: str) -> str:
+    normalized = _normalize_required_string(value, "parse_status")
+    if normalized not in ALLOWED_PARSE_STATUSES:
+        raise RawReportFileValidationError(f"Unknown raw report parse_status: {value}")
+    return normalized
+
+
+def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise RawReportFileValidationError(f"{field_name} must be a valid UUID") from exc
+
+
+def _is_duplicate_raw_report_file_integrity_error(error: IntegrityError) -> bool:
+    orig = getattr(error, "orig", None)
+    diag = getattr(orig, "diag", None)
+    constraint_name = getattr(diag, "constraint_name", None)
+    if constraint_name == "uq_raw_report_files_source_type_month_checksum":
+        return True
+    message = str(orig)
+    return "raw_report_files.source" in message and "raw_report_files.report_type" in message

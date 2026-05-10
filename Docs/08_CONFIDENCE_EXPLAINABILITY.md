@@ -60,3 +60,7 @@ MANUAL_OVERRIDE_USED
 - Clicking a number shows source, formula, confidence, and warnings.
 - User can filter table by confidence level.
 - User can export confidence notes with finance report.
+
+## Foundation implementation note
+
+The first backend explain-number endpoint supports channel-month `adjusted_gross_revenue_usd`. It derives the value from persisted revenue facts and approved manual overrides only, records a `number_explanations` snapshot, and audits the read as sensitive revenue access. Pending overrides appear as warnings and are not applied.

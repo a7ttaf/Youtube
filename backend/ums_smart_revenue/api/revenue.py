@@ -22,6 +22,11 @@ from ums_smart_revenue.finance.manual_overrides import (
     RevenueManualOverrideEntry,
     SqlAlchemyManualOverrideRepository,
 )
+from ums_smart_revenue.finance.explanations import (
+    NumberExplanationValidationError,
+    SqlAlchemyNumberExplanationRepository,
+    build_channel_month_revenue_explanation,
+)
 from ums_smart_revenue.finance.reconciliation import (
     build_revenue_reconciliation_issue_queue,
     build_revenue_reconciliation_preview,
@@ -113,6 +118,12 @@ def current_manual_override_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyManualOverrideRepository:
     return SqlAlchemyManualOverrideRepository(session)
+
+
+def current_number_explanation_repository(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyNumberExplanationRepository:
+    return SqlAlchemyNumberExplanationRepository(session)
 
 
 def current_revenue_audit_sink() -> InMemoryAuditSink:
@@ -295,6 +306,54 @@ def list_month_reconciliation_issues(
     return queue.to_api()
 
 
+@router.get("/channels/{channel_id}/months/{month}/explain")
+def explain_channel_month_revenue_metric(
+    channel_id: str,
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    revenue_repository: Annotated[SqlAlchemyRevenueFactRepository, Depends(current_revenue_fact_repository)],
+    override_repository: Annotated[SqlAlchemyManualOverrideRepository, Depends(current_manual_override_repository)],
+    explanation_repository: Annotated[
+        SqlAlchemyNumberExplanationRepository,
+        Depends(current_number_explanation_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    metric: str = "adjusted_gross_revenue_usd",
+) -> dict[str, object]:
+    target_scope = AccessScope.channel(channel_id)
+    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    try:
+        facts = revenue_repository.list_channel_month_facts(month=month, youtube_channel_id=channel_id)
+        overrides = override_repository.list_channel_month_overrides(month=month, youtube_channel_id=channel_id)
+        explanation = build_channel_month_revenue_explanation(
+            facts=facts,
+            manual_overrides=overrides,
+            month=month,
+            youtube_channel_id=channel_id,
+            metric=metric,
+        )
+        explanation_repository.record_explanation(explanation)
+    except RevenueFactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except (ManualOverrideValidationError, NumberExplanationValidationError, RevenueFactValidationError) as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="number_explanation",
+        entity_id=f"{channel_id}:{month}:{metric}",
+        scope=target_scope,
+        details={"metric": metric, "warning_count": len(explanation.warnings)},
+    )
+    response = explanation.to_api()
+    response["audit_event"] = audit_record_to_api(record)
+    return response
+
+
 @router.post("/manual-overrides", status_code=status.HTTP_201_CREATED)
 def create_manual_override(
     payload: ManualOverrideCreateRequest,
@@ -344,6 +403,9 @@ def approve_manual_override(
     repository: Annotated[SqlAlchemyManualOverrideRepository, Depends(current_manual_override_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
+    if _authorized_channel_ids_for_permission(user, Permission.APPROVE_MANUAL_OVERRIDE, org_index) == set():
+        _raise_missing_permission(Permission.APPROVE_MANUAL_OVERRIDE)
+
     try:
         existing = repository.get_override(manual_override_id)
     except ManualOverrideValidationError as exc:

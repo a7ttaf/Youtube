@@ -1,6 +1,6 @@
 STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
     "runtime": {
-        "python": "3.14.4",
+        "python": "3.14.5",
         "node_lts": "24.15.0",
     },
     "backend": {

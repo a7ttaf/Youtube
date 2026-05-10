@@ -33,7 +33,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
 
 
 def test_stack_version_baseline_records_runtime_and_frontend_targets():
-    assert STACK_VERSION_BASELINE["runtime"]["python"] == "3.14.4"
+    assert STACK_VERSION_BASELINE["runtime"]["python"] == "3.14.5"
     assert STACK_VERSION_BASELINE["runtime"]["node_lts"] == "24.15.0"
     assert STACK_VERSION_BASELINE["datastores"]["postgresql"] == "18.3"
     assert STACK_VERSION_BASELINE["datastores"]["neo4j_enterprise"] == "2026.04.0"

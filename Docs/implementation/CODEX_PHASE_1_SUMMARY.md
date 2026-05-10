@@ -78,6 +78,38 @@ Tenth continuation update:
 - audited month lock, unlock, and allocation-rule metadata changes;
 - kept the finance-close API limited to control metadata and did not implement fake revenue calculations.
 
+Eleventh continuation update:
+- added raw report-file metadata ORM and Alembic migration for `raw_report_files`;
+- added a SQLAlchemy raw report-file repository and FastAPI `/reports/raw-files` routes;
+- enforced `connectors.run_jobs` for report metadata registration and `raw_files.view` for raw metadata reads;
+- audited report registration as `REPORT_IMPORTED` and raw metadata reads as `RAW_FILE_VIEWED`;
+- rejected local/inline storage paths by requiring approved object-storage URI prefixes;
+- stored report artifact metadata only, not report contents or Google credentials.
+
+Twelfth continuation update:
+- added number-explanation ORM metadata and Alembic migration for `number_explanations`;
+- added a deterministic channel-month explanation service for `adjusted_gross_revenue_usd`;
+- added FastAPI `/revenue/channels/{channel_id}/months/{month}/explain`;
+- enforced both `finance.view_revenue` and `analytics.view_confidence` for explain-number reads;
+- persisted explanation snapshots keyed by month, entity, and metric;
+- audited explanation reads as sensitive `REVENUE_VIEWED` events;
+- kept the explanation value derived only from stored revenue facts plus approved manual overrides, with pending overrides reported as warnings.
+
+Thirteenth continuation update:
+- added export-job ORM metadata and Alembic migration for `export_jobs`;
+- added a SQLAlchemy export-job repository and FastAPI `/exports` routes;
+- records queued export metadata only, without generating workbook, PDF, slide, or fake revenue files;
+- enforces `exports.revenue` plus `finance.view_revenue` for finance exports;
+- enforces `exports.analytics` plus analytics visibility for analytics exports;
+- checks group export access against every member channel;
+- captures month lock status on the export job and audits requests as `EXPORT_CREATED`.
+
+Fourteenth continuation update:
+- added a SQLAlchemy audit-log repository and FastAPI `/audit/events` route;
+- enforced `audit.view` for audit-log reads;
+- masked sensitive audit `details` unless the caller has `audit.view_sensitive_payloads`;
+- audited audit-log reads as `AUDIT_LOG_VIEWED`.
+
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`
 - `Docs/implementation/CODEX_PHASE_1_SUMMARY.md`
@@ -89,14 +121,18 @@ Tenth continuation update:
 - `backend/ums_smart_revenue/__init__.py`
 - `backend/ums_smart_revenue/app.py`
 - `backend/ums_smart_revenue/api/__init__.py`
+- `backend/ums_smart_revenue/api/audit.py`
 - `backend/ums_smart_revenue/api/channels.py`
 - `backend/ums_smart_revenue/api/connectors.py`
 - `backend/ums_smart_revenue/api/dependencies.py`
+- `backend/ums_smart_revenue/api/exports.py`
 - `backend/ums_smart_revenue/api/finance_close.py`
 - `backend/ums_smart_revenue/api/groups.py`
+- `backend/ums_smart_revenue/api/reports.py`
 - `backend/ums_smart_revenue/api/revenue.py`
 - `backend/ums_smart_revenue/api/security.py`
 - `backend/ums_smart_revenue/auth/__init__.py`
+- `backend/ums_smart_revenue/auth/audit_log.py`
 - `backend/ums_smart_revenue/auth/permissions.py`
 - `backend/ums_smart_revenue/auth/roles.py`
 - `backend/ums_smart_revenue/auth/scopes.py`
@@ -109,10 +145,12 @@ Tenth continuation update:
 - `backend/ums_smart_revenue/auth/sql_audit_sink.py`
 - `backend/ums_smart_revenue/auth/ui_metadata.py`
 - `backend/ums_smart_revenue/db/__init__.py`
+- `backend/ums_smart_revenue/db/explanation_models.py`
 - `backend/ums_smart_revenue/db/finance_models.py`
 - `backend/ums_smart_revenue/db/session.py`
 - `backend/ums_smart_revenue/db/security_models.py`
 - `backend/ums_smart_revenue/db/org_models.py`
+- `backend/ums_smart_revenue/db/report_models.py`
 - `backend/ums_smart_revenue/db/security_schema.sql`
 - `backend/ums_smart_revenue/db/security_seed.sql`
 - `backend/ums_smart_revenue/db/alembic/env.py`
@@ -120,12 +158,16 @@ Tenth continuation update:
 - `backend/ums_smart_revenue/db/alembic/versions/20260510_0001_security_foundation.py`
 - `backend/ums_smart_revenue/db/alembic/versions/20260510_0002_org_registry.py`
 - `backend/ums_smart_revenue/db/alembic/versions/20260510_0003_finance_close.py`
+- `backend/ums_smart_revenue/db/alembic/versions/20260510_0006_raw_report_files.py`
+- `backend/ums_smart_revenue/db/alembic/versions/20260510_0007_number_explanations.py`
+- `backend/ums_smart_revenue/db/alembic/versions/20260510_0008_export_jobs.py`
 - `backend/ums_smart_revenue/config/__init__.py`
 - `backend/ums_smart_revenue/config/settings.py`
 - `backend/ums_smart_revenue/config/version_baseline.py`
 - `backend/ums_smart_revenue/connectors/__init__.py`
 - `backend/ums_smart_revenue/connectors/credentials.py`
 - `backend/ums_smart_revenue/finance/__init__.py`
+- `backend/ums_smart_revenue/finance/explanations.py`
 - `backend/ums_smart_revenue/finance/month_close.py`
 - `backend/ums_smart_revenue/org/__init__.py`
 - `backend/ums_smart_revenue/org/access_index.py`
@@ -137,13 +179,20 @@ Tenth continuation update:
 - `backend/ums_smart_revenue/graph/__init__.py`
 - `backend/ums_smart_revenue/graph/readonly_service.py`
 - `backend/ums_smart_revenue/graph/cypher.py`
+- `backend/ums_smart_revenue/reports/__init__.py`
+- `backend/ums_smart_revenue/reports/exports.py`
+- `backend/ums_smart_revenue/reports/raw_files.py`
 - `tests/conftest.py`
 - `tests/test_version_baseline.py`
+- `tests/api/test_audit_api.py`
 - `tests/api/test_app.py`
 - `tests/api/test_channels_api.py`
 - `tests/api/test_connectors_api.py`
+- `tests/api/test_exports_api.py`
 - `tests/api/test_finance_close_api.py`
 - `tests/api/test_groups_api.py`
+- `tests/api/test_raw_report_files_api.py`
+- `tests/api/test_revenue_explanations_api.py`
 - `tests/api/test_guarded_routes.py`
 - `tests/api/test_sql_backed_channel_dependencies.py`
 - `tests/auth/test_audit_service.py`
@@ -151,10 +200,16 @@ Tenth continuation update:
 - `tests/auth/test_policy.py`
 - `tests/auth/test_sql_audit_sink.py`
 - `tests/db/test_alembic_scaffold.py`
+- `tests/db/test_export_job_migration.py`
+- `tests/db/test_export_job_models.py`
+- `tests/db/test_explanation_migration.py`
+- `tests/db/test_explanation_models.py`
 - `tests/db/test_finance_close_migration.py`
 - `tests/db/test_finance_close_models.py`
 - `tests/db/test_org_registry_migration.py`
 - `tests/db/test_org_registry_models.py`
+- `tests/db/test_raw_report_file_migration.py`
+- `tests/db/test_raw_report_file_models.py`
 - `tests/db/test_security_orm.py`
 - `tests/graph/test_readonly_service.py`
 - `tests/org/test_sql_channel_registry.py`
@@ -247,6 +302,30 @@ Pytest coverage includes:
 - Finance Approver can unlock a month and create a `MONTH_UNLOCKED` audit event.
 - Export Operator cannot change allocation rules.
 - Finance Admin can record allocation-rule metadata and create an `ALLOCATION_RULE_CHANGED` audit event without calculating revenue.
+- System Integration User can register raw report-file metadata and create a sensitive `REPORT_IMPORTED` audit event.
+- Connector Admin can view scoped raw report-file metadata and create a sensitive `RAW_FILE_VIEWED` audit event.
+- Assistant Analyst cannot view raw report files.
+- Connector-scoped admins cannot view another connector's raw report metadata.
+- Raw report registration rejects local/inline storage references.
+- Duplicate raw report artifact metadata returns a controlled `409` conflict.
+- Finance Viewer can fetch an adjusted revenue explanation with an audit event and persisted snapshot.
+- Assistant Analyst cannot fetch revenue explanations by default.
+- Unsupported explanation metrics are rejected explicitly.
+- Number explanation ORM persists formula components and warnings.
+- Finance Admin can request a queued finance export with an audit event and month-lock snapshot.
+- Export Operator cannot request finance exports without finance visibility.
+- Export Operator can request scoped analytics exports.
+- Company Manager cannot request exports for another company.
+- Group export requests require access to every member channel.
+- Export requests reject non-USD currency until exchange-rate support exists.
+- Export listing returns only the requesting user's jobs.
+- Export detail reads allow a user to fetch their own export metadata.
+- Users without export permission cannot probe export ids.
+- Export job ORM persists queued job metadata.
+- Audit Viewer can list audit events with sensitive details masked.
+- Super Owner can view sensitive audit details.
+- Assistant Analyst cannot view audit events.
+- Audit-log reads create an `AUDIT_LOG_VIEWED` audit event.
 
 ## Commands Run
 - `git status --short --branch` failed because this workspace is not a Git repository.
@@ -284,6 +363,25 @@ Pytest coverage includes:
 - `pytest tests/db/test_finance_close_models.py tests/db/test_finance_close_migration.py -q -p no:cacheprovider` passed with 3 tests.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider` passed with 63 tests after finance-close control APIs were added.
 - Generated Python `__pycache__` directories were removed after the finance-close test run.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp tests/api/test_raw_report_files_api.py tests/db/test_raw_report_file_models.py tests/db/test_raw_report_file_migration.py` first failed because `report_models` did not exist, then passed with 10 tests after raw report-file metadata APIs were added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp tests/api tests/db` passed with 96 tests after the raw report-file API was added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp` passed with 135 tests after the raw report-file API was added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; python -B -m alembic -c alembic.ini upgrade head --sql` rendered migrations through `20260510_0006`.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp tests/api/test_revenue_explanations_api.py tests/db/test_explanation_models.py tests/db/test_explanation_migration.py` first failed because `explanation_models` did not exist, then passed with 5 tests after explain-number APIs were added.
+- `git diff --check` passed with CRLF conversion warnings only.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp tests/api tests/db tests/finance` passed with 105 tests after explain-number APIs were added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp` passed with 140 tests after explain-number APIs were added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; python -B -m alembic -c alembic.ini upgrade head --sql` rendered migrations through `20260510_0007`.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp tests/api/test_exports_api.py tests/db/test_export_job_models.py tests/db/test_export_job_migration.py` first failed because `ExportJobORM` did not exist, then passed with 11 tests after export-job APIs were added.
+- `git diff --check` passed again with CRLF conversion warnings only after export-job APIs were added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp tests/api tests/db tests/finance` passed with 116 tests after export-job APIs were added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp` passed with 151 tests after export-job APIs were added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; python -B -m alembic -c alembic.ini upgrade head --sql` rendered migrations through `20260510_0008`.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp tests/api/test_audit_api.py` first failed with missing `/audit/events`, then passed with 3 tests after the guarded audit-log API was added.
+- `git diff --check` passed again with CRLF conversion warnings only after audit-log APIs were added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp tests/api tests/db tests/finance` passed with 119 tests after audit-log APIs were added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp` passed with 154 tests after audit-log APIs were added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; python -B -m alembic -c alembic.ini upgrade head --sql` still rendered migrations through `20260510_0008`.
 
 ## Remaining Next Steps
 - Expand SQL audit persistence to each new sensitive endpoint as those routes are added.

@@ -3,8 +3,10 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
+from ums_smart_revenue.db.explanation_models import ExplanationBase
 from ums_smart_revenue.db.finance_models import FinanceBase
 from ums_smart_revenue.db.org_models import OrgBase
+from ums_smart_revenue.db.report_models import ReportBase
 from ums_smart_revenue.db.security_models import SecurityBase
 
 
@@ -13,7 +15,13 @@ config = context.config
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = [SecurityBase.metadata, OrgBase.metadata, FinanceBase.metadata]
+target_metadata = [
+    SecurityBase.metadata,
+    OrgBase.metadata,
+    FinanceBase.metadata,
+    ReportBase.metadata,
+    ExplanationBase.metadata,
+]
 
 
 def run_migrations_offline() -> None:

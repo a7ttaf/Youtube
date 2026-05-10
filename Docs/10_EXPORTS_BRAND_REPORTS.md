@@ -93,6 +93,9 @@ created_at
 completed_at
 ```
 
+Implementation note:
+The backend foundation currently records queued export-job metadata only. It supports finance export requests for `FINANCE_EXCEL`, `EXECUTIVE_PDF`, and `BRANDED_SLIDE_PACK`, plus non-financial `ANALYTICS_SUMMARY_CSV` requests for export operators. Finance exports require both revenue export permission and revenue visibility for the requested scope. Group exports are checked against every member channel. Currency is restricted to USD until an exchange-rate source is implemented.
+
 ## Acceptance checks
 
 - User can export by holding, sector, company, group, or channel.

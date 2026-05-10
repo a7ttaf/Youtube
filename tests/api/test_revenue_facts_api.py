@@ -365,3 +365,51 @@ def test_import_rejects_missing_channel(tmp_path):
 
     assert response.status_code == 422
     assert response.json()["detail"] == "youtube_channel_id must reference an active channel"
+
+
+def test_import_rejects_invalid_source_kind(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/facts",
+        headers=auth_headers("system_integration_user", "connector", "youtube-cms"),
+        json={
+            "month": "2026-03",
+            "youtube_channel_id": "channel-tv-a",
+            "source_kind": "ESTIMATED_FAKE_SOURCE",
+            "connector_key": "youtube-cms",
+            "gross_revenue_usd": "1234.56",
+            "views": 250000,
+            "reason": "Attempt import with invalid source kind",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "Unknown revenue fact source_kind: ESTIMATED_FAKE_SOURCE"
+
+
+def test_import_rejects_malformed_actor_id(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers("system_integration_user", "connector", "youtube-cms")
+    headers["x-user-id"] = "not-a-uuid"
+
+    response = client.post(
+        "/revenue/facts",
+        headers=headers,
+        json={
+            "month": "2026-03",
+            "youtube_channel_id": "channel-tv-a",
+            "source_kind": "YOUTUBE_CMS",
+            "connector_key": "youtube-cms",
+            "gross_revenue_usd": "1234.56",
+            "views": 250000,
+            "reason": "Attempt import with malformed actor id",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "actor_user_id must be a valid UUID"

@@ -96,6 +96,14 @@ GET /exports
 GET /exports/{export_id}
 ```
 
+### Audit
+
+```http
+GET /audit/events
+```
+
+Audit event reads require `audit.view`. Sensitive audit `details` are masked unless the caller also has `audit.view_sensitive_payloads`. Audit reads are themselves recorded as `AUDIT_LOG_VIEWED`.
+
 ### Graph
 
 ```http

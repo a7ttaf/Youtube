@@ -158,6 +158,9 @@ audit_logs (
 );
 ```
 
+Implementation note:
+The backend foundation stores explanation months as `YYYY-MM` text, records deterministic explanation snapshots keyed by month/entity/metric, and derives values from stored revenue facts plus approved manual overrides. Explanation snapshots are not a substitute for source revenue facts.
+
 ## Raw report storage
 
 ```sql
@@ -172,3 +175,30 @@ raw_report_files (
   parse_status text
 );
 ```
+
+Implementation note:
+The backend foundation stores `report_month` as `YYYY-MM` text for API consistency and stores object-storage metadata only. Raw file contents and Google credentials are not stored in this table.
+
+## Export job metadata
+
+```sql
+export_jobs (
+  id uuid primary key,
+  export_type text,
+  scope_type text,
+  scope_id text null,
+  month text,
+  currency text,
+  requested_by uuid,
+  status text,
+  file_url text null,
+  month_lock_status text,
+  include_confidence_notes boolean,
+  include_manual_override_notes boolean,
+  created_at timestamp,
+  completed_at timestamp null
+);
+```
+
+Implementation note:
+The backend foundation records export job requests as queued metadata. It does not generate workbook, PDF, or slide files yet, and it does not calculate revenue values during export request creation.

@@ -131,6 +131,31 @@ def test_finance_approver_approves_pending_manual_override(tmp_path):
     assert {log.event_type for log in audit_logs} == {"MANUAL_OVERRIDE_APPROVED", "MANUAL_OVERRIDE_CREATED"}
 
 
+def test_manual_override_creator_cannot_approve_own_override(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    create_response = client.post(
+        "/revenue/manual-overrides",
+        headers=auth_headers("finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)),
+        json={
+            "month": "2026-03",
+            "youtube_channel_id": "channel-tv-a",
+            "adjustment_revenue_usd": "125.50",
+            "reason": "Correct CMS transfer-fee allocation",
+        },
+    )
+    approve_response = client.post(
+        f"/revenue/manual-overrides/{create_response.json()['id']}/approve",
+        headers=auth_headers("finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)),
+        json={"reason": "Should require a second approver"},
+    )
+
+    assert approve_response.status_code == 422
+    assert approve_response.json()["detail"] == "Manual override creator cannot approve their own override"
+
+
 def test_manual_override_rejects_locked_month(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url, locked_month=True)
@@ -169,6 +194,21 @@ def test_company_manager_cannot_create_manual_override(tmp_path):
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: finance.create_manual_override"
+
+
+def test_user_without_approval_permission_cannot_probe_manual_override_ids(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/manual-overrides/not-a-uuid/approve",
+        headers=auth_headers("company_manager", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)),
+        json={"reason": "Should be denied before override lookup"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.approve_manual_override"
 
 
 def test_finance_viewer_reads_adjusted_revenue_summary_with_approved_overrides_only(tmp_path):

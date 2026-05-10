@@ -25,6 +25,7 @@ class AuditEventType(str, Enum):
     RAW_FILE_VIEWED = "RAW_FILE_VIEWED"
     REVENUE_VIEWED = "REVENUE_VIEWED"
     GRAPH_FINANCE_VIEWED = "GRAPH_FINANCE_VIEWED"
+    AUDIT_LOG_VIEWED = "AUDIT_LOG_VIEWED"
 
 
 @dataclass(frozen=True)
@@ -105,5 +106,9 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     AuditEventType.GRAPH_FINANCE_VIEWED: AuditEventDefinition(
         AuditEventType.GRAPH_FINANCE_VIEWED,
         permission=Permission.VIEW_GRAPH_FINANCE,
+    ),
+    AuditEventType.AUDIT_LOG_VIEWED: AuditEventDefinition(
+        AuditEventType.AUDIT_LOG_VIEWED,
+        permission=Permission.VIEW_AUDIT_LOG,
     ),
 }

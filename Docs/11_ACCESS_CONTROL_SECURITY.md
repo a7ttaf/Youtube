@@ -74,3 +74,4 @@ USER_ROLE_CHANGED
 - Assistant cannot see finance unless explicitly granted.
 - Finance export is impossible without finance/owner role.
 - Every override and export appears in audit log.
+- Audit log reads require `audit.view`; sensitive audit details remain masked unless `audit.view_sensitive_payloads` is also granted.

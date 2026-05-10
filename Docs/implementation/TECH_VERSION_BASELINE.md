@@ -14,7 +14,7 @@ For this project:
 
 | Component | Version | Use |
 |---|---:|---|
-| Python | `3.14.4` | Backend runtime target |
+| Python | `3.14.5` | Backend runtime target |
 | Node.js | `24.15.0` LTS | Future Next.js frontend runtime |
 | PostgreSQL | `18.3` | Source-of-truth operational database |
 | Neo4j Enterprise | `2026.04.0` | Read-only graph projection target |
@@ -56,4 +56,4 @@ For this project:
 - npm registry latest package metadata for frontend packages: `https://registry.npmjs.org/<package>/latest`
 
 ## Local Environment Note
-The current workstation Python is `3.12`, so tests are still run against the available local interpreter. The production runtime target is `3.14.4`, and the project metadata now expresses `>=3.14,<3.15`.
+The current workstation Python is `3.12`, so tests are still run against the available local interpreter. The production runtime target is `3.14.5`, and the project metadata now expresses `>=3.14,<3.15`.
