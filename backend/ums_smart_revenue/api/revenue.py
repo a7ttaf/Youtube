@@ -13,6 +13,7 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.finance.reconciliation import build_revenue_reconciliation_preview
 from ums_smart_revenue.finance.revenue_facts import (
     RevenueFactEntry,
     RevenueFactLockedMonthError,
@@ -176,6 +177,42 @@ def list_channel_month_revenue_facts(
         "facts": [fact.to_api() for fact in facts],
         "audit_event": audit_record_to_api(record),
     }
+
+
+@router.get("/channels/{channel_id}/months/{month}/reconciliation-preview")
+def get_channel_month_reconciliation_preview(
+    channel_id: str,
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    repository: Annotated[SqlAlchemyRevenueFactRepository, Depends(current_revenue_fact_repository)],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+) -> dict[str, object]:
+    target_scope = AccessScope.channel(channel_id)
+    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    try:
+        facts = repository.list_channel_month_facts(month=month, youtube_channel_id=channel_id)
+    except RevenueFactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RevenueFactValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    preview = build_revenue_reconciliation_preview(facts, month=month, youtube_channel_id=channel_id)
+    record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="revenue_reconciliation_preview",
+        entity_id=f"{channel_id}:{month}",
+        scope=target_scope,
+        details={
+            "status": preview.status,
+            "issue_count": len(preview.issues),
+            "compared_source_count": preview.compared_source_count,
+        },
+    )
+    return preview.to_api()
 
 
 def _require_permission(

@@ -155,6 +155,69 @@ def test_company_manager_cannot_read_revenue_facts(tmp_path):
     assert response.json()["detail"] == "Missing permission: finance.view_revenue"
 
 
+def test_finance_viewer_reads_reconciliation_preview(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-a",
+                    source_kind="YOUTUBE_CMS",
+                    source_report_id="cms-report-2026-03",
+                    gross_revenue_usd=Decimal("1000.00"),
+                    net_revenue_usd=Decimal("900.00"),
+                    views=250000,
+                    watch_time_minutes=Decimal("7200.50"),
+                    confidence_score=Decimal("0.9800"),
+                    imported_by=USER_ID,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-a",
+                    source_kind="ADSENSE",
+                    source_report_id="adsense-report-2026-03",
+                    gross_revenue_usd=Decimal("930.00"),
+                    net_revenue_usd=Decimal("880.00"),
+                    views=0,
+                    watch_time_minutes=Decimal("0"),
+                    confidence_score=Decimal("0.9000"),
+                    imported_by=USER_ID,
+                ),
+            ]
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/channels/channel-tv-a/months/2026-03/reconciliation-preview",
+        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "VARIANCE_DETECTED"
+    assert response.json()["gross_revenue_variance_usd"] == "70"
+    assert response.json()["issues"][0]["issue_type"] == "GROSS_REVENUE_VARIANCE"
+
+
+def test_company_manager_cannot_read_reconciliation_preview(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/channels/channel-tv-a/months/2026-03/reconciliation-preview",
+        headers=auth_headers("company_manager", "company", str(COMPANY_ID)),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
 def test_import_rejects_locked_finance_month(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url, locked_month=True)
