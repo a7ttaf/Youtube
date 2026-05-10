@@ -1,6 +1,6 @@
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
@@ -16,6 +16,7 @@ from ums_smart_revenue.connectors.credentials import (
     ConnectorCredentialEntry,
     ConnectorCredentialConflictError,
     ConnectorCredentialValidationError,
+    MAX_CREDENTIAL_PAGE_SIZE,
     SqlAlchemyConnectorCredentialRepository,
     is_external_secret_ref,
 )
@@ -59,9 +60,20 @@ def current_connector_repository(
 def list_connector_credentials(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     repository: Annotated[SqlAlchemyConnectorCredentialRepository, Depends(current_connector_repository)],
-) -> list[dict[str, object]]:
+    limit: Annotated[int, Query(ge=1, le=MAX_CREDENTIAL_PAGE_SIZE)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, object]:
     _require_connector_permission(user, Permission.MANAGE_CONNECTORS, AccessScope.global_scope())
-    return [credential.to_api() for credential in repository.list_credentials()]
+    page = repository.list_credentials(limit=limit, offset=offset)
+    return {
+        "items": [credential.to_api() for credential in page.items],
+        "pagination": {
+            "limit": page.limit,
+            "offset": page.offset,
+            "returned": len(page.items),
+            "has_more": page.has_more,
+        },
+    }
 
 
 @router.post("/credentials", status_code=status.HTTP_201_CREATED)

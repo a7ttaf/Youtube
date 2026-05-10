@@ -81,7 +81,7 @@ def test_connector_credentials_reject_raw_secret_payload(tmp_path):
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
-            "encrypted_secret_ref": "plain-google-password",
+            "encrypted_secret_ref": "plain-google-password",  # noqa: S105 - intentionally invalid raw-secret test input
             "reason": "Invalid raw secret",
         },
     )
@@ -129,6 +129,36 @@ def test_connector_credentials_reject_malformed_actor_id(tmp_path):
 
     assert response.status_code == 422
     assert response.json()["detail"] == "actor_user_id must be a valid UUID"
+
+
+def test_connector_credentials_list_is_paginated(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers("connector_admin")
+
+    for account_id in ("content-owner-1", "content-owner-2"):
+        create_response = client.post(
+            "/connectors/credentials",
+            headers=headers,
+            json={
+                "connector_key": "youtube_reporting",
+                "account_id": account_id,
+                "encrypted_secret_ref": f"secret-manager://ums/youtube-reporting/{account_id}",
+                "reason": "Register OAuth credential reference",
+            },
+        )
+        assert create_response.status_code == 201
+
+    response = client.get("/connectors/credentials?limit=1&offset=0", headers=headers)
+    next_response = client.get("/connectors/credentials?limit=1&offset=1", headers=headers)
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["account_id"] == "content-owner-1"
+    assert response.json()["pagination"] == {"limit": 1, "offset": 0, "returned": 1, "has_more": True}
+    assert next_response.status_code == 200
+    assert next_response.json()["items"][0]["account_id"] == "content-owner-2"
+    assert next_response.json()["pagination"] == {"limit": 1, "offset": 1, "returned": 1, "has_more": False}
 
 
 def test_assistant_cannot_create_connector_credential(tmp_path):

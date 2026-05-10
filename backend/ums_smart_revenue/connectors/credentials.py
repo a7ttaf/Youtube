@@ -17,6 +17,7 @@ SECRET_REF_PREFIXES = (
     "kms://",
 )
 CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT = "uq_api_connector_credentials_connector_account"
+MAX_CREDENTIAL_PAGE_SIZE = 100
 
 
 @dataclass(frozen=True)
@@ -37,6 +38,14 @@ class ConnectorCredentialEntry:
         }
 
 
+@dataclass(frozen=True)
+class ConnectorCredentialPage:
+    items: list[ConnectorCredentialEntry]
+    limit: int
+    offset: int
+    has_more: bool
+
+
 class ConnectorCredentialError(ValueError):
     pass
 
@@ -53,14 +62,26 @@ class SqlAlchemyConnectorCredentialRepository:
     def __init__(self, session: Session):
         self._session = session
 
-    def list_credentials(self) -> list[ConnectorCredentialEntry]:
+    def list_credentials(self, *, limit: int = 50, offset: int = 0) -> ConnectorCredentialPage:
+        if limit < 1 or limit > MAX_CREDENTIAL_PAGE_SIZE:
+            raise ConnectorCredentialValidationError(
+                f"limit must be between 1 and {MAX_CREDENTIAL_PAGE_SIZE}"
+            )
+        if offset < 0:
+            raise ConnectorCredentialValidationError("offset must be greater than or equal to 0")
         rows = self._session.scalars(
             select(ApiConnectorCredentialORM).order_by(
                 ApiConnectorCredentialORM.connector_key,
                 ApiConnectorCredentialORM.account_id,
-            )
+            ).limit(limit + 1).offset(offset)
         ).all()
-        return [self._to_entry(row) for row in rows]
+        visible_rows = rows[:limit]
+        return ConnectorCredentialPage(
+            items=[self._to_entry(row) for row in visible_rows],
+            limit=limit,
+            offset=offset,
+            has_more=len(rows) > limit,
+        )
 
     def create_credential(
         self,

@@ -64,7 +64,11 @@ class ChannelRegistryStore(Protocol):
 
 class ChannelRegistry:
     def __init__(self, channels: list[ChannelRegistryEntry] | None = None):
-        self._channels = {channel.youtube_channel_id: channel for channel in channels or []}
+        self._channels: dict[str, ChannelRegistryEntry] = {}
+        for channel in channels or []:
+            if channel.youtube_channel_id in self._channels:
+                raise ChannelRegistryConflictError(f"Duplicate channel id: {channel.youtube_channel_id}")
+            self._channels[channel.youtube_channel_id] = channel
 
     def list_channels(self) -> list[ChannelRegistryEntry]:
         return sorted(
@@ -129,7 +133,7 @@ def bootstrap_channel_registry() -> ChannelRegistry:
         ChannelRegistryEntry(
             youtube_channel_id=channel.youtube_channel_id,
             channel_name=channel.youtube_channel_id,
-            primary_company_id=channel.primary_org_unit_id,
+            primary_company_id=_parse_optional_uuid(channel.primary_org_unit_id, "primary_company_id"),
             cms_status="UNKNOWN",
             revenue_required=True,
             active=channel.active,
