@@ -6,7 +6,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
-from ums_smart_revenue.connectors.credentials import _is_duplicate_credential_integrity_error
+from ums_smart_revenue.connectors.credentials import (
+    _is_duplicate_credential_integrity_error,
+    is_external_secret_ref,
+)
 from ums_smart_revenue.db.org_models import OrgBase
 from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM, AuditLogORM, SecurityBase, UserORM
 
@@ -74,6 +77,7 @@ def test_connector_credentials_reject_raw_secret_payload(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
+    invalid_ref = "plain-google-credential"
 
     response = client.post(
         "/connectors/credentials",
@@ -81,13 +85,20 @@ def test_connector_credentials_reject_raw_secret_payload(tmp_path):
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
-            "encrypted_secret_ref": "plain-google-password",  # noqa: S105 - intentionally invalid raw-secret test input
+            "encrypted_secret_ref": invalid_ref,
             "reason": "Invalid raw secret",
         },
     )
 
     assert response.status_code == 422
     assert response.json()["detail"] == "Connector credentials must use an external encrypted secret reference"
+
+
+def test_external_secret_ref_requires_prefix_and_locator():
+    assert is_external_secret_ref("secret-manager://ums/youtube-reporting/content-owner-1")
+    assert not is_external_secret_ref("")
+    assert not is_external_secret_ref("secret-manager://")
+    assert not is_external_secret_ref("secret-manager://   ")
 
 
 def test_connector_credentials_reject_blank_required_strings(tmp_path):

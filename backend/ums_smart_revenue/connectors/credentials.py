@@ -136,7 +136,13 @@ class SqlAlchemyConnectorCredentialRepository:
 
 
 def is_external_secret_ref(value: str) -> bool:
-    return value.startswith(SECRET_REF_PREFIXES)
+    normalized = value.strip()
+    if not normalized:
+        return False
+    return any(
+        normalized.startswith(prefix) and bool(normalized[len(prefix) :].strip())
+        for prefix in SECRET_REF_PREFIXES
+    )
 
 
 def _parse_uuid(value: str) -> UUID:
