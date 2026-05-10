@@ -1,0 +1,103 @@
+from dataclasses import dataclass
+from enum import Enum
+
+from ums_smart_revenue.auth.permissions import Permission
+
+
+class AuditEventType(str, Enum):
+    LOGIN = "LOGIN"
+    LOGOUT = "LOGOUT"
+    CHANNEL_CREATED = "CHANNEL_CREATED"
+    CHANNEL_UPDATED = "CHANNEL_UPDATED"
+    GROUP_UPDATED = "GROUP_UPDATED"
+    REPORT_IMPORTED = "REPORT_IMPORTED"
+    ADSENSE_PAYMENT_SYNCED = "ADSENSE_PAYMENT_SYNCED"
+    MONTH_CLOSE_UPDATED = "MONTH_CLOSE_UPDATED"
+    MONTH_LOCKED = "MONTH_LOCKED"
+    MONTH_UNLOCKED = "MONTH_UNLOCKED"
+    MANUAL_OVERRIDE_CREATED = "MANUAL_OVERRIDE_CREATED"
+    MANUAL_OVERRIDE_APPROVED = "MANUAL_OVERRIDE_APPROVED"
+    ALLOCATION_RULE_CHANGED = "ALLOCATION_RULE_CHANGED"
+    EXPORT_CREATED = "EXPORT_CREATED"
+    USER_ROLE_CHANGED = "USER_ROLE_CHANGED"
+    CONNECTOR_JOB_RUN = "CONNECTOR_JOB_RUN"
+    CONNECTOR_SETTINGS_CHANGED = "CONNECTOR_SETTINGS_CHANGED"
+    RAW_FILE_VIEWED = "RAW_FILE_VIEWED"
+    REVENUE_VIEWED = "REVENUE_VIEWED"
+    GRAPH_FINANCE_VIEWED = "GRAPH_FINANCE_VIEWED"
+
+
+@dataclass(frozen=True)
+class AuditEventDefinition:
+    event_type: AuditEventType
+    reason_required: bool = False
+    permission: Permission | None = None
+
+
+AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
+    AuditEventType.CHANNEL_UPDATED: AuditEventDefinition(
+        AuditEventType.CHANNEL_UPDATED,
+        reason_required=True,
+        permission=Permission.MANAGE_ORG_MAPPING,
+    ),
+    AuditEventType.GROUP_UPDATED: AuditEventDefinition(
+        AuditEventType.GROUP_UPDATED,
+        reason_required=True,
+        permission=Permission.MANAGE_GROUPS,
+    ),
+    AuditEventType.MONTH_LOCKED: AuditEventDefinition(
+        AuditEventType.MONTH_LOCKED,
+        reason_required=True,
+        permission=Permission.LOCK_FINANCE_MONTH,
+    ),
+    AuditEventType.MONTH_UNLOCKED: AuditEventDefinition(
+        AuditEventType.MONTH_UNLOCKED,
+        reason_required=True,
+        permission=Permission.UNLOCK_FINANCE_MONTH,
+    ),
+    AuditEventType.MANUAL_OVERRIDE_CREATED: AuditEventDefinition(
+        AuditEventType.MANUAL_OVERRIDE_CREATED,
+        reason_required=True,
+        permission=Permission.CREATE_MANUAL_OVERRIDE,
+    ),
+    AuditEventType.MANUAL_OVERRIDE_APPROVED: AuditEventDefinition(
+        AuditEventType.MANUAL_OVERRIDE_APPROVED,
+        reason_required=True,
+        permission=Permission.APPROVE_MANUAL_OVERRIDE,
+    ),
+    AuditEventType.ALLOCATION_RULE_CHANGED: AuditEventDefinition(
+        AuditEventType.ALLOCATION_RULE_CHANGED,
+        reason_required=True,
+        permission=Permission.CHANGE_ALLOCATION_RULE,
+    ),
+    AuditEventType.EXPORT_CREATED: AuditEventDefinition(
+        AuditEventType.EXPORT_CREATED,
+        permission=Permission.EXPORT_REVENUE_REPORT,
+    ),
+    AuditEventType.USER_ROLE_CHANGED: AuditEventDefinition(
+        AuditEventType.USER_ROLE_CHANGED,
+        reason_required=True,
+        permission=Permission.ASSIGN_ROLES,
+    ),
+    AuditEventType.CONNECTOR_JOB_RUN: AuditEventDefinition(
+        AuditEventType.CONNECTOR_JOB_RUN,
+        permission=Permission.RUN_CONNECTOR_JOBS,
+    ),
+    AuditEventType.CONNECTOR_SETTINGS_CHANGED: AuditEventDefinition(
+        AuditEventType.CONNECTOR_SETTINGS_CHANGED,
+        reason_required=True,
+        permission=Permission.MANAGE_CONNECTORS,
+    ),
+    AuditEventType.RAW_FILE_VIEWED: AuditEventDefinition(
+        AuditEventType.RAW_FILE_VIEWED,
+        permission=Permission.VIEW_RAW_FILES,
+    ),
+    AuditEventType.REVENUE_VIEWED: AuditEventDefinition(
+        AuditEventType.REVENUE_VIEWED,
+        permission=Permission.VIEW_REVENUE,
+    ),
+    AuditEventType.GRAPH_FINANCE_VIEWED: AuditEventDefinition(
+        AuditEventType.GRAPH_FINANCE_VIEWED,
+        permission=Permission.VIEW_GRAPH_FINANCE,
+    ),
+}

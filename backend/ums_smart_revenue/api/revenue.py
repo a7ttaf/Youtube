@@ -1,0 +1,44 @@
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, HTTPException, status
+from sqlalchemy.orm import Session
+
+from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
+from ums_smart_revenue.auth.models import UserPrincipal
+from ums_smart_revenue.auth.permissions import Permission
+from ums_smart_revenue.auth.policy import has_permission
+from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
+from ums_smart_revenue.org.access_index import load_org_access_index_from_session
+from ums_smart_revenue.org.bootstrap_registry import BOOTSTRAP_ORG_INDEX
+
+
+router = APIRouter(prefix="/revenue", tags=["revenue"])
+
+
+def current_org_access_index() -> OrgAccessIndex:
+    return BOOTSTRAP_ORG_INDEX
+
+
+def org_access_index_from_session(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> OrgAccessIndex:
+    return load_org_access_index_from_session(session)
+
+
+@router.get("/channels/{channel_id}/authorization-check")
+def check_channel_revenue_authorization(
+    channel_id: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+) -> dict[str, object]:
+    target_scope = AccessScope.channel(channel_id)
+    if not has_permission(user, Permission.VIEW_REVENUE, target_scope, org_index):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Missing permission: {Permission.VIEW_REVENUE.value}",
+        )
+    return {
+        "authorized": True,
+        "channel_id": channel_id,
+        "permission": Permission.VIEW_REVENUE.value,
+    }

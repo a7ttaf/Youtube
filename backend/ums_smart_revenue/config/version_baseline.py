@@ -1,0 +1,33 @@
+STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
+    "runtime": {
+        "python": "3.14.4",
+        "node_lts": "24.15.0",
+    },
+    "backend": {
+        "fastapi": "0.136.1",
+        "pydantic": "2.13.4",
+        "uvicorn": "0.46.0",
+        "sqlalchemy": "2.0.49",
+        "alembic": "1.18.4",
+        "asyncpg": "0.31.0",
+        "neo4j_driver": "6.2.0",
+        "celery": "5.6.3",
+        "redis": "7.4.0",
+        "pytest": "9.0.3",
+        "httpx": "0.28.1",
+    },
+    "datastores": {
+        "postgresql": "18.3",
+        "neo4j_enterprise": "2026.04.0",
+    },
+    "frontend": {
+        "next": "16.2.6",
+        "react": "19.2.6",
+        "react_dom": "19.2.6",
+        "typescript": "6.0.3",
+        "eslint": "10.3.0",
+        "vitest": "4.1.5",
+        "playwright": "1.59.1",
+    },
+}
+
