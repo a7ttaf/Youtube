@@ -13,7 +13,9 @@ from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, User
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000006101")
 COMPANY_ID = UUID("00000000-0000-0000-0000-000000006201")
+OTHER_COMPANY_ID = UUID("00000000-0000-0000-0000-000000006202")
 CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-000000006301")
+OTHER_CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-000000006302")
 USER_ID = UUID("00000000-0000-0000-0000-000000006401")
 
 
@@ -44,11 +46,21 @@ def seed_database(database_url: str, *, locked_month: bool = False) -> None:
             [
                 OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True),
                 OrgUnitORM(id=COMPANY_ID, parent_id=SECTOR_ID, type="COMPANY", name="TV Company", active=True),
+                OrgUnitORM(id=OTHER_COMPANY_ID, parent_id=SECTOR_ID, type="COMPANY", name="News Company", active=True),
                 YouTubeChannelORM(
                     id=CHANNEL_ROW_ID,
                     youtube_channel_id="channel-tv-a",
                     channel_name="TV A",
                     primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                YouTubeChannelORM(
+                    id=OTHER_CHANNEL_ROW_ID,
+                    youtube_channel_id="channel-news-a",
+                    channel_name="News A",
+                    primary_org_unit_id=OTHER_COMPANY_ID,
                     cms_status="INSIDE_CMS",
                     revenue_required=True,
                     active=True,
@@ -211,6 +223,92 @@ def test_company_manager_cannot_read_reconciliation_preview(tmp_path):
 
     response = client.get(
         "/revenue/channels/channel-tv-a/months/2026-03/reconciliation-preview",
+        headers=auth_headers("company_manager", "company", str(COMPANY_ID)),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
+def test_finance_viewer_reads_month_reconciliation_issue_queue_for_allowed_company(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-a",
+                    source_kind="YOUTUBE_CMS",
+                    gross_revenue_usd=Decimal("1000.00"),
+                    views=250000,
+                    watch_time_minutes=Decimal("7200.50"),
+                    confidence_score=Decimal("0.9800"),
+                    imported_by=USER_ID,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-a",
+                    source_kind="ADSENSE",
+                    gross_revenue_usd=Decimal("930.00"),
+                    views=0,
+                    watch_time_minutes=Decimal("0"),
+                    confidence_score=Decimal("0.9000"),
+                    imported_by=USER_ID,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-news-a",
+                    source_kind="YOUTUBE_CMS",
+                    gross_revenue_usd=Decimal("2000.00"),
+                    views=300000,
+                    watch_time_minutes=Decimal("8200.50"),
+                    confidence_score=Decimal("0.9800"),
+                    imported_by=USER_ID,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-news-a",
+                    source_kind="ADSENSE",
+                    gross_revenue_usd=Decimal("1500.00"),
+                    views=0,
+                    watch_time_minutes=Decimal("0"),
+                    confidence_score=Decimal("0.9000"),
+                    imported_by=USER_ID,
+                ),
+            ]
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/reconciliation-issues",
+        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
+    )
+
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+
+    assert response.status_code == 200
+    assert response.json()["month"] == "2026-03"
+    assert response.json()["issue_count"] == 1
+    assert [item["youtube_channel_id"] for item in response.json()["items"]] == ["channel-tv-a"]
+    assert audit_log.entity_type == "revenue_reconciliation_issue_queue"
+    assert audit_log.sensitive is True
+
+
+def test_company_manager_cannot_read_month_reconciliation_issue_queue(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/reconciliation-issues",
         headers=auth_headers("company_manager", "company", str(COMPANY_ID)),
     )
 

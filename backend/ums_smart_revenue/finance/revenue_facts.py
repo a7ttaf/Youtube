@@ -138,6 +138,36 @@ class SqlAlchemyRevenueFactRepository:
         ).all()
         return [self._to_entry(row) for row in rows]
 
+    def list_month_facts(
+        self,
+        *,
+        month: str,
+        youtube_channel_ids: set[str] | None = None,
+    ) -> list[RevenueFactEntry]:
+        _validate_month(month)
+        if youtube_channel_ids == set():
+            return []
+
+        statement = (
+            select(MonthlyChannelRevenueFactORM)
+            .join(
+                YouTubeChannelORM,
+                MonthlyChannelRevenueFactORM.youtube_channel_id == YouTubeChannelORM.youtube_channel_id,
+            )
+            .where(
+                MonthlyChannelRevenueFactORM.month == month,
+                YouTubeChannelORM.active.is_(True),
+            )
+            .order_by(
+                MonthlyChannelRevenueFactORM.youtube_channel_id,
+                MonthlyChannelRevenueFactORM.source_kind,
+            )
+        )
+        if youtube_channel_ids is not None:
+            statement = statement.where(MonthlyChannelRevenueFactORM.youtube_channel_id.in_(youtube_channel_ids))
+
+        return [self._to_entry(row) for row in self._session.scalars(statement).all()]
+
     def _require_month_open(self, month: str) -> None:
         close = self._session.get(FinanceMonthCloseORM, month)
         if close is not None and close.status == "LOCKED":

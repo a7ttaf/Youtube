@@ -11,9 +11,13 @@ from ums_smart_revenue.auth.audit_service import AuditRecord, AuditSink, InMemor
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
-from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
+from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
+from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
-from ums_smart_revenue.finance.reconciliation import build_revenue_reconciliation_preview
+from ums_smart_revenue.finance.reconciliation import (
+    build_revenue_reconciliation_issue_queue,
+    build_revenue_reconciliation_preview,
+)
 from ums_smart_revenue.finance.revenue_facts import (
     RevenueFactEntry,
     RevenueFactLockedMonthError,
@@ -215,6 +219,46 @@ def get_channel_month_reconciliation_preview(
     return preview.to_api()
 
 
+@router.get("/months/{month}/reconciliation-issues")
+def list_month_reconciliation_issues(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    repository: Annotated[SqlAlchemyRevenueFactRepository, Depends(current_revenue_fact_repository)],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+) -> dict[str, object]:
+    revenue_channel_ids = _authorized_channel_ids_for_permission(user, Permission.VIEW_REVENUE, org_index)
+    confidence_channel_ids = _authorized_channel_ids_for_permission(user, Permission.VIEW_CONFIDENCE, org_index)
+    if revenue_channel_ids == set():
+        _raise_missing_permission(Permission.VIEW_REVENUE)
+    if confidence_channel_ids == set():
+        _raise_missing_permission(Permission.VIEW_CONFIDENCE)
+
+    visible_channel_ids = _intersect_channel_sets(revenue_channel_ids, confidence_channel_ids)
+    if visible_channel_ids == set():
+        _raise_missing_permission(Permission.VIEW_REVENUE)
+
+    try:
+        facts = repository.list_month_facts(month=month, youtube_channel_ids=visible_channel_ids)
+    except RevenueFactValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    queue = build_revenue_reconciliation_issue_queue(facts, month=month)
+    record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="revenue_reconciliation_issue_queue",
+        entity_id=month,
+        scope=AccessScope.finance_month(month),
+        details={
+            "issue_count": len(queue.items),
+            "scoped_channel_count": len(visible_channel_ids) if visible_channel_ids is not None else None,
+        },
+    )
+    return queue.to_api()
+
+
 def _require_permission(
     user: UserPrincipal,
     permission: Permission,
@@ -226,6 +270,57 @@ def _require_permission(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Missing permission: {permission.value}",
         )
+
+
+def _raise_missing_permission(permission: Permission) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"Missing permission: {permission.value}",
+    )
+
+
+def _authorized_channel_ids_for_permission(
+    user: UserPrincipal,
+    permission: Permission,
+    org_index: OrgAccessIndex,
+) -> set[str] | None:
+    if user.disabled:
+        return set()
+
+    channel_ids: set[str] = set()
+    for scope in _granted_scopes_for_permission(user, permission):
+        if scope.type == ScopeType.GLOBAL:
+            return None
+        if scope.type == ScopeType.CHANNEL and scope.id is not None:
+            channel_ids.add(scope.id)
+        elif scope.type == ScopeType.COMPANY and scope.id is not None:
+            channel_ids.update(
+                channel_id for channel_id, company_id in org_index.channel_company.items() if company_id == scope.id
+            )
+        elif scope.type == ScopeType.SECTOR and scope.id is not None:
+            channel_ids.update(
+                channel_id for channel_id, sector_id in org_index.channel_sector.items() if sector_id == scope.id
+            )
+    return channel_ids
+
+
+def _granted_scopes_for_permission(user: UserPrincipal, permission: Permission) -> tuple[AccessScope, ...]:
+    scopes: list[AccessScope] = []
+    for grant in user.direct_permissions:
+        if grant.active and grant.permission == permission:
+            scopes.append(grant.scope)
+    for assignment in user.role_assignments:
+        if assignment.active and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset()):
+            scopes.append(assignment.scope)
+    return tuple(scopes)
+
+
+def _intersect_channel_sets(left: set[str] | None, right: set[str] | None) -> set[str] | None:
+    if left is None:
+        return right
+    if right is None:
+        return left
+    return left & right
 
 
 def audit_record_to_api(record: AuditRecord) -> dict[str, object]:

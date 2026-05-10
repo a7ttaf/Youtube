@@ -57,6 +57,19 @@ class RevenueReconciliationPreview:
         }
 
 
+@dataclass(frozen=True)
+class RevenueReconciliationIssueQueue:
+    month: str
+    items: list[RevenueReconciliationPreview]
+
+    def to_api(self) -> dict[str, object]:
+        return {
+            "month": self.month,
+            "issue_count": len(self.items),
+            "items": [item.to_api() for item in self.items],
+        }
+
+
 def build_revenue_reconciliation_preview(
     facts: Iterable[RevenueFactEntry],
     *,
@@ -140,6 +153,27 @@ def build_revenue_reconciliation_preview(
         confidence_score=confidence_score,
         issues=issues,
     )
+
+
+def build_revenue_reconciliation_issue_queue(
+    facts: Iterable[RevenueFactEntry],
+    *,
+    month: str,
+) -> RevenueReconciliationIssueQueue:
+    grouped: dict[str, list[RevenueFactEntry]] = {}
+    for fact in facts:
+        if fact.month == month:
+            grouped.setdefault(fact.youtube_channel_id, []).append(fact)
+
+    items = [
+        preview
+        for preview in (
+            build_revenue_reconciliation_preview(grouped[channel_id])
+            for channel_id in sorted(grouped)
+        )
+        if preview.issues
+    ]
+    return RevenueReconciliationIssueQueue(month=month, items=items)
 
 
 def _average_confidence(facts: list[RevenueFactEntry]) -> Decimal:
