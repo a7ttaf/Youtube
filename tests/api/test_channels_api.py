@@ -1,8 +1,13 @@
 from fastapi.testclient import TestClient
 
 from ums_smart_revenue.api.channels import current_channel_registry
+from ums_smart_revenue.api.revenue import current_org_access_index
 from ums_smart_revenue.app import create_app
-from ums_smart_revenue.org.bootstrap_registry import BOOTSTRAP_COMPANY_NEWS_ID, BOOTSTRAP_COMPANY_TV_ID
+from ums_smart_revenue.org.bootstrap_registry import (
+    BOOTSTRAP_COMPANY_NEWS_ID,
+    BOOTSTRAP_COMPANY_TV_ID,
+    BOOTSTRAP_ORG_INDEX,
+)
 from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry, bootstrap_channel_registry
 
 
@@ -34,6 +39,12 @@ class StaleUpdateRegistry:
         raise KeyError(youtube_channel_id)
 
 
+def create_bootstrap_app():
+    app = create_app()
+    app.dependency_overrides[current_org_access_index] = lambda: BOOTSTRAP_ORG_INDEX
+    return app
+
+
 def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
     headers = {
         "x-user-id": "user-1",
@@ -48,8 +59,7 @@ def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dic
 
 
 def test_company_manager_lists_only_company_channels():
-    app = create_app()
-    app.dependency_overrides.clear()
+    app = create_bootstrap_app()
     client = TestClient(app)
 
     response = client.get("/channels", headers=auth_headers("company_manager", "company", BOOTSTRAP_COMPANY_TV_ID))
@@ -59,7 +69,7 @@ def test_company_manager_lists_only_company_channels():
 
 
 def test_assistant_cannot_create_channel():
-    client = TestClient(create_app())
+    client = TestClient(create_bootstrap_app())
 
     response = client.post(
         "/channels",
@@ -78,7 +88,7 @@ def test_assistant_cannot_create_channel():
 
 
 def test_data_steward_can_create_channel_inside_assigned_company():
-    client = TestClient(create_app())
+    client = TestClient(create_bootstrap_app())
 
     response = client.post(
         "/channels",
@@ -98,7 +108,7 @@ def test_data_steward_can_create_channel_inside_assigned_company():
 
 
 def test_data_steward_cannot_create_channel_in_other_company():
-    client = TestClient(create_app())
+    client = TestClient(create_bootstrap_app())
 
     response = client.post(
         "/channels",
@@ -117,7 +127,7 @@ def test_data_steward_cannot_create_channel_in_other_company():
 
 
 def test_mapping_change_requires_reason_and_permission():
-    client = TestClient(create_app())
+    client = TestClient(create_bootstrap_app())
 
     missing_reason = client.patch(
         "/channels/channel-tv-a/mapping",
@@ -136,7 +146,7 @@ def test_mapping_change_requires_reason_and_permission():
 
 
 def test_mapping_change_is_audited_for_corporate_admin():
-    client = TestClient(create_app())
+    client = TestClient(create_bootstrap_app())
 
     response = client.patch(
         "/channels/channel-tv-a/mapping",
@@ -166,7 +176,7 @@ def test_registry_factory_returns_fresh_state_per_app():
 
 
 def test_mapping_change_preserves_404_if_channel_disappears_before_update():
-    app = create_app()
+    app = create_bootstrap_app()
     app.dependency_overrides[current_channel_registry] = lambda: StaleUpdateRegistry()
     client = TestClient(app)
 

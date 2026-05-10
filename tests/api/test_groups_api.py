@@ -2,11 +2,13 @@ from uuid import UUID
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.org_models import ChannelGroupMemberORM, ChannelGroupORM, OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.org.sql_channel_groups import _is_duplicate_group_member_integrity_error
 
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000003101")
@@ -189,3 +191,15 @@ def test_malformed_group_id_returns_not_found(tmp_path):
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Group not found"
+
+
+def test_group_member_integrity_error_classifier_matches_composite_primary_key():
+    duplicate_error = IntegrityError(
+        "insert",
+        {},
+        Exception("UNIQUE constraint failed: channel_group_members.group_id, channel_group_members.channel_id"),
+    )
+    foreign_key_error = IntegrityError("insert", {}, Exception("FOREIGN KEY constraint failed"))
+
+    assert _is_duplicate_group_member_integrity_error(duplicate_error)
+    assert not _is_duplicate_group_member_integrity_error(foreign_key_error)

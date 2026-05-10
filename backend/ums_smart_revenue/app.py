@@ -15,11 +15,7 @@ from ums_smart_revenue.api.groups import (
     router as groups_router,
     sql_group_registry_from_session,
 )
-from ums_smart_revenue.api.revenue import (
-    current_org_access_index,
-    org_access_index_from_session,
-    router as revenue_router,
-)
+from ums_smart_revenue.api.revenue import router as revenue_router
 from ums_smart_revenue.api.security import router as security_router
 from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.config.version_baseline import STACK_VERSION_BASELINE
@@ -39,7 +35,6 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
         app.dependency_overrides[current_db_session] = session_dependency(session_factory)
         app.dependency_overrides[current_channel_registry] = sql_channel_registry_from_session
         app.dependency_overrides[current_group_registry] = sql_group_registry_from_session
-        app.dependency_overrides[current_org_access_index] = org_access_index_from_session
         app.dependency_overrides[current_audit_sink] = sql_audit_sink_from_session
 
     app.include_router(channels_router)

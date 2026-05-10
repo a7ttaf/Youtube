@@ -10,7 +10,6 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.org.access_index import load_org_access_index_from_session
-from ums_smart_revenue.org.bootstrap_registry import BOOTSTRAP_ORG_INDEX
 
 
 router = APIRouter(prefix="/revenue", tags=["revenue"])
@@ -22,14 +21,9 @@ class AuthorizationCheckResponse(BaseModel):
     permission: str
 
 
-def current_org_access_index() -> OrgAccessIndex:
-    return BOOTSTRAP_ORG_INDEX
-
-
-def org_access_index_from_session(
+def current_org_access_index(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> OrgAccessIndex:
-    # Used by create_app as the SQL-backed override for current_org_access_index.
     return load_org_access_index_from_session(session)
 
 

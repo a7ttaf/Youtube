@@ -1,6 +1,7 @@
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.org_models import ChannelGroupMemberORM, ChannelGroupORM, YouTubeChannelORM
@@ -54,7 +55,13 @@ class SqlAlchemyChannelGroupRegistry:
         for channel in channel_rows:
             if channel.id not in existing_ids:
                 self._session.add(ChannelGroupMemberORM(group_id=row.id, channel_id=channel.id))
-        self._session.flush()
+        try:
+            self._session.flush()
+        except IntegrityError as exc:
+            self._session.rollback()
+            if not _is_duplicate_group_member_integrity_error(exc):
+                raise
+            row = self._require_group_row(group_id)
         return self._to_entry(row)
 
     def remove_member(self, *, group_id: str, channel_id: str) -> ChannelGroupEntry:
@@ -134,3 +141,13 @@ class SqlAlchemyChannelGroupRegistry:
             active=row.active,
             channel_ids=resolved_channel_ids,
         )
+
+
+def _is_duplicate_group_member_integrity_error(exc: IntegrityError) -> bool:
+    diag = getattr(getattr(exc, "orig", None), "diag", None)
+    constraint_name = str(getattr(diag, "constraint_name", "") or "").lower()
+    error_text = f"{exc.orig!s} {exc!s}".lower()
+    return (
+        "channel_group_members_pkey" in constraint_name
+        or "unique constraint failed: channel_group_members.group_id, channel_group_members.channel_id" in error_text
+    )
