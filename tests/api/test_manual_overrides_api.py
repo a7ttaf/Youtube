@@ -6,7 +6,12 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
-from ums_smart_revenue.db.finance_models import FinanceBase, FinanceMonthCloseORM, RevenueManualOverrideORM
+from ums_smart_revenue.db.finance_models import (
+    FinanceBase,
+    FinanceMonthCloseORM,
+    MonthlyChannelRevenueFactORM,
+    RevenueManualOverrideORM,
+)
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
@@ -164,3 +169,67 @@ def test_company_manager_cannot_create_manual_override(tmp_path):
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: finance.create_manual_override"
+
+
+def test_finance_viewer_reads_adjusted_revenue_summary_with_approved_overrides_only(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    approved_create = client.post(
+        "/revenue/manual-overrides",
+        headers=auth_headers("finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)),
+        json={
+            "month": "2026-03",
+            "youtube_channel_id": "channel-tv-a",
+            "adjustment_revenue_usd": "125.50",
+            "reason": "Correct CMS transfer-fee allocation",
+        },
+    )
+    client.post(
+        f"/revenue/manual-overrides/{approved_create.json()['id']}/approve",
+        headers=auth_headers("finance_approver", FINANCE_APPROVER_ID, scope_id=str(COMPANY_ID)),
+        json={"reason": "Approved after source report review"},
+    )
+    client.post(
+        "/revenue/manual-overrides",
+        headers=auth_headers("finance_admin", FINANCE_ADMIN_ID, scope_id=str(COMPANY_ID)),
+        json={
+            "month": "2026-03",
+            "youtube_channel_id": "channel-tv-a",
+            "adjustment_revenue_usd": "-50.00",
+            "reason": "Pending dispute should not affect adjusted revenue",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            MonthlyChannelRevenueFactORM(
+                id=UUID("00000000-0000-0000-0000-000000009501"),
+                month="2026-03",
+                youtube_channel_id="channel-tv-a",
+                source_kind="YOUTUBE_CMS",
+                gross_revenue_usd=Decimal("1000.00"),
+                views=250000,
+                watch_time_minutes=Decimal("7200.50"),
+                confidence_score=Decimal("0.9800"),
+                imported_by=FINANCE_ADMIN_ID,
+            )
+        )
+        session.commit()
+
+    response = client.get(
+        "/revenue/channels/channel-tv-a/months/2026-03/summary",
+        headers=auth_headers("finance_viewer", FINANCE_APPROVER_ID, scope_id=str(COMPANY_ID)),
+    )
+
+    with Session(engine) as session:
+        audit_logs = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 200
+    assert response.json()["baseline_gross_revenue_usd"] == "1000"
+    assert response.json()["approved_manual_override_total_usd"] == "125.5"
+    assert response.json()["adjusted_gross_revenue_usd"] == "1125.5"
+    assert response.json()["pending_manual_override_count"] == 1
+    assert any(log.entity_type == "adjusted_revenue_summary" and log.sensitive for log in audit_logs)
