@@ -33,3 +33,12 @@ def test_revenue_manual_override_model_persists_pending_adjustment():
     assert override.adjustment_revenue_usd == Decimal("125.50")
     assert override.status == "PENDING"
     assert override.created_by == CREATOR_ID
+
+
+def test_revenue_manual_override_model_declares_channel_foreign_key():
+    foreign_keys = {
+        foreign_key.parent.name: (foreign_key.column.table.name, foreign_key.column.name, foreign_key.ondelete)
+        for foreign_key in RevenueManualOverrideORM.__table__.foreign_keys
+    }
+
+    assert foreign_keys["youtube_channel_id"] == ("youtube_channels", "youtube_channel_id", "RESTRICT")

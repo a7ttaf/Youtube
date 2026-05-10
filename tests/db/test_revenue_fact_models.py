@@ -39,3 +39,12 @@ def test_monthly_channel_revenue_fact_model_persists_canonical_values():
     assert fact.gross_revenue_usd == Decimal("1234.56")
     assert fact.views == 250000
     assert fact.imported_by == USER_ID
+
+
+def test_monthly_channel_revenue_fact_model_declares_channel_foreign_key():
+    foreign_keys = {
+        foreign_key.parent.name: (foreign_key.column.table.name, foreign_key.column.name, foreign_key.ondelete)
+        for foreign_key in MonthlyChannelRevenueFactORM.__table__.foreign_keys
+    }
+
+    assert foreign_keys["youtube_channel_id"] == ("youtube_channels", "youtube_channel_id", "RESTRICT")

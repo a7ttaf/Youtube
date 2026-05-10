@@ -2,12 +2,27 @@ from datetime import datetime
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import BigInteger, CheckConstraint, DateTime, Index, JSON, Numeric, Text, UniqueConstraint, Uuid, func, text
+from sqlalchemy import (
+    BigInteger,
+    CheckConstraint,
+    DateTime,
+    ForeignKey,
+    Index,
+    JSON,
+    Numeric,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    func,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
+
+from ums_smart_revenue.db.org_models import OrgBase
 
 
 class FinanceBase(DeclarativeBase):
-    pass
+    metadata = OrgBase.metadata
 
 
 class FinanceMonthCloseORM(FinanceBase):
@@ -42,7 +57,11 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     month: Mapped[str] = mapped_column(Text, nullable=False)
-    youtube_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    youtube_channel_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("youtube_channels.youtube_channel_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
     source_kind: Mapped[str] = mapped_column(Text, nullable=False)
     source_report_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     gross_revenue_usd: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
@@ -98,7 +117,11 @@ class RevenueManualOverrideORM(FinanceBase):
 
     id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
     month: Mapped[str] = mapped_column(Text, nullable=False)
-    youtube_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    youtube_channel_id: Mapped[str] = mapped_column(
+        Text,
+        ForeignKey("youtube_channels.youtube_channel_id", ondelete="RESTRICT"),
+        nullable=False,
+    )
     adjustment_revenue_usd: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
     reason: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, default="PENDING", server_default=text("'PENDING'"))
@@ -124,8 +147,10 @@ class RevenueManualOverrideORM(FinanceBase):
         CheckConstraint("adjustment_revenue_usd <> 0", name="ck_revenue_manual_overrides_adjustment_nonzero"),
         CheckConstraint("status IN ('PENDING', 'APPROVED', 'REJECTED')", name="ck_revenue_manual_overrides_status"),
         CheckConstraint(
-            "(status = 'APPROVED' AND approved_by IS NOT NULL AND approved_at IS NOT NULL) "
-            "OR (status <> 'APPROVED' AND approved_by IS NULL AND approved_at IS NULL)",
+            "(status = 'APPROVED' AND approved_by IS NOT NULL AND approved_at IS NOT NULL "
+            "AND approval_reason IS NOT NULL) "
+            "OR (status <> 'APPROVED' AND approved_by IS NULL AND approved_at IS NULL "
+            "AND approval_reason IS NULL)",
             name="ck_revenue_manual_overrides_approval_fields",
         ),
         Index("ix_revenue_manual_overrides_month_status", "month", "status"),

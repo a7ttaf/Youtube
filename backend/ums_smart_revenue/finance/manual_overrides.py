@@ -187,6 +187,8 @@ def _validate_month(month: str) -> None:
 
 
 def _validate_nonzero_adjustment(value: Decimal) -> None:
+    if not value.is_finite():
+        raise ManualOverrideValidationError("adjustment_revenue_usd must be a finite decimal")
     if value == 0:
         raise ManualOverrideValidationError("adjustment_revenue_usd must not be zero")
 

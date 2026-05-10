@@ -15,4 +15,6 @@ def test_manual_override_migration_creates_revenue_override_table():
     assert '"adjustment_revenue_usd"' in migration
     assert "fk_revenue_manual_overrides_youtube_channel_id" in migration
     assert "month ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'" in migration
+    assert "approval_reason IS NOT NULL" in migration
+    assert "approval_reason IS NULL" in migration
     assert "ck_revenue_manual_overrides_status" in migration

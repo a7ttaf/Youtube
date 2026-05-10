@@ -47,8 +47,10 @@ def upgrade() -> None:
         sa.CheckConstraint("adjustment_revenue_usd <> 0", name="ck_revenue_manual_overrides_adjustment_nonzero"),
         sa.CheckConstraint("status IN ('PENDING', 'APPROVED', 'REJECTED')", name="ck_revenue_manual_overrides_status"),
         sa.CheckConstraint(
-            "(status = 'APPROVED' AND approved_by IS NOT NULL AND approved_at IS NOT NULL) "
-            "OR (status <> 'APPROVED' AND approved_by IS NULL AND approved_at IS NULL)",
+            "(status = 'APPROVED' AND approved_by IS NOT NULL AND approved_at IS NOT NULL "
+            "AND approval_reason IS NOT NULL) "
+            "OR (status <> 'APPROVED' AND approved_by IS NULL AND approved_at IS NULL "
+            "AND approval_reason IS NULL)",
             name="ck_revenue_manual_overrides_approval_fields",
         ),
     )

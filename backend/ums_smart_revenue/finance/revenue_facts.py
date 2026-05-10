@@ -93,6 +93,10 @@ class SqlAlchemyRevenueFactRepository:
         actor_user_id: str,
     ) -> RevenueFactEntry:
         _validate_month(month)
+        _validate_revenue_amounts(
+            gross_revenue_usd=gross_revenue_usd,
+            net_revenue_usd=net_revenue_usd,
+        )
         _validate_metrics(
             views=views,
             watch_time_minutes=watch_time_minutes,
@@ -180,6 +184,40 @@ class SqlAlchemyRevenueFactRepository:
 
         return [self._to_entry(row) for row in self._session.scalars(statement).all()]
 
+    def list_month_channel_ids(
+        self,
+        *,
+        month: str,
+        youtube_channel_ids: set[str] | None = None,
+        limit: int | None = None,
+        offset: int = 0,
+    ) -> list[str]:
+        _validate_month(month)
+        if youtube_channel_ids == set():
+            return []
+
+        statement = (
+            select(MonthlyChannelRevenueFactORM.youtube_channel_id)
+            .join(
+                YouTubeChannelORM,
+                MonthlyChannelRevenueFactORM.youtube_channel_id == YouTubeChannelORM.youtube_channel_id,
+            )
+            .where(
+                MonthlyChannelRevenueFactORM.month == month,
+                YouTubeChannelORM.active.is_(True),
+            )
+            .distinct()
+            .order_by(MonthlyChannelRevenueFactORM.youtube_channel_id)
+        )
+        if youtube_channel_ids is not None:
+            statement = statement.where(MonthlyChannelRevenueFactORM.youtube_channel_id.in_(youtube_channel_ids))
+        if offset:
+            statement = statement.offset(offset)
+        if limit is not None:
+            statement = statement.limit(limit)
+
+        return list(self._session.scalars(statement).all())
+
     def _require_month_open(self, month: str) -> None:
         close = get_or_create_month_close_row(self._session, month, for_update=True)
         if close.status == "LOCKED":
@@ -239,12 +277,23 @@ def _parse_uuid(value: str) -> UUID:
 
 
 def _validate_metrics(*, views: int, watch_time_minutes: Decimal, confidence_score: Decimal) -> None:
+    if not watch_time_minutes.is_finite():
+        raise RevenueFactValidationError("watch_time_minutes must be a finite decimal")
+    if not confidence_score.is_finite():
+        raise RevenueFactValidationError("confidence_score must be a finite decimal")
     if views < 0:
         raise RevenueFactValidationError("views must be >= 0")
     if watch_time_minutes < 0:
         raise RevenueFactValidationError("watch_time_minutes must be >= 0")
     if confidence_score < 0 or confidence_score > 1:
         raise RevenueFactValidationError("confidence_score must be between 0 and 1")
+
+
+def _validate_revenue_amounts(*, gross_revenue_usd: Decimal, net_revenue_usd: Decimal | None) -> None:
+    if not gross_revenue_usd.is_finite() or gross_revenue_usd < 0:
+        raise RevenueFactValidationError("gross_revenue_usd must be a finite decimal >= 0")
+    if net_revenue_usd is not None and (not net_revenue_usd.is_finite() or net_revenue_usd < 0):
+        raise RevenueFactValidationError("net_revenue_usd must be a finite decimal >= 0")
 
 
 def _decimal_to_api(value: Decimal | None) -> str | None:

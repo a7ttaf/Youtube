@@ -73,6 +73,8 @@ POST /adsense/sync-payments
 
 ### Connectors
 
+API group: `/connectors`.
+
 ```http
 GET /connectors/credentials
 POST /connectors/credentials

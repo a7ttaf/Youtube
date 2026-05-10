@@ -35,6 +35,7 @@ from ums_smart_revenue.finance.revenue_facts import (
     RevenueFactEntry,
     RevenueFactLockedMonthError,
     RevenueFactNotFoundError,
+    RevenueFactSourceKind,
     RevenueFactValidationError,
     SqlAlchemyRevenueFactRepository,
 )
@@ -44,6 +45,16 @@ from ums_smart_revenue.org.access_index import load_org_access_index_from_sessio
 
 router = APIRouter(prefix="/revenue", tags=["revenue"])
 _AUDIT_SINK = InMemoryAuditSink()
+_REVENUE_SOURCE_KINDS_BY_CONNECTOR_KEY = {
+    "youtube-cms": {RevenueFactSourceKind.YOUTUBE_CMS.value},
+    "youtube_reporting": {RevenueFactSourceKind.YOUTUBE_CMS.value},
+    "youtube-analytics": {RevenueFactSourceKind.YOUTUBE_ANALYTICS.value},
+    "youtube_analytics": {RevenueFactSourceKind.YOUTUBE_ANALYTICS.value},
+    "adsense": {RevenueFactSourceKind.ADSENSE.value},
+    "manual-upload": {RevenueFactSourceKind.MANUAL_UPLOAD.value},
+    "manual_upload": {RevenueFactSourceKind.MANUAL_UPLOAD.value},
+    "allocation": {RevenueFactSourceKind.ALLOCATION.value},
+}
 
 
 class AuthorizationCheckResponse(BaseModel):
@@ -161,10 +172,11 @@ def import_revenue_fact(
     connector_scope = AccessScope.connector(payload.connector_key)
     _require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
     try:
+        source_kind = _validate_connector_source_kind(payload.connector_key, payload.source_kind)
         fact = repository.record_fact(
             month=payload.month,
             youtube_channel_id=payload.youtube_channel_id,
-            source_kind=payload.source_kind,
+            source_kind=source_kind,
             source_report_id=payload.source_report_id,
             gross_revenue_usd=payload.gross_revenue_usd,
             net_revenue_usd=payload.net_revenue_usd,
@@ -289,18 +301,22 @@ def list_month_reconciliation_issues(
 
     try:
         page_size = limit + 1
-        facts = repository.list_month_facts(
+        page_channel_ids = repository.list_month_channel_ids(
             month=month,
             youtube_channel_ids=visible_channel_ids,
             limit=page_size,
             offset=offset,
         )
+        channel_ids_for_page = page_channel_ids[:limit]
+        facts = repository.list_month_facts(
+            month=month,
+            youtube_channel_ids=set(channel_ids_for_page),
+        )
     except RevenueFactValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
-    page_facts = facts[:limit]
-    has_more = len(facts) > limit
-    queue = build_revenue_reconciliation_issue_queue(page_facts, month=month)
+    has_more = len(page_channel_ids) > limit
+    queue = build_revenue_reconciliation_issue_queue(facts, month=month)
     record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -310,7 +326,8 @@ def list_month_reconciliation_issues(
         scope=AccessScope.finance_month(month),
         details={
             "issue_count": len(queue.items),
-            "page_fact_count": len(page_facts),
+            "page_channel_count": len(channel_ids_for_page),
+            "page_fact_count": len(facts),
             "has_more": has_more,
             "scoped_channel_count": len(visible_channel_ids) if visible_channel_ids is not None else None,
         },
@@ -607,3 +624,19 @@ def _strip_required_string(value):
             raise ValueError("must not be blank")
         return stripped
     return value
+
+
+def _validate_connector_source_kind(connector_key: str, source_kind: str) -> str:
+    try:
+        normalized_source_kind = RevenueFactSourceKind(source_kind).value
+    except ValueError as exc:
+        raise RevenueFactValidationError(f"Unknown revenue fact source_kind: {source_kind}") from exc
+
+    allowed_source_kinds = _REVENUE_SOURCE_KINDS_BY_CONNECTOR_KEY.get(connector_key)
+    if allowed_source_kinds is None:
+        raise RevenueFactValidationError(f"Unknown revenue fact connector_key: {connector_key}")
+    if normalized_source_kind not in allowed_source_kinds:
+        raise RevenueFactValidationError(
+            f"connector_key {connector_key} cannot import source_kind {normalized_source_kind}"
+        )
+    return normalized_source_kind

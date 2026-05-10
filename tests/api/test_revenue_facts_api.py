@@ -113,6 +113,29 @@ def test_system_integration_user_imports_monthly_revenue_fact_with_audit(tmp_pat
     assert audit_log.sensitive is True
 
 
+def test_import_rejects_connector_source_kind_mismatch(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/facts",
+        headers=auth_headers("system_integration_user", "connector", "youtube-cms"),
+        json={
+            "month": "2026-03",
+            "youtube_channel_id": "channel-tv-a",
+            "source_kind": "ADSENSE",
+            "connector_key": "youtube-cms",
+            "gross_revenue_usd": "1234.56",
+            "views": 250000,
+            "reason": "Attempt import under mismatched source provenance",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "connector_key youtube-cms cannot import source_kind ADSENSE"
+
+
 def test_finance_viewer_reads_channel_month_facts_with_revenue_audit(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -306,6 +329,89 @@ def test_finance_viewer_reads_month_reconciliation_issue_queue_for_allowed_compa
     }
     assert audit_log.entity_type == "revenue_reconciliation_issue_queue"
     assert audit_log.sensitive is True
+
+
+def test_finance_viewer_pages_month_reconciliation_issue_queue_by_channel(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-a",
+                    source_kind="YOUTUBE_CMS",
+                    gross_revenue_usd=Decimal("1000.00"),
+                    views=250000,
+                    watch_time_minutes=Decimal("7200.50"),
+                    confidence_score=Decimal("0.9800"),
+                    imported_by=USER_ID,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-a",
+                    source_kind="ADSENSE",
+                    gross_revenue_usd=Decimal("930.00"),
+                    views=0,
+                    watch_time_minutes=Decimal("0"),
+                    confidence_score=Decimal("0.9000"),
+                    imported_by=USER_ID,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-news-a",
+                    source_kind="YOUTUBE_CMS",
+                    gross_revenue_usd=Decimal("2000.00"),
+                    views=300000,
+                    watch_time_minutes=Decimal("8200.50"),
+                    confidence_score=Decimal("0.9800"),
+                    imported_by=USER_ID,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-news-a",
+                    source_kind="ADSENSE",
+                    gross_revenue_usd=Decimal("1500.00"),
+                    views=0,
+                    watch_time_minutes=Decimal("0"),
+                    confidence_score=Decimal("0.9000"),
+                    imported_by=USER_ID,
+                ),
+            ]
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    first_page = client.get(
+        "/revenue/months/2026-03/reconciliation-issues?limit=1&offset=0",
+        headers=auth_headers("finance_viewer", "sector", str(SECTOR_ID)),
+    )
+    second_page = client.get(
+        "/revenue/months/2026-03/reconciliation-issues?limit=1&offset=1",
+        headers=auth_headers("finance_viewer", "sector", str(SECTOR_ID)),
+    )
+
+    assert first_page.status_code == 200
+    assert [item["youtube_channel_id"] for item in first_page.json()["items"]] == ["channel-news-a"]
+    assert first_page.json()["pagination"] == {
+        "limit": 1,
+        "offset": 0,
+        "next_offset": 1,
+        "has_more": True,
+    }
+    assert second_page.status_code == 200
+    assert [item["youtube_channel_id"] for item in second_page.json()["items"]] == ["channel-tv-a"]
+    assert second_page.json()["pagination"] == {
+        "limit": 1,
+        "offset": 1,
+        "next_offset": None,
+        "has_more": False,
+    }
 
 
 def test_company_manager_cannot_read_month_reconciliation_issue_queue(tmp_path):
