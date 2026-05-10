@@ -11,7 +11,8 @@ from ums_smart_revenue.auth.audit_service import AuditRecord, AuditSink, InMemor
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
-from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
+from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
+from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
 from ums_smart_revenue.org.channel_registry import (
     ChannelRegistry,
@@ -99,12 +100,49 @@ def list_channels(
     registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> list[dict[str, object]]:
-    visible_channels = [
-        channel.to_api()
-        for channel in registry.list_channels()
-        if has_permission(user, Permission.VIEW_ANALYTICS, AccessScope.channel(channel.youtube_channel_id), org_index)
-    ]
-    return visible_channels
+    authorized_channel_ids = _authorized_channel_ids_for_analytics(user, org_index)
+    if authorized_channel_ids is None:
+        visible_channels = registry.list_channels()
+    else:
+        visible_channels = registry.list_channels_by_ids(authorized_channel_ids)
+        visible_channels = [
+            channel
+            for channel in visible_channels
+            if has_permission(user, Permission.VIEW_ANALYTICS, AccessScope.channel(channel.youtube_channel_id), org_index)
+        ]
+    return [channel.to_api() for channel in visible_channels]
+
+
+def _authorized_channel_ids_for_analytics(user: UserPrincipal, org_index: OrgAccessIndex) -> set[str] | None:
+    if user.disabled:
+        return set()
+
+    channel_ids: set[str] = set()
+    for scope in _granted_scopes_for_permission(user, Permission.VIEW_ANALYTICS):
+        if scope.type == ScopeType.GLOBAL:
+            return None
+        if scope.type == ScopeType.CHANNEL and scope.id is not None:
+            channel_ids.add(scope.id)
+        elif scope.type == ScopeType.COMPANY and scope.id is not None:
+            channel_ids.update(
+                channel_id for channel_id, company_id in org_index.channel_company.items() if company_id == scope.id
+            )
+        elif scope.type == ScopeType.SECTOR and scope.id is not None:
+            channel_ids.update(
+                channel_id for channel_id, sector_id in org_index.channel_sector.items() if sector_id == scope.id
+            )
+    return channel_ids
+
+
+def _granted_scopes_for_permission(user: UserPrincipal, permission: Permission) -> tuple[AccessScope, ...]:
+    scopes: list[AccessScope] = []
+    for grant in user.direct_permissions:
+        if grant.active and grant.permission == permission:
+            scopes.append(grant.scope)
+    for assignment in user.role_assignments:
+        if assignment.active and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset()):
+            scopes.append(assignment.scope)
+    return tuple(scopes)
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

@@ -24,6 +24,19 @@ class SqlAlchemyChannelRegistry:
         ).all()
         return [self._to_entry(row) for row in rows]
 
+    def list_channels_by_ids(self, youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
+        if not youtube_channel_ids:
+            return []
+        rows = self._session.scalars(
+            select(YouTubeChannelORM)
+            .where(
+                YouTubeChannelORM.active.is_(True),
+                YouTubeChannelORM.youtube_channel_id.in_(youtube_channel_ids),
+            )
+            .order_by(YouTubeChannelORM.youtube_channel_id)
+        ).all()
+        return [self._to_entry(row) for row in rows]
+
     def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
         row = self._get_row(youtube_channel_id)
         if row is None:

@@ -39,6 +39,23 @@ class StaleUpdateRegistry:
         raise KeyError(youtube_channel_id)
 
 
+class ScopedListRegistry:
+    def list_channels(self) -> list[ChannelRegistryEntry]:
+        raise AssertionError("unscoped channel listing should not be used for scoped callers")
+
+    def list_channels_by_ids(self, youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
+        assert youtube_channel_ids == {"channel-tv-a"}
+        return [
+            ChannelRegistryEntry(
+                youtube_channel_id="channel-tv-a",
+                channel_name="TV A",
+                primary_company_id=BOOTSTRAP_COMPANY_TV_ID,
+                cms_status="UNKNOWN",
+                revenue_required=True,
+            )
+        ]
+
+
 def create_bootstrap_app():
     app = create_app()
     registry = bootstrap_channel_registry()
@@ -62,6 +79,17 @@ def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dic
 
 def test_company_manager_lists_only_company_channels():
     app = create_bootstrap_app()
+    client = TestClient(app)
+
+    response = client.get("/channels", headers=auth_headers("company_manager", "company", BOOTSTRAP_COMPANY_TV_ID))
+
+    assert response.status_code == 200
+    assert [channel["youtube_channel_id"] for channel in response.json()] == ["channel-tv-a"]
+
+
+def test_company_channel_listing_uses_scoped_registry_query():
+    app = create_bootstrap_app()
+    app.dependency_overrides[current_channel_registry] = lambda: ScopedListRegistry()
     client = TestClient(app)
 
     response = client.get("/channels", headers=auth_headers("company_manager", "company", BOOTSTRAP_COMPANY_TV_ID))

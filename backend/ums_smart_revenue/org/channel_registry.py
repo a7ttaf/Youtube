@@ -41,6 +41,9 @@ class ChannelRegistryStore(Protocol):
     def list_channels(self) -> list[ChannelRegistryEntry]:
         pass
 
+    def list_channels_by_ids(self, youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
+        pass
+
     def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
         pass
 
@@ -65,6 +68,16 @@ class ChannelRegistry:
 
     def list_channels(self) -> list[ChannelRegistryEntry]:
         return sorted(self._channels.values(), key=lambda channel: channel.youtube_channel_id)
+
+    def list_channels_by_ids(self, youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
+        return sorted(
+            [
+                channel
+                for channel_id, channel in self._channels.items()
+                if channel_id in youtube_channel_ids and channel.active
+            ],
+            key=lambda channel: channel.youtube_channel_id,
+        )
 
     def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
         return self._channels.get(youtube_channel_id)
