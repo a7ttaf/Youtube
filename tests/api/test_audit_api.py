@@ -93,6 +93,7 @@ def test_audit_viewer_lists_audit_events_with_sensitive_details_masked(tmp_path)
 
     next_response = client.get("/audit/events?limit=10", headers=auth_headers("audit_viewer"))
 
+    assert next_response.status_code == 200
     assert [item["event_type"] for item in next_response.json()["items"]] == ["REVENUE_VIEWED", "LOGIN"]
 
 
