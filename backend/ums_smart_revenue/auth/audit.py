@@ -85,6 +85,10 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
         AuditEventType.CONNECTOR_JOB_RUN,
         permission=Permission.RUN_CONNECTOR_JOBS,
     ),
+    AuditEventType.REPORT_IMPORTED: AuditEventDefinition(
+        AuditEventType.REPORT_IMPORTED,
+        permission=Permission.RUN_CONNECTOR_JOBS,
+    ),
     AuditEventType.CONNECTOR_SETTINGS_CHANGED: AuditEventDefinition(
         AuditEventType.CONNECTOR_SETTINGS_CHANGED,
         reason_required=True,

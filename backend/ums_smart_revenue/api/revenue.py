@@ -1,18 +1,30 @@
 from typing import Annotated
+from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
+from ums_smart_revenue.auth.audit import AuditEventType
+from ums_smart_revenue.auth.audit_service import AuditRecord, AuditSink, InMemoryAuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
+from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.finance.revenue_facts import (
+    RevenueFactEntry,
+    RevenueFactLockedMonthError,
+    RevenueFactNotFoundError,
+    RevenueFactValidationError,
+    SqlAlchemyRevenueFactRepository,
+)
 from ums_smart_revenue.org.access_index import load_org_access_index_from_session
 
 
 router = APIRouter(prefix="/revenue", tags=["revenue"])
+_AUDIT_SINK = InMemoryAuditSink()
 
 
 class AuthorizationCheckResponse(BaseModel):
@@ -21,10 +33,55 @@ class AuthorizationCheckResponse(BaseModel):
     permission: str
 
 
+class RevenueFactImportRequest(BaseModel):
+    month: str
+    youtube_channel_id: str = Field(min_length=1)
+    source_kind: str = Field(min_length=1)
+    connector_key: str = Field(min_length=1)
+    source_report_id: str | None = None
+    gross_revenue_usd: Decimal = Field(ge=0)
+    net_revenue_usd: Decimal | None = Field(default=None, ge=0)
+    views: int = Field(default=0, ge=0)
+    watch_time_minutes: Decimal = Field(default=Decimal("0"), ge=0)
+    confidence_score: Decimal = Field(default=Decimal("1"), ge=0, le=1)
+    reason: str = Field(min_length=1)
+
+    @field_validator("month", "youtube_channel_id", "source_kind", "connector_key", "reason", mode="before")
+    @classmethod
+    def strip_required_strings(cls, value):
+        return _strip_required_string(value)
+
+    @field_validator("source_report_id", mode="before")
+    @classmethod
+    def strip_optional_string(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+
 def current_org_access_index(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> OrgAccessIndex:
     return load_org_access_index_from_session(session)
+
+
+def current_revenue_fact_repository(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyRevenueFactRepository:
+    return SqlAlchemyRevenueFactRepository(session)
+
+
+def current_revenue_audit_sink() -> InMemoryAuditSink:
+    return _AUDIT_SINK
+
+
+def sql_revenue_audit_sink_from_session(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyAuditSink:
+    return SqlAlchemyAuditSink(session)
 
 
 @router.get("/channels/{channel_id}/authorization-check", response_model=AuthorizationCheckResponse)
@@ -34,13 +91,128 @@ def check_channel_revenue_authorization(
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> AuthorizationCheckResponse:
     target_scope = AccessScope.channel(channel_id)
-    if not has_permission(user, Permission.VIEW_REVENUE, target_scope, org_index):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Missing permission: {Permission.VIEW_REVENUE.value}",
-        )
+    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     return AuthorizationCheckResponse(
         authorized=True,
         channel_id=channel_id,
         permission=Permission.VIEW_REVENUE.value,
     )
+
+
+@router.post("/facts", status_code=status.HTTP_201_CREATED)
+def import_revenue_fact(
+    payload: RevenueFactImportRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[SqlAlchemyRevenueFactRepository, Depends(current_revenue_fact_repository)],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+) -> dict[str, object]:
+    connector_scope = AccessScope.connector(payload.connector_key)
+    _require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
+    try:
+        fact = repository.record_fact(
+            month=payload.month,
+            youtube_channel_id=payload.youtube_channel_id,
+            source_kind=payload.source_kind,
+            source_report_id=payload.source_report_id,
+            gross_revenue_usd=payload.gross_revenue_usd,
+            net_revenue_usd=payload.net_revenue_usd,
+            views=payload.views,
+            watch_time_minutes=payload.watch_time_minutes,
+            confidence_score=payload.confidence_score,
+            actor_user_id=user.user_id,
+        )
+    except RevenueFactLockedMonthError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except RevenueFactValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REPORT_IMPORTED,
+        entity_type="monthly_channel_revenue_fact",
+        entity_id=fact.audit_entity_id,
+        scope=connector_scope,
+        reason=payload.reason,
+        details={
+            "connector_key": payload.connector_key,
+            "source_report_id": payload.source_report_id,
+            "gross_revenue_usd": fact.to_api()["gross_revenue_usd"],
+        },
+    )
+    return _with_audit_event(fact, record)
+
+
+@router.get("/channels/{channel_id}/months/{month}/facts")
+def list_channel_month_revenue_facts(
+    channel_id: str,
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    repository: Annotated[SqlAlchemyRevenueFactRepository, Depends(current_revenue_fact_repository)],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+) -> dict[str, object]:
+    target_scope = AccessScope.channel(channel_id)
+    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    try:
+        facts = repository.list_channel_month_facts(month=month, youtube_channel_id=channel_id)
+    except RevenueFactNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except RevenueFactValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="monthly_channel_revenue_fact",
+        entity_id=f"{channel_id}:{month}",
+        scope=target_scope,
+        details={"fact_count": len(facts)},
+    )
+    return {
+        "month": month,
+        "youtube_channel_id": channel_id,
+        "facts": [fact.to_api() for fact in facts],
+        "audit_event": audit_record_to_api(record),
+    }
+
+
+def _require_permission(
+    user: UserPrincipal,
+    permission: Permission,
+    scope: AccessScope,
+    org_index: OrgAccessIndex | None = None,
+) -> None:
+    if not has_permission(user, permission, scope, org_index):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Missing permission: {permission.value}",
+        )
+
+
+def audit_record_to_api(record: AuditRecord) -> dict[str, object]:
+    return {
+        "event_type": record.event_type,
+        "entity_type": record.entity_type,
+        "entity_id": record.entity_id,
+        "scope_type": record.scope_type,
+        "scope_id": record.scope_id,
+        "reason": record.reason,
+        "sensitive": record.sensitive,
+    }
+
+
+def _with_audit_event(fact: RevenueFactEntry, record: AuditRecord) -> dict[str, object]:
+    response = fact.to_api()
+    response["audit_event"] = audit_record_to_api(record)
+    return response
+
+
+def _strip_required_string(value):
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+    return value
