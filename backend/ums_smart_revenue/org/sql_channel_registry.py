@@ -5,7 +5,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
-from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry
+from ums_smart_revenue.org.channel_registry import (
+    ChannelRegistryConflictError,
+    ChannelRegistryEntry,
+    ChannelRegistryValidationError,
+)
 
 
 class SqlAlchemyChannelRegistry:
@@ -34,9 +38,9 @@ class SqlAlchemyChannelRegistry:
         primary_company_id: str | None,
         cms_status: str,
         revenue_required: bool,
-    ) -> ChannelRegistryEntry:
+        ) -> ChannelRegistryEntry:
         if self._get_row(youtube_channel_id) is not None:
-            raise ValueError(f"Channel already exists: {youtube_channel_id}")
+            raise ChannelRegistryConflictError(f"Channel already exists: {youtube_channel_id}")
 
         row = YouTubeChannelORM(
             id=uuid4(),
@@ -52,7 +56,7 @@ class SqlAlchemyChannelRegistry:
             self._session.flush()
         except IntegrityError as exc:
             self._session.rollback()
-            raise ValueError(f"Channel already exists: {youtube_channel_id}") from exc
+            raise ChannelRegistryConflictError(f"Channel already exists: {youtube_channel_id}") from exc
         return self._to_entry(row)
 
     def update_mapping(self, *, youtube_channel_id: str, primary_company_id: str | None) -> ChannelRegistryEntry:
@@ -87,4 +91,4 @@ def _parse_optional_uuid(value: str | None, field_name: str) -> UUID | None:
     try:
         return UUID(value)
     except ValueError as exc:
-        raise ValueError(f"{field_name} must be a valid UUID") from exc
+        raise ChannelRegistryValidationError(f"{field_name} must be a valid UUID") from exc

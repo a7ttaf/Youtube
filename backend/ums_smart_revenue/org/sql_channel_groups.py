@@ -67,9 +67,6 @@ class SqlAlchemyChannelGroupRegistry:
         self._session.flush()
         return self._to_entry(row)
 
-    def _replace_members(self, group_id: UUID, channel_ids: list[str]) -> None:
-        self._replace_member_rows(group_id, self._channel_rows_by_external_ids(channel_ids))
-
     def _replace_member_rows(self, group_id: UUID, channel_rows: list[YouTubeChannelORM]) -> None:
         self._session.execute(delete(ChannelGroupMemberORM).where(ChannelGroupMemberORM.group_id == group_id))
         for channel in channel_rows:

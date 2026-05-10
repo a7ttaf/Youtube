@@ -44,7 +44,10 @@ def get_finance_month_close(
 ) -> dict[str, object]:
     _validate_month(month)
     _require_permission(user, Permission.VIEW_REVENUE, AccessScope.finance_month(month))
-    return repository.get_or_create(month).to_api()
+    close = repository.get(month)
+    if close is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finance month close record not found")
+    return close.to_api()
 
 
 @router.post("/{month}/lock")
@@ -61,7 +64,10 @@ def lock_finance_month(
     try:
         close = repository.lock_month(month=month, actor_user_id=user.user_id)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Finance month cannot be locked from its current state",
+        ) from exc
     record = _audit_finance_close(
         audit_sink=audit_sink,
         user=user,
@@ -87,7 +93,10 @@ def unlock_finance_month(
     try:
         close = repository.unlock_month(month=month, actor_user_id=user.user_id)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Finance month cannot be unlocked from its current state",
+        ) from exc
     record = _audit_finance_close(
         audit_sink=audit_sink,
         user=user,
@@ -110,11 +119,17 @@ def record_allocation_rule(
     _validate_month(month)
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, scope)
-    close = repository.record_allocation_rule(
-        month=month,
-        allocation_method=payload.allocation_method,
-        rule_payload=payload.rule_payload,
-    )
+    try:
+        close = repository.record_allocation_rule(
+            month=month,
+            allocation_method=payload.allocation_method,
+            rule_payload=payload.rule_payload,
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Finance month allocation rule cannot be changed from its current state",
+        ) from exc
     record = _audit_finance_close(
         audit_sink=audit_sink,
         user=user,

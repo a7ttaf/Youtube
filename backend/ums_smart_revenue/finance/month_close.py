@@ -35,6 +35,10 @@ class SqlAlchemyFinanceMonthCloseRepository:
     def __init__(self, session: Session):
         self._session = session
 
+    def get(self, month: str) -> FinanceMonthCloseEntry | None:
+        row = self._session.get(FinanceMonthCloseORM, month)
+        return self._to_entry(row) if row is not None else None
+
     def get_or_create(self, month: str) -> FinanceMonthCloseEntry:
         return self._to_entry(self._get_or_create_row(month))
 
@@ -68,6 +72,8 @@ class SqlAlchemyFinanceMonthCloseRepository:
         rule_payload: dict[str, object],
     ) -> FinanceMonthCloseEntry:
         row = self._get_or_create_row(month)
+        if row.status == "LOCKED":
+            raise ValueError(f"Finance month is locked: {month}")
         row.allocation_method = allocation_method
         row.allocation_rule_payload = rule_payload
         row.updated_at = datetime.now(UTC)

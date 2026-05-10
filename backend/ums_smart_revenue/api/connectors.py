@@ -1,7 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
@@ -22,14 +22,26 @@ from ums_smart_revenue.connectors.credentials import (
 router = APIRouter(prefix="/connectors", tags=["connectors"])
 
 
-class ConnectorCredentialCreateRequest(BaseModel):
+class NonBlankRequestModel(BaseModel):
+    @field_validator("*", mode="before")
+    @classmethod
+    def strip_required_strings(cls, value):
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                raise ValueError("must not be blank")
+            return stripped
+        return value
+
+
+class ConnectorCredentialCreateRequest(NonBlankRequestModel):
     connector_key: str = Field(min_length=1)
     account_id: str = Field(min_length=1)
     encrypted_secret_ref: str = Field(min_length=1)
     reason: str = Field(min_length=1)
 
 
-class ConnectorJobRequest(BaseModel):
+class ConnectorJobRequest(NonBlankRequestModel):
     connector_key: str = Field(min_length=1)
     account_id: str = Field(min_length=1)
     reason: str = Field(min_length=1)
@@ -72,7 +84,7 @@ def create_connector_credential(
             actor_user_id=user.user_id,
         )
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Connector credential already exists") from exc
 
     record = _audit_connector_change(
         audit_sink=audit_sink,

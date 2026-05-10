@@ -24,6 +24,18 @@ class ChannelRegistryEntry:
         }
 
 
+class ChannelRegistryError(ValueError):
+    pass
+
+
+class ChannelRegistryConflictError(ChannelRegistryError):
+    pass
+
+
+class ChannelRegistryValidationError(ChannelRegistryError):
+    pass
+
+
 class ChannelRegistryStore(Protocol):
     def list_channels(self) -> list[ChannelRegistryEntry]:
         pass
@@ -66,7 +78,7 @@ class ChannelRegistry:
         revenue_required: bool,
     ) -> ChannelRegistryEntry:
         if youtube_channel_id in self._channels:
-            raise ValueError(f"Channel already exists: {youtube_channel_id}")
+            raise ChannelRegistryConflictError(f"Channel already exists: {youtube_channel_id}")
         channel = ChannelRegistryEntry(
             youtube_channel_id=youtube_channel_id,
             channel_name=channel_name,

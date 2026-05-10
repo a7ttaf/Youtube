@@ -214,3 +214,11 @@ if set(PERMISSION_DEFINITIONS) != set(Permission):
     extra = sorted(permission.value for permission in set(PERMISSION_DEFINITIONS) - set(Permission))
     raise RuntimeError(f"Permission definition coverage mismatch. missing={missing} extra={extra}")
 
+_mismatched_permission_definitions = sorted(
+    permission.value
+    for permission, definition in PERMISSION_DEFINITIONS.items()
+    if definition.permission != permission
+)
+if _mismatched_permission_definitions:
+    raise RuntimeError(f"Permission metadata key mismatch: {_mismatched_permission_definitions}")
+

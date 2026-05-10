@@ -13,7 +13,13 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
-from ums_smart_revenue.org.channel_registry import ChannelRegistry, ChannelRegistryStore, bootstrap_channel_registry
+from ums_smart_revenue.org.channel_registry import (
+    ChannelRegistry,
+    ChannelRegistryConflictError,
+    ChannelRegistryStore,
+    ChannelRegistryValidationError,
+    bootstrap_channel_registry,
+)
 from ums_smart_revenue.org.sql_channel_registry import SqlAlchemyChannelRegistry
 
 
@@ -103,8 +109,10 @@ def create_channel(
             cms_status=payload.cms_status,
             revenue_required=payload.revenue_required,
         )
-    except ValueError as exc:
-        raise _channel_registry_error(exc) from exc
+    except ChannelRegistryValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    except ChannelRegistryConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Channel already exists") from exc
     return channel.to_api()
 
 
@@ -136,8 +144,10 @@ def update_channel_mapping(
             youtube_channel_id=youtube_channel_id,
             primary_company_id=payload.primary_company_id,
         )
-    except ValueError as exc:
-        raise _channel_registry_error(exc) from exc
+    except ChannelRegistryValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    except ChannelRegistryConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Channel already exists") from exc
     record = record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -154,8 +164,3 @@ def update_channel_mapping(
     response = updated.to_api()
     response["audit_event"] = audit_record_to_api(record)
     return response
-
-
-def _channel_registry_error(exc: ValueError) -> HTTPException:
-    status_code = status.HTTP_422_UNPROCESSABLE_CONTENT if "valid UUID" in str(exc) else status.HTTP_409_CONFLICT
-    return HTTPException(status_code=status_code, detail=str(exc))

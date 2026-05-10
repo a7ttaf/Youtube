@@ -57,6 +57,9 @@ class Neo4jReadOnlyService:
         return [row for row in rows if self._row_in_scope(row, scope)]
 
     def _row_in_scope(self, row: dict[str, object], scope: AccessScope) -> bool:
+        if scope.type.value == "global":
+            return True
+
         channel_id = row.get("channel_id")
         company_id = row.get("company_id")
         sector_id = row.get("sector_id")

@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from functools import lru_cache
 from os import environ
 
 
@@ -12,6 +13,7 @@ class AppSettings:
     trusted_gateway_token: str | None = None
 
 
+@lru_cache(maxsize=1)
 def load_app_settings() -> AppSettings:
     raw_database_url = environ.get(DATABASE_URL_ENV)
     database_url = raw_database_url.strip() if raw_database_url else None

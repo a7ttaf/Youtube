@@ -92,6 +92,15 @@ def test_revenue_flow_rejects_assistant_without_finance_visibility(org_index):
         service.revenue_flow(user, AccessScope.company("company-tv-a"), month="2026-03")
 
 
+def test_global_scope_allows_unregistered_graph_rows(org_index):
+    service = Neo4jReadOnlyService(client=FakeGraphClient(), org_index=org_index)
+
+    assert service._row_in_scope(
+        {"company_id": "company-not-yet-indexed", "channel_id": "channel-not-yet-indexed"},
+        AccessScope.global_scope(),
+    )
+
+
 def test_cypher_read_only_guard_blocks_write_tokens_with_non_space_separators():
     with pytest.raises(ValueError, match="MERGE"):
         assert_query_is_read_only("MATCH (n)\nMERGE\t(m:Tmp {id: 1}) RETURN n")

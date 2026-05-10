@@ -88,6 +88,25 @@ def test_connector_credentials_reject_raw_secret_payload(tmp_path):
     assert response.json()["detail"] == "Connector credentials must use an external encrypted secret reference"
 
 
+def test_connector_credentials_reject_blank_required_strings(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/connectors/credentials",
+        headers=auth_headers("connector_admin"),
+        json={
+            "connector_key": "   ",
+            "account_id": "content-owner-1",
+            "encrypted_secret_ref": "secret-manager://ums/youtube-reporting/content-owner-1",
+            "reason": "Register OAuth credential reference",
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_assistant_cannot_create_connector_credential(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
