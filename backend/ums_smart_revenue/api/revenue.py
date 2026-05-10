@@ -14,6 +14,14 @@ from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.finance.manual_overrides import (
+    ManualOverrideConflictError,
+    ManualOverrideLockedMonthError,
+    ManualOverrideNotFoundError,
+    ManualOverrideValidationError,
+    RevenueManualOverrideEntry,
+    SqlAlchemyManualOverrideRepository,
+)
 from ums_smart_revenue.finance.reconciliation import (
     build_revenue_reconciliation_issue_queue,
     build_revenue_reconciliation_preview,
@@ -67,6 +75,27 @@ class RevenueFactImportRequest(BaseModel):
         return value
 
 
+class ManualOverrideCreateRequest(BaseModel):
+    month: str
+    youtube_channel_id: str = Field(min_length=1)
+    adjustment_revenue_usd: Decimal
+    reason: str = Field(min_length=1)
+
+    @field_validator("month", "youtube_channel_id", "reason", mode="before")
+    @classmethod
+    def strip_required_strings(cls, value):
+        return _strip_required_string(value)
+
+
+class ManualOverrideApprovalRequest(BaseModel):
+    reason: str = Field(min_length=1)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip_required_strings(cls, value):
+        return _strip_required_string(value)
+
+
 def current_org_access_index(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> OrgAccessIndex:
@@ -77,6 +106,12 @@ def current_revenue_fact_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyRevenueFactRepository:
     return SqlAlchemyRevenueFactRepository(session)
+
+
+def current_manual_override_repository(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyManualOverrideRepository:
+    return SqlAlchemyManualOverrideRepository(session)
 
 
 def current_revenue_audit_sink() -> InMemoryAuditSink:
@@ -259,6 +294,94 @@ def list_month_reconciliation_issues(
     return queue.to_api()
 
 
+@router.post("/manual-overrides", status_code=status.HTTP_201_CREATED)
+def create_manual_override(
+    payload: ManualOverrideCreateRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    repository: Annotated[SqlAlchemyManualOverrideRepository, Depends(current_manual_override_repository)],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+) -> dict[str, object]:
+    target_scope = AccessScope.channel(payload.youtube_channel_id)
+    _require_permission(user, Permission.CREATE_MANUAL_OVERRIDE, target_scope, org_index)
+    try:
+        override = repository.create_override(
+            month=payload.month,
+            youtube_channel_id=payload.youtube_channel_id,
+            adjustment_revenue_usd=payload.adjustment_revenue_usd,
+            reason=payload.reason,
+            actor_user_id=user.user_id,
+        )
+    except ManualOverrideLockedMonthError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ManualOverrideValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.MANUAL_OVERRIDE_CREATED,
+        entity_type="revenue_manual_override",
+        entity_id=override.id,
+        scope=target_scope,
+        reason=payload.reason,
+        details={
+            "month": override.month,
+            "youtube_channel_id": override.youtube_channel_id,
+            "adjustment_revenue_usd": override.to_api()["adjustment_revenue_usd"],
+        },
+    )
+    return _manual_override_with_audit_event(override, record)
+
+
+@router.post("/manual-overrides/{manual_override_id}/approve")
+def approve_manual_override(
+    manual_override_id: str,
+    payload: ManualOverrideApprovalRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    repository: Annotated[SqlAlchemyManualOverrideRepository, Depends(current_manual_override_repository)],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+) -> dict[str, object]:
+    try:
+        existing = repository.get_override(manual_override_id)
+    except ManualOverrideValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    except ManualOverrideNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+
+    target_scope = AccessScope.channel(existing.youtube_channel_id)
+    _require_permission(user, Permission.APPROVE_MANUAL_OVERRIDE, target_scope, org_index)
+    try:
+        override = repository.approve_override(
+            override_id=manual_override_id,
+            actor_user_id=user.user_id,
+            reason=payload.reason,
+        )
+    except ManualOverrideConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ManualOverrideLockedMonthError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ManualOverrideValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.MANUAL_OVERRIDE_APPROVED,
+        entity_type="revenue_manual_override",
+        entity_id=override.id,
+        scope=target_scope,
+        reason=payload.reason,
+        details={
+            "month": override.month,
+            "youtube_channel_id": override.youtube_channel_id,
+            "adjustment_revenue_usd": override.to_api()["adjustment_revenue_usd"],
+        },
+    )
+    return _manual_override_with_audit_event(override, record)
+
+
 def _require_permission(
     user: UserPrincipal,
     permission: Permission,
@@ -337,6 +460,15 @@ def audit_record_to_api(record: AuditRecord) -> dict[str, object]:
 
 def _with_audit_event(fact: RevenueFactEntry, record: AuditRecord) -> dict[str, object]:
     response = fact.to_api()
+    response["audit_event"] = audit_record_to_api(record)
+    return response
+
+
+def _manual_override_with_audit_event(
+    override: RevenueManualOverrideEntry,
+    record: AuditRecord,
+) -> dict[str, object]:
+    response = override.to_api()
     response["audit_event"] = audit_record_to_api(record)
     return response
 

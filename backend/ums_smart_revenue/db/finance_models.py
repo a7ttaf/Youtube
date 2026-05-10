@@ -91,3 +91,40 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
         Index("ix_monthly_channel_revenue_facts_month", "month"),
         Index("ix_monthly_channel_revenue_facts_channel_month", "youtube_channel_id", "month"),
     )
+
+
+class RevenueManualOverrideORM(FinanceBase):
+    __tablename__ = "revenue_manual_overrides"
+
+    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    month: Mapped[str] = mapped_column(Text, nullable=False)
+    youtube_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    adjustment_revenue_usd: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    status: Mapped[str] = mapped_column(Text, nullable=False, default="PENDING", server_default=text("'PENDING'"))
+    created_by: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    approved_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approval_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+    __table_args__ = (
+        CheckConstraint(
+            "length(month) = 7 AND substr(month, 5, 1) = '-' "
+            "AND substr(month, 1, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 2, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 3, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 4, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
+            name="ck_revenue_manual_overrides_month_format",
+        ),
+        CheckConstraint("adjustment_revenue_usd <> 0", name="ck_revenue_manual_overrides_adjustment_nonzero"),
+        CheckConstraint("status IN ('PENDING', 'APPROVED', 'REJECTED')", name="ck_revenue_manual_overrides_status"),
+        CheckConstraint(
+            "(status = 'APPROVED' AND approved_by IS NOT NULL AND approved_at IS NOT NULL) OR status <> 'APPROVED'",
+            name="ck_revenue_manual_overrides_approval_fields",
+        ),
+        Index("ix_revenue_manual_overrides_month_status", "month", "status"),
+        Index("ix_revenue_manual_overrides_channel_month", "youtube_channel_id", "month"),
+    )
