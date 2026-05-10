@@ -29,6 +29,7 @@ def current_org_access_index() -> OrgAccessIndex:
 def org_access_index_from_session(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> OrgAccessIndex:
+    # Used by create_app as the SQL-backed override for current_org_access_index.
     return load_org_access_index_from_session(session)
 
 

@@ -15,7 +15,9 @@ class SqlAlchemyChannelGroupRegistry:
         rows = self._session.scalars(
             select(ChannelGroupORM).where(ChannelGroupORM.active.is_(True)).order_by(ChannelGroupORM.name)
         ).all()
-        return [self._to_entry(row) for row in rows]
+        group_ids = [row.id for row in rows]
+        channel_ids_by_group = self._channel_ids_by_group(group_ids)
+        return [self._to_entry(row, channel_ids=channel_ids_by_group.get(row.id, ())) for row in rows]
 
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
         row = self._get_group_row(group_id)
@@ -98,17 +100,37 @@ class SqlAlchemyChannelGroupRegistry:
             raise KeyError(f"Channel not found: {missing[0]}")
         return [rows_by_external_id[channel_id] for channel_id in unique_channel_ids]
 
-    def _to_entry(self, row: ChannelGroupORM) -> ChannelGroupEntry:
-        channel_ids = self._session.scalars(
-            select(YouTubeChannelORM.youtube_channel_id)
-            .join(ChannelGroupMemberORM, ChannelGroupMemberORM.channel_id == YouTubeChannelORM.id)
-            .where(ChannelGroupMemberORM.group_id == row.id)
-            .order_by(YouTubeChannelORM.youtube_channel_id)
+    def _channel_ids_by_group(self, group_ids: list[UUID]) -> dict[UUID, tuple[str, ...]]:
+        if not group_ids:
+            return {}
+        rows = self._session.execute(
+            select(ChannelGroupMemberORM.group_id, YouTubeChannelORM.youtube_channel_id)
+            .join(YouTubeChannelORM, ChannelGroupMemberORM.channel_id == YouTubeChannelORM.id)
+            .where(ChannelGroupMemberORM.group_id.in_(group_ids))
+            .order_by(ChannelGroupMemberORM.group_id, YouTubeChannelORM.youtube_channel_id)
         ).all()
+        channel_ids_by_group: dict[UUID, list[str]] = {}
+        for group_id, youtube_channel_id in rows:
+            channel_ids_by_group.setdefault(group_id, []).append(youtube_channel_id)
+        return {group_id: tuple(channel_ids) for group_id, channel_ids in channel_ids_by_group.items()}
+
+    def _to_entry(self, row: ChannelGroupORM, *, channel_ids: tuple[str, ...] | None = None) -> ChannelGroupEntry:
+        resolved_channel_ids = (
+            channel_ids
+            if channel_ids is not None
+            else tuple(
+                self._session.scalars(
+                    select(YouTubeChannelORM.youtube_channel_id)
+                    .join(ChannelGroupMemberORM, ChannelGroupMemberORM.channel_id == YouTubeChannelORM.id)
+                    .where(ChannelGroupMemberORM.group_id == row.id)
+                    .order_by(YouTubeChannelORM.youtube_channel_id)
+                ).all()
+            )
+        )
         return ChannelGroupEntry(
             id=str(row.id),
             name=row.name,
             group_type=row.group_type,
             active=row.active,
-            channel_ids=tuple(channel_ids),
+            channel_ids=resolved_channel_ids,
         )

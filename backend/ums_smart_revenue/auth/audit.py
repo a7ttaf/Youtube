@@ -34,6 +34,8 @@ class AuditEventDefinition:
     permission: Permission | None = None
 
 
+# Events omitted here intentionally have no permission marker or reason requirement.
+# record_audit_event handles them via .get() and records them as non-sensitive.
 AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     AuditEventType.CHANNEL_UPDATED: AuditEventDefinition(
         AuditEventType.CHANNEL_UPDATED,
