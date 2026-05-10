@@ -41,6 +41,8 @@ class StaleUpdateRegistry:
 
 def create_bootstrap_app():
     app = create_app()
+    registry = bootstrap_channel_registry()
+    app.dependency_overrides[current_channel_registry] = lambda: registry
     app.dependency_overrides[current_org_access_index] = lambda: BOOTSTRAP_ORG_INDEX
     return app
 
@@ -107,6 +109,30 @@ def test_data_steward_can_create_channel_inside_assigned_company():
     assert response.json()["primary_company_id"] == BOOTSTRAP_COMPANY_TV_ID
 
 
+def test_channel_requests_reject_blank_strings():
+    client = TestClient(create_bootstrap_app())
+
+    create_response = client.post(
+        "/channels",
+        headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
+        json={
+            "youtube_channel_id": "   ",
+            "channel_name": "New Channel",
+            "primary_company_id": BOOTSTRAP_COMPANY_TV_ID,
+            "cms_status": "UNKNOWN",
+            "revenue_required": True,
+        },
+    )
+    mapping_response = client.patch(
+        "/channels/channel-tv-a/mapping",
+        headers=auth_headers("corporate_admin", "global"),
+        json={"primary_company_id": BOOTSTRAP_COMPANY_NEWS_ID, "reason": "   "},
+    )
+
+    assert create_response.status_code == 422
+    assert mapping_response.status_code == 422
+
+
 def test_data_steward_cannot_create_channel_in_other_company():
     client = TestClient(create_bootstrap_app())
 
@@ -143,6 +169,19 @@ def test_mapping_change_requires_reason_and_permission():
     assert missing_reason.status_code == 422
     assert denied.status_code == 403
     assert denied.json()["detail"] == "Missing permission: registry.manage_org_mapping"
+
+
+def test_mapping_change_authorizes_before_not_found():
+    client = TestClient(create_bootstrap_app())
+
+    response = client.patch(
+        "/channels/missing-channel/mapping",
+        headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
+        json={"primary_company_id": BOOTSTRAP_COMPANY_TV_ID, "reason": "Attempt unauthorized lookup"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: registry.manage_org_mapping"
 
 
 def test_mapping_change_is_audited_for_corporate_admin():

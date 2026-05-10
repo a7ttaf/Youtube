@@ -8,7 +8,10 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.org_models import ChannelGroupMemberORM, ChannelGroupORM, OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
-from ums_smart_revenue.org.sql_channel_groups import _is_duplicate_group_member_integrity_error
+from ums_smart_revenue.org.sql_channel_groups import (
+    SqlAlchemyChannelGroupRegistry,
+    _is_duplicate_group_member_integrity_error,
+)
 
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000003101")
@@ -191,6 +194,34 @@ def test_malformed_group_id_returns_not_found(tmp_path):
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Group not found"
+
+
+def test_sql_group_add_members_treats_duplicate_race_as_idempotent(tmp_path, monkeypatch):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        registry = SqlAlchemyChannelGroupRegistry(session)
+        original_flush = session.flush
+        injected_duplicate = False
+
+        def flush_with_concurrent_duplicate(*args, **kwargs):
+            nonlocal injected_duplicate
+            if not injected_duplicate:
+                injected_duplicate = True
+                with Session(engine) as other_session:
+                    other_session.add(
+                        ChannelGroupMemberORM(group_id=GROUP_TV_ID, channel_id=CHANNEL_NEWS_ROW_ID)
+                    )
+                    other_session.commit()
+            return original_flush(*args, **kwargs)
+
+        monkeypatch.setattr(session, "flush", flush_with_concurrent_duplicate)
+
+        updated = registry.add_members(group_id=str(GROUP_TV_ID), channel_ids=["group-channel-news"])
+
+    assert updated.channel_ids == ("group-channel-news", "group-channel-tv")
 
 
 def test_group_member_integrity_error_classifier_matches_composite_primary_key():

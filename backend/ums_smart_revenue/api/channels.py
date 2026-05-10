@@ -1,7 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
@@ -36,10 +36,29 @@ class ChannelCreateRequest(BaseModel):
     cms_status: str
     revenue_required: bool
 
+    @field_validator("youtube_channel_id", "channel_name", "primary_company_id", mode="before")
+    @classmethod
+    def strip_required_strings(cls, value):
+        return _strip_required_string(value)
+
 
 class ChannelMappingRequest(BaseModel):
     primary_company_id: str = Field(min_length=1)
     reason: str = Field(min_length=1)
+
+    @field_validator("primary_company_id", "reason", mode="before")
+    @classmethod
+    def strip_required_strings(cls, value):
+        return _strip_required_string(value)
+
+
+def _strip_required_string(value):
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+    return value
 
 
 def current_channel_registry() -> ChannelRegistry:
@@ -125,10 +144,6 @@ def update_channel_mapping(
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
-    current_channel = registry.get_channel(youtube_channel_id)
-    if current_channel is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found")
-
     current_scope = AccessScope.channel(youtube_channel_id)
     target_scope = AccessScope.company(payload.primary_company_id)
     can_manage_current = has_permission(user, Permission.MANAGE_ORG_MAPPING, current_scope, org_index)
@@ -138,6 +153,10 @@ def update_channel_mapping(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Missing permission: {Permission.MANAGE_ORG_MAPPING.value}",
         )
+
+    current_channel = registry.get_channel(youtube_channel_id)
+    if current_channel is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found")
 
     try:
         updated = registry.update_mapping(

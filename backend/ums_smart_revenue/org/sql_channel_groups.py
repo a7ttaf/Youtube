@@ -52,16 +52,31 @@ class SqlAlchemyChannelGroupRegistry:
                 select(ChannelGroupMemberORM.channel_id).where(ChannelGroupMemberORM.group_id == row.id)
             ).all()
         )
-        for channel in channel_rows:
-            if channel.id not in existing_ids:
-                self._session.add(ChannelGroupMemberORM(group_id=row.id, channel_id=channel.id))
+        pending_channel_ids = [channel.id for channel in channel_rows if channel.id not in existing_ids]
+        if not pending_channel_ids:
+            return self._to_entry(row)
+
+        nested = self._session.begin_nested()
         try:
+            for channel_id in pending_channel_ids:
+                self._session.add(ChannelGroupMemberORM(group_id=row.id, channel_id=channel_id))
             self._session.flush()
         except IntegrityError as exc:
-            self._session.rollback()
+            nested.rollback()
             if not _is_duplicate_group_member_integrity_error(exc):
                 raise
             row = self._require_group_row(group_id)
+            existing_ids = set(
+                self._session.scalars(
+                    select(ChannelGroupMemberORM.channel_id).where(ChannelGroupMemberORM.group_id == row.id)
+                ).all()
+            )
+            for channel_id in pending_channel_ids:
+                if channel_id not in existing_ids:
+                    self._session.add(ChannelGroupMemberORM(group_id=row.id, channel_id=channel_id))
+            self._session.flush()
+        else:
+            nested.commit()
         return self._to_entry(row)
 
     def remove_member(self, *, group_id: str, channel_id: str) -> ChannelGroupEntry:
