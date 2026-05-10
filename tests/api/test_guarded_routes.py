@@ -1,0 +1,97 @@
+from fastapi.testclient import TestClient
+
+from ums_smart_revenue.api.revenue import current_org_access_index
+from ums_smart_revenue.app import create_app
+from ums_smart_revenue.org.bootstrap_registry import BOOTSTRAP_COMPANY_TV_ID, BOOTSTRAP_ORG_INDEX
+
+
+def create_bootstrap_app():
+    app = create_app()
+    app.dependency_overrides[current_org_access_index] = lambda: BOOTSTRAP_ORG_INDEX
+    return app
+
+
+def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
+    headers = {
+        "x-user-id": "user-1",
+        "x-user-email": "user@example.com",
+        "x-role": role,
+        "x-scope-type": scope_type,
+        "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
+    }
+    if scope_id is not None:
+        headers["x-scope-id"] = scope_id
+    return headers
+
+
+def test_guarded_revenue_route_rejects_assistant_without_finance_access():
+    client = TestClient(create_bootstrap_app())
+
+    response = client.get(
+        "/revenue/channels/channel-tv-a/authorization-check",
+        headers=auth_headers("assistant_analyst", "company", BOOTSTRAP_COMPANY_TV_ID),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
+def test_guarded_revenue_route_allows_scoped_finance_viewer():
+    client = TestClient(create_bootstrap_app())
+
+    response = client.get(
+        "/revenue/channels/channel-tv-a/authorization-check",
+        headers=auth_headers("finance_viewer", "company", BOOTSTRAP_COMPANY_TV_ID),
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "authorized": True,
+        "channel_id": "channel-tv-a",
+        "permission": "finance.view_revenue",
+    }
+
+
+def test_guarded_revenue_route_rejects_finance_viewer_outside_scope():
+    client = TestClient(create_bootstrap_app())
+
+    response = client.get(
+        "/revenue/channels/channel-news-a/authorization-check",
+        headers=auth_headers("finance_viewer", "company", BOOTSTRAP_COMPANY_TV_ID),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
+def test_guarded_route_requires_auth_headers():
+    client = TestClient(create_bootstrap_app())
+
+    response = client.get("/revenue/channels/channel-tv-a/authorization-check")
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing authentication headers"
+
+
+def test_guarded_route_rejects_untrusted_identity_headers():
+    client = TestClient(create_bootstrap_app())
+
+    headers = auth_headers("super_owner", "global")
+    headers.pop("x-ums-trusted-gateway-token")
+    response = client.get("/revenue/channels/channel-tv-a/authorization-check", headers=headers)
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid trusted gateway token"
+
+
+def test_guarded_route_rejects_non_global_scope_without_id():
+    client = TestClient(create_bootstrap_app())
+
+    response = client.get(
+        "/revenue/channels/channel-tv-a/authorization-check",
+        headers=auth_headers("finance_viewer", "company"),
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "scope_id is required for scope type: company"
+
