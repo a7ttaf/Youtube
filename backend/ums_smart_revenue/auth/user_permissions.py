@@ -8,8 +8,11 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.scopes import ScopeType
-from ums_smart_revenue.db.security_models import AccessScopeORM, UserORM, UserPermissionGrantORM
-
+from ums_smart_revenue.db.security_models import (
+    AccessScopeORM,
+    UserORM,
+    UserPermissionGrantORM,
+)
 
 _ORG_SCOPE_TYPES = frozenset(
     {
@@ -19,7 +22,9 @@ _ORG_SCOPE_TYPES = frozenset(
         ScopeType.CHANNEL.value,
     }
 )
-_FINANCE_MONTH_SCOPE_TYPES = frozenset({ScopeType.GLOBAL.value, ScopeType.FINANCE_MONTH.value})
+_FINANCE_MONTH_SCOPE_TYPES = frozenset(
+    {ScopeType.GLOBAL.value, ScopeType.FINANCE_MONTH.value}
+)
 _EXPORT_SCOPE_TYPES = _ORG_SCOPE_TYPES | frozenset({ScopeType.EXPORT.value})
 _CONNECTOR_SCOPE_TYPES = frozenset({ScopeType.GLOBAL.value, ScopeType.CONNECTOR.value})
 _GRAPH_SCOPE_TYPES = _ORG_SCOPE_TYPES | frozenset({ScopeType.GRAPH_READ.value})
@@ -38,7 +43,9 @@ PERMISSION_SCOPE_TYPES: dict[Permission, frozenset[str]] = {
     Permission.CHANGE_ALLOCATION_RULE: _FINANCE_MONTH_SCOPE_TYPES,
     Permission.EXPORT_ANALYTICS_REPORT: _EXPORT_SCOPE_TYPES,
     Permission.EXPORT_REVENUE_REPORT: _EXPORT_SCOPE_TYPES,
-    Permission.MANAGE_EXPORT_TEMPLATES: frozenset({ScopeType.GLOBAL.value, ScopeType.EXPORT.value}),
+    Permission.MANAGE_EXPORT_TEMPLATES: frozenset(
+        {ScopeType.GLOBAL.value, ScopeType.EXPORT.value}
+    ),
     Permission.MANAGE_CHANNELS: _ORG_SCOPE_TYPES,
     Permission.MANAGE_ORG_MAPPING: _ORG_SCOPE_TYPES,
     Permission.MANAGE_GROUPS: _ORG_SCOPE_TYPES,
@@ -57,9 +64,15 @@ PERMISSION_SCOPE_TYPES: dict[Permission, frozenset[str]] = {
 
 
 if set(PERMISSION_SCOPE_TYPES) != set(Permission):
-    missing = sorted(permission.value for permission in set(Permission) - set(PERMISSION_SCOPE_TYPES))
-    extra = sorted(permission.value for permission in set(PERMISSION_SCOPE_TYPES) - set(Permission))
-    raise RuntimeError(f"Permission scope coverage mismatch. missing={missing} extra={extra}")
+    missing = sorted(
+        permission.value for permission in set(Permission) - set(PERMISSION_SCOPE_TYPES)
+    )
+    extra = sorted(
+        permission.value for permission in set(PERMISSION_SCOPE_TYPES) - set(Permission)
+    )
+    raise RuntimeError(
+        f"Permission scope coverage mismatch. missing={missing} extra={extra}"
+    )
 
 
 @dataclass(frozen=True)
@@ -149,7 +162,9 @@ class SqlAlchemyUserPermissionGrantRepository:
             )
         ).one_or_none()
         if existing is not None:
-            raise UserPermissionGrantConflictError("Active permission grant already exists")
+            raise UserPermissionGrantConflictError(
+                "Active permission grant already exists"
+            )
 
         row = UserPermissionGrantORM(
             id=uuid4(),
@@ -174,10 +189,12 @@ class SqlAlchemyUserPermissionGrantRepository:
                 )
             ).one_or_none()
             if duplicate is not None:
-                raise UserPermissionGrantConflictError("Active permission grant already exists") from exc
-            if self._session.get(UserORM, target_user_id) is None:
+                raise UserPermissionGrantConflictError(
+                    "Active permission grant already exists"
+                ) from exc
+            if not self._user_exists_in_db(target_user_id):
                 raise UserPermissionGrantNotFoundError("user_id not found") from exc
-            if self._session.get(UserORM, actor_user_id) is None:
+            if not self._user_exists_in_db(actor_user_id):
                 raise UserPermissionGrantNotFoundError("granted_by not found") from exc
             raise
         return self._to_entry(row, scope)
@@ -228,7 +245,9 @@ class SqlAlchemyUserPermissionGrantRepository:
         if row is None:
             raise UserPermissionGrantNotFoundError("Permission grant not found")
         if not row.active:
-            raise UserPermissionGrantConflictError("Permission grant is already revoked")
+            raise UserPermissionGrantConflictError(
+                "Permission grant is already revoked"
+            )
 
         now = datetime.now(UTC)
         row.active = False
@@ -238,7 +257,7 @@ class SqlAlchemyUserPermissionGrantRepository:
         try:
             self._session.flush()
         except IntegrityError as exc:
-            if self._session.get(UserORM, actor_user_id) is None:
+            if not self._user_exists_in_db(actor_user_id):
                 raise UserPermissionGrantNotFoundError("revoked_by not found") from exc
             raise
         scope = self._session.get(AccessScopeORM, row.scope_id)
@@ -253,16 +272,32 @@ class SqlAlchemyUserPermissionGrantRepository:
             raise UserPermissionGrantNotFoundError(f"{field_name} not found")
         return row
 
-    def _get_or_create_scope(self, *, scope_type: str, scope_id: str | None) -> AccessScopeORM:
-        """Return an existing AccessScope row or create one, handling concurrent inserts via savepoint."""
-        normalized_scope_type, normalized_scope_id = _normalize_scope(scope_type, scope_id)
+    def _user_exists_in_db(self, user_id: UUID) -> bool:
+        """Return whether a user row exists, bypassing identity-map-only hits."""
+        return (
+            self._session.scalar(select(UserORM.id).where(UserORM.id == user_id))
+            is not None
+        )
+
+    def _get_or_create_scope(
+        self, *, scope_type: str, scope_id: str | None
+    ) -> AccessScopeORM:
+        """Return an existing AccessScope row or create one.
+
+        Handles concurrent inserts via savepoint.
+        """
+        normalized_scope_type, normalized_scope_id = _normalize_scope(
+            scope_type, scope_id
+        )
         scope_filter = (
             AccessScopeORM.scope_type == normalized_scope_type,
             AccessScopeORM.scope_id.is_(None)
             if normalized_scope_id is None
             else AccessScopeORM.scope_id == normalized_scope_id,
         )
-        row = self._session.scalars(select(AccessScopeORM).where(*scope_filter)).one_or_none()
+        row = self._session.scalars(
+            select(AccessScopeORM).where(*scope_filter)
+        ).one_or_none()
         if row is not None:
             return row
 
@@ -277,11 +312,15 @@ class SqlAlchemyUserPermissionGrantRepository:
                 self._session.add(new_row)
                 self._session.flush()
         except IntegrityError:
-            return self._session.scalars(select(AccessScopeORM).where(*scope_filter)).one()
+            return self._session.scalars(
+                select(AccessScopeORM).where(*scope_filter)
+            ).one()
         return new_row
 
     @staticmethod
-    def _to_entry(row: UserPermissionGrantORM, scope: AccessScopeORM) -> UserPermissionGrantEntry:
+    def _to_entry(
+        row: UserPermissionGrantORM, scope: AccessScopeORM
+    ) -> UserPermissionGrantEntry:
         """Map ORM row + scope row to an immutable domain entry."""
         return UserPermissionGrantEntry(
             id=str(row.id),
@@ -300,11 +339,13 @@ class SqlAlchemyUserPermissionGrantRepository:
 
 
 def _parse_uuid(value: str, *, field_name: str) -> UUID:
-    """Parse a UUID string; raise UserPermissionGrantValidationError on invalid format."""
+    """Parse a UUID string; raise validation error on invalid format."""
     try:
         return UUID(value)
     except ValueError as exc:
-        raise UserPermissionGrantValidationError(f"{field_name} must be a valid UUID") from exc
+        raise UserPermissionGrantValidationError(
+            f"{field_name} must be a valid UUID"
+        ) from exc
 
 
 def _parse_permission(value: str) -> Permission:
@@ -312,33 +353,44 @@ def _parse_permission(value: str) -> Permission:
     try:
         return Permission(_normalize_required_string(value, "permission_key"))
     except ValueError as exc:
-        raise UserPermissionGrantValidationError(f"Unknown permission_key: {value}") from exc
+        raise UserPermissionGrantValidationError(
+            f"Unknown permission_key: {value}"
+        ) from exc
 
 
 def _require_compatible_scope_type(permission: Permission, scope_type: str) -> None:
-    """Raise UserPermissionGrantValidationError if scope_type is not allowed for permission."""
+    """Raise validation error when scope_type is not allowed for permission."""
     normalized = scope_type.strip().lower()
     allowed_scope_types = PERMISSION_SCOPE_TYPES[permission]
     if normalized not in allowed_scope_types:
         allowed = ", ".join(sorted(allowed_scope_types))
         raise UserPermissionGrantValidationError(
-            f"Permission {permission.value!r} cannot be granted to scope type {normalized!r}; allowed: {allowed}"
+            f"Permission {permission.value!r} cannot be granted to scope type "
+            f"{normalized!r}; allowed: {allowed}"
         )
 
 
 def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | None]:
     """Validate and normalize scope_type/scope_id; enforce global-scope rules."""
     try:
-        parsed_scope_type = ScopeType(_normalize_required_string(scope_type, "scope_type"))
+        parsed_scope_type = ScopeType(
+            _normalize_required_string(scope_type, "scope_type")
+        )
     except ValueError as exc:
-        raise UserPermissionGrantValidationError(f"Unknown scope_type: {scope_type}") from exc
+        raise UserPermissionGrantValidationError(
+            f"Unknown scope_type: {scope_type}"
+        ) from exc
     normalized_scope_id = scope_id.strip() if isinstance(scope_id, str) else scope_id
     if parsed_scope_type == ScopeType.GLOBAL:
         if normalized_scope_id is not None:
-            raise UserPermissionGrantValidationError("scope_id must be omitted for global scope")
+            raise UserPermissionGrantValidationError(
+                "scope_id must be omitted for global scope"
+            )
         return parsed_scope_type.value, None
     if not normalized_scope_id:
-        raise UserPermissionGrantValidationError(f"scope_id is required for scope type: {parsed_scope_type.value}")
+        raise UserPermissionGrantValidationError(
+            f"scope_id is required for scope type: {parsed_scope_type.value}"
+        )
     return parsed_scope_type.value, normalized_scope_id
 
 
