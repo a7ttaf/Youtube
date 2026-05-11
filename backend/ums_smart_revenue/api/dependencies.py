@@ -99,28 +99,19 @@ def current_principal_from_database(
     try:
         return SqlAlchemyPrincipalLoader(session).load(user_id=x_user_id)
     except PrincipalDisabledError as exc:
-        logger.warning(
-            "Database principal lookup rejected disabled principal",
-            exc_info=True,
-        )
+        logger.warning("Database principal lookup rejected disabled principal")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden",
         ) from exc
     except PrincipalNotFoundError as exc:
-        logger.warning(
-            "Database principal lookup rejected unknown principal",
-            exc_info=True,
-        )
+        logger.warning("Database principal lookup rejected unknown principal")
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden",
         ) from exc
     except PrincipalValidationError as exc:
-        logger.warning(
-            "Database principal lookup rejected invalid principal input",
-            exc_info=True,
-        )
+        logger.warning("Database principal lookup rejected invalid principal input")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid request",
