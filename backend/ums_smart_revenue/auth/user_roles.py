@@ -130,7 +130,11 @@ class SqlAlchemyUserRoleAssignmentRepository:
         assignment_uuid = _parse_uuid(assignment_id, field_name="assignment_id")
         actor_user_id = _parse_uuid(revoked_by, field_name="revoked_by")
         normalized_reason = _normalize_reason(reason)
-        row = self._session.get(UserRoleAssignmentORM, assignment_uuid)
+        row = self._session.scalars(
+            select(UserRoleAssignmentORM)
+            .where(UserRoleAssignmentORM.id == assignment_uuid)
+            .with_for_update()
+        ).one_or_none()
         if row is None or row.user_id != target_user_id:
             raise UserRoleAssignmentNotFoundError("Role assignment not found")
         if not row.active:

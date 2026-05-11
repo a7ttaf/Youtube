@@ -76,13 +76,12 @@ def test_corporate_admin_assigns_scoped_assistant_role_with_audit(tmp_path):
             "reason": "Grant analytics support access",
         },
     )
+    assert response.status_code == 201
 
     engine = create_engine(database_url)
     with Session(engine) as session:
         assignment = session.scalars(select(UserRoleAssignmentORM)).one()
         audit_log = session.scalars(select(AuditLogORM)).one()
-
-    assert response.status_code == 201
     assert response.json()["role_key"] == "assistant_analyst"
     assert response.json()["scope_type"] == "company"
     assert response.json()["scope_id"] == COMPANY_ID
@@ -194,6 +193,20 @@ def test_incompatible_scope_type_rejected_before_persisting(tmp_path):
 
     assert response.status_code == 422
     assert "cannot be assigned to scope type" in response.json()["detail"]
+
+    # Regression: mixed-case scope_type must be normalised and still rejected
+    response_mixed = client.post(
+        f"/users/{TARGET_ID}/roles",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "role_key": "tv_sector_manager",
+            "scope_type": "CoMpAnY",
+            "scope_id": COMPANY_ID,
+            "reason": "Attempt sector role on mixed-case company scope",
+        },
+    )
+    assert response_mixed.status_code == 422
+    assert "cannot be assigned to scope type" in response_mixed.json()["detail"]
 
 
 def test_corporate_admin_revokes_role_assignment_with_audit(tmp_path):
