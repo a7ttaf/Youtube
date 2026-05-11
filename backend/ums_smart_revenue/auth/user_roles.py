@@ -160,26 +160,31 @@ class SqlAlchemyUserRoleAssignmentRepository:
 
     def _get_or_create_scope(self, *, scope_type: str, scope_id: str | None) -> AccessScopeORM:
         normalized_scope_type, normalized_scope_id = _normalize_scope(scope_type, scope_id)
-        row = self._session.scalars(
-            select(AccessScopeORM).where(
-                AccessScopeORM.scope_type == normalized_scope_type,
-                AccessScopeORM.scope_id.is_(None)
-                if normalized_scope_id is None
-                else AccessScopeORM.scope_id == normalized_scope_id,
-            )
-        ).one_or_none()
+        scope_filter = (
+            AccessScopeORM.scope_type == normalized_scope_type,
+            AccessScopeORM.scope_id.is_(None)
+            if normalized_scope_id is None
+            else AccessScopeORM.scope_id == normalized_scope_id,
+        )
+        row = self._session.scalars(select(AccessScopeORM).where(*scope_filter)).one_or_none()
         if row is not None:
             return row
 
-        row = AccessScopeORM(
+        new_row = AccessScopeORM(
             id=uuid4(),
             scope_type=normalized_scope_type,
             scope_id=normalized_scope_id,
             label=_scope_label(normalized_scope_type, normalized_scope_id),
         )
-        self._session.add(row)
-        self._session.flush()
-        return row
+        try:
+            with self._session.begin_nested():
+                self._session.add(new_row)
+                self._session.flush()
+        except IntegrityError:
+            # Another concurrent writer created the same scope between our SELECT and INSERT.
+            # The savepoint was rolled back; re-query to return the winning row.
+            return self._session.scalars(select(AccessScopeORM).where(*scope_filter)).one()
+        return new_row
 
     @staticmethod
     def _to_entry(row: UserRoleAssignmentORM, scope: AccessScopeORM) -> UserRoleAssignmentEntry:

@@ -211,6 +211,7 @@ def test_corporate_admin_revokes_role_assignment_with_audit(tmp_path):
         },
     )
 
+    assert create_response.status_code == 201
     response = client.post(
         f"/users/{TARGET_ID}/roles/{create_response.json()['id']}/revoke",
         headers=auth_headers("corporate_admin"),
@@ -228,3 +229,57 @@ def test_corporate_admin_revokes_role_assignment_with_audit(tmp_path):
     assert assignment.revoked_by == ADMIN_ID
     assert [log.event_type for log in audit_logs] == ["USER_ROLE_CHANGED", "USER_ROLE_CHANGED"]
     assert audit_logs[-1].reason == "Temporary access ended"
+
+
+def test_corporate_admin_cannot_revoke_finance_role(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    create_response = client.post(
+        f"/users/{TARGET_ID}/roles",
+        headers=auth_headers("finance_admin"),
+        json={
+            "role_key": "finance_viewer",
+            "scope_type": "company",
+            "scope_id": COMPANY_ID,
+            "reason": "Grant finance visibility",
+        },
+    )
+    assert create_response.status_code == 201
+
+    response = client.post(
+        f"/users/{TARGET_ID}/roles/{create_response.json()['id']}/revoke",
+        headers=auth_headers("corporate_admin"),
+        json={"reason": "Attempt revocation without finance authority"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Finance roles require Finance Admin or Super Owner"
+
+
+def test_finance_admin_can_revoke_finance_viewer_role(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    create_response = client.post(
+        f"/users/{TARGET_ID}/roles",
+        headers=auth_headers("finance_admin"),
+        json={
+            "role_key": "finance_viewer",
+            "scope_type": "company",
+            "scope_id": COMPANY_ID,
+            "reason": "Grant finance visibility",
+        },
+    )
+    assert create_response.status_code == 201
+
+    response = client.post(
+        f"/users/{TARGET_ID}/roles/{create_response.json()['id']}/revoke",
+        headers=auth_headers("finance_admin"),
+        json={"reason": "Revoke finance visibility"},
+    )
+
+    assert response.status_code == 200
+    assert response.json()["active"] is False
