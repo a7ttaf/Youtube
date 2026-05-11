@@ -9,7 +9,11 @@ from ums_smart_revenue.api.channels import (
     sql_channel_registry_from_session,
 )
 from ums_smart_revenue.api.connectors import router as connectors_router
-from ums_smart_revenue.api.dependencies import current_db_session
+from ums_smart_revenue.api.dependencies import (
+    current_db_session,
+    current_principal_from_database,
+    current_principal_from_headers,
+)
 from ums_smart_revenue.api.exports import router as exports_router
 from ums_smart_revenue.api.finance_close import router as finance_close_router
 from ums_smart_revenue.api.groups import (
@@ -25,13 +29,23 @@ from ums_smart_revenue.api.revenue import (
 from ums_smart_revenue.api.reports import router as reports_router
 from ums_smart_revenue.api.security import router as security_router
 from ums_smart_revenue.api.users import router as users_router
-from ums_smart_revenue.config.settings import load_app_settings
+from ums_smart_revenue.config.settings import (
+    AUTHZ_SOURCE_DATABASE,
+    AUTHZ_SOURCE_HEADERS,
+    load_app_settings,
+)
 from ums_smart_revenue.config.version_baseline import STACK_VERSION_BASELINE
 from ums_smart_revenue.db.session import build_session_factory, session_dependency
 
 
-def create_app(*, database_url: str | None = None) -> FastAPI:
-    resolved_database_url = database_url or load_app_settings().database_url
+def create_app(*, database_url: str | None = None, authz_source: str | None = None) -> FastAPI:
+    settings = load_app_settings()
+    resolved_database_url = database_url or settings.database_url
+    resolved_authz_source = (authz_source or settings.authz_source).strip().lower()
+    if resolved_authz_source not in {AUTHZ_SOURCE_HEADERS, AUTHZ_SOURCE_DATABASE}:
+        raise ValueError("authz_source must be 'headers' or 'database'")
+    if resolved_authz_source == AUTHZ_SOURCE_DATABASE and not resolved_database_url:
+        raise ValueError("database authz_source requires database_url or UMS_DATABASE_URL")
     app = FastAPI(
         title="UMS Smart Revenue Control Center API",
         version="0.1.0",
@@ -45,6 +59,8 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
         app.dependency_overrides[current_group_registry] = sql_group_registry_from_session
         app.dependency_overrides[current_audit_sink] = sql_audit_sink_from_session
         app.dependency_overrides[current_revenue_audit_sink] = sql_revenue_audit_sink_from_session
+        if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
+            app.dependency_overrides[current_principal_from_headers] = current_principal_from_database
 
     app.include_router(audit_router)
     app.include_router(channels_router)

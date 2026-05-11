@@ -41,6 +41,7 @@ DATA_STEWARD
 
 - OAuth tokens are encrypted.
 - Finance values are role-restricted.
+- Production authorization loads active roles, direct permission grants, and scopes from SQL using `UMS_AUTHZ_SOURCE=database`.
 - Every export is logged.
 - Every manual override is logged.
 - Month unlock requires reason.
@@ -92,3 +93,4 @@ AUDIT_LOG_VIEWED
 - Every override and export appears in audit log.
 - Audit log reads require `audit.view`; sensitive audit details remain masked unless `audit.view_sensitive_payloads` is also granted.
 - Direct permission grants require `roles.assign`, are family-restricted, and create `USER_PERMISSION_CHANGED` audit events.
+- SQL-backed principals ignore header role/scope claims and reject disabled or unregistered users.

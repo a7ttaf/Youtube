@@ -1,10 +1,16 @@
 from typing import Annotated
 
-from fastapi import Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, status
 from secrets import compare_digest
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
+from ums_smart_revenue.auth.principals import (
+    PrincipalDisabledError,
+    PrincipalNotFoundError,
+    PrincipalValidationError,
+    SqlAlchemyPrincipalLoader,
+)
 from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope, ScopeType
 from ums_smart_revenue.config.settings import load_app_settings
@@ -66,6 +72,31 @@ def current_principal_from_headers(
     )
 
 
+def current_db_session() -> Session:
+    raise RuntimeError("Database session dependency has not been configured")
+
+
+def current_principal_from_database(
+    session: Annotated[Session, Depends(current_db_session)],
+    x_user_id: Annotated[str | None, Header()] = None,
+    x_ums_trusted_gateway_token: Annotated[str | None, Header()] = None,
+) -> UserPrincipal:
+    if not x_user_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Missing authentication headers",
+        )
+    _require_trusted_gateway_token(x_ums_trusted_gateway_token)
+    try:
+        return SqlAlchemyPrincipalLoader(session).load(user_id=x_user_id)
+    except PrincipalDisabledError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except PrincipalNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+    except PrincipalValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
 def _require_trusted_gateway_token(provided_token: str | None) -> None:
     configured_token = load_app_settings().trusted_gateway_token
     if not configured_token:
@@ -78,7 +109,3 @@ def _require_trusted_gateway_token(provided_token: str | None) -> None:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid trusted gateway token",
         )
-
-
-def current_db_session() -> Session:
-    raise RuntimeError("Database session dependency has not been configured")
