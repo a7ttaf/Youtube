@@ -14,6 +14,7 @@ from ums_smart_revenue.api.channels import (
 )
 from ums_smart_revenue.api.connectors import router as connectors_router
 from ums_smart_revenue.api.dependencies import (
+    authenticated_session_dependency,
     current_db_session,
     current_principal_from_database,
     current_principal_from_headers,
@@ -41,7 +42,7 @@ from ums_smart_revenue.config.settings import (
     load_app_settings,
 )
 from ums_smart_revenue.config.version_baseline import STACK_VERSION_BASELINE
-from ums_smart_revenue.db.session import build_session_factory, session_dependency
+from ums_smart_revenue.db.session import build_session_factory
 
 
 def create_app(
@@ -66,7 +67,9 @@ def create_app(
     if resolved_database_url:
         session_factory = build_session_factory(resolved_database_url)
         overrides = app.dependency_overrides
-        overrides[current_db_session] = session_dependency(session_factory)
+        overrides[current_db_session] = authenticated_session_dependency(
+            session_factory
+        )
         overrides[current_channel_registry] = sql_channel_registry_from_session
         overrides[current_group_registry] = sql_group_registry_from_session
         overrides[current_audit_sink] = sql_audit_sink_from_session

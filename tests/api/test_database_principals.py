@@ -11,7 +11,10 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.dependencies import current_principal_from_database
+from ums_smart_revenue.api.dependencies import (
+    TrustedGatewayIdentity,
+    current_principal_from_database,
+)
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.permissions import PERMISSION_DEFINITIONS
 from ums_smart_revenue.auth.principals import (
@@ -404,17 +407,65 @@ def test_database_principal_rejects_blank_user_id_as_missing_header(tmp_path):
     assert response.json()["detail"] == "Missing authentication headers"
 
 
+def test_database_principal_rejects_bad_token_before_opening_session(monkeypatch):
+    """Invalid gateway tokens are rejected before allocating a DB session."""
+    opened_sessions = 0
+
+    class UnusedSession:
+        """Context manager that records unexpected session allocation."""
+
+        def __enter__(self):
+            """Enter the fake session context."""
+            return self
+
+        def __exit__(self, *_exc_info: object) -> bool:
+            """Exit the fake session context without swallowing exceptions."""
+            return False
+
+        def commit(self) -> None:
+            """Accept commits if the dependency unexpectedly reaches cleanup."""
+
+        def rollback(self) -> None:
+            """Accept rollbacks if the dependency unexpectedly reaches cleanup."""
+
+    def fake_build_session_factory(_database_url: str):
+        """Return a factory that records every attempted session allocation."""
+
+        def factory() -> UnusedSession:
+            """Record that a session would have been allocated."""
+            nonlocal opened_sessions
+            opened_sessions += 1
+            return UnusedSession()
+
+        return factory
+
+    monkeypatch.setattr(
+        "ums_smart_revenue.app.build_session_factory", fake_build_session_factory
+    )
+    client = TestClient(
+        create_app(
+            database_url="sqlite+pysqlite:///:memory:",
+            authz_source="database",
+        )
+    )
+    headers = auth_headers(include_bootstrap_claims=False)
+    headers["x-ums-trusted-gateway-token"] = "invalid-token"
+
+    response = client.get("/security/roles", headers=headers)
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid trusted gateway token"
+    assert opened_sessions == 0
+
+
 def test_database_principal_storage_errors_return_service_unavailable():
     """SQLAlchemy storage failures map to a controlled 503 response."""
     session = FailingSession()
 
     with pytest.raises(HTTPException) as exc_info:
         current_principal_from_database(
+            identity=TrustedGatewayIdentity(user_id=str(ACTOR_ID)),
             session=session,
-            x_user_id=str(ACTOR_ID),
-            x_ums_trusted_gateway_token=auth_headers()[
-                "x-ums-trusted-gateway-token"
-            ],
         )
 
     assert exc_info.value.status_code == 503
@@ -429,11 +480,8 @@ def test_database_principal_unexpected_errors_return_service_unavailable():
 
     with pytest.raises(HTTPException) as exc_info:
         current_principal_from_database(
+            identity=TrustedGatewayIdentity(user_id=str(ACTOR_ID)),
             session=session,
-            x_user_id=str(ACTOR_ID),
-            x_ums_trusted_gateway_token=auth_headers()[
-                "x-ums-trusted-gateway-token"
-            ],
         )
 
     assert exc_info.value.status_code == 503
@@ -461,11 +509,8 @@ def test_database_principal_active_transaction_returns_service_unavailable():
 
     with pytest.raises(HTTPException) as exc_info:
         current_principal_from_database(
+            identity=TrustedGatewayIdentity(user_id=str(ACTOR_ID)),
             session=session,
-            x_user_id=str(ACTOR_ID),
-            x_ums_trusted_gateway_token=auth_headers()[
-                "x-ums-trusted-gateway-token"
-            ],
         )
 
     assert exc_info.value.status_code == 503

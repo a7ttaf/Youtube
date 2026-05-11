@@ -1,6 +1,8 @@
 """FastAPI dependencies for authentication, authorization, and data sessions."""
 
 import logging
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass
 from secrets import compare_digest
 from typing import Annotated
 
@@ -21,9 +23,17 @@ from ums_smart_revenue.auth.principals import (
 from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope, ScopeType
 from ums_smart_revenue.config.settings import load_app_settings
+from ums_smart_revenue.db.session import SessionFactory
 
 logger = logging.getLogger(__name__)
 DATABASE_PRINCIPAL_LOAD_ATTEMPTS = 2
+
+
+@dataclass(frozen=True)
+class TrustedGatewayIdentity:
+    """Trusted gateway identity headers validated before database access."""
+
+    user_id: str
 
 
 def scope_from_header(scope_type: str, scope_id: str | None) -> AccessScope:
@@ -95,12 +105,11 @@ def current_db_session() -> Session:
     )
 
 
-def current_principal_from_database(
-    session: Annotated[Session, Depends(current_db_session)],
+def current_trusted_gateway_identity(
     x_user_id: Annotated[str | None, Header()] = None,
     x_ums_trusted_gateway_token: Annotated[str | None, Header()] = None,
-) -> UserPrincipal:
-    """Load a request principal from SQL after trusted gateway validation."""
+) -> TrustedGatewayIdentity:
+    """Validate gateway headers and normalize the SQL principal id."""
     normalized_user_id = x_user_id.strip() if x_user_id else None
     if not normalized_user_id:
         raise HTTPException(
@@ -108,8 +117,40 @@ def current_principal_from_database(
             detail="Missing authentication headers",
         )
     _require_trusted_gateway_token(x_ums_trusted_gateway_token)
+    return TrustedGatewayIdentity(user_id=normalized_user_id)
+
+
+def authenticated_session_dependency(
+    session_factory: SessionFactory,
+) -> Callable[..., Iterator[Session]]:
+    """Build a database session dependency gated by gateway authentication."""
+
+    def dependency(
+        _identity: Annotated[
+            TrustedGatewayIdentity, Depends(current_trusted_gateway_identity)
+        ],
+    ) -> Iterator[Session]:
+        """Open a database session only after gateway authentication succeeds."""
+        with session_factory() as session:
+            try:
+                yield session
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
+
+    return dependency
+
+
+def current_principal_from_database(
+    identity: Annotated[
+        TrustedGatewayIdentity, Depends(current_trusted_gateway_identity)
+    ],
+    session: Annotated[Session, Depends(current_db_session)],
+) -> UserPrincipal:
+    """Load a request principal from SQL after trusted gateway validation."""
     try:
-        return _load_database_principal_with_retries(session, normalized_user_id)
+        return _load_database_principal_with_retries(session, identity.user_id)
     except PrincipalDisabledError as exc:
         logger.warning("Database principal lookup rejected disabled principal")
         raise HTTPException(
