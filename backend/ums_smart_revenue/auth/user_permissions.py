@@ -73,7 +73,8 @@ class UserPermissionGrantEntry:
     granted_at: datetime
     revoked_by: str | None
     revoked_at: datetime | None
-    reason: str | None
+    grant_reason: str | None
+    revoke_reason: str | None
     active: bool
 
     def to_api(self) -> dict[str, object]:
@@ -88,7 +89,8 @@ class UserPermissionGrantEntry:
             "granted_at": self.granted_at.isoformat(),
             "revoked_by": self.revoked_by,
             "revoked_at": self.revoked_at.isoformat() if self.revoked_at else None,
-            "reason": self.reason,
+            "grant_reason": self.grant_reason,
+            "revoke_reason": self.revoke_reason,
             "active": self.active,
         }
 
@@ -225,7 +227,7 @@ class SqlAlchemyUserPermissionGrantRepository:
         row.active = False
         row.revoked_by = actor_user_id
         row.revoked_at = now
-        row.reason = normalized_reason
+        row.revoke_reason = normalized_reason
         self._session.flush()
         scope = self._session.get(AccessScopeORM, row.scope_id)
         if scope is None:
@@ -279,7 +281,8 @@ class SqlAlchemyUserPermissionGrantRepository:
             granted_at=row.granted_at,
             revoked_by=str(row.revoked_by) if row.revoked_by else None,
             revoked_at=row.revoked_at,
-            reason=row.reason,
+            grant_reason=row.reason,
+            revoke_reason=row.revoke_reason,
             active=row.active,
         )
 
