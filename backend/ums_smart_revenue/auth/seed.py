@@ -53,6 +53,7 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
             Permission.VIEW_GRAPH,
             Permission.VIEW_GRAPH_FINANCE,
             Permission.VIEW_AUDIT_LOG,
+            Permission.ASSIGN_ROLES,
         }
     ),
     RoleKey.FINANCE_APPROVER: frozenset(

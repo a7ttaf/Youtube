@@ -24,6 +24,7 @@ from ums_smart_revenue.api.revenue import (
 )
 from ums_smart_revenue.api.reports import router as reports_router
 from ums_smart_revenue.api.security import router as security_router
+from ums_smart_revenue.api.users import router as users_router
 from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.config.version_baseline import STACK_VERSION_BASELINE
 from ums_smart_revenue.db.session import build_session_factory, session_dependency
@@ -54,6 +55,7 @@ def create_app(*, database_url: str | None = None) -> FastAPI:
     app.include_router(reports_router)
     app.include_router(revenue_router)
     app.include_router(security_router)
+    app.include_router(users_router)
 
     @app.get("/health", tags=["system"])
     def health() -> dict[str, object]:
