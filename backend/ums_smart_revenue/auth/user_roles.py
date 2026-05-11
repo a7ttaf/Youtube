@@ -219,7 +219,7 @@ def _parse_role(value: str) -> RoleKey:
 
 def _require_compatible_scope_type(role: RoleKey, scope_type: str) -> None:
     definition = ROLE_DEFINITIONS[role]
-    normalized = scope_type.strip()
+    normalized = scope_type.strip().lower()
     if normalized not in definition.allowed_scope_types:
         allowed = ", ".join(sorted(definition.allowed_scope_types))
         raise UserRoleAssignmentValidationError(

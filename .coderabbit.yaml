@@ -453,14 +453,11 @@ reviews:
           authorization checks, and regression cases. Follow existing test framework,
           naming, fixtures, and mocking patterns.
 
-      - name: "harden error handling"
+      - name: "harden error handling and scripts"
         instructions: |
           Review changed async, network, database, and file-system code. Add missing
           error handling, cleanup, timeouts, cancellation, and safe logging using existing
           project patterns. Preserve public error contracts.
-
-      - name: "harden shell scripts"
-        instructions: |
           Improve changed shell scripts only. Add safe quoting, explicit shell options,
           trap-based cleanup, clear failure messages, scoped destructive operations,
           idempotent behavior, and secret-safe logging. Preserve documented behavior
@@ -538,7 +535,6 @@ reviews:
       enabled: true
     sqlfluff:
       enabled: true
-      dialect: postgres
 
     # Go / Rust / JVM / PHP / Ruby / Swift / C/C++
     golangci-lint:

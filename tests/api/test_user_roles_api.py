@@ -212,8 +212,9 @@ def test_corporate_admin_revokes_role_assignment_with_audit(tmp_path):
     )
 
     assert create_response.status_code == 201
+    assignment_id = create_response.json()["id"]
     response = client.post(
-        f"/users/{TARGET_ID}/roles/{create_response.json()['id']}/revoke",
+        f"/users/{TARGET_ID}/roles/{assignment_id}/revoke",
         headers=auth_headers("corporate_admin"),
         json={"reason": "Temporary access ended"},
     )
