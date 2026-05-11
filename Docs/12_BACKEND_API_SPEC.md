@@ -51,9 +51,13 @@ DELETE /groups/{group_id}/members/{channel_id}
 ```http
 POST /users/{user_id}/roles
 POST /users/{user_id}/roles/{assignment_id}/revoke
+POST /users/{user_id}/permissions
+POST /users/{user_id}/permissions/{grant_id}/revoke
 ```
 
 Role assignment and revocation both require `roles.assign`. Super Owner assignment requires an existing Super Owner. Finance roles require Finance Admin or Super Owner authority. Every assignment and revocation is audited as `USER_ROLE_CHANGED`.
+
+Direct permission grants and revocations also require `roles.assign` and are audited as `USER_PERMISSION_CHANGED`. Finance permissions can only be granted or revoked by Finance Admin or Super Owner. Connector/raw-file permissions require Connector Admin or Super Owner. Administrative permissions such as `roles.assign`, `users.manage`, `platform.manage_settings`, and `audit.view_sensitive_payloads` require Super Owner. Direct grants must be scoped with a compatible scope type for the permission.
 
 ### Revenue
 

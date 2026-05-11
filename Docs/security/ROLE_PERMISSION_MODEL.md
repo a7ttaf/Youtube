@@ -102,6 +102,7 @@ Sensitive actions include:
 - locking or unlocking a finance month;
 - changing allocation rules;
 - assigning users to roles;
+- assigning direct scoped permissions;
 - changing channel/company/sector mapping;
 - managing OAuth/API connector settings;
 - running connector jobs;
@@ -120,6 +121,10 @@ Sensitive actions include:
 - Allocation changes require `CHANGE_ALLOCATION_RULE` for the month scope.
 - Connector administration requires `MANAGE_CONNECTORS`; running jobs requires `RUN_CONNECTOR_JOBS`.
 - Role assignment APIs require `roles.assign`; Super Owner assignment requires an existing Super Owner, and finance role assignment requires Finance Admin or Super Owner authority.
+- Direct permission grant APIs require `roles.assign`, enforce the target permission family, and audit every grant or revocation as `USER_PERMISSION_CHANGED`.
+- Finance direct grants such as `finance.view_revenue`, `exports.revenue`, and `graph.view_finance` require Finance Admin or Super Owner.
+- Connector and raw-file direct grants require Connector Admin or Super Owner.
+- Administrative direct grants such as `roles.assign`, `users.manage`, `platform.manage_settings`, and `audit.view_sensitive_payloads` require Super Owner.
 - Neo4j graph reads must pass through backend guards and filter nodes by the same organization scopes used for SQL reads.
 - Dashboard users never receive Neo4j write credentials.
 

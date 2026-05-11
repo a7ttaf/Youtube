@@ -19,11 +19,46 @@ from ums_smart_revenue.auth.user_roles import (
     UserRoleAssignmentValidationError,
     SqlAlchemyUserRoleAssignmentRepository,
 )
+from ums_smart_revenue.auth.user_permissions import (
+    SqlAlchemyUserPermissionGrantRepository,
+    UserPermissionGrantConflictError,
+    UserPermissionGrantNotFoundError,
+    UserPermissionGrantValidationError,
+)
 
 
 router = APIRouter(prefix="/users", tags=["users"])
 
 FINANCE_ROLE_KEYS = frozenset({RoleKey.FINANCE_ADMIN, RoleKey.FINANCE_APPROVER, RoleKey.FINANCE_VIEWER})
+FINANCE_PERMISSION_KEYS = frozenset(
+    {
+        Permission.VIEW_REVENUE,
+        Permission.VIEW_FINALIZED_PAYMENTS,
+        Permission.VIEW_BANK_RECONCILIATION,
+        Permission.CREATE_MANUAL_OVERRIDE,
+        Permission.APPROVE_MANUAL_OVERRIDE,
+        Permission.LOCK_FINANCE_MONTH,
+        Permission.UNLOCK_FINANCE_MONTH,
+        Permission.CHANGE_ALLOCATION_RULE,
+        Permission.EXPORT_REVENUE_REPORT,
+        Permission.VIEW_GRAPH_FINANCE,
+    }
+)
+CONNECTOR_PERMISSION_KEYS = frozenset(
+    {
+        Permission.RUN_CONNECTOR_JOBS,
+        Permission.MANAGE_CONNECTORS,
+        Permission.VIEW_RAW_FILES,
+    }
+)
+SUPER_OWNER_ONLY_PERMISSION_KEYS = frozenset(
+    {
+        Permission.ASSIGN_ROLES,
+        Permission.MANAGE_USERS,
+        Permission.MANAGE_PLATFORM_SETTINGS,
+        Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS,
+    }
+)
 
 
 class UserRoleAssignRequest(BaseModel):
@@ -67,10 +102,59 @@ class UserRoleRevokeRequest(BaseModel):
         return value
 
 
+class UserPermissionGrantRequest(BaseModel):
+    permission_key: str = Field(min_length=1)
+    scope_type: str = Field(min_length=1)
+    scope_id: str | None = None
+    reason: str = Field(min_length=1)
+
+    @field_validator("permission_key", "scope_type", "reason", mode="before")
+    @classmethod
+    def strip_required_strings(cls, value):
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                raise ValueError("must not be blank")
+            return stripped
+        return value
+
+    @field_validator("scope_id", mode="before")
+    @classmethod
+    def strip_optional_string(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+
+class UserPermissionRevokeRequest(BaseModel):
+    reason: str = Field(min_length=1)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip_reason(cls, value):
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                raise ValueError("must not be blank")
+            return stripped
+        return value
+
+
 def current_user_role_assignment_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyUserRoleAssignmentRepository:
+    """FastAPI dependency: provide a scoped role assignment repository."""
     return SqlAlchemyUserRoleAssignmentRepository(session)
+
+
+def current_user_permission_grant_repository(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyUserPermissionGrantRepository:
+    """FastAPI dependency: provide a scoped permission grant repository."""
+    return SqlAlchemyUserPermissionGrantRepository(session)
 
 
 @router.post("/{user_id}/roles", status_code=status.HTTP_201_CREATED)
@@ -81,6 +165,7 @@ def assign_user_role(
     repository: Annotated[SqlAlchemyUserRoleAssignmentRepository, Depends(current_user_role_assignment_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Assign a role to a user within a scope; requires ASSIGN_ROLES and family-specific authority."""
     _require_role_assignment_permission(user)
     role = _parse_role_for_policy(payload.role_key)
     _require_role_assignment_policy(user, role)
@@ -121,6 +206,7 @@ def revoke_user_role(
     repository: Annotated[SqlAlchemyUserRoleAssignmentRepository, Depends(current_user_role_assignment_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Revoke an active role assignment; re-checks family policy against the existing role before revoking."""
     _require_role_assignment_permission(user)
     try:
         existing = repository.get_assignment(user_id=user_id, assignment_id=assignment_id)
@@ -156,7 +242,94 @@ def revoke_user_role(
     return response
 
 
+@router.post("/{user_id}/permissions", status_code=status.HTTP_201_CREATED)
+def grant_user_permission(
+    user_id: str,
+    payload: UserPermissionGrantRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[SqlAlchemyUserPermissionGrantRepository, Depends(current_user_permission_grant_repository)],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+) -> dict[str, object]:
+    """Grant a direct permission to a user; enforces family-specific authority rules."""
+    _require_role_assignment_permission(user)
+    permission = _parse_permission_for_policy(payload.permission_key)
+    _require_permission_grant_policy(user, permission)
+    try:
+        grant = repository.grant_permission(
+            user_id=user_id,
+            permission_key=payload.permission_key,
+            scope_type=payload.scope_type,
+            scope_id=payload.scope_id,
+            granted_by=user.user_id,
+            reason=payload.reason,
+        )
+    except UserPermissionGrantConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except UserPermissionGrantNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except UserPermissionGrantValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    record = _audit_permission_change(
+        audit_sink=audit_sink,
+        actor=user,
+        grant=grant.to_api(),
+        reason=payload.reason,
+        action="granted",
+    )
+    response = grant.to_api()
+    response["audit_event"] = audit_record_to_api(record)
+    return response
+
+
+@router.post("/{user_id}/permissions/{grant_id}/revoke")
+def revoke_user_permission(
+    user_id: str,
+    grant_id: str,
+    payload: UserPermissionRevokeRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[SqlAlchemyUserPermissionGrantRepository, Depends(current_user_permission_grant_repository)],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+) -> dict[str, object]:
+    """Revoke an active permission grant; re-checks family policy against the stored permission."""
+    _require_role_assignment_permission(user)
+    try:
+        existing = repository.get_grant(user_id=user_id, grant_id=grant_id)
+    except UserPermissionGrantNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except UserPermissionGrantValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    permission = _parse_permission_for_policy(existing.permission_key)
+    _require_permission_grant_policy(user, permission)
+
+    try:
+        grant = repository.revoke_permission(
+            user_id=user_id,
+            grant_id=grant_id,
+            revoked_by=user.user_id,
+            reason=payload.reason,
+        )
+    except UserPermissionGrantConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except UserPermissionGrantNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except UserPermissionGrantValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    record = _audit_permission_change(
+        audit_sink=audit_sink,
+        actor=user,
+        grant=grant.to_api(),
+        reason=payload.reason,
+        action="revoked",
+    )
+    response = grant.to_api()
+    response["audit_event"] = audit_record_to_api(record)
+    return response
+
+
 def _require_role_assignment_permission(user: UserPrincipal) -> None:
+    """Raise 403 if the caller lacks ASSIGN_ROLES on the global scope."""
     if not has_permission(user, Permission.ASSIGN_ROLES, AccessScope.global_scope()):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -165,19 +338,51 @@ def _require_role_assignment_permission(user: UserPrincipal) -> None:
 
 
 def _parse_role_for_policy(role_key: str) -> RoleKey:
+    """Parse role_key to RoleKey; raise 422 for unknown values."""
     try:
         return RoleKey(role_key)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"Unknown role_key: {role_key}") from exc
 
 
+def _parse_permission_for_policy(permission_key: str) -> Permission:
+    """Parse permission_key to Permission; raise 422 for unknown values."""
+    try:
+        return Permission(permission_key)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Unknown permission_key: {permission_key}",
+        ) from exc
+
+
 def _require_role_assignment_policy(user: UserPrincipal, role: RoleKey) -> None:
+    """Enforce family-specific assignment authority: Super Owner for super-owner roles, Finance Admin for finance roles."""
     if role == RoleKey.SUPER_OWNER and not _has_role(user, RoleKey.SUPER_OWNER):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super Owner assignments require Super Owner")
     if role in FINANCE_ROLE_KEYS and not _has_any_role(user, {RoleKey.FINANCE_ADMIN, RoleKey.SUPER_OWNER}):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Finance roles require Finance Admin or Super Owner",
+        )
+
+
+def _require_permission_grant_policy(user: UserPrincipal, permission: Permission) -> None:
+    """Enforce family-specific grant authority: Super Owner only, Finance Admin, or Connector Admin depending on permission family."""
+    if permission in SUPER_OWNER_ONLY_PERMISSION_KEYS and not _has_role(user, RoleKey.SUPER_OWNER):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Administrative permissions require Super Owner",
+        )
+    if permission in FINANCE_PERMISSION_KEYS and not _has_any_role(user, {RoleKey.FINANCE_ADMIN, RoleKey.SUPER_OWNER}):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Finance permissions require Finance Admin or Super Owner",
+        )
+    if permission in CONNECTOR_PERMISSION_KEYS and not _has_any_role(user, {RoleKey.CONNECTOR_ADMIN, RoleKey.SUPER_OWNER}):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Connector permissions require Connector Admin or Super Owner",
         )
 
 
@@ -212,5 +417,32 @@ def _audit_role_change(
             "scope_type": assignment["scope_type"],
             "scope_id": assignment["scope_id"],
             "active": assignment["active"],
+        },
+    )
+
+
+def _audit_permission_change(
+    *,
+    audit_sink: AuditSink,
+    actor: UserPrincipal,
+    grant: dict[str, object],
+    reason: str,
+    action: str,
+):
+    return record_audit_event(
+        sink=audit_sink,
+        actor=actor,
+        event_type=AuditEventType.USER_PERMISSION_CHANGED,
+        entity_type="user_permission_grant",
+        entity_id=str(grant["id"]),
+        scope=AccessScope.global_scope(),
+        reason=reason,
+        details={
+            "action": action,
+            "target_user_id": grant["user_id"],
+            "permission_key": grant["permission_key"],
+            "scope_type": grant["scope_type"],
+            "scope_id": grant["scope_id"],
+            "active": grant["active"],
         },
     )

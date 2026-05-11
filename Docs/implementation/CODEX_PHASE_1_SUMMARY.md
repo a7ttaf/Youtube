@@ -118,6 +118,16 @@ Fifteenth continuation update:
 - restricted finance role assignment to Finance Admin or Super Owner authority;
 - audited role assignment and revocation as `USER_ROLE_CHANGED`.
 
+Sixteenth continuation update:
+- added a SQLAlchemy user-permission grant repository and FastAPI `/users/{user_id}/permissions` routes;
+- persisted scoped direct permission grants through the existing `user_permission_grants` and `access_scopes` tables;
+- enforced `roles.assign` before parsing target user IDs to avoid probing;
+- restricted finance direct grants to Finance Admin or Super Owner authority;
+- restricted connector/raw-file direct grants to Connector Admin or Super Owner authority;
+- restricted administrative direct grants to Super Owner authority;
+- validated direct grant scope types against the target permission family;
+- audited direct permission grant and revocation as `USER_PERMISSION_CHANGED`.
+
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`
 - `Docs/implementation/CODEX_PHASE_1_SUMMARY.md`
@@ -142,6 +152,7 @@ Fifteenth continuation update:
 - `backend/ums_smart_revenue/api/users.py`
 - `backend/ums_smart_revenue/auth/__init__.py`
 - `backend/ums_smart_revenue/auth/audit_log.py`
+- `backend/ums_smart_revenue/auth/user_permissions.py`
 - `backend/ums_smart_revenue/auth/user_roles.py`
 - `backend/ums_smart_revenue/auth/permissions.py`
 - `backend/ums_smart_revenue/auth/roles.py`
@@ -205,6 +216,7 @@ Fifteenth continuation update:
 - `tests/api/test_groups_api.py`
 - `tests/api/test_raw_report_files_api.py`
 - `tests/api/test_revenue_explanations_api.py`
+- `tests/api/test_user_permissions_api.py`
 - `tests/api/test_user_roles_api.py`
 - `tests/api/test_guarded_routes.py`
 - `tests/api/test_sql_backed_channel_dependencies.py`
@@ -344,6 +356,10 @@ Pytest coverage includes:
 - Corporate Admin cannot assign finance roles or Super Owner.
 - Finance Admin can assign Finance Viewer.
 - Corporate Admin can revoke role assignments with audit logging.
+- Finance Admin can grant and revoke scoped direct revenue permission with `USER_PERMISSION_CHANGED` audit logging.
+- Corporate Admin can grant non-finance direct permissions but cannot grant or revoke finance direct permissions.
+- Assistant Analyst cannot grant direct permissions or probe target user ids.
+- Duplicate active direct permission grants are rejected.
 
 ## Commands Run
 - `git status --short --branch` failed because this workspace is not a Git repository.
@@ -400,6 +416,11 @@ Pytest coverage includes:
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp tests/api tests/db tests/finance` passed with 119 tests after audit-log APIs were added.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp` passed with 154 tests after audit-log APIs were added.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; python -B -m alembic -c alembic.ini upgrade head --sql` still rendered migrations through `20260510_0008`.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-permissions-red" tests/api/test_user_permissions_api.py` first failed with missing `/users/{user_id}/permissions` routes.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-permissions-green" tests/api/test_user_permissions_api.py` passed with 7 tests after direct permission grant APIs were added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-security" tests/api/test_user_roles_api.py tests/api/test_user_permissions_api.py` passed with 16 tests.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-full-permissions"` passed with 182 tests.
+- `git diff --check` passed with CRLF conversion warnings only.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-userroles" tests/api/test_user_roles_api.py` first failed with missing `/users/{user_id}/roles`, then passed with 6 tests after user-role assignment APIs were added.
 - `git diff --check` passed with CRLF conversion warnings only after user-role assignment APIs were added.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-broad" tests/api tests/db tests/auth` passed with 146 tests after user-role assignment APIs were added.
