@@ -1,0 +1,179 @@
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from decimal import Decimal
+from uuid import uuid4
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from ums_smart_revenue.db.explanation_models import NumberExplanationORM
+from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntry
+from ums_smart_revenue.finance.reconciliation import SOURCE_PRIORITY
+from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
+from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_summary
+
+
+ADJUSTED_GROSS_REVENUE_METRIC = "adjusted_gross_revenue_usd"
+
+
+@dataclass(frozen=True)
+class NumberExplanationEntry:
+    month: str
+    entity_type: str
+    entity_id: str
+    metric: str
+    value: Decimal
+    currency: str
+    formula: str
+    confidence: dict[str, object]
+    components: list[dict[str, object]]
+    warnings: list[dict[str, object]]
+
+    def to_api(self) -> dict[str, object]:
+        return {
+            "month": self.month,
+            "entity_type": self.entity_type,
+            "entity_id": self.entity_id,
+            "metric": self.metric,
+            "value": _decimal_to_api(self.value),
+            "currency": self.currency,
+            "formula": self.formula,
+            "confidence": self.confidence,
+            "components": self.components,
+            "warnings": self.warnings,
+        }
+
+
+class NumberExplanationError(ValueError):
+    pass
+
+
+class NumberExplanationValidationError(NumberExplanationError):
+    pass
+
+
+class SqlAlchemyNumberExplanationRepository:
+    def __init__(self, session: Session):
+        self._session = session
+
+    def record_explanation(self, explanation: NumberExplanationEntry) -> NumberExplanationEntry:
+        row = self._session.scalars(
+            select(NumberExplanationORM).where(
+                NumberExplanationORM.month == explanation.month,
+                NumberExplanationORM.entity_type == explanation.entity_type,
+                NumberExplanationORM.entity_id == explanation.entity_id,
+                NumberExplanationORM.metric == explanation.metric,
+            )
+        ).one_or_none()
+        now = datetime.now(UTC)
+        if row is None:
+            row = NumberExplanationORM(
+                id=uuid4(),
+                month=explanation.month,
+                entity_type=explanation.entity_type,
+                entity_id=explanation.entity_id,
+                metric=explanation.metric,
+                created_at=now,
+            )
+            self._session.add(row)
+
+        row.value = explanation.value
+        row.currency = explanation.currency
+        row.formula = explanation.formula
+        row.confidence = str(explanation.confidence["label"])
+        row.components = explanation.components
+        row.warnings = explanation.warnings
+        row.updated_at = now
+        self._session.flush()
+        return explanation
+
+
+def build_channel_month_revenue_explanation(
+    *,
+    facts: list[RevenueFactEntry],
+    manual_overrides: list[RevenueManualOverrideEntry],
+    month: str,
+    youtube_channel_id: str,
+    metric: str,
+) -> NumberExplanationEntry:
+    if metric != ADJUSTED_GROSS_REVENUE_METRIC:
+        raise NumberExplanationValidationError(f"Unsupported explanation metric: {metric}")
+
+    summary = build_adjusted_revenue_summary(
+        facts=facts,
+        manual_overrides=manual_overrides,
+        month=month,
+        youtube_channel_id=youtube_channel_id,
+    )
+    primary_fact = _primary_fact(facts)
+    approved_count = sum(1 for override in manual_overrides if override.status == "APPROVED")
+    pending_count = summary.pending_manual_override_count
+
+    components: list[dict[str, object]] = [
+        {
+            "key": "baseline_gross_revenue_usd",
+            "label": "Baseline gross revenue",
+            "value": _decimal_to_api(summary.baseline_gross_revenue_usd),
+            "source_kind": primary_fact.source_kind if primary_fact else None,
+            "source_report_id": primary_fact.source_report_id if primary_fact else None,
+        },
+        {
+            "key": "approved_manual_override_total_usd",
+            "label": "Approved manual overrides",
+            "value": _decimal_to_api(summary.approved_manual_override_total_usd),
+            "count": approved_count,
+        },
+    ]
+    warnings: list[dict[str, object]] = []
+    if pending_count:
+        subject = "override is" if pending_count == 1 else "overrides are"
+        warnings.append(
+            {
+                "code": "PENDING_MANUAL_OVERRIDES",
+                "message": f"{pending_count} pending manual {subject} not included in {metric}.",
+            }
+        )
+    if primary_fact is None:
+        warnings.append(
+            {
+                "code": "NO_REVENUE_FACTS",
+                "message": f"No revenue facts are available for {youtube_channel_id} in {month}.",
+            }
+        )
+
+    return NumberExplanationEntry(
+        month=month,
+        entity_type="channel",
+        entity_id=youtube_channel_id,
+        metric=metric,
+        value=summary.adjusted_gross_revenue_usd,
+        currency="USD",
+        formula="baseline_gross_revenue_usd + approved_manual_override_total_usd",
+        confidence=_confidence(primary_fact, warnings),
+        components=components,
+        warnings=warnings,
+    )
+
+
+def _primary_fact(facts: list[RevenueFactEntry]) -> RevenueFactEntry | None:
+    if not facts:
+        return None
+    return sorted(facts, key=lambda fact: (SOURCE_PRIORITY.get(fact.source_kind, 99), fact.source_kind))[0]
+
+
+def _confidence(primary_fact: RevenueFactEntry | None, warnings: list[dict[str, object]]) -> dict[str, object]:
+    score = primary_fact.confidence_score if primary_fact else Decimal("0")
+    if warnings and score > Decimal("0.9000"):
+        score = Decimal("0.9000")
+    label = "HIGH" if score >= Decimal("0.9000") else "MEDIUM" if score >= Decimal("0.7000") else "LOW"
+    return {
+        "label": label,
+        "score": _decimal_to_api(score),
+    }
+
+
+def _decimal_to_api(value: Decimal) -> str:
+    normalized = value.normalize()
+    if normalized == normalized.to_integral():
+        return format(normalized, "f")
+    return format(normalized, "f").rstrip("0").rstrip(".")

@@ -1,0 +1,67 @@
+# Confidence and Explainability
+
+## Purpose
+Make every number understandable and trustworthy.
+
+## Confidence levels
+
+| Code | Label | Meaning |
+|---|---|---|
+| A_OFFICIAL | Official | Direct from official YouTube/CMS/system report |
+| B_RECONCILED | Reconciled | Official gross + payment/deduction reconciliation |
+| C_ALLOCATED | Allocated | Payment is real, but channel split uses allocation rule |
+| D_ESTIMATED | Estimated | Based on estimated report, not finalized/locked |
+| E_MISSING | Missing | Required source missing or unresolved |
+
+Legacy short labels map as `A -> A_OFFICIAL`, `B -> B_RECONCILED`, `C -> C_ALLOCATED`, `D -> D_ESTIMATED`, and `E -> E_MISSING`. New API payloads and stored examples should use the expanded wire tokens.
+
+## Number explanation object
+
+```json
+{
+  "metric": "adjusted_gross_revenue_usd",
+  "entity_type": "channel",
+  "entity_id": "UCxxxx",
+  "month": "2026-03",
+  "value": "184250.00",
+  "currency": "USD",
+  "confidence": "B_RECONCILED",
+  "formula": "baseline_gross_revenue_usd + approved_manual_override_total_usd",
+  "components": [
+    {"name": "baseline_gross_revenue_usd", "value": "184000.00", "source": "youtube_report", "confidence": "A_OFFICIAL"},
+    {"name": "approved_manual_override_total_usd", "value": "250.00", "source": "manual_override", "confidence": "B_RECONCILED"}
+  ],
+  "warnings": []
+}
+```
+
+## UI rules
+
+- Every money number has an **Explain** action.
+- Every table row shows a confidence badge.
+- Missing data appears as a visible warning, not hidden.
+- Allocated values must be labeled as allocated.
+- Locked values must show lock date and locking user.
+
+## Smart alerts
+
+```text
+MISSING_REVENUE_SOURCE
+PAYMENT_NOT_MATCHED
+BANK_AMOUNT_MISSING
+TAX_REPORT_MISSING
+OUTSIDE_CMS_REVENUE_REQUIRED
+UNEXPLAINED_GAP_HIGH
+MONTH_NOT_LOCKED
+MANUAL_OVERRIDE_USED
+```
+
+## Acceptance checks
+
+- Clicking a number shows source, formula, confidence, and warnings.
+- User can filter table by confidence level.
+- User can export confidence notes with finance report.
+
+## Foundation implementation note
+
+The first backend explain-number endpoint supports channel-month `adjusted_gross_revenue_usd`. It derives the value from persisted revenue facts and approved manual overrides only, records a `number_explanations` snapshot, and audits the read as sensitive revenue access. Pending overrides appear as warnings and are not applied.

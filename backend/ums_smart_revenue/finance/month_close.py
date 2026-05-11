@@ -2,6 +2,8 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID
 
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM
@@ -31,6 +33,12 @@ class FinanceMonthCloseEntry:
         }
 
 
+class FinanceMonthCloseReadinessError(ValueError):
+    def __init__(self, readiness):
+        self.readiness = readiness
+        super().__init__("Finance month has unresolved close blockers")
+
+
 class SqlAlchemyFinanceMonthCloseRepository:
     def __init__(self, session: Session):
         self._session = session
@@ -43,9 +51,14 @@ class SqlAlchemyFinanceMonthCloseRepository:
         return self._to_entry(self._get_or_create_row(month))
 
     def lock_month(self, *, month: str, actor_user_id: str) -> FinanceMonthCloseEntry:
-        row = self._get_or_create_row(month)
+        from ums_smart_revenue.finance.month_close_readiness import SqlAlchemyFinanceCloseReadinessService
+
+        row = self._get_or_create_row(month, for_update=True)
         if row.status == "LOCKED":
             raise ValueError(f"Finance month is already locked: {month}")
+        readiness = SqlAlchemyFinanceCloseReadinessService(self._session).check_month(month)
+        if not readiness.ready:
+            raise FinanceMonthCloseReadinessError(readiness)
         row.status = "LOCKED"
         row.locked_by = _parse_uuid(actor_user_id)
         row.locked_at = datetime.now(UTC)
@@ -54,7 +67,7 @@ class SqlAlchemyFinanceMonthCloseRepository:
         return self._to_entry(row)
 
     def unlock_month(self, *, month: str, actor_user_id: str) -> FinanceMonthCloseEntry:
-        row = self._get_or_create_row(month)
+        row = self._get_or_create_row(month, for_update=True)
         if row.status != "LOCKED":
             raise ValueError(f"Finance month is not locked: {month}")
         row.status = "OPEN"
@@ -71,7 +84,7 @@ class SqlAlchemyFinanceMonthCloseRepository:
         allocation_method: str,
         rule_payload: dict[str, object],
     ) -> FinanceMonthCloseEntry:
-        row = self._get_or_create_row(month)
+        row = self._get_or_create_row(month, for_update=True)
         if row.status == "LOCKED":
             raise ValueError(f"Finance month is locked: {month}")
         row.allocation_method = allocation_method
@@ -80,13 +93,8 @@ class SqlAlchemyFinanceMonthCloseRepository:
         self._session.flush()
         return self._to_entry(row)
 
-    def _get_or_create_row(self, month: str) -> FinanceMonthCloseORM:
-        row = self._session.get(FinanceMonthCloseORM, month)
-        if row is None:
-            row = FinanceMonthCloseORM(month=month, status="OPEN", allocation_rule_payload={})
-            self._session.add(row)
-            self._session.flush()
-        return row
+    def _get_or_create_row(self, month: str, *, for_update: bool = False) -> FinanceMonthCloseORM:
+        return get_or_create_month_close_row(self._session, month, for_update=for_update)
 
     @staticmethod
     def _to_entry(row: FinanceMonthCloseORM) -> FinanceMonthCloseEntry:
@@ -107,3 +115,24 @@ def _parse_uuid(value: str) -> UUID:
         return UUID(value)
     except ValueError as exc:
         raise ValueError("actor_user_id must be a valid UUID") from exc
+
+
+def get_or_create_month_close_row(
+    session: Session,
+    month: str,
+    *,
+    for_update: bool = False,
+) -> FinanceMonthCloseORM:
+    statement = select(FinanceMonthCloseORM).where(FinanceMonthCloseORM.month == month)
+    if for_update:
+        statement = statement.with_for_update()
+    row = session.scalars(statement).one_or_none()
+    if row is None:
+        try:
+            with session.begin_nested():
+                row = FinanceMonthCloseORM(month=month, status="OPEN", allocation_rule_payload={})
+                session.add(row)
+                session.flush()
+        except IntegrityError:
+            row = session.scalars(statement).one()
+    return row

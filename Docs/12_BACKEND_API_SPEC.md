@@ -1,0 +1,166 @@
+# Backend API Draft
+
+## Purpose
+Define initial API endpoints for the UMS Smart Revenue Control Center.
+
+## API groups
+
+```text
+/auth
+/users
+/org-units
+/channels
+/groups
+/connectors
+/reports
+/revenue
+/finance-close
+/adsense
+/exports
+/graph
+/audit
+```
+
+The `/connectors` group is part of the implemented API surface and is detailed in the Connectors section below.
+
+## Example endpoints
+
+### Channels
+
+```http
+GET /channels
+GET /channels/{channel_id}
+POST /channels
+PATCH /channels/{channel_id}
+GET /channels/issues
+GET /channels/outside-cms
+```
+
+### Groups
+
+```http
+GET /groups
+POST /groups
+PATCH /groups/{group_id}
+POST /groups/{group_id}/members
+DELETE /groups/{group_id}/members/{channel_id}
+```
+
+### Revenue
+
+```http
+GET /revenue/monthly?month=2026-03&scope_type=company&scope_id=123&currency=USD
+GET /revenue/channels?month=2026-03&group_id=abc&currency=USD
+POST /revenue/channels/{channel_id}/months/{month}/explain?metric=adjusted_gross_revenue_usd
+POST /revenue/recalculate
+```
+
+### Finance close
+
+```http
+GET /finance-close/{month}
+POST /finance-close/{month}/allocate
+POST /finance-close/{month}/lock
+POST /finance-close/{month}/unlock
+```
+
+The finance-close endpoints in the foundation control close state and allocation-rule metadata only. They must not calculate or expose revenue values without the reconciliation engine and finance permissions.
+
+### AdSense
+
+```http
+GET /adsense/payments
+POST /adsense/sync-payments
+```
+
+### Connectors
+
+API group: `/connectors`.
+
+```http
+GET /connectors/credentials
+POST /connectors/credentials
+POST /connectors/jobs
+```
+
+`/connectors` is an implemented API group in this draft and owns credential-reference metadata plus connector job requests.
+
+Connector credential responses expose metadata only, never raw credential material or secret references.
+
+### Reports ingestion
+
+```http
+POST /reports/youtube/sync
+GET /reports/youtube/runs
+GET /reports/youtube/runs/{run_id}
+POST /reports/raw-files
+GET /reports/raw-files?source=youtube_reporting&report_month=2026-03&limit=50&offset=0
+GET /reports/raw-files/{raw_file_id}
+```
+
+Raw report metadata records the immutable file reference before parsing. `POST /reports/raw-files` requires `source`, `report_type`, `report_month`, `storage_uri`, `checksum`, `parse_status`, and `reason`; responses include `id`, `source`, `report_type`, `report_month`, `storage_uri`, `checksum`, `parse_status`, `downloaded_by`, `downloaded_at`, and `audit_event`. `GET /reports/raw-files` is offset-paginated with `limit` capped at `100`, optional `source`, `report_type`, and `report_month` filters, and returns `items` plus `pagination.limit`, `pagination.offset`, `pagination.returned`, and `pagination.has_more`.
+
+### Exports
+
+```http
+POST /exports
+GET /exports?page=1&page_size=50
+GET /exports/{export_id}
+```
+
+`GET /exports` is paginated. Query parameters are `page` (default `1`) and `page_size` (default `50`, maximum `100`). Requests above the maximum are rejected with `422`. Responses include paging metadata:
+
+```json
+{
+  "items": [],
+  "pagination": {
+    "total_count": 0,
+    "page": 1,
+    "page_size": 50,
+    "next_link": null
+  }
+}
+```
+
+### Audit
+
+```http
+GET /audit/events?limit=50
+GET /audit/events?limit=50&cursor_created_at=2026-05-10T12:00:00Z&cursor_id=00000000-0000-0000-0000-000000000001
+```
+
+Audit event reads require `audit.view`. Sensitive audit `details` are masked unless the caller also has `audit.view_sensitive_payloads`. Audit reads are themselves recorded as `AUDIT_LOG_VIEWED`.
+
+`GET /audit/events` uses newest-first cursor pagination. `limit` defaults to `50` and is capped at `100`; when `pagination.has_more` is true, clients pass `pagination.next_cursor.created_at` as `cursor_created_at` and `pagination.next_cursor.id` as `cursor_id` to continue from the same `(created_at, id)` position. Older unpaginated and `page`/`page_size` examples are outdated. `AUDIT_LOG_VIEWED` records created by audit reads are stored, but this listing excludes them from the paginated result set so read-generated audit entries cannot shift the pages a client is iterating. `audit.view` and `audit.view_sensitive_payloads` only affect visibility within that filtered result set.
+
+### Graph
+
+```http
+GET /graph/hierarchy
+GET /graph/revenue-flow?month=2026-03&scope_type=company&scope_id=123
+GET /graph/issues?month=2026-03
+GET /graph/outside-cms
+```
+
+## API rules
+
+- Backend enforces permissions.
+- UI cannot directly access Neo4j for restricted views.
+- Every money API must support currency parameter.
+- Every money API must return confidence and source metadata.
+- Export APIs run async jobs.
+
+## Standard money response
+
+```json
+{
+  "value": "184250.00",
+  "currency": "USD",
+  "confidence": "B_RECONCILED",
+  "source": "reconciliation_engine",
+  "locked": true,
+  "explain_url": "/revenue/channels/{channel_id}/months/{month}/explain?metric=adjusted_gross_revenue_usd"
+}
+```
+
+Money `value` fields are fixed-precision decimal strings with two fractional digits unless an endpoint documents a higher scale. Outdated floating-number examples such as `184250.0` must be migrated by clients before using finance values for reconciliation or exports.

@@ -13,7 +13,14 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
-from ums_smart_revenue.finance.month_close import FinanceMonthCloseEntry, SqlAlchemyFinanceMonthCloseRepository
+from ums_smart_revenue.finance.month_close import (
+    FinanceMonthCloseEntry,
+    FinanceMonthCloseReadinessError,
+    SqlAlchemyFinanceMonthCloseRepository,
+)
+from ums_smart_revenue.finance.month_close_readiness import (
+    SqlAlchemyFinanceCloseReadinessService,
+)
 
 
 router = APIRouter(prefix="/finance-close", tags=["finance-close"])
@@ -36,6 +43,12 @@ def current_finance_month_close_repository(
     return SqlAlchemyFinanceMonthCloseRepository(session)
 
 
+def current_finance_close_readiness_service(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyFinanceCloseReadinessService:
+    return SqlAlchemyFinanceCloseReadinessService(session)
+
+
 @router.get("/{month}")
 def get_finance_month_close(
     month: str,
@@ -48,6 +61,20 @@ def get_finance_month_close(
     if close is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finance month close record not found")
     return close.to_api()
+
+
+@router.get("/{month}/readiness")
+def get_finance_close_readiness(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    readiness_service: Annotated[
+        SqlAlchemyFinanceCloseReadinessService,
+        Depends(current_finance_close_readiness_service),
+    ],
+) -> dict[str, object]:
+    _validate_month(month)
+    _require_permission(user, Permission.LOCK_FINANCE_MONTH, AccessScope.finance_month(month))
+    return readiness_service.check_month(month).to_api()
 
 
 @router.post("/{month}/lock")
@@ -63,6 +90,11 @@ def lock_finance_month(
     _require_permission(user, Permission.LOCK_FINANCE_MONTH, scope)
     try:
         close = repository.lock_month(month=month, actor_user_id=user.user_id)
+    except FinanceMonthCloseReadinessError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=exc.readiness.to_lock_error_detail(),
+        ) from exc
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
