@@ -4,6 +4,7 @@ from enum import StrEnum
 from uuid import UUID
 
 from sqlalchemy import select
+from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.models import PermissionGrant, RoleAssignment, UserPrincipal
@@ -19,6 +20,7 @@ from ums_smart_revenue.db.security_models import (
 
 MAX_ACTIVE_ROLE_ASSIGNMENTS = 256
 MAX_ACTIVE_PERMISSION_GRANTS = 512
+PRINCIPAL_QUERY_TIMEOUT_MS = 5_000
 
 
 class UserStatus(StrEnum):
@@ -48,6 +50,12 @@ class PrincipalDisabledError(PrincipalLoadError):
 
 
 class PrincipalValidationError(PrincipalLoadError):
+    """Raised when request principal input cannot be parsed."""
+
+    pass
+
+
+class PrincipalDataValidationError(PrincipalLoadError):
     """Raised when stored principal data cannot be parsed into policy objects."""
 
     pass
@@ -65,11 +73,22 @@ class SqlAlchemyPrincipalLoader:
     def __init__(self, session: Session):
         """Store the SQLAlchemy session used for one principal lookup."""
         self._session = session
+        self._read_connection: Connection | None = None
 
     def load(self, *, user_id: str) -> UserPrincipal:
         """Return a UserPrincipal for an active stored user id."""
         parsed_user_id = _parse_uuid(user_id)
-        self._prepare_read_transaction()
+        if self._session.in_transaction():
+            return self._load_principal(parsed_user_id)
+        with self._session.begin():
+            self._read_connection = self._prepare_read_connection()
+            try:
+                return self._load_principal(parsed_user_id)
+            finally:
+                self._read_connection = None
+
+    def _load_principal(self, parsed_user_id: UUID) -> UserPrincipal:
+        """Load the principal rows within the current transaction scope."""
         user = self._session.get(UserORM, parsed_user_id)
         if user is None:
             raise PrincipalNotFoundError("User is not registered")
@@ -88,17 +107,21 @@ class SqlAlchemyPrincipalLoader:
             disabled=False,
         )
 
-    def _prepare_read_transaction(self) -> None:
-        """Set principal reads to a stable transaction isolation when possible."""
-        if self._session.in_transaction():
-            return
+    def _prepare_read_connection(self) -> Connection:
+        """Return the connection that carries principal read isolation settings."""
         bind = self._session.get_bind()
         isolation_level = (
             "SERIALIZABLE" if bind.dialect.name == "sqlite" else "REPEATABLE READ"
         )
-        self._session.connection(
+        connection = self._session.connection(
             execution_options={"isolation_level": isolation_level}
         )
+        connection.info["principal_read_isolation_level"] = isolation_level
+        if bind.dialect.name == "postgresql":
+            connection.exec_driver_sql(
+                f"SET LOCAL statement_timeout = {PRINCIPAL_QUERY_TIMEOUT_MS}"
+            )
+        return connection
 
     def _load_role_assignments(self, user_id: UUID) -> tuple[RoleAssignment, ...]:
         """Load active role assignments while enforcing a bounded row count."""
@@ -170,7 +193,7 @@ def _parse_user_status(value: str) -> UserStatus:
     try:
         return UserStatus(value)
     except ValueError as exc:
-        raise PrincipalValidationError(
+        raise PrincipalDataValidationError(
             f"Unknown user status in database: {value}"
         ) from exc
 
@@ -180,7 +203,7 @@ def _parse_role(value: str) -> RoleKey:
     try:
         return RoleKey(value)
     except ValueError as exc:
-        raise PrincipalValidationError(
+        raise PrincipalDataValidationError(
             f"Unknown role assignment in database: {value}"
         ) from exc
 
@@ -190,7 +213,7 @@ def _parse_permission(value: str) -> Permission:
     try:
         return Permission(value)
     except ValueError as exc:
-        raise PrincipalValidationError(
+        raise PrincipalDataValidationError(
             f"Unknown permission grant in database: {value}"
         ) from exc
 
@@ -200,6 +223,6 @@ def _to_scope(scope: AccessScopeORM) -> AccessScope:
     try:
         return AccessScope(ScopeType(scope.scope_type), scope.scope_id)
     except ValueError as exc:
-        raise PrincipalValidationError(
+        raise PrincipalDataValidationError(
             f"Unknown access scope in database: {scope.scope_type}"
         ) from exc

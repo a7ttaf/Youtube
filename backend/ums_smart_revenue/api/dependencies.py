@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
 from ums_smart_revenue.auth.principals import (
+    PrincipalDataValidationError,
     PrincipalDisabledError,
     PrincipalLimitExceededError,
     PrincipalNotFoundError,
@@ -124,6 +125,12 @@ def current_principal_from_database(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden",
+        ) from exc
+    except PrincipalDataValidationError as exc:
+        logger.error("Database principal lookup rejected corrupt stored data: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Principal authorization unavailable",
         ) from exc
     except PrincipalValidationError as exc:
         logger.warning(

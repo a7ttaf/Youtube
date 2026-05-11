@@ -1,5 +1,6 @@
 """Regression tests for SQL-backed principal authorization."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -47,10 +48,14 @@ class FailingSession:
         """Return a minimal bind with the dialect name used by the loader."""
         return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
 
+    def begin(self):
+        """Return a no-op context manager for the loader transaction scope."""
+        return nullcontext()
+
     def connection(self, *, execution_options):
         """Accept read isolation options before the failing lookup."""
         assert execution_options == {"isolation_level": "SERIALIZABLE"}
-        return None
+        return SimpleNamespace(info={})
 
     def get(self, *_args, **_kwargs):
         """Raise the same base error SQLAlchemy uses for storage failures."""
@@ -155,16 +160,29 @@ def add_direct_permission(
     *,
     user_id: UUID,
     permission_key: str,
+    scope_type: str = "global",
+    scope_id: str | None = None,
 ) -> None:
     """Insert one active direct permission grant for a test user."""
     engine = create_engine(database_url)
     with Session(engine) as session:
+        scope_row_id = GLOBAL_SCOPE_ID
+        if scope_type != "global":
+            scope_row_id = uuid4()
+            session.add(
+                AccessScopeORM(
+                    id=scope_row_id,
+                    scope_type=scope_type,
+                    scope_id=scope_id,
+                    label=f"{scope_type}:{scope_id}",
+                )
+            )
         session.add(
             UserPermissionGrantORM(
                 id=uuid4(),
                 user_id=user_id,
                 permission_key=permission_key,
-                scope_id=GLOBAL_SCOPE_ID,
+                scope_id=scope_row_id,
                 granted_by=user_id,
                 reason="Seed DB-backed principal permission",
                 active=True,
@@ -357,11 +375,53 @@ def test_database_principal_storage_errors_return_service_unavailable():
         current_principal_from_database(
             session=FailingSession(),
             x_user_id=str(ACTOR_ID),
-            x_ums_trusted_gateway_token="pytest-trusted-gateway-token",
+            x_ums_trusted_gateway_token=auth_headers()[
+                "x-ums-trusted-gateway-token"
+            ],
         )
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "Principal authorization unavailable"
+
+
+def test_database_principal_corrupt_stored_role_returns_service_unavailable(
+    tmp_path,
+):
+    """Corrupt stored role keys are treated as service-unavailable data errors."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    add_role_assignment(database_url, user_id=ACTOR_ID, role_key="not_a_role")
+    client = TestClient(create_app(database_url=database_url, authz_source="database"))
+
+    response = client.get(
+        "/security/roles",
+        headers=auth_headers(claimed_role="super_owner"),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Principal authorization unavailable"
+
+
+def test_database_principal_enforces_direct_permission_scope_isolation(tmp_path):
+    """A company-scoped direct grant does not satisfy a global audit read."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    add_direct_permission(
+        database_url,
+        user_id=ACTOR_ID,
+        permission_key="audit.view",
+        scope_type="company",
+        scope_id=str(TARGET_ID),
+    )
+    client = TestClient(create_app(database_url=database_url, authz_source="database"))
+
+    response = client.get(
+        "/audit/events?limit=10",
+        headers=auth_headers(claimed_role="assistant_analyst"),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: audit.view"
 
 
 def test_database_principal_rejects_too_many_active_role_assignments(tmp_path):
