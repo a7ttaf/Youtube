@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.roles import ROLE_DEFINITIONS, RoleKey
@@ -76,6 +77,7 @@ class SqlAlchemyUserRoleAssignmentRepository:
         normalized_reason = _normalize_reason(reason)
         target_user = self._require_user(target_user_id)
         self._require_assignable_role(target_user, role)
+        _require_compatible_scope_type(role, scope_type)
         scope = self._get_or_create_scope(scope_type=scope_type, scope_id=scope_id)
 
         existing = self._session.scalars(
@@ -99,7 +101,21 @@ class SqlAlchemyUserRoleAssignmentRepository:
             active=True,
         )
         self._session.add(row)
-        self._session.flush()
+        try:
+            self._session.flush()
+        except IntegrityError as exc:
+            raise UserRoleAssignmentConflictError("Active role assignment already exists") from exc
+        return self._to_entry(row, scope)
+
+    def get_assignment(self, *, user_id: str, assignment_id: str) -> UserRoleAssignmentEntry:
+        target_user_id = _parse_uuid(user_id, field_name="user_id")
+        assignment_uuid = _parse_uuid(assignment_id, field_name="assignment_id")
+        row = self._session.get(UserRoleAssignmentORM, assignment_uuid)
+        if row is None or row.user_id != target_user_id:
+            raise UserRoleAssignmentNotFoundError("Role assignment not found")
+        scope = self._session.get(AccessScopeORM, row.scope_id)
+        if scope is None:
+            raise UserRoleAssignmentNotFoundError("Role assignment scope not found")
         return self._to_entry(row, scope)
 
     def revoke_role(
@@ -194,6 +210,16 @@ def _parse_role(value: str) -> RoleKey:
         return RoleKey(_normalize_required_string(value, "role_key"))
     except ValueError as exc:
         raise UserRoleAssignmentValidationError(f"Unknown role_key: {value}") from exc
+
+
+def _require_compatible_scope_type(role: RoleKey, scope_type: str) -> None:
+    definition = ROLE_DEFINITIONS[role]
+    normalized = scope_type.strip()
+    if normalized not in definition.allowed_scope_types:
+        allowed = ", ".join(sorted(definition.allowed_scope_types))
+        raise UserRoleAssignmentValidationError(
+            f"Role {role.value!r} cannot be assigned to scope type {normalized!r}; allowed: {allowed}"
+        )
 
 
 def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | None]:

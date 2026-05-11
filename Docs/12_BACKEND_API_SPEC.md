@@ -53,7 +53,7 @@ POST /users/{user_id}/roles
 POST /users/{user_id}/roles/{assignment_id}/revoke
 ```
 
-Role assignment requires `roles.assign`. Super Owner assignment requires an existing Super Owner. Finance roles require Finance Admin or Super Owner authority. Every assignment and revocation is audited as `USER_ROLE_CHANGED`.
+Role assignment and revocation both require `roles.assign`. Super Owner assignment requires an existing Super Owner. Finance roles require Finance Admin or Super Owner authority. Every assignment and revocation is audited as `USER_ROLE_CHANGED`.
 
 ### Revenue
 

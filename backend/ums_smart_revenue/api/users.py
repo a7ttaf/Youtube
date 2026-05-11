@@ -123,6 +123,15 @@ def revoke_user_role(
 ) -> dict[str, object]:
     _require_role_assignment_permission(user)
     try:
+        existing = repository.get_assignment(user_id=user_id, assignment_id=assignment_id)
+    except UserRoleAssignmentNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except UserRoleAssignmentValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    _require_role_assignment_policy(user, RoleKey(existing.role_key))
+
+    try:
         assignment = repository.revoke_role(
             user_id=user_id,
             assignment_id=assignment_id,
@@ -135,8 +144,6 @@ def revoke_user_role(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except UserRoleAssignmentValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
-
-    _require_role_assignment_policy(user, RoleKey(assignment.role_key))
     record = _audit_role_change(
         audit_sink=audit_sink,
         actor=user,
