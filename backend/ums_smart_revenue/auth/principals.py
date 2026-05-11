@@ -4,7 +4,6 @@ from enum import StrEnum
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.engine import Connection
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.models import PermissionGrant, RoleAssignment, UserPrincipal
@@ -73,7 +72,6 @@ class SqlAlchemyPrincipalLoader:
     def __init__(self, session: Session):
         """Store the SQLAlchemy session used for one principal lookup."""
         self._session = session
-        self._read_connection: Connection | None = None
 
     def load(self, *, user_id: str) -> UserPrincipal:
         """Return a UserPrincipal for an active stored user id."""
@@ -81,11 +79,8 @@ class SqlAlchemyPrincipalLoader:
         if self._session.in_transaction():
             return self._load_principal(parsed_user_id)
         with self._session.begin():
-            self._read_connection = self._prepare_read_connection()
-            try:
-                return self._load_principal(parsed_user_id)
-            finally:
-                self._read_connection = None
+            self._prepare_read_connection()
+            return self._load_principal(parsed_user_id)
 
     def _load_principal(self, parsed_user_id: UUID) -> UserPrincipal:
         """Load the principal rows within the current transaction scope."""
@@ -107,8 +102,8 @@ class SqlAlchemyPrincipalLoader:
             disabled=False,
         )
 
-    def _prepare_read_connection(self) -> Connection:
-        """Return the connection that carries principal read isolation settings."""
+    def _prepare_read_connection(self) -> None:
+        """Apply principal read isolation and timeout settings to the transaction."""
         bind = self._session.get_bind()
         isolation_level = (
             "SERIALIZABLE" if bind.dialect.name == "sqlite" else "REPEATABLE READ"
@@ -116,12 +111,10 @@ class SqlAlchemyPrincipalLoader:
         connection = self._session.connection(
             execution_options={"isolation_level": isolation_level}
         )
-        connection.info["principal_read_isolation_level"] = isolation_level
         if bind.dialect.name == "postgresql":
             connection.exec_driver_sql(
                 f"SET LOCAL statement_timeout = {PRINCIPAL_QUERY_TIMEOUT_MS}"
             )
-        return connection
 
     def _load_role_assignments(self, user_id: UUID) -> tuple[RoleAssignment, ...]:
         """Load active role assignments while enforcing a bounded row count."""
