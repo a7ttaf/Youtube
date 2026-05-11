@@ -514,14 +514,6 @@ reviews:
       enabled: true
     checkmake:
       enabled: true
-        ruff:
-      enabled: true
-    opengrep:
-      enabled: true
-    sqlfluff:
-      enabled: true
-      dialect: postgres
-
 
     # Web / TypeScript / Node
     eslint:
@@ -544,6 +536,9 @@ reviews:
       enabled: true
     flake8:
       enabled: true
+    sqlfluff:
+      enabled: true
+      dialect: postgres
 
     # Go / Rust / JVM / PHP / Ruby / Swift / C/C++
     golangci-lint:
@@ -574,8 +569,6 @@ reviews:
     buf:
       enabled: true
     regal:
-      enabled: true
-    sqlfluff:
       enabled: true
     psscriptanalyzer:
       enabled: true
