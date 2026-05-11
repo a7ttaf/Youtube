@@ -235,7 +235,12 @@ class SqlAlchemyUserPermissionGrantRepository:
         row.revoked_by = actor_user_id
         row.revoked_at = now
         row.revoke_reason = normalized_reason
-        self._session.flush()
+        try:
+            self._session.flush()
+        except IntegrityError as exc:
+            if self._session.get(UserORM, actor_user_id) is None:
+                raise UserPermissionGrantNotFoundError("revoked_by not found") from exc
+            raise
         scope = self._session.get(AccessScopeORM, row.scope_id)
         if scope is None:
             raise UserPermissionGrantNotFoundError("Permission grant scope not found")
