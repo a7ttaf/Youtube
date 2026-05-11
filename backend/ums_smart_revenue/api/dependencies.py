@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
 from ums_smart_revenue.auth.principals import (
     PrincipalDisabledError,
+    PrincipalLimitExceededError,
     PrincipalNotFoundError,
     PrincipalValidationError,
     SqlAlchemyPrincipalLoader,
@@ -20,6 +21,7 @@ logger = logging.getLogger(__name__)
 
 
 def scope_from_header(scope_type: str, scope_id: str | None) -> AccessScope:
+    """Parse gateway scope headers into a policy AccessScope."""
     try:
         parsed_scope_type = ScopeType(scope_type)
     except ValueError as exc:
@@ -50,6 +52,7 @@ def current_principal_from_headers(
     x_scope_id: Annotated[str | None, Header()] = None,
     x_ums_trusted_gateway_token: Annotated[str | None, Header()] = None,
 ) -> UserPrincipal:
+    """Build a bootstrap principal from trusted identity gateway headers."""
     if not all([x_user_id, x_user_email, x_role, x_scope_type]):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -79,6 +82,7 @@ def current_principal_from_headers(
 
 
 def current_db_session() -> Session:
+    """Fail closed until the app factory wires a concrete database session."""
     raise HTTPException(
         status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
         detail="database session not configured",
@@ -90,6 +94,7 @@ def current_principal_from_database(
     x_user_id: Annotated[str | None, Header()] = None,
     x_ums_trusted_gateway_token: Annotated[str | None, Header()] = None,
 ) -> UserPrincipal:
+    """Load a request principal from SQL after trusted gateway validation."""
     if not x_user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
@@ -110,6 +115,12 @@ def current_principal_from_database(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Forbidden",
         ) from exc
+    except PrincipalLimitExceededError as exc:
+        logger.warning("Database principal lookup rejected over-limit principal")
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden",
+        ) from exc
     except PrincipalValidationError as exc:
         logger.warning("Database principal lookup rejected invalid principal input")
         raise HTTPException(
@@ -119,6 +130,7 @@ def current_principal_from_database(
 
 
 def _require_trusted_gateway_token(provided_token: str | None) -> None:
+    """Require the configured trusted-gateway token to match the request token."""
     configured_token = load_app_settings().trusted_gateway_token
     if not configured_token:
         raise HTTPException(

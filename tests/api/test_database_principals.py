@@ -1,11 +1,16 @@
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.permissions import PERMISSION_DEFINITIONS
+from ums_smart_revenue.auth.principals import (
+    PrincipalLoadError,
+    SqlAlchemyPrincipalLoader,
+)
 from ums_smart_revenue.auth.roles import ROLE_DEFINITIONS
 from ums_smart_revenue.db.security_models import (
     AccessScopeORM,
@@ -21,6 +26,8 @@ from ums_smart_revenue.db.security_models import (
 ACTOR_ID = UUID("00000000-0000-0000-0000-000000016001")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000016002")
 GLOBAL_SCOPE_ID = UUID("00000000-0000-0000-0000-000000016101")
+ROLE_ASSIGNMENT_OVERFLOW_COUNT = 257
+PERMISSION_GRANT_OVERFLOW_COUNT = 513
 
 
 def auth_headers(
@@ -29,6 +36,7 @@ def auth_headers(
     claimed_role: str = "assistant_analyst",
     include_bootstrap_claims: bool = True,
 ) -> dict[str, str]:
+    """Build trusted gateway headers for database-mode request tests."""
     headers = {
         "x-user-id": str(user_id),
         "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
@@ -45,10 +53,12 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """Return an isolated SQLite URL for a pytest temp directory."""
     return f"sqlite+pysqlite:///{(tmp_path / 'database-principals.db').as_posix()}"
 
 
 def seed_security_catalog(session: Session) -> AccessScopeORM:
+    """Seed the role, permission, and global-scope rows required by auth tests."""
     scope = AccessScopeORM(id=GLOBAL_SCOPE_ID, scope_type="global", label="Global")
     session.add(scope)
     for definition in ROLE_DEFINITIONS.values():
@@ -73,6 +83,7 @@ def seed_security_catalog(session: Session) -> AccessScopeORM:
 
 
 def seed_database(database_url: str) -> None:
+    """Create the security schema and seed the two users used by auth tests."""
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
     with Session(engine) as session:
@@ -95,6 +106,7 @@ def seed_database(database_url: str) -> None:
 
 
 def add_role_assignment(database_url: str, *, user_id: UUID, role_key: str) -> None:
+    """Insert one active role assignment for a test user."""
     engine = create_engine(database_url)
     with Session(engine) as session:
         session.add(
@@ -117,6 +129,7 @@ def add_direct_permission(
     user_id: UUID,
     permission_key: str,
 ) -> None:
+    """Insert one active direct permission grant for a test user."""
     engine = create_engine(database_url)
     with Session(engine) as session:
         session.add(
@@ -130,6 +143,62 @@ def add_direct_permission(
                 active=True,
             )
         )
+        session.commit()
+
+
+def add_many_role_assignments(database_url: str, *, count: int) -> None:
+    """Insert enough active role rows to exercise principal-load limits."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        # SQLite cannot express the Postgres-only partial global-scope index.
+        session.execute(text("DROP INDEX IF EXISTS uq_access_scopes_global_singleton"))
+        for index in range(count):
+            scope = AccessScopeORM(
+                id=uuid4(),
+                scope_type="company",
+                scope_id=f"overflow-company-{index}",
+                label=f"Overflow company {index}",
+            )
+            session.add(scope)
+            session.add(
+                UserRoleAssignmentORM(
+                    id=uuid4(),
+                    user_id=ACTOR_ID,
+                    role_key="company_manager",
+                    scope_id=scope.id,
+                    assigned_by=ACTOR_ID,
+                    reason="Seed over-limit DB-backed principal role",
+                    active=True,
+                )
+            )
+        session.commit()
+
+
+def add_many_permission_grants(database_url: str, *, count: int) -> None:
+    """Insert enough direct permission rows to exercise principal-load limits."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        # SQLite cannot express the Postgres-only partial global-scope index.
+        session.execute(text("DROP INDEX IF EXISTS uq_access_scopes_global_singleton"))
+        for index in range(count):
+            scope = AccessScopeORM(
+                id=uuid4(),
+                scope_type="company",
+                scope_id=f"overflow-grant-company-{index}",
+                label=f"Overflow grant company {index}",
+            )
+            session.add(scope)
+            session.add(
+                UserPermissionGrantORM(
+                    id=uuid4(),
+                    user_id=ACTOR_ID,
+                    permission_key="analytics.view",
+                    scope_id=scope.id,
+                    granted_by=ACTOR_ID,
+                    reason="Seed over-limit DB-backed principal permission",
+                    active=True,
+                )
+            )
         session.commit()
 
 
@@ -233,6 +302,28 @@ def test_database_principal_sanitizes_invalid_user_id(tmp_path):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Invalid request"
+
+
+def test_database_principal_rejects_too_many_active_role_assignments(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    add_many_role_assignments(database_url, count=ROLE_ASSIGNMENT_OVERFLOW_COUNT)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        with pytest.raises(PrincipalLoadError, match="role assignments"):
+            SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
+
+
+def test_database_principal_rejects_too_many_active_permission_grants(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    add_many_permission_grants(database_url, count=PERMISSION_GRANT_OVERFLOW_COUNT)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        with pytest.raises(PrincipalLoadError, match="permission grants"):
+            SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
 
 
 def test_missing_database_session_dependency_fails_closed():

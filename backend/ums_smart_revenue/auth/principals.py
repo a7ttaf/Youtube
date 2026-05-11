@@ -14,28 +14,49 @@ from ums_smart_revenue.db.security_models import (
     UserRoleAssignmentORM,
 )
 
+MAX_ACTIVE_ROLE_ASSIGNMENTS = 256
+MAX_ACTIVE_PERMISSION_GRANTS = 512
+
 
 class PrincipalLoadError(ValueError):
+    """Base error for database-backed principal loading failures."""
+
     pass
 
 
 class PrincipalNotFoundError(PrincipalLoadError):
+    """Raised when the trusted user id does not map to a stored user."""
+
     pass
 
 
 class PrincipalDisabledError(PrincipalLoadError):
+    """Raised when the stored user exists but is not allowed to authenticate."""
+
     pass
 
 
 class PrincipalValidationError(PrincipalLoadError):
+    """Raised when stored principal data cannot be parsed into policy objects."""
+
+    pass
+
+
+class PrincipalLimitExceededError(PrincipalLoadError):
+    """Raised when a principal exceeds request-time role or grant limits."""
+
     pass
 
 
 class SqlAlchemyPrincipalLoader:
+    """Load authorization principals from SQL state instead of identity headers."""
+
     def __init__(self, session: Session):
+        """Store the SQLAlchemy session used for one principal lookup."""
         self._session = session
 
     def load(self, *, user_id: str) -> UserPrincipal:
+        """Return a UserPrincipal for an active stored user id."""
         parsed_user_id = _parse_uuid(user_id)
         user = self._session.get(UserORM, parsed_user_id)
         if user is None:
@@ -53,6 +74,7 @@ class SqlAlchemyPrincipalLoader:
         )
 
     def _load_role_assignments(self, user_id: UUID) -> tuple[RoleAssignment, ...]:
+        """Load active role assignments while enforcing a bounded row count."""
         rows = self._session.execute(
             select(UserRoleAssignmentORM, AccessScopeORM)
             .join(AccessScopeORM, UserRoleAssignmentORM.scope_id == AccessScopeORM.id)
@@ -61,7 +83,13 @@ class SqlAlchemyPrincipalLoader:
                 UserRoleAssignmentORM.active.is_(True),
             )
             .order_by(UserRoleAssignmentORM.assigned_at, UserRoleAssignmentORM.id)
+            .limit(MAX_ACTIVE_ROLE_ASSIGNMENTS + 1)
         ).all()
+        if len(rows) > MAX_ACTIVE_ROLE_ASSIGNMENTS:
+            raise PrincipalLimitExceededError(
+                "Principal has more than "
+                f"{MAX_ACTIVE_ROLE_ASSIGNMENTS} active role assignments"
+            )
         assignments: list[RoleAssignment] = []
         for assignment, scope in rows:
             assignments.append(
@@ -74,6 +102,7 @@ class SqlAlchemyPrincipalLoader:
         return tuple(assignments)
 
     def _load_permission_grants(self, user_id: UUID) -> tuple[PermissionGrant, ...]:
+        """Load active direct permission grants while enforcing a bounded row count."""
         rows = self._session.execute(
             select(UserPermissionGrantORM, AccessScopeORM)
             .join(AccessScopeORM, UserPermissionGrantORM.scope_id == AccessScopeORM.id)
@@ -82,7 +111,13 @@ class SqlAlchemyPrincipalLoader:
                 UserPermissionGrantORM.active.is_(True),
             )
             .order_by(UserPermissionGrantORM.granted_at, UserPermissionGrantORM.id)
+            .limit(MAX_ACTIVE_PERMISSION_GRANTS + 1)
         ).all()
+        if len(rows) > MAX_ACTIVE_PERMISSION_GRANTS:
+            raise PrincipalLimitExceededError(
+                "Principal has more than "
+                f"{MAX_ACTIVE_PERMISSION_GRANTS} active permission grants"
+            )
         grants: list[PermissionGrant] = []
         for grant, scope in rows:
             grants.append(
@@ -96,6 +131,7 @@ class SqlAlchemyPrincipalLoader:
 
 
 def _parse_uuid(value: str) -> UUID:
+    """Parse a trusted user-id header into a UUID."""
     try:
         return UUID(value)
     except ValueError as exc:
@@ -103,21 +139,30 @@ def _parse_uuid(value: str) -> UUID:
 
 
 def _parse_role(value: str) -> RoleKey:
+    """Resolve a stored role key into the policy RoleKey enum."""
     try:
         return RoleKey(value)
     except ValueError as exc:
-        raise PrincipalValidationError(f"Unknown role assignment in database: {value}") from exc
+        raise PrincipalValidationError(
+            f"Unknown role assignment in database: {value}"
+        ) from exc
 
 
 def _parse_permission(value: str) -> Permission:
+    """Resolve a stored permission key into the policy Permission enum."""
     try:
         return Permission(value)
     except ValueError as exc:
-        raise PrincipalValidationError(f"Unknown permission grant in database: {value}") from exc
+        raise PrincipalValidationError(
+            f"Unknown permission grant in database: {value}"
+        ) from exc
 
 
 def _to_scope(scope: AccessScopeORM) -> AccessScope:
+    """Convert a stored access scope row into a policy AccessScope."""
     try:
         return AccessScope(ScopeType(scope.scope_type), scope.scope_id)
     except ValueError as exc:
-        raise PrincipalValidationError(f"Unknown access scope in database: {scope.scope_type}") from exc
+        raise PrincipalValidationError(
+            f"Unknown access scope in database: {scope.scope_type}"
+        ) from exc
