@@ -105,11 +105,8 @@ class SqlAlchemyPrincipalLoader:
     def _prepare_read_connection(self) -> None:
         """Apply principal read isolation and timeout settings to the transaction."""
         bind = self._session.get_bind()
-        isolation_level = (
-            "SERIALIZABLE" if bind.dialect.name == "sqlite" else "REPEATABLE READ"
-        )
         connection = self._session.connection(
-            execution_options={"isolation_level": isolation_level}
+            execution_options={"isolation_level": "SERIALIZABLE"}
         )
         if bind.dialect.name == "postgresql":
             connection.exec_driver_sql(

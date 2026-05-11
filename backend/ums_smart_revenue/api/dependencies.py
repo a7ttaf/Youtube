@@ -22,6 +22,7 @@ from ums_smart_revenue.auth.scopes import AccessScope, ScopeType
 from ums_smart_revenue.config.settings import load_app_settings
 
 logger = logging.getLogger(__name__)
+DATABASE_PRINCIPAL_LOAD_ATTEMPTS = 2
 
 
 def scope_from_header(scope_type: str, scope_id: str | None) -> AccessScope:
@@ -107,7 +108,7 @@ def current_principal_from_database(
         )
     _require_trusted_gateway_token(x_ums_trusted_gateway_token)
     try:
-        return SqlAlchemyPrincipalLoader(session).load(user_id=normalized_user_id)
+        return _load_database_principal_with_retries(session, normalized_user_id)
     except PrincipalDisabledError as exc:
         logger.warning("Database principal lookup rejected disabled principal")
         raise HTTPException(
@@ -146,6 +147,28 @@ def current_principal_from_database(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Principal authorization unavailable",
         ) from exc
+    except Exception as exc:
+        logger.exception("Database principal lookup failed unexpectedly")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Principal authorization unavailable",
+        ) from exc
+
+
+def _load_database_principal_with_retries(
+    session: Session,
+    normalized_user_id: str,
+) -> UserPrincipal:
+    """Retry transient storage failures once before failing closed."""
+    for attempt_index in range(DATABASE_PRINCIPAL_LOAD_ATTEMPTS):
+        try:
+            return SqlAlchemyPrincipalLoader(session).load(user_id=normalized_user_id)
+        except SQLAlchemyError:
+            if attempt_index + 1 >= DATABASE_PRINCIPAL_LOAD_ATTEMPTS:
+                raise
+            session.rollback()
+            logger.warning("Retrying database principal lookup after storage failure")
+    raise RuntimeError("database principal retry loop exhausted")
 
 
 def _require_trusted_gateway_token(provided_token: str | None) -> None:

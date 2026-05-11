@@ -15,6 +15,7 @@ from ums_smart_revenue.api.dependencies import current_principal_from_database
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.permissions import PERMISSION_DEFINITIONS
 from ums_smart_revenue.auth.principals import (
+    PRINCIPAL_QUERY_TIMEOUT_MS,
     PrincipalLoadError,
     SqlAlchemyPrincipalLoader,
 )
@@ -37,29 +38,61 @@ ROLE_ASSIGNMENT_OVERFLOW_COUNT = 257
 PERMISSION_GRANT_OVERFLOW_COUNT = 513
 
 
+class RecordingConnection:
+    """Connection double that records transaction-local SQL commands."""
+
+    def __init__(self) -> None:
+        """Initialize the recorded command list."""
+        self.executed_sql: list[str] = []
+
+    def exec_driver_sql(self, sql: str) -> None:
+        """Record raw SQL executed against the connection."""
+        self.executed_sql.append(sql)
+
+
 class FailingSession:
     """Session double that raises during the user row lookup."""
+
+    def __init__(
+        self,
+        *,
+        dialect_name: str = "sqlite",
+        lookup_error: Exception | None = None,
+    ) -> None:
+        """Initialize the failing session and its observable counters."""
+        self.connection_count = 0
+        self.dialect_name = dialect_name
+        self.get_count = 0
+        self.lookup_error = lookup_error or SQLAlchemyError("database unavailable")
+        self.recording_connection = RecordingConnection()
+        self.rollback_count = 0
 
     def in_transaction(self) -> bool:
         """Report no active transaction so the loader prepares isolation."""
         return False
 
-    def get_bind(self):
+    def get_bind(self) -> SimpleNamespace:
         """Return a minimal bind with the dialect name used by the loader."""
-        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+        return SimpleNamespace(dialect=SimpleNamespace(name=self.dialect_name))
 
-    def begin(self):
+    def begin(self) -> nullcontext:
         """Return a no-op context manager for the loader transaction scope."""
         return nullcontext()
 
-    def connection(self, *, execution_options):
+    def connection(self, *, execution_options: dict[str, str]) -> RecordingConnection:
         """Accept read isolation options before the failing lookup."""
         assert execution_options == {"isolation_level": "SERIALIZABLE"}
-        return SimpleNamespace(info={})
+        self.connection_count += 1
+        return self.recording_connection
 
-    def get(self, *_args, **_kwargs):
+    def get(self, *_args: object, **_kwargs: object) -> None:
         """Raise the same base error SQLAlchemy uses for storage failures."""
-        raise SQLAlchemyError("database unavailable")
+        self.get_count += 1
+        raise self.lookup_error
+
+    def rollback(self) -> None:
+        """Record rollback calls between retry attempts."""
+        self.rollback_count += 1
 
 
 def auth_headers(
@@ -371,9 +404,11 @@ def test_database_principal_rejects_blank_user_id_as_missing_header(tmp_path):
 
 def test_database_principal_storage_errors_return_service_unavailable():
     """SQLAlchemy storage failures map to a controlled 503 response."""
+    session = FailingSession()
+
     with pytest.raises(HTTPException) as exc_info:
         current_principal_from_database(
-            session=FailingSession(),
+            session=session,
             x_user_id=str(ACTOR_ID),
             x_ums_trusted_gateway_token=auth_headers()[
                 "x-ums-trusted-gateway-token"
@@ -382,6 +417,40 @@ def test_database_principal_storage_errors_return_service_unavailable():
 
     assert exc_info.value.status_code == 503
     assert exc_info.value.detail == "Principal authorization unavailable"
+    assert session.get_count == 2
+    assert session.rollback_count == 1
+
+
+def test_database_principal_unexpected_errors_return_service_unavailable():
+    """Unexpected loader failures are fail-closed instead of leaking as 500s."""
+    session = FailingSession(lookup_error=RuntimeError("driver bridge failed"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        current_principal_from_database(
+            session=session,
+            x_user_id=str(ACTOR_ID),
+            x_ums_trusted_gateway_token=auth_headers()[
+                "x-ums-trusted-gateway-token"
+            ],
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Principal authorization unavailable"
+    assert session.get_count == 1
+    assert session.rollback_count == 0
+
+
+def test_database_principal_uses_serializable_postgres_reads():
+    """Postgres principal reads request serializable isolation and a timeout."""
+    session = FailingSession(dialect_name="postgresql")
+
+    with pytest.raises(SQLAlchemyError):
+        SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
+
+    assert session.connection_count == 1
+    assert session.recording_connection.executed_sql == [
+        f"SET LOCAL statement_timeout = {PRINCIPAL_QUERY_TIMEOUT_MS}"
+    ]
 
 
 def test_database_principal_corrupt_stored_role_returns_service_unavailable(
