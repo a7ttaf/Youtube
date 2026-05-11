@@ -67,6 +67,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Fully reverse upgrade(): drop all tables and indexes created in this migration in reverse dependency order."""
     op.drop_index("ix_export_jobs_scope_month", table_name="export_jobs")
     op.drop_index("ix_export_jobs_requested_by_created", table_name="export_jobs")
     op.drop_table("export_jobs")

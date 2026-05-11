@@ -42,4 +42,5 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Fully reverse upgrade(): drop all tables and indexes created in this migration in reverse dependency order."""
     op.drop_table("finance_month_close")

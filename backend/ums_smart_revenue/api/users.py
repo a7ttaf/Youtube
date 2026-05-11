@@ -146,12 +146,14 @@ class UserPermissionRevokeRequest(BaseModel):
 def current_user_role_assignment_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyUserRoleAssignmentRepository:
+    """FastAPI dependency: provide a scoped role assignment repository."""
     return SqlAlchemyUserRoleAssignmentRepository(session)
 
 
 def current_user_permission_grant_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyUserPermissionGrantRepository:
+    """FastAPI dependency: provide a scoped permission grant repository."""
     return SqlAlchemyUserPermissionGrantRepository(session)
 
 
@@ -163,6 +165,7 @@ def assign_user_role(
     repository: Annotated[SqlAlchemyUserRoleAssignmentRepository, Depends(current_user_role_assignment_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Assign a role to a user within a scope; requires ASSIGN_ROLES and family-specific authority."""
     _require_role_assignment_permission(user)
     role = _parse_role_for_policy(payload.role_key)
     _require_role_assignment_policy(user, role)
@@ -203,6 +206,7 @@ def revoke_user_role(
     repository: Annotated[SqlAlchemyUserRoleAssignmentRepository, Depends(current_user_role_assignment_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Revoke an active role assignment; re-checks family policy against the existing role before revoking."""
     _require_role_assignment_permission(user)
     try:
         existing = repository.get_assignment(user_id=user_id, assignment_id=assignment_id)
@@ -246,6 +250,7 @@ def grant_user_permission(
     repository: Annotated[SqlAlchemyUserPermissionGrantRepository, Depends(current_user_permission_grant_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Grant a direct permission to a user; enforces family-specific authority rules."""
     _require_role_assignment_permission(user)
     permission = _parse_permission_for_policy(payload.permission_key)
     _require_permission_grant_policy(user, permission)
@@ -286,6 +291,7 @@ def revoke_user_permission(
     repository: Annotated[SqlAlchemyUserPermissionGrantRepository, Depends(current_user_permission_grant_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Revoke an active permission grant; re-checks family policy against the stored permission."""
     _require_role_assignment_permission(user)
     try:
         existing = repository.get_grant(user_id=user_id, grant_id=grant_id)
@@ -323,6 +329,7 @@ def revoke_user_permission(
 
 
 def _require_role_assignment_permission(user: UserPrincipal) -> None:
+    """Raise 403 if the caller lacks ASSIGN_ROLES on the global scope."""
     if not has_permission(user, Permission.ASSIGN_ROLES, AccessScope.global_scope()):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -331,6 +338,7 @@ def _require_role_assignment_permission(user: UserPrincipal) -> None:
 
 
 def _parse_role_for_policy(role_key: str) -> RoleKey:
+    """Parse role_key to RoleKey; raise 422 for unknown values."""
     try:
         return RoleKey(role_key)
     except ValueError as exc:
@@ -338,6 +346,7 @@ def _parse_role_for_policy(role_key: str) -> RoleKey:
 
 
 def _parse_permission_for_policy(permission_key: str) -> Permission:
+    """Parse permission_key to Permission; raise 422 for unknown values."""
     try:
         return Permission(permission_key)
     except ValueError as exc:
@@ -348,6 +357,7 @@ def _parse_permission_for_policy(permission_key: str) -> Permission:
 
 
 def _require_role_assignment_policy(user: UserPrincipal, role: RoleKey) -> None:
+    """Enforce family-specific assignment authority: Super Owner for super-owner roles, Finance Admin for finance roles."""
     if role == RoleKey.SUPER_OWNER and not _has_role(user, RoleKey.SUPER_OWNER):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super Owner assignments require Super Owner")
     if role in FINANCE_ROLE_KEYS and not _has_any_role(user, {RoleKey.FINANCE_ADMIN, RoleKey.SUPER_OWNER}):
@@ -358,6 +368,7 @@ def _require_role_assignment_policy(user: UserPrincipal, role: RoleKey) -> None:
 
 
 def _require_permission_grant_policy(user: UserPrincipal, permission: Permission) -> None:
+    """Enforce family-specific grant authority: Super Owner only, Finance Admin, or Connector Admin depending on permission family."""
     if permission in SUPER_OWNER_ONLY_PERMISSION_KEYS and not _has_role(user, RoleKey.SUPER_OWNER):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

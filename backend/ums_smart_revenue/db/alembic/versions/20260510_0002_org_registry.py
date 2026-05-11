@@ -102,6 +102,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Fully reverse upgrade(): drop all tables and indexes created in this migration in reverse dependency order."""
     op.drop_table("channel_group_members")
     op.drop_table("channel_groups")
     op.drop_index("ix_youtube_channels_primary_org_unit_id", table_name="youtube_channels")

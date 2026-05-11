@@ -77,6 +77,7 @@ class UserPermissionGrantEntry:
     active: bool
 
     def to_api(self) -> dict[str, object]:
+        """Serialize the grant entry to a JSON-safe dict for API responses."""
         return {
             "id": self.id,
             "user_id": self.user_id,
@@ -122,11 +123,18 @@ class SqlAlchemyUserPermissionGrantRepository:
         granted_by: str,
         reason: str,
     ) -> UserPermissionGrantEntry:
+        """Grant a direct permission to a user within a scope.
+
+        Raises UserPermissionGrantConflictError if an active grant already exists,
+        UserPermissionGrantNotFoundError if the target or actor user does not exist,
+        and UserPermissionGrantValidationError for invalid inputs.
+        """
         target_user_id = _parse_uuid(user_id, field_name="user_id")
         actor_user_id = _parse_uuid(granted_by, field_name="granted_by")
         permission = _parse_permission(permission_key)
         normalized_reason = _normalize_reason(reason)
-        self._require_user(target_user_id)
+        self._require_user(target_user_id, field_name="user_id")
+        self._require_user(actor_user_id, field_name="granted_by")
         _require_compatible_scope_type(permission, scope_type)
         scope = self._get_or_create_scope(scope_type=scope_type, scope_id=scope_id)
 
@@ -150,9 +158,9 @@ class SqlAlchemyUserPermissionGrantRepository:
             reason=normalized_reason,
             active=True,
         )
-        self._session.add(row)
         try:
             with self._session.begin_nested():
+                self._session.add(row)
                 self._session.flush()
         except IntegrityError as exc:
             duplicate = self._session.scalars(
@@ -169,6 +177,11 @@ class SqlAlchemyUserPermissionGrantRepository:
         return self._to_entry(row, scope)
 
     def get_grant(self, *, user_id: str, grant_id: str) -> UserPermissionGrantEntry:
+        """Return the permission grant identified by grant_id scoped to user_id.
+
+        Raises UserPermissionGrantNotFoundError if the grant does not exist or
+        belongs to a different user.
+        """
         target_user_id = _parse_uuid(user_id, field_name="user_id")
         grant_uuid = _parse_uuid(grant_id, field_name="grant_id")
         row = self._session.get(UserPermissionGrantORM, grant_uuid)
@@ -187,10 +200,17 @@ class SqlAlchemyUserPermissionGrantRepository:
         revoked_by: str,
         reason: str,
     ) -> UserPermissionGrantEntry:
+        """Revoke an active permission grant.
+
+        Acquires a row-level lock before mutating to prevent double-revoke races.
+        Raises UserPermissionGrantConflictError if already revoked,
+        UserPermissionGrantNotFoundError if the grant or actor does not exist.
+        """
         target_user_id = _parse_uuid(user_id, field_name="user_id")
         grant_uuid = _parse_uuid(grant_id, field_name="grant_id")
         actor_user_id = _parse_uuid(revoked_by, field_name="revoked_by")
         normalized_reason = _normalize_reason(reason)
+        self._require_user(actor_user_id, field_name="revoked_by")
         row = self._session.scalars(
             select(UserPermissionGrantORM)
             .where(UserPermissionGrantORM.id == grant_uuid)
@@ -212,13 +232,15 @@ class SqlAlchemyUserPermissionGrantRepository:
             raise UserPermissionGrantNotFoundError("Permission grant scope not found")
         return self._to_entry(row, scope)
 
-    def _require_user(self, user_id: UUID) -> UserORM:
+    def _require_user(self, user_id: UUID, *, field_name: str = "user_id") -> UserORM:
+        """Look up a user by UUID; raise UserPermissionGrantNotFoundError if absent."""
         row = self._session.get(UserORM, user_id)
         if row is None:
-            raise UserPermissionGrantNotFoundError("User not found")
+            raise UserPermissionGrantNotFoundError(f"{field_name} not found")
         return row
 
     def _get_or_create_scope(self, *, scope_type: str, scope_id: str | None) -> AccessScopeORM:
+        """Return an existing AccessScope row or create one, handling concurrent inserts via savepoint."""
         normalized_scope_type, normalized_scope_id = _normalize_scope(scope_type, scope_id)
         scope_filter = (
             AccessScopeORM.scope_type == normalized_scope_type,
@@ -246,6 +268,7 @@ class SqlAlchemyUserPermissionGrantRepository:
 
     @staticmethod
     def _to_entry(row: UserPermissionGrantORM, scope: AccessScopeORM) -> UserPermissionGrantEntry:
+        """Map ORM row + scope row to an immutable domain entry."""
         return UserPermissionGrantEntry(
             id=str(row.id),
             user_id=str(row.user_id),
@@ -262,6 +285,7 @@ class SqlAlchemyUserPermissionGrantRepository:
 
 
 def _parse_uuid(value: str, *, field_name: str) -> UUID:
+    """Parse a UUID string; raise UserPermissionGrantValidationError on invalid format."""
     try:
         return UUID(value)
     except ValueError as exc:
@@ -269,6 +293,7 @@ def _parse_uuid(value: str, *, field_name: str) -> UUID:
 
 
 def _parse_permission(value: str) -> Permission:
+    """Resolve a permission key string to a Permission enum member."""
     try:
         return Permission(_normalize_required_string(value, "permission_key"))
     except ValueError as exc:
@@ -276,6 +301,7 @@ def _parse_permission(value: str) -> Permission:
 
 
 def _require_compatible_scope_type(permission: Permission, scope_type: str) -> None:
+    """Raise UserPermissionGrantValidationError if scope_type is not allowed for permission."""
     normalized = scope_type.strip().lower()
     allowed_scope_types = PERMISSION_SCOPE_TYPES[permission]
     if normalized not in allowed_scope_types:
@@ -286,6 +312,7 @@ def _require_compatible_scope_type(permission: Permission, scope_type: str) -> N
 
 
 def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | None]:
+    """Validate and normalize scope_type/scope_id; enforce global-scope rules."""
     try:
         parsed_scope_type = ScopeType(_normalize_required_string(scope_type, "scope_type"))
     except ValueError as exc:

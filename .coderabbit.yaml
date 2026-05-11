@@ -422,6 +422,9 @@ reviews:
           Fail if database migration files add destructive operations such as DROP,
           irreversible ALTER, data deletion, or non-null columns without defaults/backfill
           and there is no rollback, staged migration plan, or explicit irreversible rationale.
+          Do NOT fail for standard Alembic migrations where upgrade() only creates tables and
+          indexes and downgrade() symmetrically drops those same objects in reverse dependency
+          order — that is the correct, fully reversible Alembic pattern.
 
       - mode: warning
         name: "No obvious perf regression"
