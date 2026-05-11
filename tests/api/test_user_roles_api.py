@@ -174,6 +174,28 @@ def test_corporate_admin_cannot_assign_super_owner(tmp_path):
     assert response.json()["detail"] == "Super Owner assignments require Super Owner"
 
 
+def test_incompatible_scope_type_rejected_before_persisting(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    # tv_sector_manager allows only global/sector scopes; company must be rejected at the
+    # repository layer (no special policy gate for this role, so scope check is reachable)
+    response = client.post(
+        f"/users/{TARGET_ID}/roles",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "role_key": "tv_sector_manager",
+            "scope_type": "company",
+            "scope_id": COMPANY_ID,
+            "reason": "Attempt sector role on company scope",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "cannot be assigned to scope type" in response.json()["detail"]
+
+
 def test_corporate_admin_revokes_role_assignment_with_audit(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

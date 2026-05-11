@@ -1,0 +1,11 @@
+version: "2"
+language: en-US
+reviews:
+  tools:
+    ruff:
+      enabled: true
+    opengrep:
+      enabled: true
+    sqlfluff:
+      enabled: true
+      dialect: postgres
