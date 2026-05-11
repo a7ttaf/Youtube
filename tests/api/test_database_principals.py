@@ -27,14 +27,21 @@ def auth_headers(
     user_id: UUID = ACTOR_ID,
     *,
     claimed_role: str = "assistant_analyst",
+    include_bootstrap_claims: bool = True,
 ) -> dict[str, str]:
-    return {
+    headers = {
         "x-user-id": str(user_id),
-        "x-user-email": "ignored-header@example.com",
-        "x-role": claimed_role,
-        "x-scope-type": "global",
         "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
     }
+    if include_bootstrap_claims:
+        headers.update(
+            {
+                "x-user-email": "ignored-header@example.com",
+                "x-role": claimed_role,
+                "x-scope-type": "global",
+            }
+        )
+    return headers
 
 
 def build_database_url(tmp_path) -> str:
@@ -134,7 +141,7 @@ def test_database_principal_uses_stored_role_instead_of_claimed_header_role(tmp_
 
     response = client.post(
         f"/users/{TARGET_ID}/roles",
-        headers=auth_headers(claimed_role="assistant_analyst"),
+        headers=auth_headers(include_bootstrap_claims=False),
         json={
             "role_key": "assistant_analyst",
             "scope_type": "global",
@@ -226,3 +233,15 @@ def test_database_principal_sanitizes_invalid_user_id(tmp_path):
 
     assert response.status_code == 400
     assert response.json()["detail"] == "Invalid request"
+
+
+def test_missing_database_session_dependency_fails_closed():
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/audit/events?limit=10",
+        headers=auth_headers(claimed_role="super_owner"),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "database session not configured"

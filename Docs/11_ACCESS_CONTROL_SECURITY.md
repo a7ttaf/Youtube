@@ -55,7 +55,7 @@ DATA_STEWARD
 - `database`: production mode. The trusted gateway supplies the authenticated user identity, and the API loads active role assignments, direct permission grants, and scopes from SQL. Header-provided role and scope claims are ignored.
 - `headers`: bootstrap/development mode. This is the default when `UMS_AUTHZ_SOURCE` is unset. The API trusts header-provided roles and scopes for local setup, deterministic tests, and early bootstrap work only.
 
-Enable `UMS_AUTHZ_SOURCE=database` after users, roles, permissions, and scopes are configured in SQL and the trusted gateway is sending stable user IDs. Switching from bootstrap/header mode to database mode is a breaking authorization behavior change: previously accepted header role/scope claims no longer grant access, and disabled or unregistered SQL users fail closed before route handlers run.
+Enable `UMS_AUTHZ_SOURCE=database` after users, roles, permissions, and scopes are configured in SQL, the trusted gateway is sending stable user IDs, and `UMS_TRUSTED_GATEWAY_TOKEN` is provisioned for the API and gateway. Missing trusted-gateway token configuration is a hard pre-deployment failure: protected routes return 503 until the token is configured. Switching from bootstrap/header mode to database mode is a breaking authorization behavior change: previously accepted header role/scope claims no longer grant access, and disabled or unregistered SQL users fail closed before route handlers run.
 
 ## Neo4j roles
 

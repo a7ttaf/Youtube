@@ -79,7 +79,10 @@ def current_principal_from_headers(
 
 
 def current_db_session() -> Session:
-    raise RuntimeError("Database session dependency has not been configured")
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="database session not configured",
+    )
 
 
 def current_principal_from_database(
