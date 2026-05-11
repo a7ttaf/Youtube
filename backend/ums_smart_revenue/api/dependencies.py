@@ -14,6 +14,7 @@ from ums_smart_revenue.auth.principals import (
     PrincipalDisabledError,
     PrincipalLimitExceededError,
     PrincipalNotFoundError,
+    PrincipalTransactionError,
     PrincipalValidationError,
     SqlAlchemyPrincipalLoader,
 )
@@ -129,6 +130,12 @@ def current_principal_from_database(
         ) from exc
     except PrincipalDataValidationError as exc:
         logger.error("Database principal lookup rejected corrupt stored data: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Principal authorization unavailable",
+        ) from exc
+    except PrincipalTransactionError as exc:
+        logger.error("Database principal lookup rejected unsafe transaction: %s", exc)
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Principal authorization unavailable",

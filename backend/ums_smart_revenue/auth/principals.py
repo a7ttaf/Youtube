@@ -60,6 +60,12 @@ class PrincipalDataValidationError(PrincipalLoadError):
     pass
 
 
+class PrincipalTransactionError(PrincipalLoadError):
+    """Raised when a caller transaction prevents read isolation setup."""
+
+    pass
+
+
 class PrincipalLimitExceededError(PrincipalLoadError):
     """Raised when a principal exceeds request-time role or grant limits."""
 
@@ -74,10 +80,12 @@ class SqlAlchemyPrincipalLoader:
         self._session = session
 
     def load(self, *, user_id: str) -> UserPrincipal:
-        """Return a UserPrincipal for an active stored user id."""
+        """Return a UserPrincipal using a loader-owned isolated transaction."""
         parsed_user_id = _parse_uuid(user_id)
         if self._session.in_transaction():
-            return self._load_principal(parsed_user_id)
+            raise PrincipalTransactionError(
+                "Principal loads require a session without an active transaction"
+            )
         with self._session.begin():
             self._prepare_read_connection()
             return self._load_principal(parsed_user_id)

@@ -57,7 +57,7 @@ DATA_STEWARD
 
 Enable `UMS_AUTHZ_SOURCE=database` after users, roles, permissions, and scopes are configured in SQL, the trusted gateway is sending stable user IDs, and `UMS_TRUSTED_GATEWAY_TOKEN` is provisioned for the API and gateway. Missing trusted-gateway token configuration is a hard pre-deployment failure: protected routes return 503 until the token is configured. Switching from bootstrap/header mode to database mode is a breaking authorization behavior change: previously accepted header role/scope claims no longer grant access, and disabled or unregistered SQL users fail closed before route handlers run.
 
-Database-mode principal reads run inside a `SERIALIZABLE` transaction and PostgreSQL deployments set a transaction-local statement timeout before reading user, role, permission, and scope rows. Transient SQLAlchemy storage failures are rolled back and retried once; persistent storage failures, corrupt stored authorization data, and unexpected loader errors fail closed with 503 responses.
+Database-mode principal reads run inside a loader-owned `SERIALIZABLE` transaction and PostgreSQL deployments set a transaction-local statement timeout before reading user, role, permission, and scope rows. Calls made with a pre-existing active session transaction fail closed so weaker caller isolation cannot bypass the principal-read contract. Transient SQLAlchemy storage failures are rolled back and retried once; persistent storage failures, corrupt stored authorization data, and unexpected loader errors fail closed with 503 responses.
 
 ## Neo4j roles
 

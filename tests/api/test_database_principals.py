@@ -56,10 +56,12 @@ class FailingSession:
     def __init__(
         self,
         *,
+        active_transaction: bool = False,
         dialect_name: str = "sqlite",
         lookup_error: Exception | None = None,
     ) -> None:
         """Initialize the failing session and its observable counters."""
+        self.active_transaction = active_transaction
         self.connection_count = 0
         self.dialect_name = dialect_name
         self.get_count = 0
@@ -69,7 +71,7 @@ class FailingSession:
 
     def in_transaction(self) -> bool:
         """Report no active transaction so the loader prepares isolation."""
-        return False
+        return self.active_transaction
 
     def get_bind(self) -> SimpleNamespace:
         """Return a minimal bind with the dialect name used by the loader."""
@@ -451,6 +453,25 @@ def test_database_principal_uses_serializable_postgres_reads():
     assert session.recording_connection.executed_sql == [
         f"SET LOCAL statement_timeout = {PRINCIPAL_QUERY_TIMEOUT_MS}"
     ]
+
+
+def test_database_principal_active_transaction_returns_service_unavailable():
+    """Pre-existing transactions are rejected before principal rows are read."""
+    session = FailingSession(active_transaction=True)
+
+    with pytest.raises(HTTPException) as exc_info:
+        current_principal_from_database(
+            session=session,
+            x_user_id=str(ACTOR_ID),
+            x_ums_trusted_gateway_token=auth_headers()[
+                "x-ums-trusted-gateway-token"
+            ],
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Principal authorization unavailable"
+    assert session.connection_count == 0
+    assert session.get_count == 0
 
 
 def test_database_principal_corrupt_stored_role_returns_service_unavailable(
