@@ -1,0 +1,634 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+
+language: en-US
+early_access: false
+tone_instructions: "Direct, precise, production-focused. Prioritize correctness, weird edge cases, security, maintainability, and tests. No jokes."
+
+chat:
+  art: false
+  allow_non_org_members: false
+  auto_reply: true
+  integrations:
+    jira:
+      usage: auto
+    linear:
+      usage: auto
+
+knowledge_base:
+  opt_out: false
+  web_search:
+    enabled: true
+
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "**/AGENTS.md"
+      - "**/CODING_STANDARDS.md"
+      - "**/SECURITY.md"
+      - "**/ARCHITECTURE.md"
+      - "**/TESTING.md"
+      - "**/docs/engineering/**/*.md"
+      - "**/.teamrules"
+
+  learnings:
+    scope: auto
+
+  issues:
+    scope: auto
+
+  jira:
+    usage: auto
+    project_keys: []
+
+  linear:
+    usage: auto
+    team_keys: []
+
+  pull_requests:
+    scope: auto
+
+  mcp:
+    usage: auto
+    disabled_servers: []
+
+  linked_repositories: []
+  # For Pro+ multi-repo analysis, add related repos here:
+  # linked_repositories:
+  #   - repository: "myorg/backend-api"
+  #     instructions: "Authoritative REST/GraphQL API and database schema."
+  #   - repository: "myorg/web-client"
+  #     instructions: "Main web client consuming this service."
+
+reviews:
+  profile: assertive
+  request_changes_workflow: true
+
+  high_level_summary: true
+  high_level_summary_placeholder: "@coderabbitai summary"
+  high_level_summary_in_walkthrough: true
+  high_level_summary_instructions: |
+    Write a production-review summary:
+    - What changed and why.
+    - User-visible behavior changes.
+    - Security, privacy, data, or compatibility impact.
+    - Test coverage added or missing.
+    - Migration, rollback, or operational risks.
+    Keep it concise and actionable.
+
+  auto_title_placeholder: "@coderabbitai"
+  auto_title_instructions: |
+    Generate a concise Conventional Commit style title:
+    type(scope): outcome
+    Prefer feat, fix, refactor, perf, test, docs, chore, ci, or security.
+
+  review_status: true
+  review_details: true
+  commit_status: true
+  fail_commit_status: true
+  collapse_walkthrough: true
+  changed_files_summary: true
+  sequence_diagrams: true
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  suggested_labels: true
+  auto_apply_labels: false
+  suggested_reviewers: true
+  auto_assign_reviewers: false
+  in_progress_fortune: false
+  poem: false
+  enable_prompt_for_ai_agents: true
+  abort_on_close: true
+  disable_cache: false
+
+  labeling_instructions:
+    - label: security
+      instructions: "Suggest when the PR touches authentication, authorization, secrets, crypto, PII, payment data, dependency trust, network boundaries, or security-sensitive configuration."
+    - label: data-migration
+      instructions: "Suggest when the PR changes database schemas, migration files, seed data, data retention, or data backfills."
+    - label: api-change
+      instructions: "Suggest when public REST, GraphQL, RPC, SDK, CLI, event, queue, or environment-variable contracts change."
+    - label: needs-tests
+      instructions: "Suggest when changed behavior lacks clear automated test coverage or no-test rationale."
+    - label: performance
+      instructions: "Suggest when the PR changes hot paths, queries, caching, rendering loops, concurrency, or large payload handling."
+    - label: infra
+      instructions: "Suggest when the PR changes CI/CD, Docker, Kubernetes, Terraform, cloud permissions, or deployment configuration."
+
+  auto_review:
+    enabled: true
+
+    # Review every new push to an existing PR.
+    auto_incremental_review: true
+
+    # 0 = never auto-pause. This keeps feedback active on long-running draft/WIP PRs.
+    auto_pause_after_reviewed_commits: 0
+
+    # Critical: include draft PRs in automatic reviews.
+    drafts: true
+
+    # Review PRs targeting any branch, not only the default branch.
+    base_branches:
+      - ".*"
+
+    # Do not exclude WIP/draft PRs. Only skip explicit opt-out PRs.
+    labels:
+      - "!do-not-review"
+
+    ignore_title_keywords:
+      - "DO NOT REVIEW"
+      - "[skip review]"
+      - "[skip coderabbit]"
+
+    ignore_usernames: []
+
+  slop_detection:
+    enabled: true
+    label: low-quality
+
+  path_filters:
+    # Core source/application files.
+    # Important: because this config uses explicit include patterns below, CodeRabbit treats
+    # the positive patterns as an allowlist. These patterns keep normal source files included.
+    - "**/*.{ts,tsx,js,jsx,mts,cts,mjs,cjs,py,pyi,go,rs,java,kt,kts,cs,php,rb,swift,c,cc,cpp,cxx,h,hpp,hxx,sql,prisma,graphql,gql,proto,css,scss,sass,html,md,mdx,json,yaml,yml,toml,xml}"
+
+    # Core project directories, including extensionless scripts/configs in application areas.
+    - "src/**"
+    - "app/**"
+    - "apps/**"
+    - "packages/**"
+    - "phantom/**"
+    - "components/**"
+    - "hooks/**"
+    - "lib/**"
+    - "services/**"
+    - "server/**"
+    - "client/**"
+    - "api/**"
+    - "routes/**"
+    - "pages/**"
+    - "tests/**"
+    - "test/**"
+    - "__tests__/**"
+
+    # Infrastructure and project-control files that may not have ordinary source extensions.
+    - "**/Dockerfile"
+    - "**/Dockerfile.*"
+    - "**/Makefile"
+    - "**/makefile"
+    - "**/Justfile"
+    - "**/Procfile"
+    - "**/.github/workflows/**"
+    - "**/.gitlab-ci.yml"
+    - "**/azure-pipelines.yml"
+    - "**/bitbucket-pipelines.yml"
+    - "**/*.tf"
+    - "k8s/**"
+    - "helm/**"
+    - "charts/**"
+
+    # Explicit includes that override CodeRabbit's default ignored paths.
+    # Keep these only for generated/build artifacts that are committed and meaningful to review.
+    - "**/dist/**"
+    - "**/build/**"
+    - "**/.next/**"
+    - "**/.nuxt/**"
+    - "**/.svelte-kit/**"
+    - "**/.webpack/**"
+    - "**/generated/**"
+    - "**/@generated/**"
+    - "**/__generated__/**"
+    - "**/__generated/**"
+    - "**/_generated/**"
+    - "**/gen/**"
+    - "**/@gen/**"
+    - "**/__gen__/**"
+    - "**/__gen/**"
+    - "**/_gen/**"
+
+    # Explicitly include shell scripts, including script tests and extensionless scripts.
+    - "**/*.{sh,bash,ksh,dash,bats}"
+    - "**/bin/**/*.{sh,bash,ksh,dash,bats}"
+    - "**/{scripts,script,ci,ops,tools}/**/*"
+
+    # Keep noisy dependencies, caches, coverage, and compiler internals excluded.
+    - "!**/node_modules/**"
+    - "!**/vendor/**"
+    - "!**/.yarn/**"
+    - "!**/.docusaurus/**"
+    - "!**/.temp/**"
+    - "!**/.cache/**"
+    - "!**/coverage/**"
+    - "!**/.pytest_cache/**"
+    - "!**/__pycache__/**"
+    - "!**/.mypy_cache/**"
+    - "!**/.turbo/**"
+    - "!**/.gradle/**"
+    - "!**/target/**"
+    - "!**/bin/Debug/**"
+    - "!**/bin/Release/**"
+    - "!**/obj/**"
+
+    # Explicitly include dependency manifests and lockfiles so supply-chain drift is reviewed.
+    - "**/package.json"
+    - "**/package-lock.json"
+    - "**/pnpm-lock.yaml"
+    - "**/yarn.lock"
+    - "**/bun.lockb"
+    - "**/*.lock"
+    - "**/requirements*.txt"
+    - "**/pyproject.toml"
+    - "**/poetry.lock"
+    - "**/Pipfile.lock"
+    - "**/go.mod"
+    - "**/go.sum"
+    - "**/Cargo.toml"
+    - "**/Cargo.lock"
+    - "**/pom.xml"
+    - "**/build.gradle"
+    - "**/composer.json"
+    - "**/composer.lock"
+
+  path_instructions:
+    - path: "**/*.{ts,tsx,js,jsx,py,go,rs,java,kt,cs,php,rb,swift,c,cpp,h,hpp,sh,bash,ksh,dash}"
+      instructions: |
+        Review as production code. Prioritize:
+        - Correctness: changed behavior must match the PR description and linked issue.
+        - Edge cases: empty input, huge input, null/undefined, invalid enum values, race conditions, retry storms, timeout behavior, DST/time zones, locale, pagination boundaries, floating-point/rounding, and partial failures.
+        - Security: authentication, authorization, tenant isolation, IDOR, injection, XSS, SSRF, deserialization, path traversal, CORS/CSRF, secrets, sensitive logs, crypto misuse, and dependency trust.
+        - Reliability: idempotency, rollback safety, backpressure, retries with jitter, cancellation, cleanup, resource leaks, and observability.
+        - Maintainability: simple control flow, small functions, clear names, explicit contracts, typed boundaries, no dead code, no speculative abstraction.
+        - Performance: N+1 queries, unbounded loops, repeated network calls, unnecessary allocations, cache invalidation, large payloads, and rendering hot paths.
+        Flag only issues that are actionable and materially improve the PR.
+
+    - path: "**/*.{test,spec}.{ts,tsx,js,jsx,py,go,rs,java,kt,cs,php,rb,sh,bash,ksh,dash}"
+      instructions: |
+        Review tests for behavior, not implementation details:
+        - Cover success, failure, edge, regression, and authorization paths.
+        - Avoid brittle snapshots and excessive mocking.
+        - Verify negative cases and user-visible outcomes.
+        - Ensure async tests await correctly and cannot pass accidentally.
+        - Check that generated tests match existing project style.
+
+    - path: "**/{api,routes,controllers,handlers,pages,app}/**/*"
+      instructions: |
+        API and request-handling review:
+        - Validate input at trust boundaries.
+        - Enforce authentication and authorization before data access.
+        - Avoid leaking internal errors or sensitive data.
+        - Check rate limits, pagination, idempotency, and backward compatibility.
+        - Verify status codes, response shapes, and error contracts.
+
+    - path: "**/{db,database,migrations,prisma,schema}/**/*"
+      instructions: |
+        Data and migration review:
+        - Migrations must be backward-compatible where possible.
+        - Destructive changes require rollback or explicit irreversible rationale.
+        - Avoid long locks, full table scans, unsafe defaults, and non-null columns without safe backfill.
+        - Verify indexes match query patterns and avoid duplicate/unused indexes.
+        - Check data privacy, retention, and PII handling.
+
+    - path: "**/{Dockerfile,docker-compose*.yml,.github/workflows/**,.gitlab-ci.yml,azure-pipelines.yml,bitbucket-pipelines.yml,*.tf,k8s/**,helm/**,charts/**}"
+      instructions: |
+        Infrastructure and CI/CD review:
+        - Principle of least privilege for tokens, IAM, cloud roles, and service accounts.
+        - No secrets in YAML, Dockerfiles, scripts, logs, or build args.
+        - Pin critical action/container/tool versions where practical.
+        - Check cache poisoning, artifact exposure, unsafe pull_request_target usage, and deployment blast radius.
+        - Verify environment separation and rollback safety.
+
+    - path: "**/*.{sh,bash,ksh,dash}"
+      instructions: |
+        Shell script review:
+        - Treat shell scripts as production code when they affect setup, CI/CD, deployments, data, secrets, developer machines, or customer environments.
+        - Prefer POSIX-compatible `sh` unless the shebang explicitly requires Bash/Ksh/Dash features.
+        - Verify the shebang, executable intent, shell options, and portability assumptions.
+        - Check quoting, word splitting, globbing, arrays, command substitution, pipelines, traps, cleanup, temporary files, and environment-variable handling.
+        - Flag unsafe `eval`, command injection, untrusted input in shell commands, insecure `curl | sh`, unsafe `rm -rf`, broad `chmod/chown`, and secret leakage through logs or `set -x`.
+        - Require safe error handling for critical scripts: clear failure messages, `set -euo pipefail` where appropriate, trap-based cleanup, and idempotent behavior.
+        - Check CI/deployment scripts for permissions, branch/environment guards, rollback safety, retries, timeouts, and dry-run behavior where useful.
+
+    - path: "**/{scripts,script,ci,ops,tools,bin}/**/*"
+      instructions: |
+        Script-directory review:
+        - If the changed file is a shell or executable script, apply the shell script review rules even when the file has no extension.
+        - Verify dangerous operations are scoped, reversible where practical, and guarded by explicit confirmations or environment checks.
+        - Ensure scripts work from documented working directories and fail clearly when required tools or variables are missing.
+
+    - path: "**/*.bats"
+      instructions: |
+        Shell test review:
+        - Review Bats tests for realistic command behavior, failure paths, exit codes, stdout/stderr assertions, temporary-directory isolation, and cleanup.
+        - Avoid tests that depend on local machine state, network availability, absolute paths, or execution order unless explicitly isolated.
+
+    - path: "**/{package.json,package-lock.json,pnpm-lock.yaml,yarn.lock,bun.lockb,requirements*.txt,pyproject.toml,poetry.lock,Pipfile.lock,go.mod,go.sum,Cargo.toml,Cargo.lock,pom.xml,build.gradle,composer.json,composer.lock}"
+      instructions: |
+        Dependency and supply-chain review:
+        - Flag new dependencies without a clear need.
+        - Check typosquatting, abandoned packages, suspicious install scripts, and overly broad version ranges.
+        - Verify manifest and lockfile changes are consistent.
+        - Prefer minimal, well-maintained, actively patched dependencies.
+        - Call out license or security concerns when visible.
+
+    - path: "**/{dist,build,.next,.nuxt,.svelte-kit,.webpack,generated,@generated,__generated__,__generated,_generated,gen,@gen,__gen__,__gen,_gen}/**/*"
+      instructions: |
+        Generated/build artifact review:
+        - Review only committed artifacts that affect runtime behavior, packaging, deployment, public assets, or generated API contracts.
+        - Do not nitpick minified formatting or generated style.
+        - Check source-output drift, missing regenerated files, stale bundles, broken source maps, exposed secrets, oversized payloads, and public-contract mismatches.
+        - For generated schemas, SDKs, clients, migrations, or API types, verify compatibility with the source definition.
+
+    - path: "**/*.{md,mdx,rst}"
+      instructions: |
+        Documentation review:
+        - Ensure claims match the code change.
+        - Flag outdated setup, API, config, or migration instructions.
+        - Prefer concise examples that compile or are clearly marked as pseudocode.
+        - Ensure user-visible docs mention breaking changes and operational steps.
+
+  pre_merge_checks:
+    override_requested_reviewers_only: false
+
+    title:
+      mode: error
+      requirements: |
+        Title must be concise, specific, and use Conventional Commit style:
+        type(scope): outcome
+        Example: fix(auth): prevent refresh token reuse
+
+    description:
+      mode: error
+
+    issue_assessment:
+      mode: warning
+
+    docstrings:
+      mode: warning
+      threshold: 70
+
+    custom_checks:
+      - mode: error
+        name: "No secrets or sensitive logs"
+        instructions: |
+          Fail if changed files add hardcoded credentials, tokens, private keys,
+          API keys, or log statements that may expose passwords, access tokens,
+          refresh tokens, session IDs, SSNs, payment data, or personal data.
+          Exclude clearly fake values in test fixtures, .example files, and docs.
+
+      - mode: warning
+        name: "Shell scripts are safe and portable"
+        instructions: |
+          Warn if changed shell scripts or executable scripts introduce unsafe quoting,
+          word splitting, untrusted command construction, dangerous destructive commands,
+          missing critical error handling, non-idempotent deployment behavior, unguarded
+          production operations, secret leakage through logs or tracing, or unclear shell
+          portability assumptions.
+
+      - mode: error
+        name: "Authorization preserved"
+        instructions: |
+          Fail if a changed endpoint, resolver, controller, handler, job, or data-access
+          path reads or mutates user, tenant, organization, payment, or admin data without
+          an explicit authorization check or a clearly reused authorization wrapper.
+          Pass if the PR only changes unrelated code.
+
+      - mode: error
+        name: "Safe public contracts"
+        instructions: |
+          Fail if public APIs, SDK types, CLI flags, webhooks, events, database schemas,
+          environment variables, or configuration keys are changed incompatibly without
+          documenting the breaking change in the PR description and relevant docs or changelog.
+
+      - mode: warning
+        name: "Behavior changes tested"
+        instructions: |
+          Fail only as warning if production behavior changes but the PR adds no relevant
+          automated tests and the PR description does not explain why tests are unnecessary.
+          Treat refactors with no behavior change as passing when the description says so
+          and changed tests are not necessary.
+
+      - mode: warning
+        name: "Weird production edge cases considered"
+        instructions: |
+          Warn if the PR changes production behavior but appears to ignore important edge
+          cases such as empty input, huge input, null/undefined, invalid enums, timezone/DST,
+          pagination boundaries, duplicate requests, partial failures, retries, race conditions,
+          cancellation, timeout behavior, or multi-tenant authorization boundaries.
+
+      - mode: error
+        name: "Migration rollback safety"
+        instructions: |
+          Fail if database migration files add destructive operations such as DROP,
+          irreversible ALTER, data deletion, or non-null columns without defaults/backfill
+          and there is no rollback, staged migration plan, or explicit irreversible rationale.
+
+      - mode: warning
+        name: "No obvious perf regression"
+        instructions: |
+          Warn if changed hot-path code introduces N+1 queries, unbounded loops over
+          user-controlled data, repeated network calls inside loops, large synchronous
+          work on request/render paths, or cache invalidation bugs.
+
+  finishing_touches:
+    docstrings:
+      enabled: true
+
+    unit_tests:
+      enabled: true
+
+    simplify:
+      enabled: true
+
+    custom:
+      - name: "tighten changed code"
+        instructions: |
+          Improve only the changed files. Remove unnecessary complexity, dead branches,
+          duplicate logic, stale imports, and speculative abstractions. Preserve behavior.
+          Do not make broad rewrites.
+
+      - name: "add edge tests"
+        instructions: |
+          Add focused tests for changed behavior, especially edge cases, failure paths,
+          authorization checks, and regression cases. Follow existing test framework,
+          naming, fixtures, and mocking patterns.
+
+      - name: "harden error handling and scripts"
+        instructions: |
+          Review changed async, network, database, and file-system code. Add missing
+          error handling, cleanup, timeouts, cancellation, and safe logging using existing
+          project patterns. Preserve public error contracts.
+          Improve changed shell scripts only. Add safe quoting, explicit shell options,
+          trap-based cleanup, clear failure messages, scoped destructive operations,
+          idempotent behavior, and secret-safe logging. Preserve documented behavior
+          and project shell compatibility.
+
+      - name: "tighten types"
+        instructions: |
+          Replace unsafe any/dynamic/unknown usage in changed files with precise types
+          where possible. Add explicit return types to exported/public functions when
+          consistent with project style. Do not over-constrain internal helpers.
+
+      - name: "document public changes"
+        instructions: |
+          Update README, docs, changelog, migration notes, or API examples for changed
+          public behavior, configuration, environment variables, CLI flags, schemas, or APIs.
+
+  tools:
+    github-checks:
+      enabled: true
+      timeout_ms: 900000
+
+    # Universal quality / security
+    actionlint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    yamllint:
+      enabled: true
+    markdownlint:
+      enabled: true
+    languagetool:
+      enabled: true
+      level: picky
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    dotenvLint:
+      enabled: true
+    checkov:
+      enabled: true
+    trivy:
+      enabled: true
+    tflint:
+      enabled: true
+    semgrep:
+      enabled: true
+    opengrep:
+      enabled: true
+    osvScanner:
+      enabled: true
+    checkmake:
+      enabled: true
+
+    # Web / TypeScript / Node
+    eslint:
+      enabled: true
+    biome:
+      enabled: true
+    oxc:
+      enabled: true
+    stylelint:
+      enabled: true
+    htmlhint:
+      enabled: true
+    prismaLint:
+      enabled: true
+
+    # Python
+    ruff:
+      enabled: true
+    pylint:
+      enabled: true
+    flake8:
+      enabled: true
+    sqlfluff:
+      enabled: true
+
+    # Go / Rust / JVM / PHP / Ruby / Swift / C/C++
+    golangci-lint:
+      enabled: true
+    clippy:
+      enabled: true
+    pmd:
+      enabled: true
+    detekt:
+      enabled: true
+    phpstan:
+      enabled: true
+      level: max
+    phpmd:
+      enabled: true
+    phpcs:
+      enabled: true
+    rubocop:
+      enabled: true
+    brakeman:
+      enabled: true
+    swiftlint:
+      enabled: true
+    clang:
+      enabled: true
+    cppcheck:
+      enabled: true
+    buf:
+      enabled: true
+    regal:
+      enabled: true
+    psscriptanalyzer:
+      enabled: true
+    blinter:
+      enabled: true
+
+code_generation:
+  docstrings:
+    language: en-US
+    path_instructions:
+      - path: "**/*.{ts,tsx,js,jsx,py,go,rs,java,kt,cs,php,rb,swift,c,cpp,h,hpp,sh,bash,ksh,dash}"
+        instructions: |
+          Generate concise docstrings/comments only for public functions, exported APIs, shell functions,
+          non-obvious business logic, or complex edge-case handling. Do not document
+          trivial getters/setters. Include parameters, return value, errors/exceptions,
+          side effects, and security assumptions when relevant.
+
+  unit_tests:
+    path_instructions:
+      - path: "**/*.{ts,tsx,js,jsx}"
+        instructions: |
+          Use the repository's existing test framework. Prefer user-visible behavior
+          tests over implementation tests. Cover edge cases, async behavior, error
+          paths, authz decisions, and regression cases. Use typed fixtures.
+
+      - path: "**/*.py"
+        instructions: |
+          Follow existing pytest/unittest patterns. Include success, failure, boundary,
+          fixture, mocking, and regression cases. Avoid brittle implementation assertions.
+
+      - path: "**/*.{go,rs,java,kt,cs,php,rb}"
+        instructions: |
+          Follow existing language-specific test conventions. Add focused tests around
+          changed behavior, errors, concurrency, authorization, and serialization.
+
+      - path: "**/*.{sh,bash,ksh,dash}"
+        instructions: |
+          If the repository has Bats, shunit2, ShellSpec, or an existing shell-test pattern,
+          add focused tests for changed script behavior. Cover arguments, required environment
+          variables, exit codes, stdout/stderr, failure paths, dry-run behavior, and cleanup.
+
+issue_enrichment:
+  auto_enrich:
+    enabled: true
+
+  planning:
+    enabled: true
+    auto_planning:
+      enabled: true
+      labels:
+        - feature
+        - enhancement
+        - bug
+        - security
+        - "!do-not-plan"
+
+  labeling:
+    auto_apply_labels: false
+    labeling_instructions:
+      - label: bug
+        instructions: "The issue reports incorrect behavior, regression, crash, data loss, or broken workflow."
+      - label: enhancement
+        instructions: "The issue requests new capability or improvement."
+      - label: security
+        instructions: "The issue involves security, privacy, authentication, authorization, secrets, or compliance."
+      - label: needs-triage
+        instructions: "The issue lacks enough detail to plan implementation safely."

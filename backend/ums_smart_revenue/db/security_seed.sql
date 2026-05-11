@@ -105,6 +105,7 @@ VALUES
     ('finance_admin', 'graph.view'),
     ('finance_admin', 'graph.view_finance'),
     ('finance_admin', 'audit.view'),
+    ('finance_admin', 'roles.assign'),
     ('finance_approver', 'analytics.view'),
     ('finance_approver', 'analytics.view_confidence'),
     ('finance_approver', 'finance.view_revenue'),

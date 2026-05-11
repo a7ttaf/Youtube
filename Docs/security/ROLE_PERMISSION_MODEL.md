@@ -119,6 +119,7 @@ Sensitive actions include:
 - Month lock/unlock requires `LOCK_FINANCE_MONTH` or `UNLOCK_FINANCE_MONTH` for the month scope.
 - Allocation changes require `CHANGE_ALLOCATION_RULE` for the month scope.
 - Connector administration requires `MANAGE_CONNECTORS`; running jobs requires `RUN_CONNECTOR_JOBS`.
+- Role assignment APIs require `roles.assign`; Super Owner assignment requires an existing Super Owner, and finance role assignment requires Finance Admin or Super Owner authority.
 - Neo4j graph reads must pass through backend guards and filter nodes by the same organization scopes used for SQL reads.
 - Dashboard users never receive Neo4j write credentials.
 

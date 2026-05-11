@@ -110,6 +110,14 @@ Fourteenth continuation update:
 - masked sensitive audit `details` unless the caller has `audit.view_sensitive_payloads`;
 - audited audit-log reads as `AUDIT_LOG_VIEWED`.
 
+Fifteenth continuation update:
+- added a SQLAlchemy user-role assignment repository and FastAPI `/users/{user_id}/roles` routes;
+- persisted scoped user-role assignments through the existing `user_role_assignments` and `access_scopes` tables;
+- enforced `roles.assign` before parsing target user IDs to avoid probing;
+- restricted Super Owner assignment to existing Super Owners;
+- restricted finance role assignment to Finance Admin or Super Owner authority;
+- audited role assignment and revocation as `USER_ROLE_CHANGED`.
+
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`
 - `Docs/implementation/CODEX_PHASE_1_SUMMARY.md`
@@ -131,8 +139,10 @@ Fourteenth continuation update:
 - `backend/ums_smart_revenue/api/reports.py`
 - `backend/ums_smart_revenue/api/revenue.py`
 - `backend/ums_smart_revenue/api/security.py`
+- `backend/ums_smart_revenue/api/users.py`
 - `backend/ums_smart_revenue/auth/__init__.py`
 - `backend/ums_smart_revenue/auth/audit_log.py`
+- `backend/ums_smart_revenue/auth/user_roles.py`
 - `backend/ums_smart_revenue/auth/permissions.py`
 - `backend/ums_smart_revenue/auth/roles.py`
 - `backend/ums_smart_revenue/auth/scopes.py`
@@ -195,6 +205,7 @@ Fourteenth continuation update:
 - `tests/api/test_groups_api.py`
 - `tests/api/test_raw_report_files_api.py`
 - `tests/api/test_revenue_explanations_api.py`
+- `tests/api/test_user_roles_api.py`
 - `tests/api/test_guarded_routes.py`
 - `tests/api/test_sql_backed_channel_dependencies.py`
 - `tests/auth/test_audit_service.py`
@@ -328,6 +339,11 @@ Pytest coverage includes:
 - Super Owner can view sensitive audit details.
 - Assistant Analyst cannot view audit events.
 - Audit-log reads create an `AUDIT_LOG_VIEWED` audit event.
+- Corporate Admin can assign scoped Assistant Analyst access and produce a `USER_ROLE_CHANGED` audit event.
+- Assistant Analyst cannot assign roles or probe target user ids.
+- Corporate Admin cannot assign finance roles or Super Owner.
+- Finance Admin can assign Finance Viewer.
+- Corporate Admin can revoke role assignments with audit logging.
 
 ## Commands Run
 - `git status --short --branch` failed because this workspace is not a Git repository.
@@ -383,6 +399,11 @@ Pytest coverage includes:
 - `git diff --check` passed again with CRLF conversion warnings only after audit-log APIs were added.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp tests/api tests/db tests/finance` passed with 119 tests after audit-log APIs were added.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pytest-tmp` passed with 154 tests after audit-log APIs were added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; python -B -m alembic -c alembic.ini upgrade head --sql` still rendered migrations through `20260510_0008`.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-userroles" tests/api/test_user_roles_api.py` first failed with missing `/users/{user_id}/roles`, then passed with 6 tests after user-role assignment APIs were added.
+- `git diff --check` passed with CRLF conversion warnings only after user-role assignment APIs were added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-broad" tests/api tests/db tests/auth` passed with 146 tests after user-role assignment APIs were added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-full"` passed with 171 tests after user-role assignment APIs were added.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; python -B -m alembic -c alembic.ini upgrade head --sql` still rendered migrations through `20260510_0008`.
 
 ## Remaining Next Steps

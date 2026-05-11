@@ -1,0 +1,4 @@
+[sqlfluff]
+dialect = postgres
+templater = raw
+sql_file_exts = .sql

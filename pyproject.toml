@@ -24,3 +24,9 @@ test = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["backend"]
+
+[tool.ruff]
+src = ["backend"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "UP"]
