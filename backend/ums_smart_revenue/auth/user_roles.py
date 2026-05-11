@@ -102,9 +102,20 @@ class SqlAlchemyUserRoleAssignmentRepository:
         )
         self._session.add(row)
         try:
-            self._session.flush()
+            with self._session.begin_nested():
+                self._session.flush()
         except IntegrityError as exc:
-            raise UserRoleAssignmentConflictError("Active role assignment already exists") from exc
+            duplicate = self._session.scalars(
+                select(UserRoleAssignmentORM).where(
+                    UserRoleAssignmentORM.user_id == target_user_id,
+                    UserRoleAssignmentORM.role_key == role.value,
+                    UserRoleAssignmentORM.scope_id == scope.id,
+                    UserRoleAssignmentORM.active.is_(True),
+                )
+            ).one_or_none()
+            if duplicate is not None:
+                raise UserRoleAssignmentConflictError("Active role assignment already exists") from exc
+            raise
         return self._to_entry(row, scope)
 
     def get_assignment(self, *, user_id: str, assignment_id: str) -> UserRoleAssignmentEntry:

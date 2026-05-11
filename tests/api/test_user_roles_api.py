@@ -208,6 +208,11 @@ def test_incompatible_scope_type_rejected_before_persisting(tmp_path):
     assert response_mixed.status_code == 422
     assert "cannot be assigned to scope type" in response_mixed.json()["detail"]
 
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        assert session.scalars(select(UserRoleAssignmentORM)).all() == []
+        assert session.scalars(select(AuditLogORM)).all() == []
+
 
 def test_corporate_admin_revokes_role_assignment_with_audit(tmp_path):
     database_url = build_database_url(tmp_path)
