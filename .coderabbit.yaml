@@ -506,7 +506,7 @@ reviews:
     semgrep:
       enabled: true
     opengrep:
-      enabled: true
+      enabled: false
     osvScanner:
       enabled: true
     checkmake:
