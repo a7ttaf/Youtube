@@ -75,6 +75,7 @@ MANUAL_OVERRIDE_APPROVED
 ALLOCATION_RULE_CHANGED
 EXPORT_CREATED
 USER_ROLE_CHANGED
+USER_PERMISSION_CHANGED
 CONNECTOR_JOB_RUN
 CONNECTOR_SETTINGS_CHANGED
 RAW_FILE_VIEWED
@@ -90,3 +91,4 @@ AUDIT_LOG_VIEWED
 - Finance export is impossible without finance/owner role.
 - Every override and export appears in audit log.
 - Audit log reads require `audit.view`; sensitive audit details remain masked unless `audit.view_sensitive_payloads` is also granted.
+- Direct permission grants require `roles.assign`, are family-restricted, and create `USER_PERMISSION_CHANGED` audit events.

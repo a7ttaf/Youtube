@@ -20,6 +20,7 @@ class AuditEventType(str, Enum):
     ALLOCATION_RULE_CHANGED = "ALLOCATION_RULE_CHANGED"
     EXPORT_CREATED = "EXPORT_CREATED"
     USER_ROLE_CHANGED = "USER_ROLE_CHANGED"
+    USER_PERMISSION_CHANGED = "USER_PERMISSION_CHANGED"
     CONNECTOR_JOB_RUN = "CONNECTOR_JOB_RUN"
     CONNECTOR_SETTINGS_CHANGED = "CONNECTOR_SETTINGS_CHANGED"
     RAW_FILE_VIEWED = "RAW_FILE_VIEWED"
@@ -79,6 +80,11 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     ),
     AuditEventType.USER_ROLE_CHANGED: AuditEventDefinition(
         AuditEventType.USER_ROLE_CHANGED,
+        reason_required=True,
+        permission=Permission.ASSIGN_ROLES,
+    ),
+    AuditEventType.USER_PERMISSION_CHANGED: AuditEventDefinition(
+        AuditEventType.USER_PERMISSION_CHANGED,
         reason_required=True,
         permission=Permission.ASSIGN_ROLES,
     ),

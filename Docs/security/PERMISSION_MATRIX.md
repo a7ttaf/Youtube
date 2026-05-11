@@ -57,6 +57,8 @@
 - Super Owner role assignment requires an existing Super Owner.
 - Corporate Admin can assign operational roles but cannot grant finance permissions unless also Finance Admin or Super Owner.
 - Finance Admin can assign finance roles but cannot assign Super Owner.
+- Direct permission grants require `roles.assign`, a compatible scope type, and family-specific grant authority.
+- Finance direct grants require Finance Admin or Super Owner; connector/raw-file direct grants require Connector Admin or Super Owner; administrative direct grants require Super Owner.
 - Export Operator requires underlying view permission for the export scope.
 - Graph `revenue-flow` views require both `graph.view` and `graph.view_finance`.
 - Raw report files require `raw_files.view` even when the user can view normalized analytics.
