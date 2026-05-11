@@ -175,6 +175,10 @@ class SqlAlchemyUserPermissionGrantRepository:
             ).one_or_none()
             if duplicate is not None:
                 raise UserPermissionGrantConflictError("Active permission grant already exists") from exc
+            if self._session.get(UserORM, target_user_id) is None:
+                raise UserPermissionGrantNotFoundError("user_id not found") from exc
+            if self._session.get(UserORM, actor_user_id) is None:
+                raise UserPermissionGrantNotFoundError("granted_by not found") from exc
             raise
         return self._to_entry(row, scope)
 
@@ -215,10 +219,13 @@ class SqlAlchemyUserPermissionGrantRepository:
         self._require_user(actor_user_id, field_name="revoked_by")
         row = self._session.scalars(
             select(UserPermissionGrantORM)
-            .where(UserPermissionGrantORM.id == grant_uuid)
+            .where(
+                UserPermissionGrantORM.id == grant_uuid,
+                UserPermissionGrantORM.user_id == target_user_id,
+            )
             .with_for_update()
         ).one_or_none()
-        if row is None or row.user_id != target_user_id:
+        if row is None:
             raise UserPermissionGrantNotFoundError("Permission grant not found")
         if not row.active:
             raise UserPermissionGrantConflictError("Permission grant is already revoked")
