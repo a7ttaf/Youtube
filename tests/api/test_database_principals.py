@@ -1,7 +1,7 @@
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
@@ -18,13 +18,16 @@ from ums_smart_revenue.db.security_models import (
     UserRoleAssignmentORM,
 )
 
-
 ACTOR_ID = UUID("00000000-0000-0000-0000-000000016001")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000016002")
 GLOBAL_SCOPE_ID = UUID("00000000-0000-0000-0000-000000016101")
 
 
-def auth_headers(user_id: UUID = ACTOR_ID, *, claimed_role: str = "assistant_analyst") -> dict[str, str]:
+def auth_headers(
+    user_id: UUID = ACTOR_ID,
+    *,
+    claimed_role: str = "assistant_analyst",
+) -> dict[str, str]:
     return {
         "x-user-id": str(user_id),
         "x-user-email": "ignored-header@example.com",
@@ -69,8 +72,16 @@ def seed_database(database_url: str) -> None:
         seed_security_catalog(session)
         session.add_all(
             [
-                UserORM(id=ACTOR_ID, email="actor@example.com", display_name="Actor User"),
-                UserORM(id=TARGET_ID, email="target@example.com", display_name="Target User"),
+                UserORM(
+                    id=ACTOR_ID,
+                    email="actor@example.com",
+                    display_name="Actor User",
+                ),
+                UserORM(
+                    id=TARGET_ID,
+                    email="target@example.com",
+                    display_name="Target User",
+                ),
             ]
         )
         session.commit()
@@ -93,7 +104,12 @@ def add_role_assignment(database_url: str, *, user_id: UUID, role_key: str) -> N
         session.commit()
 
 
-def add_direct_permission(database_url: str, *, user_id: UUID, permission_key: str) -> None:
+def add_direct_permission(
+    database_url: str,
+    *,
+    user_id: UUID,
+    permission_key: str,
+) -> None:
     engine = create_engine(database_url)
     with Session(engine) as session:
         session.add(
@@ -152,13 +168,18 @@ def test_database_principal_loads_direct_permission_grants(tmp_path):
         session.commit()
     client = TestClient(create_app(database_url=database_url, authz_source="database"))
 
-    response = client.get("/audit/events?limit=10", headers=auth_headers(claimed_role="assistant_analyst"))
+    response = client.get(
+        "/audit/events?limit=10",
+        headers=auth_headers(claimed_role="assistant_analyst"),
+    )
 
     assert response.status_code == 200
-    assert [item["event_type"] for item in response.json()["items"]] == ["CHANNEL_UPDATED"]
+    assert [item["event_type"] for item in response.json()["items"]] == [
+        "CHANNEL_UPDATED"
+    ]
 
 
-def test_database_principal_rejects_disabled_user_even_with_super_owner_header(tmp_path):
+def test_database_principal_rejects_disabled_user_with_super_owner_header(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -170,10 +191,13 @@ def test_database_principal_rejects_disabled_user_even_with_super_owner_header(t
     add_role_assignment(database_url, user_id=ACTOR_ID, role_key="super_owner")
     client = TestClient(create_app(database_url=database_url, authz_source="database"))
 
-    response = client.get("/security/roles", headers=auth_headers(claimed_role="super_owner"))
+    response = client.get(
+        "/security/roles",
+        headers=auth_headers(claimed_role="super_owner"),
+    )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "User is disabled"
+    assert response.json()["detail"] == "Forbidden"
 
 
 def test_database_principal_rejects_unregistered_user(tmp_path):
@@ -181,7 +205,24 @@ def test_database_principal_rejects_unregistered_user(tmp_path):
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url, authz_source="database"))
 
-    response = client.get("/security/roles", headers=auth_headers(user_id=uuid4(), claimed_role="super_owner"))
+    response = client.get(
+        "/security/roles",
+        headers=auth_headers(user_id=uuid4(), claimed_role="super_owner"),
+    )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "User is not registered"
+    assert response.json()["detail"] == "Forbidden"
+
+
+def test_database_principal_sanitizes_invalid_user_id(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url, authz_source="database"))
+
+    headers = auth_headers(claimed_role="super_owner")
+    headers["x-user-id"] = "not-a-uuid"
+
+    response = client.get("/security/roles", headers=headers)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid request"

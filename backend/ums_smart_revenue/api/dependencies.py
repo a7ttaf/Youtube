@@ -1,7 +1,8 @@
+import logging
+from secrets import compare_digest
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, status
-from secrets import compare_digest
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
@@ -14,6 +15,8 @@ from ums_smart_revenue.auth.principals import (
 from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope, ScopeType
 from ums_smart_revenue.config.settings import load_app_settings
+
+logger = logging.getLogger(__name__)
 
 
 def scope_from_header(scope_type: str, scope_id: str | None) -> AccessScope:
@@ -57,7 +60,10 @@ def current_principal_from_headers(
     try:
         role = RoleKey(x_role)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"Unknown role: {x_role}") from exc
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"Unknown role: {x_role}",
+        ) from exc
 
     return UserPrincipal(
         user_id=x_user_id,
@@ -90,11 +96,32 @@ def current_principal_from_database(
     try:
         return SqlAlchemyPrincipalLoader(session).load(user_id=x_user_id)
     except PrincipalDisabledError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        logger.warning(
+            "Database principal lookup rejected disabled principal",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden",
+        ) from exc
     except PrincipalNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
+        logger.warning(
+            "Database principal lookup rejected unknown principal",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Forbidden",
+        ) from exc
     except PrincipalValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        logger.warning(
+            "Database principal lookup rejected invalid principal input",
+            exc_info=True,
+        )
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid request",
+        ) from exc
 
 
 def _require_trusted_gateway_token(provided_token: str | None) -> None:

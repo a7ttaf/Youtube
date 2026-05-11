@@ -48,6 +48,15 @@ DATA_STEWARD
 - Graph views respect same backend permissions.
 - Neo4j direct access is restricted to admins and read-only graph users.
 
+## Authorization modes
+
+`UMS_AUTHZ_SOURCE` controls where route authorization loads the active principal:
+
+- `database`: production mode. The trusted gateway supplies the authenticated user identity, and the API loads active role assignments, direct permission grants, and scopes from SQL. Header-provided role and scope claims are ignored.
+- `headers`: bootstrap/development mode. This is the default when `UMS_AUTHZ_SOURCE` is unset. The API trusts header-provided roles and scopes for local setup, deterministic tests, and early bootstrap work only.
+
+Enable `UMS_AUTHZ_SOURCE=database` after users, roles, permissions, and scopes are configured in SQL and the trusted gateway is sending stable user IDs. Switching from bootstrap/header mode to database mode is a breaking authorization behavior change: previously accepted header role/scope claims no longer grant access, and disabled or unregistered SQL users fail closed before route handlers run.
+
 ## Neo4j roles
 
 ```text
@@ -93,4 +102,4 @@ AUDIT_LOG_VIEWED
 - Every override and export appears in audit log.
 - Audit log reads require `audit.view`; sensitive audit details remain masked unless `audit.view_sensitive_payloads` is also granted.
 - Direct permission grants require `roles.assign`, are family-restricted, and create `USER_PERMISSION_CHANGED` audit events.
-- SQL-backed principals ignore header role/scope claims and reject disabled or unregistered users.
+- SQL-backed principals ignore header role/scope claims and reject disabled or unregistered users before any route handlers are invoked.
