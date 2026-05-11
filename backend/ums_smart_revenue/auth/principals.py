@@ -1,3 +1,6 @@
+"""Database-backed principal loading for request authorization."""
+
+from enum import StrEnum
 from uuid import UUID
 
 from sqlalchemy import select
@@ -16,6 +19,14 @@ from ums_smart_revenue.db.security_models import (
 
 MAX_ACTIVE_ROLE_ASSIGNMENTS = 256
 MAX_ACTIVE_PERMISSION_GRANTS = 512
+
+
+class UserStatus(StrEnum):
+    """Allowed stored user status values for principal loading."""
+
+    ACTIVE = "active"
+    DISABLED = "disabled"
+    SERVICE = "service"
 
 
 class PrincipalLoadError(ValueError):
@@ -58,10 +69,12 @@ class SqlAlchemyPrincipalLoader:
     def load(self, *, user_id: str) -> UserPrincipal:
         """Return a UserPrincipal for an active stored user id."""
         parsed_user_id = _parse_uuid(user_id)
+        self._prepare_read_transaction()
         user = self._session.get(UserORM, parsed_user_id)
         if user is None:
             raise PrincipalNotFoundError("User is not registered")
-        if user.status == "disabled":
+        user_status = _parse_user_status(user.status)
+        if user_status == UserStatus.DISABLED:
             raise PrincipalDisabledError("User is disabled")
 
         return UserPrincipal(
@@ -69,8 +82,22 @@ class SqlAlchemyPrincipalLoader:
             email=user.email,
             role_assignments=self._load_role_assignments(user.id),
             direct_permissions=self._load_permission_grants(user.id),
-            is_service_account=user.is_service_account or user.status == "service",
+            is_service_account=(
+                user.is_service_account or user_status == UserStatus.SERVICE
+            ),
             disabled=False,
+        )
+
+    def _prepare_read_transaction(self) -> None:
+        """Set principal reads to a stable transaction isolation when possible."""
+        if self._session.in_transaction():
+            return
+        bind = self._session.get_bind()
+        isolation_level = (
+            "SERIALIZABLE" if bind.dialect.name == "sqlite" else "REPEATABLE READ"
+        )
+        self._session.connection(
+            execution_options={"isolation_level": isolation_level}
         )
 
     def _load_role_assignments(self, user_id: UUID) -> tuple[RoleAssignment, ...]:
@@ -133,9 +160,19 @@ class SqlAlchemyPrincipalLoader:
 def _parse_uuid(value: str) -> UUID:
     """Parse a trusted user-id header into a UUID."""
     try:
-        return UUID(value)
+        return UUID(value.strip())
     except ValueError as exc:
         raise PrincipalValidationError("user_id must be a valid UUID") from exc
+
+
+def _parse_user_status(value: str) -> UserStatus:
+    """Resolve a stored user status into the UserStatus enum."""
+    try:
+        return UserStatus(value)
+    except ValueError as exc:
+        raise PrincipalValidationError(
+            f"Unknown user status in database: {value}"
+        ) from exc
 
 
 def _parse_role(value: str) -> RoleKey:

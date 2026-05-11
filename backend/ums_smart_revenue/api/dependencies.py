@@ -1,8 +1,11 @@
+"""FastAPI dependencies for authentication, authorization, and data sessions."""
+
 import logging
 from secrets import compare_digest
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, status
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
@@ -95,14 +98,15 @@ def current_principal_from_database(
     x_ums_trusted_gateway_token: Annotated[str | None, Header()] = None,
 ) -> UserPrincipal:
     """Load a request principal from SQL after trusted gateway validation."""
-    if not x_user_id:
+    normalized_user_id = x_user_id.strip() if x_user_id else None
+    if not normalized_user_id:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Missing authentication headers",
         )
     _require_trusted_gateway_token(x_ums_trusted_gateway_token)
     try:
-        return SqlAlchemyPrincipalLoader(session).load(user_id=x_user_id)
+        return SqlAlchemyPrincipalLoader(session).load(user_id=normalized_user_id)
     except PrincipalDisabledError as exc:
         logger.warning("Database principal lookup rejected disabled principal")
         raise HTTPException(
@@ -122,10 +126,18 @@ def current_principal_from_database(
             detail="Forbidden",
         ) from exc
     except PrincipalValidationError as exc:
-        logger.warning("Database principal lookup rejected invalid principal input")
+        logger.warning(
+            "Database principal lookup rejected invalid principal input: %s", exc
+        )
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid request",
+        ) from exc
+    except SQLAlchemyError as exc:
+        logger.exception("Database principal lookup failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Principal authorization unavailable",
         ) from exc
 
 

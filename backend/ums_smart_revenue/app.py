@@ -1,3 +1,5 @@
+"""FastAPI application factory and router wiring."""
+
 from fastapi import FastAPI
 
 from ums_smart_revenue.api.audit import router as audit_router

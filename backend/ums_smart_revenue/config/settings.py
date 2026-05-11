@@ -1,3 +1,5 @@
+"""Runtime configuration loaded from UMS_* environment variables."""
+
 from dataclasses import dataclass
 from functools import lru_cache
 from os import environ

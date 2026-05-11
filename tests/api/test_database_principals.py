@@ -1,10 +1,16 @@
+"""Regression tests for SQL-backed principal authorization."""
+
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.dependencies import current_principal_from_database
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.permissions import PERMISSION_DEFINITIONS
 from ums_smart_revenue.auth.principals import (
@@ -28,6 +34,27 @@ TARGET_ID = UUID("00000000-0000-0000-0000-000000016002")
 GLOBAL_SCOPE_ID = UUID("00000000-0000-0000-0000-000000016101")
 ROLE_ASSIGNMENT_OVERFLOW_COUNT = 257
 PERMISSION_GRANT_OVERFLOW_COUNT = 513
+
+
+class FailingSession:
+    """Session double that raises during the user row lookup."""
+
+    def in_transaction(self) -> bool:
+        """Report no active transaction so the loader prepares isolation."""
+        return False
+
+    def get_bind(self):
+        """Return a minimal bind with the dialect name used by the loader."""
+        return SimpleNamespace(dialect=SimpleNamespace(name="sqlite"))
+
+    def connection(self, *, execution_options):
+        """Accept read isolation options before the failing lookup."""
+        assert execution_options == {"isolation_level": "SERIALIZABLE"}
+        return None
+
+    def get(self, *_args, **_kwargs):
+        """Raise the same base error SQLAlchemy uses for storage failures."""
+        raise SQLAlchemyError("database unavailable")
 
 
 def auth_headers(
@@ -203,6 +230,7 @@ def add_many_permission_grants(database_url: str, *, count: int) -> None:
 
 
 def test_database_principal_uses_stored_role_instead_of_claimed_header_role(tmp_path):
+    """Database mode authorizes from stored roles without bootstrap claims."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     add_role_assignment(database_url, user_id=ACTOR_ID, role_key="corporate_admin")
@@ -224,6 +252,7 @@ def test_database_principal_uses_stored_role_instead_of_claimed_header_role(tmp_
 
 
 def test_database_principal_loads_direct_permission_grants(tmp_path):
+    """Direct SQL permission grants authorize guarded endpoints."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     add_direct_permission(database_url, user_id=ACTOR_ID, permission_key="audit.view")
@@ -256,6 +285,7 @@ def test_database_principal_loads_direct_permission_grants(tmp_path):
 
 
 def test_database_principal_rejects_disabled_user_with_super_owner_header(tmp_path):
+    """Disabled SQL users fail closed even if headers claim super-owner."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -277,6 +307,7 @@ def test_database_principal_rejects_disabled_user_with_super_owner_header(tmp_pa
 
 
 def test_database_principal_rejects_unregistered_user(tmp_path):
+    """Unknown SQL users fail closed with a generic forbidden response."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url, authz_source="database"))
@@ -291,6 +322,7 @@ def test_database_principal_rejects_unregistered_user(tmp_path):
 
 
 def test_database_principal_sanitizes_invalid_user_id(tmp_path):
+    """Malformed user ids return a generic invalid-request response."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url, authz_source="database"))
@@ -304,29 +336,62 @@ def test_database_principal_sanitizes_invalid_user_id(tmp_path):
     assert response.json()["detail"] == "Invalid request"
 
 
+def test_database_principal_rejects_blank_user_id_as_missing_header(tmp_path):
+    """Whitespace-only user ids are treated as missing auth headers."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url, authz_source="database"))
+
+    headers = auth_headers(claimed_role="super_owner")
+    headers["x-user-id"] = "   "
+
+    response = client.get("/security/roles", headers=headers)
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Missing authentication headers"
+
+
+def test_database_principal_storage_errors_return_service_unavailable():
+    """SQLAlchemy storage failures map to a controlled 503 response."""
+    with pytest.raises(HTTPException) as exc_info:
+        current_principal_from_database(
+            session=FailingSession(),
+            x_user_id=str(ACTOR_ID),
+            x_ums_trusted_gateway_token="pytest-trusted-gateway-token",
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Principal authorization unavailable"
+
+
 def test_database_principal_rejects_too_many_active_role_assignments(tmp_path):
+    """Role assignment overflow fails before building the principal."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     add_many_role_assignments(database_url, count=ROLE_ASSIGNMENT_OVERFLOW_COUNT)
     engine = create_engine(database_url)
 
-    with Session(engine) as session:
-        with pytest.raises(PrincipalLoadError, match="role assignments"):
-            SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
+    with Session(engine) as session, pytest.raises(
+        PrincipalLoadError, match="role assignments"
+    ):
+        SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
 
 
 def test_database_principal_rejects_too_many_active_permission_grants(tmp_path):
+    """Direct permission grant overflow fails before building the principal."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     add_many_permission_grants(database_url, count=PERMISSION_GRANT_OVERFLOW_COUNT)
     engine = create_engine(database_url)
 
-    with Session(engine) as session:
-        with pytest.raises(PrincipalLoadError, match="permission grants"):
-            SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
+    with Session(engine) as session, pytest.raises(
+        PrincipalLoadError, match="permission grants"
+    ):
+        SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
 
 
-def test_missing_database_session_dependency_fails_closed():
+def test_audit_endpoint_fails_closed_without_database_session():
+    """Audit reads fail closed when no database session dependency is wired."""
     client = TestClient(create_app())
 
     response = client.get(
