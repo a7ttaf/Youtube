@@ -175,7 +175,6 @@ def _load_database_principal_with_retries(
                 raise
             session.rollback()
             logger.warning("Retrying database principal lookup after storage failure")
-    raise RuntimeError("database principal retry loop exhausted")
 
 
 def _require_trusted_gateway_token(provided_token: str | None) -> None:
