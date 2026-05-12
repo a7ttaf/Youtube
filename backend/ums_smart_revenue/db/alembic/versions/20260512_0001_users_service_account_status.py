@@ -14,6 +14,9 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # Permanent canonicalization: these rows already violate the user lifecycle
+    # contract, and reverting the repair would recreate invalid service-account
+    # states after rollback.
     op.execute(
         "UPDATE users SET is_service_account = true "
         "WHERE status = 'service' AND is_service_account IS false"
@@ -32,7 +35,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Fully reverse upgrade(): drop the service-account status check."""
+    """Drop the constraint while preserving upgrade()'s data canonicalization."""
     op.drop_constraint(
         "ck_users_service_account_status",
         "users",
