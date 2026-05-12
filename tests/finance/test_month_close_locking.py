@@ -16,18 +16,18 @@ from ums_smart_revenue.finance.month_close_readiness import (
 
 
 class _DialectSession:
-    def __init__(self, dialect_name: str):
+    def __init__(self, dialect_name: str) -> None:
         self._bind = SimpleNamespace(dialect=SimpleNamespace(name=dialect_name))
         self.executed: list[tuple[object, dict[str, object]]] = []
 
-    def get_bind(self):
+    def get_bind(self) -> SimpleNamespace:
         return self._bind
 
-    def execute(self, statement, parameters):
+    def execute(self, statement: object, parameters: dict[str, object]) -> None:
         self.executed.append((statement, parameters))
 
 
-def test_finance_month_advisory_lock_uses_postgres_transaction_lock():
+def test_finance_month_advisory_lock_uses_postgres_transaction_lock() -> None:
     """Postgres close attempts acquire a stable transaction-scoped month lock."""
     session = _DialectSession("postgresql")
 
@@ -42,7 +42,7 @@ def test_finance_month_advisory_lock_uses_postgres_transaction_lock():
     assert parameters["lock_key"] == second_session.executed[0][1]["lock_key"]
 
 
-def test_finance_month_advisory_lock_is_noop_for_sqlite_tests():
+def test_finance_month_advisory_lock_is_noop_for_sqlite_tests() -> None:
     """SQLite-backed tests keep the close-row lock path without PG SQL."""
     session = _DialectSession("sqlite")
 
@@ -53,21 +53,21 @@ def test_finance_month_advisory_lock_is_noop_for_sqlite_tests():
 
 def test_get_or_create_month_close_row_acquires_guard_before_row_lock(
     monkeypatch: pytest.MonkeyPatch,
-):
+) -> None:
     """Month-scoped writers serialize before taking the close-row lock."""
     calls: list[tuple[str, object]] = []
 
     class ScalarRows:
-        def one_or_none(self):
+        def one_or_none(self) -> SimpleNamespace:
             calls.append(("fetch", None))
             return SimpleNamespace(month="2026-03", status="OPEN")
 
     class Session:
-        def scalars(self, statement):
+        def scalars(self, statement: object) -> ScalarRows:
             calls.append(("select", statement))
             return ScalarRows()
 
-    def record_guard(session, month: str) -> None:
+    def record_guard(session: object, month: str) -> None:
         del session
         calls.append(("guard", month))
 
@@ -86,25 +86,25 @@ def test_get_or_create_month_close_row_acquires_guard_before_row_lock(
 
 def test_for_update_readiness_acquires_guard_before_blocker_queries(
     monkeypatch: pytest.MonkeyPatch,
-):
+) -> None:
     """Lock-time readiness holds the month guard before blocker reads."""
     calls: list[tuple[str, object]] = []
 
-    def record_guard(session, month: str) -> None:
+    def record_guard(session: object, month: str) -> None:
         del session
         calls.append(("guard", month))
 
-    def record_pending(self, month: str, *, for_update: bool) -> int:
+    def record_pending(self: object, month: str, *, for_update: bool) -> int:
         del self, month
         calls.append(("pending", for_update))
         return 0
 
-    def record_missing(self, month: str, *, for_update: bool) -> int:
+    def record_missing(self: object, month: str, *, for_update: bool) -> int:
         del self, month
         calls.append(("missing", for_update))
         return 0
 
-    def record_facts(self, month: str, *, for_update: bool) -> list[object]:
+    def record_facts(self: object, month: str, *, for_update: bool) -> list[object]:
         del self, month
         calls.append(("facts", for_update))
         return []
@@ -145,11 +145,13 @@ def test_for_update_readiness_acquires_guard_before_blocker_queries(
 
 def test_revenue_fact_writes_use_guarded_month_open_check(
     monkeypatch: pytest.MonkeyPatch,
-):
+) -> None:
     """Revenue fact imports funnel through the guarded month-open check."""
     calls: list[tuple[str, bool]] = []
 
-    def record_get_or_create(session, month: str, *, for_update: bool):
+    def record_get_or_create(
+        session: object, month: str, *, for_update: bool
+    ) -> SimpleNamespace:
         del session
         calls.append((month, for_update))
         return SimpleNamespace(status="OPEN")
@@ -169,11 +171,13 @@ def test_revenue_fact_writes_use_guarded_month_open_check(
 
 def test_manual_override_writes_use_guarded_month_open_check(
     monkeypatch: pytest.MonkeyPatch,
-):
+) -> None:
     """Manual override mutations funnel through the guarded month-open check."""
     calls: list[tuple[str, bool]] = []
 
-    def record_get_or_create(session, month: str, *, for_update: bool):
+    def record_get_or_create(
+        session: object, month: str, *, for_update: bool
+    ) -> SimpleNamespace:
         del session
         calls.append((month, for_update))
         return SimpleNamespace(status="OPEN")
