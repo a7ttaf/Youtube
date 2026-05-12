@@ -59,6 +59,7 @@
 - Finance Admin can assign finance roles but cannot assign Super Owner.
 - Direct permission grants require `roles.assign`, a compatible scope type, and family-specific grant authority.
 - User account create/update requires `users.manage`, but service account lifecycle changes require Super Owner.
+- User account list and access-profile reads require `users.manage`; list responses use bounded cursor pagination and profile responses show active role assignments and direct grants only.
 - Finance direct grants require Finance Admin or Super Owner; connector/raw-file direct grants require Connector Admin or Super Owner; administrative direct grants require Super Owner.
 - Export Operator requires underlying view permission for the export scope.
 - Graph `revenue-flow` views require both `graph.view` and `graph.view_finance`.

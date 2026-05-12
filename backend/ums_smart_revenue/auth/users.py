@@ -2,9 +2,10 @@ import logging
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
+from typing import TypeVar
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import (
     DBAPIError,
     DisconnectionError,
@@ -15,9 +16,17 @@ from sqlalchemy.exc import (
 from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.security_models import UserORM
+from ums_smart_revenue.auth.user_permissions import UserPermissionGrantEntry
+from ums_smart_revenue.auth.user_roles import UserRoleAssignmentEntry
+from ums_smart_revenue.db.security_models import (
+    AccessScopeORM,
+    UserORM,
+    UserPermissionGrantORM,
+    UserRoleAssignmentORM,
+)
 
 logger = logging.getLogger(__name__)
+T = TypeVar("T")
 
 USER_STATUS_ACTIVE = "active"
 USER_STATUS_DISABLED = "disabled"
@@ -28,6 +37,7 @@ USER_STATUSES = frozenset(
 USER_EMAIL_UNIQUE_CONSTRAINT = "uq_users_email_lower"
 USER_EMAIL_MAX_LENGTH = 320
 USER_DISPLAY_NAME_MAX_LENGTH = 200
+USER_LIST_MAX_OFFSET = 10_000
 _EMAIL_CONFLICT_SAMPLE_LIMIT = 2
 USER_ACCOUNT_STORAGE_ATTEMPTS = 2
 
@@ -54,6 +64,27 @@ class UserAccountEntry:
             "is_service_account": self.is_service_account,
             "created_at": self.created_at.isoformat(),
             "updated_at": self.updated_at.isoformat(),
+        }
+
+
+@dataclass(frozen=True)
+class UserAccessProfileEntry:
+    """User account plus active scoped authorization rows for admin review."""
+
+    user: UserAccountEntry
+    role_assignments: tuple[UserRoleAssignmentEntry, ...]
+    direct_permissions: tuple[UserPermissionGrantEntry, ...]
+
+    def to_api(self) -> dict[str, object]:
+        """Serialize the access profile for API responses."""
+        return {
+            "user": self.user.to_api(),
+            "role_assignments": [
+                assignment.to_api() for assignment in self.role_assignments
+            ],
+            "direct_permissions": [
+                grant.to_api() for grant in self.direct_permissions
+            ],
         }
 
 
@@ -163,6 +194,106 @@ class SqlAlchemyUserAccountRepository:
 
         return self._run_with_storage_retries(operation)
 
+    def list_users(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        status: str | None = None,
+        cursor_email: str | None = None,
+        cursor_id: str | None = None,
+    ) -> tuple[tuple[UserAccountEntry, ...], bool, dict[str, str] | None]:
+        """Return a stable page of user accounts sorted by normalized email."""
+        normalized_limit = _normalize_limit(limit)
+        normalized_offset = _normalize_offset(offset)
+        normalized_status = _normalize_status(status) if status is not None else None
+        cursor = _normalize_user_cursor(
+            cursor_email=cursor_email,
+            cursor_id=cursor_id,
+            offset=normalized_offset,
+        )
+
+        def operation() -> tuple[
+            tuple[UserAccountEntry, ...], bool, dict[str, str] | None
+        ]:
+            """Attempt one user-list read against the current session."""
+            email_sort_key = func.lower(UserORM.email)
+            statement = select(UserORM).order_by(email_sort_key, UserORM.id)
+            if normalized_status is not None:
+                statement = statement.where(UserORM.status == normalized_status)
+            if cursor is not None:
+                cursor_email_value, cursor_uuid = cursor
+                statement = statement.where(
+                    or_(
+                        email_sort_key > cursor_email_value,
+                        and_(
+                            email_sort_key == cursor_email_value,
+                            UserORM.id > cursor_uuid,
+                        ),
+                    )
+                )
+            elif normalized_offset:
+                statement = statement.offset(normalized_offset)
+            rows = self._session.scalars(
+                statement.limit(normalized_limit + 1)
+            ).all()
+            items = tuple(self._to_entry(row) for row in rows[:normalized_limit])
+            has_more = len(rows) > normalized_limit
+            return (
+                items,
+                has_more,
+                _next_user_cursor(items) if has_more else None,
+            )
+
+        return self._run_with_storage_retries(operation)
+
+    def get_access_profile(self, *, user_id: str) -> UserAccessProfileEntry:
+        """Load one account with active role assignments and direct grants."""
+        user_uuid = _parse_uuid(user_id, field_name="user_id")
+
+        def operation() -> UserAccessProfileEntry:
+            """Attempt one access-profile read against the current session."""
+            account_row = self._session.get(UserORM, user_uuid)
+            if account_row is None:
+                raise UserAccountNotFoundError("User not found")
+
+            role_rows = self._session.execute(
+                select(UserRoleAssignmentORM, AccessScopeORM)
+                .join(
+                    AccessScopeORM,
+                    UserRoleAssignmentORM.scope_id == AccessScopeORM.id,
+                )
+                .where(
+                    UserRoleAssignmentORM.user_id == user_uuid,
+                    UserRoleAssignmentORM.active.is_(True),
+                )
+                .order_by(UserRoleAssignmentORM.assigned_at, UserRoleAssignmentORM.id)
+            ).all()
+            permission_rows = self._session.execute(
+                select(UserPermissionGrantORM, AccessScopeORM)
+                .join(
+                    AccessScopeORM,
+                    UserPermissionGrantORM.scope_id == AccessScopeORM.id,
+                )
+                .where(
+                    UserPermissionGrantORM.user_id == user_uuid,
+                    UserPermissionGrantORM.active.is_(True),
+                )
+                .order_by(UserPermissionGrantORM.granted_at, UserPermissionGrantORM.id)
+            ).all()
+            return UserAccessProfileEntry(
+                user=self._to_entry(account_row),
+                role_assignments=tuple(
+                    _role_access_to_entry(row, scope) for row, scope in role_rows
+                ),
+                direct_permissions=tuple(
+                    _permission_access_to_entry(row, scope)
+                    for row, scope in permission_rows
+                ),
+            )
+
+        return self._run_with_storage_retries(operation)
+
     def update_user(
         self,
         *,
@@ -234,8 +365,8 @@ class SqlAlchemyUserAccountRepository:
         return self._run_with_storage_retries(operation)
 
     def _run_with_storage_retries(
-        self, operation: Callable[[], UserAccountEntry]
-    ) -> UserAccountEntry:
+        self, operation: Callable[[], T]
+    ) -> T:
         """Retry transient storage failures once and fail closed otherwise."""
         for attempt_index in range(USER_ACCOUNT_STORAGE_ATTEMPTS):
             try:
@@ -326,6 +457,49 @@ def _normalize_status(value: str) -> str:
     return normalized
 
 
+def _normalize_limit(value: int) -> int:
+    """Normalize and bound list page sizes for repository callers."""
+    if not isinstance(value, int):
+        raise UserAccountValidationError("limit must be an integer")
+    if value < 1 or value > 100:
+        raise UserAccountValidationError("limit must be between 1 and 100")
+    return value
+
+
+def _normalize_offset(value: int) -> int:
+    """Normalize list offsets for repository callers."""
+    if not isinstance(value, int):
+        raise UserAccountValidationError("offset must be an integer")
+    if value < 0:
+        raise UserAccountValidationError("offset must be greater than or equal to 0")
+    if value > USER_LIST_MAX_OFFSET:
+        raise UserAccountValidationError(
+            f"offset must be less than or equal to {USER_LIST_MAX_OFFSET}"
+        )
+    return value
+
+
+def _normalize_user_cursor(
+    *,
+    cursor_email: str | None,
+    cursor_id: str | None,
+    offset: int,
+) -> tuple[str, UUID] | None:
+    """Normalize the user-list keyset cursor and reject ambiguous paging."""
+    if (cursor_email is None) != (cursor_id is None):
+        raise UserAccountValidationError(
+            "cursor_email and cursor_id must be provided together"
+        )
+    if cursor_email is None or cursor_id is None:
+        return None
+    if offset != 0:
+        raise UserAccountValidationError("offset must be 0 when cursor is provided")
+    return (
+        _normalize_email(cursor_email),
+        _parse_uuid(cursor_id, field_name="cursor_id"),
+    )
+
+
 def _normalize_service_account_flag(value: object) -> bool:
     """Reject non-boolean service-account flags before persistence."""
     if not isinstance(value, bool):
@@ -385,3 +559,50 @@ def _is_retryable_user_storage_error(exc: SQLAlchemyError) -> bool:
     if isinstance(exc, (DisconnectionError, OperationalError, SQLAlchemyTimeoutError)):
         return True
     return isinstance(exc, DBAPIError) and exc.connection_invalidated
+
+
+def _role_access_to_entry(
+    row: UserRoleAssignmentORM, scope: AccessScopeORM
+) -> UserRoleAssignmentEntry:
+    """Map an active role assignment row into its public access-profile shape."""
+    return UserRoleAssignmentEntry(
+        id=str(row.id),
+        user_id=str(row.user_id),
+        role_key=row.role_key,
+        scope_type=scope.scope_type,
+        scope_id=scope.scope_id,
+        assigned_by=str(row.assigned_by) if row.assigned_by else None,
+        assigned_at=row.assigned_at,
+        revoked_by=str(row.revoked_by) if row.revoked_by else None,
+        revoked_at=row.revoked_at,
+        reason=row.reason,
+        active=row.active,
+    )
+
+
+def _permission_access_to_entry(
+    row: UserPermissionGrantORM, scope: AccessScopeORM
+) -> UserPermissionGrantEntry:
+    """Map an active direct grant row into its public access-profile shape."""
+    return UserPermissionGrantEntry(
+        id=str(row.id),
+        user_id=str(row.user_id),
+        permission_key=row.permission_key,
+        scope_type=scope.scope_type,
+        scope_id=scope.scope_id,
+        granted_by=str(row.granted_by) if row.granted_by else None,
+        granted_at=row.granted_at,
+        revoked_by=str(row.revoked_by) if row.revoked_by else None,
+        revoked_at=row.revoked_at,
+        grant_reason=row.reason,
+        revoke_reason=row.revoke_reason,
+        active=row.active,
+    )
+
+
+def _next_user_cursor(items: tuple[UserAccountEntry, ...]) -> dict[str, str] | None:
+    """Return the keyset cursor for continuing after the last returned account."""
+    if not items:
+        return None
+    last_item = items[-1]
+    return {"email": last_item.email, "id": last_item.id}
