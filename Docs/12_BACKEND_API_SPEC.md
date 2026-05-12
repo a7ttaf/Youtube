@@ -139,9 +139,21 @@ new close cycle if they affect a locked month.
 ### AdSense
 
 ```http
-GET /adsense/payments
 POST /adsense/sync-payments
+GET /adsense/payments?month=2026-03&limit=50&offset=0
 ```
+
+`POST /adsense/sync-payments` is an implemented control-plane ingestion endpoint
+for official AdSense payment metadata that has already been downloaded through
+approved connector storage. It requires `connectors.run_jobs` on connector scope
+`adsense`, requires a non-empty audit reason, and records `ADSENSE_PAYMENT_SYNCED`.
+The endpoint accepts up to 100 payment objects and upserts by `(month,
+payment_name)`, so connector reruns update the existing payment row instead of
+duplicating it. Sync is rejected for locked finance months.
+
+`GET /adsense/payments` requires global `finance.view_finalized_payments` and is
+audited as `PAYMENT_VIEWED`. It returns payment metadata only; it does not expose
+bank reconciliation data and does not calculate revenue.
 
 ### Connectors
 

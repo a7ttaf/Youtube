@@ -92,13 +92,18 @@ tax_monthly_channel (
 
 adsense_payments (
   id uuid primary key,
-  month text,
-  payment_name text,
-  payment_date date,
-  payment_amount numeric,
-  payment_currency text,
-  raw_payload jsonb,
-  created_at timestamp
+  month text not null,
+  payment_name text not null,
+  payment_date date not null,
+  payment_amount numeric(18, 6) not null,
+  payment_currency text not null,
+  payment_status text not null default 'PAID',
+  raw_payload jsonb not null,
+  source_report_id text null,
+  imported_by uuid null,
+  imported_at timestamp not null default now(),
+  updated_at timestamp not null default now(),
+  unique (month, payment_name)
 );
 
 finance_month_close (
@@ -118,6 +123,10 @@ finance_month_close (
 -- allocation_rule_payload, unlocked_by, unlocked_at, and updated_at control
 -- columns. Revenue fact tables remain separate and are not calculated by the
 -- close-control API.
+-- AdSense payment sync is idempotent by `(month, payment_name)` and is blocked
+-- when the matching finance month is locked. Payment rows are official payment
+-- metadata only; financial source-of-truth calculations remain in SQL revenue
+-- fact/reconciliation tables, not Neo4j.
 
 channel_net_revenue (
   month text,

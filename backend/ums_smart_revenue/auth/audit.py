@@ -26,6 +26,7 @@ class AuditEventType(str, Enum):
     CONNECTOR_SETTINGS_CHANGED = "CONNECTOR_SETTINGS_CHANGED"
     RAW_FILE_VIEWED = "RAW_FILE_VIEWED"
     REVENUE_VIEWED = "REVENUE_VIEWED"
+    PAYMENT_VIEWED = "PAYMENT_VIEWED"
     GRAPH_FINANCE_VIEWED = "GRAPH_FINANCE_VIEWED"
     AUDIT_LOG_VIEWED = "AUDIT_LOG_VIEWED"
 
@@ -102,6 +103,10 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
         AuditEventType.REPORT_IMPORTED,
         permission=Permission.RUN_CONNECTOR_JOBS,
     ),
+    AuditEventType.ADSENSE_PAYMENT_SYNCED: AuditEventDefinition(
+        AuditEventType.ADSENSE_PAYMENT_SYNCED,
+        permission=Permission.RUN_CONNECTOR_JOBS,
+    ),
     AuditEventType.CONNECTOR_SETTINGS_CHANGED: AuditEventDefinition(
         AuditEventType.CONNECTOR_SETTINGS_CHANGED,
         reason_required=True,
@@ -114,6 +119,10 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     AuditEventType.REVENUE_VIEWED: AuditEventDefinition(
         AuditEventType.REVENUE_VIEWED,
         permission=Permission.VIEW_REVENUE,
+    ),
+    AuditEventType.PAYMENT_VIEWED: AuditEventDefinition(
+        AuditEventType.PAYMENT_VIEWED,
+        permission=Permission.VIEW_FINALIZED_PAYMENTS,
     ),
     AuditEventType.GRAPH_FINANCE_VIEWED: AuditEventDefinition(
         AuditEventType.GRAPH_FINANCE_VIEWED,

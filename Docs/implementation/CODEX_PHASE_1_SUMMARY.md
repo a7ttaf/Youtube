@@ -156,6 +156,15 @@ Twentieth continuation update:
 - preserved the existing blockers for pending manual overrides and unresolved reconciliation issues;
 - hardened lock attempts to acquire a transaction-scoped finance-month guard plus the month-close row, then re-run readiness with row locks on matching pending overrides, missing revenue-required channel rows, and monthly revenue facts so stale readiness snapshots and concurrent month-scoped writers cannot authorize an invalid lock.
 
+Twenty-first continuation update:
+- added AdSense payment SQL metadata with an Alembic migration for `adsense_payments`;
+- added a SQLAlchemy AdSense payment repository that validates official payment metadata and upserts by `(month, payment_name)` so connector reruns do not duplicate rows;
+- added FastAPI `/adsense/sync-payments` guarded by `connectors.run_jobs` on connector scope `adsense`;
+- added FastAPI `/adsense/payments` guarded by global `finance.view_finalized_payments`;
+- rejected AdSense payment sync for locked finance months;
+- audited payment sync as `ADSENSE_PAYMENT_SYNCED` and finalized-payment reads as `PAYMENT_VIEWED`;
+- kept this slice to payment metadata and did not add fake revenue calculations, bank matching, Google password storage, or Neo4j financial source-of-truth behavior.
+
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`
 - `Docs/implementation/CODEX_PHASE_1_SUMMARY.md`
@@ -167,6 +176,7 @@ Twentieth continuation update:
 - `backend/ums_smart_revenue/__init__.py`
 - `backend/ums_smart_revenue/app.py`
 - `backend/ums_smart_revenue/api/__init__.py`
+- `backend/ums_smart_revenue/api/adsense.py`
 - `backend/ums_smart_revenue/api/audit.py`
 - `backend/ums_smart_revenue/api/channels.py`
 - `backend/ums_smart_revenue/api/connectors.py`
@@ -214,12 +224,14 @@ Twentieth continuation update:
 - `backend/ums_smart_revenue/db/alembic/versions/20260510_0006_raw_report_files.py`
 - `backend/ums_smart_revenue/db/alembic/versions/20260510_0007_number_explanations.py`
 - `backend/ums_smart_revenue/db/alembic/versions/20260510_0008_export_jobs.py`
+- `backend/ums_smart_revenue/db/alembic/versions/20260512_0002_adsense_payments.py`
 - `backend/ums_smart_revenue/config/__init__.py`
 - `backend/ums_smart_revenue/config/settings.py`
 - `backend/ums_smart_revenue/config/version_baseline.py`
 - `backend/ums_smart_revenue/connectors/__init__.py`
 - `backend/ums_smart_revenue/connectors/credentials.py`
 - `backend/ums_smart_revenue/finance/__init__.py`
+- `backend/ums_smart_revenue/finance/adsense_payments.py`
 - `backend/ums_smart_revenue/finance/explanations.py`
 - `backend/ums_smart_revenue/finance/month_close.py`
 - `backend/ums_smart_revenue/org/__init__.py`
@@ -238,6 +250,7 @@ Twentieth continuation update:
 - `tests/conftest.py`
 - `tests/test_version_baseline.py`
 - `tests/api/test_audit_api.py`
+- `tests/api/test_adsense_payments_api.py`
 - `tests/api/test_app.py`
 - `tests/api/test_channels_api.py`
 - `tests/api/test_connectors_api.py`
@@ -258,6 +271,8 @@ Twentieth continuation update:
 - `tests/auth/test_policy.py`
 - `tests/auth/test_sql_audit_sink.py`
 - `tests/db/test_alembic_scaffold.py`
+- `tests/db/test_adsense_payment_migration.py`
+- `tests/db/test_adsense_payment_models.py`
 - `tests/db/test_export_job_migration.py`
 - `tests/db/test_export_job_models.py`
 - `tests/db/test_explanation_migration.py`
@@ -408,6 +423,13 @@ Pytest coverage includes:
 - DB-backed principals load direct permission grants and use them on guarded routes.
 - DB-backed principals reject disabled users even when headers claim Super Owner.
 - DB-backed principals reject users that are authenticated by the gateway but not registered in SQL.
+- System Integration User can sync official AdSense payment metadata with a sensitive `ADSENSE_PAYMENT_SYNCED` audit event.
+- AdSense payment sync is idempotent for repeated `(month, payment_name)` rows.
+- Finance Viewer can list finalized AdSense payment metadata with a sensitive `PAYMENT_VIEWED` audit event.
+- Assistant Analyst cannot view AdSense payment metadata by default.
+- Connector-scoped users cannot sync AdSense payments through another connector scope.
+- Locked finance months reject AdSense payment sync and persist no payment rows.
+- AdSense payment ORM and migration preserve payment date, amount, currency, status, raw payload reference data, source report id, and importer metadata.
 
 ## Commands Run
 - `git status --short --branch` failed because this workspace is not a Git repository.
@@ -514,6 +536,16 @@ Pytest coverage includes:
 - `$env:PYTHONDONTWRITEBYTECODE='1'; python -B -m pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-pr8-red" tests/api/test_finance_close_api.py::test_finance_lock_requests_pessimistic_readiness_recheck` first failed because lock attempts did not request a pessimistic readiness recheck.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; python -B -m pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-pr8-green-lock" tests/api/test_finance_close_api.py::test_finance_lock_requests_pessimistic_readiness_recheck` passed after the lock-time recheck started using row-lock mode.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; python -B -m pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-pr8-edge" tests/api/test_finance_close_api.py::test_finance_close_readiness_counts_bulk_missing_required_revenue_facts tests/api/test_finance_close_api.py::test_finance_lock_rechecks_after_channel_becomes_revenue_required` passed with 2 tests.
+- `pytest tests/api/test_adsense_payments_api.py tests/db/test_adsense_payment_migration.py tests/db/test_adsense_payment_models.py -q` first failed with missing AdSense payment routes, model, table, and migration.
+- `pytest tests/api/test_adsense_payments_api.py tests/db/test_adsense_payment_migration.py tests/db/test_adsense_payment_models.py -q` passed with 8 tests after AdSense payment sync/list support was added.
+- `python -m ruff check backend/ums_smart_revenue/api/adsense.py backend/ums_smart_revenue/finance/adsense_payments.py tests/api/test_adsense_payments_api.py tests/db/test_adsense_payment_migration.py tests/db/test_adsense_payment_models.py` passed.
+- `python -m ruff check --select I backend/ums_smart_revenue/db/finance_models.py backend/ums_smart_revenue/auth/audit.py backend/ums_smart_revenue/app.py` passed.
+- `pytest tests/auth tests/db tests/finance tests/graph tests/org tests/test_version_baseline.py -q` passed with 82 tests.
+- `python -B -m alembic -c alembic.ini upgrade head --sql` rendered migrations through `20260512_0002`.
+- `pytest tests/api/test_app.py tests/api/test_audit_api.py tests/api/test_channels_api.py tests/api/test_connectors_api.py tests/api/test_database_principals.py tests/api/test_groups_api.py tests/api/test_guarded_routes.py tests/api/test_sql_backed_channel_dependencies.py -q` passed with 63 tests.
+- `pytest tests/api/test_adsense_payments_api.py tests/api/test_exports_api.py tests/api/test_finance_close_api.py tests/api/test_manual_overrides_api.py tests/api/test_raw_report_files_api.py tests/api/test_revenue_explanations_api.py tests/api/test_revenue_facts_api.py -q` passed with 65 tests.
+- `pytest tests/api/test_user_access_read_api.py tests/api/test_user_accounts_api.py tests/api/test_user_permissions_api.py tests/api/test_user_roles_api.py -q` passed with 69 tests.
+- `git diff --check` passed with CRLF conversion warnings only.
 
 ## Remaining Next Steps
 - Expand SQL audit persistence to each new sensitive endpoint as those routes are added.
