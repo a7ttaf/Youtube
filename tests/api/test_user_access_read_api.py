@@ -157,6 +157,7 @@ def insert_user(
     email: str,
     display_name: str = "Inserted User",
 ) -> None:
+    """Insert an account between paginated API requests."""
     engine = create_engine(database_url)
     with Session(engine) as session:
         session.add(
@@ -213,6 +214,7 @@ def test_user_account_list_can_filter_by_status(tmp_path):
 
 
 def test_user_account_list_returns_empty_page_for_large_offset(tmp_path):
+    """Large offsets return an empty bounded page instead of an error."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -237,6 +239,7 @@ def test_user_account_list_returns_empty_page_for_large_offset(tmp_path):
 
 
 def test_user_account_list_cursor_is_stable_when_new_users_arrive(tmp_path):
+    """Cursor pagination continues after the prior row when earlier users arrive."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -316,6 +319,7 @@ def test_corporate_admin_reads_active_user_access_profile(tmp_path):
 
 
 def test_corporate_admin_gets_404_for_missing_access_profile(tmp_path):
+    """Authorized access-profile reads report missing users as not found."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -330,6 +334,7 @@ def test_corporate_admin_gets_404_for_missing_access_profile(tmp_path):
 
 
 def test_corporate_admin_gets_422_for_invalid_access_profile_uuid(tmp_path):
+    """Authorized access-profile reads validate malformed target UUIDs."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
