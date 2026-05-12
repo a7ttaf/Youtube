@@ -12,6 +12,7 @@ from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.users import (
     SqlAlchemyUserAccountRepository,
     UserAccountConflictError,
+    UserAccountServiceAccountPolicyError,
     UserAccountValidationError,
 )
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
@@ -607,6 +608,53 @@ def test_super_owner_cannot_set_human_user_to_service_status(tmp_path):
     assert response.json()["detail"] == "service status requires a service account user"
 
 
+def test_create_user_rejects_unbounded_reason_text(tmp_path):
+    """Reject create reasons that exceed the audit reason length contract."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/users",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "email": "reason-overflow@example.com",
+            "display_name": "Reason Overflow User",
+            "reason": "R" * 501,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_patch_user_rejects_unbounded_reason_text(tmp_path):
+    """Reject update reasons that exceed the audit reason length contract."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    create_response = client.post(
+        "/users",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "email": "analyst@example.com",
+            "display_name": "Analyst User",
+            "reason": "Create analyst account",
+        },
+    )
+    assert create_response.status_code == 201
+
+    response = client.patch(
+        f"/users/{create_response.json()['id']}",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "display_name": "Updated Analyst",
+            "reason": "R" * 501,
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_corporate_admin_cannot_patch_existing_service_account(tmp_path):
     """Require Super Owner for any PATCH against a service-account user."""
     database_url = build_database_url(tmp_path)
@@ -637,6 +685,35 @@ def test_corporate_admin_cannot_patch_existing_service_account(tmp_path):
     assert (
         response.json()["detail"] == "Service account management requires Super Owner"
     )
+
+
+def test_repository_rechecks_service_account_policy_during_update(tmp_path):
+    """Block stale non-owner PATCH authorization after a row becomes service-only."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        repository = SqlAlchemyUserAccountRepository(session)
+        service_account = repository.create_user(
+            email="svc-policy@example.com",
+            display_name="Service Policy User",
+            is_service_account=True,
+        )
+        session.commit()
+
+    with Session(engine) as session:
+        repository = SqlAlchemyUserAccountRepository(session)
+
+        with pytest.raises(
+            UserAccountServiceAccountPolicyError,
+            match="Service account management requires Super Owner",
+        ):
+            repository.update_user(
+                user_id=service_account.id,
+                display_name="Blocked Rename",
+                service_account_updates_allowed=False,
+            )
 
 
 def test_user_repository_returns_conflict_for_concurrent_duplicate_update(

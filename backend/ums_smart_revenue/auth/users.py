@@ -87,6 +87,12 @@ class UserAccountStorageError(UserAccountError):
     pass
 
 
+class UserAccountServiceAccountPolicyError(UserAccountError):
+    """Raised when a stale service-account row blocks a non-owner update."""
+
+    pass
+
+
 class SqlAlchemyUserAccountRepository:
     """SQLAlchemy-backed repository for guarded user account lifecycle changes."""
 
@@ -164,6 +170,7 @@ class SqlAlchemyUserAccountRepository:
         email: str | None = None,
         display_name: str | None = None,
         status: str | None = None,
+        service_account_updates_allowed: bool = True,
     ) -> UserAccountEntry:
         """Update account metadata or lifecycle status after compatibility checks."""
         user_uuid = _parse_uuid(user_id, field_name="user_id")
@@ -190,6 +197,11 @@ class SqlAlchemyUserAccountRepository:
             row = self._session.get(UserORM, user_uuid)
             if row is None:
                 raise UserAccountNotFoundError("User not found")
+
+            if row.is_service_account and not service_account_updates_allowed:
+                raise UserAccountServiceAccountPolicyError(
+                    "Service account management requires Super Owner"
+                )
 
             if normalized_email is not None and (
                 self._email_exists(normalized_email, excluding_user_id=user_uuid)

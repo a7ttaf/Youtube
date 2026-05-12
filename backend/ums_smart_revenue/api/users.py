@@ -36,6 +36,7 @@ from ums_smart_revenue.auth.users import (
     SqlAlchemyUserAccountRepository,
     UserAccountConflictError,
     UserAccountNotFoundError,
+    UserAccountServiceAccountPolicyError,
     UserAccountStorageError,
     UserAccountValidationError,
 )
@@ -75,6 +76,7 @@ SUPER_OWNER_ONLY_PERMISSION_KEYS = frozenset(
         Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS,
     }
 )
+USER_ACTION_REASON_MAX_LENGTH = 500
 
 
 class UserRoleAssignRequest(BaseModel):
@@ -83,7 +85,7 @@ class UserRoleAssignRequest(BaseModel):
     role_key: str = Field(min_length=1)
     scope_type: str = Field(min_length=1)
     scope_id: str | None = None
-    reason: str = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=USER_ACTION_REASON_MAX_LENGTH)
 
     @field_validator("role_key", "scope_type", "reason", mode="before")
     @classmethod
@@ -114,7 +116,7 @@ class UserAccountCreateRequest(BaseModel):
     email: str = Field(min_length=1, max_length=USER_EMAIL_MAX_LENGTH)
     display_name: str = Field(min_length=1, max_length=USER_DISPLAY_NAME_MAX_LENGTH)
     is_service_account: bool = False
-    reason: str = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=USER_ACTION_REASON_MAX_LENGTH)
 
     @field_validator("email", "display_name", "reason", mode="before")
     @classmethod
@@ -136,7 +138,7 @@ class UserAccountUpdateRequest(BaseModel):
         default=None, max_length=USER_DISPLAY_NAME_MAX_LENGTH
     )
     status: str | None = None
-    reason: str = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=USER_ACTION_REASON_MAX_LENGTH)
 
     @field_validator("email", "display_name", "status", mode="before")
     @classmethod
@@ -183,7 +185,7 @@ class UserAccountUpdateRequest(BaseModel):
 class UserRoleRevokeRequest(BaseModel):
     """Request body for revoking an active user role assignment."""
 
-    reason: str = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=USER_ACTION_REASON_MAX_LENGTH)
 
     @field_validator("reason", mode="before")
     @classmethod
@@ -203,7 +205,7 @@ class UserPermissionGrantRequest(BaseModel):
     permission_key: str = Field(min_length=1)
     scope_type: str = Field(min_length=1)
     scope_id: str | None = None
-    reason: str = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=USER_ACTION_REASON_MAX_LENGTH)
 
     @field_validator("permission_key", "scope_type", "reason", mode="before")
     @classmethod
@@ -231,7 +233,7 @@ class UserPermissionGrantRequest(BaseModel):
 class UserPermissionRevokeRequest(BaseModel):
     """Request body for revoking an active direct permission grant."""
 
-    reason: str = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=USER_ACTION_REASON_MAX_LENGTH)
 
     @field_validator("reason", mode="before")
     @classmethod
@@ -341,7 +343,10 @@ def update_user_account(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
 
-    if existing.is_service_account or payload.status == "service":
+    service_account_updates_allowed = _has_role(user, RoleKey.SUPER_OWNER)
+    if (existing.is_service_account or payload.status == "service") and (
+        not service_account_updates_allowed
+    ):
         _require_service_account_management_policy(user)
 
     try:
@@ -350,6 +355,7 @@ def update_user_account(
             email=payload.email,
             display_name=payload.display_name,
             status=payload.status,
+            service_account_updates_allowed=service_account_updates_allowed,
         )
     except UserAccountConflictError as exc:
         raise HTTPException(
@@ -362,6 +368,10 @@ def update_user_account(
     except UserAccountValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    except UserAccountServiceAccountPolicyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)
         ) from exc
     except UserAccountStorageError as exc:
         raise HTTPException(
