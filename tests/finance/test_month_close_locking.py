@@ -38,10 +38,15 @@ def test_finance_month_advisory_lock_uses_postgres_transaction_lock() -> None:
     second_session = _DialectSession("postgresql")
     acquire_finance_month_advisory_lock(second_session, "2026-03")
     assert len(second_session.executed) == 1
+    other_month_session = _DialectSession("postgresql")
+    acquire_finance_month_advisory_lock(other_month_session, "2026-04")
+    assert len(other_month_session.executed) == 1
 
     assert "pg_advisory_xact_lock" in str(statement)
     assert isinstance(parameters["lock_key"], int)
     assert parameters["lock_key"] == second_session.executed[0][1]["lock_key"]
+    assert isinstance(other_month_session.executed[0][1]["lock_key"], int)
+    assert parameters["lock_key"] != other_month_session.executed[0][1]["lock_key"]
 
 
 def test_finance_month_advisory_lock_is_noop_for_sqlite_tests() -> None:
