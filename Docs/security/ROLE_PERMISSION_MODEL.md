@@ -5,6 +5,8 @@ UMS Smart Revenue Control Center is a corporate finance and revenue operations p
 
 The source of truth for permissions is the application database. SQL/PostgreSQL or warehouse tables remain the financial source of truth. Neo4j is a read-only graph projection and never grants access by itself.
 
+Runtime authorization should use database-backed principals in production. In that mode the trusted gateway supplies only the authenticated user identity, and the application loads active role assignments, direct permission grants, and scopes from SQL. Header-provided role or scope claims are bootstrap/test conveniences only and must not be treated as the corporate source of truth.
+
 ## Scope Model
 Permissions can be granted at these scope levels:
 
@@ -112,6 +114,8 @@ Sensitive actions include:
 
 ## Guard Rules
 - UI must never rely on hidden columns alone. Backend permissions decide every sensitive response.
+- Production authorization must use SQL-backed principals (`UMS_AUTHZ_SOURCE=database`) so persisted role assignments and direct permission grants are enforced at runtime.
+- Unknown or disabled database users must fail closed before route handlers run.
 - Money APIs require `VIEW_REVENUE` for the requested organization scope.
 - Payment APIs require `VIEW_FINALIZED_PAYMENTS`.
 - Bank reconciliation APIs require `VIEW_BANK_RECONCILIATION`.

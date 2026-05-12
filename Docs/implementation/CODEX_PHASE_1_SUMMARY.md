@@ -135,6 +135,13 @@ Seventeenth continuation update:
 - normalized user email addresses and rejected duplicate emails case-insensitively;
 - audited user account create/update as `USER_ACCOUNT_CHANGED`.
 
+Eighteenth continuation update:
+- added a SQLAlchemy principal loader that builds `UserPrincipal` from active `user_role_assignments`, `user_permission_grants`, and `access_scopes`;
+- added `authz_source="database"` / `UMS_AUTHZ_SOURCE=database` app mode to use SQL as the runtime authorization source;
+- kept header-sourced principals as bootstrap/test mode so existing local tests remain explicit and stable;
+- made database-backed principals ignore header role/scope claims;
+- fail-closed for disabled or unregistered database users before route handlers run.
+
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`
 - `Docs/implementation/CODEX_PHASE_1_SUMMARY.md`
@@ -159,6 +166,7 @@ Seventeenth continuation update:
 - `backend/ums_smart_revenue/api/users.py`
 - `backend/ums_smart_revenue/auth/__init__.py`
 - `backend/ums_smart_revenue/auth/audit_log.py`
+- `backend/ums_smart_revenue/auth/principals.py`
 - `backend/ums_smart_revenue/auth/user_permissions.py`
 - `backend/ums_smart_revenue/auth/user_roles.py`
 - `backend/ums_smart_revenue/auth/permissions.py`
@@ -219,6 +227,7 @@ Seventeenth continuation update:
 - `tests/api/test_app.py`
 - `tests/api/test_channels_api.py`
 - `tests/api/test_connectors_api.py`
+- `tests/api/test_database_principals.py`
 - `tests/api/test_exports_api.py`
 - `tests/api/test_finance_close_api.py`
 - `tests/api/test_groups_api.py`
@@ -374,6 +383,10 @@ Pytest coverage includes:
 - Duplicate user emails are rejected case-insensitively.
 - Service account creation is restricted to Super Owner.
 - No-op user account updates are rejected before creating an audit event.
+- DB-backed principals use stored active role assignments instead of claimed header roles.
+- DB-backed principals load direct permission grants and use them on guarded routes.
+- DB-backed principals reject disabled users even when headers claim Super Owner.
+- DB-backed principals reject users that are authenticated by the gateway but not registered in SQL.
 
 ## Commands Run
 - `git status --short --branch` failed because this workspace is not a Git repository.
@@ -449,12 +462,17 @@ Pytest coverage includes:
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-broad" tests/api tests/db tests/auth` passed with 146 tests after user-role assignment APIs were added.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-full"` passed with 171 tests after user-role assignment APIs were added.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; python -B -m alembic -c alembic.ini upgrade head --sql` still rendered migrations through `20260510_0008`.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-db-principals-red" tests/api/test_database_principals.py` first failed because `create_app()` had no `authz_source` argument.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-db-principals-green" tests/api/test_database_principals.py` passed with 4 tests after DB-backed principal loading was added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-db-principals-docs" tests/api/test_database_principals.py` passed with 4 tests after documentation updates.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-authz-slice" tests/api/test_database_principals.py tests/api/test_user_roles_api.py tests/api/test_user_permissions_api.py tests/auth` passed with 43 tests.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-full-db-principals"` passed with 189 tests.
 
 ## Remaining Next Steps
 - Expand SQL audit persistence to each new sensitive endpoint as those routes are added.
 - Add broader integration tests around real API routes as modules are built.
 - Add a concrete secret-manager adapter after UMS chooses the provider; the current foundation stores external encrypted secret references only.
-- Replace the temporary header-based principal dependency with the chosen corporate identity provider.
+- Replace the trusted gateway identity headers with the chosen corporate identity provider integration; database-backed authorization is now available behind `UMS_AUTHZ_SOURCE=database`.
 
 ## Unresolved Assumptions
 - Final identity provider is not specified.

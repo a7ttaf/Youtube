@@ -23,6 +23,15 @@ Define initial API endpoints for the UMS Smart Revenue Control Center.
 
 The `/connectors` group is part of the implemented API surface and is detailed in the Connectors section below.
 
+## Authentication and authorization source
+
+The trusted gateway still supplies identity headers, but authorization can run in two modes:
+
+- `headers`: bootstrap/test mode. The backend constructs the principal from `x-role`, `x-scope-type`, and `x-scope-id`.
+- `database`: production-oriented mode. Set `UMS_AUTHZ_SOURCE=database` with `UMS_DATABASE_URL`; the backend loads the user, active role assignments, direct permission grants, and scopes from SQL. Header role/scope claims are ignored in this mode.
+
+Database authorization rejects unknown users and disabled users before route code executes.
+
 ## Example endpoints
 
 ### Channels
