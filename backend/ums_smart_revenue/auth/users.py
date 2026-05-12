@@ -113,6 +113,7 @@ class SqlAlchemyUserAccountRepository:
         )
 
         def operation() -> UserAccountEntry:
+            """Attempt one account-create write against the current session."""
             if self._email_exists(normalized_email):
                 raise UserAccountConflictError("User email already exists")
 
@@ -148,6 +149,7 @@ class SqlAlchemyUserAccountRepository:
         user_uuid = _parse_uuid(user_id, field_name="user_id")
 
         def operation() -> UserAccountEntry:
+            """Attempt one account lookup against the current session."""
             row = self._session.get(UserORM, user_uuid)
             if row is None:
                 raise UserAccountNotFoundError("User not found")
@@ -184,6 +186,7 @@ class SqlAlchemyUserAccountRepository:
             normalized_status = _normalize_status(status)
 
         def operation() -> UserAccountEntry:
+            """Attempt one account-update write against the current session."""
             row = self._session.get(UserORM, user_uuid)
             if row is None:
                 raise UserAccountNotFoundError("User not found")

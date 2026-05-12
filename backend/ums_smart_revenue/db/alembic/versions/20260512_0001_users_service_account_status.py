@@ -14,6 +14,7 @@ depends_on = None
 
 
 def upgrade() -> None:
+    """Backfill service-account status data and add the consistency check."""
     # Permanent canonicalization: these rows already violate the user lifecycle
     # contract, and reverting the repair would recreate invalid service-account
     # states after rollback.

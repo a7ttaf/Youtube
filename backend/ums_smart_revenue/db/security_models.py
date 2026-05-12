@@ -17,10 +17,14 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
 class SecurityBase(DeclarativeBase):
+    """Declarative base for authorization and audit SQL tables."""
+
     pass
 
 
 class UserORM(SecurityBase):
+    """User account row with human/service lifecycle invariants."""
+
     __tablename__ = "users"
 
     id: Mapped[UUID] = mapped_column(
@@ -58,6 +62,8 @@ class UserORM(SecurityBase):
 
 
 class RoleORM(SecurityBase):
+    """Role catalog row seeded into the authorization model."""
+
     __tablename__ = "roles"
 
     key: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -72,6 +78,8 @@ class RoleORM(SecurityBase):
 
 
 class PermissionORM(SecurityBase):
+    """Permission catalog row including sensitivity and audit metadata."""
+
     __tablename__ = "permissions"
 
     key: Mapped[str] = mapped_column(Text, primary_key=True)
@@ -88,6 +96,8 @@ class PermissionORM(SecurityBase):
 
 
 class AccessScopeORM(SecurityBase):
+    """Normalized authorization scope row for global and entity scopes."""
+
     __tablename__ = "access_scopes"
 
     id: Mapped[UUID] = mapped_column(
@@ -128,6 +138,8 @@ class AccessScopeORM(SecurityBase):
 
 
 class RolePermissionAssignmentORM(SecurityBase):
+    """Static mapping from roles to permissions."""
+
     __tablename__ = "role_permission_assignments"
 
     role_key: Mapped[str] = mapped_column(
@@ -142,6 +154,8 @@ class RolePermissionAssignmentORM(SecurityBase):
 
 
 class UserRoleAssignmentORM(SecurityBase):
+    """Scoped role assignment row with explicit revocation state."""
+
     __tablename__ = "user_role_assignments"
 
     id: Mapped[UUID] = mapped_column(
@@ -192,6 +206,8 @@ class UserRoleAssignmentORM(SecurityBase):
 
 
 class UserPermissionGrantORM(SecurityBase):
+    """Scoped direct permission grant row with explicit revocation state."""
+
     __tablename__ = "user_permission_grants"
 
     id: Mapped[UUID] = mapped_column(
@@ -243,6 +259,8 @@ class UserPermissionGrantORM(SecurityBase):
 
 
 class AuditLogORM(SecurityBase):
+    """Append-only audit log row for sensitive authorization operations."""
+
     __tablename__ = "audit_logs"
 
     id: Mapped[UUID] = mapped_column(
@@ -276,6 +294,8 @@ class AuditLogORM(SecurityBase):
 
 
 class ApiConnectorCredentialORM(SecurityBase):
+    """Connector credential reference row without raw secret material."""
+
     __tablename__ = "api_connector_credentials"
 
     id: Mapped[UUID] = mapped_column(

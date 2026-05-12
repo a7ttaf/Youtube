@@ -335,6 +335,7 @@ def test_user_repository_returns_conflict_for_concurrent_duplicate_create(
     tmp_path,
     monkeypatch,
 ):
+    """Map create-time unique index races to the duplicate email contract."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -473,6 +474,7 @@ def test_create_user_rolls_back_account_when_audit_recording_fails(
     tmp_path,
     monkeypatch,
 ):
+    """Fail closed and rollback the account write when audit logging fails."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
 
@@ -506,6 +508,185 @@ def test_create_user_rolls_back_account_when_audit_recording_fails(
     assert response.json()["detail"] == "Audit logging unavailable"
     assert persisted_user is None
     assert audit_logs == []
+
+
+def test_patch_rejects_unknown_user_status_enum(tmp_path):
+    """Reject unsupported lifecycle status values at the PATCH boundary."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    create_response = client.post(
+        "/users",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "email": "analyst@example.com",
+            "display_name": "Analyst User",
+            "reason": "Create analyst account",
+        },
+    )
+    assert create_response.status_code == 201
+
+    response = client.patch(
+        f"/users/{create_response.json()['id']}",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "status": "retired",
+            "reason": "Reject unknown lifecycle status",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "Unknown status: retired" in str(response.json()["detail"])
+
+
+@pytest.mark.parametrize(
+    ("field_name", "field_value"),
+    [
+        ("email", f"{'a' * 309}@example.com"),
+        ("display_name", "A" * 201),
+    ],
+)
+def test_patch_rejects_user_field_length_boundaries(
+    tmp_path,
+    field_name,
+    field_value,
+):
+    """Reject PATCH payloads that exceed documented account field lengths."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    create_response = client.post(
+        "/users",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "email": "analyst@example.com",
+            "display_name": "Analyst User",
+            "reason": "Create analyst account",
+        },
+    )
+    assert create_response.status_code == 201
+
+    response = client.patch(
+        f"/users/{create_response.json()['id']}",
+        headers=auth_headers("corporate_admin"),
+        json={
+            field_name: field_value,
+            "reason": "Reject field length overflow",
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_super_owner_cannot_set_human_user_to_service_status(tmp_path):
+    """Reject invalid human-to-service status transitions via PATCH."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    create_response = client.post(
+        "/users",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "email": "analyst@example.com",
+            "display_name": "Analyst User",
+            "reason": "Create analyst account",
+        },
+    )
+    assert create_response.status_code == 201
+
+    response = client.patch(
+        f"/users/{create_response.json()['id']}",
+        headers=auth_headers("super_owner"),
+        json={
+            "status": "service",
+            "reason": "Reject invalid human lifecycle transition",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "service status requires a service account user"
+
+
+def test_corporate_admin_cannot_patch_existing_service_account(tmp_path):
+    """Require Super Owner for any PATCH against a service-account user."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    create_response = client.post(
+        "/users",
+        headers=auth_headers("super_owner"),
+        json={
+            "email": "svc-youtube@example.com",
+            "display_name": "YouTube Connector Service",
+            "is_service_account": True,
+            "reason": "Create connector service account",
+        },
+    )
+    assert create_response.status_code == 201
+
+    response = client.patch(
+        f"/users/{create_response.json()['id']}",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "display_name": "Renamed Service Account",
+            "reason": "Attempt service account update",
+        },
+    )
+
+    assert response.status_code == 403
+    assert (
+        response.json()["detail"] == "Service account management requires Super Owner"
+    )
+
+
+def test_user_repository_returns_conflict_for_concurrent_duplicate_update(
+    tmp_path,
+    monkeypatch,
+):
+    """Map update-time unique index races to the duplicate email contract."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        repository = SqlAlchemyUserAccountRepository(session)
+        account = repository.create_user(
+            email="loser@example.com",
+            display_name="Race Loser",
+            is_service_account=False,
+        )
+        session.commit()
+
+    with Session(engine) as session:
+        repository = SqlAlchemyUserAccountRepository(session)
+        original_flush = session.flush
+        injected_duplicate = False
+
+        def flush_with_concurrent_duplicate(*args, **kwargs):
+            nonlocal injected_duplicate
+            if not injected_duplicate:
+                injected_duplicate = True
+                with Session(engine) as other_session:
+                    other_session.add(
+                        UserORM(
+                            id=uuid4(),
+                            email="race-update@example.com",
+                            display_name="Race Winner",
+                        )
+                    )
+                    other_session.commit()
+            return original_flush(*args, **kwargs)
+
+        monkeypatch.setattr(session, "flush", flush_with_concurrent_duplicate)
+
+        with pytest.raises(
+            UserAccountConflictError,
+            match="User email already exists",
+        ):
+            repository.update_user(
+                user_id=account.id,
+                email="Race-Update@Example.com",
+            )
 
 
 def test_update_to_historical_duplicate_email_returns_conflict(tmp_path):
