@@ -120,17 +120,7 @@ class SqlAlchemyFinanceCloseReadinessService:
 
     def _pending_manual_override_count(self, month: str, *, for_update: bool) -> int:
         """Count pending overrides, locking matching rows during lock-time rechecks."""
-        if for_update:
-            statement = (
-                select(RevenueManualOverrideORM.id)
-                .where(
-                    RevenueManualOverrideORM.month == month,
-                    RevenueManualOverrideORM.status == "PENDING",
-                )
-                .with_for_update()
-            )
-            return len(self._session.scalars(statement).all())
-        return int(
+        count = int(
             self._session.scalar(
                 select(func.count())
                 .select_from(RevenueManualOverrideORM)
@@ -141,6 +131,17 @@ class SqlAlchemyFinanceCloseReadinessService:
             )
             or 0
         )
+        if for_update:
+            statement = (
+                select(RevenueManualOverrideORM.id)
+                .where(
+                    RevenueManualOverrideORM.month == month,
+                    RevenueManualOverrideORM.status == "PENDING",
+                )
+                .with_for_update()
+            )
+            self._count_locked_rows(statement)
+        return count
 
     def _missing_required_revenue_fact_count(
         self, month: str, *, for_update: bool
@@ -163,13 +164,7 @@ class SqlAlchemyFinanceCloseReadinessService:
                 MonthlyChannelRevenueFactORM.id.is_(None),
             )
         )
-        if for_update:
-            return len(
-                self._session.scalars(
-                    missing_channels_statement.with_for_update(of=YouTubeChannelORM)
-                ).all()
-            )
-        return int(
+        count = int(
             self._session.scalar(
                 select(func.count(YouTubeChannelORM.youtube_channel_id))
                 .select_from(YouTubeChannelORM)
@@ -188,6 +183,18 @@ class SqlAlchemyFinanceCloseReadinessService:
                 )
             )
             or 0
+        )
+        if for_update:
+            self._count_locked_rows(
+                missing_channels_statement.with_for_update(of=YouTubeChannelORM)
+            )
+        return count
+
+    def _count_locked_rows(self, statement) -> int:
+        """Count a row-locking scalar query without materializing all rows."""
+        return sum(
+            1
+            for _ in self._session.scalars(statement.execution_options(yield_per=1000))
         )
 
     def _month_facts(self, month: str, *, for_update: bool) -> list[RevenueFactEntry]:

@@ -27,6 +27,7 @@ USER_ID = UUID("00000000-0000-0000-0000-000000005001")
 def auth_headers(
     role: str, scope_type: str = "finance-month", scope_id: str = "2026-03"
 ) -> dict[str, str]:
+    """Build trusted-gateway headers for finance-close API tests."""
     return {
         "x-user-id": str(USER_ID),
         "x-user-email": "finance-close@example.com",
@@ -38,10 +39,12 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """Return an isolated SQLite URL for a finance-close test database."""
     return f"sqlite+pysqlite:///{(tmp_path / 'finance-close.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
+    """Create finance-close test tables and the acting user row."""
     engine = create_engine(database_url)
     OrgBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
@@ -58,6 +61,7 @@ def seed_database(database_url: str) -> None:
 
 
 def test_finance_close_entry_to_api_copies_allocation_rule_payload():
+    """Serializer copies allocation-rule payloads instead of sharing dicts."""
     payload = {"basis": "gross_revenue_usd"}
     entry = FinanceMonthCloseEntry(
         month="2026-03",
@@ -78,6 +82,7 @@ def test_finance_close_entry_to_api_copies_allocation_rule_payload():
 
 
 def test_finance_admin_can_lock_month_with_audit(tmp_path):
+    """Finance Admin can lock an open month and emit a lock audit event."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -102,6 +107,7 @@ def test_finance_admin_can_lock_month_with_audit(tmp_path):
 
 
 def test_finance_close_rejects_invalid_month_path(tmp_path):
+    """Invalid month path values are rejected before close-state lookup."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -119,6 +125,7 @@ def test_finance_close_rejects_invalid_month_path(tmp_path):
 
 
 def test_get_finance_close_does_not_create_missing_month(tmp_path):
+    """Reading a missing close row returns 404 without creating state."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -137,6 +144,7 @@ def test_get_finance_close_does_not_create_missing_month(tmp_path):
 
 
 def test_finance_admin_cannot_lock_already_locked_month(tmp_path):
+    """Locking an already locked month returns the close-state conflict."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -161,6 +169,7 @@ def test_finance_admin_cannot_lock_already_locked_month(tmp_path):
 
 
 def test_finance_admin_cannot_lock_month_with_pending_manual_override(tmp_path):
+    """Pending manual overrides block month locking with blocker details."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -202,6 +211,7 @@ def test_finance_admin_cannot_lock_month_with_pending_manual_override(tmp_path):
 
 
 def test_finance_close_readiness_reports_reconciliation_variance(tmp_path):
+    """Readiness and lock responses include reconciliation issue blockers."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -273,6 +283,7 @@ def test_finance_close_readiness_reports_reconciliation_variance(tmp_path):
 
 
 def test_finance_close_readiness_blocks_missing_required_revenue_facts(tmp_path):
+    """Required active channels without facts block readiness and locking."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -321,6 +332,7 @@ def test_finance_close_readiness_blocks_missing_required_revenue_facts(tmp_path)
 
 
 def test_finance_close_readiness_counts_bulk_missing_required_revenue_facts(tmp_path):
+    """Readiness reports the full count of missing required channel facts."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -357,6 +369,7 @@ def test_finance_close_readiness_counts_bulk_missing_required_revenue_facts(tmp_
 
 
 def test_finance_lock_rechecks_after_channel_becomes_revenue_required(tmp_path):
+    """Locking rechecks current channel state after a stale readiness view."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -410,6 +423,7 @@ def test_finance_lock_rechecks_after_channel_becomes_revenue_required(tmp_path):
 def test_finance_lock_requests_pessimistic_readiness_recheck(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ):
+    """Locking asks readiness to use row-lock mode before state transition."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     observed_for_update: list[bool] = []
@@ -420,6 +434,7 @@ def test_finance_lock_requests_pessimistic_readiness_recheck(
         *,
         for_update: bool = False,
     ) -> FinanceCloseReadiness:
+        """Capture whether the lock path requested row-lock mode."""
         del self
         observed_for_update.append(for_update)
         return FinanceCloseReadiness(month=month, blockers=[])
@@ -442,6 +457,7 @@ def test_finance_lock_requests_pessimistic_readiness_recheck(
 
 
 def test_finance_close_readiness_ignores_performance_only_channels(tmp_path):
+    """Performance-only channels without revenue facts do not block close."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -469,6 +485,7 @@ def test_finance_close_readiness_ignores_performance_only_channels(tmp_path):
 
 
 def test_finance_viewer_cannot_lock_month(tmp_path):
+    """Finance Viewer lacks permission to lock a finance month."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -484,6 +501,7 @@ def test_finance_viewer_cannot_lock_month(tmp_path):
 
 
 def test_finance_approver_can_unlock_month_with_audit(tmp_path):
+    """Finance Approver can unlock a locked month with an audit event."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -511,6 +529,7 @@ def test_finance_approver_can_unlock_month_with_audit(tmp_path):
 
 
 def test_finance_approver_cannot_unlock_open_month(tmp_path):
+    """Unlocking an open month returns the close-state conflict."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -529,6 +548,7 @@ def test_finance_approver_cannot_unlock_open_month(tmp_path):
 
 
 def test_export_operator_cannot_change_allocation_rule(tmp_path):
+    """Export Operator cannot change finance allocation-rule metadata."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -551,6 +571,7 @@ def test_export_operator_cannot_change_allocation_rule(tmp_path):
 
 
 def test_finance_admin_can_record_allocation_rule_metadata_with_audit(tmp_path):
+    """Finance Admin can record allocation metadata with an audit event."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -581,6 +602,7 @@ def test_finance_admin_can_record_allocation_rule_metadata_with_audit(tmp_path):
 
 
 def test_finance_admin_cannot_change_allocation_rule_on_locked_month(tmp_path):
+    """Locked months reject allocation-rule metadata changes."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
