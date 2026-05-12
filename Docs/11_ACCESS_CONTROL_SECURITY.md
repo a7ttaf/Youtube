@@ -41,11 +41,23 @@ DATA_STEWARD
 
 - OAuth tokens are encrypted.
 - Finance values are role-restricted.
+- Production authorization loads active roles, direct permission grants, and scopes from SQL using `UMS_AUTHZ_SOURCE=database`.
 - Every export is logged.
 - Every manual override is logged.
 - Month unlock requires reason.
 - Graph views respect same backend permissions.
 - Neo4j direct access is restricted to admins and read-only graph users.
+
+## Authorization modes
+
+`UMS_AUTHZ_SOURCE` controls where route authorization loads the active principal:
+
+- `database`: production mode. The trusted gateway supplies the authenticated user identity, and the API loads active role assignments, direct permission grants, and scopes from SQL. Header-provided role and scope claims are ignored.
+- `headers`: bootstrap/development mode. This is the default when `UMS_AUTHZ_SOURCE` is unset. The API trusts header-provided roles and scopes for local setup, deterministic tests, and early bootstrap work only.
+
+Enable `UMS_AUTHZ_SOURCE=database` after users, roles, permissions, and scopes are configured in SQL, the trusted gateway is sending stable user IDs, and `UMS_TRUSTED_GATEWAY_TOKEN` is provisioned for the API and gateway. Missing trusted-gateway token configuration is a hard pre-deployment failure: protected routes return 503 until the token is configured. Switching from bootstrap/header mode to database mode is a breaking authorization behavior change: previously accepted header role/scope claims no longer grant access, and disabled or unregistered SQL users fail closed before route handlers run.
+
+Database-backed routes validate the trusted-gateway token and normalize `x-user-id` before allocating a SQLAlchemy session, so invalid gateway traffic cannot consume database connections. Database-mode principal reads run inside a loader-owned `SERIALIZABLE` transaction and PostgreSQL deployments set a transaction-local statement timeout before reading user, role, permission, and scope rows. Calls made with a pre-existing active session transaction fail closed so weaker caller isolation cannot bypass the principal-read contract or mix authorization reads with caller-owned writes. Principal loads accept up to 256 active role assignments and 512 active direct permission grants; larger principals fail closed. Retryable SQLAlchemy storage failures such as disconnects, operational errors, and timeouts are rolled back and retried once; non-transient SQLAlchemy failures, corrupt stored authorization data, and unexpected loader errors fail closed with 503 responses.
 
 ## Neo4j roles
 
@@ -92,3 +104,4 @@ AUDIT_LOG_VIEWED
 - Every override and export appears in audit log.
 - Audit log reads require `audit.view`; sensitive audit details remain masked unless `audit.view_sensitive_payloads` is also granted.
 - Direct permission grants require `roles.assign`, are family-restricted, and create `USER_PERMISSION_CHANGED` audit events.
+- SQL-backed principals ignore header role/scope claims and reject disabled or unregistered users before any route handlers are invoked.
