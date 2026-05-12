@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.api.dependencies import (
     TrustedGatewayIdentity,
     current_principal_from_database,
+    current_trusted_gateway_identity,
 )
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.permissions import PERMISSION_DEFINITIONS
@@ -455,6 +456,20 @@ def test_database_principal_rejects_malformed_user_id_before_opening_session(
     assert response.status_code == 400
     assert response.json()["detail"] == "Invalid request"
     assert counter.opened_sessions == 0
+
+
+def test_database_principal_canonicalizes_user_id_before_session():
+    """Valid user ids are normalized before session-backed loading."""
+    mixed_case_user_id = "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA"
+
+    identity = current_trusted_gateway_identity(
+        x_user_id=mixed_case_user_id,
+        x_ums_trusted_gateway_token=auth_headers()[
+            "x-ums-trusted-gateway-token"
+        ],
+    )
+
+    assert identity.user_id == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
 
 
 def test_database_principal_rejects_blank_user_id_as_missing_header(tmp_path):
