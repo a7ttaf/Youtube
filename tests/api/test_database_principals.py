@@ -105,6 +105,42 @@ class FailingSession:
         self.rollback_count += 1
 
 
+class UnusedSession:
+    """Context manager that records unexpected session allocation."""
+
+    def __enter__(self):
+        """Enter the fake session context."""
+        return self
+
+    def __exit__(self, *_exc_info: object) -> bool:
+        """Exit the fake session context without swallowing exceptions."""
+        return False
+
+    def commit(self) -> None:
+        """Accept commits if the dependency unexpectedly reaches cleanup."""
+
+    def rollback(self) -> None:
+        """Accept rollbacks if the dependency unexpectedly reaches cleanup."""
+
+
+class SessionAllocationCounter:
+    """Session factory double that counts allocation attempts."""
+
+    def __init__(self) -> None:
+        """Initialize the session allocation counter."""
+        self.opened_sessions = 0
+
+    def build_session_factory(self, _database_url: str):
+        """Return a factory that records every attempted session allocation."""
+
+        def factory() -> UnusedSession:
+            """Record that a session would have been allocated."""
+            self.opened_sessions += 1
+            return UnusedSession()
+
+        return factory
+
+
 def auth_headers(
     user_id: UUID = ACTOR_ID,
     *,
@@ -397,6 +433,30 @@ def test_database_principal_sanitizes_invalid_user_id(tmp_path):
     assert response.json()["detail"] == "Invalid request"
 
 
+def test_database_principal_rejects_malformed_user_id_before_opening_session(
+    monkeypatch,
+):
+    """Malformed nonblank user ids are rejected before DB session allocation."""
+    counter = SessionAllocationCounter()
+    monkeypatch.setattr(
+        "ums_smart_revenue.app.build_session_factory", counter.build_session_factory
+    )
+    client = TestClient(
+        create_app(
+            database_url="sqlite+pysqlite:///:memory:",
+            authz_source="database",
+        )
+    )
+    headers = auth_headers(include_bootstrap_claims=False)
+    headers["x-user-id"] = "not-a-uuid"
+
+    response = client.get("/security/roles", headers=headers)
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid request"
+    assert counter.opened_sessions == 0
+
+
 def test_database_principal_rejects_blank_user_id_as_missing_header(tmp_path):
     """Whitespace-only user ids are treated as missing auth headers."""
     database_url = build_database_url(tmp_path)
@@ -414,38 +474,9 @@ def test_database_principal_rejects_blank_user_id_as_missing_header(tmp_path):
 
 def test_database_principal_rejects_bad_token_before_opening_session(monkeypatch):
     """Invalid gateway tokens are rejected before allocating a DB session."""
-    opened_sessions = 0
-
-    class UnusedSession:
-        """Context manager that records unexpected session allocation."""
-
-        def __enter__(self):
-            """Enter the fake session context."""
-            return self
-
-        def __exit__(self, *_exc_info: object) -> bool:
-            """Exit the fake session context without swallowing exceptions."""
-            return False
-
-        def commit(self) -> None:
-            """Accept commits if the dependency unexpectedly reaches cleanup."""
-
-        def rollback(self) -> None:
-            """Accept rollbacks if the dependency unexpectedly reaches cleanup."""
-
-    def fake_build_session_factory(_database_url: str):
-        """Return a factory that records every attempted session allocation."""
-
-        def factory() -> UnusedSession:
-            """Record that a session would have been allocated."""
-            nonlocal opened_sessions
-            opened_sessions += 1
-            return UnusedSession()
-
-        return factory
-
+    counter = SessionAllocationCounter()
     monkeypatch.setattr(
-        "ums_smart_revenue.app.build_session_factory", fake_build_session_factory
+        "ums_smart_revenue.app.build_session_factory", counter.build_session_factory
     )
     client = TestClient(
         create_app(
@@ -460,7 +491,7 @@ def test_database_principal_rejects_bad_token_before_opening_session(monkeypatch
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid trusted gateway token"
-    assert opened_sessions == 0
+    assert counter.opened_sessions == 0
 
 
 def test_database_principal_retryable_storage_errors_return_service_unavailable():
