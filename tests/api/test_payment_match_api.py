@@ -1,0 +1,207 @@
+from datetime import date
+from decimal import Decimal
+from uuid import UUID, uuid4
+
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from ums_smart_revenue.app import create_app
+from ums_smart_revenue.db.finance_models import (
+    AdSensePaymentORM,
+    FinanceBase,
+    MonthlyChannelRevenueFactORM,
+)
+from ums_smart_revenue.db.org_models import (
+    OrgBase,
+    OrgUnitORM,
+    YouTubeChannelORM,
+)
+from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+
+SECTOR_ID = UUID("00000000-0000-0000-0000-00000000a101")
+COMPANY_ID = UUID("00000000-0000-0000-0000-00000000a201")
+CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-00000000a301")
+USER_ID = UUID("00000000-0000-0000-0000-00000000a401")
+
+
+def auth_headers(
+    role: str,
+    scope_type: str = "global",
+    scope_id: str | None = None,
+) -> dict[str, str]:
+    headers = {
+        "x-user-id": str(USER_ID),
+        "x-user-email": "payment-match@example.com",
+        "x-role": role,
+        "x-scope-type": scope_type,
+        "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
+    }
+    if scope_id is not None:
+        headers["x-scope-id"] = scope_id
+    return headers
+
+
+def build_database_url(tmp_path) -> str:
+    return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
+
+
+def seed_database(database_url: str, *, payment_amount: str = "930.00") -> None:
+    engine = create_engine(database_url)
+    OrgBase.metadata.create_all(engine)
+    SecurityBase.metadata.create_all(engine)
+    FinanceBase.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                OrgUnitORM(
+                    id=SECTOR_ID,
+                    parent_id=None,
+                    type="SECTOR",
+                    name="TV",
+                    active=True,
+                ),
+                OrgUnitORM(
+                    id=COMPANY_ID,
+                    parent_id=SECTOR_ID,
+                    type="COMPANY",
+                    name="TV Company",
+                    active=True,
+                ),
+                YouTubeChannelORM(
+                    id=CHANNEL_ROW_ID,
+                    youtube_channel_id="channel-tv-a",
+                    channel_name="TV A",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-a",
+                    source_kind="YOUTUBE_CMS",
+                    source_report_id="cms-report-2026-03",
+                    gross_revenue_usd=Decimal("930.00"),
+                    net_revenue_usd=None,
+                    views=250000,
+                    watch_time_minutes=Decimal("7200.50"),
+                    confidence_score=Decimal("0.9825"),
+                    imported_by=USER_ID,
+                ),
+                AdSensePaymentORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    payment_name="AdSense payment March 2026",
+                    payment_date=date(2026, 4, 21),
+                    payment_amount=Decimal(payment_amount),
+                    payment_currency="USD",
+                    payment_status="PAID",
+                    raw_payload={"paymentId": "pay_2026_03"},
+                    source_report_id="adsense-payment-2026-03",
+                    imported_by=USER_ID,
+                ),
+                UserORM(
+                    id=USER_ID,
+                    email="payment-match@example.com",
+                    display_name="Payment Match User",
+                ),
+            ]
+        )
+        session.commit()
+
+
+def test_finance_viewer_reads_payment_match_with_revenue_and_payment_audits(
+    tmp_path,
+):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/payment-match",
+        headers=auth_headers("finance_viewer", "global"),
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_logs = session.scalars(
+            select(AuditLogORM).order_by(AuditLogORM.created_at)
+        ).all()
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "PAYMENT_MATCHED"
+    assert response.json()["currency"] == "USD"
+    assert response.json()["youtube_revenue_total_usd"] == "930"
+    assert response.json()["adsense_paid_amount"] == "930"
+    assert response.json()["payment_gap_usd"] == "0"
+    assert response.json()["audit_events"][0]["event_type"] == "REVENUE_VIEWED"
+    assert response.json()["audit_events"][1]["event_type"] == "PAYMENT_VIEWED"
+    assert [log.event_type for log in audit_logs] == [
+        "REVENUE_VIEWED",
+        "PAYMENT_VIEWED",
+    ]
+    assert all(log.sensitive is True for log in audit_logs)
+
+
+def test_month_payment_match_reports_payment_variance(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url, payment_amount="900.00")
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/payment-match",
+        headers=auth_headers("finance_viewer", "global"),
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "PAYMENT_VARIANCE"
+    assert response.json()["payment_gap_usd"] == "30"
+    assert response.json()["issues"][0]["issue_type"] == "PAYMENT_GAP"
+
+
+def test_month_payment_match_rejects_non_usd_currency_until_exchange_rates_exist(
+    tmp_path,
+):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/payment-match?currency=EUR",
+        headers=auth_headers("finance_viewer", "global"),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == (
+        "currency must be USD until exchange-rate support is implemented"
+    )
+
+
+def test_assistant_cannot_read_month_payment_match(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/payment-match",
+        headers=auth_headers("assistant_analyst", "global"),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
+def test_company_scoped_finance_viewer_cannot_read_holding_payment_match(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/payment-match",
+        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"

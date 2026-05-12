@@ -162,6 +162,18 @@ class SqlAlchemyAdSensePaymentRepository:
             has_more=len(rows) > limit,
         )
 
+    def list_month_payments(self, *, month: str) -> list[AdSensePaymentEntry]:
+        _validate_month(month)
+        rows = self._session.scalars(
+            select(AdSensePaymentORM)
+            .where(AdSensePaymentORM.month == month)
+            .order_by(
+                AdSensePaymentORM.payment_date.desc(),
+                AdSensePaymentORM.payment_name,
+            )
+        ).all()
+        return [self._to_entry(row) for row in rows]
+
     def _require_month_open(self, month: str) -> None:
         close = get_or_create_month_close_row(self._session, month, for_update=True)
         if close.status == "LOCKED":

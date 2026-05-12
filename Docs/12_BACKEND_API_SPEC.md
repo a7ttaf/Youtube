@@ -103,9 +103,21 @@ Direct permission grants and revocations also require `roles.assign` and are aud
 ```http
 GET /revenue/monthly?month=2026-03&scope_type=company&scope_id=123&currency=USD
 GET /revenue/channels?month=2026-03&group_id=abc&currency=USD
+GET /revenue/months/{month}/payment-match?currency=USD
 POST /revenue/channels/{channel_id}/months/{month}/explain?metric=adjusted_gross_revenue_usd
 POST /revenue/recalculate
 ```
+
+`GET /revenue/months/{month}/payment-match` is an implemented holding-level
+finance read that compares selected monthly YouTube revenue facts against paid
+AdSense payment rows for the same month. It requires global
+`finance.view_revenue` and global `finance.view_finalized_payments`, audits both
+`REVENUE_VIEWED` and `PAYMENT_VIEWED`, returns match status, totals, gap,
+issues, and audit event metadata, and excludes non-paid AdSense rows from the
+paid total while still reporting their count. This endpoint does not calculate
+tax, bank gaps, net revenue, or allocation rules. Until exchange-rate support
+exists, `currency` must be `USD`; payment rows in another currency are excluded
+from the match and surfaced as reconciliation issues.
 
 ### Finance close
 

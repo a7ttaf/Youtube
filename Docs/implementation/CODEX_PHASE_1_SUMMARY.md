@@ -165,6 +165,14 @@ Twenty-first continuation update:
 - audited payment sync as `ADSENSE_PAYMENT_SYNCED` and finalized-payment reads as `PAYMENT_VIEWED`;
 - kept this slice to payment metadata and did not add fake revenue calculations, bank matching, Google password storage, or Neo4j financial source-of-truth behavior.
 
+Twenty-second continuation update:
+- added deterministic month-level payment matching that compares selected YouTube revenue facts to paid AdSense payment rows;
+- added FastAPI `GET /revenue/months/{month}/payment-match`;
+- required global `finance.view_revenue` and global `finance.view_finalized_payments` for holding-level match reads;
+- audited payment-match reads as both `REVENUE_VIEWED` and `PAYMENT_VIEWED`;
+- reported non-paid AdSense records while excluding them from the paid amount;
+- kept the slice limited to source-of-truth comparison and did not invent tax, bank, net-revenue, or allocation logic.
+
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`
 - `Docs/implementation/CODEX_PHASE_1_SUMMARY.md`
@@ -234,6 +242,7 @@ Twenty-first continuation update:
 - `backend/ums_smart_revenue/finance/adsense_payments.py`
 - `backend/ums_smart_revenue/finance/explanations.py`
 - `backend/ums_smart_revenue/finance/month_close.py`
+- `backend/ums_smart_revenue/finance/payment_matching.py`
 - `backend/ums_smart_revenue/org/__init__.py`
 - `backend/ums_smart_revenue/org/access_index.py`
 - `backend/ums_smart_revenue/org/bootstrap_registry.py`
@@ -258,6 +267,7 @@ Twenty-first continuation update:
 - `tests/api/test_exports_api.py`
 - `tests/api/test_finance_close_api.py`
 - `tests/api/test_groups_api.py`
+- `tests/api/test_payment_match_api.py`
 - `tests/api/test_raw_report_files_api.py`
 - `tests/api/test_revenue_explanations_api.py`
 - `tests/api/test_user_access_read_api.py`
@@ -284,6 +294,7 @@ Twenty-first continuation update:
 - `tests/db/test_raw_report_file_migration.py`
 - `tests/db/test_raw_report_file_models.py`
 - `tests/db/test_security_orm.py`
+- `tests/finance/test_payment_matching.py`
 - `tests/graph/test_readonly_service.py`
 - `tests/org/test_sql_channel_registry.py`
 - `alembic.ini`
@@ -430,6 +441,10 @@ Pytest coverage includes:
 - Connector-scoped users cannot sync AdSense payments through another connector scope.
 - Locked finance months reject AdSense payment sync and persist no payment rows.
 - AdSense payment ORM and migration preserve payment date, amount, currency, status, raw payload reference data, source report id, and importer metadata.
+- Monthly payment matching selects YouTube revenue facts, compares them with paid AdSense payment rows, detects gaps, and excludes non-paid AdSense rows from the paid total.
+- Finance Viewer can read holding-level monthly payment-match summaries with both `REVENUE_VIEWED` and `PAYMENT_VIEWED` audit events.
+- Assistant Analyst and company-scoped finance roles cannot read holding-level payment-match summaries by default.
+- Payment-match reads reject non-USD currency requests until exchange-rate support exists and exclude non-USD AdSense payment rows from USD matching.
 
 ## Commands Run
 - `git status --short --branch` failed because this workspace is not a Git repository.
@@ -546,6 +561,15 @@ Pytest coverage includes:
 - `pytest tests/api/test_adsense_payments_api.py tests/api/test_exports_api.py tests/api/test_finance_close_api.py tests/api/test_manual_overrides_api.py tests/api/test_raw_report_files_api.py tests/api/test_revenue_explanations_api.py tests/api/test_revenue_facts_api.py -q` passed with 65 tests.
 - `pytest tests/api/test_user_access_read_api.py tests/api/test_user_accounts_api.py tests/api/test_user_permissions_api.py tests/api/test_user_roles_api.py -q` passed with 69 tests.
 - `git diff --check` passed with CRLF conversion warnings only.
+- `pytest tests/finance/test_payment_matching.py tests/api/test_payment_match_api.py -q` first failed with missing payment-match service/API support, then passed after implementation.
+- `python -m ruff check backend/ums_smart_revenue/finance/payment_matching.py tests/finance/test_payment_matching.py tests/api/test_payment_match_api.py` passed.
+- `python -m ruff check --select I backend/ums_smart_revenue/api/revenue.py backend/ums_smart_revenue/finance/adsense_payments.py` passed.
+- `python -B -m pytest tests/finance/test_payment_matching.py tests/api/test_payment_match_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-payment-match-focused-3"` passed with 10 tests.
+- `python -B -m pytest tests/api/test_adsense_payments_api.py tests/api/test_exports_api.py tests/api/test_finance_close_api.py tests/api/test_manual_overrides_api.py tests/api/test_payment_match_api.py tests/api/test_raw_report_files_api.py tests/api/test_revenue_explanations_api.py tests/api/test_revenue_facts_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-payment-match-api-finance-3"` passed with 70 tests.
+- `python -B -m pytest tests/auth tests/db tests/finance tests/graph tests/org tests/test_version_baseline.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-payment-match-nonapi-2"` passed with 87 tests.
+- `python -B -m pytest tests/api/test_app.py tests/api/test_audit_api.py tests/api/test_channels_api.py tests/api/test_connectors_api.py tests/api/test_database_principals.py tests/api/test_groups_api.py tests/api/test_guarded_routes.py tests/api/test_sql_backed_channel_dependencies.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-payment-match-api-core"` passed with 63 tests.
+- `python -B -m pytest tests/api/test_user_access_read_api.py tests/api/test_user_accounts_api.py tests/api/test_user_permissions_api.py tests/api/test_user_roles_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-payment-match-user-access"` passed with 69 tests.
+- `git diff --check` passed with CRLF conversion warnings only after payment-match implementation.
 
 ## Remaining Next Steps
 - Expand SQL audit persistence to each new sensitive endpoint as those routes are added.

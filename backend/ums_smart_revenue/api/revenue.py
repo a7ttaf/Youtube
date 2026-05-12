@@ -1,19 +1,35 @@
-from typing import Annotated
 from decimal import Decimal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
+from ums_smart_revenue.api.dependencies import (
+    current_db_session,
+    current_principal_from_headers,
+)
 from ums_smart_revenue.auth.audit import AuditEventType
-from ums_smart_revenue.auth.audit_service import AuditRecord, AuditSink, InMemoryAuditSink, record_audit_event
+from ums_smart_revenue.auth.audit_service import (
+    AuditRecord,
+    AuditSink,
+    InMemoryAuditSink,
+    record_audit_event,
+)
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.finance.adsense_payments import (
+    SqlAlchemyAdSensePaymentRepository,
+)
+from ums_smart_revenue.finance.explanations import (
+    NumberExplanationValidationError,
+    SqlAlchemyNumberExplanationRepository,
+    build_channel_month_revenue_explanation,
+)
 from ums_smart_revenue.finance.manual_overrides import (
     ManualOverrideConflictError,
     ManualOverrideLockedMonthError,
@@ -22,10 +38,10 @@ from ums_smart_revenue.finance.manual_overrides import (
     RevenueManualOverrideEntry,
     SqlAlchemyManualOverrideRepository,
 )
-from ums_smart_revenue.finance.explanations import (
-    NumberExplanationValidationError,
-    SqlAlchemyNumberExplanationRepository,
-    build_channel_month_revenue_explanation,
+from ums_smart_revenue.finance.payment_matching import (
+    PaymentMatchValidationError,
+    build_monthly_payment_match_summary,
+    normalize_payment_match_currency,
 )
 from ums_smart_revenue.finance.reconciliation import (
     build_revenue_reconciliation_issue_queue,
@@ -41,7 +57,6 @@ from ums_smart_revenue.finance.revenue_facts import (
 )
 from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_summary
 from ums_smart_revenue.org.access_index import load_org_access_index_from_session
-
 
 router = APIRouter(prefix="/revenue", tags=["revenue"])
 _AUDIT_SINK = InMemoryAuditSink()
@@ -123,6 +138,12 @@ def current_revenue_fact_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyRevenueFactRepository:
     return SqlAlchemyRevenueFactRepository(session)
+
+
+def current_adsense_payment_repository(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyAdSensePaymentRepository:
+    return SqlAlchemyAdSensePaymentRepository(session)
 
 
 def current_manual_override_repository(
@@ -340,6 +361,73 @@ def list_month_reconciliation_issues(
         "has_more": has_more,
     }
     return response
+
+
+@router.get("/months/{month}/payment-match")
+def get_month_payment_match(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    revenue_repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
+    payment_repository: Annotated[
+        SqlAlchemyAdSensePaymentRepository,
+        Depends(current_adsense_payment_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    currency: Annotated[str, Query(min_length=1)] = "USD",
+) -> dict[str, object]:
+    scope = AccessScope.global_scope()
+    _require_permission(user, Permission.VIEW_REVENUE, scope)
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, scope)
+    try:
+        normalized_currency = normalize_payment_match_currency(currency)
+        facts = revenue_repository.list_month_facts(month=month)
+        payments = payment_repository.list_month_payments(month=month)
+        summary = build_monthly_payment_match_summary(
+            month=month,
+            facts=facts,
+            payments=payments,
+            currency=normalized_currency,
+        )
+    except (PaymentMatchValidationError, RevenueFactValidationError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    summary_api = summary.to_api()
+    revenue_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="monthly_payment_match",
+        entity_id=month,
+        scope=scope,
+        details={
+            "status": summary.status,
+            "youtube_revenue_total_usd": summary_api["youtube_revenue_total_usd"],
+        },
+    )
+    payment_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.PAYMENT_VIEWED,
+        entity_type="monthly_payment_match",
+        entity_id=month,
+        scope=scope,
+        details={
+            "status": summary.status,
+            "adsense_paid_amount": summary_api["adsense_paid_amount"],
+            "paid_payment_count": summary.paid_payment_count,
+        },
+    )
+    summary_api["audit_events"] = [
+        audit_record_to_api(revenue_record),
+        audit_record_to_api(payment_record),
+    ]
+    return summary_api
 
 
 @router.post("/channels/{channel_id}/months/{month}/explain")
