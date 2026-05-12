@@ -7,7 +7,15 @@ from secrets import compare_digest
 from typing import Annotated
 
 from fastapi import Depends, Header, HTTPException, status
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import (
+    DBAPIError,
+    DisconnectionError,
+    OperationalError,
+    SQLAlchemyError,
+)
+from sqlalchemy.exc import (
+    TimeoutError as SQLAlchemyTimeoutError,
+)
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
@@ -211,11 +219,21 @@ def _load_database_principal_with_retries(
     for attempt_index in range(DATABASE_PRINCIPAL_LOAD_ATTEMPTS):
         try:
             return SqlAlchemyPrincipalLoader(session).load(user_id=normalized_user_id)
-        except SQLAlchemyError:
-            if attempt_index + 1 >= DATABASE_PRINCIPAL_LOAD_ATTEMPTS:
+        except SQLAlchemyError as exc:
+            if (
+                attempt_index + 1 >= DATABASE_PRINCIPAL_LOAD_ATTEMPTS
+                or not _is_retryable_principal_storage_error(exc)
+            ):
                 raise
             session.rollback()
             logger.warning("Retrying database principal lookup after storage failure")
+
+
+def _is_retryable_principal_storage_error(exc: SQLAlchemyError) -> bool:
+    """Return whether a principal storage failure is safe to retry once."""
+    if isinstance(exc, (DisconnectionError, OperationalError, SQLAlchemyTimeoutError)):
+        return True
+    return isinstance(exc, DBAPIError) and exc.connection_invalidated
 
 
 def _require_trusted_gateway_token(provided_token: str | None) -> None:

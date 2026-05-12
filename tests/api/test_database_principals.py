@@ -9,6 +9,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.dependencies import (
@@ -18,6 +19,8 @@ from ums_smart_revenue.api.dependencies import (
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.permissions import PERMISSION_DEFINITIONS
 from ums_smart_revenue.auth.principals import (
+    MAX_ACTIVE_PERMISSION_GRANTS,
+    MAX_ACTIVE_ROLE_ASSIGNMENTS,
     PRINCIPAL_QUERY_TIMEOUT_MS,
     PrincipalLoadError,
     SqlAlchemyPrincipalLoader,
@@ -37,8 +40,8 @@ from ums_smart_revenue.db.security_models import (
 ACTOR_ID = UUID("00000000-0000-0000-0000-000000016001")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000016002")
 GLOBAL_SCOPE_ID = UUID("00000000-0000-0000-0000-000000016101")
-ROLE_ASSIGNMENT_OVERFLOW_COUNT = 257
-PERMISSION_GRANT_OVERFLOW_COUNT = 513
+ROLE_ASSIGNMENT_OVERFLOW_COUNT = MAX_ACTIVE_ROLE_ASSIGNMENTS + 1
+PERMISSION_GRANT_OVERFLOW_COUNT = MAX_ACTIVE_PERMISSION_GRANTS + 1
 
 
 class RecordingConnection:
@@ -68,7 +71,9 @@ class FailingSession:
         self.connection_count = 0
         self.dialect_name = dialect_name
         self.get_count = 0
-        self.lookup_error = lookup_error or SQLAlchemyError("database unavailable")
+        self.lookup_error = lookup_error or SQLAlchemyTimeoutError(
+            "database unavailable"
+        )
         self.recording_connection = RecordingConnection()
         self.rollback_count = 0
 
@@ -458,8 +463,8 @@ def test_database_principal_rejects_bad_token_before_opening_session(monkeypatch
     assert opened_sessions == 0
 
 
-def test_database_principal_storage_errors_return_service_unavailable():
-    """SQLAlchemy storage failures map to a controlled 503 response."""
+def test_database_principal_retryable_storage_errors_return_service_unavailable():
+    """Retryable SQLAlchemy storage failures are retried once before 503."""
     session = FailingSession()
 
     with pytest.raises(HTTPException) as exc_info:
@@ -472,6 +477,22 @@ def test_database_principal_storage_errors_return_service_unavailable():
     assert exc_info.value.detail == "Principal authorization unavailable"
     assert session.get_count == 2
     assert session.rollback_count == 1
+
+
+def test_database_principal_non_retryable_storage_errors_do_not_retry():
+    """Non-transient SQLAlchemy failures fail closed without retry storms."""
+    session = FailingSession(lookup_error=SQLAlchemyError("statement is invalid"))
+
+    with pytest.raises(HTTPException) as exc_info:
+        current_principal_from_database(
+            identity=TrustedGatewayIdentity(user_id=str(ACTOR_ID)),
+            session=session,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Principal authorization unavailable"
+    assert session.get_count == 1
+    assert session.rollback_count == 0
 
 
 def test_database_principal_unexpected_errors_return_service_unavailable():
@@ -497,14 +518,15 @@ def test_database_principal_uses_serializable_postgres_reads():
     with pytest.raises(SQLAlchemyError):
         SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
 
+    assert PRINCIPAL_QUERY_TIMEOUT_MS == 5_000
     assert session.connection_count == 1
     assert session.recording_connection.executed_sql == [
         f"SET LOCAL statement_timeout = {PRINCIPAL_QUERY_TIMEOUT_MS}"
     ]
 
 
-def test_database_principal_active_transaction_returns_service_unavailable():
-    """Pre-existing transactions are rejected before principal rows are read."""
+def test_database_principal_rejects_active_transaction_to_avoid_race_reads():
+    """Caller-owned transactions are rejected to avoid mixed-isolation races."""
     session = FailingSession(active_transaction=True)
 
     with pytest.raises(HTTPException) as exc_info:
@@ -559,6 +581,19 @@ def test_database_principal_enforces_direct_permission_scope_isolation(tmp_path)
     assert response.json()["detail"] == "Missing permission: audit.view"
 
 
+def test_database_principal_accepts_role_assignment_limit_boundary(tmp_path):
+    """Exactly 256 active role assignments are accepted for one principal."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    add_many_role_assignments(database_url, count=MAX_ACTIVE_ROLE_ASSIGNMENTS)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        principal = SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
+
+    assert len(principal.role_assignments) == MAX_ACTIVE_ROLE_ASSIGNMENTS
+
+
 def test_database_principal_rejects_too_many_active_role_assignments(tmp_path):
     """Role assignment overflow fails before building the principal."""
     database_url = build_database_url(tmp_path)
@@ -570,6 +605,19 @@ def test_database_principal_rejects_too_many_active_role_assignments(tmp_path):
         PrincipalLoadError, match="role assignments"
     ):
         SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
+
+
+def test_database_principal_accepts_permission_grant_limit_boundary(tmp_path):
+    """Exactly 512 active direct permission grants are accepted."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    add_many_permission_grants(database_url, count=MAX_ACTIVE_PERMISSION_GRANTS)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        principal = SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
+
+    assert len(principal.direct_permissions) == MAX_ACTIVE_PERMISSION_GRANTS
 
 
 def test_database_principal_rejects_too_many_active_permission_grants(tmp_path):
