@@ -1,7 +1,7 @@
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-import re
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -10,7 +10,6 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.db.finance_models import RevenueManualOverrideORM
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
-
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
@@ -115,6 +114,32 @@ class SqlAlchemyManualOverrideRepository:
             )
             .order_by(RevenueManualOverrideORM.created_at, RevenueManualOverrideORM.id)
         ).all()
+        return [self._to_entry(row) for row in rows]
+
+    def list_month_overrides(
+        self,
+        *,
+        month: str,
+        youtube_channel_ids: set[str] | None = None,
+    ) -> list[RevenueManualOverrideEntry]:
+        _validate_month(month)
+        if youtube_channel_ids == set():
+            return []
+
+        statement = (
+            select(RevenueManualOverrideORM)
+            .where(RevenueManualOverrideORM.month == month)
+            .order_by(
+                RevenueManualOverrideORM.youtube_channel_id,
+                RevenueManualOverrideORM.created_at,
+                RevenueManualOverrideORM.id,
+            )
+        )
+        if youtube_channel_ids is not None:
+            statement = statement.where(
+                RevenueManualOverrideORM.youtube_channel_id.in_(youtube_channel_ids)
+            )
+        rows = self._session.scalars(statement).all()
         return [self._to_entry(row) for row in rows]
 
     def approve_override(

@@ -121,6 +121,7 @@ Sensitive actions include:
 - Payment APIs require `VIEW_FINALIZED_PAYMENTS`.
 - Bank reconciliation read APIs require `VIEW_BANK_RECONCILIATION` plus finalized-payment visibility for the requested finance-month scope when payment rows are part of the response.
 - Bank reconciliation write APIs require `MANAGE_BANK_RECONCILIATION` for the requested finance-month scope, a non-empty reason, an unlocked month, and audit logging.
+- Smart alert APIs that combine revenue, confidence, payment, and bank state require all underlying permissions and audit each sensitive data family viewed.
 - Revenue exports require both `EXPORT_REVENUE_REPORT` and `VIEW_REVENUE`.
 - Manual overrides require `CREATE_MANUAL_OVERRIDE`, a reason, and audit logging.
 - Override approval requires `APPROVE_MANUAL_OVERRIDE` and should be a different user from the creator.

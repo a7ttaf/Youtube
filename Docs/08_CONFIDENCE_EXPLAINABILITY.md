@@ -65,3 +65,11 @@ MANUAL_OVERRIDE_USED
 ## Foundation implementation note
 
 The first backend explain-number endpoint supports channel-month `adjusted_gross_revenue_usd`. It derives the value from persisted revenue facts and approved manual overrides only, records a `number_explanations` snapshot, and audits the read as sensitive revenue access. Pending overrides appear as warnings and are not applied.
+
+The backend now also exposes a month-level smart-alert engine for the internal
+finance command center. It derives alerts from stored SQL facts, official
+AdSense payment metadata, finance-entered bank reconciliation receipt rows,
+manual overrides, and finance month-close state. It does not invent missing
+money values or calculate net revenue. Alert reads are permission-checked for
+revenue, confidence, finalized payments, and bank reconciliation, then audited
+as sensitive finance access.

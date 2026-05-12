@@ -182,6 +182,14 @@ Twenty-third continuation update:
 - audited receipt writes as `BANK_RECONCILIATION_RECORDED` and summary reads as both `BANK_RECONCILIATION_VIEWED` and `PAYMENT_VIEWED`;
 - computed only a month-level bank gap from paid USD AdSense payments versus finance-normalized bank receipts, without allocating transfer/FX gaps, calculating net revenue, automating exchange rates, or making Neo4j a financial source of truth.
 
+Twenty-fourth continuation update:
+- added a deterministic month-level smart-alert engine for the internal finance command center;
+- added FastAPI `GET /revenue/months/{month}/smart-alerts`;
+- derived alerts only from SQL-backed revenue facts, manual overrides, AdSense payments, bank reconciliation entries, and finance month-close state;
+- required global `finance.view_revenue`, global `analytics.view_confidence`, and finance-month scoped finalized-payment and bank-reconciliation visibility;
+- audited smart-alert reads as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, and `BANK_RECONCILIATION_VIEWED`;
+- reported `MISSING_REVENUE_SOURCE`, `PAYMENT_NOT_MATCHED`, `BANK_AMOUNT_MISSING`, `UNEXPLAINED_GAP_HIGH`, `MONTH_NOT_LOCKED`, and `MANUAL_OVERRIDE_USED` without inventing missing revenue, allocating bank gaps, or calculating net revenue.
+
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`
 - `Docs/implementation/CODEX_PHASE_1_SUMMARY.md`
@@ -254,6 +262,7 @@ Twenty-third continuation update:
 - `backend/ums_smart_revenue/finance/explanations.py`
 - `backend/ums_smart_revenue/finance/month_close.py`
 - `backend/ums_smart_revenue/finance/payment_matching.py`
+- `backend/ums_smart_revenue/finance/smart_alerts.py`
 - `backend/ums_smart_revenue/org/__init__.py`
 - `backend/ums_smart_revenue/org/access_index.py`
 - `backend/ums_smart_revenue/org/bootstrap_registry.py`
@@ -282,6 +291,7 @@ Twenty-third continuation update:
 - `tests/api/test_payment_match_api.py`
 - `tests/api/test_raw_report_files_api.py`
 - `tests/api/test_revenue_explanations_api.py`
+- `tests/api/test_smart_alerts_api.py`
 - `tests/api/test_user_access_read_api.py`
 - `tests/api/test_user_accounts_api.py`
 - `tests/api/test_user_permissions_api.py`
@@ -310,6 +320,7 @@ Twenty-third continuation update:
 - `tests/db/test_security_orm.py`
 - `tests/finance/test_payment_matching.py`
 - `tests/finance/test_bank_reconciliation.py`
+- `tests/finance/test_smart_alerts.py`
 - `tests/graph/test_readonly_service.py`
 - `tests/org/test_sql_channel_registry.py`
 - `alembic.ini`
@@ -468,6 +479,10 @@ Pytest coverage includes:
 - Locked finance months reject bank reconciliation writes and persist no receipt rows.
 - Bank reconciliation ORM and migration preserve receipt date, bank reference, original receipt amount/currency, finance-normalized USD amount, transfer fee, FX difference, source report id, recorder metadata, and month/reference uniqueness.
 - Monthly bank reconciliation compares paid USD AdSense payment rows with finance-normalized bank receipt rows, reports month-level gaps, and excludes non-paid or non-USD payment rows from the paid USD total.
+- Monthly smart alerts combine existing SQL-backed finance signals into command-center alerts without calculating new money values.
+- Finance Viewer can read month smart alerts with sensitive revenue, payment, and bank-reconciliation audit events.
+- Assistant Analyst cannot read month smart alerts by default.
+- Smart alerts report payment mismatch, missing bank amount, high unexplained gaps, unlocked month state, missing revenue source, and approved manual override usage.
 
 ## Commands Run
 - `git status --short --branch` failed because this workspace is not a Git repository.
@@ -614,6 +629,16 @@ Pytest coverage includes:
 - `python -B -m alembic -c alembic.ini upgrade head --sql > "$env:TEMP\ums-bank-reconciliation-alembic.sql"` rendered migrations through `20260513_0001`.
 - `Select-String -Path "$env:TEMP\ums-bank-reconciliation-alembic.sql" -Pattern "bank_reconciliation_entries|20260513_0001"` confirmed the rendered bank reconciliation table and migration revision.
 - `git diff --check` passed with CRLF conversion warnings only after bank reconciliation implementation.
+- `python -B -m pytest tests/finance/test_smart_alerts.py tests/api/test_smart_alerts_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-smart-alerts-red-1"` first failed with missing smart-alert module and route support.
+- `python -B -m pytest tests/finance/test_smart_alerts.py tests/api/test_smart_alerts_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-smart-alerts-focused-final"` passed with 5 tests after implementation.
+- `python -m ruff check backend/ums_smart_revenue/finance/smart_alerts.py tests/finance/test_smart_alerts.py tests/api/test_smart_alerts_api.py` passed.
+- `python -m ruff check --select I backend/ums_smart_revenue/api/revenue.py backend/ums_smart_revenue/finance/manual_overrides.py` passed after import ordering.
+- `python -B -m pytest tests/auth tests/db tests/finance tests/graph tests/org tests/test_version_baseline.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-smart-alerts-nonapi"` passed with 95 tests.
+- `python -B -m pytest tests/api/test_smart_alerts_api.py tests/api/test_payment_match_api.py tests/api/test_bank_reconciliation_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-smart-alerts-api-core"` passed with 14 tests.
+- `python -B -m pytest tests/api/test_revenue_facts_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-smart-alerts-revenue-facts"` passed with 13 tests.
+- `python -B -m pytest tests/api/test_manual_overrides_api.py tests/api/test_finance_close_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-smart-alerts-api-close-overrides"` passed with 26 tests.
+- `python -B -m pytest tests/api/test_adsense_payments_api.py tests/api/test_revenue_explanations_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-smart-alerts-api-adsense-explain"` passed with 9 tests.
+- `git diff --check` passed with CRLF conversion warnings only after smart-alert implementation.
 
 ## Remaining Next Steps
 - Expand SQL audit persistence to each new sensitive endpoint as those routes are added.

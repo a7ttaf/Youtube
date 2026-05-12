@@ -46,6 +46,7 @@ from ums_smart_revenue.finance.manual_overrides import (
     RevenueManualOverrideEntry,
     SqlAlchemyManualOverrideRepository,
 )
+from ums_smart_revenue.finance.month_close import SqlAlchemyFinanceMonthCloseRepository
 from ums_smart_revenue.finance.payment_matching import (
     PaymentMatchValidationError,
     build_monthly_payment_match_summary,
@@ -64,6 +65,9 @@ from ums_smart_revenue.finance.revenue_facts import (
     SqlAlchemyRevenueFactRepository,
 )
 from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_summary
+from ums_smart_revenue.finance.smart_alerts import (
+    build_monthly_smart_alert_summary,
+)
 from ums_smart_revenue.org.access_index import load_org_access_index_from_session
 
 router = APIRouter(prefix="/revenue", tags=["revenue"])
@@ -192,6 +196,12 @@ def current_bank_reconciliation_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyBankReconciliationRepository:
     return SqlAlchemyBankReconciliationRepository(session)
+
+
+def current_finance_month_close_repository(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyFinanceMonthCloseRepository:
+    return SqlAlchemyFinanceMonthCloseRepository(session)
 
 
 def current_number_explanation_repository(
@@ -468,6 +478,114 @@ def get_month_payment_match(
     summary_api["audit_events"] = [
         audit_record_to_api(revenue_record),
         audit_record_to_api(payment_record),
+    ]
+    return summary_api
+
+
+@router.get("/months/{month}/smart-alerts")
+def get_month_smart_alerts(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    revenue_repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
+    payment_repository: Annotated[
+        SqlAlchemyAdSensePaymentRepository,
+        Depends(current_adsense_payment_repository),
+    ],
+    bank_repository: Annotated[
+        SqlAlchemyBankReconciliationRepository,
+        Depends(current_bank_reconciliation_repository),
+    ],
+    override_repository: Annotated[
+        SqlAlchemyManualOverrideRepository,
+        Depends(current_manual_override_repository),
+    ],
+    close_repository: Annotated[
+        SqlAlchemyFinanceMonthCloseRepository,
+        Depends(current_finance_month_close_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+) -> dict[str, object]:
+    global_scope = AccessScope.global_scope()
+    month_scope = AccessScope.finance_month(month)
+    _require_permission(user, Permission.VIEW_REVENUE, global_scope)
+    _require_permission(user, Permission.VIEW_CONFIDENCE, global_scope)
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
+    _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
+    try:
+        facts = revenue_repository.list_month_facts(month=month)
+        payments = payment_repository.list_month_payments(month=month)
+        bank_entries = bank_repository.list_month_entries(month=month)
+        manual_overrides = override_repository.list_month_overrides(month=month)
+        close = close_repository.get(month)
+        payment_match = build_monthly_payment_match_summary(
+            month=month,
+            facts=facts,
+            payments=payments,
+        )
+        bank_reconciliation = build_month_bank_reconciliation_summary(
+            month=month,
+            payments=payments,
+            bank_entries=bank_entries,
+        )
+    except (
+        AdSensePaymentValidationError,
+        BankReconciliationValidationError,
+        ManualOverrideValidationError,
+        PaymentMatchValidationError,
+        RevenueFactValidationError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    summary = build_monthly_smart_alert_summary(
+        month=month,
+        payment_match=payment_match,
+        bank_reconciliation=bank_reconciliation,
+        close_status=close.status if close else "OPEN",
+        manual_overrides=manual_overrides,
+    )
+    summary_api = summary.to_api()
+    audit_details = {
+        "status": summary.status,
+        "alert_count": len(summary.alerts),
+        "highest_severity": summary.highest_severity,
+    }
+    revenue_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="monthly_smart_alerts",
+        entity_id=month,
+        scope=global_scope,
+        details=audit_details,
+    )
+    payment_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.PAYMENT_VIEWED,
+        entity_type="monthly_smart_alerts",
+        entity_id=month,
+        scope=month_scope,
+        details=audit_details,
+    )
+    bank_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
+        entity_type="monthly_smart_alerts",
+        entity_id=month,
+        scope=month_scope,
+        details=audit_details,
+    )
+    summary_api["audit_events"] = [
+        audit_record_to_api(revenue_record),
+        audit_record_to_api(payment_record),
+        audit_record_to_api(bank_record),
     ]
     return summary_api
 

@@ -106,6 +106,7 @@ GET /revenue/channels?month=2026-03&group_id=abc&currency=USD
 GET /revenue/months/{month}/payment-match?currency=USD
 GET /revenue/months/{month}/bank-reconciliation
 POST /revenue/months/{month}/bank-reconciliation
+GET /revenue/months/{month}/smart-alerts
 POST /revenue/channels/{channel_id}/months/{month}/explain?metric=adjusted_gross_revenue_usd
 POST /revenue/recalculate
 ```
@@ -141,6 +142,21 @@ status, paid amount, received
 amount, month-level bank gap, transfer-fee and FX-difference totals, receipt
 entries, issues, and audit event metadata. Non-paid AdSense rows and non-USD
 payment rows are excluded from the paid USD comparison and reported as issues.
+
+`GET /revenue/months/{month}/smart-alerts` is an implemented month-level issue
+engine for the internal finance command center. It derives alerts only from SQL
+source-of-truth data already stored by the backend: monthly revenue facts,
+approved/pending manual overrides, official AdSense payment metadata,
+finance-entered bank reconciliation receipt rows, and finance month-close
+state. It requires global `finance.view_revenue`, global
+`analytics.view_confidence`, `finance.view_finalized_payments` for the requested
+finance-month scope, and `finance.view_bank_reconciliation` for the requested
+finance-month scope. The response includes alert codes such as
+`MISSING_REVENUE_SOURCE`, `PAYMENT_NOT_MATCHED`, `BANK_AMOUNT_MISSING`,
+`UNEXPLAINED_GAP_HIGH`, `MONTH_NOT_LOCKED`, and `MANUAL_OVERRIDE_USED`. Reads
+are audited as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, and
+`BANK_RECONCILIATION_VIEWED`. This endpoint does not calculate net revenue,
+allocate bank gaps, or use Neo4j as a financial source of truth.
 
 ### Finance close
 
