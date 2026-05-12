@@ -9,8 +9,8 @@ users (
   display_name text not null,
   status text not null default 'active',
   is_service_account boolean not null default false,
-  created_at timestamp,
-  updated_at timestamp
+  created_at timestamp not null default now(),
+  updated_at timestamp not null default now()
 );
 
 org_units (
@@ -56,8 +56,10 @@ User table constraints:
 
 - `status` is constrained to `active`, `disabled`, or `service`.
 - `uq_users_email_lower` enforces case-insensitive uniqueness on `lower(email)`.
-- Service users are represented by `is_service_account=true` and `status='service'`
-  unless explicitly disabled.
+- `ck_users_service_account_status` enforces the service-account/status invariant:
+  service accounts may use `service` or `disabled`, and human accounts may use
+  `active` or `disabled`.
+- `updated_at` is DB-defaulted and refreshed by the ORM when account rows change.
 
 ## Revenue tables
 
