@@ -58,11 +58,24 @@ DELETE /groups/{group_id}/members/{channel_id}
 ### Users and roles
 
 ```http
+POST /users
+PATCH /users/{user_id}
 POST /users/{user_id}/roles
 POST /users/{user_id}/roles/{assignment_id}/revoke
 POST /users/{user_id}/permissions
 POST /users/{user_id}/permissions/{grant_id}/revoke
 ```
+
+User create/update endpoints require `users.manage` and a non-empty reason capped at 500 characters.
+Service account creation and any `PATCH /users/{user_id}` updates to service
+accounts, including status or other account fields, require Super Owner.
+Every user account lifecycle change is audited as `USER_ACCOUNT_CHANGED`.
+`POST /users` is not backed by a separate server-side idempotency-key store in
+this phase; normalized email uniqueness is the retry guard, so duplicate create
+retries return `409 Conflict` and clients must treat that as a possible prior
+success after a timeout. User-account storage operations retry one transient
+database disconnect, operational error, or timeout, then fail closed with `503`
+instead of waiting indefinitely.
 
 Role assignment and revocation both require `roles.assign`. Super Owner assignment requires an existing Super Owner. Finance roles require Finance Admin or Super Owner authority. Every assignment and revocation is audited as `USER_ROLE_CHANGED`.
 

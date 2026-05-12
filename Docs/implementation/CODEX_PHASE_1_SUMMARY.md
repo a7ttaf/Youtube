@@ -129,6 +129,13 @@ Sixteenth continuation update:
 - audited direct permission grant and revocation as `USER_PERMISSION_CHANGED`.
 
 Seventeenth continuation update:
+- added a SQLAlchemy user-account repository and FastAPI `POST /users` plus `PATCH /users/{user_id}` routes;
+- enforced `users.manage` before creating or updating user accounts;
+- restricted service-account lifecycle changes to Super Owner authority;
+- normalized user email addresses and rejected duplicate emails case-insensitively;
+- audited user account create/update as `USER_ACCOUNT_CHANGED`.
+
+Eighteenth continuation update:
 - added a SQLAlchemy principal loader that builds `UserPrincipal` from active `user_role_assignments`, `user_permission_grants`, and `access_scopes`;
 - added `authz_source="database"` / `UMS_AUTHZ_SOURCE=database` app mode to use SQL as the runtime authorization source;
 - kept header-sourced principals as bootstrap/test mode so existing local tests remain explicit and stable;
@@ -173,6 +180,7 @@ Seventeenth continuation update:
 - `backend/ums_smart_revenue/auth/audit_service.py`
 - `backend/ums_smart_revenue/auth/sql_audit_sink.py`
 - `backend/ums_smart_revenue/auth/ui_metadata.py`
+- `backend/ums_smart_revenue/auth/users.py`
 - `backend/ums_smart_revenue/db/__init__.py`
 - `backend/ums_smart_revenue/db/explanation_models.py`
 - `backend/ums_smart_revenue/db/finance_models.py`
@@ -225,6 +233,7 @@ Seventeenth continuation update:
 - `tests/api/test_groups_api.py`
 - `tests/api/test_raw_report_files_api.py`
 - `tests/api/test_revenue_explanations_api.py`
+- `tests/api/test_user_accounts_api.py`
 - `tests/api/test_user_permissions_api.py`
 - `tests/api/test_user_roles_api.py`
 - `tests/api/test_guarded_routes.py`
@@ -369,6 +378,11 @@ Pytest coverage includes:
 - Corporate Admin can grant non-finance direct permissions but cannot grant or revoke finance direct permissions.
 - Assistant Analyst cannot grant direct permissions or probe target user ids.
 - Duplicate active direct permission grants are rejected.
+- Corporate Admin can create and disable human user accounts with `USER_ACCOUNT_CHANGED` audit events.
+- Assistant Analyst cannot create or update users.
+- Duplicate user emails are rejected case-insensitively.
+- Service account creation is restricted to Super Owner.
+- No-op user account updates are rejected before creating an audit event.
 - DB-backed principals use stored active role assignments instead of claimed header roles.
 - DB-backed principals load direct permission grants and use them on guarded routes.
 - DB-backed principals reject disabled users even when headers claim Super Owner.
@@ -434,6 +448,15 @@ Pytest coverage includes:
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-security" tests/api/test_user_roles_api.py tests/api/test_user_permissions_api.py` passed with 16 tests.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-full-permissions"` passed with 182 tests.
 - `git diff --check` passed with CRLF conversion warnings only.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-accounts-red" tests/api/test_user_accounts_api.py` first failed with missing `/users` account lifecycle routes.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-accounts-green" tests/api/test_user_accounts_api.py` passed with 7 tests after user account lifecycle APIs were added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-security-accounts" tests/api/test_user_accounts_api.py tests/api/test_user_roles_api.py tests/api/test_user_permissions_api.py` passed with 23 tests.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-full-user-accounts"` passed with 192 tests.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-accounts-noop-red" tests/api/test_user_accounts_api.py::test_user_update_requires_at_least_one_account_field` first failed because no-op updates returned `200`.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-accounts-noop-green" tests/api/test_user_accounts_api.py::test_user_update_requires_at_least_one_account_field` passed after update validation was added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-accounts-final" tests/api/test_user_accounts_api.py` passed with 8 tests.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-security-accounts-final" tests/api/test_user_accounts_api.py tests/api/test_user_roles_api.py tests/api/test_user_permissions_api.py` passed with 24 tests.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-full-user-accounts-final"` passed with 193 tests.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-userroles" tests/api/test_user_roles_api.py` first failed with missing `/users/{user_id}/roles`, then passed with 6 tests after user-role assignment APIs were added.
 - `git diff --check` passed with CRLF conversion warnings only after user-role assignment APIs were added.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-broad" tests/api tests/db tests/auth` passed with 146 tests after user-role assignment APIs were added.

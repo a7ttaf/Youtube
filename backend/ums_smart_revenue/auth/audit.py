@@ -19,6 +19,7 @@ class AuditEventType(str, Enum):
     MANUAL_OVERRIDE_APPROVED = "MANUAL_OVERRIDE_APPROVED"
     ALLOCATION_RULE_CHANGED = "ALLOCATION_RULE_CHANGED"
     EXPORT_CREATED = "EXPORT_CREATED"
+    USER_ACCOUNT_CHANGED = "USER_ACCOUNT_CHANGED"
     USER_ROLE_CHANGED = "USER_ROLE_CHANGED"
     USER_PERMISSION_CHANGED = "USER_PERMISSION_CHANGED"
     CONNECTOR_JOB_RUN = "CONNECTOR_JOB_RUN"
@@ -77,6 +78,11 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     AuditEventType.EXPORT_CREATED: AuditEventDefinition(
         AuditEventType.EXPORT_CREATED,
         permission=Permission.EXPORT_REVENUE_REPORT,
+    ),
+    AuditEventType.USER_ACCOUNT_CHANGED: AuditEventDefinition(
+        AuditEventType.USER_ACCOUNT_CHANGED,
+        reason_required=True,
+        permission=Permission.MANAGE_USERS,
     ),
     AuditEventType.USER_ROLE_CHANGED: AuditEventDefinition(
         AuditEventType.USER_ROLE_CHANGED,

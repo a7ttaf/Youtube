@@ -7,10 +7,14 @@ from ums_smart_revenue.db.security_models import AuditLogORM
 
 
 class SqlAlchemyAuditSink:
+    """Persist audit records through the request-scoped SQLAlchemy session."""
+
     def __init__(self, session: Session):
+        """Bind audit writes to the same transaction as the guarded mutation."""
         self._session = session
 
     def append(self, record: AuditRecord) -> None:
+        """Append one audit log row and flush so failures happen before commit."""
         user_id = _parse_uuid(record.user_id)
         self._session.add(
             AuditLogORM(
@@ -30,8 +34,14 @@ class SqlAlchemyAuditSink:
         )
         self._session.flush()
 
+    def rollback(self) -> None:
+        """Rollback and detach pending objects after fail-closed audit errors."""
+        self._session.rollback()
+        self._session.expunge_all()
+
 
 def _parse_uuid(value: str) -> UUID:
+    """Parse audit actor ids before writing SQL foreign-key references."""
     try:
         return UUID(value)
     except ValueError as exc:

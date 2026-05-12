@@ -103,6 +103,7 @@ Sensitive actions include:
 - creating or approving manual overrides;
 - locking or unlocking a finance month;
 - changing allocation rules;
+- creating, disabling, or updating user accounts;
 - assigning users to roles;
 - assigning direct scoped permissions;
 - changing channel/company/sector mapping;
@@ -124,6 +125,8 @@ Sensitive actions include:
 - Month lock/unlock requires `LOCK_FINANCE_MONTH` or `UNLOCK_FINANCE_MONTH` for the month scope.
 - Allocation changes require `CHANGE_ALLOCATION_RULE` for the month scope.
 - Connector administration requires `MANAGE_CONNECTORS`; running jobs requires `RUN_CONNECTOR_JOBS`.
+- User account creation and updates require `users.manage`, a reason, and a `USER_ACCOUNT_CHANGED` audit event.
+- Service account lifecycle changes require Super Owner authority.
 - Role assignment APIs require `roles.assign`; Super Owner assignment requires an existing Super Owner, and finance role assignment requires Finance Admin or Super Owner authority.
 - Direct permission grant APIs require `roles.assign`, enforce the target permission family, and audit every grant or revocation as `USER_PERMISSION_CHANGED`.
 - Finance direct grants such as `finance.view_revenue`, `exports.revenue`, and `graph.view_finance` require Finance Admin or Super Owner.

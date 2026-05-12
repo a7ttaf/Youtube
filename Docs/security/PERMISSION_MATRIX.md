@@ -28,7 +28,7 @@
 | `graph.view_finance` | View graph nodes or edges containing money values. | Yes |
 | `audit.view` | View audit log entries. | Yes |
 | `audit.view_sensitive_payloads` | View unmasked sensitive audit payloads. | Yes |
-| `users.manage` | Create/update users. | Yes |
+| `users.manage` | Create, update, disable, or reactivate user accounts. | Yes |
 | `roles.assign` | Assign or revoke user roles. | Yes |
 | `platform.manage_settings` | Manage platform-level settings. | Yes |
 
@@ -58,6 +58,7 @@
 - Corporate Admin can assign operational roles but cannot grant finance permissions unless also Finance Admin or Super Owner.
 - Finance Admin can assign finance roles but cannot assign Super Owner.
 - Direct permission grants require `roles.assign`, a compatible scope type, and family-specific grant authority.
+- User account create/update requires `users.manage`, but service account lifecycle changes require Super Owner.
 - Finance direct grants require Finance Admin or Super Owner; connector/raw-file direct grants require Connector Admin or Super Owner; administrative direct grants require Super Owner.
 - Export Operator requires underlying view permission for the export scope.
 - Graph `revenue-flow` views require both `graph.view` and `graph.view_finance`.

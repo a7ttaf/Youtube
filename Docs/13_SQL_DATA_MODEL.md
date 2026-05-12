@@ -3,6 +3,16 @@
 ## Core app tables
 
 ```sql
+users (
+  id uuid primary key,
+  email text not null,
+  display_name text not null,
+  status text not null default 'active',
+  is_service_account boolean not null default false,
+  created_at timestamp not null default now(),
+  updated_at timestamp not null default now()
+);
+
 org_units (
   id uuid primary key,
   parent_id uuid null,
@@ -41,6 +51,15 @@ channel_group_members (
   primary key (group_id, channel_id)
 );
 ```
+
+User table constraints:
+
+- `status` is constrained to `active`, `disabled`, or `service`.
+- `uq_users_email_lower` enforces case-insensitive uniqueness on `lower(email)`.
+- `ck_users_service_account_status` enforces the service-account/status invariant:
+  service accounts may use `service` or `disabled`, and human accounts may use
+  `active` or `disabled`.
+- `updated_at` is DB-defaulted and refreshed by the ORM when account rows change.
 
 ## Revenue tables
 
