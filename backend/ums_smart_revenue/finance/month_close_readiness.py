@@ -9,6 +9,7 @@ from ums_smart_revenue.db.finance_models import (
     RevenueManualOverrideORM,
 )
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
+from ums_smart_revenue.finance.month_close import acquire_finance_month_advisory_lock
 from ums_smart_revenue.finance.reconciliation import (
     build_revenue_reconciliation_issue_queue,
 )
@@ -73,8 +74,10 @@ class SqlAlchemyFinanceCloseReadinessService:
     def check_month(
         self, month: str, *, for_update: bool = False
     ) -> FinanceCloseReadiness:
-        """Return readiness, optionally locking rows for a close attempt."""
+        """Return readiness, optionally guarding the close attempt transaction."""
         _validate_month(month)
+        if for_update:
+            acquire_finance_month_advisory_lock(self._session, month)
         blockers: list[FinanceCloseBlocker] = []
         pending_override_count = self._pending_manual_override_count(
             month, for_update=for_update

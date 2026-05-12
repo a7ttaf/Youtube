@@ -126,11 +126,12 @@ unresolved reconciliation issues, and active registry channels marked
 performance-only or not revenue-required do not block month close.
 
 Lock requests must not trust a prior `GET /finance-close/{month}/readiness`
-response. They acquire the `finance_month_close` row, then re-run readiness in
-the same transaction with row locks on matching pending overrides, missing
-revenue-required channel rows, and monthly revenue facts. At the default
-read-committed isolation level, revenue fact and manual-override writes use the
-same month-close row lock and therefore serialize with lock/unlock operations.
+response. They acquire a transaction-scoped finance-month advisory guard and
+the `finance_month_close` row, then re-run readiness in the same transaction
+with row locks on matching pending overrides, missing revenue-required channel
+rows, and monthly revenue facts. At the default read-committed isolation level,
+revenue fact and manual-override writes acquire the same month guard before
+committing month-scoped changes, so they serialize with lock/unlock operations.
 Channel registry state committed before the lock-time recheck is authoritative
 for the close decision; registry changes committed later require an unlock and
 new close cycle if they affect a locked month.

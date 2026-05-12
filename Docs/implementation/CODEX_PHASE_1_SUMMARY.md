@@ -154,7 +154,7 @@ Twentieth continuation update:
 - added a `MISSING_REVENUE_FACTS` close blocker surfaced through `GET /finance-close/{month}/readiness` and lock conflict responses;
 - kept performance-only or non-revenue-required channels from blocking close when they have no revenue facts;
 - preserved the existing blockers for pending manual overrides and unresolved reconciliation issues;
-- hardened lock attempts to acquire the month-close row and re-run readiness with row locks on matching pending overrides, missing revenue-required channel rows, and monthly revenue facts so stale readiness snapshots cannot authorize a lock.
+- hardened lock attempts to acquire a transaction-scoped finance-month guard plus the month-close row, then re-run readiness with row locks on matching pending overrides, missing revenue-required channel rows, and monthly revenue facts so stale readiness snapshots and concurrent month-scoped writers cannot authorize an invalid lock.
 
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`

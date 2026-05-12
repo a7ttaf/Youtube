@@ -1,12 +1,15 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from hashlib import blake2b
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM
+
+_FINANCE_MONTH_LOCK_KEY_PREFIX = "finance-month-close:"
 
 
 @dataclass(frozen=True)
@@ -45,7 +48,7 @@ class FinanceMonthCloseReadinessError(ValueError):
 
 
 class SqlAlchemyFinanceMonthCloseRepository:
-    """Persist and mutate finance month close control rows with row locks."""
+    """Persist and mutate finance month close control rows with month locks."""
 
     def __init__(self, session: Session):
         self._session = session
@@ -60,7 +63,7 @@ class SqlAlchemyFinanceMonthCloseRepository:
         return self._to_entry(self._get_or_create_row(month))
 
     def lock_month(self, *, month: str, actor_user_id: str) -> FinanceMonthCloseEntry:
-        """Lock month after a row-locked, current readiness recheck passes."""
+        """Lock month after a guarded, current readiness recheck passes."""
         from ums_smart_revenue.finance.month_close_readiness import (
             SqlAlchemyFinanceCloseReadinessService,
         )
@@ -81,7 +84,7 @@ class SqlAlchemyFinanceMonthCloseRepository:
         return self._to_entry(row)
 
     def unlock_month(self, *, month: str, actor_user_id: str) -> FinanceMonthCloseEntry:
-        """Reopen a locked month while holding the close row lock."""
+        """Reopen a locked month while holding the month close guard."""
         row = self._get_or_create_row(month, for_update=True)
         if row.status != "LOCKED":
             raise ValueError(f"Finance month is not locked: {month}")
@@ -112,7 +115,7 @@ class SqlAlchemyFinanceMonthCloseRepository:
     def _get_or_create_row(
         self, month: str, *, for_update: bool = False
     ) -> FinanceMonthCloseORM:
-        """Return the ORM row, optionally acquiring a database row lock."""
+        """Return the ORM row, optionally acquiring the month close guard."""
         return get_or_create_month_close_row(
             self._session, month, for_update=for_update
         )
@@ -146,7 +149,9 @@ def get_or_create_month_close_row(
     *,
     for_update: bool = False,
 ) -> FinanceMonthCloseORM:
-    """Return or create the close row, using a savepoint for insert races."""
+    """Return or create the close row, guarding month writers when requested."""
+    if for_update:
+        acquire_finance_month_advisory_lock(session, month)
     statement = select(FinanceMonthCloseORM).where(FinanceMonthCloseORM.month == month)
     if for_update:
         statement = statement.with_for_update()
@@ -162,3 +167,22 @@ def get_or_create_month_close_row(
         except IntegrityError:
             row = session.scalars(statement).one()
     return row
+
+
+def acquire_finance_month_advisory_lock(session: Session, month: str) -> None:
+    """Acquire the transaction-scoped month guard used by close and writer paths."""
+    if session.get_bind().dialect.name != "postgresql":
+        return
+    session.execute(
+        text("SELECT pg_advisory_xact_lock(:lock_key)"),
+        {"lock_key": _finance_month_advisory_lock_key(month)},
+    )
+
+
+def _finance_month_advisory_lock_key(month: str) -> int:
+    """Return a stable signed 64-bit advisory-lock key for a finance month."""
+    digest = blake2b(
+        f"{_FINANCE_MONTH_LOCK_KEY_PREFIX}{month}".encode(),
+        digest_size=8,
+    ).digest()
+    return int.from_bytes(digest, byteorder="big", signed=True)
