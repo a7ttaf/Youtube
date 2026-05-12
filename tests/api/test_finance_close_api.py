@@ -15,6 +15,7 @@ from ums_smart_revenue.db.finance_models import (
 )
 from ums_smart_revenue.db.org_models import OrgBase, YouTubeChannelORM
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.finance.month_close import FinanceMonthCloseEntry
 from ums_smart_revenue.finance.month_close_readiness import (
     FinanceCloseReadiness,
     SqlAlchemyFinanceCloseReadinessService,
@@ -54,6 +55,26 @@ def seed_database(database_url: str) -> None:
             )
         )
         session.commit()
+
+
+def test_finance_close_entry_to_api_copies_allocation_rule_payload():
+    payload = {"basis": "gross_revenue_usd"}
+    entry = FinanceMonthCloseEntry(
+        month="2026-03",
+        status="OPEN",
+        allocation_method="gross_revenue_proportional",
+        allocation_rule_payload=payload,
+        locked_by=None,
+        locked_at=None,
+        unlocked_by=None,
+        unlocked_at=None,
+    )
+
+    api_payload = entry.to_api()
+    api_payload["allocation_rule_payload"]["basis"] = "mutated"
+
+    assert entry.allocation_rule_payload == {"basis": "gross_revenue_usd"}
+    assert payload == {"basis": "gross_revenue_usd"}
 
 
 def test_finance_admin_can_lock_month_with_audit(tmp_path):
