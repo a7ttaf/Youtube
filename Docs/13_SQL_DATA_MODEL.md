@@ -166,6 +166,14 @@ channel_net_revenue (
 );
 ```
 
+Implementation note:
+The first net-revenue API is read-only and does not persist this
+`channel_net_revenue` table yet. It derives month/channel summaries from
+`monthly_channel_revenue_facts.net_revenue_usd` and approved
+`revenue_manual_overrides` only. Channels whose primary source has no official
+net value are reported as missing source data rather than backfilled from tax,
+payment, bank, or allocation assumptions.
+
 ## Explanation and audit tables
 
 ```sql

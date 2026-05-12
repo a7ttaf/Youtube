@@ -190,6 +190,15 @@ Twenty-fourth continuation update:
 - audited smart-alert reads as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, and `BANK_RECONCILIATION_VIEWED`;
 - reported `MISSING_REVENUE_SOURCE`, `PAYMENT_NOT_MATCHED`, `BANK_AMOUNT_MISSING`, `UNEXPLAINED_GAP_HIGH`, `MONTH_NOT_LOCKED`, and `MANUAL_OVERRIDE_USED` without inventing missing revenue, allocating bank gaps, or calculating net revenue.
 
+Twenty-fifth continuation update:
+- added a deterministic source-backed net-revenue summary foundation;
+- added FastAPI `GET /revenue/months/{month}/net-revenue`;
+- supported `global`, `sector`, `company`, and `channel` revenue scopes with `finance.view_revenue` and `analytics.view_confidence` checks;
+- calculated net revenue only from official SQL revenue fact `net_revenue_usd` plus approved manual revenue overrides;
+- reported `NET_REVENUE_SOURCE_MISSING` when a primary source lacks net revenue instead of inventing tax, deductions, or allocated bank/payment gaps;
+- audited net-revenue summary reads as `REVENUE_VIEWED`;
+- kept calculated values read-only and did not persist `channel_net_revenue` rows yet.
+
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`
 - `Docs/implementation/CODEX_PHASE_1_SUMMARY.md`
@@ -261,6 +270,7 @@ Twenty-fourth continuation update:
 - `backend/ums_smart_revenue/finance/bank_reconciliation.py`
 - `backend/ums_smart_revenue/finance/explanations.py`
 - `backend/ums_smart_revenue/finance/month_close.py`
+- `backend/ums_smart_revenue/finance/net_revenue.py`
 - `backend/ums_smart_revenue/finance/payment_matching.py`
 - `backend/ums_smart_revenue/finance/smart_alerts.py`
 - `backend/ums_smart_revenue/org/__init__.py`
@@ -290,6 +300,7 @@ Twenty-fourth continuation update:
 - `tests/api/test_groups_api.py`
 - `tests/api/test_payment_match_api.py`
 - `tests/api/test_raw_report_files_api.py`
+- `tests/api/test_net_revenue_api.py`
 - `tests/api/test_revenue_explanations_api.py`
 - `tests/api/test_smart_alerts_api.py`
 - `tests/api/test_user_access_read_api.py`
@@ -320,6 +331,7 @@ Twenty-fourth continuation update:
 - `tests/db/test_security_orm.py`
 - `tests/finance/test_payment_matching.py`
 - `tests/finance/test_bank_reconciliation.py`
+- `tests/finance/test_net_revenue.py`
 - `tests/finance/test_smart_alerts.py`
 - `tests/graph/test_readonly_service.py`
 - `tests/org/test_sql_channel_registry.py`
@@ -483,6 +495,10 @@ Pytest coverage includes:
 - Finance Viewer can read month smart alerts with sensitive revenue, payment, and bank-reconciliation audit events.
 - Assistant Analyst cannot read month smart alerts by default.
 - Smart alerts report payment mismatch, missing bank amount, high unexplained gaps, unlocked month state, missing revenue source, and approved manual override usage.
+- Channel net revenue uses official source `net_revenue_usd` and approved manual revenue overrides only.
+- Month net revenue totals include calculated channel net/deductions while counting channels whose primary source lacks net values.
+- Finance Viewer can read scoped month net-revenue summaries with a sensitive `REVENUE_VIEWED` audit event.
+- Assistant Analyst cannot read month net-revenue summaries by default, and non-USD net-revenue reads are rejected until exchange-rate support exists.
 
 ## Commands Run
 - `git status --short --branch` failed because this workspace is not a Git repository.
@@ -639,6 +655,17 @@ Pytest coverage includes:
 - `python -B -m pytest tests/api/test_manual_overrides_api.py tests/api/test_finance_close_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-smart-alerts-api-close-overrides"` passed with 26 tests.
 - `python -B -m pytest tests/api/test_adsense_payments_api.py tests/api/test_revenue_explanations_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-smart-alerts-api-adsense-explain"` passed with 9 tests.
 - `git diff --check` passed with CRLF conversion warnings only after smart-alert implementation.
+- `python -B -m pytest tests/finance/test_net_revenue.py tests/api/test_net_revenue_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-net-revenue-red-1"` first failed with missing net-revenue module and route support.
+- `python -B -m pytest tests/finance/test_net_revenue.py tests/api/test_net_revenue_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-net-revenue-green-1"` passed with 6 tests after implementation.
+- `python -B -m pytest tests/finance/test_net_revenue.py tests/api/test_net_revenue_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-net-revenue-focused-2"` passed with 6 tests after formatting cleanup.
+- `python -m ruff check backend/ums_smart_revenue/finance/net_revenue.py tests/finance/test_net_revenue.py tests/api/test_net_revenue_api.py` passed.
+- `python -m ruff check --select I backend/ums_smart_revenue/api/revenue.py backend/ums_smart_revenue/finance/net_revenue.py` passed.
+- `python -B -m pytest tests/api/test_net_revenue_api.py tests/api/test_revenue_facts_api.py tests/api/test_revenue_explanations_api.py tests/api/test_manual_overrides_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-net-revenue-api-related-1"` passed with 27 tests.
+- `python -B -m pytest tests/finance/test_net_revenue.py tests/finance/test_revenue_summary.py tests/finance/test_revenue_reconciliation.py tests/finance/test_payment_matching.py tests/finance/test_smart_alerts.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-net-revenue-finance-related-1"` passed with 17 tests.
+- `python -B -m pytest tests/api/test_smart_alerts_api.py tests/api/test_payment_match_api.py tests/api/test_bank_reconciliation_api.py tests/api/test_finance_close_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-net-revenue-month-routes"` passed with 32 tests.
+- `python -B -m pytest tests/auth tests/db tests/finance tests/graph tests/org tests/test_version_baseline.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-net-revenue-nonapi"` passed with 98 tests.
+- `python -B -m pytest tests/finance/test_net_revenue.py tests/api/test_net_revenue_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-net-revenue-final-focused"` passed with 6 tests after final API helper formatting.
+- `git diff --check` passed with CRLF conversion warnings only after net-revenue implementation.
 
 ## Remaining Next Steps
 - Expand SQL audit persistence to each new sensitive endpoint as those routes are added.

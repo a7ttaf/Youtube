@@ -107,6 +107,7 @@ GET /revenue/months/{month}/payment-match?currency=USD
 GET /revenue/months/{month}/bank-reconciliation
 POST /revenue/months/{month}/bank-reconciliation
 GET /revenue/months/{month}/smart-alerts
+GET /revenue/months/{month}/net-revenue?scope_type=company&scope_id=123&currency=USD
 POST /revenue/channels/{channel_id}/months/{month}/explain?metric=adjusted_gross_revenue_usd
 POST /revenue/recalculate
 ```
@@ -157,6 +158,16 @@ finance-month scope. The response includes alert codes such as
 are audited as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, and
 `BANK_RECONCILIATION_VIEWED`. This endpoint does not calculate net revenue,
 allocate bank gaps, or use Neo4j as a financial source of truth.
+
+`GET /revenue/months/{month}/net-revenue` is an implemented read-only net
+revenue foundation for `global`, `sector`, `company`, and `channel` scopes. It
+requires `finance.view_revenue` and `analytics.view_confidence` for the
+requested scope, audits `REVENUE_VIEWED`, and currently supports `USD` only. It
+uses the selected primary SQL revenue fact's official `net_revenue_usd` plus
+approved manual revenue overrides. Missing source net values are returned as
+`NET_REVENUE_SOURCE_MISSING` channel issues and counted at month level. The
+endpoint does not persist calculated rows, allocate bank/payment gaps, invent
+tax values, or use Neo4j as a financial source of truth.
 
 ### Finance close
 

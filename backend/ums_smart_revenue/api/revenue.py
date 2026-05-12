@@ -47,6 +47,11 @@ from ums_smart_revenue.finance.manual_overrides import (
     SqlAlchemyManualOverrideRepository,
 )
 from ums_smart_revenue.finance.month_close import SqlAlchemyFinanceMonthCloseRepository
+from ums_smart_revenue.finance.net_revenue import (
+    NetRevenueValidationError,
+    build_month_net_revenue_summary,
+    normalize_net_revenue_currency,
+)
 from ums_smart_revenue.finance.payment_matching import (
     PaymentMatchValidationError,
     build_monthly_payment_match_summary,
@@ -590,6 +595,75 @@ def get_month_smart_alerts(
     return summary_api
 
 
+@router.get("/months/{month}/net-revenue")
+def get_month_net_revenue(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    revenue_repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
+    override_repository: Annotated[
+        SqlAlchemyManualOverrideRepository,
+        Depends(current_manual_override_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    scope_type: Annotated[str, Query(min_length=1)] = "global",
+    scope_id: str | None = None,
+    currency: Annotated[str, Query(min_length=1)] = "USD",
+) -> dict[str, object]:
+    target_scope, channel_ids = _revenue_read_scope_to_channel_ids(
+        scope_type=scope_type,
+        scope_id=scope_id,
+        org_index=org_index,
+    )
+    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    try:
+        normalize_net_revenue_currency(currency)
+        facts = revenue_repository.list_month_facts(
+            month=month,
+            youtube_channel_ids=channel_ids,
+        )
+        overrides = override_repository.list_month_overrides(
+            month=month,
+            youtube_channel_ids=channel_ids,
+        )
+        summary = build_month_net_revenue_summary(
+            month=month,
+            facts=facts,
+            manual_overrides=overrides,
+        )
+    except (
+        ManualOverrideValidationError,
+        NetRevenueValidationError,
+        RevenueFactValidationError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    summary_api = summary.to_api()
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="monthly_net_revenue_summary",
+        entity_id=f"{month}:{scope_type}:{scope_id or 'global'}",
+        scope=target_scope,
+        details={
+            "status": summary.status,
+            "channel_count": summary.channel_count,
+            "calculated_channel_count": summary.calculated_channel_count,
+            "missing_net_source_count": summary.missing_net_source_count,
+        },
+    )
+    summary_api["audit_event"] = audit_record_to_api(record)
+    return summary_api
+
+
 @router.post(
     "/months/{month}/bank-reconciliation",
     status_code=status.HTTP_201_CREATED,
@@ -964,6 +1038,57 @@ def _intersect_channel_sets(left: set[str] | None, right: set[str] | None) -> se
     if right is None:
         return left
     return left & right
+
+
+def _revenue_read_scope_to_channel_ids(
+    *,
+    scope_type: str,
+    scope_id: str | None,
+    org_index: OrgAccessIndex,
+) -> tuple[AccessScope, set[str] | None]:
+    normalized_scope_type = scope_type.strip()
+    normalized_scope_id = (
+        scope_id.strip() if isinstance(scope_id, str) else scope_id
+    )
+    if normalized_scope_type == "global":
+        if normalized_scope_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="scope_id must be omitted for global revenue reads",
+            )
+        return AccessScope.global_scope(), None
+    if not normalized_scope_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "scope_id is required for revenue scope_type: "
+                f"{normalized_scope_type}"
+            ),
+        )
+    if normalized_scope_type == "sector":
+        return (
+            AccessScope.sector(normalized_scope_id),
+            {
+                channel_id
+                for channel_id, sector_id in org_index.channel_sector.items()
+                if sector_id == normalized_scope_id
+            },
+        )
+    if normalized_scope_type == "company":
+        return (
+            AccessScope.company(normalized_scope_id),
+            {
+                channel_id
+                for channel_id, company_id in org_index.channel_company.items()
+                if company_id == normalized_scope_id
+            },
+        )
+    if normalized_scope_type == "channel":
+        return AccessScope.channel(normalized_scope_id), {normalized_scope_id}
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=f"Unknown revenue scope_type: {scope_type}",
+    )
 
 
 def audit_record_to_api(record: AuditRecord) -> dict[str, object]:
