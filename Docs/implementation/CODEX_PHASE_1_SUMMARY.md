@@ -142,6 +142,13 @@ Eighteenth continuation update:
 - made database-backed principals ignore header role/scope claims;
 - fail-closed for disabled or unregistered database users before route handlers run.
 
+Nineteenth continuation update:
+- added guarded `GET /users` account listing with bounded pagination and optional status filtering;
+- added guarded `GET /users/{user_id}/access` to return a user's active scoped role assignments and active direct permission grants;
+- enforced `users.manage` before access-profile target id parsing so unauthorized callers cannot probe account ids;
+- returned assignment and grant identifiers in access profiles so admin UI workflows can revoke active access explicitly;
+- kept revoked historical access out of the active profile, leaving history to audit and future access-history endpoints.
+
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`
 - `Docs/implementation/CODEX_PHASE_1_SUMMARY.md`
@@ -233,6 +240,7 @@ Eighteenth continuation update:
 - `tests/api/test_groups_api.py`
 - `tests/api/test_raw_report_files_api.py`
 - `tests/api/test_revenue_explanations_api.py`
+- `tests/api/test_user_access_read_api.py`
 - `tests/api/test_user_accounts_api.py`
 - `tests/api/test_user_permissions_api.py`
 - `tests/api/test_user_roles_api.py`
@@ -383,6 +391,9 @@ Pytest coverage includes:
 - Duplicate user emails are rejected case-insensitively.
 - Service account creation is restricted to Super Owner.
 - No-op user account updates are rejected before creating an audit event.
+- Corporate Admin can list user accounts with bounded pagination and status filtering.
+- Corporate Admin can read a user's active access profile, including scoped role assignments and direct grants.
+- Assistant Analyst cannot list users or probe access-profile target ids.
 - DB-backed principals use stored active role assignments instead of claimed header roles.
 - DB-backed principals load direct permission grants and use them on guarded routes.
 - DB-backed principals reject disabled users even when headers claim Super Owner.
@@ -467,6 +478,18 @@ Pytest coverage includes:
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-db-principals-docs" tests/api/test_database_principals.py` passed with 4 tests after documentation updates.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-authz-slice" tests/api/test_database_principals.py tests/api/test_user_roles_api.py tests/api/test_user_permissions_api.py tests/auth` passed with 43 tests.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-full-db-principals"` passed with 189 tests.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-access-red" tests/api/test_user_access_read_api.py` first exposed a test-fixture duplicate-scope issue under SQLite, then the corrected red run failed with missing `GET /users` and `GET /users/{user_id}/access`.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-access-green" tests/api/test_user_access_read_api.py` passed with 5 tests after user access read APIs were added.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-access-related" tests/api/test_user_access_read_api.py tests/api/test_user_accounts_api.py tests/api/test_user_roles_api.py tests/api/test_user_permissions_api.py` passed with 56 tests.
+- `python -m ruff check backend tests` was attempted and showed existing repo-wide style debt outside this slice; changed-file Ruff validation was used for this branch.
+- `python -m ruff check backend/ums_smart_revenue/api/users.py backend/ums_smart_revenue/auth/users.py tests/api/test_user_access_read_api.py` passed.
+- `git diff --check` passed with CRLF conversion warnings only.
+- Full-suite pytest exceeded the local command timeout in this Windows workspace, so orphaned pytest processes were stopped and the suite was validated in captured chunks.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-access-nonapi" tests/auth tests/db tests/finance tests/graph tests/org tests/test_version_baseline.py` passed with 74 tests.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-access-related-final" tests/api/test_user_access_read_api.py tests/api/test_user_accounts_api.py tests/api/test_user_roles_api.py tests/api/test_user_permissions_api.py` passed with 56 tests.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-api-core-final" tests/api/test_app.py tests/api/test_audit_api.py tests/api/test_channels_api.py tests/api/test_connectors_api.py tests/api/test_groups_api.py tests/api/test_guarded_routes.py tests/api/test_sql_backed_channel_dependencies.py` passed with 42 tests.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-api-revenue-final" tests/api/test_exports_api.py tests/api/test_finance_close_api.py tests/api/test_manual_overrides_api.py tests/api/test_raw_report_files_api.py tests/api/test_revenue_explanations_api.py tests/api/test_revenue_facts_api.py` passed with 53 tests.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-db-principals-final" tests/api/test_database_principals.py` passed with 21 tests.
 
 ## Remaining Next Steps
 - Expand SQL audit persistence to each new sensitive endpoint as those routes are added.

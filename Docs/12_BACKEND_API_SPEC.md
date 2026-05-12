@@ -58,6 +58,8 @@ DELETE /groups/{group_id}/members/{channel_id}
 ### Users and roles
 
 ```http
+GET /users
+GET /users/{user_id}/access
 POST /users
 PATCH /users/{user_id}
 POST /users/{user_id}/roles
@@ -65,6 +67,13 @@ POST /users/{user_id}/roles/{assignment_id}/revoke
 POST /users/{user_id}/permissions
 POST /users/{user_id}/permissions/{grant_id}/revoke
 ```
+
+`GET /users` requires `users.manage` and returns a bounded, email-sorted page
+of user accounts with optional status filtering. `GET /users/{user_id}/access`
+also requires `users.manage` before target-id parsing and returns the user's
+active scoped role assignments and active direct permission grants, including
+assignment/grant ids for follow-up revocation workflows. Revoked historical rows
+remain available through audit/history surfaces rather than the active profile.
 
 User create/update endpoints require `users.manage` and a non-empty reason capped at 500 characters.
 Service account creation and any `PATCH /users/{user_id}` updates to service

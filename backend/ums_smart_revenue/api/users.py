@@ -1,7 +1,7 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, StrictBool, field_validator, model_validator
 from sqlalchemy.orm import Session
 
@@ -266,6 +266,70 @@ def current_user_permission_grant_repository(
 ) -> SqlAlchemyUserPermissionGrantRepository:
     """FastAPI dependency: provide a scoped permission grant repository."""
     return SqlAlchemyUserPermissionGrantRepository(session)
+
+
+@router.get("")
+def list_user_accounts(
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[
+        SqlAlchemyUserAccountRepository, Depends(current_user_account_repository)
+    ],
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    status_filter: Annotated[str | None, Query(alias="status")] = None,
+) -> dict[str, object]:
+    """List user accounts for access administration; requires MANAGE_USERS."""
+    _require_user_management_permission(user)
+    try:
+        items, has_more = repository.list_users(
+            limit=limit,
+            offset=offset,
+            status=status_filter,
+        )
+    except UserAccountValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    except UserAccountStorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
+
+    return {
+        "items": [item.to_api() for item in items],
+        "pagination": {
+            "limit": limit,
+            "offset": offset,
+            "returned": len(items),
+            "has_more": has_more,
+        },
+    }
+
+
+@router.get("/{user_id}/access")
+def get_user_access_profile(
+    user_id: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[
+        SqlAlchemyUserAccountRepository, Depends(current_user_account_repository)
+    ],
+) -> dict[str, object]:
+    """Return a user's active roles and direct grants; requires MANAGE_USERS."""
+    _require_user_management_permission(user)
+    try:
+        return repository.get_access_profile(user_id=user_id).to_api()
+    except UserAccountNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except UserAccountValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    except UserAccountStorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
