@@ -499,8 +499,8 @@ def test_create_user_rolls_back_account_when_audit_recording_fails(
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
 
-    def fail_audit_recording(**kwargs):
-        raise RuntimeError("audit sink unavailable")
+    def fail_audit_recording(**_kwargs: object) -> None:
+        raise RuntimeError
 
     monkeypatch.setattr(users_api, "record_audit_event", fail_audit_recording)
     client = TestClient(
@@ -529,6 +529,60 @@ def test_create_user_rolls_back_account_when_audit_recording_fails(
     assert response.json()["detail"] == "Audit logging unavailable"
     assert persisted_user is None
     assert audit_logs == []
+
+
+def test_patch_user_rolls_back_account_when_audit_recording_fails(
+    tmp_path,
+    monkeypatch,
+):
+    """Fail closed and rollback account updates when PATCH audit logging fails."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(
+        create_app(database_url=database_url),
+        raise_server_exceptions=False,
+    )
+    create_response = client.post(
+        "/users",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "email": "patch-audit-failure@example.com",
+            "display_name": "Patch Audit User",
+            "reason": "Create user before patch audit rollback",
+        },
+    )
+    assert create_response.status_code == 201
+    user_id = create_response.json()["id"]
+
+    def fail_audit_recording(**_kwargs: object) -> None:
+        raise RuntimeError
+
+    monkeypatch.setattr(users_api, "record_audit_event", fail_audit_recording)
+
+    response = client.patch(
+        f"/users/{user_id}",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "display_name": "Patch Audit Failed",
+            "status": "disabled",
+            "reason": "Exercise patch audit rollback",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        persisted_user = session.get(UserORM, UUID(user_id))
+        audit_logs = session.scalars(
+            select(AuditLogORM).order_by(AuditLogORM.created_at, AuditLogORM.id)
+        ).all()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Audit logging unavailable"
+    assert persisted_user is not None
+    assert persisted_user.display_name == "Patch Audit User"
+    assert persisted_user.status == "active"
+    assert len(audit_logs) == 1
+    assert audit_logs[0].reason == "Create user before patch audit rollback"
 
 
 def test_patch_rejects_unknown_user_status_enum(tmp_path):
