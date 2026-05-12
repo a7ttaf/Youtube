@@ -49,11 +49,15 @@ DELETE /groups/{group_id}/members/{channel_id}
 ### Users and roles
 
 ```http
+POST /users
+PATCH /users/{user_id}
 POST /users/{user_id}/roles
 POST /users/{user_id}/roles/{assignment_id}/revoke
 POST /users/{user_id}/permissions
 POST /users/{user_id}/permissions/{grant_id}/revoke
 ```
+
+User create/update endpoints require `users.manage` and a non-empty reason. Service account creation or status changes require Super Owner. Every user account lifecycle change is audited as `USER_ACCOUNT_CHANGED`.
 
 Role assignment and revocation both require `roles.assign`. Super Owner assignment requires an existing Super Owner. Finance roles require Finance Admin or Super Owner authority. Every assignment and revocation is audited as `USER_ROLE_CHANGED`.
 

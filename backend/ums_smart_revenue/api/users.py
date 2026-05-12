@@ -1,7 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
@@ -24,6 +24,12 @@ from ums_smart_revenue.auth.user_permissions import (
     UserPermissionGrantConflictError,
     UserPermissionGrantNotFoundError,
     UserPermissionGrantValidationError,
+)
+from ums_smart_revenue.auth.users import (
+    SqlAlchemyUserAccountRepository,
+    UserAccountConflictError,
+    UserAccountNotFoundError,
+    UserAccountValidationError,
 )
 
 
@@ -88,6 +94,56 @@ class UserRoleAssignRequest(BaseModel):
         return value
 
 
+class UserAccountCreateRequest(BaseModel):
+    email: str = Field(min_length=1)
+    display_name: str = Field(min_length=1)
+    is_service_account: bool = False
+    reason: str = Field(min_length=1)
+
+    @field_validator("email", "display_name", "reason", mode="before")
+    @classmethod
+    def strip_required_strings(cls, value):
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                raise ValueError("must not be blank")
+            return stripped
+        return value
+
+
+class UserAccountUpdateRequest(BaseModel):
+    email: str | None = None
+    display_name: str | None = None
+    status: str | None = None
+    reason: str = Field(min_length=1)
+
+    @field_validator("email", "display_name", "status", mode="before")
+    @classmethod
+    def strip_optional_strings(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip_reason(cls, value):
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                raise ValueError("must not be blank")
+            return stripped
+        return value
+
+    @model_validator(mode="after")
+    def require_account_change(self):
+        if self.email is None and self.display_name is None and self.status is None:
+            raise ValueError("at least one account field must be provided")
+        return self
+
+
 class UserRoleRevokeRequest(BaseModel):
     reason: str = Field(min_length=1)
 
@@ -150,11 +206,100 @@ def current_user_role_assignment_repository(
     return SqlAlchemyUserRoleAssignmentRepository(session)
 
 
+def current_user_account_repository(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyUserAccountRepository:
+    """FastAPI dependency: provide a user account repository."""
+    return SqlAlchemyUserAccountRepository(session)
+
+
 def current_user_permission_grant_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyUserPermissionGrantRepository:
     """FastAPI dependency: provide a scoped permission grant repository."""
     return SqlAlchemyUserPermissionGrantRepository(session)
+
+
+@router.post("", status_code=status.HTTP_201_CREATED)
+def create_user_account(
+    payload: UserAccountCreateRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[SqlAlchemyUserAccountRepository, Depends(current_user_account_repository)],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+) -> dict[str, object]:
+    """Create a human or service user account; requires MANAGE_USERS."""
+    _require_user_management_permission(user)
+    if payload.is_service_account:
+        _require_service_account_management_policy(user)
+    try:
+        account = repository.create_user(
+            email=payload.email,
+            display_name=payload.display_name,
+            is_service_account=payload.is_service_account,
+        )
+    except UserAccountConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except UserAccountNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except UserAccountValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    record = _audit_user_account_change(
+        audit_sink=audit_sink,
+        actor=user,
+        account=account.to_api(),
+        reason=payload.reason,
+        action="created",
+    )
+    response = account.to_api()
+    response["audit_event"] = audit_record_to_api(record)
+    return response
+
+
+@router.patch("/{user_id}")
+def update_user_account(
+    user_id: str,
+    payload: UserAccountUpdateRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[SqlAlchemyUserAccountRepository, Depends(current_user_account_repository)],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+) -> dict[str, object]:
+    """Update user account metadata or status; requires MANAGE_USERS."""
+    _require_user_management_permission(user)
+    try:
+        existing = repository.get_user(user_id=user_id)
+    except UserAccountNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except UserAccountValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    if existing.is_service_account or payload.status == "service":
+        _require_service_account_management_policy(user)
+
+    try:
+        account = repository.update_user(
+            user_id=user_id,
+            email=payload.email,
+            display_name=payload.display_name,
+            status=payload.status,
+        )
+    except UserAccountConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except UserAccountNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except UserAccountValidationError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+
+    record = _audit_user_account_change(
+        audit_sink=audit_sink,
+        actor=user,
+        account=account.to_api(),
+        reason=payload.reason,
+        action="updated",
+    )
+    response = account.to_api()
+    response["audit_event"] = audit_record_to_api(record)
+    return response
 
 
 @router.post("/{user_id}/roles", status_code=status.HTTP_201_CREATED)
@@ -337,6 +482,24 @@ def _require_role_assignment_permission(user: UserPrincipal) -> None:
         )
 
 
+def _require_user_management_permission(user: UserPrincipal) -> None:
+    """Raise 403 if the caller lacks MANAGE_USERS on the global scope."""
+    if not has_permission(user, Permission.MANAGE_USERS, AccessScope.global_scope()):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Missing permission: {Permission.MANAGE_USERS.value}",
+        )
+
+
+def _require_service_account_management_policy(user: UserPrincipal) -> None:
+    """Restrict service account lifecycle changes to Super Owner."""
+    if not _has_role(user, RoleKey.SUPER_OWNER):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Service account management requires Super Owner",
+        )
+
+
 def _parse_role_for_policy(role_key: str) -> RoleKey:
     """Parse role_key to RoleKey; raise 422 for unknown values."""
     try:
@@ -417,6 +580,32 @@ def _audit_role_change(
             "scope_type": assignment["scope_type"],
             "scope_id": assignment["scope_id"],
             "active": assignment["active"],
+        },
+    )
+
+
+def _audit_user_account_change(
+    *,
+    audit_sink: AuditSink,
+    actor: UserPrincipal,
+    account: dict[str, object],
+    reason: str,
+    action: str,
+):
+    return record_audit_event(
+        sink=audit_sink,
+        actor=actor,
+        event_type=AuditEventType.USER_ACCOUNT_CHANGED,
+        entity_type="user",
+        entity_id=str(account["id"]),
+        scope=AccessScope.global_scope(),
+        reason=reason,
+        details={
+            "action": action,
+            "target_user_id": account["id"],
+            "email": account["email"],
+            "status": account["status"],
+            "is_service_account": account["is_service_account"],
         },
     )
 
