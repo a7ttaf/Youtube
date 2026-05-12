@@ -91,7 +91,7 @@ $env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp .pyte
 - [x] Verify revenue fact imports reject locked months, missing channels, invalid months, invalid source kinds, and malformed actor IDs.
 - [x] Verify reconciliation does not invent revenue and only explains differences among stored facts.
 - [x] Verify manual overrides require approval, cannot self-approve, cannot apply in locked months, and only approved overrides affect adjusted summaries.
-- [x] Verify month close readiness blocks on unresolved reconciliation issues and pending manual overrides.
+- [x] Verify month close readiness blocks on unresolved reconciliation issues, pending manual overrides, and missing monthly facts for active revenue-required channels.
 
 Result:
 - Focused API tests passed with `30 passed`.

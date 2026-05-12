@@ -111,12 +111,30 @@ POST /revenue/recalculate
 
 ```http
 GET /finance-close/{month}
+GET /finance-close/{month}/readiness
 POST /finance-close/{month}/allocate
 POST /finance-close/{month}/lock
 POST /finance-close/{month}/unlock
 ```
 
-The finance-close endpoints in the foundation control close state and allocation-rule metadata only. They must not calculate or expose revenue values without the reconciliation engine and finance permissions.
+The finance-close endpoints in the foundation control close state and
+allocation-rule metadata only. They must not calculate or expose revenue values
+without the reconciliation engine and finance permissions. Readiness checks are
+required before locking and currently block on pending manual overrides,
+unresolved reconciliation issues, and active registry channels marked
+`revenue_required` that have no monthly revenue facts (`MISSING_REVENUE_FACTS`). Channels marked
+performance-only or not revenue-required do not block month close.
+
+Lock requests must not trust a prior `GET /finance-close/{month}/readiness`
+response. They acquire a transaction-scoped finance-month advisory guard and
+the `finance_month_close` row, then re-run readiness in the same transaction
+with row locks on matching pending overrides, missing revenue-required channel
+rows, and monthly revenue facts. At the default read-committed isolation level,
+revenue fact and manual-override writes acquire the same month guard before
+committing month-scoped changes, so they serialize with lock/unlock operations.
+Channel registry state committed before the lock-time recheck is authoritative
+for the close decision; registry changes committed later require an unlock and
+new close cycle if they affect a locked month.
 
 ### AdSense
 
