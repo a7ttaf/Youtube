@@ -120,28 +120,15 @@ class SqlAlchemyFinanceCloseReadinessService:
 
     def _pending_manual_override_count(self, month: str, *, for_update: bool) -> int:
         """Count pending overrides, locking matching rows during lock-time rechecks."""
-        count = int(
-            self._session.scalar(
-                select(func.count())
-                .select_from(RevenueManualOverrideORM)
-                .where(
-                    RevenueManualOverrideORM.month == month,
-                    RevenueManualOverrideORM.status == "PENDING",
-                )
-            )
-            or 0
+        pending_overrides_statement = select(RevenueManualOverrideORM.id).where(
+            RevenueManualOverrideORM.month == month,
+            RevenueManualOverrideORM.status == "PENDING",
         )
         if for_update:
-            statement = (
-                select(RevenueManualOverrideORM.id)
-                .where(
-                    RevenueManualOverrideORM.month == month,
-                    RevenueManualOverrideORM.status == "PENDING",
-                )
-                .with_for_update()
+            return self._count_locked_rows(
+                pending_overrides_statement.with_for_update()
             )
-            self._count_locked_rows(statement)
-        return count
+        return self._count_statement_rows(pending_overrides_statement)
 
     def _missing_required_revenue_fact_count(
         self, month: str, *, for_update: bool
@@ -164,31 +151,18 @@ class SqlAlchemyFinanceCloseReadinessService:
                 MonthlyChannelRevenueFactORM.id.is_(None),
             )
         )
-        count = int(
-            self._session.scalar(
-                select(func.count(YouTubeChannelORM.youtube_channel_id))
-                .select_from(YouTubeChannelORM)
-                .outerjoin(
-                    MonthlyChannelRevenueFactORM,
-                    (
-                        MonthlyChannelRevenueFactORM.youtube_channel_id
-                        == YouTubeChannelORM.youtube_channel_id
-                    )
-                    & (MonthlyChannelRevenueFactORM.month == month),
-                )
-                .where(
-                    YouTubeChannelORM.active.is_(True),
-                    YouTubeChannelORM.revenue_required.is_(True),
-                    MonthlyChannelRevenueFactORM.id.is_(None),
-                )
-            )
-            or 0
-        )
         if for_update:
-            self._count_locked_rows(
+            return self._count_locked_rows(
                 missing_channels_statement.with_for_update(of=YouTubeChannelORM)
             )
-        return count
+        return self._count_statement_rows(missing_channels_statement)
+
+    def _count_statement_rows(self, statement) -> int:
+        """Count rows returned by a selectable without duplicating its filters."""
+        return int(
+            self._session.scalar(select(func.count()).select_from(statement.subquery()))
+            or 0
+        )
 
     def _count_locked_rows(self, statement) -> int:
         """Count a row-locking scalar query without materializing all rows."""
