@@ -206,6 +206,21 @@ def test_user_repository_rejects_non_string_email(tmp_path):
             )
 
 
+def test_user_repository_rejects_non_string_user_id(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        repository = SqlAlchemyUserAccountRepository(session)
+
+        with pytest.raises(
+            UserAccountValidationError,
+            match="user_id must be a valid UUID",
+        ):
+            repository.get_user(user_id=123)
+
+
 def test_corporate_admin_cannot_create_service_account(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

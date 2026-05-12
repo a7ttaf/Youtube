@@ -180,10 +180,14 @@ class SqlAlchemyUserAccountRepository:
         )
 
 
-def _parse_uuid(value: str, *, field_name: str) -> UUID:
+def _parse_uuid(value: object, *, field_name: str) -> UUID:
     try:
+        if isinstance(value, UUID):
+            return value
+        if not isinstance(value, str):
+            raise TypeError(f"{field_name} must be a string")
         return UUID(value)
-    except ValueError as exc:
+    except (AttributeError, TypeError, ValueError) as exc:
         raise UserAccountValidationError(f"{field_name} must be a valid UUID") from exc
 
 
