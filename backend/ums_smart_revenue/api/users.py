@@ -5,7 +5,10 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
-from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
+from ums_smart_revenue.api.dependencies import (
+    current_db_session,
+    current_principal_from_headers,
+)
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -13,29 +16,33 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope
-from ums_smart_revenue.auth.user_roles import (
-    UserRoleAssignmentConflictError,
-    UserRoleAssignmentNotFoundError,
-    UserRoleAssignmentValidationError,
-    SqlAlchemyUserRoleAssignmentRepository,
-)
 from ums_smart_revenue.auth.user_permissions import (
     SqlAlchemyUserPermissionGrantRepository,
     UserPermissionGrantConflictError,
     UserPermissionGrantNotFoundError,
     UserPermissionGrantValidationError,
 )
+from ums_smart_revenue.auth.user_roles import (
+    SqlAlchemyUserRoleAssignmentRepository,
+    UserRoleAssignmentConflictError,
+    UserRoleAssignmentNotFoundError,
+    UserRoleAssignmentValidationError,
+)
 from ums_smart_revenue.auth.users import (
+    USER_DISPLAY_NAME_MAX_LENGTH,
+    USER_EMAIL_MAX_LENGTH,
+    USER_STATUSES,
     SqlAlchemyUserAccountRepository,
     UserAccountConflictError,
     UserAccountNotFoundError,
     UserAccountValidationError,
 )
 
-
 router = APIRouter(prefix="/users", tags=["users"])
 
-FINANCE_ROLE_KEYS = frozenset({RoleKey.FINANCE_ADMIN, RoleKey.FINANCE_APPROVER, RoleKey.FINANCE_VIEWER})
+FINANCE_ROLE_KEYS = frozenset(
+    {RoleKey.FINANCE_ADMIN, RoleKey.FINANCE_APPROVER, RoleKey.FINANCE_VIEWER}
+)
 FINANCE_PERMISSION_KEYS = frozenset(
     {
         Permission.VIEW_REVENUE,
@@ -95,8 +102,8 @@ class UserRoleAssignRequest(BaseModel):
 
 
 class UserAccountCreateRequest(BaseModel):
-    email: str = Field(min_length=1)
-    display_name: str = Field(min_length=1)
+    email: str = Field(min_length=1, max_length=USER_EMAIL_MAX_LENGTH)
+    display_name: str = Field(min_length=1, max_length=USER_DISPLAY_NAME_MAX_LENGTH)
     is_service_account: bool = False
     reason: str = Field(min_length=1)
 
@@ -112,8 +119,10 @@ class UserAccountCreateRequest(BaseModel):
 
 
 class UserAccountUpdateRequest(BaseModel):
-    email: str | None = None
-    display_name: str | None = None
+    email: str | None = Field(default=None, max_length=USER_EMAIL_MAX_LENGTH)
+    display_name: str | None = Field(
+        default=None, max_length=USER_DISPLAY_NAME_MAX_LENGTH
+    )
     status: str | None = None
     reason: str = Field(min_length=1)
 
@@ -136,6 +145,17 @@ class UserAccountUpdateRequest(BaseModel):
                 raise ValueError("must not be blank")
             return stripped
         return value
+
+    @field_validator("status")
+    @classmethod
+    def normalize_status(cls, value):
+        if value is None:
+            return None
+        normalized = value.lower()
+        if normalized not in USER_STATUSES:
+            allowed = ", ".join(sorted(USER_STATUSES))
+            raise ValueError(f"Unknown status: {normalized}; allowed: {allowed}")
+        return normalized
 
     @model_validator(mode="after")
     def require_account_change(self):
@@ -224,7 +244,9 @@ def current_user_permission_grant_repository(
 def create_user_account(
     payload: UserAccountCreateRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyUserAccountRepository, Depends(current_user_account_repository)],
+    repository: Annotated[
+        SqlAlchemyUserAccountRepository, Depends(current_user_account_repository)
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     """Create a human or service user account; requires MANAGE_USERS."""
@@ -238,11 +260,17 @@ def create_user_account(
             is_service_account=payload.is_service_account,
         )
     except UserAccountConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     except UserAccountNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
     except UserAccountValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
 
     record = _audit_user_account_change(
         audit_sink=audit_sink,
@@ -261,7 +289,9 @@ def update_user_account(
     user_id: str,
     payload: UserAccountUpdateRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyUserAccountRepository, Depends(current_user_account_repository)],
+    repository: Annotated[
+        SqlAlchemyUserAccountRepository, Depends(current_user_account_repository)
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     """Update user account metadata or status; requires MANAGE_USERS."""
@@ -269,9 +299,13 @@ def update_user_account(
     try:
         existing = repository.get_user(user_id=user_id)
     except UserAccountNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
     except UserAccountValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
 
     if existing.is_service_account or payload.status == "service":
         _require_service_account_management_policy(user)
@@ -284,11 +318,17 @@ def update_user_account(
             status=payload.status,
         )
     except UserAccountConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     except UserAccountNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
     except UserAccountValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
 
     record = _audit_user_account_change(
         audit_sink=audit_sink,
@@ -307,10 +347,16 @@ def assign_user_role(
     user_id: str,
     payload: UserRoleAssignRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyUserRoleAssignmentRepository, Depends(current_user_role_assignment_repository)],
+    repository: Annotated[
+        SqlAlchemyUserRoleAssignmentRepository,
+        Depends(current_user_role_assignment_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
-    """Assign a role to a user within a scope; requires ASSIGN_ROLES and family-specific authority."""
+    """Assign a role to a user within a scope.
+
+    Requires ASSIGN_ROLES and family-specific authority.
+    """
     _require_role_assignment_permission(user)
     role = _parse_role_for_policy(payload.role_key)
     _require_role_assignment_policy(user, role)
@@ -324,11 +370,17 @@ def assign_user_role(
             reason=payload.reason,
         )
     except UserRoleAssignmentConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     except UserRoleAssignmentNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
     except UserRoleAssignmentValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
 
     record = _audit_role_change(
         audit_sink=audit_sink,
@@ -348,17 +400,29 @@ def revoke_user_role(
     assignment_id: str,
     payload: UserRoleRevokeRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyUserRoleAssignmentRepository, Depends(current_user_role_assignment_repository)],
+    repository: Annotated[
+        SqlAlchemyUserRoleAssignmentRepository,
+        Depends(current_user_role_assignment_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
-    """Revoke an active role assignment; re-checks family policy against the existing role before revoking."""
+    """Revoke an active role assignment.
+
+    Re-checks family policy against the existing role before revoking.
+    """
     _require_role_assignment_permission(user)
     try:
-        existing = repository.get_assignment(user_id=user_id, assignment_id=assignment_id)
+        existing = repository.get_assignment(
+            user_id=user_id, assignment_id=assignment_id
+        )
     except UserRoleAssignmentNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
     except UserRoleAssignmentValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
 
     _require_role_assignment_policy(user, RoleKey(existing.role_key))
 
@@ -370,11 +434,17 @@ def revoke_user_role(
             reason=payload.reason,
         )
     except UserRoleAssignmentConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     except UserRoleAssignmentNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
     except UserRoleAssignmentValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
     record = _audit_role_change(
         audit_sink=audit_sink,
         actor=user,
@@ -392,7 +462,10 @@ def grant_user_permission(
     user_id: str,
     payload: UserPermissionGrantRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyUserPermissionGrantRepository, Depends(current_user_permission_grant_repository)],
+    repository: Annotated[
+        SqlAlchemyUserPermissionGrantRepository,
+        Depends(current_user_permission_grant_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     """Grant a direct permission to a user; enforces family-specific authority rules."""
@@ -409,11 +482,17 @@ def grant_user_permission(
             reason=payload.reason,
         )
     except UserPermissionGrantConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     except UserPermissionGrantNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
     except UserPermissionGrantValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
 
     record = _audit_permission_change(
         audit_sink=audit_sink,
@@ -433,17 +512,27 @@ def revoke_user_permission(
     grant_id: str,
     payload: UserPermissionRevokeRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyUserPermissionGrantRepository, Depends(current_user_permission_grant_repository)],
+    repository: Annotated[
+        SqlAlchemyUserPermissionGrantRepository,
+        Depends(current_user_permission_grant_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
-    """Revoke an active permission grant; re-checks family policy against the stored permission."""
+    """Revoke an active permission grant.
+
+    Re-checks family policy against the stored permission.
+    """
     _require_role_assignment_permission(user)
     try:
         existing = repository.get_grant(user_id=user_id, grant_id=grant_id)
     except UserPermissionGrantNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
     except UserPermissionGrantValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
 
     permission = _parse_permission_for_policy(existing.permission_key)
     _require_permission_grant_policy(user, permission)
@@ -456,11 +545,17 @@ def revoke_user_permission(
             reason=payload.reason,
         )
     except UserPermissionGrantConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     except UserPermissionGrantNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
     except UserPermissionGrantValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
     record = _audit_permission_change(
         audit_sink=audit_sink,
         actor=user,
@@ -505,7 +600,10 @@ def _parse_role_for_policy(role_key: str) -> RoleKey:
     try:
         return RoleKey(role_key)
     except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"Unknown role_key: {role_key}") from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Unknown role_key: {role_key}",
+        ) from exc
 
 
 def _parse_permission_for_policy(permission_key: str) -> Permission:
@@ -520,29 +618,42 @@ def _parse_permission_for_policy(permission_key: str) -> Permission:
 
 
 def _require_role_assignment_policy(user: UserPrincipal, role: RoleKey) -> None:
-    """Enforce family-specific assignment authority: Super Owner for super-owner roles, Finance Admin for finance roles."""
+    """Enforce role-family-specific assignment authority."""
     if role == RoleKey.SUPER_OWNER and not _has_role(user, RoleKey.SUPER_OWNER):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Super Owner assignments require Super Owner")
-    if role in FINANCE_ROLE_KEYS and not _has_any_role(user, {RoleKey.FINANCE_ADMIN, RoleKey.SUPER_OWNER}):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Super Owner assignments require Super Owner",
+        )
+    if role in FINANCE_ROLE_KEYS and not _has_any_role(
+        user, {RoleKey.FINANCE_ADMIN, RoleKey.SUPER_OWNER}
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Finance roles require Finance Admin or Super Owner",
         )
 
 
-def _require_permission_grant_policy(user: UserPrincipal, permission: Permission) -> None:
-    """Enforce family-specific grant authority: Super Owner only, Finance Admin, or Connector Admin depending on permission family."""
-    if permission in SUPER_OWNER_ONLY_PERMISSION_KEYS and not _has_role(user, RoleKey.SUPER_OWNER):
+def _require_permission_grant_policy(
+    user: UserPrincipal, permission: Permission
+) -> None:
+    """Enforce permission-family-specific grant authority."""
+    if permission in SUPER_OWNER_ONLY_PERMISSION_KEYS and not _has_role(
+        user, RoleKey.SUPER_OWNER
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Administrative permissions require Super Owner",
         )
-    if permission in FINANCE_PERMISSION_KEYS and not _has_any_role(user, {RoleKey.FINANCE_ADMIN, RoleKey.SUPER_OWNER}):
+    if permission in FINANCE_PERMISSION_KEYS and not _has_any_role(
+        user, {RoleKey.FINANCE_ADMIN, RoleKey.SUPER_OWNER}
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Finance permissions require Finance Admin or Super Owner",
         )
-    if permission in CONNECTOR_PERMISSION_KEYS and not _has_any_role(user, {RoleKey.CONNECTOR_ADMIN, RoleKey.SUPER_OWNER}):
+    if permission in CONNECTOR_PERMISSION_KEYS and not _has_any_role(
+        user, {RoleKey.CONNECTOR_ADMIN, RoleKey.SUPER_OWNER}
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="Connector permissions require Connector Admin or Super Owner",
@@ -550,11 +661,17 @@ def _require_permission_grant_policy(user: UserPrincipal, permission: Permission
 
 
 def _has_role(user: UserPrincipal, role: RoleKey) -> bool:
-    return any(assignment.active and assignment.role == role for assignment in user.role_assignments)
+    return any(
+        assignment.active and assignment.role == role
+        for assignment in user.role_assignments
+    )
 
 
 def _has_any_role(user: UserPrincipal, roles: set[RoleKey]) -> bool:
-    return any(assignment.active and assignment.role in roles for assignment in user.role_assignments)
+    return any(
+        assignment.active and assignment.role in roles
+        for assignment in user.role_assignments
+    )
 
 
 def _audit_role_change(

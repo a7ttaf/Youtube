@@ -1,12 +1,12 @@
-from uuid import UUID
+from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
-
 
 ADMIN_ID = UUID("00000000-0000-0000-0000-000000017001")
 
@@ -29,7 +29,9 @@ def seed_database(database_url: str) -> None:
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add(UserORM(id=ADMIN_ID, email="admin@example.com", display_name="Admin User"))
+        session.add(
+            UserORM(id=ADMIN_ID, email="admin@example.com", display_name="Admin User")
+        )
         session.commit()
 
 
@@ -50,7 +52,9 @@ def test_corporate_admin_creates_human_user_with_audit(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        user = session.scalars(select(UserORM).where(UserORM.email == "analyst@example.com")).one()
+        user = session.scalars(
+            select(UserORM).where(UserORM.email == "analyst@example.com")
+        ).one()
         audit_log = session.scalars(select(AuditLogORM)).one()
 
     assert response.status_code == 201
@@ -114,6 +118,71 @@ def test_duplicate_user_email_is_rejected_case_insensitively(tmp_path):
     assert second.json()["detail"] == "User email already exists"
 
 
+def test_historical_duplicate_user_emails_return_conflict(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.execute(text("DROP INDEX IF EXISTS uq_users_email_lower"))
+        session.add_all(
+            [
+                UserORM(
+                    id=uuid4(), email="legacy@example.com", display_name="Legacy User"
+                ),
+                UserORM(
+                    id=uuid4(),
+                    email="Legacy@Example.com",
+                    display_name="Legacy User Two",
+                ),
+            ]
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/users",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "email": "LEGACY@example.com",
+            "display_name": "Duplicate Legacy User",
+            "reason": "Verify historical duplicate conflict handling",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "User email already exists"
+
+
+@pytest.mark.parametrize(
+    "email",
+    [
+        "a@@example.com",
+        "a@example",
+        "a@.example.com",
+        "a@example.com.",
+        "a@exa..mple.com",
+        "a user@example.com",
+    ],
+)
+def test_malformed_user_email_is_rejected(tmp_path, email):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/users",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "email": email,
+            "display_name": "Invalid Email User",
+            "reason": "Reject malformed email",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "email must be a valid email address"
+
+
 def test_corporate_admin_cannot_create_service_account(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -131,7 +200,9 @@ def test_corporate_admin_cannot_create_service_account(tmp_path):
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Service account management requires Super Owner"
+    assert (
+        response.json()["detail"] == "Service account management requires Super Owner"
+    )
 
 
 def test_super_owner_creates_service_account(tmp_path):
@@ -152,7 +223,9 @@ def test_super_owner_creates_service_account(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        service_user = session.scalars(select(UserORM).where(UserORM.email == "svc-youtube@example.com")).one()
+        service_user = session.scalars(
+            select(UserORM).where(UserORM.email == "svc-youtube@example.com")
+        ).one()
 
     assert response.status_code == 201
     assert response.json()["status"] == "service"
@@ -190,7 +263,9 @@ def test_corporate_admin_updates_user_status_with_audit(tmp_path):
     engine = create_engine(database_url)
     with Session(engine) as session:
         user = session.get(UserORM, UUID(user_id))
-        audit_logs = session.scalars(select(AuditLogORM).order_by(AuditLogORM.created_at)).all()
+        audit_logs = session.scalars(
+            select(AuditLogORM).order_by(AuditLogORM.created_at, AuditLogORM.id)
+        ).all()
 
     assert response.status_code == 200
     assert response.json()["display_name"] == "Disabled Analyst"
@@ -198,8 +273,56 @@ def test_corporate_admin_updates_user_status_with_audit(tmp_path):
     assert user is not None
     assert user.display_name == "Disabled Analyst"
     assert user.status == "disabled"
-    assert [log.event_type for log in audit_logs] == ["USER_ACCOUNT_CHANGED", "USER_ACCOUNT_CHANGED"]
+    assert [log.event_type for log in audit_logs] == [
+        "USER_ACCOUNT_CHANGED",
+        "USER_ACCOUNT_CHANGED",
+    ]
     assert audit_logs[-1].reason == "Offboarding request"
+
+
+def test_update_to_historical_duplicate_email_returns_conflict(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    create_response = client.post(
+        "/users",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "email": "analyst@example.com",
+            "display_name": "Analyst User",
+            "reason": "Create analyst account",
+        },
+    )
+    assert create_response.status_code == 201
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.execute(text("DROP INDEX IF EXISTS uq_users_email_lower"))
+        session.add_all(
+            [
+                UserORM(
+                    id=uuid4(), email="legacy@example.com", display_name="Legacy User"
+                ),
+                UserORM(
+                    id=uuid4(),
+                    email="Legacy@Example.com",
+                    display_name="Legacy User Two",
+                ),
+            ]
+        )
+        session.commit()
+
+    response = client.patch(
+        f"/users/{create_response.json()['id']}",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "email": "legacy@example.com",
+            "reason": "Verify update duplicate conflict handling",
+        },
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "User email already exists"
 
 
 def test_user_update_requires_at_least_one_account_field(tmp_path):

@@ -1,3 +1,4 @@
+import logging
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID, uuid4
@@ -8,11 +9,17 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.security_models import UserORM
 
+logger = logging.getLogger(__name__)
 
 USER_STATUS_ACTIVE = "active"
 USER_STATUS_DISABLED = "disabled"
 USER_STATUS_SERVICE = "service"
-USER_STATUSES = frozenset({USER_STATUS_ACTIVE, USER_STATUS_DISABLED, USER_STATUS_SERVICE})
+USER_STATUSES = frozenset(
+    {USER_STATUS_ACTIVE, USER_STATUS_DISABLED, USER_STATUS_SERVICE}
+)
+USER_EMAIL_MAX_LENGTH = 320
+USER_DISPLAY_NAME_MAX_LENGTH = 200
+_EMAIL_CONFLICT_SAMPLE_LIMIT = 2
 
 
 @dataclass(frozen=True)
@@ -65,7 +72,11 @@ class SqlAlchemyUserAccountRepository:
         is_service_account: bool,
     ) -> UserAccountEntry:
         normalized_email = _normalize_email(email)
-        normalized_display_name = _normalize_required_string(display_name, "display_name")
+        normalized_display_name = _normalize_bounded_string(
+            display_name,
+            "display_name",
+            max_length=USER_DISPLAY_NAME_MAX_LENGTH,
+        )
         if self._email_exists(normalized_email):
             raise UserAccountConflictError("User email already exists")
 
@@ -108,18 +119,16 @@ class SqlAlchemyUserAccountRepository:
 
         if email is not None:
             normalized_email = _normalize_email(email)
-            existing = self._session.scalars(
-                select(UserORM).where(
-                    func.lower(UserORM.email) == normalized_email,
-                    UserORM.id != user_uuid,
-                )
-            ).one_or_none()
-            if existing is not None:
+            if self._email_exists(normalized_email, excluding_user_id=user_uuid):
                 raise UserAccountConflictError("User email already exists")
             row.email = normalized_email
 
         if display_name is not None:
-            row.display_name = _normalize_required_string(display_name, "display_name")
+            row.display_name = _normalize_bounded_string(
+                display_name,
+                "display_name",
+                max_length=USER_DISPLAY_NAME_MAX_LENGTH,
+            )
 
         if status is not None:
             normalized_status = _normalize_status(status)
@@ -129,16 +138,25 @@ class SqlAlchemyUserAccountRepository:
         try:
             self._session.flush()
         except IntegrityError as exc:
-            if email is not None and self._email_exists(_normalize_email(email), excluding_user_id=user_uuid):
+            if email is not None and self._email_exists(
+                _normalize_email(email), excluding_user_id=user_uuid
+            ):
                 raise UserAccountConflictError("User email already exists") from exc
             raise
         return self._to_entry(row)
 
-    def _email_exists(self, email: str, *, excluding_user_id: UUID | None = None) -> bool:
+    def _email_exists(
+        self, email: str, *, excluding_user_id: UUID | None = None
+    ) -> bool:
         criteria = [func.lower(UserORM.email) == email]
         if excluding_user_id is not None:
             criteria.append(UserORM.id != excluding_user_id)
-        return self._session.scalars(select(UserORM.id).where(*criteria)).one_or_none() is not None
+        conflicts = self._session.scalars(
+            select(UserORM.id).where(*criteria).limit(_EMAIL_CONFLICT_SAMPLE_LIMIT)
+        ).all()
+        if len(conflicts) > 1:
+            logger.warning("Multiple existing users matched a normalized email lookup")
+        return bool(conflicts)
 
     @staticmethod
     def _to_entry(row: UserORM) -> UserAccountEntry:
@@ -161,8 +179,21 @@ def _parse_uuid(value: str, *, field_name: str) -> UUID:
 
 
 def _normalize_email(value: str) -> str:
-    normalized = _normalize_required_string(value, "email").lower()
-    if "@" not in normalized or normalized.startswith("@") or normalized.endswith("@"):
+    normalized = _normalize_bounded_string(
+        value, "email", max_length=USER_EMAIL_MAX_LENGTH
+    ).lower()
+    if normalized.count("@") != 1:
+        raise UserAccountValidationError("email must be a valid email address")
+    local, domain = normalized.split("@", maxsplit=1)
+    if (
+        not local
+        or not domain
+        or any(character.isspace() for character in normalized)
+        or domain.startswith(".")
+        or domain.endswith(".")
+        or "." not in domain
+        or any(part == "" for part in domain.split("."))
+    ):
         raise UserAccountValidationError("email must be a valid email address")
     return normalized
 
@@ -171,19 +202,34 @@ def _normalize_status(value: str) -> str:
     normalized = _normalize_required_string(value, "status").lower()
     if normalized not in USER_STATUSES:
         allowed = ", ".join(sorted(USER_STATUSES))
-        raise UserAccountValidationError(f"Unknown status: {normalized}; allowed: {allowed}")
+        raise UserAccountValidationError(
+            f"Unknown status: {normalized}; allowed: {allowed}"
+        )
     return normalized
 
 
 def _require_compatible_status(row: UserORM, status: str) -> None:
     if status == USER_STATUS_SERVICE and not row.is_service_account:
-        raise UserAccountValidationError("service status requires a service account user")
+        raise UserAccountValidationError(
+            "service status requires a service account user"
+        )
     if row.is_service_account and status == USER_STATUS_ACTIVE:
-        raise UserAccountValidationError("service accounts must use service or disabled status")
+        raise UserAccountValidationError(
+            "service accounts must use service or disabled status"
+        )
 
 
 def _normalize_required_string(value: str, field_name: str) -> str:
     normalized = value.strip()
     if not normalized:
         raise UserAccountValidationError(f"{field_name} must not be blank")
+    return normalized
+
+
+def _normalize_bounded_string(value: str, field_name: str, *, max_length: int) -> str:
+    normalized = _normalize_required_string(value, field_name)
+    if len(normalized) > max_length:
+        raise UserAccountValidationError(
+            f"{field_name} must be at most {max_length} characters"
+        )
     return normalized
