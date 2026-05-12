@@ -245,6 +245,26 @@ def test_user_repository_rejects_non_boolean_service_account_flag(tmp_path):
             )
 
 
+def test_create_user_rejects_coerced_service_account_flag(tmp_path):
+    """Reject non-boolean JSON values for service-account creation."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/users",
+        headers=auth_headers("super_owner"),
+        json={
+            "email": "svc-coerced@example.com",
+            "display_name": "Coerced Service Flag",
+            "is_service_account": "true",
+            "reason": "Reject coerced service flag",
+        },
+    )
+
+    assert response.status_code == 422
+
+
 def test_user_repository_maps_email_unique_constraint_to_conflict(
     tmp_path,
     monkeypatch,

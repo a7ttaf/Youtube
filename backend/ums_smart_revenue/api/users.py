@@ -2,7 +2,7 @@ import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, StrictBool, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
@@ -115,7 +115,7 @@ class UserAccountCreateRequest(BaseModel):
 
     email: str = Field(min_length=1, max_length=USER_EMAIL_MAX_LENGTH)
     display_name: str = Field(min_length=1, max_length=USER_DISPLAY_NAME_MAX_LENGTH)
-    is_service_account: bool = False
+    is_service_account: StrictBool = Field(default=False)
     reason: str = Field(min_length=1, max_length=USER_ACTION_REASON_MAX_LENGTH)
 
     @field_validator("email", "display_name", "reason", mode="before")
