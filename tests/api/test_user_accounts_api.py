@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.users import (
     SqlAlchemyUserAccountRepository,
+    UserAccountConflictError,
     UserAccountValidationError,
 )
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
@@ -219,6 +220,48 @@ def test_user_repository_rejects_non_string_user_id(tmp_path):
             match="user_id must be a valid UUID",
         ):
             repository.get_user(user_id=123)
+
+
+def test_user_repository_rejects_non_boolean_service_account_flag(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        repository = SqlAlchemyUserAccountRepository(session)
+
+        with pytest.raises(
+            UserAccountValidationError,
+            match="is_service_account must be a boolean",
+        ):
+            repository.create_user(
+                email="service-flag@example.com",
+                display_name="Invalid Service Flag User",
+                is_service_account="false",
+            )
+
+
+def test_user_repository_maps_email_unique_constraint_to_conflict(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        repository = SqlAlchemyUserAccountRepository(session)
+        monkeypatch.setattr(repository, "_email_exists", lambda *args, **kwargs: False)
+
+        with pytest.raises(
+            UserAccountConflictError,
+            match="User email already exists",
+        ):
+            repository.create_user(
+                email="admin@example.com",
+                display_name="Duplicate Admin User",
+                is_service_account=False,
+            )
 
 
 def test_corporate_admin_cannot_create_service_account(tmp_path):

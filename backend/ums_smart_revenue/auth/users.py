@@ -17,6 +17,7 @@ USER_STATUS_SERVICE = "service"
 USER_STATUSES = frozenset(
     {USER_STATUS_ACTIVE, USER_STATUS_DISABLED, USER_STATUS_SERVICE}
 )
+USER_EMAIL_UNIQUE_CONSTRAINT = "uq_users_email_lower"
 USER_EMAIL_MAX_LENGTH = 320
 USER_DISPLAY_NAME_MAX_LENGTH = 200
 _EMAIL_CONFLICT_SAMPLE_LIMIT = 2
@@ -77,6 +78,9 @@ class SqlAlchemyUserAccountRepository:
             "display_name",
             max_length=USER_DISPLAY_NAME_MAX_LENGTH,
         )
+        normalized_is_service_account = _normalize_service_account_flag(
+            is_service_account
+        )
         if self._email_exists(normalized_email):
             raise UserAccountConflictError("User email already exists")
 
@@ -84,15 +88,21 @@ class SqlAlchemyUserAccountRepository:
             id=uuid4(),
             email=normalized_email,
             display_name=normalized_display_name,
-            status=USER_STATUS_SERVICE if is_service_account else USER_STATUS_ACTIVE,
-            is_service_account=is_service_account,
+            status=(
+                USER_STATUS_SERVICE
+                if normalized_is_service_account
+                else USER_STATUS_ACTIVE
+            ),
+            is_service_account=normalized_is_service_account,
         )
         try:
             with self._session.begin_nested():
                 self._session.add(row)
                 self._session.flush()
         except IntegrityError as exc:
-            if self._email_exists(normalized_email):
+            if _is_email_constraint_violation(exc) or self._email_exists(
+                normalized_email
+            ):
                 raise UserAccountConflictError("User email already exists") from exc
             raise
         return self._to_entry(row)
@@ -147,8 +157,9 @@ class SqlAlchemyUserAccountRepository:
                     row.status = normalized_status
                 self._session.flush()
         except IntegrityError as exc:
-            if normalized_email is not None and self._email_exists(
-                normalized_email, excluding_user_id=user_uuid
+            if normalized_email is not None and (
+                _is_email_constraint_violation(exc)
+                or self._email_exists(normalized_email, excluding_user_id=user_uuid)
             ):
                 raise UserAccountConflictError("User email already exists") from exc
             raise
@@ -221,6 +232,12 @@ def _normalize_status(value: str) -> str:
     return normalized
 
 
+def _normalize_service_account_flag(value: object) -> bool:
+    if not isinstance(value, bool):
+        raise UserAccountValidationError("is_service_account must be a boolean")
+    return value
+
+
 def _require_compatible_status(row: UserORM, status: str) -> None:
     if status == USER_STATUS_SERVICE and not row.is_service_account:
         raise UserAccountValidationError(
@@ -248,3 +265,17 @@ def _normalize_bounded_string(value: str, field_name: str, *, max_length: int) -
             f"{field_name} must be at most {max_length} characters"
         )
     return normalized
+
+
+def _is_email_constraint_violation(exc: IntegrityError) -> bool:
+    diag = getattr(getattr(exc, "orig", None), "diag", None)
+    constraint_name = str(getattr(diag, "constraint_name", "") or "").lower()
+    if constraint_name == USER_EMAIL_UNIQUE_CONSTRAINT:
+        return True
+
+    error_text = f"{exc.orig!s} {exc!s}".lower()
+    return (
+        USER_EMAIL_UNIQUE_CONSTRAINT in error_text
+        or "unique constraint failed: index 'uq_users_email_lower'" in error_text
+        or 'unique constraint failed: index "uq_users_email_lower"' in error_text
+    )
