@@ -12,7 +12,7 @@ from ums_smart_revenue.db.finance_models import (
     MonthlyChannelRevenueFactORM,
     RevenueManualOverrideORM,
 )
-from ums_smart_revenue.db.org_models import OrgBase
+from ums_smart_revenue.db.org_models import OrgBase, YouTubeChannelORM
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
 
@@ -220,6 +220,83 @@ def test_finance_close_readiness_reports_reconciliation_variance(tmp_path):
             "message": "1 channel has unresolved reconciliation issues for 2026-03.",
         }
     ]
+
+
+def test_finance_close_readiness_blocks_missing_required_revenue_facts(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            YouTubeChannelORM(
+                id=uuid4(),
+                youtube_channel_id="channel-missing-revenue",
+                channel_name="Missing Revenue Channel",
+                revenue_required=True,
+                active=True,
+            )
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    readiness = client.get(
+        "/finance-close/2026-03/readiness",
+        headers=auth_headers("finance_admin"),
+    )
+    lock_response = client.post(
+        "/finance-close/2026-03/lock",
+        headers=auth_headers("finance_admin"),
+        json={"reason": "Should wait for missing required revenue"},
+    )
+
+    expected_blockers = [
+        {
+            "blocker_type": "MISSING_REVENUE_FACTS",
+            "severity": "HIGH",
+            "count": 1,
+            "message": (
+                "1 revenue-required channel has no revenue facts for 2026-03."
+            ),
+        }
+    ]
+    assert readiness.status_code == 200
+    assert readiness.json() == {
+        "month": "2026-03",
+        "ready": False,
+        "blockers": expected_blockers,
+    }
+    assert lock_response.status_code == 409
+    assert lock_response.json()["detail"] == {
+        "message": "Finance month has unresolved close blockers",
+        "blockers": expected_blockers,
+    }
+
+
+def test_finance_close_readiness_ignores_performance_only_channels(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            YouTubeChannelORM(
+                id=uuid4(),
+                youtube_channel_id="channel-performance-only",
+                channel_name="Performance Only Channel",
+                revenue_required=False,
+                revenue_source_status="PERFORMANCE_ONLY",
+                active=True,
+            )
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    readiness = client.get(
+        "/finance-close/2026-03/readiness",
+        headers=auth_headers("finance_admin"),
+    )
+
+    assert readiness.status_code == 200
+    assert readiness.json() == {"month": "2026-03", "ready": True, "blockers": []}
 
 
 def test_finance_viewer_cannot_lock_month(tmp_path):

@@ -1,13 +1,18 @@
-from dataclasses import dataclass
 import re
+from dataclasses import dataclass
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.finance_models import MonthlyChannelRevenueFactORM, RevenueManualOverrideORM
-from ums_smart_revenue.finance.reconciliation import build_revenue_reconciliation_issue_queue
+from ums_smart_revenue.db.finance_models import (
+    MonthlyChannelRevenueFactORM,
+    RevenueManualOverrideORM,
+)
+from ums_smart_revenue.db.org_models import YouTubeChannelORM
+from ums_smart_revenue.finance.reconciliation import (
+    build_revenue_reconciliation_issue_queue,
+)
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
-
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
@@ -69,7 +74,22 @@ class SqlAlchemyFinanceCloseReadinessService:
                 )
             )
 
-        issue_count = len(build_revenue_reconciliation_issue_queue(self._month_facts(month), month=month).items)
+        missing_fact_count = self._missing_required_revenue_fact_count(month)
+        if missing_fact_count:
+            blockers.append(
+                FinanceCloseBlocker(
+                    blocker_type="MISSING_REVENUE_FACTS",
+                    severity="HIGH",
+                    count=missing_fact_count,
+                    message=_missing_fact_message(month, missing_fact_count),
+                )
+            )
+
+        issue_queue = build_revenue_reconciliation_issue_queue(
+            self._month_facts(month),
+            month=month,
+        )
+        issue_count = len(issue_queue.items)
         if issue_count:
             blockers.append(
                 FinanceCloseBlocker(
@@ -92,11 +112,36 @@ class SqlAlchemyFinanceCloseReadinessService:
             or 0
         )
 
+    def _missing_required_revenue_fact_count(self, month: str) -> int:
+        return int(
+            self._session.scalar(
+                select(func.count(YouTubeChannelORM.youtube_channel_id))
+                .select_from(YouTubeChannelORM)
+                .outerjoin(
+                    MonthlyChannelRevenueFactORM,
+                    (
+                        MonthlyChannelRevenueFactORM.youtube_channel_id
+                        == YouTubeChannelORM.youtube_channel_id
+                    )
+                    & (MonthlyChannelRevenueFactORM.month == month),
+                )
+                .where(
+                    YouTubeChannelORM.active.is_(True),
+                    YouTubeChannelORM.revenue_required.is_(True),
+                    MonthlyChannelRevenueFactORM.id.is_(None),
+                )
+            )
+            or 0
+        )
+
     def _month_facts(self, month: str) -> list[RevenueFactEntry]:
         rows = self._session.scalars(
             select(MonthlyChannelRevenueFactORM)
             .where(MonthlyChannelRevenueFactORM.month == month)
-            .order_by(MonthlyChannelRevenueFactORM.youtube_channel_id, MonthlyChannelRevenueFactORM.source_kind)
+            .order_by(
+                MonthlyChannelRevenueFactORM.youtube_channel_id,
+                MonthlyChannelRevenueFactORM.source_kind,
+            )
         ).all()
         return [
             RevenueFactEntry(
@@ -125,6 +170,12 @@ def _pending_override_message(month: str, count: int) -> str:
     subject = "manual override" if count == 1 else "manual overrides"
     verb = "requires" if count == 1 else "require"
     return f"{count} pending {subject} {verb} approval before locking {month}."
+
+
+def _missing_fact_message(month: str, count: int) -> str:
+    subject = "channel" if count == 1 else "channels"
+    verb = "has" if count == 1 else "have"
+    return f"{count} revenue-required {subject} {verb} no revenue facts for {month}."
 
 
 def _reconciliation_issue_message(month: str, count: int) -> str:

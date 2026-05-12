@@ -161,6 +161,7 @@ Sensitive actions include:
 ## Finance Close API Rules
 - Viewing finance-close status requires `finance.view_revenue` for the finance-month scope because close status affects finance workflows.
 - Locking a month requires `finance.lock_month`, a non-empty reason, and a `MONTH_LOCKED` audit event.
+- Month readiness must block locks while pending overrides, unresolved reconciliation issues, or missing facts for active revenue-required channels exist.
 - Unlocking a month requires `finance.unlock_month`, a non-empty reason, and a `MONTH_UNLOCKED` audit event.
 - Recording allocation-rule metadata requires `finance.change_allocation_rule`, a non-empty reason, and an `ALLOCATION_RULE_CHANGED` audit event.
 - The foundation finance-close API records control metadata only; it must not invent revenue calculations or mutate locked revenue facts.

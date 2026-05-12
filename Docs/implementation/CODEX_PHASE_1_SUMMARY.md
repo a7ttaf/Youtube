@@ -149,6 +149,12 @@ Nineteenth continuation update:
 - returned assignment and grant identifiers in access profiles so admin UI workflows can revoke active access explicitly;
 - kept revoked historical access out of the active profile, leaving history to audit and future access-history endpoints.
 
+Twentieth continuation update:
+- hardened finance month-close readiness so active registry channels marked `revenue_required` must have at least one monthly revenue fact before the month can lock;
+- added a `MISSING_REVENUE_FACTS` close blocker surfaced through `GET /finance-close/{month}/readiness` and lock conflict responses;
+- kept performance-only or non-revenue-required channels from blocking close when they have no revenue facts;
+- preserved the existing blockers for pending manual overrides and unresolved reconciliation issues.
+
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`
 - `Docs/implementation/CODEX_PHASE_1_SUMMARY.md`
@@ -351,6 +357,8 @@ Pytest coverage includes:
 - Finance Admin can lock a month and create a `MONTH_LOCKED` audit event.
 - Finance Viewer cannot lock a month.
 - Finance Approver can unlock a month and create a `MONTH_UNLOCKED` audit event.
+- Finance close readiness blocks missing facts for active revenue-required channels before month lock.
+- Finance close readiness does not block performance-only channels without facts.
 - Export Operator cannot change allocation rules.
 - Finance Admin can record allocation-rule metadata and create an `ALLOCATION_RULE_CHANGED` audit event without calculating revenue.
 - System Integration User can register raw report-file metadata and create a sensitive `REPORT_IMPORTED` audit event.
@@ -498,6 +506,10 @@ Pytest coverage includes:
 - `python -m ruff check backend/ums_smart_revenue/api/users.py backend/ums_smart_revenue/auth/users.py tests/api/test_user_access_read_api.py` passed after the user-list offset cap was added.
 - `python -B -m pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-access-offset-cap" tests/api/test_user_access_read_api.py` passed with 18 tests after the offset cap and query-boundary coverage were added.
 - `python -B -m pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-access-related-offset-cap" tests/api/test_user_access_read_api.py tests/api/test_user_accounts_api.py tests/api/test_user_roles_api.py tests/api/test_user_permissions_api.py` passed with 69 tests.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-close-readiness-red" tests/api/test_finance_close_api.py` first failed because required channels with no facts did not block close readiness.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-close-readiness-target" tests/api/test_finance_close_api.py::test_finance_close_readiness_blocks_missing_required_revenue_facts tests/api/test_finance_close_api.py::test_finance_close_readiness_ignores_performance_only_channels` passed with 2 tests.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-close-readiness-file" tests/api/test_finance_close_api.py` passed with 14 tests.
+- `python -m ruff check backend/ums_smart_revenue/finance/month_close_readiness.py` passed.
 
 ## Remaining Next Steps
 - Expand SQL audit persistence to each new sensitive endpoint as those routes are added.
