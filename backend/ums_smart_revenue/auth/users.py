@@ -1,10 +1,18 @@
 import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import (
+    DBAPIError,
+    DisconnectionError,
+    IntegrityError,
+    OperationalError,
+    SQLAlchemyError,
+)
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.security_models import UserORM
@@ -21,10 +29,13 @@ USER_EMAIL_UNIQUE_CONSTRAINT = "uq_users_email_lower"
 USER_EMAIL_MAX_LENGTH = 320
 USER_DISPLAY_NAME_MAX_LENGTH = 200
 _EMAIL_CONFLICT_SAMPLE_LIMIT = 2
+USER_ACCOUNT_STORAGE_ATTEMPTS = 2
 
 
 @dataclass(frozen=True)
 class UserAccountEntry:
+    """Immutable user account snapshot returned by repository operations."""
+
     id: str
     email: str
     display_name: str
@@ -34,6 +45,7 @@ class UserAccountEntry:
     updated_at: datetime
 
     def to_api(self) -> dict[str, object]:
+        """Serialize the account snapshot for API responses and audit details."""
         return {
             "id": self.id,
             "email": self.email,
@@ -46,23 +58,40 @@ class UserAccountEntry:
 
 
 class UserAccountError(ValueError):
+    """Base class for user account domain failures exposed to API handlers."""
+
     pass
 
 
 class UserAccountConflictError(UserAccountError):
+    """Raised when a requested account mutation conflicts with stored data."""
+
     pass
 
 
 class UserAccountNotFoundError(UserAccountError):
+    """Raised when a requested user account does not exist."""
+
     pass
 
 
 class UserAccountValidationError(UserAccountError):
+    """Raised when account input cannot be normalized into a safe value."""
+
+    pass
+
+
+class UserAccountStorageError(UserAccountError):
+    """Raised when account storage is unavailable after retryable attempts."""
+
     pass
 
 
 class SqlAlchemyUserAccountRepository:
+    """SQLAlchemy-backed repository for guarded user account lifecycle changes."""
+
     def __init__(self, session: Session):
+        """Bind repository operations to the request-scoped SQLAlchemy session."""
         self._session = session
 
     def create_user(
@@ -72,6 +101,7 @@ class SqlAlchemyUserAccountRepository:
         display_name: str,
         is_service_account: bool,
     ) -> UserAccountEntry:
+        """Create a user account and normalize email, display name, and status."""
         normalized_email = _normalize_email(email)
         normalized_display_name = _normalize_bounded_string(
             display_name,
@@ -81,38 +111,49 @@ class SqlAlchemyUserAccountRepository:
         normalized_is_service_account = _normalize_service_account_flag(
             is_service_account
         )
-        if self._email_exists(normalized_email):
-            raise UserAccountConflictError("User email already exists")
 
-        row = UserORM(
-            id=uuid4(),
-            email=normalized_email,
-            display_name=normalized_display_name,
-            status=(
-                USER_STATUS_SERVICE
-                if normalized_is_service_account
-                else USER_STATUS_ACTIVE
-            ),
-            is_service_account=normalized_is_service_account,
-        )
-        try:
-            with self._session.begin_nested():
+        def operation() -> UserAccountEntry:
+            if self._email_exists(normalized_email):
+                raise UserAccountConflictError("User email already exists")
+
+            row = UserORM(
+                id=uuid4(),
+                email=normalized_email,
+                display_name=normalized_display_name,
+                status=(
+                    USER_STATUS_SERVICE
+                    if normalized_is_service_account
+                    else USER_STATUS_ACTIVE
+                ),
+                is_service_account=normalized_is_service_account,
+            )
+            try:
                 self._session.add(row)
                 self._session.flush()
-        except IntegrityError as exc:
-            if _is_email_constraint_violation(exc) or self._email_exists(
-                normalized_email
-            ):
-                raise UserAccountConflictError("User email already exists") from exc
-            raise
-        return self._to_entry(row)
+            except IntegrityError as exc:
+                self._session.rollback()
+                if _is_email_constraint_violation(exc) or self._email_exists(
+                    normalized_email
+                ):
+                    raise UserAccountConflictError("User email already exists") from exc
+                raise UserAccountConflictError(
+                    "User account violates database constraints"
+                ) from exc
+            return self._to_entry(row)
+
+        return self._run_with_storage_retries(operation)
 
     def get_user(self, *, user_id: str) -> UserAccountEntry:
+        """Load one account by UUID string, returning a domain not-found error."""
         user_uuid = _parse_uuid(user_id, field_name="user_id")
-        row = self._session.get(UserORM, user_uuid)
-        if row is None:
-            raise UserAccountNotFoundError("User not found")
-        return self._to_entry(row)
+
+        def operation() -> UserAccountEntry:
+            row = self._session.get(UserORM, user_uuid)
+            if row is None:
+                raise UserAccountNotFoundError("User not found")
+            return self._to_entry(row)
+
+        return self._run_with_storage_retries(operation)
 
     def update_user(
         self,
@@ -122,10 +163,8 @@ class SqlAlchemyUserAccountRepository:
         display_name: str | None = None,
         status: str | None = None,
     ) -> UserAccountEntry:
+        """Update account metadata or lifecycle status after compatibility checks."""
         user_uuid = _parse_uuid(user_id, field_name="user_id")
-        row = self._session.get(UserORM, user_uuid)
-        if row is None:
-            raise UserAccountNotFoundError("User not found")
 
         normalized_email = None
         normalized_display_name = None
@@ -133,8 +172,6 @@ class SqlAlchemyUserAccountRepository:
 
         if email is not None:
             normalized_email = _normalize_email(email)
-            if self._email_exists(normalized_email, excluding_user_id=user_uuid):
-                raise UserAccountConflictError("User email already exists")
 
         if display_name is not None:
             normalized_display_name = _normalize_bounded_string(
@@ -145,10 +182,21 @@ class SqlAlchemyUserAccountRepository:
 
         if status is not None:
             normalized_status = _normalize_status(status)
-            _require_compatible_status(row, normalized_status)
 
-        try:
-            with self._session.begin_nested():
+        def operation() -> UserAccountEntry:
+            row = self._session.get(UserORM, user_uuid)
+            if row is None:
+                raise UserAccountNotFoundError("User not found")
+
+            if normalized_email is not None and (
+                self._email_exists(normalized_email, excluding_user_id=user_uuid)
+            ):
+                raise UserAccountConflictError("User email already exists")
+
+            if normalized_status is not None:
+                _require_compatible_status(row, normalized_status)
+
+            try:
                 if normalized_email is not None:
                     row.email = normalized_email
                 if normalized_display_name is not None:
@@ -156,18 +204,45 @@ class SqlAlchemyUserAccountRepository:
                 if normalized_status is not None:
                     row.status = normalized_status
                 self._session.flush()
-        except IntegrityError as exc:
-            if normalized_email is not None and (
-                _is_email_constraint_violation(exc)
-                or self._email_exists(normalized_email, excluding_user_id=user_uuid)
-            ):
-                raise UserAccountConflictError("User email already exists") from exc
-            raise
-        return self._to_entry(row)
+            except IntegrityError as exc:
+                self._session.rollback()
+                if normalized_email is not None and (
+                    _is_email_constraint_violation(exc)
+                    or self._email_exists(normalized_email, excluding_user_id=user_uuid)
+                ):
+                    raise UserAccountConflictError("User email already exists") from exc
+                raise UserAccountConflictError(
+                    "User account violates database constraints"
+                ) from exc
+            return self._to_entry(row)
+
+        return self._run_with_storage_retries(operation)
+
+    def _run_with_storage_retries(
+        self, operation: Callable[[], UserAccountEntry]
+    ) -> UserAccountEntry:
+        """Retry transient storage failures once and fail closed otherwise."""
+        for attempt_index in range(USER_ACCOUNT_STORAGE_ATTEMPTS):
+            try:
+                return operation()
+            except SQLAlchemyError as exc:
+                self._session.rollback()
+                if (
+                    attempt_index + 1 >= USER_ACCOUNT_STORAGE_ATTEMPTS
+                    or not _is_retryable_user_storage_error(exc)
+                ):
+                    raise UserAccountStorageError(
+                        "User account storage unavailable"
+                    ) from exc
+                logger.warning(
+                    "Retrying user account storage operation after transient failure"
+                )
+        raise RuntimeError("unreachable user account retry state")
 
     def _email_exists(
         self, email: str, *, excluding_user_id: UUID | None = None
     ) -> bool:
+        """Return whether a normalized email already belongs to another user."""
         criteria = [func.lower(UserORM.email) == email]
         if excluding_user_id is not None:
             criteria.append(UserORM.id != excluding_user_id)
@@ -180,6 +255,7 @@ class SqlAlchemyUserAccountRepository:
 
     @staticmethod
     def _to_entry(row: UserORM) -> UserAccountEntry:
+        """Map a SQLAlchemy user row into the repository response object."""
         return UserAccountEntry(
             id=str(row.id),
             email=row.email,
@@ -192,6 +268,7 @@ class SqlAlchemyUserAccountRepository:
 
 
 def _parse_uuid(value: object, *, field_name: str) -> UUID:
+    """Parse a UUID input and expose invalid values as domain validation errors."""
     try:
         if isinstance(value, UUID):
             return value
@@ -203,6 +280,7 @@ def _parse_uuid(value: object, *, field_name: str) -> UUID:
 
 
 def _normalize_email(value: str) -> str:
+    """Normalize an account email and reject malformed local or domain parts."""
     normalized = _normalize_bounded_string(
         value, "email", max_length=USER_EMAIL_MAX_LENGTH
     ).lower()
@@ -223,6 +301,7 @@ def _normalize_email(value: str) -> str:
 
 
 def _normalize_status(value: str) -> str:
+    """Normalize a lifecycle status and enforce the supported status set."""
     normalized = _normalize_required_string(value, "status").lower()
     if normalized not in USER_STATUSES:
         allowed = ", ".join(sorted(USER_STATUSES))
@@ -233,12 +312,14 @@ def _normalize_status(value: str) -> str:
 
 
 def _normalize_service_account_flag(value: object) -> bool:
+    """Reject non-boolean service-account flags before persistence."""
     if not isinstance(value, bool):
         raise UserAccountValidationError("is_service_account must be a boolean")
     return value
 
 
 def _require_compatible_status(row: UserORM, status: str) -> None:
+    """Enforce human versus service-account lifecycle status invariants."""
     if status == USER_STATUS_SERVICE and not row.is_service_account:
         raise UserAccountValidationError(
             "service status requires a service account user"
@@ -250,6 +331,7 @@ def _require_compatible_status(row: UserORM, status: str) -> None:
 
 
 def _normalize_required_string(value: object, field_name: str) -> str:
+    """Trim and require a non-empty string value for account inputs."""
     if not isinstance(value, str):
         raise UserAccountValidationError(f"{field_name} must be a non-empty string")
     normalized = value.strip()
@@ -259,6 +341,7 @@ def _normalize_required_string(value: object, field_name: str) -> str:
 
 
 def _normalize_bounded_string(value: str, field_name: str, *, max_length: int) -> str:
+    """Normalize a required string and enforce a maximum persisted length."""
     normalized = _normalize_required_string(value, field_name)
     if len(normalized) > max_length:
         raise UserAccountValidationError(
@@ -268,6 +351,7 @@ def _normalize_bounded_string(value: str, field_name: str, *, max_length: int) -
 
 
 def _is_email_constraint_violation(exc: IntegrityError) -> bool:
+    """Return whether an integrity error came from the normalized email index."""
     diag = getattr(getattr(exc, "orig", None), "diag", None)
     constraint_name = str(getattr(diag, "constraint_name", "") or "").lower()
     if constraint_name == USER_EMAIL_UNIQUE_CONSTRAINT:
@@ -279,3 +363,10 @@ def _is_email_constraint_violation(exc: IntegrityError) -> bool:
         or "unique constraint failed: index 'uq_users_email_lower'" in error_text
         or 'unique constraint failed: index "uq_users_email_lower"' in error_text
     )
+
+
+def _is_retryable_user_storage_error(exc: SQLAlchemyError) -> bool:
+    """Return whether a storage exception is safe to retry within the request."""
+    if isinstance(exc, (DisconnectionError, OperationalError, SQLAlchemyTimeoutError)):
+        return True
+    return isinstance(exc, DBAPIError) and exc.connection_invalidated

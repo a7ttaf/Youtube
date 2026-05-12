@@ -1,3 +1,4 @@
+import logging
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -35,10 +36,12 @@ from ums_smart_revenue.auth.users import (
     SqlAlchemyUserAccountRepository,
     UserAccountConflictError,
     UserAccountNotFoundError,
+    UserAccountStorageError,
     UserAccountValidationError,
 )
 
 router = APIRouter(prefix="/users", tags=["users"])
+logger = logging.getLogger(__name__)
 
 FINANCE_ROLE_KEYS = frozenset(
     {RoleKey.FINANCE_ADMIN, RoleKey.FINANCE_APPROVER, RoleKey.FINANCE_VIEWER}
@@ -75,6 +78,8 @@ SUPER_OWNER_ONLY_PERMISSION_KEYS = frozenset(
 
 
 class UserRoleAssignRequest(BaseModel):
+    """Request body for assigning a role to a user within an access scope."""
+
     role_key: str = Field(min_length=1)
     scope_type: str = Field(min_length=1)
     scope_id: str | None = None
@@ -83,6 +88,7 @@ class UserRoleAssignRequest(BaseModel):
     @field_validator("role_key", "scope_type", "reason", mode="before")
     @classmethod
     def strip_required_strings(cls, value):
+        """Trim required role-assignment strings and reject blank values."""
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
@@ -93,6 +99,7 @@ class UserRoleAssignRequest(BaseModel):
     @field_validator("scope_id", mode="before")
     @classmethod
     def strip_optional_string(cls, value):
+        """Normalize blank optional scope ids to None."""
         if value is None:
             return None
         if isinstance(value, str):
@@ -102,6 +109,8 @@ class UserRoleAssignRequest(BaseModel):
 
 
 class UserAccountCreateRequest(BaseModel):
+    """Request body for creating human or service user accounts."""
+
     email: str = Field(min_length=1, max_length=USER_EMAIL_MAX_LENGTH)
     display_name: str = Field(min_length=1, max_length=USER_DISPLAY_NAME_MAX_LENGTH)
     is_service_account: bool = False
@@ -110,6 +119,7 @@ class UserAccountCreateRequest(BaseModel):
     @field_validator("email", "display_name", "reason", mode="before")
     @classmethod
     def strip_required_strings(cls, value):
+        """Trim required account-create strings and reject blank values."""
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
@@ -119,6 +129,8 @@ class UserAccountCreateRequest(BaseModel):
 
 
 class UserAccountUpdateRequest(BaseModel):
+    """Request body for partial account metadata or lifecycle updates."""
+
     email: str | None = Field(default=None, max_length=USER_EMAIL_MAX_LENGTH)
     display_name: str | None = Field(
         default=None, max_length=USER_DISPLAY_NAME_MAX_LENGTH
@@ -129,6 +141,7 @@ class UserAccountUpdateRequest(BaseModel):
     @field_validator("email", "display_name", "status", mode="before")
     @classmethod
     def strip_optional_strings(cls, value):
+        """Trim optional update strings and treat blanks as absent fields."""
         if value is None:
             return None
         if isinstance(value, str):
@@ -139,6 +152,7 @@ class UserAccountUpdateRequest(BaseModel):
     @field_validator("reason", mode="before")
     @classmethod
     def strip_reason(cls, value):
+        """Trim the required audit reason and reject blank values."""
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
@@ -149,6 +163,7 @@ class UserAccountUpdateRequest(BaseModel):
     @field_validator("status")
     @classmethod
     def normalize_status(cls, value):
+        """Normalize lifecycle status values before repository validation."""
         if value is None:
             return None
         normalized = value.lower()
@@ -159,17 +174,21 @@ class UserAccountUpdateRequest(BaseModel):
 
     @model_validator(mode="after")
     def require_account_change(self):
+        """Reject requests that would only write an audit reason."""
         if self.email is None and self.display_name is None and self.status is None:
             raise ValueError("at least one account field must be provided")
         return self
 
 
 class UserRoleRevokeRequest(BaseModel):
+    """Request body for revoking an active user role assignment."""
+
     reason: str = Field(min_length=1)
 
     @field_validator("reason", mode="before")
     @classmethod
     def strip_reason(cls, value):
+        """Trim the required revoke reason and reject blank values."""
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
@@ -179,6 +198,8 @@ class UserRoleRevokeRequest(BaseModel):
 
 
 class UserPermissionGrantRequest(BaseModel):
+    """Request body for granting a scoped direct permission to a user."""
+
     permission_key: str = Field(min_length=1)
     scope_type: str = Field(min_length=1)
     scope_id: str | None = None
@@ -187,6 +208,7 @@ class UserPermissionGrantRequest(BaseModel):
     @field_validator("permission_key", "scope_type", "reason", mode="before")
     @classmethod
     def strip_required_strings(cls, value):
+        """Trim required permission-grant strings and reject blank values."""
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
@@ -197,6 +219,7 @@ class UserPermissionGrantRequest(BaseModel):
     @field_validator("scope_id", mode="before")
     @classmethod
     def strip_optional_string(cls, value):
+        """Normalize blank optional scope ids to None."""
         if value is None:
             return None
         if isinstance(value, str):
@@ -206,11 +229,14 @@ class UserPermissionGrantRequest(BaseModel):
 
 
 class UserPermissionRevokeRequest(BaseModel):
+    """Request body for revoking an active direct permission grant."""
+
     reason: str = Field(min_length=1)
 
     @field_validator("reason", mode="before")
     @classmethod
     def strip_reason(cls, value):
+        """Trim the required revoke reason and reject blank values."""
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
@@ -271,6 +297,10 @@ def create_user_account(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
+    except UserAccountStorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
 
     record = _audit_user_account_change(
         audit_sink=audit_sink,
@@ -306,6 +336,10 @@ def update_user_account(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
+    except UserAccountStorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
+        ) from exc
 
     if existing.is_service_account or payload.status == "service":
         _require_service_account_management_policy(user)
@@ -328,6 +362,10 @@ def update_user_account(
     except UserAccountValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    except UserAccountStorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)
         ) from exc
 
     record = _audit_user_account_change(
@@ -661,6 +699,7 @@ def _require_permission_grant_policy(
 
 
 def _has_role(user: UserPrincipal, role: RoleKey) -> bool:
+    """Return whether the caller has an active assignment for one role."""
     return any(
         assignment.active and assignment.role == role
         for assignment in user.role_assignments
@@ -668,6 +707,7 @@ def _has_role(user: UserPrincipal, role: RoleKey) -> bool:
 
 
 def _has_any_role(user: UserPrincipal, roles: set[RoleKey]) -> bool:
+    """Return whether the caller has any active assignment in a role set."""
     return any(
         assignment.active and assignment.role in roles
         for assignment in user.role_assignments
@@ -682,7 +722,8 @@ def _audit_role_change(
     reason: str,
     action: str,
 ):
-    return record_audit_event(
+    """Record a fail-closed audit event for role assignment changes."""
+    return _record_user_audit_event(
         sink=audit_sink,
         actor=actor,
         event_type=AuditEventType.USER_ROLE_CHANGED,
@@ -709,7 +750,8 @@ def _audit_user_account_change(
     reason: str,
     action: str,
 ):
-    return record_audit_event(
+    """Record a fail-closed audit event for account lifecycle changes."""
+    return _record_user_audit_event(
         sink=audit_sink,
         actor=actor,
         event_type=AuditEventType.USER_ACCOUNT_CHANGED,
@@ -735,7 +777,8 @@ def _audit_permission_change(
     reason: str,
     action: str,
 ):
-    return record_audit_event(
+    """Record a fail-closed audit event for direct permission changes."""
+    return _record_user_audit_event(
         sink=audit_sink,
         actor=actor,
         event_type=AuditEventType.USER_PERMISSION_CHANGED,
@@ -752,3 +795,30 @@ def _audit_permission_change(
             "active": grant["active"],
         },
     )
+
+
+def _record_user_audit_event(**kwargs):
+    """Persist a user-management audit event or return a stable API error."""
+    try:
+        return record_audit_event(**kwargs)
+    except ValueError as exc:
+        _rollback_audit_session(kwargs.get("sink"))
+        logger.warning("User-management audit event rejected: %s", exc)
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+    except Exception as exc:
+        _rollback_audit_session(kwargs.get("sink"))
+        logger.exception("User-management audit event recording failed")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Audit logging unavailable",
+        ) from exc
+
+
+def _rollback_audit_session(sink: object) -> None:
+    """Rollback SQL-backed audit sinks so handled API errors do not commit writes."""
+    rollback = getattr(sink, "rollback", None)
+    if callable(rollback):
+        rollback()

@@ -3,8 +3,11 @@ from uuid import UUID, uuid4
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select, text
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import TimeoutError as SQLAlchemyTimeoutError
 from sqlalchemy.orm import Session
 
+import ums_smart_revenue.api.users as users_api
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.users import (
     SqlAlchemyUserAccountRepository,
@@ -264,6 +267,111 @@ def test_user_repository_maps_email_unique_constraint_to_conflict(
             )
 
 
+def test_user_repository_maps_unknown_integrity_error_to_conflict(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        repository = SqlAlchemyUserAccountRepository(session)
+        monkeypatch.setattr(repository, "_email_exists", lambda *args, **kwargs: False)
+
+        def fail_flush(*args, **kwargs):
+            raise IntegrityError(
+                "insert",
+                {},
+                Exception("CHECK constraint failed: ck_users_service_account_status"),
+            )
+
+        monkeypatch.setattr(session, "flush", fail_flush)
+
+        with pytest.raises(
+            UserAccountConflictError,
+            match="User account violates database constraints",
+        ):
+            repository.create_user(
+                email="constraint@example.com",
+                display_name="Constraint User",
+                is_service_account=False,
+            )
+
+
+def test_user_repository_retries_transient_create_storage_error(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        repository = SqlAlchemyUserAccountRepository(session)
+        original_flush = session.flush
+        flush_attempts = 0
+
+        def flaky_flush(*args, **kwargs):
+            nonlocal flush_attempts
+            flush_attempts += 1
+            if flush_attempts == 1:
+                raise SQLAlchemyTimeoutError("temporary timeout")
+            return original_flush(*args, **kwargs)
+
+        monkeypatch.setattr(session, "flush", flaky_flush)
+
+        account = repository.create_user(
+            email="retry@example.com",
+            display_name="Retry User",
+            is_service_account=False,
+        )
+
+    assert account.email == "retry@example.com"
+    assert flush_attempts > 1
+
+
+def test_user_repository_returns_conflict_for_concurrent_duplicate_create(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        repository = SqlAlchemyUserAccountRepository(session)
+        original_flush = session.flush
+        injected_duplicate = False
+
+        def flush_with_concurrent_duplicate(*args, **kwargs):
+            nonlocal injected_duplicate
+            if not injected_duplicate:
+                injected_duplicate = True
+                with Session(engine) as other_session:
+                    other_session.add(
+                        UserORM(
+                            id=uuid4(),
+                            email="race@example.com",
+                            display_name="Race Winner",
+                        )
+                    )
+                    other_session.commit()
+            return original_flush(*args, **kwargs)
+
+        monkeypatch.setattr(session, "flush", flush_with_concurrent_duplicate)
+
+        with pytest.raises(
+            UserAccountConflictError,
+            match="User email already exists",
+        ):
+            repository.create_user(
+                email="Race@Example.com",
+                display_name="Race Loser",
+                is_service_account=False,
+            )
+
+
 def test_corporate_admin_cannot_create_service_account(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -359,6 +467,45 @@ def test_corporate_admin_updates_user_status_with_audit(tmp_path):
         "USER_ACCOUNT_CHANGED",
     ]
     assert audit_logs[-1].reason == "Offboarding request"
+
+
+def test_create_user_rolls_back_account_when_audit_recording_fails(
+    tmp_path,
+    monkeypatch,
+):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+
+    def fail_audit_recording(**kwargs):
+        raise RuntimeError("audit sink unavailable")
+
+    monkeypatch.setattr(users_api, "record_audit_event", fail_audit_recording)
+    client = TestClient(
+        create_app(database_url=database_url),
+        raise_server_exceptions=False,
+    )
+
+    response = client.post(
+        "/users",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "email": "audit-failure@example.com",
+            "display_name": "Audit Failure User",
+            "reason": "Exercise audit rollback",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        persisted_user = session.scalars(
+            select(UserORM).where(UserORM.email == "audit-failure@example.com")
+        ).one_or_none()
+        audit_logs = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Audit logging unavailable"
+    assert persisted_user is None
+    assert audit_logs == []
 
 
 def test_update_to_historical_duplicate_email_returns_conflict(tmp_path):
