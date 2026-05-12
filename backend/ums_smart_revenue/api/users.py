@@ -32,6 +32,7 @@ from ums_smart_revenue.auth.user_roles import (
 from ums_smart_revenue.auth.users import (
     USER_DISPLAY_NAME_MAX_LENGTH,
     USER_EMAIL_MAX_LENGTH,
+    USER_LIST_MAX_OFFSET,
     USER_STATUSES,
     SqlAlchemyUserAccountRepository,
     UserAccountConflictError,
@@ -275,7 +276,7 @@ def list_user_accounts(
         SqlAlchemyUserAccountRepository, Depends(current_user_account_repository)
     ],
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
-    offset: Annotated[int, Query(ge=0)] = 0,
+    offset: Annotated[int, Query(ge=0, le=USER_LIST_MAX_OFFSET)] = 0,
     cursor_email: Annotated[str | None, Query()] = None,
     cursor_id: Annotated[str | None, Query()] = None,
     status_filter: Annotated[str | None, Query(alias="status")] = None,

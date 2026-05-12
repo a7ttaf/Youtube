@@ -75,7 +75,8 @@ when `pagination.has_more` is true, clients pass `pagination.next_cursor.email`
 as `cursor_email` and `pagination.next_cursor.id` as `cursor_id` to continue
 from the same normalized `(email, id)` position even if earlier-sorting accounts
 are inserted between requests. `offset` remains accepted for compatibility and
-empty-result handling, but cursor pagination is preferred for iteration.
+empty-result handling, capped at `10000`, but cursor pagination is preferred for
+iteration.
 `GET /users/{user_id}/access` also requires `users.manage` before target-id
 parsing and returns the user's active scoped role assignments and active direct
 permission grants, including assignment/grant ids for follow-up revocation

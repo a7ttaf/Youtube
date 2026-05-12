@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.permissions import PERMISSION_DEFINITIONS
 from ums_smart_revenue.auth.roles import ROLE_DEFINITIONS
+from ums_smart_revenue.auth.users import USER_LIST_MAX_OFFSET
 from ums_smart_revenue.db.security_models import (
     AccessScopeORM,
     PermissionORM,
@@ -284,6 +285,7 @@ def test_user_account_list_cursor_is_stable_when_new_users_arrive(tmp_path):
         pytest.param({"status": "archived"}, id="invalid-status"),
         pytest.param({"limit": 0}, id="limit-too-small"),
         pytest.param({"limit": 101}, id="limit-too-large"),
+        pytest.param({"offset": USER_LIST_MAX_OFFSET + 1}, id="offset-too-large"),
         pytest.param({"cursor_email": "admin@example.com"}, id="partial-cursor-email"),
         pytest.param({"cursor_id": str(ADMIN_ID)}, id="partial-cursor-id"),
         pytest.param(

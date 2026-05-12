@@ -37,6 +37,7 @@ USER_STATUSES = frozenset(
 USER_EMAIL_UNIQUE_CONSTRAINT = "uq_users_email_lower"
 USER_EMAIL_MAX_LENGTH = 320
 USER_DISPLAY_NAME_MAX_LENGTH = 200
+USER_LIST_MAX_OFFSET = 10_000
 _EMAIL_CONFLICT_SAMPLE_LIMIT = 2
 USER_ACCOUNT_STORAGE_ATTEMPTS = 2
 
@@ -471,6 +472,10 @@ def _normalize_offset(value: int) -> int:
         raise UserAccountValidationError("offset must be an integer")
     if value < 0:
         raise UserAccountValidationError("offset must be greater than or equal to 0")
+    if value > USER_LIST_MAX_OFFSET:
+        raise UserAccountValidationError(
+            f"offset must be less than or equal to {USER_LIST_MAX_OFFSET}"
+        )
     return value
 
 

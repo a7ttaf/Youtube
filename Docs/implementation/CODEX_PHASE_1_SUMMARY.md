@@ -143,7 +143,7 @@ Eighteenth continuation update:
 - fail-closed for disabled or unregistered database users before route handlers run.
 
 Nineteenth continuation update:
-- added guarded `GET /users` account listing with bounded cursor pagination, offset compatibility, and optional status filtering;
+- added guarded `GET /users` account listing with bounded cursor pagination, capped offset compatibility, and optional status filtering;
 - added guarded `GET /users/{user_id}/access` to return a user's active scoped role assignments and active direct permission grants;
 - enforced `users.manage` before access-profile target id parsing so unauthorized callers cannot probe account ids;
 - returned assignment and grant identifiers in access profiles so admin UI workflows can revoke active access explicitly;
@@ -391,7 +391,7 @@ Pytest coverage includes:
 - Duplicate user emails are rejected case-insensitively.
 - Service account creation is restricted to Super Owner.
 - No-op user account updates are rejected before creating an audit event.
-- Corporate Admin can list user accounts with bounded cursor pagination, status filtering, and empty large-offset handling.
+- Corporate Admin can list user accounts with bounded cursor pagination, status filtering, capped offset rejection, and empty large-offset handling.
 - Corporate Admin can read a user's active access profile, including scoped role assignments and direct grants.
 - User access-profile reads return 404 for missing users and 422 for invalid target UUIDs after valid authorization.
 - Assistant Analyst cannot list users or probe access-profile target ids.
@@ -495,6 +495,9 @@ Pytest coverage includes:
 - `python -B -m pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-access-edge" tests/api/test_user_access_read_api.py` passed with 9 tests after user-list cursor pagination and access-profile edge cases were added.
 - `python -B -m pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-access-related-pr7" tests/api/test_user_access_read_api.py tests/api/test_user_accounts_api.py tests/api/test_user_roles_api.py tests/api/test_user_permissions_api.py` passed with 60 tests.
 - `git diff --check` passed with CRLF conversion warnings only after the PR #7 pre-merge fix.
+- `python -m ruff check backend/ums_smart_revenue/api/users.py backend/ums_smart_revenue/auth/users.py tests/api/test_user_access_read_api.py` passed after the user-list offset cap was added.
+- `python -B -m pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-access-offset-cap" tests/api/test_user_access_read_api.py` passed with 18 tests after the offset cap and query-boundary coverage were added.
+- `python -B -m pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-access-related-offset-cap" tests/api/test_user_access_read_api.py tests/api/test_user_accounts_api.py tests/api/test_user_roles_api.py tests/api/test_user_permissions_api.py` passed with 69 tests.
 
 ## Remaining Next Steps
 - Expand SQL audit persistence to each new sensitive endpoint as those routes are added.
