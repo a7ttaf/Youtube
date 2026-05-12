@@ -9,6 +9,7 @@
 | `finance.view_revenue` | View gross, finalized, allocated, or net revenue. | Yes |
 | `finance.view_finalized_payments` | View AdSense/payment status and finalized payment amounts. | Yes |
 | `finance.view_bank_reconciliation` | View bank received amounts, FX, transfer fees, and gaps. | Yes |
+| `finance.manage_bank_reconciliation` | Record or update finance-provided bank reconciliation receipt metadata. | Yes |
 | `finance.create_manual_override` | Create manual finance overrides. | Yes |
 | `finance.approve_manual_override` | Approve manual finance overrides. | Yes |
 | `finance.lock_month` | Lock a finance month. | Yes |
@@ -61,6 +62,7 @@
 - User account create/update requires `users.manage`, but service account lifecycle changes require Super Owner.
 - User account list and access-profile reads require `users.manage`; list responses use bounded cursor pagination and profile responses show active role assignments and direct grants only.
 - Finance direct grants require Finance Admin or Super Owner; connector/raw-file direct grants require Connector Admin or Super Owner; administrative direct grants require Super Owner.
+- Finalized-payment and bank-reconciliation permissions may be granted on organization scopes or a specific `finance-month`; month-scoped grants do not imply another month.
 - Export Operator requires underlying view permission for the export scope.
 - Graph `revenue-flow` views require both `graph.view` and `graph.view_finance`.
 - Raw report files require `raw_files.view` even when the user can view normalized analytics.

@@ -173,6 +173,15 @@ Twenty-second continuation update:
 - reported non-paid AdSense records while excluding them from the paid amount;
 - kept the slice limited to source-of-truth comparison and did not invent tax, bank, net-revenue, or allocation logic.
 
+Twenty-third continuation update:
+- added SQL bank reconciliation receipt metadata with an Alembic migration for `bank_reconciliation_entries`;
+- added a SQLAlchemy bank reconciliation repository that upserts finance-provided receipt rows by `(month, bank_reference)`;
+- added FastAPI `POST /revenue/months/{month}/bank-reconciliation` guarded by `finance.manage_bank_reconciliation` on the requested finance-month scope;
+- added FastAPI `GET /revenue/months/{month}/bank-reconciliation` guarded by `finance.view_bank_reconciliation` and `finance.view_finalized_payments` on the requested finance-month scope;
+- rejected bank reconciliation writes for locked finance months;
+- audited receipt writes as `BANK_RECONCILIATION_RECORDED` and summary reads as both `BANK_RECONCILIATION_VIEWED` and `PAYMENT_VIEWED`;
+- computed only a month-level bank gap from paid USD AdSense payments versus finance-normalized bank receipts, without allocating transfer/FX gaps, calculating net revenue, automating exchange rates, or making Neo4j a financial source of truth.
+
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`
 - `Docs/implementation/CODEX_PHASE_1_SUMMARY.md`
@@ -233,6 +242,7 @@ Twenty-second continuation update:
 - `backend/ums_smart_revenue/db/alembic/versions/20260510_0007_number_explanations.py`
 - `backend/ums_smart_revenue/db/alembic/versions/20260510_0008_export_jobs.py`
 - `backend/ums_smart_revenue/db/alembic/versions/20260512_0002_adsense_payments.py`
+- `backend/ums_smart_revenue/db/alembic/versions/20260513_0001_bank_reconciliation.py`
 - `backend/ums_smart_revenue/config/__init__.py`
 - `backend/ums_smart_revenue/config/settings.py`
 - `backend/ums_smart_revenue/config/version_baseline.py`
@@ -240,6 +250,7 @@ Twenty-second continuation update:
 - `backend/ums_smart_revenue/connectors/credentials.py`
 - `backend/ums_smart_revenue/finance/__init__.py`
 - `backend/ums_smart_revenue/finance/adsense_payments.py`
+- `backend/ums_smart_revenue/finance/bank_reconciliation.py`
 - `backend/ums_smart_revenue/finance/explanations.py`
 - `backend/ums_smart_revenue/finance/month_close.py`
 - `backend/ums_smart_revenue/finance/payment_matching.py`
@@ -260,6 +271,7 @@ Twenty-second continuation update:
 - `tests/test_version_baseline.py`
 - `tests/api/test_audit_api.py`
 - `tests/api/test_adsense_payments_api.py`
+- `tests/api/test_bank_reconciliation_api.py`
 - `tests/api/test_app.py`
 - `tests/api/test_channels_api.py`
 - `tests/api/test_connectors_api.py`
@@ -283,6 +295,8 @@ Twenty-second continuation update:
 - `tests/db/test_alembic_scaffold.py`
 - `tests/db/test_adsense_payment_migration.py`
 - `tests/db/test_adsense_payment_models.py`
+- `tests/db/test_bank_reconciliation_migration.py`
+- `tests/db/test_bank_reconciliation_models.py`
 - `tests/db/test_export_job_migration.py`
 - `tests/db/test_export_job_models.py`
 - `tests/db/test_explanation_migration.py`
@@ -295,6 +309,7 @@ Twenty-second continuation update:
 - `tests/db/test_raw_report_file_models.py`
 - `tests/db/test_security_orm.py`
 - `tests/finance/test_payment_matching.py`
+- `tests/finance/test_bank_reconciliation.py`
 - `tests/graph/test_readonly_service.py`
 - `tests/org/test_sql_channel_registry.py`
 - `alembic.ini`
@@ -445,6 +460,14 @@ Pytest coverage includes:
 - Finance Viewer can read holding-level monthly payment-match summaries with both `REVENUE_VIEWED` and `PAYMENT_VIEWED` audit events.
 - Assistant Analyst and company-scoped finance roles cannot read holding-level payment-match summaries by default.
 - Payment-match reads reject non-USD currency requests until exchange-rate support exists and exclude non-USD AdSense payment rows from USD matching.
+- Finance Admin and Finance Approver can record finance-provided bank receipt metadata with a sensitive `BANK_RECONCILIATION_RECORDED` audit event.
+- Finance Viewer can read monthly bank reconciliation summaries with both `BANK_RECONCILIATION_VIEWED` and `PAYMENT_VIEWED` audit events.
+- Finance-month-scoped bank reconciliation grants work only for the matching month.
+- Assistant Analyst cannot read bank reconciliation summaries by default.
+- Finance Viewer cannot record bank reconciliation receipt metadata by default.
+- Locked finance months reject bank reconciliation writes and persist no receipt rows.
+- Bank reconciliation ORM and migration preserve receipt date, bank reference, original receipt amount/currency, finance-normalized USD amount, transfer fee, FX difference, source report id, recorder metadata, and month/reference uniqueness.
+- Monthly bank reconciliation compares paid USD AdSense payment rows with finance-normalized bank receipt rows, reports month-level gaps, and excludes non-paid or non-USD payment rows from the paid USD total.
 
 ## Commands Run
 - `git status --short --branch` failed because this workspace is not a Git repository.
@@ -570,6 +593,27 @@ Pytest coverage includes:
 - `python -B -m pytest tests/api/test_app.py tests/api/test_audit_api.py tests/api/test_channels_api.py tests/api/test_connectors_api.py tests/api/test_database_principals.py tests/api/test_groups_api.py tests/api/test_guarded_routes.py tests/api/test_sql_backed_channel_dependencies.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-payment-match-api-core"` passed with 63 tests.
 - `python -B -m pytest tests/api/test_user_access_read_api.py tests/api/test_user_accounts_api.py tests/api/test_user_permissions_api.py tests/api/test_user_roles_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-payment-match-user-access"` passed with 69 tests.
 - `git diff --check` passed with CRLF conversion warnings only after payment-match implementation.
+- `python -B -m pytest tests/finance/test_bank_reconciliation.py tests/db/test_bank_reconciliation_models.py tests/db/test_bank_reconciliation_migration.py tests/api/test_bank_reconciliation_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-bank-reconciliation-red-2"` first failed with missing bank reconciliation service, ORM, migration, and guarded API support.
+- `python -B -m pytest tests/api/test_bank_reconciliation_api.py::test_finance_month_scoped_admin_records_matching_month tests/api/test_bank_reconciliation_api.py::test_finance_month_scoped_viewer_cannot_read_another_month -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-bank-reconciliation-month-scope-red"` first failed because bank reconciliation endpoint checks used global scope only.
+- `python -B -m pytest tests/api/test_bank_reconciliation_api.py::test_finance_month_scoped_admin_records_matching_month tests/api/test_bank_reconciliation_api.py::test_finance_month_scoped_viewer_cannot_read_another_month -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-bank-reconciliation-month-scope-green"` passed after bank reconciliation checks moved to the requested finance-month scope.
+- `python -B -m pytest tests/finance/test_bank_reconciliation.py tests/db/test_bank_reconciliation_models.py tests/db/test_bank_reconciliation_migration.py tests/api/test_bank_reconciliation_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-bank-reconciliation-focused-final-2"` passed with 12 tests after implementation, ORM formatting cleanup, and finance-month scope coverage.
+- `python -m ruff check backend/ums_smart_revenue/finance/bank_reconciliation.py backend/ums_smart_revenue/db/alembic/versions/20260513_0001_bank_reconciliation.py tests/finance/test_bank_reconciliation.py tests/db/test_bank_reconciliation_models.py tests/db/test_bank_reconciliation_migration.py tests/api/test_bank_reconciliation_api.py` passed.
+- `python -m ruff check --select I backend/ums_smart_revenue/api/revenue.py backend/ums_smart_revenue/db/finance_models.py backend/ums_smart_revenue/auth/permissions.py backend/ums_smart_revenue/auth/seed.py backend/ums_smart_revenue/auth/audit.py backend/ums_smart_revenue/auth/user_permissions.py backend/ums_smart_revenue/api/users.py` passed.
+- The combined finance API regression command timed out locally, so the same files were validated individually to avoid masking results behind Windows test runtime noise.
+- `python -B -m pytest tests/api/test_adsense_payments_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-bank-reconciliation-adsense-file"` passed with 6 tests.
+- `python -B -m pytest tests/api/test_exports_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-bank-reconciliation-exports-file"` passed with 9 tests.
+- `python -B -m pytest tests/api/test_finance_close_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-bank-reconciliation-finance-close-file"` passed with 18 tests.
+- `python -B -m pytest tests/api/test_manual_overrides_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-bank-reconciliation-manual-overrides-file"` passed with 8 tests.
+- `python -B -m pytest tests/api/test_payment_match_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-bank-reconciliation-payment-match-file"` passed with 5 tests.
+- `python -B -m pytest tests/api/test_raw_report_files_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-bank-reconciliation-raw-report-files"` passed with 8 tests.
+- `python -B -m pytest tests/api/test_revenue_explanations_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-bank-reconciliation-explanations-file"` passed with 3 tests.
+- `python -B -m pytest tests/api/test_revenue_facts_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-bank-reconciliation-revenue-facts-file"` passed with 13 tests.
+- `python -B -m pytest tests/api/test_user_permissions_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-bank-reconciliation-user-permissions"` passed with 7 tests.
+- `python -B -m pytest tests/auth tests/db tests/finance tests/graph tests/org tests/test_version_baseline.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-bank-reconciliation-nonapi-final"` passed with 92 tests.
+- `python -B -m pytest tests/api/test_user_access_read_api.py tests/api/test_user_accounts_api.py tests/api/test_user_permissions_api.py tests/api/test_user_roles_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-bank-reconciliation-user-access-final"` passed with 69 tests.
+- `python -B -m alembic -c alembic.ini upgrade head --sql > "$env:TEMP\ums-bank-reconciliation-alembic.sql"` rendered migrations through `20260513_0001`.
+- `Select-String -Path "$env:TEMP\ums-bank-reconciliation-alembic.sql" -Pattern "bank_reconciliation_entries|20260513_0001"` confirmed the rendered bank reconciliation table and migration revision.
+- `git diff --check` passed with CRLF conversion warnings only after bank reconciliation implementation.
 
 ## Remaining Next Steps
 - Expand SQL audit persistence to each new sensitive endpoint as those routes are added.

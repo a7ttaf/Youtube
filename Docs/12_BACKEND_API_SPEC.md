@@ -104,6 +104,8 @@ Direct permission grants and revocations also require `roles.assign` and are aud
 GET /revenue/monthly?month=2026-03&scope_type=company&scope_id=123&currency=USD
 GET /revenue/channels?month=2026-03&group_id=abc&currency=USD
 GET /revenue/months/{month}/payment-match?currency=USD
+GET /revenue/months/{month}/bank-reconciliation
+POST /revenue/months/{month}/bank-reconciliation
 POST /revenue/channels/{channel_id}/months/{month}/explain?metric=adjusted_gross_revenue_usd
 POST /revenue/recalculate
 ```
@@ -118,6 +120,27 @@ paid total while still reporting their count. This endpoint does not calculate
 tax, bank gaps, net revenue, or allocation rules. Until exchange-rate support
 exists, `currency` must be `USD`; payment rows in another currency are excluded
 from the match and surfaced as reconciliation issues.
+
+`POST /revenue/months/{month}/bank-reconciliation` records finance-provided
+bank receipt metadata for a finance month. It requires
+`finance.manage_bank_reconciliation` for the requested finance-month scope
+(global grants satisfy that scope), a non-empty reason, and an unlocked month,
+then audits `BANK_RECONCILIATION_RECORDED`. Rows are upserted by
+`(month, bank_reference)` and store normalized USD receipt values supplied by
+finance, transfer fee metadata, FX difference metadata, notes, source report
+reference, and recorder metadata. The endpoint does not calculate exchange
+rates, allocate transfer/FX gaps to channels, or calculate net revenue.
+
+`GET /revenue/months/{month}/bank-reconciliation` is an implemented
+holding-level finance read that compares paid USD AdSense payment metadata with
+finance-provided normalized bank receipt rows for the same month. It requires
+`finance.view_bank_reconciliation` and `finance.view_finalized_payments` for the
+requested finance-month scope (global grants satisfy that scope), audits both
+`BANK_RECONCILIATION_VIEWED` and `PAYMENT_VIEWED`, returns bank confirmation
+status, paid amount, received
+amount, month-level bank gap, transfer-fee and FX-difference totals, receipt
+entries, issues, and audit event metadata. Non-paid AdSense rows and non-USD
+payment rows are excluded from the paid USD comparison and reported as issues.
 
 ### Finance close
 

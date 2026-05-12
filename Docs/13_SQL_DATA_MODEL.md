@@ -106,6 +106,24 @@ adsense_payments (
   unique (month, payment_name)
 );
 
+bank_reconciliation_entries (
+  id uuid primary key,
+  month text not null,
+  bank_reference text not null,
+  bank_received_date date not null,
+  bank_received_amount numeric(18, 6) not null,
+  bank_received_currency text not null,
+  bank_received_amount_usd numeric(18, 6) not null,
+  transfer_fee_usd numeric(18, 6) not null default 0,
+  fx_difference_usd numeric(18, 6) not null default 0,
+  notes text null,
+  source_report_id text null,
+  recorded_by uuid not null,
+  recorded_at timestamp not null default now(),
+  updated_at timestamp not null default now(),
+  unique (month, bank_reference)
+);
+
 finance_month_close (
   month text primary key,
   status text,
@@ -127,6 +145,11 @@ finance_month_close (
 -- when the matching finance month is locked. Payment rows are official payment
 -- metadata only; financial source-of-truth calculations remain in SQL revenue
 -- fact/reconciliation tables, not Neo4j.
+-- Bank reconciliation entries are manually supplied finance receipt metadata.
+-- They store finance-normalized USD receipt values and are blocked when the
+-- matching finance month is locked. Month-level bank gaps are derived in SQL
+-- services from paid USD AdSense payment rows versus normalized bank receipts;
+-- transfer/FX gaps are not allocated to channels in this phase.
 
 channel_net_revenue (
   month text,

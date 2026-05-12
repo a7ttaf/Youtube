@@ -27,6 +27,8 @@ class AuditEventType(str, Enum):
     RAW_FILE_VIEWED = "RAW_FILE_VIEWED"
     REVENUE_VIEWED = "REVENUE_VIEWED"
     PAYMENT_VIEWED = "PAYMENT_VIEWED"
+    BANK_RECONCILIATION_RECORDED = "BANK_RECONCILIATION_RECORDED"
+    BANK_RECONCILIATION_VIEWED = "BANK_RECONCILIATION_VIEWED"
     GRAPH_FINANCE_VIEWED = "GRAPH_FINANCE_VIEWED"
     AUDIT_LOG_VIEWED = "AUDIT_LOG_VIEWED"
 
@@ -123,6 +125,15 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     AuditEventType.PAYMENT_VIEWED: AuditEventDefinition(
         AuditEventType.PAYMENT_VIEWED,
         permission=Permission.VIEW_FINALIZED_PAYMENTS,
+    ),
+    AuditEventType.BANK_RECONCILIATION_RECORDED: AuditEventDefinition(
+        AuditEventType.BANK_RECONCILIATION_RECORDED,
+        reason_required=True,
+        permission=Permission.MANAGE_BANK_RECONCILIATION,
+    ),
+    AuditEventType.BANK_RECONCILIATION_VIEWED: AuditEventDefinition(
+        AuditEventType.BANK_RECONCILIATION_VIEWED,
+        permission=Permission.VIEW_BANK_RECONCILIATION,
     ),
     AuditEventType.GRAPH_FINANCE_VIEWED: AuditEventDefinition(
         AuditEventType.GRAPH_FINANCE_VIEWED,
