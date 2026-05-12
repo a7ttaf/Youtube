@@ -117,14 +117,17 @@ class SqlAlchemyUserAccountRepository:
         if row is None:
             raise UserAccountNotFoundError("User not found")
 
+        normalized_email = None
+        normalized_display_name = None
+        normalized_status = None
+
         if email is not None:
             normalized_email = _normalize_email(email)
             if self._email_exists(normalized_email, excluding_user_id=user_uuid):
                 raise UserAccountConflictError("User email already exists")
-            row.email = normalized_email
 
         if display_name is not None:
-            row.display_name = _normalize_bounded_string(
+            normalized_display_name = _normalize_bounded_string(
                 display_name,
                 "display_name",
                 max_length=USER_DISPLAY_NAME_MAX_LENGTH,
@@ -133,13 +136,19 @@ class SqlAlchemyUserAccountRepository:
         if status is not None:
             normalized_status = _normalize_status(status)
             _require_compatible_status(row, normalized_status)
-            row.status = normalized_status
 
         try:
-            self._session.flush()
+            with self._session.begin_nested():
+                if normalized_email is not None:
+                    row.email = normalized_email
+                if normalized_display_name is not None:
+                    row.display_name = normalized_display_name
+                if normalized_status is not None:
+                    row.status = normalized_status
+                self._session.flush()
         except IntegrityError as exc:
-            if email is not None and self._email_exists(
-                _normalize_email(email), excluding_user_id=user_uuid
+            if normalized_email is not None and self._email_exists(
+                normalized_email, excluding_user_id=user_uuid
             ):
                 raise UserAccountConflictError("User email already exists") from exc
             raise

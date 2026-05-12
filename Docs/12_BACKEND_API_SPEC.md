@@ -66,7 +66,10 @@ POST /users/{user_id}/permissions
 POST /users/{user_id}/permissions/{grant_id}/revoke
 ```
 
-User create/update endpoints require `users.manage` and a non-empty reason. Service account creation or status changes require Super Owner. Every user account lifecycle change is audited as `USER_ACCOUNT_CHANGED`.
+User create/update endpoints require `users.manage` and a non-empty reason.
+Service account creation and any `PATCH /users/{user_id}` updates to service
+accounts, including status or other account fields, require Super Owner.
+Every user account lifecycle change is audited as `USER_ACCOUNT_CHANGED`.
 
 Role assignment and revocation both require `roles.assign`. Super Owner assignment requires an existing Super Owner. Finance roles require Finance Admin or Super Owner authority. Every assignment and revocation is audited as `USER_ROLE_CHANGED`.
 
