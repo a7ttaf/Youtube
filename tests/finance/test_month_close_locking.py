@@ -32,10 +32,12 @@ def test_finance_month_advisory_lock_uses_postgres_transaction_lock() -> None:
     session = _DialectSession("postgresql")
 
     acquire_finance_month_advisory_lock(session, "2026-03")
+    assert len(session.executed) == 1
 
     statement, parameters = session.executed[0]
     second_session = _DialectSession("postgresql")
     acquire_finance_month_advisory_lock(second_session, "2026-03")
+    assert len(second_session.executed) == 1
 
     assert "pg_advisory_xact_lock" in str(statement)
     assert isinstance(parameters["lock_key"], int)
