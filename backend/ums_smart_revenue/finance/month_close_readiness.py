@@ -19,12 +19,15 @@ MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 @dataclass(frozen=True)
 class FinanceCloseBlocker:
+    """A single condition that prevents a finance month from closing."""
+
     blocker_type: str
     severity: str
     count: int
     message: str
 
     def to_api(self) -> dict[str, object]:
+        """Serialize the blocker to the public API response shape."""
         return {
             "blocker_type": self.blocker_type,
             "severity": self.severity,
@@ -35,14 +38,18 @@ class FinanceCloseBlocker:
 
 @dataclass(frozen=True)
 class FinanceCloseReadiness:
+    """Readiness result for a finance month close attempt."""
+
     month: str
     blockers: list[FinanceCloseBlocker]
 
     @property
     def ready(self) -> bool:
+        """Return whether the month has no unresolved blockers."""
         return not self.blockers
 
     def to_api(self) -> dict[str, object]:
+        """Serialize readiness to the public API response shape."""
         return {
             "month": self.month,
             "ready": self.ready,
@@ -50,6 +57,7 @@ class FinanceCloseReadiness:
         }
 
     def to_lock_error_detail(self) -> dict[str, object]:
+        """Serialize readiness as the HTTP 409 detail used by lock attempts."""
         return {
             "message": "Finance month has unresolved close blockers",
             "blockers": [blocker.to_api() for blocker in self.blockers],
@@ -57,13 +65,20 @@ class FinanceCloseReadiness:
 
 
 class SqlAlchemyFinanceCloseReadinessService:
+    """Evaluate close blockers from the SQL-backed finance and channel tables."""
+
     def __init__(self, session: Session):
         self._session = session
 
-    def check_month(self, month: str) -> FinanceCloseReadiness:
+    def check_month(
+        self, month: str, *, for_update: bool = False
+    ) -> FinanceCloseReadiness:
+        """Return readiness, optionally locking rows for a close attempt."""
         _validate_month(month)
         blockers: list[FinanceCloseBlocker] = []
-        pending_override_count = self._pending_manual_override_count(month)
+        pending_override_count = self._pending_manual_override_count(
+            month, for_update=for_update
+        )
         if pending_override_count:
             blockers.append(
                 FinanceCloseBlocker(
@@ -74,7 +89,9 @@ class SqlAlchemyFinanceCloseReadinessService:
                 )
             )
 
-        missing_fact_count = self._missing_required_revenue_fact_count(month)
+        missing_fact_count = self._missing_required_revenue_fact_count(
+            month, for_update=for_update
+        )
         if missing_fact_count:
             blockers.append(
                 FinanceCloseBlocker(
@@ -86,7 +103,7 @@ class SqlAlchemyFinanceCloseReadinessService:
             )
 
         issue_queue = build_revenue_reconciliation_issue_queue(
-            self._month_facts(month),
+            self._month_facts(month, for_update=for_update),
             month=month,
         )
         issue_count = len(issue_queue.items)
@@ -101,10 +118,23 @@ class SqlAlchemyFinanceCloseReadinessService:
             )
         return FinanceCloseReadiness(month=month, blockers=blockers)
 
-    def _pending_manual_override_count(self, month: str) -> int:
+    def _pending_manual_override_count(self, month: str, *, for_update: bool) -> int:
+        """Count pending overrides, locking matching rows during lock-time rechecks."""
+        if for_update:
+            statement = (
+                select(RevenueManualOverrideORM.id)
+                .where(
+                    RevenueManualOverrideORM.month == month,
+                    RevenueManualOverrideORM.status == "PENDING",
+                )
+                .with_for_update()
+            )
+            return len(self._session.scalars(statement).all())
         return int(
             self._session.scalar(
-                select(func.count()).select_from(RevenueManualOverrideORM).where(
+                select(func.count())
+                .select_from(RevenueManualOverrideORM)
+                .where(
                     RevenueManualOverrideORM.month == month,
                     RevenueManualOverrideORM.status == "PENDING",
                 )
@@ -112,7 +142,33 @@ class SqlAlchemyFinanceCloseReadinessService:
             or 0
         )
 
-    def _missing_required_revenue_fact_count(self, month: str) -> int:
+    def _missing_required_revenue_fact_count(
+        self, month: str, *, for_update: bool
+    ) -> int:
+        """Count active revenue-required channels missing facts for the month."""
+        missing_channels_statement = (
+            select(YouTubeChannelORM.youtube_channel_id)
+            .select_from(YouTubeChannelORM)
+            .outerjoin(
+                MonthlyChannelRevenueFactORM,
+                (
+                    MonthlyChannelRevenueFactORM.youtube_channel_id
+                    == YouTubeChannelORM.youtube_channel_id
+                )
+                & (MonthlyChannelRevenueFactORM.month == month),
+            )
+            .where(
+                YouTubeChannelORM.active.is_(True),
+                YouTubeChannelORM.revenue_required.is_(True),
+                MonthlyChannelRevenueFactORM.id.is_(None),
+            )
+        )
+        if for_update:
+            return len(
+                self._session.scalars(
+                    missing_channels_statement.with_for_update(of=YouTubeChannelORM)
+                ).all()
+            )
         return int(
             self._session.scalar(
                 select(func.count(YouTubeChannelORM.youtube_channel_id))
@@ -134,15 +190,19 @@ class SqlAlchemyFinanceCloseReadinessService:
             or 0
         )
 
-    def _month_facts(self, month: str) -> list[RevenueFactEntry]:
-        rows = self._session.scalars(
+    def _month_facts(self, month: str, *, for_update: bool) -> list[RevenueFactEntry]:
+        """Load month facts used for reconciliation, locking them for close attempts."""
+        statement = (
             select(MonthlyChannelRevenueFactORM)
             .where(MonthlyChannelRevenueFactORM.month == month)
             .order_by(
                 MonthlyChannelRevenueFactORM.youtube_channel_id,
                 MonthlyChannelRevenueFactORM.source_kind,
             )
-        ).all()
+        )
+        if for_update:
+            statement = statement.with_for_update()
+        rows = self._session.scalars(statement).all()
         return [
             RevenueFactEntry(
                 id=str(row.id),
@@ -162,22 +222,26 @@ class SqlAlchemyFinanceCloseReadinessService:
 
 
 def _validate_month(month: str) -> None:
+    """Validate month path parameters before querying close state."""
     if not MONTH_PATTERN.fullmatch(month):
         raise ValueError("month must use YYYY-MM with a calendar month from 01 to 12")
 
 
 def _pending_override_message(month: str, count: int) -> str:
+    """Build a grammatically correct pending-override blocker message."""
     subject = "manual override" if count == 1 else "manual overrides"
     verb = "requires" if count == 1 else "require"
     return f"{count} pending {subject} {verb} approval before locking {month}."
 
 
 def _missing_fact_message(month: str, count: int) -> str:
+    """Build a grammatically correct missing-revenue-facts blocker message."""
     subject = "channel" if count == 1 else "channels"
     verb = "has" if count == 1 else "have"
     return f"{count} revenue-required {subject} {verb} no revenue facts for {month}."
 
 
 def _reconciliation_issue_message(month: str, count: int) -> str:
+    """Build a grammatically correct reconciliation-issue blocker message."""
     subject = "channel has" if count == 1 else "channels have"
     return f"{count} {subject} unresolved reconciliation issues for {month}."

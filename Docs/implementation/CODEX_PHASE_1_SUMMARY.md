@@ -153,7 +153,8 @@ Twentieth continuation update:
 - hardened finance month-close readiness so active registry channels marked `revenue_required` must have at least one monthly revenue fact before the month can lock;
 - added a `MISSING_REVENUE_FACTS` close blocker surfaced through `GET /finance-close/{month}/readiness` and lock conflict responses;
 - kept performance-only or non-revenue-required channels from blocking close when they have no revenue facts;
-- preserved the existing blockers for pending manual overrides and unresolved reconciliation issues.
+- preserved the existing blockers for pending manual overrides and unresolved reconciliation issues;
+- hardened lock attempts to acquire the month-close row and re-run readiness with row locks on matching pending overrides, missing revenue-required channel rows, and monthly revenue facts so stale readiness snapshots cannot authorize a lock.
 
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`
@@ -510,6 +511,9 @@ Pytest coverage includes:
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-close-readiness-target" tests/api/test_finance_close_api.py::test_finance_close_readiness_blocks_missing_required_revenue_facts tests/api/test_finance_close_api.py::test_finance_close_readiness_ignores_performance_only_channels` passed with 2 tests.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-close-readiness-file" tests/api/test_finance_close_api.py` passed with 14 tests.
 - `python -m ruff check backend/ums_smart_revenue/finance/month_close_readiness.py` passed.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; python -B -m pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-pr8-red" tests/api/test_finance_close_api.py::test_finance_lock_requests_pessimistic_readiness_recheck` first failed because lock attempts did not request a pessimistic readiness recheck.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; python -B -m pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-pr8-green-lock" tests/api/test_finance_close_api.py::test_finance_lock_requests_pessimistic_readiness_recheck` passed after the lock-time recheck started using row-lock mode.
+- `$env:PYTHONDONTWRITEBYTECODE='1'; python -B -m pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-pr8-edge" tests/api/test_finance_close_api.py::test_finance_close_readiness_counts_bulk_missing_required_revenue_facts tests/api/test_finance_close_api.py::test_finance_lock_rechecks_after_channel_becomes_revenue_required` passed with 2 tests.
 
 ## Remaining Next Steps
 - Expand SQL audit persistence to each new sensitive endpoint as those routes are added.
