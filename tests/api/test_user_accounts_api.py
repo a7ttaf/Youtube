@@ -6,6 +6,10 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.users import (
+    SqlAlchemyUserAccountRepository,
+    UserAccountValidationError,
+)
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
 ADMIN_ID = UUID("00000000-0000-0000-0000-000000017001")
@@ -181,6 +185,25 @@ def test_malformed_user_email_is_rejected(tmp_path, email):
 
     assert response.status_code == 422
     assert response.json()["detail"] == "email must be a valid email address"
+
+
+def test_user_repository_rejects_non_string_email(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        repository = SqlAlchemyUserAccountRepository(session)
+
+        with pytest.raises(
+            UserAccountValidationError,
+            match="email must be a non-empty string",
+        ):
+            repository.create_user(
+                email=123,
+                display_name="Invalid Email User",
+                is_service_account=False,
+            )
 
 
 def test_corporate_admin_cannot_create_service_account(tmp_path):

@@ -228,7 +228,9 @@ def _require_compatible_status(row: UserORM, status: str) -> None:
         )
 
 
-def _normalize_required_string(value: str, field_name: str) -> str:
+def _normalize_required_string(value: object, field_name: str) -> str:
+    if not isinstance(value, str):
+        raise UserAccountValidationError(f"{field_name} must be a non-empty string")
     normalized = value.strip()
     if not normalized:
         raise UserAccountValidationError(f"{field_name} must not be blank")
