@@ -1,6 +1,7 @@
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
@@ -277,6 +278,48 @@ def test_user_account_list_cursor_is_stable_when_new_users_arrive(tmp_path):
     ]
 
 
+@pytest.mark.parametrize(
+    "params",
+    [
+        pytest.param({"status": "archived"}, id="invalid-status"),
+        pytest.param({"limit": 0}, id="limit-too-small"),
+        pytest.param({"limit": 101}, id="limit-too-large"),
+        pytest.param({"cursor_email": "admin@example.com"}, id="partial-cursor-email"),
+        pytest.param({"cursor_id": str(ADMIN_ID)}, id="partial-cursor-id"),
+        pytest.param(
+            {"cursor_email": "not-an-email", "cursor_id": str(ADMIN_ID)},
+            id="invalid-cursor-email",
+        ),
+        pytest.param(
+            {"cursor_email": "admin@example.com", "cursor_id": "not-a-uuid"},
+            id="invalid-cursor-id",
+        ),
+        pytest.param(
+            {
+                "limit": 1,
+                "offset": 1,
+                "cursor_email": "admin@example.com",
+                "cursor_id": str(ADMIN_ID),
+            },
+            id="cursor-with-offset",
+        ),
+    ],
+)
+def test_user_account_list_rejects_invalid_query_boundaries(tmp_path, params):
+    """Authorized list requests reject invalid status and pagination inputs."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/users",
+        headers=auth_headers("corporate_admin"),
+        params=params,
+    )
+
+    assert response.status_code == 422
+
+
 def test_assistant_cannot_list_user_accounts(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -349,6 +392,7 @@ def test_corporate_admin_gets_422_for_invalid_access_profile_uuid(tmp_path):
 
 
 def test_assistant_cannot_probe_user_access_profiles(tmp_path):
+    """Unauthorized callers cannot probe malformed or valid access-profile paths."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -360,3 +404,11 @@ def test_assistant_cannot_probe_user_access_profiles(tmp_path):
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: users.manage"
+
+    valid_user_response = client.get(
+        f"/users/{TARGET_ID}/access",
+        headers=auth_headers("assistant_analyst"),
+    )
+
+    assert valid_user_response.status_code == 403
+    assert valid_user_response.json()["detail"] == "Missing permission: users.manage"
