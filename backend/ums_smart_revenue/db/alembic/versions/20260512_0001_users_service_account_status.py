@@ -14,11 +14,20 @@ depends_on = None
 
 
 def upgrade() -> None:
+    op.execute(
+        "UPDATE users SET is_service_account = true "
+        "WHERE status = 'service' AND is_service_account IS false"
+    )
+    op.execute(
+        "UPDATE users SET status = 'service' "
+        "WHERE is_service_account IS true AND status = 'active'"
+    )
     op.create_check_constraint(
         "ck_users_service_account_status",
         "users",
         "(is_service_account = true AND status IN ('service', 'disabled')) "
         "OR (is_service_account = false AND status IN ('active', 'disabled'))",
+        postgresql_not_valid=True,
     )
 
 
