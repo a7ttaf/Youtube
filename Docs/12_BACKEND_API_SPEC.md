@@ -122,7 +122,7 @@ allocation-rule metadata only. They must not calculate or expose revenue values
 without the reconciliation engine and finance permissions. Readiness checks are
 required before locking and currently block on pending manual overrides,
 unresolved reconciliation issues, and active registry channels marked
-`revenue_required` that have no monthly revenue facts. Channels marked
+`revenue_required` that have no monthly revenue facts (`MISSING_REVENUE_FACTS`). Channels marked
 performance-only or not revenue-required do not block month close.
 
 ### AdSense
