@@ -59,6 +59,7 @@ DELETE /groups/{group_id}/members/{channel_id}
 
 ```http
 GET /users
+GET /users?limit=50&cursor_email=admin@example.com&cursor_id=00000000-0000-0000-0000-000000000001
 GET /users/{user_id}/access
 POST /users
 PATCH /users/{user_id}
@@ -69,11 +70,17 @@ POST /users/{user_id}/permissions/{grant_id}/revoke
 ```
 
 `GET /users` requires `users.manage` and returns a bounded, email-sorted page
-of user accounts with optional status filtering. `GET /users/{user_id}/access`
-also requires `users.manage` before target-id parsing and returns the user's
-active scoped role assignments and active direct permission grants, including
-assignment/grant ids for follow-up revocation workflows. Revoked historical rows
-remain available through audit/history surfaces rather than the active profile.
+of user accounts with optional status filtering. Pagination uses a keyset cursor:
+when `pagination.has_more` is true, clients pass `pagination.next_cursor.email`
+as `cursor_email` and `pagination.next_cursor.id` as `cursor_id` to continue
+from the same normalized `(email, id)` position even if earlier-sorting accounts
+are inserted between requests. `offset` remains accepted for compatibility and
+empty-result handling, but cursor pagination is preferred for iteration.
+`GET /users/{user_id}/access` also requires `users.manage` before target-id
+parsing and returns the user's active scoped role assignments and active direct
+permission grants, including assignment/grant ids for follow-up revocation
+workflows. Revoked historical rows remain available through audit/history
+surfaces rather than the active profile.
 
 User create/update endpoints require `users.manage` and a non-empty reason capped at 500 characters.
 Service account creation and any `PATCH /users/{user_id}` updates to service

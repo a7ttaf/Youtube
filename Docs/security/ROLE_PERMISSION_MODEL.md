@@ -126,7 +126,7 @@ Sensitive actions include:
 - Allocation changes require `CHANGE_ALLOCATION_RULE` for the month scope.
 - Connector administration requires `MANAGE_CONNECTORS`; running jobs requires `RUN_CONNECTOR_JOBS`.
 - User account creation and updates require `users.manage`, a reason, and a `USER_ACCOUNT_CHANGED` audit event.
-- User account list and access-profile reads require `users.manage`; access profiles expose only active role assignments and direct grants for administration workflows.
+- User account list and access-profile reads require `users.manage`; account lists use bounded cursor pagination and access profiles expose only active role assignments and direct grants for administration workflows.
 - Service account lifecycle changes require Super Owner authority.
 - Role assignment APIs require `roles.assign`; Super Owner assignment requires an existing Super Owner, and finance role assignment requires Finance Admin or Super Owner authority.
 - Direct permission grant APIs require `roles.assign`, enforce the target permission family, and audit every grant or revocation as `USER_PERMISSION_CHANGED`.

@@ -276,15 +276,19 @@ def list_user_accounts(
     ],
     limit: Annotated[int, Query(ge=1, le=100)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
+    cursor_email: Annotated[str | None, Query()] = None,
+    cursor_id: Annotated[str | None, Query()] = None,
     status_filter: Annotated[str | None, Query(alias="status")] = None,
 ) -> dict[str, object]:
     """List user accounts for access administration; requires MANAGE_USERS."""
     _require_user_management_permission(user)
     try:
-        items, has_more = repository.list_users(
+        items, has_more, next_cursor = repository.list_users(
             limit=limit,
             offset=offset,
             status=status_filter,
+            cursor_email=cursor_email,
+            cursor_id=cursor_id,
         )
     except UserAccountValidationError as exc:
         raise HTTPException(
@@ -302,6 +306,7 @@ def list_user_accounts(
             "offset": offset,
             "returned": len(items),
             "has_more": has_more,
+            "next_cursor": next_cursor,
         },
     }
 

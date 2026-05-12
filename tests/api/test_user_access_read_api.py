@@ -21,6 +21,8 @@ from ums_smart_revenue.db.security_models import (
 ADMIN_ID = UUID("00000000-0000-0000-0000-000000018001")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000018002")
 OTHER_ID = UUID("00000000-0000-0000-0000-000000018003")
+EARLY_SORT_ID = UUID("00000000-0000-0000-0000-000000018004")
+MISSING_ID = UUID("00000000-0000-0000-0000-000000018099")
 COMPANY_SCOPE_ID = UUID("00000000-0000-0000-0000-000000018101")
 CHANNEL_SCOPE_ID = UUID("00000000-0000-0000-0000-000000018102")
 COMPANY_ID = "company-tv-a"
@@ -148,6 +150,25 @@ def seed_database(database_url: str) -> None:
         session.commit()
 
 
+def insert_user(
+    database_url: str,
+    *,
+    user_id: UUID,
+    email: str,
+    display_name: str = "Inserted User",
+) -> None:
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            UserORM(
+                id=user_id,
+                email=email,
+                display_name=display_name,
+            )
+        )
+        session.commit()
+
+
 def test_corporate_admin_lists_user_accounts_with_pagination(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -170,6 +191,7 @@ def test_corporate_admin_lists_user_accounts_with_pagination(tmp_path):
         "offset": 0,
         "returned": 2,
         "has_more": True,
+        "next_cursor": {"email": "disabled@example.com", "id": str(OTHER_ID)},
     }
 
 
@@ -186,6 +208,68 @@ def test_user_account_list_can_filter_by_status(tmp_path):
 
     assert response.status_code == 200
     assert [item["email"] for item in response.json()["items"]] == [
+        "disabled@example.com"
+    ]
+
+
+def test_user_account_list_returns_empty_page_for_large_offset(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/users",
+        headers=auth_headers("corporate_admin"),
+        params={"limit": 10, "offset": 100},
+    )
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "items": [],
+        "pagination": {
+            "limit": 10,
+            "offset": 100,
+            "returned": 0,
+            "has_more": False,
+            "next_cursor": None,
+        },
+    }
+
+
+def test_user_account_list_cursor_is_stable_when_new_users_arrive(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    first_page = client.get(
+        "/users",
+        headers=auth_headers("corporate_admin"),
+        params={"limit": 1},
+    )
+    assert first_page.status_code == 200
+    next_cursor = first_page.json()["pagination"]["next_cursor"]
+
+    insert_user(
+        database_url,
+        user_id=EARLY_SORT_ID,
+        email="aaa-inserted@example.com",
+        display_name="Inserted Before Cursor",
+    )
+    second_page = client.get(
+        "/users",
+        headers=auth_headers("corporate_admin"),
+        params={
+            "limit": 1,
+            "cursor_email": next_cursor["email"],
+            "cursor_id": next_cursor["id"],
+        },
+    )
+
+    assert second_page.status_code == 200
+    assert [item["email"] for item in first_page.json()["items"]] == [
+        "admin@example.com"
+    ]
+    assert [item["email"] for item in second_page.json()["items"]] == [
         "disabled@example.com"
     ]
 
@@ -229,6 +313,34 @@ def test_corporate_admin_reads_active_user_access_profile(tmp_path):
     assert direct_permission["scope_type"] == "channel"
     assert direct_permission["scope_id"] == CHANNEL_ID
     assert direct_permission["active"] is True
+
+
+def test_corporate_admin_gets_404_for_missing_access_profile(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        f"/users/{MISSING_ID}/access",
+        headers=auth_headers("corporate_admin"),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "User not found"
+
+
+def test_corporate_admin_gets_422_for_invalid_access_profile_uuid(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/users/not-a-uuid/access",
+        headers=auth_headers("corporate_admin"),
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "user_id must be a valid UUID"
 
 
 def test_assistant_cannot_probe_user_access_profiles(tmp_path):

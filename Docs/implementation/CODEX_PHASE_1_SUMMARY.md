@@ -143,7 +143,7 @@ Eighteenth continuation update:
 - fail-closed for disabled or unregistered database users before route handlers run.
 
 Nineteenth continuation update:
-- added guarded `GET /users` account listing with bounded pagination and optional status filtering;
+- added guarded `GET /users` account listing with bounded cursor pagination, offset compatibility, and optional status filtering;
 - added guarded `GET /users/{user_id}/access` to return a user's active scoped role assignments and active direct permission grants;
 - enforced `users.manage` before access-profile target id parsing so unauthorized callers cannot probe account ids;
 - returned assignment and grant identifiers in access profiles so admin UI workflows can revoke active access explicitly;
@@ -391,8 +391,9 @@ Pytest coverage includes:
 - Duplicate user emails are rejected case-insensitively.
 - Service account creation is restricted to Super Owner.
 - No-op user account updates are rejected before creating an audit event.
-- Corporate Admin can list user accounts with bounded pagination and status filtering.
+- Corporate Admin can list user accounts with bounded cursor pagination, status filtering, and empty large-offset handling.
 - Corporate Admin can read a user's active access profile, including scoped role assignments and direct grants.
+- User access-profile reads return 404 for missing users and 422 for invalid target UUIDs after valid authorization.
 - Assistant Analyst cannot list users or probe access-profile target ids.
 - DB-backed principals use stored active role assignments instead of claimed header roles.
 - DB-backed principals load direct permission grants and use them on guarded routes.
@@ -490,6 +491,10 @@ Pytest coverage includes:
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-api-core-final" tests/api/test_app.py tests/api/test_audit_api.py tests/api/test_channels_api.py tests/api/test_connectors_api.py tests/api/test_groups_api.py tests/api/test_guarded_routes.py tests/api/test_sql_backed_channel_dependencies.py` passed with 42 tests.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-api-revenue-final" tests/api/test_exports_api.py tests/api/test_finance_close_api.py tests/api/test_manual_overrides_api.py tests/api/test_raw_report_files_api.py tests/api/test_revenue_explanations_api.py tests/api/test_revenue_facts_api.py` passed with 53 tests.
 - `$env:PYTHONDONTWRITEBYTECODE='1'; pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-db-principals-final" tests/api/test_database_principals.py` passed with 21 tests.
+- `python -m ruff check backend/ums_smart_revenue/api/users.py backend/ums_smart_revenue/auth/users.py tests/api/test_user_access_read_api.py` passed after PR #7 pre-merge edge coverage was added.
+- `python -B -m pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-access-edge" tests/api/test_user_access_read_api.py` passed with 9 tests after user-list cursor pagination and access-profile edge cases were added.
+- `python -B -m pytest -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-user-access-related-pr7" tests/api/test_user_access_read_api.py tests/api/test_user_accounts_api.py tests/api/test_user_roles_api.py tests/api/test_user_permissions_api.py` passed with 60 tests.
+- `git diff --check` passed with CRLF conversion warnings only after the PR #7 pre-merge fix.
 
 ## Remaining Next Steps
 - Expand SQL audit persistence to each new sensitive endpoint as those routes are added.

@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import TypeVar
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.exc import (
     DBAPIError,
     DisconnectionError,
@@ -199,23 +199,49 @@ class SqlAlchemyUserAccountRepository:
         limit: int = 50,
         offset: int = 0,
         status: str | None = None,
-    ) -> tuple[tuple[UserAccountEntry, ...], bool]:
+        cursor_email: str | None = None,
+        cursor_id: str | None = None,
+    ) -> tuple[tuple[UserAccountEntry, ...], bool, dict[str, str] | None]:
         """Return a stable page of user accounts sorted by normalized email."""
         normalized_limit = _normalize_limit(limit)
         normalized_offset = _normalize_offset(offset)
         normalized_status = _normalize_status(status) if status is not None else None
+        cursor = _normalize_user_cursor(
+            cursor_email=cursor_email,
+            cursor_id=cursor_id,
+            offset=normalized_offset,
+        )
 
-        def operation() -> tuple[tuple[UserAccountEntry, ...], bool]:
+        def operation() -> tuple[
+            tuple[UserAccountEntry, ...], bool, dict[str, str] | None
+        ]:
             """Attempt one user-list read against the current session."""
-            statement = select(UserORM).order_by(func.lower(UserORM.email), UserORM.id)
+            email_sort_key = func.lower(UserORM.email)
+            statement = select(UserORM).order_by(email_sort_key, UserORM.id)
             if normalized_status is not None:
                 statement = statement.where(UserORM.status == normalized_status)
+            if cursor is not None:
+                cursor_email_value, cursor_uuid = cursor
+                statement = statement.where(
+                    or_(
+                        email_sort_key > cursor_email_value,
+                        and_(
+                            email_sort_key == cursor_email_value,
+                            UserORM.id > cursor_uuid,
+                        ),
+                    )
+                )
+            elif normalized_offset:
+                statement = statement.offset(normalized_offset)
             rows = self._session.scalars(
-                statement.offset(normalized_offset).limit(normalized_limit + 1)
+                statement.limit(normalized_limit + 1)
             ).all()
+            items = tuple(self._to_entry(row) for row in rows[:normalized_limit])
+            has_more = len(rows) > normalized_limit
             return (
-                tuple(self._to_entry(row) for row in rows[:normalized_limit]),
-                len(rows) > normalized_limit,
+                items,
+                has_more,
+                _next_user_cursor(items) if has_more else None,
             )
 
         return self._run_with_storage_retries(operation)
@@ -448,6 +474,27 @@ def _normalize_offset(value: int) -> int:
     return value
 
 
+def _normalize_user_cursor(
+    *,
+    cursor_email: str | None,
+    cursor_id: str | None,
+    offset: int,
+) -> tuple[str, UUID] | None:
+    """Normalize the user-list keyset cursor and reject ambiguous paging."""
+    if (cursor_email is None) != (cursor_id is None):
+        raise UserAccountValidationError(
+            "cursor_email and cursor_id must be provided together"
+        )
+    if cursor_email is None or cursor_id is None:
+        return None
+    if offset != 0:
+        raise UserAccountValidationError("offset must be 0 when cursor is provided")
+    return (
+        _normalize_email(cursor_email),
+        _parse_uuid(cursor_id, field_name="cursor_id"),
+    )
+
+
 def _normalize_service_account_flag(value: object) -> bool:
     """Reject non-boolean service-account flags before persistence."""
     if not isinstance(value, bool):
@@ -546,3 +593,11 @@ def _permission_access_to_entry(
         revoke_reason=row.revoke_reason,
         active=row.active,
     )
+
+
+def _next_user_cursor(items: tuple[UserAccountEntry, ...]) -> dict[str, str] | None:
+    """Return the keyset cursor for continuing after the last returned account."""
+    if not items:
+        return None
+    last_item = items[-1]
+    return {"email": last_item.email, "id": last_item.id}
