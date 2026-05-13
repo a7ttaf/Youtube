@@ -284,19 +284,18 @@ def preview_finance_workbook(
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
         export_job = repository.get_job(export_id)
-        if export_job.export_type != "FINANCE_EXCEL":
-            raise FinanceWorkbookPreviewValidationError(
-                "finance workbook preview only supports FINANCE_EXCEL exports"
-            )
         _require_finance_export_artifact_permissions(
             user=user,
-            export_type=export_job.export_type,
             scope_type=export_job.scope_type,
             scope_id=export_job.scope_id,
             month=export_job.month,
             org_index=org_index,
             group_registry=group_registry,
         )
+        if export_job.export_type != "FINANCE_EXCEL":
+            raise FinanceWorkbookPreviewValidationError(
+                "finance workbook preview only supports FINANCE_EXCEL exports"
+            )
         preview = _build_finance_workbook_preview_for_export(
             export_job=export_job,
             session=session,
@@ -356,19 +355,18 @@ def download_finance_workbook(
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
         export_job = repository.get_job(export_id)
-        if export_job.export_type != "FINANCE_EXCEL":
-            raise FinanceWorkbookPreviewValidationError(
-                "finance workbook download only supports FINANCE_EXCEL exports"
-            )
         _require_finance_export_artifact_permissions(
             user=user,
-            export_type=export_job.export_type,
             scope_type=export_job.scope_type,
             scope_id=export_job.scope_id,
             month=export_job.month,
             org_index=org_index,
             group_registry=group_registry,
         )
+        if export_job.export_type != "FINANCE_EXCEL":
+            raise FinanceWorkbookPreviewValidationError(
+                "finance workbook download only supports FINANCE_EXCEL exports"
+            )
         preview = _build_finance_workbook_preview_for_export(
             export_job=export_job,
             session=session,
@@ -434,19 +432,18 @@ def download_executive_pdf(
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
         export_job = repository.get_job(export_id)
-        if export_job.export_type != "EXECUTIVE_PDF":
-            raise ExecutivePdfValidationError(
-                "executive PDF download only supports EXECUTIVE_PDF exports"
-            )
         _require_finance_export_artifact_permissions(
             user=user,
-            export_type=export_job.export_type,
             scope_type=export_job.scope_type,
             scope_id=export_job.scope_id,
             month=export_job.month,
             org_index=org_index,
             group_registry=group_registry,
         )
+        if export_job.export_type != "EXECUTIVE_PDF":
+            raise ExecutivePdfValidationError(
+                "executive PDF download only supports EXECUTIVE_PDF exports"
+            )
         source_summaries = _build_finance_source_summaries_for_export(
             export_job=export_job,
             session=session,
@@ -517,19 +514,18 @@ def download_branded_slide_pack(
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
         export_job = repository.get_job(export_id)
-        if export_job.export_type != "BRANDED_SLIDE_PACK":
-            raise BrandedSlidePackValidationError(
-                "branded slide pack download only supports BRANDED_SLIDE_PACK exports"
-            )
         _require_finance_export_artifact_permissions(
             user=user,
-            export_type=export_job.export_type,
             scope_type=export_job.scope_type,
             scope_id=export_job.scope_id,
             month=export_job.month,
             org_index=org_index,
             group_registry=group_registry,
         )
+        if export_job.export_type != "BRANDED_SLIDE_PACK":
+            raise BrandedSlidePackValidationError(
+                "branded slide pack download only supports BRANDED_SLIDE_PACK exports"
+            )
         source_summaries = _build_finance_source_summaries_for_export(
             export_job=export_job,
             session=session,
@@ -778,7 +774,27 @@ def _require_export_permissions(
     view_permission = (
         Permission.VIEW_REVENUE if finance_export else Permission.VIEW_ANALYTICS
     )
+    _require_export_scope_permissions(
+        user=user,
+        export_permission=export_permission,
+        view_permission=view_permission,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        org_index=org_index,
+        group_registry=group_registry,
+    )
 
+
+def _require_export_scope_permissions(
+    *,
+    user: UserPrincipal,
+    export_permission: Permission,
+    view_permission: Permission,
+    scope_type: str,
+    scope_id: str | None,
+    org_index: OrgAccessIndex,
+    group_registry: ChannelGroupRegistryStore,
+) -> None:
     if scope_type == "group":
         if not scope_id:
             raise ExportJobValidationError(
@@ -803,16 +819,16 @@ def _require_export_permissions(
 def _require_finance_export_artifact_permissions(
     *,
     user: UserPrincipal,
-    export_type: str,
     scope_type: str,
     scope_id: str | None,
     month: str,
     org_index: OrgAccessIndex,
     group_registry: ChannelGroupRegistryStore,
 ) -> None:
-    _require_export_permissions(
+    _require_export_scope_permissions(
         user=user,
-        export_type=export_type,
+        export_permission=Permission.EXPORT_REVENUE_REPORT,
+        view_permission=Permission.VIEW_REVENUE,
         scope_type=scope_type,
         scope_id=scope_id,
         org_index=org_index,

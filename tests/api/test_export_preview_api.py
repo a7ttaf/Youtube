@@ -321,6 +321,22 @@ def test_export_operator_cannot_preview_finance_workbook(tmp_path):
     assert response.json()["detail"] == "Missing permission: exports.revenue"
 
 
+def test_export_operator_cannot_probe_artifact_type_through_finance_preview(
+    tmp_path,
+):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url, export_type="ANALYTICS_SUMMARY_CSV")
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        f"/exports/{EXPORT_ID}/finance-workbook-preview",
+        headers=auth_headers("export_operator"),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: exports.revenue"
+
+
 def test_finance_workbook_preview_rejects_analytics_export_job(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url, export_type="ANALYTICS_SUMMARY_CSV")
