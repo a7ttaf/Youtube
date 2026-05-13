@@ -626,7 +626,7 @@ def get_month_net_revenue(
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
     try:
-        normalize_net_revenue_currency(currency)
+        normalized_currency = normalize_net_revenue_currency(currency)
         facts = revenue_repository.list_month_facts(
             month=month,
             youtube_channel_ids=channel_ids,
@@ -651,6 +651,7 @@ def get_month_net_revenue(
         ) from exc
 
     summary_api = summary.to_api()
+    summary_api["currency"] = normalized_currency
     record = record_audit_event(
         sink=audit_sink,
         actor=user,

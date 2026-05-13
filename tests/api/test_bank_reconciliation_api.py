@@ -171,7 +171,11 @@ def test_finance_viewer_reads_bank_reconciliation_summary_with_audit(tmp_path):
     engine = create_engine(database_url)
     with Session(engine) as session:
         audit_logs = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.created_at)
+            select(AuditLogORM).order_by(
+                AuditLogORM.created_at,
+                AuditLogORM.event_type,
+                AuditLogORM.id,
+            )
         ).all()
 
     assert create_response.status_code == 201

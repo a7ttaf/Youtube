@@ -1,6 +1,8 @@
 from decimal import Decimal
 from importlib import import_module
 
+import pytest
+
 from ums_smart_revenue.finance.bank_reconciliation import (
     MonthBankReconciliationSummary,
 )
@@ -154,9 +156,7 @@ def test_smart_alerts_flag_missing_revenue_source():
 
 
 def test_smart_alerts_reject_negative_high_gap_threshold():
-    try:
+    with pytest.raises(ValueError) as exc_info:
         build_alerts(high_gap_threshold_usd=Decimal("-1.00"))
-    except ValueError as exc:
-        assert str(exc) == "high_gap_threshold_usd must be non-negative"
-    else:
-        raise AssertionError("negative high_gap_threshold_usd should be rejected")
+
+    assert str(exc_info.value) == "high_gap_threshold_usd must be non-negative"

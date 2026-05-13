@@ -2,6 +2,8 @@ from datetime import date
 from decimal import Decimal
 from importlib import import_module
 
+import pytest
+
 from ums_smart_revenue.finance.adsense_payments import AdSensePaymentEntry
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 
@@ -150,14 +152,12 @@ def test_monthly_payment_match_summary_requires_youtube_revenue_sources():
 def test_monthly_payment_match_summary_rejects_negative_tolerance():
     module = import_module("ums_smart_revenue.finance.payment_matching")
 
-    try:
+    with pytest.raises(module.PaymentMatchValidationError) as exc_info:
         module.build_monthly_payment_match_summary(
             month="2026-03",
             facts=[revenue_fact(channel_id="channel-tv-a", amount="930.00")],
             payments=[adsense_payment(amount="930.00")],
             tolerance_usd=Decimal("-0.01"),
         )
-    except module.PaymentMatchValidationError as exc:
-        assert str(exc) == "tolerance_usd must be non-negative"
-    else:
-        raise AssertionError("negative tolerance_usd should be rejected")
+
+    assert str(exc_info.value) == "tolerance_usd must be non-negative"
