@@ -3,7 +3,9 @@ from decimal import Decimal
 from importlib import import_module
 from uuid import UUID, uuid4
 
+import pytest
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import FinanceBase
@@ -45,3 +47,28 @@ def test_bank_reconciliation_model_persists_finance_bank_receipt_metadata():
     assert entry.transfer_fee_usd == Decimal("1.50")
     assert entry.fx_difference_usd == Decimal("0.25")
     assert entry.recorded_by == USER_ID
+
+
+def test_bank_reconciliation_model_rejects_non_alpha_currency_code():
+    module = import_module("ums_smart_revenue.db.finance_models")
+    bank_model = module.BankReconciliationEntryORM
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    FinanceBase.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        session.add(
+            bank_model(
+                id=uuid4(),
+                month="2026-03",
+                bank_reference="invalid-currency",
+                bank_received_date=date(2026, 4, 22),
+                bank_received_amount=Decimal("928.50"),
+                bank_received_currency="1$A",
+                bank_received_amount_usd=Decimal("928.50"),
+                transfer_fee_usd=Decimal("1.50"),
+                fx_difference_usd=Decimal("0.25"),
+                recorded_by=USER_ID,
+            )
+        )
+        with pytest.raises(IntegrityError):
+            session.commit()

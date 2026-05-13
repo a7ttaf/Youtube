@@ -244,14 +244,25 @@ def get_export(
         ) from exc
 
     if export_job.requested_by != user.user_id:
-        _require_export_permissions(
-            user=user,
-            export_type=export_job.export_type,
-            scope_type=export_job.scope_type,
-            scope_id=export_job.scope_id,
-            org_index=org_index,
-            group_registry=group_registry,
-        )
+        try:
+            _require_export_permissions(
+                user=user,
+                export_type=export_job.export_type,
+                scope_type=export_job.scope_type,
+                scope_id=export_job.scope_id,
+                org_index=org_index,
+                group_registry=group_registry,
+            )
+        except KeyError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=str(exc).strip("'"),
+            ) from exc
+        except ExportJobValidationError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=str(exc),
+            ) from exc
     return export_job.to_api()
 
 
@@ -318,6 +329,7 @@ def preview_finance_workbook(
         audit_sink=audit_sink,
         user=user,
         export_job=export_job,
+        group_registry=group_registry,
         artifact_type="finance_workbook_preview",
         include_download_event=False,
     )
@@ -390,6 +402,7 @@ def download_finance_workbook(
         audit_sink=audit_sink,
         user=user,
         export_job=export_job,
+        group_registry=group_registry,
         artifact_type="finance_workbook_xlsx",
         include_download_event=True,
     )
@@ -474,6 +487,7 @@ def download_executive_pdf(
         audit_sink=audit_sink,
         user=user,
         export_job=export_job,
+        group_registry=group_registry,
         artifact_type="executive_pdf",
         include_download_event=True,
     )
@@ -556,6 +570,7 @@ def download_branded_slide_pack(
         audit_sink=audit_sink,
         user=user,
         export_job=export_job,
+        group_registry=group_registry,
         artifact_type="branded_slide_pack_pptx",
         include_download_event=True,
     )
@@ -612,12 +627,15 @@ def _build_finance_source_summaries_for_export(
         month=export_job.month,
         youtube_channel_ids=channel_ids,
     )
-    payments = SqlAlchemyAdSensePaymentRepository(session).list_month_payments(
-        month=export_job.month
-    )
-    bank_entries = SqlAlchemyBankReconciliationRepository(session).list_month_entries(
-        month=export_job.month
-    )
+    payments = []
+    bank_entries = []
+    if channel_ids is None:
+        payments = SqlAlchemyAdSensePaymentRepository(session).list_month_payments(
+            month=export_job.month
+        )
+        bank_entries = SqlAlchemyBankReconciliationRepository(
+            session
+        ).list_month_entries(month=export_job.month)
     close = SqlAlchemyFinanceMonthCloseRepository(session).get(export_job.month)
     close_status = close.status if close is not None else export_job.month_lock_status
 
@@ -657,18 +675,22 @@ def _record_finance_export_artifact_audit(
     audit_sink: AuditSink,
     user: UserPrincipal,
     export_job,
+    group_registry: ChannelGroupRegistryStore,
     artifact_type: str,
     include_download_event: bool,
 ):
-    revenue_scope = _access_scope_from_export_scope(
-        export_job.scope_type,
-        export_job.scope_id,
+    revenue_scopes = _audit_revenue_scopes_for_export(
+        scope_type=export_job.scope_type,
+        scope_id=export_job.scope_id,
+        group_registry=group_registry,
     )
     month_scope = AccessScope.finance_month(export_job.month)
     details = {
         "export_type": export_job.export_type,
         "artifact_type": artifact_type,
         "month": export_job.month,
+        "scope_type": export_job.scope_type,
+        "scope_id": export_job.scope_id,
     }
     audit_records = [
         record_audit_event(
@@ -679,26 +701,31 @@ def _record_finance_export_artifact_audit(
             entity_id=export_job.id,
             scope=revenue_scope,
             details=details,
-        ),
-        record_audit_event(
-            sink=audit_sink,
-            actor=user,
-            event_type=AuditEventType.PAYMENT_VIEWED,
-            entity_type="export_job",
-            entity_id=export_job.id,
-            scope=month_scope,
-            details=details,
-        ),
-        record_audit_event(
-            sink=audit_sink,
-            actor=user,
-            event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
-            entity_type="export_job",
-            entity_id=export_job.id,
-            scope=month_scope,
-            details=details,
-        ),
+        )
+        for revenue_scope in revenue_scopes
     ]
+    audit_records.extend(
+        [
+            record_audit_event(
+                sink=audit_sink,
+                actor=user,
+                event_type=AuditEventType.PAYMENT_VIEWED,
+                entity_type="export_job",
+                entity_id=export_job.id,
+                scope=month_scope,
+                details=details,
+            ),
+            record_audit_event(
+                sink=audit_sink,
+                actor=user,
+                event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
+                entity_type="export_job",
+                entity_id=export_job.id,
+                scope=month_scope,
+                details=details,
+            ),
+        ]
+    )
     if include_download_event:
         audit_records.append(
             record_audit_event(
@@ -712,6 +739,24 @@ def _record_finance_export_artifact_audit(
             )
         )
     return audit_records
+
+
+def _audit_revenue_scopes_for_export(
+    *,
+    scope_type: str,
+    scope_id: str | None,
+    group_registry: ChannelGroupRegistryStore,
+) -> tuple[AccessScope, ...]:
+    if scope_type != "group":
+        return (_access_scope_from_export_scope(scope_type, scope_id),)
+    if not scope_id:
+        raise ExportJobValidationError(
+            "scope_id is required for export scope_type: group"
+        )
+    group = group_registry.get_group(scope_id)
+    if group is None:
+        raise KeyError(f"Group not found: {scope_id}")
+    return tuple(AccessScope.channel(channel_id) for channel_id in group.channel_ids)
 
 
 def _require_export_permissions(

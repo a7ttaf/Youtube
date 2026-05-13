@@ -67,6 +67,8 @@ def build_monthly_payment_match_summary(
     currency: str = "USD",
     tolerance_usd: Decimal = DEFAULT_PAYMENT_MATCH_TOLERANCE_USD,
 ) -> MonthlyPaymentMatchSummary:
+    if tolerance_usd < 0:
+        raise PaymentMatchValidationError("tolerance_usd must be non-negative")
     normalized_currency = normalize_payment_match_currency(currency)
     month_facts = [fact for fact in facts if fact.month == month]
     month_payments = [payment for payment in payments if payment.month == month]

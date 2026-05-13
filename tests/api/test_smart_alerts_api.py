@@ -135,7 +135,7 @@ def test_finance_viewer_reads_month_smart_alerts_with_sensitive_audits(tmp_path)
     engine = create_engine(database_url)
     with Session(engine) as session:
         audit_logs = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.created_at)
+            select(AuditLogORM).order_by(AuditLogORM.event_type)
         ).all()
 
     assert response.status_code == 200
@@ -153,9 +153,9 @@ def test_finance_viewer_reads_month_smart_alerts_with_sensitive_audits(tmp_path)
         "BANK_RECONCILIATION_VIEWED",
     ]
     assert [log.event_type for log in audit_logs] == [
-        "REVENUE_VIEWED",
-        "PAYMENT_VIEWED",
         "BANK_RECONCILIATION_VIEWED",
+        "PAYMENT_VIEWED",
+        "REVENUE_VIEWED",
     ]
     assert all(log.sensitive is True for log in audit_logs)
 

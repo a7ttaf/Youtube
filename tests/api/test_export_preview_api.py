@@ -19,7 +19,13 @@ from ums_smart_revenue.db.finance_models import (
     MonthlyChannelRevenueFactORM,
     RevenueManualOverrideORM,
 )
-from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
+from ums_smart_revenue.db.org_models import (
+    ChannelGroupMemberORM,
+    ChannelGroupORM,
+    OrgBase,
+    OrgUnitORM,
+    YouTubeChannelORM,
+)
 from ums_smart_revenue.db.report_models import ExportJobORM, ReportBase
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
@@ -28,6 +34,8 @@ COMPANY_ID = UUID("00000000-0000-0000-0000-000000023101")
 CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-000000023201")
 USER_ID = UUID("00000000-0000-0000-0000-000000023301")
 EXPORT_ID = UUID("00000000-0000-0000-0000-000000023401")
+GROUP_ID = UUID("00000000-0000-0000-0000-000000023501")
+OTHER_USER_ID = UUID("00000000-0000-0000-0000-000000023601")
 
 
 def auth_headers(role: str, scope_type: str = "global") -> dict[str, str]:
@@ -44,111 +52,139 @@ def build_database_url(tmp_path) -> str:
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
-def seed_database(database_url: str, *, export_type: str = "FINANCE_EXCEL") -> None:
+def seed_database(
+    database_url: str,
+    *,
+    export_type: str = "FINANCE_EXCEL",
+    scope_type: str = "global",
+    scope_id: str | None = None,
+    requested_by: UUID = USER_ID,
+    include_group: bool = False,
+) -> None:
+    resolved_scope_id = scope_id
+    if resolved_scope_id is None and scope_type == "company":
+        resolved_scope_id = str(COMPANY_ID)
+    if resolved_scope_id is None and scope_type == "group":
+        resolved_scope_id = str(GROUP_ID)
+
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
     ReportBase.metadata.create_all(engine)
     with Session(engine) as session:
-        session.add_all(
-            [
-                UserORM(
-                    id=USER_ID,
-                    email="export-preview@example.com",
-                    display_name="Export Preview User",
-                ),
-                OrgUnitORM(
-                    id=SECTOR_ID,
-                    parent_id=None,
-                    type="SECTOR",
-                    name="TV",
-                    active=True,
-                ),
-                OrgUnitORM(
-                    id=COMPANY_ID,
-                    parent_id=SECTOR_ID,
-                    type="COMPANY",
-                    name="Company A",
-                    active=True,
-                ),
-                YouTubeChannelORM(
-                    id=CHANNEL_ROW_ID,
-                    youtube_channel_id="channel-tv-a",
-                    channel_name="Channel TV A",
-                    primary_org_unit_id=COMPANY_ID,
-                    cms_status="INSIDE_CMS",
-                    revenue_required=True,
-                    active=True,
-                ),
-                FinanceMonthCloseORM(
-                    month="2026-03",
-                    status="LOCKED",
-                    allocation_rule_payload={},
-                ),
-                MonthlyChannelRevenueFactORM(
-                    id=uuid4(),
-                    month="2026-03",
-                    youtube_channel_id="channel-tv-a",
-                    source_kind="YOUTUBE_CMS",
-                    source_report_id="cms-report-2026-03",
-                    gross_revenue_usd=Decimal("1000.00"),
-                    net_revenue_usd=Decimal("880.00"),
-                    views=250000,
-                    watch_time_minutes=Decimal("7200.50"),
-                    confidence_score=Decimal("0.9825"),
-                    imported_by=USER_ID,
-                ),
-                RevenueManualOverrideORM(
-                    id=uuid4(),
-                    month="2026-03",
-                    youtube_channel_id="channel-tv-a",
-                    adjustment_revenue_usd=Decimal("50.00"),
-                    reason="Approved finance correction",
-                    status="APPROVED",
-                    created_by=USER_ID,
-                    approved_by=uuid4(),
-                    approved_at=datetime(2026, 4, 24, tzinfo=UTC),
-                    approval_reason="Approved correction",
-                ),
-                AdSensePaymentORM(
-                    id=uuid4(),
-                    month="2026-03",
-                    payment_name="March AdSense",
-                    payment_date=date(2026, 4, 21),
-                    payment_amount=Decimal("1000.00"),
-                    payment_currency="USD",
-                    payment_status="PAID",
-                    raw_payload={"source": "pytest"},
-                    imported_by=USER_ID,
-                ),
-                BankReconciliationEntryORM(
-                    id=uuid4(),
-                    month="2026-03",
-                    bank_reference="WIRE-2026-03",
-                    bank_received_date=date(2026, 4, 22),
-                    bank_received_amount=Decimal("1000.00"),
-                    bank_received_currency="USD",
-                    bank_received_amount_usd=Decimal("1000.00"),
-                    transfer_fee_usd=Decimal("0.00"),
-                    fx_difference_usd=Decimal("0.00"),
-                    recorded_by=USER_ID,
-                ),
-                ExportJobORM(
-                    id=EXPORT_ID,
-                    export_type=export_type,
-                    scope_type="company",
-                    scope_id=str(COMPANY_ID),
-                    month="2026-03",
-                    currency="USD",
-                    requested_by=USER_ID,
-                    status="QUEUED",
-                    month_lock_status="LOCKED",
-                    include_confidence_notes=True,
-                    include_manual_override_notes=True,
-                ),
-            ]
-        )
+        rows = [
+            UserORM(
+                id=USER_ID,
+                email="export-preview@example.com",
+                display_name="Export Preview User",
+            ),
+            OrgUnitORM(
+                id=SECTOR_ID,
+                parent_id=None,
+                type="SECTOR",
+                name="TV",
+                active=True,
+            ),
+            OrgUnitORM(
+                id=COMPANY_ID,
+                parent_id=SECTOR_ID,
+                type="COMPANY",
+                name="Company A",
+                active=True,
+            ),
+            YouTubeChannelORM(
+                id=CHANNEL_ROW_ID,
+                youtube_channel_id="channel-tv-a",
+                channel_name="Channel TV A",
+                primary_org_unit_id=COMPANY_ID,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                active=True,
+            ),
+            FinanceMonthCloseORM(
+                month="2026-03",
+                status="LOCKED",
+                allocation_rule_payload={},
+            ),
+            MonthlyChannelRevenueFactORM(
+                id=uuid4(),
+                month="2026-03",
+                youtube_channel_id="channel-tv-a",
+                source_kind="YOUTUBE_CMS",
+                source_report_id="cms-report-2026-03",
+                gross_revenue_usd=Decimal("1000.00"),
+                net_revenue_usd=Decimal("880.00"),
+                views=250000,
+                watch_time_minutes=Decimal("7200.50"),
+                confidence_score=Decimal("0.9825"),
+                imported_by=USER_ID,
+            ),
+            RevenueManualOverrideORM(
+                id=uuid4(),
+                month="2026-03",
+                youtube_channel_id="channel-tv-a",
+                adjustment_revenue_usd=Decimal("50.00"),
+                reason="Approved finance correction",
+                status="APPROVED",
+                created_by=USER_ID,
+                approved_by=uuid4(),
+                approved_at=datetime(2026, 4, 24, tzinfo=UTC),
+                approval_reason="Approved correction",
+            ),
+            AdSensePaymentORM(
+                id=uuid4(),
+                month="2026-03",
+                payment_name="March AdSense",
+                payment_date=date(2026, 4, 21),
+                payment_amount=Decimal("1000.00"),
+                payment_currency="USD",
+                payment_status="PAID",
+                raw_payload={"source": "pytest"},
+                imported_by=USER_ID,
+            ),
+            BankReconciliationEntryORM(
+                id=uuid4(),
+                month="2026-03",
+                bank_reference="WIRE-2026-03",
+                bank_received_date=date(2026, 4, 22),
+                bank_received_amount=Decimal("1000.00"),
+                bank_received_currency="USD",
+                bank_received_amount_usd=Decimal("1000.00"),
+                transfer_fee_usd=Decimal("0.00"),
+                fx_difference_usd=Decimal("0.00"),
+                recorded_by=USER_ID,
+            ),
+            ExportJobORM(
+                id=EXPORT_ID,
+                export_type=export_type,
+                scope_type=scope_type,
+                scope_id=resolved_scope_id,
+                month="2026-03",
+                currency="USD",
+                requested_by=requested_by,
+                status="QUEUED",
+                month_lock_status="LOCKED",
+                include_confidence_notes=True,
+                include_manual_override_notes=True,
+            ),
+        ]
+        if include_group:
+            rows.extend(
+                [
+                    ChannelGroupORM(
+                        id=GROUP_ID,
+                        name="March Finance Review",
+                        group_type="FINANCE_GROUP",
+                        active=True,
+                    ),
+                    ChannelGroupMemberORM(
+                        group_id=GROUP_ID,
+                        channel_id=CHANNEL_ROW_ID,
+                    ),
+                ]
+            )
+        session.add_all(rows)
         session.commit()
 
 
@@ -193,6 +229,75 @@ def test_finance_admin_previews_finance_workbook_with_sensitive_audit(tmp_path):
         "REVENUE_VIEWED",
     }
     assert all(event.sensitive for event in audit_events)
+
+
+def test_scoped_finance_workbook_omits_month_wide_cash_without_attribution(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url, scope_type="company")
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        f"/exports/{EXPORT_ID}/finance-workbook-preview",
+        headers=auth_headers("finance_admin"),
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["executive_summary"]["total_net_revenue_usd"] == "930"
+    assert payload["executive_summary"]["payment_match_status"] == (
+        "MISSING_ADSENSE_PAYMENT"
+    )
+    assert payload["executive_summary"]["bank_reconciliation_status"] == (
+        "MISSING_ADSENSE_PAYMENT"
+    )
+
+
+def test_group_scoped_finance_workbook_records_channel_revenue_audit(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url, scope_type="group", include_group=True)
+    client = TestClient(
+        create_app(database_url=database_url),
+        raise_server_exceptions=False,
+    )
+
+    response = client.get(
+        f"/exports/{EXPORT_ID}/finance-workbook-preview",
+        headers=auth_headers("finance_admin"),
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_scopes = session.scalars(
+            select(AuditLogORM).order_by(AuditLogORM.event_type, AuditLogORM.id)
+        ).all()
+
+    assert response.status_code == 200
+    assert ("REVENUE_VIEWED", "channel", "channel-tv-a") in {
+        (event.event_type, event.scope_type, event.scope_id)
+        for event in audit_scopes
+    }
+
+
+def test_get_export_returns_not_found_for_missing_group_scope(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(
+        database_url,
+        scope_type="group",
+        requested_by=OTHER_USER_ID,
+        include_group=False,
+    )
+    client = TestClient(
+        create_app(database_url=database_url),
+        raise_server_exceptions=False,
+    )
+
+    response = client.get(
+        f"/exports/{EXPORT_ID}",
+        headers=auth_headers("finance_admin"),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == f"Group not found: {GROUP_ID}"
 
 
 def test_export_operator_cannot_preview_finance_workbook(tmp_path):
@@ -245,7 +350,7 @@ def test_finance_admin_downloads_generated_finance_workbook_with_audit(tmp_path)
     assert response.headers["content-type"] == (
         "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-    assert "ums-finance-2026-03-company.xlsx" in response.headers["content-disposition"]
+    assert "ums-finance-2026-03-global.xlsx" in response.headers["content-disposition"]
     workbook = load_workbook(BytesIO(response.content), data_only=True)
     assert workbook.sheetnames == [
         "Executive Summary",
@@ -287,7 +392,7 @@ def test_finance_admin_downloads_generated_executive_pdf_with_audit(tmp_path):
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/pdf"
-    assert "ums-executive-2026-03-company.pdf" in response.headers[
+    assert "ums-executive-2026-03-global.pdf" in response.headers[
         "content-disposition"
     ]
     assert response.content.startswith(b"%PDF-")
@@ -341,7 +446,7 @@ def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(tmp_pat
     assert response.headers["content-type"] == (
         "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     )
-    assert "ums-branded-2026-03-company.pptx" in response.headers[
+    assert "ums-branded-2026-03-global.pptx" in response.headers[
         "content-disposition"
     ]
     presentation = Presentation(BytesIO(response.content))
@@ -381,11 +486,7 @@ def _extract_pdf_text(content: bytes) -> str:
 
 
 def _slide_texts(presentation: Presentation) -> list[str]:
-    slide_texts = []
-    for slide in presentation.slides:
-        text_parts = []
-        for shape in slide.shapes:
-            if hasattr(shape, "text"):
-                text_parts.append(shape.text)
-        slide_texts.append("\n".join(text_parts))
-    return slide_texts
+    return [
+        "\n".join(shape.text for shape in slide.shapes if hasattr(shape, "text"))
+        for slide in presentation.slides
+    ]

@@ -128,7 +128,13 @@ class SqlAlchemyManualOverrideRepository:
 
         statement = (
             select(RevenueManualOverrideORM)
+            .join(
+                YouTubeChannelORM,
+                RevenueManualOverrideORM.youtube_channel_id
+                == YouTubeChannelORM.youtube_channel_id,
+            )
             .where(RevenueManualOverrideORM.month == month)
+            .where(YouTubeChannelORM.active.is_(True))
             .order_by(
                 RevenueManualOverrideORM.youtube_channel_id,
                 RevenueManualOverrideORM.created_at,

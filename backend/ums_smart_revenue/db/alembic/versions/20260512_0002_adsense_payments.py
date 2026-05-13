@@ -5,10 +5,9 @@ Revises: 20260512_0001
 Create Date: 2026-05-12
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects import postgresql
-
 
 revision = "20260512_0002"
 down_revision = "20260512_0001"
@@ -33,17 +32,16 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.UniqueConstraint("month", "payment_name", name="uq_adsense_payments_month_name"),
         sa.CheckConstraint(
-            "length(month) = 7 AND substr(month, 5, 1) = '-' "
-            "AND substr(month, 1, 1) BETWEEN '0' AND '9' "
-            "AND substr(month, 2, 1) BETWEEN '0' AND '9' "
-            "AND substr(month, 3, 1) BETWEEN '0' AND '9' "
-            "AND substr(month, 4, 1) BETWEEN '0' AND '9' "
-            "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
+            _month_format_check_sql(),
             name="ck_adsense_payments_month_format",
         ),
         sa.CheckConstraint("payment_amount >= 0", name="ck_adsense_payments_amount_nonnegative"),
         sa.CheckConstraint(
-            "length(payment_currency) = 3 AND payment_currency = upper(payment_currency)",
+            "length(payment_currency) = 3 "
+            "AND payment_currency = upper(payment_currency) "
+            "AND substr(payment_currency, 1, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(payment_currency, 2, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(payment_currency, 3, 1) BETWEEN 'A' AND 'Z'",
             name="ck_adsense_payments_currency_code",
         ),
         sa.CheckConstraint(
@@ -60,3 +58,14 @@ def downgrade() -> None:
     op.drop_index("ix_adsense_payments_source_report", table_name="adsense_payments")
     op.drop_index("ix_adsense_payments_month_date", table_name="adsense_payments")
     op.drop_table("adsense_payments")
+
+
+def _month_format_check_sql() -> str:
+    bind = op.get_bind()
+    dialect_name = bind.dialect.name if bind is not None else "postgresql"
+    if dialect_name == "sqlite":
+        return (
+            "month GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]' "
+            "AND substr(month, 6, 2) BETWEEN '01' AND '12'"
+        )
+    return "month ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'"

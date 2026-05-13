@@ -233,7 +233,10 @@ class BankReconciliationEntryORM(FinanceBase):
         ),
         CheckConstraint(
             "length(bank_received_currency) = 3 "
-            "AND bank_received_currency = upper(bank_received_currency)",
+            "AND bank_received_currency = upper(bank_received_currency) "
+            "AND substr(bank_received_currency, 1, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(bank_received_currency, 2, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(bank_received_currency, 3, 1) BETWEEN 'A' AND 'Z'",
             name="ck_bank_reconciliation_currency_code",
         ),
         Index("ix_bank_reconciliation_entries_month", "month"),
@@ -300,7 +303,10 @@ class AdSensePaymentORM(FinanceBase):
         ),
         CheckConstraint(
             "length(payment_currency) = 3 "
-            "AND payment_currency = upper(payment_currency)",
+            "AND payment_currency = upper(payment_currency) "
+            "AND substr(payment_currency, 1, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(payment_currency, 2, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(payment_currency, 3, 1) BETWEEN 'A' AND 'Z'",
             name="ck_adsense_payments_currency_code",
         ),
         CheckConstraint(

@@ -115,13 +115,14 @@ POST /revenue/recalculate
 `GET /revenue/months/{month}/payment-match` is an implemented holding-level
 finance read that compares selected monthly YouTube revenue facts against paid
 AdSense payment rows for the same month. It requires global
-`finance.view_revenue` and global `finance.view_finalized_payments`, audits both
-`REVENUE_VIEWED` and `PAYMENT_VIEWED`, returns match status, totals, gap,
-issues, and audit event metadata, and excludes non-paid AdSense rows from the
-paid total while still reporting their count. This endpoint does not calculate
-tax, bank gaps, net revenue, or allocation rules. Until exchange-rate support
-exists, `currency` must be `USD`; payment rows in another currency are excluded
-from the match and surfaced as reconciliation issues.
+`finance.view_revenue` plus `finance.view_finalized_payments` for the requested
+finance-month scope, audits both `REVENUE_VIEWED` and `PAYMENT_VIEWED`, returns
+match status, totals, gap, issues, and audit event metadata, and excludes
+non-paid AdSense rows from the paid total while still reporting their count.
+This endpoint does not calculate tax, bank gaps, net revenue, or allocation
+rules. Until exchange-rate support exists, `currency` must be `USD`; payment
+rows in another currency are excluded from the match and surfaced as
+reconciliation issues.
 
 `POST /revenue/months/{month}/bank-reconciliation` records finance-provided
 bank receipt metadata for a finance month. It requires
@@ -279,6 +280,10 @@ requested finance-month scope. The endpoint returns a
 executive summary, and source summaries from SQL-backed revenue facts, manual
 overrides, AdSense payment metadata, bank reconciliation rows, finance close
 state, payment matching, bank confirmation, net revenue, and smart alerts. It
+uses month-wide AdSense payment and bank reconciliation rows only for global
+exports; scoped exports keep those summaries empty until payment/bank cash can
+be attributed below the month level. Group exports audit revenue reads per
+member channel. It
 audits reads as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, and
 `BANK_RECONCILIATION_VIEWED`. It does not create an XLSX/PDF/slide artifact,
 does not update `file_url`, and does not mark the export job complete.
@@ -341,7 +346,8 @@ GET /graph/outside-cms
 - UI cannot directly access Neo4j for restricted views.
 - Every money API must support currency parameter.
 - Every money API must return confidence and source metadata.
-- Export APIs run async jobs.
+- Export APIs may run async jobs or return guarded on-demand artifacts,
+  depending on the endpoint contract.
 
 ## Standard money response
 

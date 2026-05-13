@@ -151,3 +151,12 @@ def test_smart_alerts_flag_missing_revenue_source():
 
     assert summary.alerts[0].code == "MISSING_REVENUE_SOURCE"
     assert summary.alerts[0].severity == "HIGH"
+
+
+def test_smart_alerts_reject_negative_high_gap_threshold():
+    try:
+        build_alerts(high_gap_threshold_usd=Decimal("-1.00"))
+    except ValueError as exc:
+        assert str(exc) == "high_gap_threshold_usd must be non-negative"
+    else:
+        raise AssertionError("negative high_gap_threshold_usd should be rejected")

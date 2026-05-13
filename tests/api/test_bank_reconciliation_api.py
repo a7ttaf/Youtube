@@ -121,6 +121,38 @@ def test_finance_admin_records_bank_reconciliation_with_audit(tmp_path):
     assert audit_log.sensitive is True
 
 
+def test_bank_reconciliation_record_is_idempotent_for_same_month_reference(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    first = client.post(
+        "/revenue/months/2026-03/bank-reconciliation",
+        headers=auth_headers("finance_admin", "global"),
+        json=bank_payload("928.50"),
+    )
+    second = client.post(
+        "/revenue/months/2026-03/bank-reconciliation",
+        headers=auth_headers("finance_admin", "global"),
+        json=bank_payload("930.00"),
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        bank_count = session.execute(
+            text("SELECT COUNT(*) FROM bank_reconciliation_entries")
+        ).scalar_one()
+        received_amount = session.execute(
+            text("SELECT bank_received_amount_usd FROM bank_reconciliation_entries")
+        ).scalar_one()
+
+    assert first.status_code == 201
+    assert second.status_code == 201
+    assert second.json()["bank_received_amount_usd"] == "930"
+    assert bank_count == 1
+    assert received_amount == Decimal("930.000000")
+
+
 def test_finance_viewer_reads_bank_reconciliation_summary_with_audit(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

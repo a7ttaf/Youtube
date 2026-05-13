@@ -145,3 +145,19 @@ def test_monthly_payment_match_summary_requires_youtube_revenue_sources():
     assert summary.payment_gap_usd is None
     assert summary.missing_youtube_source_channel_count == 1
     assert summary.issues[0].issue_type == "NO_YOUTUBE_REVENUE_FACTS"
+
+
+def test_monthly_payment_match_summary_rejects_negative_tolerance():
+    module = import_module("ums_smart_revenue.finance.payment_matching")
+
+    try:
+        module.build_monthly_payment_match_summary(
+            month="2026-03",
+            facts=[revenue_fact(channel_id="channel-tv-a", amount="930.00")],
+            payments=[adsense_payment(amount="930.00")],
+            tolerance_usd=Decimal("-0.01"),
+        )
+    except module.PaymentMatchValidationError as exc:
+        assert str(exc) == "tolerance_usd must be non-negative"
+    else:
+        raise AssertionError("negative tolerance_usd should be rejected")

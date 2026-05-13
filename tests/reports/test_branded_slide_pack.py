@@ -30,7 +30,7 @@ def test_branded_slide_pack_report_builds_planned_slide_manifest():
         net_revenue=_net_revenue_summary(),
         payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
         bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
-        smart_alerts=_smart_alert_summary(alert_count=0),
+        smart_alerts=_smart_alert_summary(),
     )
 
     payload = report.to_api()
@@ -54,7 +54,7 @@ def test_branded_slide_pack_rejects_non_slide_export_type():
             net_revenue=_net_revenue_summary(),
             payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
             bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
-            smart_alerts=_smart_alert_summary(alert_count=0),
+            smart_alerts=_smart_alert_summary(),
         )
 
     assert str(exc_info.value) == (
@@ -68,7 +68,7 @@ def test_branded_slide_pack_pptx_contains_planned_slides_and_summary_values():
         net_revenue=_net_revenue_summary(),
         payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
         bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
-        smart_alerts=_smart_alert_summary(alert_count=0),
+        smart_alerts=_smart_alert_summary(),
     )
 
     pptx_bytes = build_branded_slide_pack_pptx(report)
@@ -88,15 +88,28 @@ def test_branded_slide_pack_pptx_contains_planned_slides_and_summary_values():
         assert slide_name in combined_text
 
 
+def test_branded_slide_pack_pptx_handles_missing_channel_net_revenue():
+    report = build_branded_slide_pack_report(
+        export_job=_export_job(export_type="BRANDED_SLIDE_PACK"),
+        net_revenue=_net_revenue_summary(include_missing_channel=True),
+        payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
+        bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
+        smart_alerts=_smart_alert_summary(),
+    )
+
+    pptx_bytes = build_branded_slide_pack_pptx(report)
+    presentation = Presentation(BytesIO(pptx_bytes))
+    combined_text = "\n".join(_slide_texts(presentation))
+
+    assert pptx_bytes.startswith(b"PK")
+    assert "channel-missing-source" in combined_text
+
+
 def _slide_texts(presentation: Presentation) -> list[str]:
-    slide_texts = []
-    for slide in presentation.slides:
-        text_parts = []
-        for shape in slide.shapes:
-            if hasattr(shape, "text"):
-                text_parts.append(shape.text)
-        slide_texts.append("\n".join(text_parts))
-    return slide_texts
+    return [
+        "\n".join(shape.text for shape in slide.shapes if hasattr(shape, "text"))
+        for slide in presentation.slides
+    ]
 
 
 def _export_job(*, export_type: str) -> ExportJobEntry:
@@ -118,7 +131,9 @@ def _export_job(*, export_type: str) -> ExportJobEntry:
     )
 
 
-def _net_revenue_summary() -> MonthNetRevenueSummary:
+def _net_revenue_summary(
+    *, include_missing_channel: bool = False
+) -> MonthNetRevenueSummary:
     channel = ChannelNetRevenueSummary(
         month="2026-03",
         youtube_channel_id="channel-tv-a",
@@ -136,17 +151,38 @@ def _net_revenue_summary() -> MonthNetRevenueSummary:
         pending_manual_override_count=0,
         issues=[],
     )
+    channels = [channel]
+    if include_missing_channel:
+        channels.append(
+            ChannelNetRevenueSummary(
+                month="2026-03",
+                youtube_channel_id="channel-missing-source",
+                status="NET_REVENUE_SOURCE_MISSING",
+                primary_source_kind=None,
+                baseline_gross_revenue_usd=Decimal("100.00"),
+                baseline_net_revenue_usd=None,
+                approved_manual_override_total_usd=Decimal("0.00"),
+                adjusted_gross_revenue_usd=Decimal("100.00"),
+                net_revenue_usd=None,
+                deduction_amount_usd=None,
+                deduction_percentage=None,
+                confidence="E_MISSING",
+                approved_manual_override_count=0,
+                pending_manual_override_count=0,
+                issues=[],
+            )
+        )
     return MonthNetRevenueSummary(
         month="2026-03",
         status="CALCULATED",
-        channel_count=1,
+        channel_count=len(channels),
         calculated_channel_count=1,
-        missing_net_source_count=0,
+        missing_net_source_count=1 if include_missing_channel else 0,
         pending_manual_override_count=0,
         total_adjusted_gross_revenue_usd=Decimal("1050.00"),
         total_net_revenue_usd=Decimal("930.00"),
         total_deduction_amount_usd=Decimal("120.00"),
-        channels=[channel],
+        channels=channels,
     )
 
 
@@ -190,8 +226,7 @@ def _bank_summary(*, status: str) -> MonthBankReconciliationSummary:
     )
 
 
-def _smart_alert_summary(*, alert_count: int) -> MonthlySmartAlertSummary:
-    assert alert_count == 0
+def _smart_alert_summary() -> MonthlySmartAlertSummary:
     return MonthlySmartAlertSummary(
         month="2026-03",
         status="CLEAR",

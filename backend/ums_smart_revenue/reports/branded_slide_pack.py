@@ -193,7 +193,11 @@ def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
             f"{_decimal_to_api(channel.net_revenue_usd)} USD"
             for channel in sorted(
                 report.net_revenue.channels,
-                key=lambda item: item.net_revenue_usd,
+                key=lambda item: (
+                    item.net_revenue_usd
+                    if item.net_revenue_usd is not None
+                    else Decimal("-Infinity")
+                ),
                 reverse=True,
             )[:8]
         ]

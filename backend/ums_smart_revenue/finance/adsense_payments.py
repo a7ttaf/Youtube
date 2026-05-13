@@ -5,6 +5,8 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import AdSensePaymentORM
@@ -101,29 +103,43 @@ class SqlAlchemyAdSensePaymentRepository:
         for payment in payments:
             normalized_payment = _normalize_payment(payment)
             self._require_month_open(normalized_payment.month)
-            row = self._session.scalars(
-                select(AdSensePaymentORM).where(
-                    AdSensePaymentORM.month == normalized_payment.month,
-                    AdSensePaymentORM.payment_name == normalized_payment.payment_name,
-                )
-            ).one_or_none()
+            now = datetime.now(UTC)
+            insert_statement = _dialect_insert(
+                self._session.get_bind().dialect.name
+            )(AdSensePaymentORM).values(
+                id=uuid4(),
+                month=normalized_payment.month,
+                payment_name=normalized_payment.payment_name,
+                payment_date=normalized_payment.payment_date,
+                payment_amount=normalized_payment.payment_amount,
+                payment_currency=normalized_payment.payment_currency,
+                payment_status=normalized_payment.payment_status,
+                raw_payload=dict(normalized_payment.raw_payload),
+                source_report_id=normalized_source_report_id,
+                imported_by=actor_uuid,
+                updated_at=now,
+            )
+            statement = insert_statement.on_conflict_do_update(
+                index_elements=[
+                    AdSensePaymentORM.month,
+                    AdSensePaymentORM.payment_name,
+                ],
+                set_={
+                    "payment_date": normalized_payment.payment_date,
+                    "payment_amount": normalized_payment.payment_amount,
+                    "payment_currency": normalized_payment.payment_currency,
+                    "payment_status": normalized_payment.payment_status,
+                    "raw_payload": dict(normalized_payment.raw_payload),
+                    "source_report_id": normalized_source_report_id,
+                    "imported_by": actor_uuid,
+                    "updated_at": now,
+                },
+            ).returning(AdSensePaymentORM.id)
+            row_id = self._session.execute(statement).scalar_one()
+            row = self._session.get(AdSensePaymentORM, row_id)
             if row is None:
-                row = AdSensePaymentORM(
-                    id=uuid4(),
-                    month=normalized_payment.month,
-                    payment_name=normalized_payment.payment_name,
-                )
-                self._session.add(row)
-
-            row.payment_date = normalized_payment.payment_date
-            row.payment_amount = normalized_payment.payment_amount
-            row.payment_currency = normalized_payment.payment_currency
-            row.payment_status = normalized_payment.payment_status
-            row.raw_payload = dict(normalized_payment.raw_payload)
-            row.source_report_id = normalized_source_report_id
-            row.imported_by = actor_uuid
-            row.updated_at = datetime.now(UTC)
-            self._session.flush()
+                raise AdSensePaymentValidationError("AdSense payment upsert failed")
+            self._session.refresh(row)
             entries.append(self._to_entry(row))
 
         return entries
@@ -258,6 +274,16 @@ def _validate_payment_amount(value: Decimal) -> None:
         raise AdSensePaymentValidationError(
             "payment_amount must be a finite decimal >= 0"
         )
+
+
+def _dialect_insert(dialect_name: str):
+    if dialect_name == "sqlite":
+        return sqlite_insert
+    if dialect_name == "postgresql":
+        return postgresql_insert
+    raise AdSensePaymentValidationError(
+        f"Unsupported database dialect for AdSense payment upsert: {dialect_name}"
+    )
 
 
 def _parse_uuid(value: str) -> UUID:

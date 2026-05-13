@@ -6,6 +6,8 @@ from decimal import ROUND_HALF_UP, Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import BankReconciliationEntryORM
@@ -146,33 +148,49 @@ class SqlAlchemyBankReconciliationRepository:
         actor_uuid = _parse_uuid(actor_user_id)
         self._require_month_open(month)
 
-        row = self._session.scalars(
-            select(BankReconciliationEntryORM)
-            .where(
-                BankReconciliationEntryORM.month == month,
-                BankReconciliationEntryORM.bank_reference == normalized_reference,
-            )
-            .with_for_update()
-        ).one_or_none()
+        now = datetime.now(UTC)
+        insert_statement = _dialect_insert(self._session.get_bind().dialect.name)(
+            BankReconciliationEntryORM
+        ).values(
+            id=uuid4(),
+            month=month,
+            bank_reference=normalized_reference,
+            bank_received_date=bank_received_date,
+            bank_received_amount=bank_received_amount,
+            bank_received_currency=normalized_currency,
+            bank_received_amount_usd=bank_received_amount_usd,
+            transfer_fee_usd=transfer_fee_usd,
+            fx_difference_usd=fx_difference_usd,
+            notes=normalized_notes,
+            source_report_id=normalized_source_report_id,
+            recorded_by=actor_uuid,
+            updated_at=now,
+        )
+        statement = insert_statement.on_conflict_do_update(
+            index_elements=[
+                BankReconciliationEntryORM.month,
+                BankReconciliationEntryORM.bank_reference,
+            ],
+            set_={
+                "bank_received_date": bank_received_date,
+                "bank_received_amount": bank_received_amount,
+                "bank_received_currency": normalized_currency,
+                "bank_received_amount_usd": bank_received_amount_usd,
+                "transfer_fee_usd": transfer_fee_usd,
+                "fx_difference_usd": fx_difference_usd,
+                "notes": normalized_notes,
+                "source_report_id": normalized_source_report_id,
+                "recorded_by": actor_uuid,
+                "updated_at": now,
+            },
+        ).returning(BankReconciliationEntryORM.id)
+        row_id = self._session.execute(statement).scalar_one()
+        row = self._session.get(BankReconciliationEntryORM, row_id)
         if row is None:
-            row = BankReconciliationEntryORM(
-                id=uuid4(),
-                month=month,
-                bank_reference=normalized_reference,
+            raise BankReconciliationValidationError(
+                "Bank reconciliation upsert failed"
             )
-            self._session.add(row)
-
-        row.bank_received_date = bank_received_date
-        row.bank_received_amount = bank_received_amount
-        row.bank_received_currency = normalized_currency
-        row.bank_received_amount_usd = bank_received_amount_usd
-        row.transfer_fee_usd = transfer_fee_usd
-        row.fx_difference_usd = fx_difference_usd
-        row.notes = normalized_notes
-        row.source_report_id = normalized_source_report_id
-        row.recorded_by = actor_uuid
-        row.updated_at = datetime.now(UTC)
-        self._session.flush()
+        self._session.refresh(row)
         return self._to_entry(row)
 
     def list_month_entries(self, *, month: str) -> list[BankReconciliationEntry]:
@@ -388,3 +406,13 @@ def _decimal_to_api(value: Decimal | None) -> str | None:
     if normalized == normalized.to_integral():
         return format(normalized, "f")
     return format(normalized, "f").rstrip("0").rstrip(".")
+
+
+def _dialect_insert(dialect_name: str):
+    if dialect_name == "sqlite":
+        return sqlite_insert
+    if dialect_name == "postgresql":
+        return postgresql_insert
+    raise BankReconciliationValidationError(
+        f"Unsupported database dialect for bank reconciliation upsert: {dialect_name}"
+    )

@@ -435,9 +435,10 @@ def get_month_payment_match(
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     currency: Annotated[str, Query(min_length=1)] = "USD",
 ) -> dict[str, object]:
-    scope = AccessScope.global_scope()
-    _require_permission(user, Permission.VIEW_REVENUE, scope)
-    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, scope)
+    revenue_scope = AccessScope.global_scope()
+    payment_scope = AccessScope.finance_month(month)
+    _require_permission(user, Permission.VIEW_REVENUE, revenue_scope)
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, payment_scope)
     try:
         normalized_currency = normalize_payment_match_currency(currency)
         facts = revenue_repository.list_month_facts(month=month)
@@ -448,7 +449,11 @@ def get_month_payment_match(
             payments=payments,
             currency=normalized_currency,
         )
-    except (PaymentMatchValidationError, RevenueFactValidationError) as exc:
+    except (
+        AdSensePaymentValidationError,
+        PaymentMatchValidationError,
+        RevenueFactValidationError,
+    ) as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
@@ -461,7 +466,7 @@ def get_month_payment_match(
         event_type=AuditEventType.REVENUE_VIEWED,
         entity_type="monthly_payment_match",
         entity_id=month,
-        scope=scope,
+        scope=revenue_scope,
         details={
             "status": summary.status,
             "youtube_revenue_total_usd": summary_api["youtube_revenue_total_usd"],
@@ -473,7 +478,7 @@ def get_month_payment_match(
         event_type=AuditEventType.PAYMENT_VIEWED,
         entity_type="monthly_payment_match",
         entity_id=month,
-        scope=scope,
+        scope=payment_scope,
         details={
             "status": summary.status,
             "adsense_paid_amount": summary_api["adsense_paid_amount"],

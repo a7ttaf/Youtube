@@ -1,9 +1,10 @@
 import importlib.util
 from pathlib import Path
+from uuid import uuid4
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, event, inspect, text
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_PATH = (
@@ -16,9 +17,35 @@ MIGRATION_PATH = (
 def test_bank_reconciliation_migration_creates_bank_reconciliation_table():
     assert MIGRATION_PATH.exists()
     engine = create_engine("sqlite+pysqlite:///:memory:")
+    _register_sqlite_uuid_function(engine)
 
     with engine.begin() as connection:
         _apply_migration(connection)
+        generated_id = connection.execute(
+            text(
+                """
+                INSERT INTO bank_reconciliation_entries (
+                    month,
+                    bank_reference,
+                    bank_received_date,
+                    bank_received_amount,
+                    bank_received_currency,
+                    bank_received_amount_usd,
+                    recorded_by
+                )
+                VALUES (
+                    '2026-03',
+                    'WIRE-2026-03',
+                    '2026-04-22',
+                    930.00,
+                    'USD',
+                    930.00,
+                    '00000000-0000-0000-0000-000000009901'
+                )
+                RETURNING id
+                """
+            )
+        ).scalar_one()
         inspector = inspect(connection)
         table_names = inspector.get_table_names()
         columns = {
@@ -52,6 +79,13 @@ def test_bank_reconciliation_migration_creates_bank_reconciliation_table():
         "bank_reference",
     )
     assert indexes["ix_bank_reconciliation_entries_month"] == ("month",)
+    assert generated_id
+
+
+def _register_sqlite_uuid_function(engine) -> None:
+    @event.listens_for(engine, "connect")
+    def connect(dbapi_connection, _connection_record) -> None:
+        dbapi_connection.create_function("gen_random_uuid", 0, lambda: str(uuid4()))
 
 
 def _apply_migration(connection) -> None:

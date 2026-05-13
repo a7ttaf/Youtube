@@ -2,11 +2,18 @@ from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.revenue import get_month_payment_match
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
+from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
+from ums_smart_revenue.auth.roles import RoleKey
+from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.db.finance_models import (
     AdSensePaymentORM,
     FinanceBase,
@@ -18,6 +25,7 @@ from ums_smart_revenue.db.org_models import (
     YouTubeChannelORM,
 )
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.finance.adsense_payments import AdSensePaymentValidationError
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-00000000a101")
 COMPANY_ID = UUID("00000000-0000-0000-0000-00000000a201")
@@ -127,7 +135,7 @@ def test_finance_viewer_reads_payment_match_with_revenue_and_payment_audits(
     engine = create_engine(database_url)
     with Session(engine) as session:
         audit_logs = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.created_at)
+            select(AuditLogORM).order_by(AuditLogORM.event_type)
         ).all()
 
     assert response.status_code == 200
@@ -138,11 +146,42 @@ def test_finance_viewer_reads_payment_match_with_revenue_and_payment_audits(
     assert response.json()["payment_gap_usd"] == "0"
     assert response.json()["audit_events"][0]["event_type"] == "REVENUE_VIEWED"
     assert response.json()["audit_events"][1]["event_type"] == "PAYMENT_VIEWED"
-    assert [log.event_type for log in audit_logs] == [
+    audit_logs_by_type = {log.event_type: log for log in audit_logs}
+    assert set(audit_logs_by_type) == {
         "REVENUE_VIEWED",
         "PAYMENT_VIEWED",
-    ]
+    }
+    assert (
+        audit_logs_by_type["PAYMENT_VIEWED"].scope_type,
+        audit_logs_by_type["PAYMENT_VIEWED"].scope_id,
+    ) == (
+        "finance-month",
+        "2026-03",
+    )
     assert all(log.sensitive is True for log in audit_logs)
+
+
+def test_payment_match_maps_adsense_payment_validation_to_422():
+    user = UserPrincipal(
+        user_id=str(USER_ID),
+        email="payment-match@example.com",
+        role_assignments=(
+            RoleAssignment(role=RoleKey.FINANCE_VIEWER, scope=AccessScope.global_scope()),
+        ),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        get_month_payment_match(
+            month="2026-03",
+            user=user,
+            revenue_repository=_EmptyRevenueRepository(),
+            payment_repository=_FailingPaymentRepository(),
+            audit_sink=InMemoryAuditSink(),
+            currency="USD",
+        )
+
+    assert exc_info.value.status_code == 422
+    assert exc_info.value.detail == "invalid payment query"
 
 
 def test_month_payment_match_reports_payment_variance(tmp_path):
@@ -205,3 +244,13 @@ def test_company_scoped_finance_viewer_cannot_read_holding_payment_match(tmp_pat
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
+class _EmptyRevenueRepository:
+    def list_month_facts(self, *, month: str):
+        return []
+
+
+class _FailingPaymentRepository:
+    def list_month_payments(self, *, month: str):
+        raise AdSensePaymentValidationError("invalid payment query")

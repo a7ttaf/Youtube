@@ -58,6 +58,8 @@ def build_monthly_smart_alert_summary(
     manual_overrides: Iterable[RevenueManualOverrideEntry],
     high_gap_threshold_usd: Decimal = DEFAULT_HIGH_GAP_THRESHOLD_USD,
 ) -> MonthlySmartAlertSummary:
+    if high_gap_threshold_usd < 0:
+        raise ValueError("high_gap_threshold_usd must be non-negative")
     alerts: list[MonthlySmartAlert] = []
     normalized_close_status = close_status or "OPEN"
     overrides = list(manual_overrides)
@@ -180,6 +182,8 @@ def _high_gap_details(
     bank_gap_usd: Decimal | None,
     threshold_usd: Decimal,
 ) -> dict[str, object]:
+    if threshold_usd < 0:
+        raise ValueError("high_gap_threshold_usd must be non-negative")
     details: dict[str, object] = {"threshold_usd": _decimal_to_api(threshold_usd)}
     if payment_gap_usd is not None and abs(payment_gap_usd) >= threshold_usd:
         details["payment_gap_usd"] = _decimal_to_api(payment_gap_usd)

@@ -299,7 +299,11 @@ def _channel_ranking_table(report: ExecutivePdfReport) -> Table:
             ]
             for channel in sorted(
                 report.net_revenue.channels,
-                key=lambda item: item.net_revenue_usd,
+                key=lambda item: (
+                    item.net_revenue_usd
+                    if item.net_revenue_usd is not None
+                    else Decimal("-Infinity")
+                ),
                 reverse=True,
             )[:10]
         ],

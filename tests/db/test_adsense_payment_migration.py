@@ -1,9 +1,10 @@
 import importlib.util
 from pathlib import Path
+from uuid import uuid4
 
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
-from sqlalchemy import create_engine, inspect
+from sqlalchemy import create_engine, event, inspect, text
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_PATH = (
@@ -15,9 +16,35 @@ MIGRATION_PATH = (
 def test_adsense_payment_migration_creates_payment_table():
     assert MIGRATION_PATH.exists()
     engine = create_engine("sqlite+pysqlite:///:memory:")
+    _register_sqlite_uuid_function(engine)
 
     with engine.begin() as connection:
         _apply_migration(connection)
+        generated_id = connection.execute(
+            text(
+                """
+                INSERT INTO adsense_payments (
+                    month,
+                    payment_name,
+                    payment_date,
+                    payment_amount,
+                    payment_currency,
+                    payment_status,
+                    raw_payload
+                )
+                VALUES (
+                    '2026-03',
+                    'March AdSense',
+                    '2026-04-21',
+                    930.00,
+                    'USD',
+                    'PAID',
+                    '{}'
+                )
+                RETURNING id
+                """
+            )
+        ).scalar_one()
         inspector = inspect(connection)
         table_names = inspector.get_table_names()
         columns = {
@@ -47,6 +74,13 @@ def test_adsense_payment_migration_creates_payment_table():
         "payment_name",
     )
     assert indexes["ix_adsense_payments_month_date"] == ("month", "payment_date")
+    assert generated_id
+
+
+def _register_sqlite_uuid_function(engine) -> None:
+    @event.listens_for(engine, "connect")
+    def connect(dbapi_connection, _connection_record) -> None:
+        dbapi_connection.create_function("gen_random_uuid", 0, lambda: str(uuid4()))
 
 
 def _apply_migration(connection) -> None:

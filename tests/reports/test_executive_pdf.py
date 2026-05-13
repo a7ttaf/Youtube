@@ -30,7 +30,7 @@ def test_executive_pdf_report_builds_section_manifest_from_source_summaries():
         net_revenue=_net_revenue_summary(),
         payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
         bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
-        smart_alerts=_smart_alert_summary(alert_count=0),
+        smart_alerts=_smart_alert_summary(),
     )
 
     payload = report.to_api()
@@ -54,7 +54,7 @@ def test_executive_pdf_rejects_non_pdf_export_type():
             net_revenue=_net_revenue_summary(),
             payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
             bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
-            smart_alerts=_smart_alert_summary(alert_count=0),
+            smart_alerts=_smart_alert_summary(),
         )
 
     assert str(exc_info.value) == (
@@ -68,7 +68,7 @@ def test_executive_pdf_bytes_contain_expected_management_summary():
         net_revenue=_net_revenue_summary(),
         payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
         bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
-        smart_alerts=_smart_alert_summary(alert_count=0),
+        smart_alerts=_smart_alert_summary(),
     )
 
     pdf_bytes = build_executive_pdf_bytes(report)
@@ -81,6 +81,22 @@ def test_executive_pdf_bytes_contain_expected_management_summary():
     assert "930" in text
     assert "PAYMENT_MATCHED" in text
     assert "BANK_CONFIRMED" in text
+
+
+def test_executive_pdf_bytes_handle_missing_channel_net_revenue():
+    report = build_executive_pdf_report(
+        export_job=_export_job(export_type="EXECUTIVE_PDF"),
+        net_revenue=_net_revenue_summary(include_missing_channel=True),
+        payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
+        bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
+        smart_alerts=_smart_alert_summary(),
+    )
+
+    pdf_bytes = build_executive_pdf_bytes(report)
+    text = _extract_pdf_text(pdf_bytes)
+
+    assert pdf_bytes.startswith(b"%PDF-")
+    assert "channel-missing-source" in text
 
 
 def _extract_pdf_text(content: bytes) -> str:
@@ -107,7 +123,9 @@ def _export_job(*, export_type: str) -> ExportJobEntry:
     )
 
 
-def _net_revenue_summary() -> MonthNetRevenueSummary:
+def _net_revenue_summary(
+    *, include_missing_channel: bool = False
+) -> MonthNetRevenueSummary:
     channel = ChannelNetRevenueSummary(
         month="2026-03",
         youtube_channel_id="channel-tv-a",
@@ -125,17 +143,38 @@ def _net_revenue_summary() -> MonthNetRevenueSummary:
         pending_manual_override_count=0,
         issues=[],
     )
+    channels = [channel]
+    if include_missing_channel:
+        channels.append(
+            ChannelNetRevenueSummary(
+                month="2026-03",
+                youtube_channel_id="channel-missing-source",
+                status="NET_REVENUE_SOURCE_MISSING",
+                primary_source_kind=None,
+                baseline_gross_revenue_usd=Decimal("100.00"),
+                baseline_net_revenue_usd=None,
+                approved_manual_override_total_usd=Decimal("0.00"),
+                adjusted_gross_revenue_usd=Decimal("100.00"),
+                net_revenue_usd=None,
+                deduction_amount_usd=None,
+                deduction_percentage=None,
+                confidence="E_MISSING",
+                approved_manual_override_count=0,
+                pending_manual_override_count=0,
+                issues=[],
+            )
+        )
     return MonthNetRevenueSummary(
         month="2026-03",
         status="CALCULATED",
-        channel_count=1,
+        channel_count=len(channels),
         calculated_channel_count=1,
-        missing_net_source_count=0,
+        missing_net_source_count=1 if include_missing_channel else 0,
         pending_manual_override_count=0,
         total_adjusted_gross_revenue_usd=Decimal("1050.00"),
         total_net_revenue_usd=Decimal("930.00"),
         total_deduction_amount_usd=Decimal("120.00"),
-        channels=[channel],
+        channels=channels,
     )
 
 
@@ -179,8 +218,7 @@ def _bank_summary(*, status: str) -> MonthBankReconciliationSummary:
     )
 
 
-def _smart_alert_summary(*, alert_count: int) -> MonthlySmartAlertSummary:
-    assert alert_count == 0
+def _smart_alert_summary() -> MonthlySmartAlertSummary:
     return MonthlySmartAlertSummary(
         month="2026-03",
         status="CLEAR",

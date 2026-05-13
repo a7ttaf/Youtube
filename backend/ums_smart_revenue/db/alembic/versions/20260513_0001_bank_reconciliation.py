@@ -63,12 +63,7 @@ def upgrade() -> None:
             name="uq_bank_reconciliation_month_reference",
         ),
         sa.CheckConstraint(
-            "length(month) = 7 AND substr(month, 5, 1) = '-' "
-            "AND substr(month, 1, 1) BETWEEN '0' AND '9' "
-            "AND substr(month, 2, 1) BETWEEN '0' AND '9' "
-            "AND substr(month, 3, 1) BETWEEN '0' AND '9' "
-            "AND substr(month, 4, 1) BETWEEN '0' AND '9' "
-            "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
+            _month_format_check_sql(),
             name="ck_bank_reconciliation_month_format",
         ),
         sa.CheckConstraint(
@@ -85,7 +80,10 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint(
             "length(bank_received_currency) = 3 "
-            "AND bank_received_currency = upper(bank_received_currency)",
+            "AND bank_received_currency = upper(bank_received_currency) "
+            "AND substr(bank_received_currency, 1, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(bank_received_currency, 2, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(bank_received_currency, 3, 1) BETWEEN 'A' AND 'Z'",
             name="ck_bank_reconciliation_currency_code",
         ),
     )
@@ -111,3 +109,14 @@ def downgrade() -> None:
         table_name="bank_reconciliation_entries",
     )
     op.drop_table("bank_reconciliation_entries")
+
+
+def _month_format_check_sql() -> str:
+    bind = op.get_bind()
+    dialect_name = bind.dialect.name if bind is not None else "postgresql"
+    if dialect_name == "sqlite":
+        return (
+            "month GLOB '[0-9][0-9][0-9][0-9]-[0-1][0-9]' "
+            "AND substr(month, 6, 2) BETWEEN '01' AND '12'"
+        )
+    return "month ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'"

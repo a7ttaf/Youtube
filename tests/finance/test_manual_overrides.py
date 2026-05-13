@@ -1,16 +1,23 @@
+from datetime import UTC, datetime
 from decimal import Decimal
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.db.finance_models import FinanceBase, RevenueManualOverrideORM
+from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.finance.manual_overrides import (
     ManualOverrideValidationError,
     SqlAlchemyManualOverrideRepository,
 )
 
-
 USER_ID = "00000000-0000-0000-0000-000000011001"
+SECTOR_ID = UUID("00000000-0000-0000-0000-000000011101")
+COMPANY_ID = UUID("00000000-0000-0000-0000-000000011201")
+ACTIVE_CHANNEL_ID = UUID("00000000-0000-0000-0000-000000011301")
+INACTIVE_CHANNEL_ID = UUID("00000000-0000-0000-0000-000000011302")
 
 
 def test_manual_override_repository_rejects_non_finite_adjustment_amount():
@@ -26,3 +33,77 @@ def test_manual_override_repository_rejects_non_finite_adjustment_amount():
                 reason="Reject impossible finance amount",
                 actor_user_id=USER_ID,
             )
+
+
+def test_list_month_overrides_excludes_inactive_channels():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    OrgBase.metadata.create_all(engine)
+    FinanceBase.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        session.add_all(
+            [
+                OrgUnitORM(
+                    id=SECTOR_ID,
+                    parent_id=None,
+                    type="SECTOR",
+                    name="TV",
+                    active=True,
+                ),
+                OrgUnitORM(
+                    id=COMPANY_ID,
+                    parent_id=SECTOR_ID,
+                    type="COMPANY",
+                    name="TV Company",
+                    active=True,
+                ),
+                YouTubeChannelORM(
+                    id=ACTIVE_CHANNEL_ID,
+                    youtube_channel_id="channel-active",
+                    channel_name="Active Channel",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                YouTubeChannelORM(
+                    id=INACTIVE_CHANNEL_ID,
+                    youtube_channel_id="channel-inactive",
+                    channel_name="Inactive Channel",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=False,
+                ),
+                RevenueManualOverrideORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-active",
+                    adjustment_revenue_usd=Decimal("50.00"),
+                    reason="Active channel adjustment",
+                    status="APPROVED",
+                    created_by=UUID(USER_ID),
+                    approved_by=uuid4(),
+                    approved_at=datetime(2026, 4, 24, tzinfo=UTC),
+                    approval_reason="Approved",
+                ),
+                RevenueManualOverrideORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-inactive",
+                    adjustment_revenue_usd=Decimal("75.00"),
+                    reason="Inactive channel adjustment",
+                    status="APPROVED",
+                    created_by=UUID(USER_ID),
+                    approved_by=uuid4(),
+                    approved_at=datetime(2026, 4, 24, tzinfo=UTC),
+                    approval_reason="Approved",
+                ),
+            ]
+        )
+        session.commit()
+
+        repository = SqlAlchemyManualOverrideRepository(session)
+        overrides = repository.list_month_overrides(month="2026-03")
+
+    assert [override.youtube_channel_id for override in overrides] == ["channel-active"]
