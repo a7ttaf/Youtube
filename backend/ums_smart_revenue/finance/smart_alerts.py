@@ -274,6 +274,8 @@ def _select_primary_facts_by_channel(
             item.youtube_channel_id,
             SOURCE_PRIORITY.get(item.source_kind, 99),
             item.source_kind,
+            item.source_report_id or "",
+            item.id,
         ),
     ):
         selected.setdefault(fact.youtube_channel_id, fact)

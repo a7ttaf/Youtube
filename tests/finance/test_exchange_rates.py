@@ -202,3 +202,28 @@ def test_exchange_rate_repository_rejects_invalid_rate():
                 actor_user_id=str(USER_ID),
                 source_report_id=None,
             )
+
+
+def test_exchange_rate_repository_rejects_rate_with_too_many_digits():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    FinanceBase.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        repository = SqlAlchemyExchangeRateRepository(session)
+        with pytest.raises(
+            ExchangeRateValidationError,
+            match="rate has too many significant digits:",
+        ):
+            repository.sync_rates(
+                rates=[
+                    CurrencyExchangeRateInput(
+                        rate_date=date(2026, 4, 22),
+                        base_currency="EUR",
+                        quote_currency="USD",
+                        rate=Decimal("123456789012345678901234567890.1234567890"),
+                    )
+                ],
+                provider_key="ecb",
+                actor_user_id=str(USER_ID),
+                source_report_id=None,
+            )

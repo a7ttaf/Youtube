@@ -167,3 +167,30 @@ def test_finance_viewer_cannot_sync_exchange_rates(tmp_path):
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: connectors.run_jobs"
+
+
+def test_exchange_rate_sync_rejects_unquantizable_rate(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/exchange-rates/sync",
+        headers=auth_headers("system_integration_user", "connector", "ecb"),
+        json={
+            "provider_key": "ecb",
+            "source_report_id": "ecb-oversized",
+            "reason": "Validate oversized rate",
+            "rates": [
+                {
+                    "rate_date": "2026-04-22",
+                    "base_currency": "EUR",
+                    "quote_currency": "USD",
+                    "rate": "123456789012345678901234567890.1234567890",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"].startswith("rate has too many significant digits:")

@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -255,7 +255,12 @@ def _parse_uuid(value: str) -> UUID:
 
 
 def _quantize_rate(value: Decimal) -> Decimal:
-    return value.quantize(Decimal("0.0000000001"))
+    try:
+        return value.quantize(Decimal("0.0000000001"))
+    except InvalidOperation as exc:
+        raise ExchangeRateValidationError(
+            f"rate has too many significant digits: {value}"
+        ) from exc
 
 
 def _decimal_to_api(value: Decimal) -> str:

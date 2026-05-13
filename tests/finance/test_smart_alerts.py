@@ -91,13 +91,15 @@ def revenue_fact(
     month: str,
     amount: str,
     channel_id: str = "channel-tv-a",
+    fact_id: str | None = None,
+    source_report_id: str | None = None,
 ) -> RevenueFactEntry:
     return RevenueFactEntry(
-        id=f"{channel_id}-{month}",
+        id=fact_id or f"{channel_id}-{month}",
         month=month,
         youtube_channel_id=channel_id,
         source_kind="YOUTUBE_CMS",
-        source_report_id=f"cms-{month}",
+        source_report_id=source_report_id or f"cms-{month}",
         gross_revenue_usd=Decimal(amount),
         net_revenue_usd=None,
         views=0,
@@ -248,6 +250,50 @@ def test_smart_alerts_ignore_revenue_change_equal_to_threshold():
         "alert_count": 0,
         "alerts": [],
     }
+
+
+def test_smart_alerts_use_stable_primary_fact_tiebreaker():
+    summary = build_alerts(
+        payment_match=payment_summary(
+            status="PAYMENT_MATCHED",
+            payment_gap_usd=Decimal("0.0000"),
+            issues=[],
+        ),
+        bank_reconciliation=bank_summary(
+            status="BANK_CONFIRMED",
+            bank_received_amount_usd=Decimal("900.0000"),
+            bank_gap_usd=Decimal("0.0000"),
+            entry_count=1,
+            issues=[],
+        ),
+        close_status="LOCKED",
+        manual_overrides=[],
+        current_revenue_facts=[
+            revenue_fact(
+                month="2026-03",
+                amount="4000.00",
+                fact_id="z-current",
+                source_report_id="z-report",
+            ),
+            revenue_fact(
+                month="2026-03",
+                amount="900.00",
+                fact_id="a-current",
+                source_report_id="a-report",
+            ),
+        ],
+        previous_revenue_facts=[
+            revenue_fact(
+                month="2026-02",
+                amount="2000.00",
+                fact_id="a-previous",
+                source_report_id="a-report",
+            ),
+        ],
+    )
+
+    assert [alert.code for alert in summary.alerts] == ["REVENUE_TREND_ANOMALY"]
+    assert summary.alerts[0].details["channels"][0]["current_gross_revenue_usd"] == "900"
 
 
 def test_smart_alerts_reject_negative_high_gap_threshold():

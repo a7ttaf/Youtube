@@ -484,7 +484,7 @@ def test_finance_workbook_storage_failure_preserves_completed_export(
     monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_root_file))
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    completed_at = datetime(2026, 4, 30, 10, 0)
+    completed_at = datetime(2026, 4, 30, 10, 0, tzinfo=UTC)
     existing_filename = "ums-finance-2026-03-global.xlsx"
     existing_uri = f"file-store://exports/{EXPORT_ID}/{existing_filename}"
     engine = create_engine(database_url)
@@ -519,7 +519,7 @@ def test_finance_workbook_storage_failure_preserves_completed_export(
     assert response.json()["detail"] == "Export artifact storage unavailable"
     assert export_job is not None
     assert export_job.status == "COMPLETED"
-    assert export_job.completed_at == completed_at
+    assert export_job.completed_at == completed_at.replace(tzinfo=None)
     assert export_job.file_url == existing_uri
     assert export_job.artifact_filename == existing_filename
     assert export_job.artifact_byte_size == 42

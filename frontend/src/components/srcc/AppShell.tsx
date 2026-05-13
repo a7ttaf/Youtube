@@ -260,6 +260,7 @@ export default function AppShell() {
             traceTab={traceTab}
             setTraceTab={setTraceTab}
             canViewFinance={canViewFinance}
+            role={role}
           />
         )}
         {view === "exports" && <ExportsView canViewFinance={canViewFinance} />}
@@ -377,6 +378,12 @@ function CommandView({
                         aria-selected={isSel}
                         className={isSel ? "is-selected" : undefined}
                         onClick={() => setSelected(c.name)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Enter" || e.key === " ") {
+                            e.preventDefault();
+                            setSelected(c.name);
+                          }
+                        }}
                       >
                         <td>
                           <span className="channel-cell">
@@ -774,11 +781,35 @@ function TraceView({
   traceTab,
   setTraceTab,
   canViewFinance,
+  role,
 }: {
   traceTab: "Revenue Flow" | "Issues" | "Ownership";
   setTraceTab: (t: "Revenue Flow" | "Issues" | "Ownership") => void;
   canViewFinance: boolean;
+  role: Role;
 }) {
+  const permissionDetails =
+    role === "finance"
+      ? [
+          { label: "Role", value: "Finance Admin" },
+          { label: "Scope", value: "Global finance month" },
+          { label: "Companies", value: "All allowed" },
+          { label: "Raw files", value: "Hidden unless explicitly granted" },
+        ]
+      : role === "assistant"
+        ? [
+            { label: "Role", value: "Assistant Analyst" },
+            { label: "Scope", value: "Assigned non-finance work" },
+            { label: "Companies", value: "Visible without money cells" },
+            { label: "Raw files", value: "Hidden unless explicitly granted" },
+          ]
+        : [
+            { label: "Role", value: "Company Manager" },
+            { label: "Scope", value: "Assigned company only" },
+            { label: "Companies", value: "Company-scoped" },
+            { label: "Raw files", value: "Hidden unless explicitly granted" },
+          ];
+
   return (
     <section className="view-page" aria-labelledby="traceViewTitle">
       <div className="view-summary" aria-label="Trace summary">
@@ -841,12 +872,7 @@ function TraceView({
               <Badge tone="violet">Scoped trace</Badge>
             </div>
             <div className="detail-grid">
-              {[
-                { label: "Role", value: "Finance Admin" },
-                { label: "Scope", value: "Global finance month" },
-                { label: "Companies", value: "All allowed" },
-                { label: "Raw files", value: "Hidden unless explicitly granted" },
-              ].map((d) => (
+              {permissionDetails.map((d) => (
                 <div key={d.label} className="detail-cell">
                   <span>{d.label}</span><strong>{d.value}</strong>
                 </div>

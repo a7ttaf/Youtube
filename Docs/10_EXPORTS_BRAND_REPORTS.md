@@ -89,7 +89,7 @@ pdf_header_footer
 - Executive PDF downloads persist the PDF artifact, update `file_url` and artifact metadata, mark the job `COMPLETED`, add an `EXPORT_DOWNLOADED` audit event, and return the file.
 - Branded slide pack downloads require the same revenue, finalized-payment, and bank-reconciliation permissions as finance workbook downloads.
 - Branded slide pack downloads persist the PPTX artifact, update `file_url` and artifact metadata, mark the job `COMPLETED`, add an `EXPORT_DOWNLOADED` audit event, and return the file.
-- Artifact storage failures mark the export job `FAILED` with a failure reason and do not emit `EXPORT_DOWNLOADED`.
+- Artifact storage failures for jobs that have not already completed mark the export job `FAILED` with a failure reason and do not emit `EXPORT_DOWNLOADED`; if a completed job already has a persisted artifact, the existing artifact metadata is preserved and the retry returns an unavailable response without adding a download audit event.
 
 ## Export job fields
 
@@ -138,5 +138,5 @@ The default artifact store writes to a local filesystem path and exposes object-
 - Executive PDF downloads produce a valid PDF with the planned management-summary sections.
 - Branded slide downloads produce a valid PPTX file with the planned 10-slide management deck.
 - Generated XLSX, PDF, and PPTX downloads persist artifact metadata, mark export jobs complete, and record SHA-256 checksums.
-- Artifact storage failure marks the export job failed without recording a download audit.
+- Artifact storage failure marks an incomplete export job failed without recording a download audit, while completed jobs keep their existing artifact metadata.
 - Export log records who created each report.
