@@ -1,10 +1,10 @@
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 from ums_smart_revenue.auth.permissions import Permission
 
 
-class AuditEventType(str, Enum):
+class AuditEventType(StrEnum):
     LOGIN = "LOGIN"
     LOGOUT = "LOGOUT"
     CHANNEL_CREATED = "CHANNEL_CREATED"
@@ -19,6 +19,7 @@ class AuditEventType(str, Enum):
     MANUAL_OVERRIDE_APPROVED = "MANUAL_OVERRIDE_APPROVED"
     ALLOCATION_RULE_CHANGED = "ALLOCATION_RULE_CHANGED"
     EXPORT_CREATED = "EXPORT_CREATED"
+    EXPORT_DOWNLOADED = "EXPORT_DOWNLOADED"
     USER_ACCOUNT_CHANGED = "USER_ACCOUNT_CHANGED"
     USER_ROLE_CHANGED = "USER_ROLE_CHANGED"
     USER_PERMISSION_CHANGED = "USER_PERMISSION_CHANGED"
@@ -26,6 +27,9 @@ class AuditEventType(str, Enum):
     CONNECTOR_SETTINGS_CHANGED = "CONNECTOR_SETTINGS_CHANGED"
     RAW_FILE_VIEWED = "RAW_FILE_VIEWED"
     REVENUE_VIEWED = "REVENUE_VIEWED"
+    PAYMENT_VIEWED = "PAYMENT_VIEWED"
+    BANK_RECONCILIATION_RECORDED = "BANK_RECONCILIATION_RECORDED"
+    BANK_RECONCILIATION_VIEWED = "BANK_RECONCILIATION_VIEWED"
     GRAPH_FINANCE_VIEWED = "GRAPH_FINANCE_VIEWED"
     AUDIT_LOG_VIEWED = "AUDIT_LOG_VIEWED"
 
@@ -79,6 +83,10 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
         AuditEventType.EXPORT_CREATED,
         permission=Permission.EXPORT_REVENUE_REPORT,
     ),
+    AuditEventType.EXPORT_DOWNLOADED: AuditEventDefinition(
+        AuditEventType.EXPORT_DOWNLOADED,
+        permission=Permission.EXPORT_REVENUE_REPORT,
+    ),
     AuditEventType.USER_ACCOUNT_CHANGED: AuditEventDefinition(
         AuditEventType.USER_ACCOUNT_CHANGED,
         reason_required=True,
@@ -102,6 +110,10 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
         AuditEventType.REPORT_IMPORTED,
         permission=Permission.RUN_CONNECTOR_JOBS,
     ),
+    AuditEventType.ADSENSE_PAYMENT_SYNCED: AuditEventDefinition(
+        AuditEventType.ADSENSE_PAYMENT_SYNCED,
+        permission=Permission.RUN_CONNECTOR_JOBS,
+    ),
     AuditEventType.CONNECTOR_SETTINGS_CHANGED: AuditEventDefinition(
         AuditEventType.CONNECTOR_SETTINGS_CHANGED,
         reason_required=True,
@@ -114,6 +126,19 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     AuditEventType.REVENUE_VIEWED: AuditEventDefinition(
         AuditEventType.REVENUE_VIEWED,
         permission=Permission.VIEW_REVENUE,
+    ),
+    AuditEventType.PAYMENT_VIEWED: AuditEventDefinition(
+        AuditEventType.PAYMENT_VIEWED,
+        permission=Permission.VIEW_FINALIZED_PAYMENTS,
+    ),
+    AuditEventType.BANK_RECONCILIATION_RECORDED: AuditEventDefinition(
+        AuditEventType.BANK_RECONCILIATION_RECORDED,
+        reason_required=True,
+        permission=Permission.MANAGE_BANK_RECONCILIATION,
+    ),
+    AuditEventType.BANK_RECONCILIATION_VIEWED: AuditEventDefinition(
+        AuditEventType.BANK_RECONCILIATION_VIEWED,
+        permission=Permission.VIEW_BANK_RECONCILIATION,
     ),
     AuditEventType.GRAPH_FINANCE_VIEWED: AuditEventDefinition(
         AuditEventType.GRAPH_FINANCE_VIEWED,

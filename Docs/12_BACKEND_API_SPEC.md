@@ -103,9 +103,72 @@ Direct permission grants and revocations also require `roles.assign` and are aud
 ```http
 GET /revenue/monthly?month=2026-03&scope_type=company&scope_id=123&currency=USD
 GET /revenue/channels?month=2026-03&group_id=abc&currency=USD
+GET /revenue/months/{month}/payment-match?currency=USD
+GET /revenue/months/{month}/bank-reconciliation
+POST /revenue/months/{month}/bank-reconciliation
+GET /revenue/months/{month}/smart-alerts
+GET /revenue/months/{month}/net-revenue?scope_type=company&scope_id=123&currency=USD
 POST /revenue/channels/{channel_id}/months/{month}/explain?metric=adjusted_gross_revenue_usd
 POST /revenue/recalculate
 ```
+
+`GET /revenue/months/{month}/payment-match` is an implemented holding-level
+finance read that compares selected monthly YouTube revenue facts against paid
+AdSense payment rows for the same month. It requires global
+`finance.view_revenue` plus `finance.view_finalized_payments` for the requested
+finance-month scope, audits both `REVENUE_VIEWED` and `PAYMENT_VIEWED`, returns
+match status, totals, gap, issues, and audit event metadata, and excludes
+non-paid AdSense rows from the paid total while still reporting their count.
+This endpoint does not calculate tax, bank gaps, net revenue, or allocation
+rules. Until exchange-rate support exists, `currency` must be `USD`; payment
+rows in another currency are excluded from the match and surfaced as
+reconciliation issues.
+
+`POST /revenue/months/{month}/bank-reconciliation` records finance-provided
+bank receipt metadata for a finance month. It requires
+`finance.manage_bank_reconciliation` for the requested finance-month scope
+(global grants satisfy that scope), a non-empty reason, and an unlocked month,
+then audits `BANK_RECONCILIATION_RECORDED`. Rows are upserted by
+`(month, bank_reference)` and store normalized USD receipt values supplied by
+finance, transfer fee metadata, FX difference metadata, notes, source report
+reference, and recorder metadata. The endpoint does not calculate exchange
+rates, allocate transfer/FX gaps to channels, or calculate net revenue.
+
+`GET /revenue/months/{month}/bank-reconciliation` is an implemented
+holding-level finance read that compares paid USD AdSense payment metadata with
+finance-provided normalized bank receipt rows for the same month. It requires
+`finance.view_bank_reconciliation` and `finance.view_finalized_payments` for the
+requested finance-month scope (global grants satisfy that scope), audits both
+`BANK_RECONCILIATION_VIEWED` and `PAYMENT_VIEWED`, returns bank confirmation
+status, paid amount, received
+amount, month-level bank gap, transfer-fee and FX-difference totals, receipt
+entries, issues, and audit event metadata. Non-paid AdSense rows and non-USD
+payment rows are excluded from the paid USD comparison and reported as issues.
+
+`GET /revenue/months/{month}/smart-alerts` is an implemented month-level issue
+engine for the internal finance command center. It derives alerts only from SQL
+source-of-truth data already stored by the backend: monthly revenue facts,
+approved/pending manual overrides, official AdSense payment metadata,
+finance-entered bank reconciliation receipt rows, and finance month-close
+state. It requires global `finance.view_revenue`, global
+`analytics.view_confidence`, `finance.view_finalized_payments` for the requested
+finance-month scope, and `finance.view_bank_reconciliation` for the requested
+finance-month scope. The response includes alert codes such as
+`MISSING_REVENUE_SOURCE`, `PAYMENT_NOT_MATCHED`, `BANK_AMOUNT_MISSING`,
+`UNEXPLAINED_GAP_HIGH`, `MONTH_NOT_LOCKED`, and `MANUAL_OVERRIDE_USED`. Reads
+are audited as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, and
+`BANK_RECONCILIATION_VIEWED`. This endpoint does not calculate net revenue,
+allocate bank gaps, or use Neo4j as a financial source of truth.
+
+`GET /revenue/months/{month}/net-revenue` is an implemented read-only net
+revenue foundation for `global`, `sector`, `company`, and `channel` scopes. It
+requires `finance.view_revenue` and `analytics.view_confidence` for the
+requested scope, audits `REVENUE_VIEWED`, and currently supports `USD` only. It
+uses the selected primary SQL revenue fact's official `net_revenue_usd` plus
+approved manual revenue overrides. Missing source net values are returned as
+`NET_REVENUE_SOURCE_MISSING` channel issues and counted at month level. The
+endpoint does not persist calculated rows, allocate bank/payment gaps, invent
+tax values, or use Neo4j as a financial source of truth.
 
 ### Finance close
 
@@ -139,9 +202,21 @@ new close cycle if they affect a locked month.
 ### AdSense
 
 ```http
-GET /adsense/payments
 POST /adsense/sync-payments
+GET /adsense/payments?month=2026-03&limit=50&offset=0
 ```
+
+`POST /adsense/sync-payments` is an implemented control-plane ingestion endpoint
+for official AdSense payment metadata that has already been downloaded through
+approved connector storage. It requires `connectors.run_jobs` on connector scope
+`adsense`, requires a non-empty audit reason, and records `ADSENSE_PAYMENT_SYNCED`.
+The endpoint accepts up to 100 payment objects and upserts by `(month,
+payment_name)`, so connector reruns update the existing payment row instead of
+duplicating it. Sync is rejected for locked finance months.
+
+`GET /adsense/payments` requires global `finance.view_finalized_payments` and is
+audited as `PAYMENT_VIEWED`. It returns payment metadata only; it does not expose
+bank reconciliation data and does not calculate revenue.
 
 ### Connectors
 
@@ -174,23 +249,76 @@ Raw report metadata records the immutable file reference before parsing. `POST /
 
 ```http
 POST /exports
-GET /exports?page=1&page_size=50
+GET /exports?limit=50&offset=0
 GET /exports/{export_id}
+GET /exports/{export_id}/finance-workbook-preview
+GET /exports/{export_id}/finance-workbook.xlsx
+GET /exports/{export_id}/executive.pdf
+GET /exports/{export_id}/branded-slide-pack.pptx
 ```
 
-`GET /exports` is paginated. Query parameters are `page` (default `1`) and `page_size` (default `50`, maximum `100`). Requests above the maximum are rejected with `422`. Responses include paging metadata:
+`GET /exports` is paginated. Query parameters are `limit` (default `50`, maximum `100`) and `offset` (default `0`). Requests above the maximum are rejected with `422`. Responses include paging metadata:
 
 ```json
 {
   "items": [],
   "pagination": {
-    "total_count": 0,
-    "page": 1,
-    "page_size": 50,
-    "next_link": null
+    "limit": 50,
+    "offset": 0,
+    "returned": 0,
+    "has_more": false
   }
 }
 ```
+
+`GET /exports/{export_id}/finance-workbook-preview` is an implemented read-only
+foundation for future `FINANCE_EXCEL` generation. It requires `exports.revenue`
+and `finance.view_revenue` for the export scope, plus
+`finance.view_finalized_payments` and `finance.view_bank_reconciliation` on the
+requested finance-month scope. The endpoint returns a
+`FINANCE_EXCEL_WORKBOOK_PREVIEW` payload with the planned sheet manifest,
+executive summary, and source summaries from SQL-backed revenue facts, manual
+overrides, AdSense payment metadata, bank reconciliation rows, finance close
+state, payment matching, bank confirmation, net revenue, and smart alerts. It
+uses month-wide AdSense payment and bank reconciliation rows only for global
+exports; scoped exports keep those summaries empty until payment/bank cash can
+be attributed below the month level. Group exports audit revenue reads per
+member channel. It
+audits reads as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, and
+`BANK_RECONCILIATION_VIEWED`. It does not create an XLSX/PDF/slide artifact,
+does not update `file_url`, and does not mark the export job complete.
+
+`GET /exports/{export_id}/finance-workbook.xlsx` uses the same permission checks
+and SQL source summaries as the preview endpoint, then generates an on-demand
+XLSX response with media type
+`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` and an
+attachment filename. It audits `REVENUE_VIEWED`, `PAYMENT_VIEWED`,
+`BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`. The endpoint does not
+persist the generated workbook, upload it to object storage, update `file_url`,
+or mark the export job complete in this foundation phase.
+
+`GET /exports/{export_id}/executive.pdf` supports `EXECUTIVE_PDF` export jobs.
+It uses the same finance export, revenue visibility, finalized-payment, and
+bank-reconciliation checks as the workbook download, then generates an
+on-demand PDF response with media type `application/pdf` and an attachment
+filename. The report sections are sourced from SQL-backed net revenue, payment
+matching, bank reconciliation, finance month-close state, and smart-alert
+summaries. It audits `REVENUE_VIEWED`, `PAYMENT_VIEWED`,
+`BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`. The endpoint does not
+persist the generated PDF, upload it to object storage, update `file_url`, or
+mark the export job complete in this foundation phase.
+
+`GET /exports/{export_id}/branded-slide-pack.pptx` supports
+`BRANDED_SLIDE_PACK` export jobs. It uses the same finance export, revenue
+visibility, finalized-payment, and bank-reconciliation checks as the workbook
+download, then generates an on-demand PPTX response with media type
+`application/vnd.openxmlformats-officedocument.presentationml.presentation` and
+an attachment filename. The 10-slide deck is sourced from SQL-backed net
+revenue, payment matching, bank reconciliation, finance month-close state, and
+smart-alert summaries. It audits `REVENUE_VIEWED`, `PAYMENT_VIEWED`,
+`BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`. The endpoint does not
+persist the generated deck, upload it to object storage, update `file_url`, or
+mark the export job complete in this foundation phase.
 
 ### Audit
 
@@ -218,7 +346,8 @@ GET /graph/outside-cms
 - UI cannot directly access Neo4j for restricted views.
 - Every money API must support currency parameter.
 - Every money API must return confidence and source metadata.
-- Export APIs run async jobs.
+- Export APIs may run async jobs or return guarded on-demand artifacts,
+  depending on the endpoint contract.
 
 ## Standard money response
 

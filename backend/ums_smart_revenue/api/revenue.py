@@ -1,19 +1,43 @@
-from typing import Annotated
+from datetime import date
 from decimal import Decimal
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
+from ums_smart_revenue.api.dependencies import (
+    current_db_session,
+    current_principal_from_headers,
+)
 from ums_smart_revenue.auth.audit import AuditEventType
-from ums_smart_revenue.auth.audit_service import AuditRecord, AuditSink, InMemoryAuditSink, record_audit_event
+from ums_smart_revenue.auth.audit_service import (
+    AuditRecord,
+    AuditSink,
+    InMemoryAuditSink,
+    record_audit_event,
+)
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.finance.adsense_payments import (
+    AdSensePaymentValidationError,
+    SqlAlchemyAdSensePaymentRepository,
+)
+from ums_smart_revenue.finance.bank_reconciliation import (
+    BankReconciliationLockedMonthError,
+    BankReconciliationValidationError,
+    SqlAlchemyBankReconciliationRepository,
+    build_month_bank_reconciliation_summary,
+)
+from ums_smart_revenue.finance.explanations import (
+    NumberExplanationValidationError,
+    SqlAlchemyNumberExplanationRepository,
+    build_channel_month_revenue_explanation,
+)
 from ums_smart_revenue.finance.manual_overrides import (
     ManualOverrideConflictError,
     ManualOverrideLockedMonthError,
@@ -22,10 +46,16 @@ from ums_smart_revenue.finance.manual_overrides import (
     RevenueManualOverrideEntry,
     SqlAlchemyManualOverrideRepository,
 )
-from ums_smart_revenue.finance.explanations import (
-    NumberExplanationValidationError,
-    SqlAlchemyNumberExplanationRepository,
-    build_channel_month_revenue_explanation,
+from ums_smart_revenue.finance.month_close import SqlAlchemyFinanceMonthCloseRepository
+from ums_smart_revenue.finance.net_revenue import (
+    NetRevenueValidationError,
+    build_month_net_revenue_summary,
+    normalize_net_revenue_currency,
+)
+from ums_smart_revenue.finance.payment_matching import (
+    PaymentMatchValidationError,
+    build_monthly_payment_match_summary,
+    normalize_payment_match_currency,
 )
 from ums_smart_revenue.finance.reconciliation import (
     build_revenue_reconciliation_issue_queue,
@@ -40,8 +70,10 @@ from ums_smart_revenue.finance.revenue_facts import (
     SqlAlchemyRevenueFactRepository,
 )
 from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_summary
+from ums_smart_revenue.finance.smart_alerts import (
+    build_monthly_smart_alert_summary,
+)
 from ums_smart_revenue.org.access_index import load_org_access_index_from_session
-
 
 router = APIRouter(prefix="/revenue", tags=["revenue"])
 _AUDIT_SINK = InMemoryAuditSink()
@@ -113,6 +145,34 @@ class ManualOverrideApprovalRequest(BaseModel):
         return _strip_required_string(value)
 
 
+class BankReconciliationRecordRequest(BaseModel):
+    bank_reference: str = Field(min_length=1)
+    bank_received_date: date
+    bank_received_amount: Decimal = Field(ge=0)
+    bank_received_currency: str = Field(min_length=1)
+    bank_received_amount_usd: Decimal = Field(ge=0)
+    transfer_fee_usd: Decimal = Field(default=Decimal("0"), ge=0)
+    fx_difference_usd: Decimal = Decimal("0")
+    notes: str | None = None
+    source_report_id: str | None = None
+    reason: str = Field(min_length=1)
+
+    @field_validator("bank_reference", "bank_received_currency", "reason", mode="before")
+    @classmethod
+    def strip_required_strings(cls, value):
+        return _strip_required_string(value)
+
+    @field_validator("notes", "source_report_id", mode="before")
+    @classmethod
+    def strip_optional_strings(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+
 def current_org_access_index(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> OrgAccessIndex:
@@ -125,10 +185,28 @@ def current_revenue_fact_repository(
     return SqlAlchemyRevenueFactRepository(session)
 
 
+def current_adsense_payment_repository(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyAdSensePaymentRepository:
+    return SqlAlchemyAdSensePaymentRepository(session)
+
+
 def current_manual_override_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyManualOverrideRepository:
     return SqlAlchemyManualOverrideRepository(session)
+
+
+def current_bank_reconciliation_repository(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyBankReconciliationRepository:
+    return SqlAlchemyBankReconciliationRepository(session)
+
+
+def current_finance_month_close_repository(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyFinanceMonthCloseRepository:
+    return SqlAlchemyFinanceMonthCloseRepository(session)
 
 
 def current_number_explanation_repository(
@@ -340,6 +418,384 @@ def list_month_reconciliation_issues(
         "has_more": has_more,
     }
     return response
+
+
+@router.get("/months/{month}/payment-match")
+def get_month_payment_match(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    revenue_repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
+    payment_repository: Annotated[
+        SqlAlchemyAdSensePaymentRepository,
+        Depends(current_adsense_payment_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    currency: Annotated[str, Query(min_length=1)] = "USD",
+) -> dict[str, object]:
+    revenue_scope = AccessScope.global_scope()
+    payment_scope = AccessScope.finance_month(month)
+    _require_permission(user, Permission.VIEW_REVENUE, revenue_scope)
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, payment_scope)
+    try:
+        normalized_currency = normalize_payment_match_currency(currency)
+        facts = revenue_repository.list_month_facts(month=month)
+        payments = payment_repository.list_month_payments(month=month)
+        summary = build_monthly_payment_match_summary(
+            month=month,
+            facts=facts,
+            payments=payments,
+            currency=normalized_currency,
+        )
+    except (
+        AdSensePaymentValidationError,
+        PaymentMatchValidationError,
+        RevenueFactValidationError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    summary_api = summary.to_api()
+    revenue_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="monthly_payment_match",
+        entity_id=month,
+        scope=revenue_scope,
+        details={
+            "status": summary.status,
+            "youtube_revenue_total_usd": summary_api["youtube_revenue_total_usd"],
+        },
+    )
+    payment_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.PAYMENT_VIEWED,
+        entity_type="monthly_payment_match",
+        entity_id=month,
+        scope=payment_scope,
+        details={
+            "status": summary.status,
+            "adsense_paid_amount": summary_api["adsense_paid_amount"],
+            "paid_payment_count": summary.paid_payment_count,
+        },
+    )
+    summary_api["audit_events"] = [
+        audit_record_to_api(revenue_record),
+        audit_record_to_api(payment_record),
+    ]
+    return summary_api
+
+
+@router.get("/months/{month}/smart-alerts")
+def get_month_smart_alerts(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    revenue_repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
+    payment_repository: Annotated[
+        SqlAlchemyAdSensePaymentRepository,
+        Depends(current_adsense_payment_repository),
+    ],
+    bank_repository: Annotated[
+        SqlAlchemyBankReconciliationRepository,
+        Depends(current_bank_reconciliation_repository),
+    ],
+    override_repository: Annotated[
+        SqlAlchemyManualOverrideRepository,
+        Depends(current_manual_override_repository),
+    ],
+    close_repository: Annotated[
+        SqlAlchemyFinanceMonthCloseRepository,
+        Depends(current_finance_month_close_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+) -> dict[str, object]:
+    global_scope = AccessScope.global_scope()
+    month_scope = AccessScope.finance_month(month)
+    _require_permission(user, Permission.VIEW_REVENUE, global_scope)
+    _require_permission(user, Permission.VIEW_CONFIDENCE, global_scope)
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
+    _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
+    try:
+        facts = revenue_repository.list_month_facts(month=month)
+        payments = payment_repository.list_month_payments(month=month)
+        bank_entries = bank_repository.list_month_entries(month=month)
+        manual_overrides = override_repository.list_month_overrides(month=month)
+        close = close_repository.get(month)
+        payment_match = build_monthly_payment_match_summary(
+            month=month,
+            facts=facts,
+            payments=payments,
+        )
+        bank_reconciliation = build_month_bank_reconciliation_summary(
+            month=month,
+            payments=payments,
+            bank_entries=bank_entries,
+        )
+    except (
+        AdSensePaymentValidationError,
+        BankReconciliationValidationError,
+        ManualOverrideValidationError,
+        PaymentMatchValidationError,
+        RevenueFactValidationError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    summary = build_monthly_smart_alert_summary(
+        month=month,
+        payment_match=payment_match,
+        bank_reconciliation=bank_reconciliation,
+        close_status=close.status if close else "OPEN",
+        manual_overrides=manual_overrides,
+    )
+    summary_api = summary.to_api()
+    audit_details = {
+        "status": summary.status,
+        "alert_count": len(summary.alerts),
+        "highest_severity": summary.highest_severity,
+    }
+    revenue_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="monthly_smart_alerts",
+        entity_id=month,
+        scope=global_scope,
+        details=audit_details,
+    )
+    payment_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.PAYMENT_VIEWED,
+        entity_type="monthly_smart_alerts",
+        entity_id=month,
+        scope=month_scope,
+        details=audit_details,
+    )
+    bank_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
+        entity_type="monthly_smart_alerts",
+        entity_id=month,
+        scope=month_scope,
+        details=audit_details,
+    )
+    summary_api["audit_events"] = [
+        audit_record_to_api(revenue_record),
+        audit_record_to_api(payment_record),
+        audit_record_to_api(bank_record),
+    ]
+    return summary_api
+
+
+@router.get("/months/{month}/net-revenue")
+def get_month_net_revenue(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    revenue_repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
+    override_repository: Annotated[
+        SqlAlchemyManualOverrideRepository,
+        Depends(current_manual_override_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    scope_type: Annotated[str, Query(min_length=1)] = "global",
+    scope_id: str | None = None,
+    currency: Annotated[str, Query(min_length=1)] = "USD",
+) -> dict[str, object]:
+    target_scope, channel_ids = _revenue_read_scope_to_channel_ids(
+        scope_type=scope_type,
+        scope_id=scope_id,
+        org_index=org_index,
+    )
+    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    try:
+        normalized_currency = normalize_net_revenue_currency(currency)
+        facts = revenue_repository.list_month_facts(
+            month=month,
+            youtube_channel_ids=channel_ids,
+        )
+        overrides = override_repository.list_month_overrides(
+            month=month,
+            youtube_channel_ids=channel_ids,
+        )
+        summary = build_month_net_revenue_summary(
+            month=month,
+            facts=facts,
+            manual_overrides=overrides,
+        )
+    except (
+        ManualOverrideValidationError,
+        NetRevenueValidationError,
+        RevenueFactValidationError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    summary_api = summary.to_api()
+    summary_api["currency"] = normalized_currency
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="monthly_net_revenue_summary",
+        entity_id=f"{month}:{scope_type}:{scope_id or 'global'}",
+        scope=target_scope,
+        details={
+            "status": summary.status,
+            "channel_count": summary.channel_count,
+            "calculated_channel_count": summary.calculated_channel_count,
+            "missing_net_source_count": summary.missing_net_source_count,
+        },
+    )
+    summary_api["audit_event"] = audit_record_to_api(record)
+    return summary_api
+
+
+@router.post(
+    "/months/{month}/bank-reconciliation",
+    status_code=status.HTTP_201_CREATED,
+)
+def record_month_bank_reconciliation(
+    month: str,
+    payload: BankReconciliationRecordRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[
+        SqlAlchemyBankReconciliationRepository,
+        Depends(current_bank_reconciliation_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+) -> dict[str, object]:
+    scope = AccessScope.finance_month(month)
+    _require_permission(user, Permission.MANAGE_BANK_RECONCILIATION, scope)
+    try:
+        entry = repository.record_entry(
+            month=month,
+            bank_reference=payload.bank_reference,
+            bank_received_date=payload.bank_received_date,
+            bank_received_amount=payload.bank_received_amount,
+            bank_received_currency=payload.bank_received_currency,
+            bank_received_amount_usd=payload.bank_received_amount_usd,
+            transfer_fee_usd=payload.transfer_fee_usd,
+            fx_difference_usd=payload.fx_difference_usd,
+            notes=payload.notes,
+            source_report_id=payload.source_report_id,
+            actor_user_id=user.user_id,
+        )
+    except BankReconciliationLockedMonthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    except BankReconciliationValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.BANK_RECONCILIATION_RECORDED,
+        entity_type="bank_reconciliation_entry",
+        entity_id=entry.id,
+        scope=AccessScope.finance_month(month),
+        reason=payload.reason,
+        details={
+            "bank_reference": entry.bank_reference,
+            "bank_received_amount_usd": entry.to_api()[
+                "bank_received_amount_usd"
+            ],
+        },
+    )
+    response = entry.to_api()
+    response["audit_event"] = audit_record_to_api(record)
+    return response
+
+
+@router.get("/months/{month}/bank-reconciliation")
+def get_month_bank_reconciliation(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    payment_repository: Annotated[
+        SqlAlchemyAdSensePaymentRepository,
+        Depends(current_adsense_payment_repository),
+    ],
+    bank_repository: Annotated[
+        SqlAlchemyBankReconciliationRepository,
+        Depends(current_bank_reconciliation_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+) -> dict[str, object]:
+    scope = AccessScope.finance_month(month)
+    _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, scope)
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, scope)
+    try:
+        payments = payment_repository.list_month_payments(month=month)
+        entries = bank_repository.list_month_entries(month=month)
+    except (AdSensePaymentValidationError, BankReconciliationValidationError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    summary = build_month_bank_reconciliation_summary(
+        month=month,
+        payments=payments,
+        bank_entries=entries,
+    )
+    summary_api = summary.to_api()
+    bank_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
+        entity_type="month_bank_reconciliation",
+        entity_id=month,
+        scope=AccessScope.finance_month(month),
+        details={
+            "status": summary.status,
+            "entry_count": summary.entry_count,
+            "bank_received_amount_usd": summary_api[
+                "bank_received_amount_usd"
+            ],
+        },
+    )
+    payment_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.PAYMENT_VIEWED,
+        entity_type="month_bank_reconciliation",
+        entity_id=month,
+        scope=scope,
+        details={
+            "status": summary.status,
+            "paid_payment_count": summary.paid_payment_count,
+            "adsense_paid_amount_usd": summary_api["adsense_paid_amount_usd"],
+        },
+    )
+    summary_api["audit_events"] = [
+        audit_record_to_api(bank_record),
+        audit_record_to_api(payment_record),
+    ]
+    return summary_api
 
 
 @router.post("/channels/{channel_id}/months/{month}/explain")
@@ -588,6 +1044,57 @@ def _intersect_channel_sets(left: set[str] | None, right: set[str] | None) -> se
     if right is None:
         return left
     return left & right
+
+
+def _revenue_read_scope_to_channel_ids(
+    *,
+    scope_type: str,
+    scope_id: str | None,
+    org_index: OrgAccessIndex,
+) -> tuple[AccessScope, set[str] | None]:
+    normalized_scope_type = scope_type.strip()
+    normalized_scope_id = (
+        scope_id.strip() if isinstance(scope_id, str) else scope_id
+    )
+    if normalized_scope_type == "global":
+        if normalized_scope_id:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="scope_id must be omitted for global revenue reads",
+            )
+        return AccessScope.global_scope(), None
+    if not normalized_scope_id:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "scope_id is required for revenue scope_type: "
+                f"{normalized_scope_type}"
+            ),
+        )
+    if normalized_scope_type == "sector":
+        return (
+            AccessScope.sector(normalized_scope_id),
+            {
+                channel_id
+                for channel_id, sector_id in org_index.channel_sector.items()
+                if sector_id == normalized_scope_id
+            },
+        )
+    if normalized_scope_type == "company":
+        return (
+            AccessScope.company(normalized_scope_id),
+            {
+                channel_id
+                for channel_id, company_id in org_index.channel_company.items()
+                if company_id == normalized_scope_id
+            },
+        )
+    if normalized_scope_type == "channel":
+        return AccessScope.channel(normalized_scope_id), {normalized_scope_id}
+    raise HTTPException(
+        status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+        detail=f"Unknown revenue scope_type: {scope_type}",
+    )
 
 
 def audit_record_to_api(record: AuditRecord) -> dict[str, object]:

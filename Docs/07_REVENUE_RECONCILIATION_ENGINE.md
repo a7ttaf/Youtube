@@ -105,6 +105,21 @@ holding_net_revenue
 monthly_reconciliation_summary
 ```
 
+## Foundation implementation note
+
+The backend now exposes a read-only net-revenue foundation for month summaries.
+It calculates channel net revenue only when the selected primary SQL revenue
+fact already includes official `net_revenue_usd`. Approved manual revenue
+overrides are added to both adjusted gross and net revenue so the source
+deduction amount remains traceable. Pending overrides lower confidence but are
+not applied. If a primary source has no net value, the API returns
+`NET_REVENUE_SOURCE_MISSING` instead of inventing tax, deductions, or allocated
+bank/payment gaps.
+
+This foundation does not yet persist `channel_net_revenue` rows, allocate
+transfer/FX/payment gaps, ingest tax tables, or use Neo4j as a financial source
+of truth.
+
 ## Acceptance checks
 
 - System can calculate net revenue for one month.

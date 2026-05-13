@@ -1,7 +1,6 @@
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.roles import RoleKey
 
-
 ALL_PERMISSIONS = frozenset(Permission)
 
 ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
@@ -43,6 +42,7 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
             Permission.VIEW_REVENUE,
             Permission.VIEW_FINALIZED_PAYMENTS,
             Permission.VIEW_BANK_RECONCILIATION,
+            Permission.MANAGE_BANK_RECONCILIATION,
             Permission.CREATE_MANUAL_OVERRIDE,
             Permission.APPROVE_MANUAL_OVERRIDE,
             Permission.LOCK_FINANCE_MONTH,
@@ -63,6 +63,7 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
             Permission.VIEW_REVENUE,
             Permission.VIEW_FINALIZED_PAYMENTS,
             Permission.VIEW_BANK_RECONCILIATION,
+            Permission.MANAGE_BANK_RECONCILIATION,
             Permission.APPROVE_MANUAL_OVERRIDE,
             Permission.UNLOCK_FINANCE_MONTH,
             Permission.CHANGE_ALLOCATION_RULE,

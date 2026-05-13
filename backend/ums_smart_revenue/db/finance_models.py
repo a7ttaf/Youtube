@@ -1,14 +1,15 @@
-from datetime import datetime
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     Index,
-    JSON,
     Numeric,
     Text,
     UniqueConstraint,
@@ -155,4 +156,163 @@ class RevenueManualOverrideORM(FinanceBase):
         ),
         Index("ix_revenue_manual_overrides_month_status", "month", "status"),
         Index("ix_revenue_manual_overrides_channel_month", "youtube_channel_id", "month"),
+    )
+
+
+class BankReconciliationEntryORM(FinanceBase):
+    __tablename__ = "bank_reconciliation_entries"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    month: Mapped[str] = mapped_column(Text, nullable=False)
+    bank_reference: Mapped[str] = mapped_column(Text, nullable=False)
+    bank_received_date: Mapped[date] = mapped_column(Date, nullable=False)
+    bank_received_amount: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6),
+        nullable=False,
+    )
+    bank_received_currency: Mapped[str] = mapped_column(Text, nullable=False)
+    bank_received_amount_usd: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6),
+        nullable=False,
+    )
+    transfer_fee_usd: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6),
+        nullable=False,
+        server_default=text("0"),
+    )
+    fx_difference_usd: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6),
+        nullable=False,
+        server_default=text("0"),
+    )
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_report_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    recorded_by: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "month",
+            "bank_reference",
+            name="uq_bank_reconciliation_month_reference",
+        ),
+        CheckConstraint(
+            "length(month) = 7 AND substr(month, 5, 1) = '-' "
+            "AND substr(month, 1, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 2, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 3, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 4, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
+            name="ck_bank_reconciliation_month_format",
+        ),
+        CheckConstraint(
+            "bank_received_amount >= 0",
+            name="ck_bank_reconciliation_received_nonnegative",
+        ),
+        CheckConstraint(
+            "bank_received_amount_usd >= 0",
+            name="ck_bank_reconciliation_received_usd_nonnegative",
+        ),
+        CheckConstraint(
+            "transfer_fee_usd >= 0",
+            name="ck_bank_reconciliation_transfer_fee_nonnegative",
+        ),
+        CheckConstraint(
+            "length(bank_received_currency) = 3 "
+            "AND bank_received_currency = upper(bank_received_currency) "
+            "AND substr(bank_received_currency, 1, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(bank_received_currency, 2, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(bank_received_currency, 3, 1) BETWEEN 'A' AND 'Z'",
+            name="ck_bank_reconciliation_currency_code",
+        ),
+        Index("ix_bank_reconciliation_entries_month", "month"),
+        Index("ix_bank_reconciliation_entries_source_report", "source_report_id"),
+    )
+
+
+class AdSensePaymentORM(FinanceBase):
+    __tablename__ = "adsense_payments"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    month: Mapped[str] = mapped_column(Text, nullable=False)
+    payment_name: Mapped[str] = mapped_column(Text, nullable=False)
+    payment_date: Mapped[date] = mapped_column(Date, nullable=False)
+    payment_amount: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    payment_currency: Mapped[str] = mapped_column(Text, nullable=False)
+    payment_status: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+        default="PAID",
+        server_default=text("'PAID'"),
+    )
+    raw_payload: Mapped[dict[str, object]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    source_report_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    imported_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    imported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "month",
+            "payment_name",
+            name="uq_adsense_payments_month_name",
+        ),
+        CheckConstraint(
+            "length(month) = 7 AND substr(month, 5, 1) = '-' "
+            "AND substr(month, 1, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 2, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 3, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 4, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
+            name="ck_adsense_payments_month_format",
+        ),
+        CheckConstraint(
+            "payment_amount >= 0",
+            name="ck_adsense_payments_amount_nonnegative",
+        ),
+        CheckConstraint(
+            "length(payment_currency) = 3 "
+            "AND payment_currency = upper(payment_currency) "
+            "AND substr(payment_currency, 1, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(payment_currency, 2, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(payment_currency, 3, 1) BETWEEN 'A' AND 'Z'",
+            name="ck_adsense_payments_currency_code",
+        ),
+        CheckConstraint(
+            "payment_status IN ('PAID', 'PENDING', 'UNPAID', 'CANCELLED')",
+            name="ck_adsense_payments_payment_status",
+        ),
+        Index("ix_adsense_payments_month_date", "month", "payment_date"),
+        Index("ix_adsense_payments_source_report", "source_report_id"),
     )

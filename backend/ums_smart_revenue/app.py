@@ -2,6 +2,7 @@
 
 from fastapi import FastAPI
 
+from ums_smart_revenue.api.adsense import router as adsense_router
 from ums_smart_revenue.api.audit import router as audit_router
 from ums_smart_revenue.api.channels import (
     current_audit_sink,
@@ -80,6 +81,7 @@ def create_app(
         if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
             overrides[current_principal_from_headers] = current_principal_from_database
 
+    app.include_router(adsense_router)
     app.include_router(audit_router)
     app.include_router(channels_router)
     app.include_router(connectors_router)

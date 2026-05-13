@@ -1,0 +1,174 @@
+from datetime import UTC, date, datetime
+from decimal import Decimal
+from uuid import UUID, uuid4
+
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from ums_smart_revenue.app import create_app
+from ums_smart_revenue.db.finance_models import (
+    AdSensePaymentORM,
+    FinanceBase,
+    MonthlyChannelRevenueFactORM,
+    RevenueManualOverrideORM,
+)
+from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
+from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+
+SECTOR_ID = UUID("00000000-0000-0000-0000-00000000b101")
+COMPANY_ID = UUID("00000000-0000-0000-0000-00000000b201")
+CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-00000000b301")
+USER_ID = UUID("00000000-0000-0000-0000-00000000b401")
+APPROVER_ID = UUID("00000000-0000-0000-0000-00000000b402")
+
+
+def auth_headers(
+    role: str,
+    scope_type: str = "global",
+    scope_id: str | None = None,
+) -> dict[str, str]:
+    headers = {
+        "x-user-id": str(USER_ID),
+        "x-user-email": "smart-alerts@example.com",
+        "x-role": role,
+        "x-scope-type": scope_type,
+        "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
+    }
+    if scope_id is not None:
+        headers["x-scope-id"] = scope_id
+    return headers
+
+
+def build_database_url(tmp_path) -> str:
+    return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
+
+
+def seed_database(database_url: str) -> None:
+    engine = create_engine(database_url)
+    OrgBase.metadata.create_all(engine)
+    SecurityBase.metadata.create_all(engine)
+    FinanceBase.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                OrgUnitORM(
+                    id=SECTOR_ID,
+                    parent_id=None,
+                    type="SECTOR",
+                    name="TV",
+                    active=True,
+                ),
+                OrgUnitORM(
+                    id=COMPANY_ID,
+                    parent_id=SECTOR_ID,
+                    type="COMPANY",
+                    name="TV Company",
+                    active=True,
+                ),
+                YouTubeChannelORM(
+                    id=CHANNEL_ROW_ID,
+                    youtube_channel_id="channel-tv-a",
+                    channel_name="TV A",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-a",
+                    source_kind="YOUTUBE_CMS",
+                    source_report_id="cms-report-2026-03",
+                    gross_revenue_usd=Decimal("1000.00"),
+                    net_revenue_usd=Decimal("900.00"),
+                    views=250000,
+                    watch_time_minutes=Decimal("7200.50"),
+                    confidence_score=Decimal("0.9825"),
+                    imported_by=USER_ID,
+                ),
+                AdSensePaymentORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    payment_name="AdSense payment March 2026",
+                    payment_date=date(2026, 4, 21),
+                    payment_amount=Decimal("900.00"),
+                    payment_currency="USD",
+                    payment_status="PAID",
+                    raw_payload={"paymentId": "pay_2026_03"},
+                    source_report_id="adsense-payment-2026-03",
+                    imported_by=USER_ID,
+                ),
+                RevenueManualOverrideORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-a",
+                    adjustment_revenue_usd=Decimal("50.00"),
+                    reason="Finance correction",
+                    status="APPROVED",
+                    created_by=USER_ID,
+                    approved_by=APPROVER_ID,
+                    approved_at=datetime(2026, 4, 25, tzinfo=UTC),
+                    approval_reason="Approved correction",
+                ),
+                UserORM(
+                    id=USER_ID,
+                    email="smart-alerts@example.com",
+                    display_name="Smart Alerts User",
+                ),
+            ]
+        )
+        session.commit()
+
+
+def test_finance_viewer_reads_month_smart_alerts_with_sensitive_audits(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/smart-alerts",
+        headers=auth_headers("finance_viewer", "global"),
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_logs = session.scalars(
+            select(AuditLogORM).order_by(AuditLogORM.event_type)
+        ).all()
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ATTENTION_REQUIRED"
+    assert [alert["code"] for alert in response.json()["alerts"]] == [
+        "PAYMENT_NOT_MATCHED",
+        "BANK_AMOUNT_MISSING",
+        "UNEXPLAINED_GAP_HIGH",
+        "MONTH_NOT_LOCKED",
+        "MANUAL_OVERRIDE_USED",
+    ]
+    assert [event["event_type"] for event in response.json()["audit_events"]] == [
+        "REVENUE_VIEWED",
+        "PAYMENT_VIEWED",
+        "BANK_RECONCILIATION_VIEWED",
+    ]
+    assert [log.event_type for log in audit_logs] == [
+        "BANK_RECONCILIATION_VIEWED",
+        "PAYMENT_VIEWED",
+        "REVENUE_VIEWED",
+    ]
+    assert all(log.sensitive is True for log in audit_logs)
+
+
+def test_assistant_cannot_read_month_smart_alerts(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/smart-alerts",
+        headers=auth_headers("assistant_analyst", "global"),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"

@@ -40,10 +40,10 @@ Global platform administrator for organization structure, users, channel registr
 Global data operations role for channel registry quality, report ingestion visibility, sync health, and non-payment operational troubleshooting. Can run connector jobs but cannot administer OAuth credentials or change finance rules.
 
 ### Finance Admin
-Global finance owner for revenue, finalized payments, bank reconciliation, manual overrides, allocation rules, exports, and finance month locking. Cannot assign Super Owner without Super Owner approval.
+Global finance owner for revenue, finalized payments, bank reconciliation reads and receipt recording, manual overrides, allocation rules, exports, and finance month locking. Cannot assign Super Owner without Super Owner approval.
 
 ### Finance Approver
-Second-control finance role for approving manual overrides, allocation rule changes, and month unlock requests. Designed for segregation of duties when Finance Admin enters the change.
+Second-control finance role for approving manual overrides, allocation rule changes, month unlock requests, and controlled bank reconciliation receipt updates. Designed for segregation of duties when Finance Admin enters the change.
 
 ### Finance Viewer
 Read-only finance role. Can view revenue, finalized payments, bank/payment reconciliation, and finance exports within granted scope. Cannot lock months, create overrides, change allocation rules, or manage connectors.
@@ -84,7 +84,7 @@ Scoped registry maintenance role. Can change channel/company/sector mappings and
 |---|---|
 | Analytics | view channel metrics, view company performance, view issue flags. |
 | Finance | view revenue, finalized payments, bank reconciliation, allocation results. |
-| Finance control | manual override, override approval, lock/unlock month, change allocation rules. |
+| Finance control | manual override, override approval, lock/unlock month, change allocation rules, record bank reconciliation receipts. |
 | Registry | manage channel registry, company mapping, sector mapping, groups. |
 | Export | export analytics, export revenue, manage templates, view export history. |
 | Connectors | run connector jobs, manage OAuth/API settings, view connector health. |
@@ -99,6 +99,7 @@ Sensitive actions include:
 - viewing revenue;
 - viewing finalized payments;
 - viewing bank/payment reconciliation;
+- recording bank/payment reconciliation receipts;
 - exporting revenue files;
 - creating or approving manual overrides;
 - locking or unlocking a finance month;
@@ -118,7 +119,9 @@ Sensitive actions include:
 - Unknown or disabled database users must fail closed before route handlers run.
 - Money APIs require `VIEW_REVENUE` for the requested organization scope.
 - Payment APIs require `VIEW_FINALIZED_PAYMENTS`.
-- Bank reconciliation APIs require `VIEW_BANK_RECONCILIATION`.
+- Bank reconciliation read APIs require `VIEW_BANK_RECONCILIATION` plus finalized-payment visibility for the requested finance-month scope when payment rows are part of the response.
+- Bank reconciliation write APIs require `MANAGE_BANK_RECONCILIATION` for the requested finance-month scope, a non-empty reason, an unlocked month, and audit logging.
+- Smart alert APIs that combine revenue, confidence, payment, and bank state require all underlying permissions and audit each sensitive data family viewed.
 - Revenue exports require both `EXPORT_REVENUE_REPORT` and `VIEW_REVENUE`.
 - Manual overrides require `CREATE_MANUAL_OVERRIDE`, a reason, and audit logging.
 - Override approval requires `APPROVE_MANUAL_OVERRIDE` and should be a different user from the creator.

@@ -8,6 +8,7 @@ class Permission(str, Enum):
     VIEW_REVENUE = "finance.view_revenue"
     VIEW_FINALIZED_PAYMENTS = "finance.view_finalized_payments"
     VIEW_BANK_RECONCILIATION = "finance.view_bank_reconciliation"
+    MANAGE_BANK_RECONCILIATION = "finance.manage_bank_reconciliation"
     CREATE_MANUAL_OVERRIDE = "finance.create_manual_override"
     APPROVE_MANUAL_OVERRIDE = "finance.approve_manual_override"
     LOCK_FINANCE_MONTH = "finance.lock_month"
@@ -66,6 +67,12 @@ PERMISSION_DEFINITIONS: dict[Permission, PermissionDefinition] = {
     Permission.VIEW_BANK_RECONCILIATION: PermissionDefinition(
         Permission.VIEW_BANK_RECONCILIATION,
         "View bank reconciliation",
+        sensitive=True,
+        audit_on_use=True,
+    ),
+    Permission.MANAGE_BANK_RECONCILIATION: PermissionDefinition(
+        Permission.MANAGE_BANK_RECONCILIATION,
+        "Manage bank reconciliation",
         sensitive=True,
         audit_on_use=True,
     ),

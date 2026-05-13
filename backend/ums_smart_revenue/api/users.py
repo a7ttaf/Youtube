@@ -53,6 +53,7 @@ FINANCE_PERMISSION_KEYS = frozenset(
         Permission.VIEW_REVENUE,
         Permission.VIEW_FINALIZED_PAYMENTS,
         Permission.VIEW_BANK_RECONCILIATION,
+        Permission.MANAGE_BANK_RECONCILIATION,
         Permission.CREATE_MANUAL_OVERRIDE,
         Permission.APPROVE_MANUAL_OVERRIDE,
         Permission.LOCK_FINANCE_MONTH,
