@@ -248,23 +248,72 @@ Raw report metadata records the immutable file reference before parsing. `POST /
 
 ```http
 POST /exports
-GET /exports?page=1&page_size=50
+GET /exports?limit=50&offset=0
 GET /exports/{export_id}
+GET /exports/{export_id}/finance-workbook-preview
+GET /exports/{export_id}/finance-workbook.xlsx
+GET /exports/{export_id}/executive.pdf
+GET /exports/{export_id}/branded-slide-pack.pptx
 ```
 
-`GET /exports` is paginated. Query parameters are `page` (default `1`) and `page_size` (default `50`, maximum `100`). Requests above the maximum are rejected with `422`. Responses include paging metadata:
+`GET /exports` is paginated. Query parameters are `limit` (default `50`, maximum `100`) and `offset` (default `0`). Requests above the maximum are rejected with `422`. Responses include paging metadata:
 
 ```json
 {
   "items": [],
   "pagination": {
-    "total_count": 0,
-    "page": 1,
-    "page_size": 50,
-    "next_link": null
+    "limit": 50,
+    "offset": 0,
+    "returned": 0,
+    "has_more": false
   }
 }
 ```
+
+`GET /exports/{export_id}/finance-workbook-preview` is an implemented read-only
+foundation for future `FINANCE_EXCEL` generation. It requires `exports.revenue`
+and `finance.view_revenue` for the export scope, plus
+`finance.view_finalized_payments` and `finance.view_bank_reconciliation` on the
+requested finance-month scope. The endpoint returns a
+`FINANCE_EXCEL_WORKBOOK_PREVIEW` payload with the planned sheet manifest,
+executive summary, and source summaries from SQL-backed revenue facts, manual
+overrides, AdSense payment metadata, bank reconciliation rows, finance close
+state, payment matching, bank confirmation, net revenue, and smart alerts. It
+audits reads as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, and
+`BANK_RECONCILIATION_VIEWED`. It does not create an XLSX/PDF/slide artifact,
+does not update `file_url`, and does not mark the export job complete.
+
+`GET /exports/{export_id}/finance-workbook.xlsx` uses the same permission checks
+and SQL source summaries as the preview endpoint, then generates an on-demand
+XLSX response with media type
+`application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` and an
+attachment filename. It audits `REVENUE_VIEWED`, `PAYMENT_VIEWED`,
+`BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`. The endpoint does not
+persist the generated workbook, upload it to object storage, update `file_url`,
+or mark the export job complete in this foundation phase.
+
+`GET /exports/{export_id}/executive.pdf` supports `EXECUTIVE_PDF` export jobs.
+It uses the same finance export, revenue visibility, finalized-payment, and
+bank-reconciliation checks as the workbook download, then generates an
+on-demand PDF response with media type `application/pdf` and an attachment
+filename. The report sections are sourced from SQL-backed net revenue, payment
+matching, bank reconciliation, finance month-close state, and smart-alert
+summaries. It audits `REVENUE_VIEWED`, `PAYMENT_VIEWED`,
+`BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`. The endpoint does not
+persist the generated PDF, upload it to object storage, update `file_url`, or
+mark the export job complete in this foundation phase.
+
+`GET /exports/{export_id}/branded-slide-pack.pptx` supports
+`BRANDED_SLIDE_PACK` export jobs. It uses the same finance export, revenue
+visibility, finalized-payment, and bank-reconciliation checks as the workbook
+download, then generates an on-demand PPTX response with media type
+`application/vnd.openxmlformats-officedocument.presentationml.presentation` and
+an attachment filename. The 10-slide deck is sourced from SQL-backed net
+revenue, payment matching, bank reconciliation, finance month-close state, and
+smart-alert summaries. It audits `REVENUE_VIEWED`, `PAYMENT_VIEWED`,
+`BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`. The endpoint does not
+persist the generated deck, upload it to object storage, update `file_url`, or
+mark the export job complete in this foundation phase.
 
 ### Audit
 

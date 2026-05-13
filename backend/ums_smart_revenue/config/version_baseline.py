@@ -13,8 +13,12 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "neo4j_driver": "6.2.0",
         "celery": "5.6.3",
         "redis": "7.4.0",
+        "openpyxl": "3.1.5",
+        "reportlab": "4.5.1",
+        "python_pptx": "1.0.2",
         "pytest": "9.0.3",
         "httpx": "0.28.1",
+        "pypdf": "6.11.0",
     },
     "datastores": {
         "postgresql": "18.3",
@@ -30,4 +34,3 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "playwright": "1.59.1",
     },
 }
-

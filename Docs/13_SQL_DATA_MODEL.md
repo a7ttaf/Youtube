@@ -262,4 +262,12 @@ export_jobs (
 ```
 
 Implementation note:
-The backend foundation records export job requests as queued metadata. It does not generate workbook, PDF, or slide files yet, and it does not calculate revenue values during export request creation.
+The backend foundation records export job requests as queued metadata. It can generate an on-demand `FINANCE_EXCEL` workbook response from guarded SQL-backed preview data, but it does not persist generated files, update `file_url`, generate PDF or slide files, or calculate revenue values during export request creation.
+`EXECUTIVE_PDF` export jobs can also be rendered on demand from the same guarded
+SQL-backed source summaries. Generated PDF bytes are response-only in this
+phase; `file_url`, `completed_at`, and job status are not updated until a
+persistent artifact store/job runner is introduced.
+`BRANDED_SLIDE_PACK` export jobs can also be rendered on demand as a PPTX deck
+from the same guarded SQL-backed source summaries. Generated slide-pack bytes
+are response-only in this phase; `file_url`, `completed_at`, and job status are
+not updated until a persistent artifact store/job runner is introduced.

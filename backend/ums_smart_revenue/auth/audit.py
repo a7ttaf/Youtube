@@ -1,10 +1,10 @@
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 from ums_smart_revenue.auth.permissions import Permission
 
 
-class AuditEventType(str, Enum):
+class AuditEventType(StrEnum):
     LOGIN = "LOGIN"
     LOGOUT = "LOGOUT"
     CHANNEL_CREATED = "CHANNEL_CREATED"
@@ -19,6 +19,7 @@ class AuditEventType(str, Enum):
     MANUAL_OVERRIDE_APPROVED = "MANUAL_OVERRIDE_APPROVED"
     ALLOCATION_RULE_CHANGED = "ALLOCATION_RULE_CHANGED"
     EXPORT_CREATED = "EXPORT_CREATED"
+    EXPORT_DOWNLOADED = "EXPORT_DOWNLOADED"
     USER_ACCOUNT_CHANGED = "USER_ACCOUNT_CHANGED"
     USER_ROLE_CHANGED = "USER_ROLE_CHANGED"
     USER_PERMISSION_CHANGED = "USER_PERMISSION_CHANGED"
@@ -80,6 +81,10 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     ),
     AuditEventType.EXPORT_CREATED: AuditEventDefinition(
         AuditEventType.EXPORT_CREATED,
+        permission=Permission.EXPORT_REVENUE_REPORT,
+    ),
+    AuditEventType.EXPORT_DOWNLOADED: AuditEventDefinition(
+        AuditEventType.EXPORT_DOWNLOADED,
         permission=Permission.EXPORT_REVENUE_REPORT,
     ),
     AuditEventType.USER_ACCOUNT_CHANGED: AuditEventDefinition(

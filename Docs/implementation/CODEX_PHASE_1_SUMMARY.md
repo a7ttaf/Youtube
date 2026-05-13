@@ -199,6 +199,42 @@ Twenty-fifth continuation update:
 - audited net-revenue summary reads as `REVENUE_VIEWED`;
 - kept calculated values read-only and did not persist `channel_net_revenue` rows yet.
 
+Twenty-sixth continuation update:
+- added a deterministic finance workbook preview foundation for `FINANCE_EXCEL` export jobs;
+- added FastAPI `GET /exports/{export_id}/finance-workbook-preview`;
+- returns the planned finance workbook sheet manifest, executive summary, and source summaries without generating XLSX/PDF/slide artifacts or marking jobs complete;
+- requires revenue export permission, scoped revenue visibility, and finance-month scoped finalized-payment and bank-reconciliation visibility;
+- derives preview data only from SQL source-of-truth services: revenue facts, manual overrides, AdSense payments, bank reconciliation rows, finance close state, payment match, bank confirmation, net revenue, and smart alerts;
+- audits preview reads as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, and `BANK_RECONCILIATION_VIEWED`;
+- rejects non-`FINANCE_EXCEL` jobs for workbook preview instead of silently fabricating another artifact type.
+
+Twenty-seventh continuation update:
+- added pinned stable `openpyxl==3.1.5` for XLSX generation and recorded it in the version baseline;
+- added deterministic finance workbook XLSX generation from the existing `FINANCE_EXCEL` preview object;
+- added FastAPI `GET /exports/{export_id}/finance-workbook.xlsx`;
+- returns an on-demand XLSX response with the planned finance workbook sheets;
+- reuses the same revenue export, scoped revenue, finalized-payment, and bank-reconciliation permission checks as preview;
+- audits workbook downloads as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, `BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`;
+- keeps generated workbooks ephemeral in this phase: no object-storage upload, no `file_url` update, and no export-job completion mutation.
+
+Twenty-eighth continuation update:
+- verified and pinned stable `ReportLab==4.5.1` for PDF generation and `pypdf==6.11.0` for PDF test extraction;
+- added deterministic executive finance PDF generation for `EXECUTIVE_PDF` export jobs;
+- added FastAPI `GET /exports/{export_id}/executive.pdf`;
+- returns an on-demand PDF response with the planned executive management sections;
+- reuses the same revenue export, scoped revenue, finalized-payment, and bank-reconciliation permission checks as workbook downloads;
+- audits executive PDF downloads as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, `BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`;
+- keeps generated PDFs ephemeral in this phase: no object-storage upload, no `file_url` update, and no export-job completion mutation.
+
+Twenty-ninth continuation update:
+- verified and pinned stable `python-pptx==1.0.2` for PowerPoint deck generation;
+- added deterministic branded finance slide-pack generation for `BRANDED_SLIDE_PACK` export jobs;
+- added FastAPI `GET /exports/{export_id}/branded-slide-pack.pptx`;
+- returns an on-demand PPTX response with the planned 10-slide management deck;
+- reuses the same revenue export, scoped revenue, finalized-payment, and bank-reconciliation permission checks as workbook downloads;
+- audits branded slide-pack downloads as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, `BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`;
+- keeps generated slide packs ephemeral in this phase: no object-storage upload, no `file_url` update, and no export-job completion mutation.
+
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`
 - `Docs/implementation/CODEX_PHASE_1_SUMMARY.md`
@@ -218,6 +254,9 @@ Twenty-fifth continuation update:
 - `backend/ums_smart_revenue/api/exports.py`
 - `backend/ums_smart_revenue/api/finance_close.py`
 - `backend/ums_smart_revenue/api/groups.py`
+- `backend/ums_smart_revenue/reports/branded_slide_pack.py`
+- `backend/ums_smart_revenue/reports/executive_pdf.py`
+- `backend/ums_smart_revenue/reports/finance_workbook.py`
 - `backend/ums_smart_revenue/api/reports.py`
 - `backend/ums_smart_revenue/api/revenue.py`
 - `backend/ums_smart_revenue/api/security.py`
@@ -295,6 +334,7 @@ Twenty-fifth continuation update:
 - `tests/api/test_channels_api.py`
 - `tests/api/test_connectors_api.py`
 - `tests/api/test_database_principals.py`
+- `tests/api/test_export_preview_api.py`
 - `tests/api/test_exports_api.py`
 - `tests/api/test_finance_close_api.py`
 - `tests/api/test_groups_api.py`
@@ -335,6 +375,9 @@ Twenty-fifth continuation update:
 - `tests/finance/test_smart_alerts.py`
 - `tests/graph/test_readonly_service.py`
 - `tests/org/test_sql_channel_registry.py`
+- `tests/reports/test_branded_slide_pack.py`
+- `tests/reports/test_executive_pdf.py`
+- `tests/reports/test_finance_workbook_preview.py`
 - `alembic.ini`
 
 ## Role Model Summary
@@ -499,6 +542,12 @@ Pytest coverage includes:
 - Month net revenue totals include calculated channel net/deductions while counting channels whose primary source lacks net values.
 - Finance Viewer can read scoped month net-revenue summaries with a sensitive `REVENUE_VIEWED` audit event.
 - Assistant Analyst cannot read month net-revenue summaries by default, and non-USD net-revenue reads are rejected until exchange-rate support exists.
+- Finance Admin can preview a `FINANCE_EXCEL` workbook from an export job with revenue, payment, and bank-reconciliation audit events.
+- Export Operator cannot preview finance workbooks without revenue-export and finance visibility.
+- Finance workbook preview rejects analytics export jobs instead of fabricating workbook output.
+- Finance workbook preview returns the planned sheet manifest and source-backed executive summary from existing finance services.
+- Finance Admin can download a generated `FINANCE_EXCEL` workbook with the planned sheet names and source-backed values.
+- Finance workbook downloads are audited as sensitive export-download activity.
 
 ## Commands Run
 - `git status --short --branch` failed because this workspace is not a Git repository.
@@ -666,8 +715,55 @@ Pytest coverage includes:
 - `python -B -m pytest tests/auth tests/db tests/finance tests/graph tests/org tests/test_version_baseline.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-net-revenue-nonapi"` passed with 98 tests.
 - `python -B -m pytest tests/finance/test_net_revenue.py tests/api/test_net_revenue_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-net-revenue-final-focused"` passed with 6 tests after final API helper formatting.
 - `git diff --check` passed with CRLF conversion warnings only after net-revenue implementation.
+- `python -B -m pytest tests/reports/test_finance_workbook_preview.py tests/api/test_export_preview_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-export-preview-focused-2"` passed with 5 tests after finance workbook preview implementation.
+- `python -m ruff check backend/ums_smart_revenue/reports/finance_workbook.py backend/ums_smart_revenue/api/exports.py tests/reports/test_finance_workbook_preview.py tests/api/test_export_preview_api.py` passed after formatting cleanup.
+- `python -B -m pytest tests/reports/test_finance_workbook_preview.py tests/finance/test_net_revenue.py tests/finance/test_payment_matching.py tests/finance/test_bank_reconciliation.py tests/finance/test_smart_alerts.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-export-preview-service-related"` passed with 16 tests.
+- The combined API regression command for export preview timed out locally, so the same API files were validated individually to avoid masking results behind Windows test runtime noise.
+- `python -B -m pytest tests/api/test_exports_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-export-preview-exports-file"` passed with 9 tests.
+- `python -B -m pytest tests/api/test_export_preview_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-export-preview-api-file"` passed with 3 tests.
+- `python -B -m pytest tests/api/test_net_revenue_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-export-preview-net-revenue-api"` passed with 3 tests.
+- `python -B -m pytest tests/api/test_smart_alerts_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-export-preview-smart-alerts-api"` passed with 2 tests.
+- `python -B -m pytest tests/api/test_payment_match_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-export-preview-payment-match-api-final"` passed with 5 tests.
+- `python -B -m pytest tests/api/test_bank_reconciliation_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-export-preview-bank-api-final"` passed with 7 tests.
+- `git diff --check` passed with CRLF conversion warnings only after finance workbook preview implementation.
+- `python -B -m pytest tests/reports/test_finance_workbook_preview.py tests/api/test_export_preview_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-finance-xlsx-red"` first failed because `openpyxl` was not installed.
+- `python -m pip install openpyxl==3.1.5` installed the pinned stable XLSX dependency locally.
+- `python -B -m pytest tests/reports/test_finance_workbook_preview.py tests/api/test_export_preview_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-finance-xlsx-red-2"` then failed because `build_finance_workbook_xlsx` did not exist.
+- `python -B -m pytest tests/reports/test_finance_workbook_preview.py tests/api/test_export_preview_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-finance-xlsx-green-1"` passed with 7 tests after XLSX generation and download route implementation.
+- `python -m ruff check backend/ums_smart_revenue/reports/finance_workbook.py backend/ums_smart_revenue/api/exports.py backend/ums_smart_revenue/auth/audit.py backend/ums_smart_revenue/config/version_baseline.py tests/reports/test_finance_workbook_preview.py tests/api/test_export_preview_api.py tests/test_version_baseline.py` passed after formatting and import cleanup.
+- `python -B -m pytest tests/reports/test_finance_workbook_preview.py tests/api/test_export_preview_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-finance-xlsx-focused-final-4"` passed with 7 tests.
+- `python -B -m pytest tests/reports/test_finance_workbook_preview.py tests/finance/test_net_revenue.py tests/finance/test_payment_matching.py tests/finance/test_bank_reconciliation.py tests/finance/test_smart_alerts.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-finance-xlsx-services-final"` passed with 17 tests.
+- The combined adjacent API/audit/version command timed out locally, so the same files were validated individually.
+- `python -B -m pytest tests/api/test_exports_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-finance-xlsx-exports-final"` passed with 9 tests.
+- `python -B -m pytest tests/auth/test_audit_service.py tests/api/test_audit_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-finance-xlsx-audit-final"` passed with 8 tests.
+- `python -B -m pytest tests/test_version_baseline.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-finance-xlsx-version-final"` passed with 2 tests.
+- `git diff --check` passed with CRLF conversion warnings only after XLSX generation.
+- `python -m pip install reportlab==4.5.1 pypdf==6.11.0` installed the verified stable PDF dependencies locally.
+- `python -B -m pytest tests/reports/test_executive_pdf.py tests/api/test_export_preview_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-executive-pdf-red"` first failed because the executive PDF report module and API route did not exist.
+- `python -B -m pytest tests/reports/test_executive_pdf.py -vv -s -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-executive-pdf-report-isolate"` passed with 3 tests after the report builder was implemented.
+- `python -B -m pytest tests/api/test_export_preview_api.py::test_finance_admin_downloads_generated_executive_pdf_with_audit -vv -s -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-executive-pdf-api-one-new"` passed with 1 test.
+- `python -B -m pytest tests/api/test_export_preview_api.py::test_export_operator_cannot_download_executive_pdf -vv -s -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-executive-pdf-api-one-negative"` passed with 1 test.
+- `python -m ruff check backend/ums_smart_revenue/reports/executive_pdf.py backend/ums_smart_revenue/api/exports.py backend/ums_smart_revenue/config/version_baseline.py tests/reports/test_executive_pdf.py tests/api/test_export_preview_api.py tests/test_version_baseline.py` passed.
+- `python -B -m pytest tests/reports/test_executive_pdf.py tests/reports/test_finance_workbook_preview.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-executive-pdf-reports-final"` passed with 6 tests.
+- `python -B -m pytest tests/test_version_baseline.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-executive-pdf-version-final"` passed with 2 tests.
+- A parallel run of `tests/api/test_exports_api.py` timed out locally, then `python -B -m pytest tests/api/test_exports_api.py -vv -s -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-executive-pdf-exports-final-solo"` passed with 9 tests.
+- `python -B -m pytest tests/api/test_export_preview_api.py -vv -s -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-executive-pdf-preview-final"` passed with 6 tests.
+- `python -B -m pytest tests/auth/test_audit_service.py tests/api/test_audit_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-executive-pdf-audit-final"` passed with 8 tests.
+- `git diff --check` passed with CRLF conversion warnings only after executive PDF generation.
+- `python -m pip install python-pptx==1.0.2` installed the verified stable slide-generation dependency locally.
+- `python -B -m pytest tests/reports/test_branded_slide_pack.py tests/api/test_export_preview_api.py::test_finance_admin_downloads_generated_branded_slide_pack_with_audit tests/api/test_export_preview_api.py::test_export_operator_cannot_download_branded_slide_pack -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-branded-slide-red"` first failed because the branded slide-pack report module and API route did not exist.
+- `python -B -m pytest tests/reports/test_branded_slide_pack.py tests/api/test_export_preview_api.py::test_finance_admin_downloads_generated_branded_slide_pack_with_audit tests/api/test_export_preview_api.py::test_export_operator_cannot_download_branded_slide_pack -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-branded-slide-green-1"` passed with 5 tests after slide-pack generation and the guarded route were implemented.
+- `python -B -m pytest tests/reports/test_branded_slide_pack.py tests/reports/test_executive_pdf.py tests/reports/test_finance_workbook_preview.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-branded-slide-reports-final"` passed with 9 tests.
+- `python -B -m pytest tests/test_version_baseline.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-branded-slide-version-final"` passed with 2 tests.
+- `python -m ruff check backend/ums_smart_revenue/reports/branded_slide_pack.py backend/ums_smart_revenue/reports/executive_pdf.py backend/ums_smart_revenue/reports/finance_workbook.py backend/ums_smart_revenue/api/exports.py backend/ums_smart_revenue/config/version_baseline.py tests/reports/test_branded_slide_pack.py tests/reports/test_executive_pdf.py tests/reports/test_finance_workbook_preview.py tests/api/test_export_preview_api.py tests/test_version_baseline.py` passed.
+- `python -B -m pytest tests/api/test_export_preview_api.py -vv -s -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-branded-slide-preview-final"` passed with 8 tests.
+- `python -B -m pytest tests/api/test_exports_api.py -vv -s -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-branded-slide-exports-final"` passed with 9 tests.
+- `python -B -m pytest tests/auth/test_audit_service.py tests/api/test_audit_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-branded-slide-audit-final"` passed with 8 tests.
+- `git diff --check` passed with CRLF conversion warnings only after branded slide-pack generation.
+- `python -B -m pytest tests/reports/test_branded_slide_pack.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-branded-slide-refactor-final"` passed with 3 tests after slide-shape cleanup.
 
 ## Remaining Next Steps
+- Implement persistent export artifact storage and job completion transitions for generated workbooks, PDFs, and slide packs.
 - Expand SQL audit persistence to each new sensitive endpoint as those routes are added.
 - Add broader integration tests around real API routes as modules are built.
 - Add a concrete secret-manager adapter after UMS chooses the provider; the current foundation stores external encrypted secret references only.
