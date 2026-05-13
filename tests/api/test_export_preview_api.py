@@ -522,6 +522,9 @@ def test_finance_workbook_storage_failure_preserves_completed_export(
     assert export_job.completed_at == completed_at.replace(tzinfo=None)
     assert export_job.file_url == existing_uri
     assert export_job.artifact_filename == existing_filename
+    assert export_job.artifact_content_type == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
     assert export_job.artifact_byte_size == 42
     assert export_job.artifact_checksum_sha256 == "a" * 64
     assert export_job.failure_reason is None

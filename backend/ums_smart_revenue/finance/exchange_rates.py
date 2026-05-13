@@ -108,8 +108,13 @@ class SqlAlchemyExchangeRateRepository:
                 )
             seen_rate_keys.add(rate_key)
 
+        prepared_rates = [
+            (normalized, _quantize_rate(normalized.rate))
+            for normalized in normalized_rates
+        ]
+
         entries: list[CurrencyExchangeRateEntry] = []
-        for normalized in normalized_rates:
+        for normalized, quantized_rate in prepared_rates:
             now = datetime.now(UTC)
             insert_statement = _dialect_insert(
                 self._session.get_bind().dialect.name
@@ -118,7 +123,7 @@ class SqlAlchemyExchangeRateRepository:
                 rate_date=normalized.rate_date,
                 base_currency=normalized.base_currency,
                 quote_currency=normalized.quote_currency,
-                rate=_quantize_rate(normalized.rate),
+                rate=quantized_rate,
                 provider_key=normalized_provider,
                 source_report_id=normalized_source_report_id,
                 raw_payload=normalized.raw_payload or {},
@@ -133,7 +138,7 @@ class SqlAlchemyExchangeRateRepository:
                     CurrencyExchangeRateORM.provider_key,
                 ],
                 set_={
-                    "rate": _quantize_rate(normalized.rate),
+                    "rate": quantized_rate,
                     "source_report_id": normalized_source_report_id,
                     "raw_payload": normalized.raw_payload or {},
                     "imported_by": actor_uuid,

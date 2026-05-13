@@ -379,6 +379,7 @@ function CommandView({
                         className={isSel ? "is-selected" : undefined}
                         onClick={() => setSelected(c.name)}
                         onKeyDown={(e) => {
+                          if (e.target !== e.currentTarget) return;
                           if (e.key === "Enter" || e.key === " ") {
                             e.preventDefault();
                             setSelected(c.name);

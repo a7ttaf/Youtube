@@ -301,3 +301,13 @@ def test_smart_alerts_reject_negative_high_gap_threshold():
         build_alerts(high_gap_threshold_usd=Decimal("-1.00"))
 
     assert str(exc_info.value) == "high_gap_threshold_usd must be non-negative"
+
+
+def test_smart_alerts_reject_negative_revenue_trend_anomaly_threshold():
+    with pytest.raises(ValueError) as exc_info:
+        build_alerts(revenue_trend_anomaly_threshold_percent=Decimal("-0.01"))
+
+    assert (
+        str(exc_info.value)
+        == "revenue_trend_anomaly_threshold_percent must be non-negative"
+    )
