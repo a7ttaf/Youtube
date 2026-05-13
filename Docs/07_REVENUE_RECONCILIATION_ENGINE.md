@@ -117,8 +117,21 @@ not applied. If a primary source has no net value, the API returns
 bank/payment gaps.
 
 This foundation does not yet persist `channel_net_revenue` rows, allocate
-transfer/FX/payment gaps, ingest tax tables, or use Neo4j as a financial source
-of truth.
+transfer/FX/payment gaps, ingest tax tables, or depend on a graph database.
+
+Monthly revenue facts may include official Shorts, longform, and subscription
+revenue component values when the source report provides them. These fields are
+stored and exposed for analysis, issue review, and export context, but they do
+not change gross/net calculations in this phase. Missing component fields remain
+null and must not be backfilled from gross revenue.
+
+The backend now also exposes `POST /revenue/recalculate` as a dry-run allocation
+review foundation. It accepts the finance month, allocation method, scoped data
+selection, currency, and reason; requires both revenue visibility and
+allocation-rule permission; and audits `RECALCULATION_REQUESTED`. The endpoint
+returns source coverage and blockers only, with `NO_WRITES_PERFORMED`, until the
+full allocation engine is implemented. It must not create financial rows or
+invent transfer, FX, tax, or payment-gap values.
 
 ## Acceptance checks
 

@@ -4,30 +4,47 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
+from ums_smart_revenue.api.dependencies import (
+    current_db_session,
+    current_principal_from_headers,
+)
+from ums_smart_revenue.api.registry_dependencies import current_group_registry
 from ums_smart_revenue.api.revenue import current_org_access_index
 from ums_smart_revenue.auth.audit import AuditEventType
-from ums_smart_revenue.auth.audit_service import AuditRecord, AuditSink, InMemoryAuditSink, record_audit_event
+from ums_smart_revenue.auth.audit_service import (
+    AuditRecord,
+    AuditSink,
+    InMemoryAuditSink,
+    record_audit_event,
+)
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.org.channel_groups import ChannelGroupRegistryStore
+from ums_smart_revenue.org.channel_issues import (
+    build_channel_registry_issues,
+    summarize_channel_registry_issues,
+)
 from ums_smart_revenue.org.channel_registry import (
     ChannelRegistry,
     ChannelRegistryConflictError,
+    ChannelRegistryEntry,
     ChannelRegistryStore,
     ChannelRegistryValidationError,
     bootstrap_channel_registry,
 )
 from ums_smart_revenue.org.sql_channel_registry import SqlAlchemyChannelRegistry
 
-
 router = APIRouter(prefix="/channels", tags=["channels"])
 
 _CHANNEL_REGISTRY = bootstrap_channel_registry()
 _AUDIT_SINK = InMemoryAuditSink()
+_OFFICIAL_REVENUE_SOURCE_STATUSES = frozenset(
+    {"OFFICIAL_CMS_REVENUE", "OFFICIAL_MANUAL_IMPORT"}
+)
 
 
 class ChannelCreateRequest(BaseModel):
@@ -37,7 +54,9 @@ class ChannelCreateRequest(BaseModel):
     cms_status: str
     revenue_required: bool
 
-    @field_validator("youtube_channel_id", "channel_name", "primary_company_id", mode="before")
+    @field_validator(
+        "youtube_channel_id", "channel_name", "primary_company_id", mode="before"
+    )
     @classmethod
     def strip_required_strings(cls, value):
         return _strip_required_string(value)
@@ -100,20 +119,135 @@ def list_channels(
     registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> list[dict[str, object]]:
+    return [
+        channel.to_api()
+        for channel in _visible_channels_for_analytics(
+            user=user,
+            registry=registry,
+            org_index=org_index,
+        )
+    ]
+
+
+@router.get("/outside-cms")
+def list_outside_cms_channels(
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+) -> dict[str, object]:
+    channels = [
+        channel
+        for channel in _visible_channels_for_analytics(
+            user=user,
+            registry=registry,
+            org_index=org_index,
+        )
+        if channel.cms_status == "OUTSIDE_CMS"
+    ]
+    items = [_outside_cms_channel_to_api(channel) for channel in channels]
+    return {
+        "items": items,
+        "summary": {
+            "outside_cms_channel_count": len(items),
+            "revenue_required_count": sum(
+                1 for item in items if item["revenue_required"]
+            ),
+            "missing_official_revenue_count": sum(
+                1 for item in items if item["missing_official_revenue"]
+            ),
+        },
+    }
+
+
+@router.get("/issues")
+def list_channel_issues(
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
+    group_registry: Annotated[
+        ChannelGroupRegistryStore, Depends(current_group_registry)
+    ],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+) -> dict[str, object]:
+    issues = build_channel_registry_issues(
+        channels=_visible_channels_for_analytics(
+            user=user,
+            registry=registry,
+            org_index=org_index,
+        ),
+        groups=group_registry.list_groups(),
+        org_index=org_index,
+    )
+    return {
+        "items": [issue.to_api() for issue in issues],
+        "summary": summarize_channel_registry_issues(issues),
+    }
+
+
+def _visible_channels_for_analytics(
+    *,
+    user: UserPrincipal,
+    registry: ChannelRegistryStore,
+    org_index: OrgAccessIndex,
+) -> list[ChannelRegistryEntry]:
     authorized_channel_ids = _authorized_channel_ids_for_analytics(user, org_index)
     if authorized_channel_ids is None:
-        visible_channels = registry.list_channels()
-    else:
-        visible_channels = registry.list_channels_by_ids(authorized_channel_ids)
-        visible_channels = [
-            channel
-            for channel in visible_channels
-            if has_permission(user, Permission.VIEW_ANALYTICS, AccessScope.channel(channel.youtube_channel_id), org_index)
-        ]
-    return [channel.to_api() for channel in visible_channels]
+        return registry.list_channels()
+    visible_channels = registry.list_channels_by_ids(authorized_channel_ids)
+    return [
+        channel
+        for channel in visible_channels
+        if has_permission(
+            user,
+            Permission.VIEW_ANALYTICS,
+            AccessScope.channel(channel.youtube_channel_id),
+            org_index,
+        )
+    ]
 
 
-def _authorized_channel_ids_for_analytics(user: UserPrincipal, org_index: OrgAccessIndex) -> set[str] | None:
+def _outside_cms_channel_to_api(channel: ChannelRegistryEntry) -> dict[str, object]:
+    missing_official_revenue = (
+        channel.revenue_required
+        and channel.revenue_source_status not in _OFFICIAL_REVENUE_SOURCE_STATUSES
+    )
+    return {
+        "youtube_channel_id": channel.youtube_channel_id,
+        "channel_name": channel.channel_name,
+        "primary_company_id": channel.primary_company_id,
+        "cms_status": channel.cms_status,
+        "content_owner_id": channel.content_owner_id,
+        "revenue_required": channel.revenue_required,
+        "revenue_source_status": channel.revenue_source_status,
+        "missing_official_revenue": missing_official_revenue,
+        "recommended_action": _recommended_outside_cms_action(
+            revenue_required=channel.revenue_required,
+            revenue_source_status=channel.revenue_source_status,
+            missing_official_revenue=missing_official_revenue,
+        ),
+    }
+
+
+def _recommended_outside_cms_action(
+    *,
+    revenue_required: bool,
+    revenue_source_status: str,
+    missing_official_revenue: bool,
+) -> str:
+    if not revenue_required or revenue_source_status == "PERFORMANCE_ONLY":
+        return "Confirm performance-only classification."
+    if missing_official_revenue:
+        return "Link channel to CMS or import official manual revenue."
+    if revenue_source_status == "OFFICIAL_MANUAL_IMPORT":
+        return (
+            "Keep manual official revenue import current; "
+            "CMS linking remains recommended."
+        )
+    return "Verify CMS link and continue normal ingestion."
+
+
+def _authorized_channel_ids_for_analytics(
+    user: UserPrincipal, org_index: OrgAccessIndex
+) -> set[str] | None:
     if user.disabled:
         return set()
 
@@ -125,22 +259,30 @@ def _authorized_channel_ids_for_analytics(user: UserPrincipal, org_index: OrgAcc
             channel_ids.add(scope.id)
         elif scope.type == ScopeType.COMPANY and scope.id is not None:
             channel_ids.update(
-                channel_id for channel_id, company_id in org_index.channel_company.items() if company_id == scope.id
+                channel_id
+                for channel_id, company_id in org_index.channel_company.items()
+                if company_id == scope.id
             )
         elif scope.type == ScopeType.SECTOR and scope.id is not None:
             channel_ids.update(
-                channel_id for channel_id, sector_id in org_index.channel_sector.items() if sector_id == scope.id
+                channel_id
+                for channel_id, sector_id in org_index.channel_sector.items()
+                if sector_id == scope.id
             )
     return channel_ids
 
 
-def _granted_scopes_for_permission(user: UserPrincipal, permission: Permission) -> tuple[AccessScope, ...]:
+def _granted_scopes_for_permission(
+    user: UserPrincipal, permission: Permission
+) -> tuple[AccessScope, ...]:
     scopes: list[AccessScope] = []
     for grant in user.direct_permissions:
         if grant.active and grant.permission == permission:
             scopes.append(grant.scope)
     for assignment in user.role_assignments:
-        if assignment.active and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset()):
+        if assignment.active and permission in ROLE_PERMISSIONS.get(
+            assignment.role, frozenset()
+        ):
             scopes.append(assignment.scope)
     return tuple(scopes)
 
@@ -167,9 +309,13 @@ def create_channel(
             revenue_required=payload.revenue_required,
         )
     except ChannelRegistryValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
     except ChannelRegistryConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Channel already exists") from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Channel already exists"
+        ) from exc
     return channel.to_api()
 
 
@@ -184,8 +330,12 @@ def update_channel_mapping(
 ) -> dict[str, object]:
     current_scope = AccessScope.channel(youtube_channel_id)
     target_scope = AccessScope.company(payload.primary_company_id)
-    can_manage_current = has_permission(user, Permission.MANAGE_ORG_MAPPING, current_scope, org_index)
-    can_manage_target = has_permission(user, Permission.MANAGE_ORG_MAPPING, target_scope, org_index)
+    can_manage_current = has_permission(
+        user, Permission.MANAGE_ORG_MAPPING, current_scope, org_index
+    )
+    can_manage_target = has_permission(
+        user, Permission.MANAGE_ORG_MAPPING, target_scope, org_index
+    )
     if not (can_manage_current and can_manage_target):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -194,7 +344,9 @@ def update_channel_mapping(
 
     current_channel = registry.get_channel(youtube_channel_id)
     if current_channel is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found"
+        )
 
     try:
         updated = registry.update_mapping(
@@ -202,11 +354,17 @@ def update_channel_mapping(
             primary_company_id=payload.primary_company_id,
         )
     except KeyError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found") from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found"
+        ) from exc
     except ChannelRegistryValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
     except ChannelRegistryConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Channel already exists") from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Channel already exists"
+        ) from exc
     record = record_audit_event(
         sink=audit_sink,
         actor=user,

@@ -4,7 +4,6 @@
 
 - Backend: FastAPI or NestJS?
 - Warehouse: BigQuery or PostgreSQL-only first?
-- Neo4j: AuraDB, Enterprise, or self-hosted?
 - Job runner: Airflow, Temporal, Celery/RQ, or cloud scheduler?
 - Export engine: Python libraries or dedicated reporting service?
 
@@ -23,6 +22,8 @@
 - Who can approve manual overrides?
 - What happens if bank amount is not available?
 - Which FX rate should be used before UAE USD account is active?
+- Which FX provider is authoritative for automated `currency_exchange_rates`
+  imports, and what fallback policy applies when a requested rate is missing?
 - How to treat UAE USD account after activation?
 
 ## UI decisions
@@ -33,20 +34,12 @@
 - Brand identity template source.
 - Which users can see the internal performance league?
 
-## Neo4j decisions
-
-- Use Bloom/Explore only, custom embedded graph only, or both?
-- Which graph views are needed for first beta?
-- Should graph show finance values to everyone or finance-only?
-- Should graph be refreshed after every sync or only after month close?
-
 ## Suggested default decisions
 
 ```text
 Backend: FastAPI
 Database: PostgreSQL + optional BigQuery for warehouse
-Neo4j: AuraDB or self-hosted Enterprise depending on data governance
-Graph UI: Bloom/Explore for internal analysts + embedded graph for dashboard
+Graph database: none in active roadmap
 Allocation method: post-tax revenue proportional allocation
 Outside-CMS labels: show confidence clearly
 Bank input: manual first, automation later

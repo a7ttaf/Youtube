@@ -17,10 +17,6 @@ Smart Number Engine
     └── Export Engine
     ↓
 Operational DB / Warehouse
-    ↓
-Read-only Graph Sync
-    ↓
-Neo4j Graph Projection
 ```
 
 ## Recommended stack
@@ -31,7 +27,6 @@ Neo4j Graph Projection
 | Backend | Python FastAPI or Node.js/NestJS |
 | App database | PostgreSQL |
 | Analytics warehouse | BigQuery or PostgreSQL partitioned tables |
-| Graph read-model | Neo4j AuraDB / Neo4j Enterprise / self-hosted Neo4j |
 | Jobs | Celery/RQ, Temporal, Airflow, or Cloud Scheduler + workers |
 | Object storage | Google Cloud Storage / S3-compatible storage |
 | Exports | Excel templates, PDF generator, PPTX generator |
@@ -42,14 +37,13 @@ Neo4j Graph Projection
 - Filter and select month, company, sector, channel, group, currency.
 - Show numbers, explanation, confidence, and warnings.
 - Trigger exports.
-- Show graph exploration pages.
+- Show hierarchy, ownership, issue, and revenue-flow views only from guarded backend APIs.
 
 ### Backend API
 - Authentication and role enforcement.
 - Data query layer.
 - Calculation APIs.
 - Export job creation.
-- Neo4j query proxy for allowed graph views.
 
 ### Smart Number Engine
 - Normalizes raw data.
@@ -62,15 +56,15 @@ Neo4j Graph Projection
 - Source of truth.
 - Stores raw reports, normalized facts, month-close records, overrides, and locked values.
 
-### Neo4j read-model
-- Receives projected graph data only.
-- Supports relationship exploration and graph visualizations.
-- Does not own business truth.
+### SQL-backed read models
+- Serve hierarchy, ownership, issue, explanation, and reconciliation views from source-of-truth tables or warehouse projections.
+- Apply the same organization and finance permissions as the underlying APIs.
+- Do not introduce a separate graph database or dashboard-only data path.
 
 ## Non-negotiable design choices
 
 - Never calculate finance numbers directly inside the UI.
-- Never use Neo4j as source of truth for financial calculations.
+- Do not add a Neo4j/graph database layer to the active architecture.
 - Store raw source files before normalization.
 - Keep locked finance results immutable unless admin unlocks with reason.
 - Every manual override must be logged.

@@ -124,6 +124,21 @@ bank_reconciliation_entries (
   unique (month, bank_reference)
 );
 
+currency_exchange_rates (
+  id uuid primary key,
+  rate_date date not null,
+  base_currency text not null,
+  quote_currency text not null,
+  rate numeric(18, 10) not null,
+  provider_key text not null,
+  source_report_id text null,
+  raw_payload jsonb not null,
+  imported_by uuid null,
+  imported_at timestamp not null default now(),
+  updated_at timestamp not null default now(),
+  unique (rate_date, base_currency, quote_currency, provider_key)
+);
+
 finance_month_close (
   month text primary key,
   status text,
@@ -150,6 +165,14 @@ finance_month_close (
 -- matching finance month is locked. Month-level bank gaps are derived in SQL
 -- services from paid USD AdSense payment rows versus normalized bank receipts;
 -- transfer/FX gaps are not allocated to channels in this phase.
+-- Currency exchange rates are SQL source-of-truth provider observations for
+-- future non-USD normalization. The foundation upserts provider/date/pair rows
+-- and exposes latest-rate reads, but it does not yet apply rates to payments,
+-- bank receipts, exports, or net-revenue calculations.
+-- Monthly channel revenue facts store optional official Shorts, longform, and
+-- subscription revenue component columns when source reports provide those
+-- values. Component columns are nullable, non-negative, and their known sum
+-- cannot exceed gross_revenue_usd. Null means not provided, not zero.
 
 channel_net_revenue (
   month text,

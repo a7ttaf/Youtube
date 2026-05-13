@@ -20,14 +20,15 @@ from ums_smart_revenue.api.dependencies import (
     current_principal_from_database,
     current_principal_from_headers,
 )
+from ums_smart_revenue.api.exchange_rates import router as exchange_rates_router
 from ums_smart_revenue.api.exports import router as exports_router
 from ums_smart_revenue.api.finance_close import router as finance_close_router
 from ums_smart_revenue.api.groups import (
+    router as groups_router,
+)
+from ums_smart_revenue.api.registry_dependencies import (
     current_group_registry,
     sql_group_registry_from_session,
-)
-from ums_smart_revenue.api.groups import (
-    router as groups_router,
 )
 from ums_smart_revenue.api.reports import router as reports_router
 from ums_smart_revenue.api.revenue import (
@@ -85,6 +86,7 @@ def create_app(
     app.include_router(audit_router)
     app.include_router(channels_router)
     app.include_router(connectors_router)
+    app.include_router(exchange_rates_router)
     app.include_router(exports_router)
     app.include_router(finance_close_router)
     app.include_router(groups_router)

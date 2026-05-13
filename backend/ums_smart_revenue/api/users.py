@@ -60,7 +60,6 @@ FINANCE_PERMISSION_KEYS = frozenset(
         Permission.UNLOCK_FINANCE_MONTH,
         Permission.CHANGE_ALLOCATION_RULE,
         Permission.EXPORT_REVENUE_REPORT,
-        Permission.VIEW_GRAPH_FINANCE,
     }
 )
 CONNECTOR_PERMISSION_KEYS = frozenset(

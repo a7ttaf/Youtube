@@ -1,0 +1,1025 @@
+import { useState, useCallback } from "react";
+import {
+  AUDIT_EVENTS,
+  AUDIT_SUMMARY,
+  CHANNELS,
+  CLOSE_CHECKPOINTS,
+  CLOSE_DETAILS,
+  CLOSE_STEPS,
+  CLOSE_SUMMARY,
+  CONNECTORS_SUMMARY,
+  CONNECTOR_HEALTH,
+  CONNECTOR_JOBS,
+  CREDENTIAL_CONTROLS,
+  EXPLAIN_ROWS,
+  EXPORTS_GUARDRAILS,
+  EXPORTS_ROWS,
+  EXPORTS_SUMMARY,
+  EXPORT_META,
+  EXPORT_READINESS,
+  ISSUES,
+  KPIS,
+  NAV_GROUPS,
+  RECON_NOTES,
+  REGISTRY_CONTROLS,
+  REGISTRY_ROWS,
+  REGISTRY_SUMMARY,
+  TRACE_EVENTS,
+  TRACE_LINES_LARGE,
+  TRACE_NODES_LARGE,
+  TRACE_SUMMARY,
+  VIEW_COPY,
+  WORKFLOW_STEPS,
+} from "@/lib/mock/data";
+import type { Role, Severity, ViewKey } from "@/lib/mock/data";
+import { BrandIcon, LockIcon, NAV_ICONS, RefreshIcon } from "./icons";
+
+/* ------------------------------------------------------------------ shared */
+
+function Badge({ tone, children }: { tone: Severity; children: React.ReactNode }) {
+  return <span className={`badge ${tone}`}>{children}</span>;
+}
+
+function Dot({ tone }: { tone?: Severity }) {
+  return <span className={`dot${tone ? ` ${tone}` : ""}`} aria-hidden="true" />;
+}
+
+function ItemRow({
+  tone,
+  title,
+  sub,
+  trailing,
+  className = "issue-item",
+}: {
+  tone: Severity;
+  title: string;
+  sub: string;
+  trailing: React.ReactNode;
+  className?: string;
+}) {
+  return (
+    <div className={className} role="listitem">
+      <Dot tone={tone} />
+      <span>
+        <span className="item-title">{title}</span>
+        <span className="item-sub">{sub}</span>
+      </span>
+      {trailing}
+    </div>
+  );
+}
+
+function SummaryTile({
+  label,
+  value,
+  note,
+  finance,
+}: {
+  label: string;
+  value: string;
+  note: string;
+  finance?: boolean;
+}) {
+  return (
+    <article className="summary-tile">
+      <span>{label}</span>
+      <strong className={finance ? "finance-data" : undefined}>{value}</strong>
+      <small>{note}</small>
+    </article>
+  );
+}
+
+/* ------------------------------------------------------------------ shell */
+
+export default function AppShell() {
+  const [view, setView] = useState<ViewKey>("command");
+  const [role, setRole] = useState<Role>("finance");
+  const [selected, setSelected] = useState<string>("UMS Drama");
+  const [revenueTab, setRevenueTab] = useState<"Net" | "Gross" | "Allocated">("Net");
+  const [traceTab, setTraceTab] = useState<"Revenue Flow" | "Issues" | "Ownership">(
+    "Revenue Flow",
+  );
+
+  const masked = role !== "finance";
+  const copy = VIEW_COPY[view];
+
+  const switchView = useCallback((v: ViewKey) => setView(v), []);
+
+  return (
+    <div className={`app${masked ? " hidden-finance" : ""}`}>
+      {/* ============================================================ sidebar */}
+      <aside className="sidebar" aria-label="Primary navigation">
+        <div className="brand">
+          <div className="brand-mark">
+            <BrandIcon />
+          </div>
+          <div>
+            <strong>UMS Revenue</strong>
+            <span>Control Center</span>
+          </div>
+        </div>
+
+        {NAV_GROUPS.map((group) => (
+          <nav key={group.label} className="nav-section" aria-label={group.label}>
+            <div className="nav-title">{group.label}</div>
+            {group.items.map((item) => {
+              const active = item.key === view;
+              return (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`nav-item${active ? " is-active" : ""}`}
+                  aria-current={active ? "page" : undefined}
+                  onClick={() => switchView(item.key)}
+                >
+                  {NAV_ICONS[item.icon]}
+                  <span>{item.label}</span>
+                  <span className="nav-count">{item.count}</span>
+                </button>
+              );
+            })}
+          </nav>
+        ))}
+
+        <div className="role-card">
+          <label htmlFor="roleSelect">Current role</label>
+          <select
+            id="roleSelect"
+            value={role}
+            onChange={(e) => setRole(e.target.value as Role)}
+          >
+            <option value="finance">Finance Admin</option>
+            <option value="assistant">Assistant Analyst</option>
+            <option value="company">Company Manager</option>
+          </select>
+          <div className="role-meta" aria-label="Role permission state">
+            <span className={`role-state${masked ? " is-restricted" : ""}`}>
+              <Dot tone={masked ? "red" : "green"} />
+              <span>{masked ? "Money masked" : "Money visible"}</span>
+            </span>
+            <span className="role-state">
+              <Dot tone="amber" />
+              <span>Raw files gated</span>
+            </span>
+          </div>
+        </div>
+      </aside>
+
+      {/* ============================================================ main */}
+      <main className="main">
+        {/* top bar */}
+        <header className="topbar">
+          <div className="page-title">
+            <div className="title-row">
+              <h1>{copy.title}</h1>
+            </div>
+            <p>{copy.subtitle}</p>
+            <div className="operational-cues" aria-label="Operational status">
+              <span className="cue green">
+                Source <strong>A Official</strong>
+              </span>
+              <span className="cue amber">
+                Bank gap <strong>$31.4K</strong>
+              </span>
+              <span className="cue red">
+                Export blockers <strong>2</strong>
+              </span>
+              <span className="cue violet">
+                Trace <strong>SQL scoped</strong>
+              </span>
+            </div>
+          </div>
+          <div className="control-row" aria-label="Report filters">
+            <select className="control" aria-label="Month" defaultValue="Mar 2026">
+              <option>Mar 2026</option>
+              <option>Feb 2026</option>
+              <option>Jan 2026</option>
+            </select>
+            <select className="control" aria-label="Scope" defaultValue="UMS Holding">
+              <option>UMS Holding</option>
+              <option>TV Sector</option>
+              <option>News Sector</option>
+              <option>Company A</option>
+            </select>
+            <select className="control" aria-label="Currency" defaultValue="USD">
+              <option>USD</option>
+              <option>EGP</option>
+              <option>AED</option>
+            </select>
+            <button className="icon-button" aria-label="Refresh reports" title="Refresh reports">
+              <RefreshIcon />
+            </button>
+            <button className="primary-button">Create Export</button>
+          </div>
+        </header>
+
+        {view === "command" && (
+          <CommandView
+            selected={selected}
+            setSelected={setSelected}
+            revenueTab={revenueTab}
+            setRevenueTab={setRevenueTab}
+          />
+        )}
+        {view === "registry" && <RegistryView />}
+        {view === "close" && <CloseView />}
+        {view === "trace" && <TraceView traceTab={traceTab} setTraceTab={setTraceTab} />}
+        {view === "exports" && <ExportsView />}
+        {view === "connectors" && <ConnectorsView />}
+        {view === "audit" && <AuditView />}
+
+        {view === "command" && <WorkflowRail />}
+      </main>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ command */
+
+function CommandView({
+  selected,
+  setSelected,
+  revenueTab,
+  setRevenueTab,
+}: {
+  selected: string;
+  setSelected: (s: string) => void;
+  revenueTab: "Net" | "Gross" | "Allocated";
+  setRevenueTab: (t: "Net" | "Gross" | "Allocated") => void;
+}) {
+  const selectedChannel = CHANNELS.find((c) => c.name === selected) ?? CHANNELS[0];
+
+  return (
+    <>
+      {/* status strip */}
+      <section className="status-strip" aria-label="Revenue summary">
+        {KPIS.map((k) => (
+          <article key={k.id} className={`metric ${k.tone}`}>
+            <header>
+              <span className="metric-label">{k.label}</span>
+              <Badge tone={k.badge.tone}>{k.badge.text}</Badge>
+            </header>
+            <div className={`metric-value${k.finance ? " finance-data" : ""}`}>{k.value}</div>
+            <div className="metric-note">
+              <span>{k.note[0]}</span>
+              {k.id === "close" ? (
+                <span className="locked">
+                  <LockIcon />
+                  {k.note[1]}
+                </span>
+              ) : (
+                <span>{k.note[1]}</span>
+              )}
+            </div>
+          </article>
+        ))}
+      </section>
+
+      <section className="workspace" aria-label="Command workspace">
+        <div className="work-left">
+          {/* channel revenue table */}
+          <section className="panel channel-table" aria-labelledby="channelTableTitle">
+            <div className="panel-header">
+              <div className="panel-title">
+                <strong id="channelTableTitle">Channel Revenue Table</strong>
+                <span>Money values are source-linked and permission-gated</span>
+              </div>
+              <div className="segmented" role="tablist" aria-label="Revenue type">
+                {(["Net", "Gross", "Allocated"] as const).map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    role="tab"
+                    aria-selected={revenueTab === t}
+                    className={revenueTab === t ? "is-active" : undefined}
+                    onClick={() => setRevenueTab(t)}
+                  >
+                    {t}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div className="table-wrap">
+              <table role="grid" aria-label="Channel revenue">
+                <thead>
+                  <tr>
+                    <th scope="col">Channel</th>
+                    <th scope="col">Company</th>
+                    <th scope="col">CMS</th>
+                    <th scope="col">Gross</th>
+                    <th scope="col">Tax</th>
+                    <th scope="col">Deductions</th>
+                    <th scope="col">Net</th>
+                    <th scope="col">Confidence</th>
+                    <th scope="col">Issues</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {CHANNELS.map((c) => {
+                    const isSel = c.name === selected;
+                    return (
+                      <tr
+                        key={c.id}
+                        role="row"
+                        tabIndex={0}
+                        aria-selected={isSel}
+                        className={isSel ? "is-selected" : undefined}
+                        onClick={() => setSelected(c.name)}
+                      >
+                        <td>
+                          <span className="channel-cell">
+                            <span className="avatar">{c.avatar}</span>
+                            <span className="channel-copy">
+                              <span className="channel-name">{c.name}</span>
+                              <span className="channel-id">{c.code}</span>
+                              <button
+                                type="button"
+                                className="mini-button inline-explain"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelected(c.name);
+                                }}
+                              >
+                                Explain
+                              </button>
+                            </span>
+                          </span>
+                        </td>
+                        <td>{c.company}</td>
+                        <td>
+                          <Badge tone={c.cms.tone}>{c.cms.text}</Badge>
+                        </td>
+                        <td className="money finance-data">{c.gross}</td>
+                        <td className="money finance-data">{c.tax}</td>
+                        <td className="money finance-data">{c.deductions}</td>
+                        <td className="money finance-data">{c.net}</td>
+                        <td>
+                          <Badge tone={c.confidence.tone}>{c.confidence.text}</Badge>
+                        </td>
+                        <td>
+                          {c.issue ? (
+                            <Badge tone={c.issue.tone}>{c.issue.text}</Badge>
+                          ) : (
+                            <span className="muted">None</span>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          {/* issue + close split */}
+          <div className="layout-split">
+            <section className="panel" aria-labelledby="issuesTitle">
+              <div className="panel-header">
+                <div className="panel-title">
+                  <strong id="issuesTitle">Issue Queue</strong>
+                  <span>Alerts block export until resolved or accepted</span>
+                </div>
+                <Badge tone="red">26 open</Badge>
+              </div>
+              <div className="issue-list" role="list">
+                {ISSUES.map((i) => (
+                  <ItemRow
+                    key={i.title}
+                    tone={i.tone}
+                    title={i.title}
+                    sub={i.sub}
+                    trailing={<Badge tone={i.badge.tone}>{i.badge.text}</Badge>}
+                  />
+                ))}
+              </div>
+            </section>
+
+            <section className="panel" aria-labelledby="closeTitle">
+              <div className="panel-header">
+                <div className="panel-title">
+                  <strong id="closeTitle">Month Close Controls</strong>
+                  <span>Restricted actions are audited</span>
+                </div>
+                <Badge tone="blue">Step 6</Badge>
+              </div>
+              <div className="close-list" role="list">
+                {CLOSE_STEPS.map((s) => (
+                  <ItemRow
+                    key={s.title}
+                    tone={s.tone}
+                    title={s.title}
+                    sub={s.sub}
+                    className="close-item"
+                    trailing={
+                      s.badge ? (
+                        <Badge tone={s.badge.tone}>{s.badge.text}</Badge>
+                      ) : (
+                        <button className="mini-button" type="button">
+                          {s.action}
+                        </button>
+                      )
+                    }
+                  />
+                ))}
+              </div>
+            </section>
+          </div>
+        </div>
+
+        {/* explain + readiness */}
+        <aside className="side-stack" aria-label="Explanation and readiness">
+          <section className="panel explain-card">
+            <div className="explain-head">
+              <div>
+                <h2>{selectedChannel.name}</h2>
+                <p>Net revenue explanation, March 2026</p>
+              </div>
+              <Badge tone="blue">B Reconciled</Badge>
+            </div>
+            <div className="formula" role="text" aria-label="Revenue formula">
+              net = gross + adjustments - tax - allocated_deductions + manual_adjustments
+            </div>
+            <div className="explain-list" role="list">
+              {EXPLAIN_ROWS.map((r) => (
+                <ItemRow
+                  key={r.title}
+                  tone={r.tone}
+                  title={r.title}
+                  sub={r.sub}
+                  className="explain-row"
+                  trailing={<span className="money finance-data">{r.value}</span>}
+                />
+              ))}
+            </div>
+          </section>
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title">
+                <strong>Export Readiness</strong>
+                <span>Finance workbook, PDF, slide pack</span>
+              </div>
+              <Badge tone="amber">2 blockers</Badge>
+            </div>
+            <div className="issue-list" role="list">
+              {EXPORT_READINESS.map((r) => (
+                <ItemRow
+                  key={r.title}
+                  tone={r.tone}
+                  title={r.title}
+                  sub={r.sub}
+                  trailing={<Badge tone={r.badge.tone}>{r.badge.text}</Badge>}
+                />
+              ))}
+            </div>
+          </section>
+        </aside>
+      </section>
+    </>
+  );
+}
+
+function WorkflowRail() {
+  return (
+    <footer className="workflow" aria-label="Month close workflow">
+      <div className="workflow-label">
+        Monthly close<span>2 blockers before export</span>
+      </div>
+      <div className="steps" role="list">
+        {WORKFLOW_STEPS.map((s) => (
+          <span key={s.label} className={`step ${s.state}`} role="listitem">
+            <Dot tone={s.tone === "primary" ? undefined : (s.tone as Severity)} />
+            {s.label}
+          </span>
+        ))}
+      </div>
+      <button className="primary-button">Open Close</button>
+    </footer>
+  );
+}
+
+/* ------------------------------------------------------------------ registry */
+
+function RegistryView() {
+  return (
+    <section className="view-page" aria-labelledby="registryTitle">
+      <div className="view-summary" aria-label="Registry summary">
+        {REGISTRY_SUMMARY.map((s) => (
+          <SummaryTile key={s.label} {...s} />
+        ))}
+      </div>
+
+      <div className="view-grid wide-side">
+        <section className="panel">
+          <div className="panel-header">
+            <div className="panel-title">
+              <strong id="registryTitle">Channel Registry</strong>
+              <span>Ownership, CMS status, revenue scope, and SQL lineage identity</span>
+            </div>
+            <div className="view-actions">
+              <button className="ghost-button" type="button">Bulk Import</button>
+              <button className="primary-button" type="button">Request Mapping Change</button>
+            </div>
+          </div>
+          <div className="permission-band">
+            <Dot tone="green" />
+            <span>
+              <strong>Finance-visible mapping layer</strong>
+              <span>Company managers see only assigned companies; sector managers see assigned sectors; every mapping change writes an audit event.</span>
+            </span>
+            <Badge tone="blue">Scoped</Badge>
+          </div>
+          <div className="table-wrap">
+            <table aria-label="Channel registry">
+              <thead>
+                <tr>
+                  <th>Channel</th><th>Company</th><th>Sector</th><th>CMS</th>
+                  <th>Revenue Source</th><th>Trace Key</th><th>State</th><th>Action</th>
+                </tr>
+              </thead>
+              <tbody>
+                {REGISTRY_ROWS.map((r) => (
+                  <tr key={r.code}>
+                    <td>
+                      <span className="channel-cell">
+                        <span className="avatar">{r.avatar}</span>
+                        <span>
+                          <span className="channel-name">{r.name}</span>
+                          <span className="channel-id">{r.code}</span>
+                        </span>
+                      </span>
+                    </td>
+                    <td>{r.company}</td>
+                    <td>{r.sector}</td>
+                    <td><Badge tone={r.cms.tone}>{r.cms.text}</Badge></td>
+                    <td>{r.source}</td>
+                    <td><span className="code-chip">{r.node}</span></td>
+                    <td><Badge tone={r.state.tone}>{r.state.text}</Badge></td>
+                    <td><button className="mini-button" type="button">{r.action}</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <aside className="view-stack" aria-label="Registry side panels">
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title">
+                <strong>Mapping Change Request</strong>
+                <span>Restricted to registry admins and corporate finance approvers</span>
+              </div>
+              <Badge tone="amber">Audit required</Badge>
+            </div>
+            <div className="form-grid">
+              <div className="field-row">
+                <label htmlFor="registryChannel">Channel</label>
+                <select id="registryChannel"><option>Sports Extra</option><option>Music Stage</option></select>
+              </div>
+              <div className="field-row">
+                <label htmlFor="registryCompany">Company</label>
+                <select id="registryCompany"><option>TV Sector</option><option>Catalog Media</option></select>
+              </div>
+              <div className="field-row">
+                <label htmlFor="registryReason">Reason</label>
+                <input id="registryReason" defaultValue="March source evidence received" />
+              </div>
+              <div className="field-row">
+                <label htmlFor="registryEffective">Effective month</label>
+                <select id="registryEffective"><option>Mar 2026</option><option>Apr 2026</option></select>
+              </div>
+            </div>
+            <div className="action-row">
+              <button className="ghost-button" type="button">Save Draft</button>
+              <button className="primary-button" type="button">Submit Approval</button>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title">
+                <strong>Registry Controls</strong>
+                <span>Production behavior expected from the backend foundation</span>
+              </div>
+            </div>
+            <div className="issue-list" role="list">
+              {REGISTRY_CONTROLS.map((c) => (
+                <ItemRow key={c.title} tone={c.tone} title={c.title} sub={c.sub}
+                  trailing={<Badge tone={c.badge.tone}>{c.badge.text}</Badge>} />
+              ))}
+            </div>
+          </section>
+        </aside>
+      </div>
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------ close */
+
+function CloseView() {
+  return (
+    <section className="view-page" aria-labelledby="closeViewTitle">
+      <div className="view-summary" aria-label="Month close summary">
+        {CLOSE_SUMMARY.map((s) => <SummaryTile key={s.label} {...s} />)}
+      </div>
+
+      <div className="view-grid">
+        <section className="panel">
+          <div className="panel-header">
+            <div className="panel-title">
+              <strong id="closeViewTitle">Month Close Workbench</strong>
+              <span>Deterministic workflow from report ingestion to locked exports</span>
+            </div>
+            <Badge tone="amber">Finance Admin</Badge>
+          </div>
+          <div className="detail-grid">
+            {CLOSE_DETAILS.map((d) => (
+              <div key={d.label} className="detail-cell">
+                <span>{d.label}</span>
+                <strong>{d.value}</strong>
+              </div>
+            ))}
+          </div>
+          <div className="table-wrap">
+            <table aria-label="Month close checkpoints">
+              <thead>
+                <tr><th>Checkpoint</th><th>Owner</th><th>Evidence</th><th>Sensitive Action</th><th>State</th><th>Next</th></tr>
+              </thead>
+              <tbody>
+                {CLOSE_CHECKPOINTS.map((c) => (
+                  <tr key={c.name}>
+                    <td>{c.name}</td>
+                    <td>{c.owner}</td>
+                    <td><span className="code-chip">{c.evidence}</span></td>
+                    <td>{c.action}</td>
+                    <td><Badge tone={c.state.tone}>{c.state.text}</Badge></td>
+                    <td><button className="mini-button" type="button">{c.next}</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <aside className="view-stack">
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title">
+                <strong>Lock Controls</strong>
+                <span>Actions stay disabled until blockers are cleared</span>
+              </div>
+              <Badge tone="red">Restricted</Badge>
+            </div>
+            <div className="form-grid">
+              <div className="field-row">
+                <label htmlFor="closeMonth">Month</label>
+                <select id="closeMonth"><option>Mar 2026</option><option>Feb 2026</option></select>
+              </div>
+              <div className="field-row">
+                <label htmlFor="closeReason">Reason</label>
+                <input id="closeReason" defaultValue="Export blockers remain open" />
+              </div>
+              <div className="field-row">
+                <label htmlFor="closeApprover">Approver</label>
+                <select id="closeApprover"><option>Finance Admin required</option><option>Corporate Admin co-approval</option></select>
+              </div>
+            </div>
+            <div className="action-row">
+              <button className="danger-button" type="button">Request Unlock</button>
+              <button className="primary-button" type="button">Lock Month</button>
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title">
+                <strong>Reconciliation Equation</strong>
+                <span>Displayed as explanation, not editable revenue logic</span>
+              </div>
+            </div>
+            <div className="formula" style={{ margin: 13 }}>
+              gross_reported - official_tax - payment_fees - allocation_gap + approved_overrides = locked_net
+            </div>
+            <div className="issue-list" role="list">
+              {RECON_NOTES.map((n) => (
+                <ItemRow key={n.title} tone={n.tone} title={n.title} sub={n.sub}
+                  trailing={<Badge tone={n.badge.tone}>{n.badge.text}</Badge>} />
+              ))}
+            </div>
+          </section>
+        </aside>
+      </div>
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------ trace */
+
+function TraceView({
+  traceTab,
+  setTraceTab,
+}: {
+  traceTab: "Revenue Flow" | "Issues" | "Ownership";
+  setTraceTab: (t: "Revenue Flow" | "Issues" | "Ownership") => void;
+}) {
+  return (
+    <section className="view-page" aria-labelledby="traceViewTitle">
+      <div className="view-summary" aria-label="Trace summary">
+        {TRACE_SUMMARY.map((s) => <SummaryTile key={s.label} {...s} />)}
+      </div>
+
+      <div className="view-grid wide-side">
+        <section className="panel">
+          <div className="panel-header">
+            <div className="panel-title">
+              <strong id="traceViewTitle">Trace Explorer</strong>
+              <span>Ownership, source, issue, and payment relationships filtered by application permissions</span>
+            </div>
+            <div className="segmented" role="tablist" aria-label="Trace mode">
+              {(["Revenue Flow", "Issues", "Ownership"] as const).map((t) => (
+                <button
+                  key={t}
+                  type="button"
+                  role="tab"
+                  aria-selected={traceTab === t}
+                  className={traceTab === t ? "is-active" : undefined}
+                  onClick={() => setTraceTab(t)}
+                >
+                  {t}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div style={{ padding: 13 }}>
+            <div className="trace-canvas large" aria-label="SQL-scoped lineage mockup">
+              {TRACE_LINES_LARGE.map((l, i) => (
+                <span key={i} className="trace-line"
+                  style={{ left: l.left, top: l.top, width: l.width, transform: `rotate(${l.rotate}deg)` }} />
+              ))}
+              {TRACE_NODES_LARGE.map((n) => (
+                <span key={n.text}
+                  className={`trace-node${n.finance ? " finance" : ""}`}
+                  style={{ left: n.x, top: n.y }}>
+                  {n.text}
+                </span>
+              ))}
+              <span className="trace-note">
+                Dashboard users read SQL-backed lineage only. The app resolves scopes first,
+                then applies allowed company, channel, month, and revenue permissions before
+                trace data is returned.
+              </span>
+            </div>
+          </div>
+        </section>
+
+        <aside className="view-stack">
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title">
+                <strong>Permission Filter</strong>
+                <span>Applied before SQL trace query construction</span>
+              </div>
+              <Badge tone="violet">Scoped trace</Badge>
+            </div>
+            <div className="detail-grid">
+              {[
+                { label: "Role", value: "Finance Admin" },
+                { label: "Scope", value: "Global finance month" },
+                { label: "Companies", value: "All allowed" },
+                { label: "Raw files", value: "Hidden unless explicitly granted" },
+              ].map((d) => (
+                <div key={d.label} className="detail-cell">
+                  <span>{d.label}</span><strong>{d.value}</strong>
+                </div>
+              ))}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title">
+                <strong>Trace Selection</strong>
+                <span>Issue path selected from SQL-backed reconciliation state</span>
+              </div>
+            </div>
+            <div className="issue-list" role="list">
+              {TRACE_EVENTS.map((t) => (
+                <ItemRow key={t.title} tone={t.tone} title={t.title} sub={t.sub}
+                  trailing={<Badge tone={t.badge.tone}>{t.badge.text}</Badge>} />
+              ))}
+            </div>
+          </section>
+        </aside>
+      </div>
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------ exports */
+
+function ExportsView() {
+  return (
+    <section className="view-page" aria-labelledby="exportsTitle">
+      <div className="view-summary" aria-label="Export summary">
+        {EXPORTS_SUMMARY.map((s) => <SummaryTile key={s.label} {...s} />)}
+      </div>
+
+      <div className="view-grid">
+        <section className="panel">
+          <div className="panel-header">
+            <div className="panel-title">
+              <strong id="exportsTitle">Export Center</strong>
+              <span>Permission-controlled packages with locked month and audit requirements</span>
+            </div>
+            <button className="primary-button" type="button">Create Export Job</button>
+          </div>
+          <div className="table-wrap">
+            <table aria-label="Exports">
+              <thead>
+                <tr><th>Package</th><th>Audience</th><th>Contains Money</th><th>Requires</th><th>Status</th><th>Action</th></tr>
+              </thead>
+              <tbody>
+                {EXPORTS_ROWS.map((r) => (
+                  <tr key={r.name}>
+                    <td>{r.name}</td>
+                    <td>{r.audience}</td>
+                    <td><Badge tone={r.money.tone}>{r.money.text}</Badge></td>
+                    <td>{r.requires}</td>
+                    <td><Badge tone={r.status.tone}>{r.status.text}</Badge></td>
+                    <td><button className="mini-button" type="button">{r.action}</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <aside className="view-stack">
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title">
+                <strong>Export Guardrails</strong>
+                <span>Every package records scope, filters, checksum, and actor</span>
+              </div>
+            </div>
+            <div className="issue-list" role="list">
+              {EXPORTS_GUARDRAILS.map((g) => (
+                <ItemRow key={g.title} tone={g.tone} title={g.title} sub={g.sub}
+                  trailing={<Badge tone={g.badge.tone}>{g.badge.text}</Badge>} />
+              ))}
+            </div>
+          </section>
+
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title">
+                <strong>Export Metadata</strong>
+                <span>UI-facing fields that must come from backend jobs</span>
+              </div>
+            </div>
+            <div className="detail-grid">
+              {EXPORT_META.map((m) => (
+                <div key={m.label} className="detail-cell">
+                  <span>{m.label}</span>
+                  <strong>{m.chip ? <span className="code-chip">{m.chip}</span> : m.value}</strong>
+                </div>
+              ))}
+            </div>
+          </section>
+        </aside>
+      </div>
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------ connectors */
+
+function ConnectorsView() {
+  return (
+    <section className="view-page" aria-labelledby="connectorsTitle">
+      <div className="view-summary" aria-label="Connector summary">
+        {CONNECTORS_SUMMARY.map((s) => <SummaryTile key={s.label} {...s} />)}
+      </div>
+
+      <div className="view-grid">
+        <section className="panel">
+          <div className="panel-header">
+            <div className="panel-title">
+              <strong id="connectorsTitle">Connector Operations</strong>
+              <span>OAuth credentials, API jobs, raw files, and ingestion windows</span>
+            </div>
+            <button className="primary-button" type="button">Run Approved Job</button>
+          </div>
+          <div className="connector-health" aria-label="Connector health">
+            {CONNECTOR_HEALTH.map((h) => (
+              <div key={h.name} className="health-block">
+                <strong>{h.name}</strong>
+                <span>{h.note}</span>
+                <Badge tone={h.badge.tone}>{h.badge.text}</Badge>
+              </div>
+            ))}
+          </div>
+          <div className="table-wrap">
+            <table aria-label="Connector jobs">
+              <thead>
+                <tr><th>Job</th><th>Credential</th><th>Last Run</th><th>Raw File</th><th>Sensitive Action</th><th>State</th></tr>
+              </thead>
+              <tbody>
+                {CONNECTOR_JOBS.map((j) => (
+                  <tr key={j.job}>
+                    <td>{j.job}</td>
+                    <td><span className="code-chip">{j.credential}</span></td>
+                    <td>{j.lastRun}</td>
+                    <td><span className="code-chip">{j.rawFile}</span></td>
+                    <td>{j.action}</td>
+                    <td><Badge tone={j.state.tone}>{j.state.text}</Badge></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <aside className="view-stack">
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title">
+                <strong>Credential Controls</strong>
+                <span>No Google passwords stored; OAuth grants only</span>
+              </div>
+              <Badge tone="red">Admin only</Badge>
+            </div>
+            <div className="issue-list" role="list">
+              {CREDENTIAL_CONTROLS.map((c) => (
+                <ItemRow key={c.title} tone={c.tone} title={c.title} sub={c.sub}
+                  trailing={<Badge tone={c.badge.tone}>{c.badge.text}</Badge>} />
+              ))}
+            </div>
+          </section>
+        </aside>
+      </div>
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------ audit */
+
+function AuditView() {
+  return (
+    <section className="view-page" aria-labelledby="auditTitle">
+      <div className="view-summary" aria-label="Audit summary">
+        {AUDIT_SUMMARY.map((s) => <SummaryTile key={s.label} {...s} />)}
+      </div>
+
+      <div className="view-grid">
+        <section className="panel">
+          <div className="panel-header">
+            <div className="panel-title">
+              <strong id="auditTitle">Audit Log</strong>
+              <span>Every sensitive action records actor, permission, scope, target, and result</span>
+            </div>
+            <div className="view-actions">
+              <select className="control" aria-label="Audit severity">
+                <option>All sensitive</option><option>Denied</option><option>Exports</option>
+              </select>
+              <button className="ghost-button" type="button">Download Audit View</button>
+            </div>
+          </div>
+          <div className="timeline" role="list">
+            {AUDIT_EVENTS.map((e) => (
+              <div key={e.time + e.title} className="timeline-item" role="listitem">
+                <span className="timeline-time">{e.time}</span>
+                <Dot tone={e.tone} />
+                <span>
+                  <span className="item-title">{e.title}</span>
+                  <span className="item-sub">{e.sub}</span>
+                </span>
+                <Badge tone={e.badge.tone}>{e.badge.text}</Badge>
+              </div>
+            ))}
+          </div>
+        </section>
+
+        <aside className="view-stack">
+          <section className="panel">
+            <div className="panel-header">
+              <div className="panel-title">
+                <strong>Audit Coverage</strong>
+                <span>Required to be present for every sensitive surface</span>
+              </div>
+            </div>
+            <div className="issue-list" role="list">
+              <ItemRow tone="green" title="Revenue reads" sub="Every money cell view emits an audit row"
+                trailing={<Badge tone="green">On</Badge>} />
+              <ItemRow tone="green" title="Override before/after" sub="Both values stored with reason and approver"
+                trailing={<Badge tone="green">On</Badge>} />
+              <ItemRow tone="amber" title="Trace queries" sub="Filtered query is audited with allowed scope"
+                trailing={<Badge tone="amber">Logged</Badge>} />
+            </div>
+          </section>
+        </aside>
+      </div>
+    </section>
+  );
+}

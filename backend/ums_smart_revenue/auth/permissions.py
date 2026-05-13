@@ -1,8 +1,8 @@
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 
-class Permission(str, Enum):
+class Permission(StrEnum):
     VIEW_ANALYTICS = "analytics.view"
     VIEW_CONFIDENCE = "analytics.view_confidence"
     VIEW_REVENUE = "finance.view_revenue"
@@ -24,8 +24,6 @@ class Permission(str, Enum):
     RUN_CONNECTOR_JOBS = "connectors.run_jobs"
     MANAGE_CONNECTORS = "connectors.manage"
     VIEW_RAW_FILES = "raw_files.view"
-    VIEW_GRAPH = "graph.view"
-    VIEW_GRAPH_FINANCE = "graph.view_finance"
     VIEW_AUDIT_LOG = "audit.view"
     VIEW_SENSITIVE_AUDIT_PAYLOADS = "audit.view_sensitive_payloads"
     MANAGE_USERS = "users.manage"
@@ -165,17 +163,6 @@ PERMISSION_DEFINITIONS: dict[Permission, PermissionDefinition] = {
         sensitive=True,
         audit_on_use=True,
     ),
-    Permission.VIEW_GRAPH: PermissionDefinition(
-        Permission.VIEW_GRAPH,
-        "View graph",
-        sensitive=False,
-    ),
-    Permission.VIEW_GRAPH_FINANCE: PermissionDefinition(
-        Permission.VIEW_GRAPH_FINANCE,
-        "View finance graph",
-        sensitive=True,
-        audit_on_use=True,
-    ),
     Permission.VIEW_AUDIT_LOG: PermissionDefinition(
         Permission.VIEW_AUDIT_LOG,
         "View audit log",
@@ -217,9 +204,15 @@ SENSITIVE_PERMISSIONS = frozenset(
 
 
 if set(PERMISSION_DEFINITIONS) != set(Permission):
-    missing = sorted(permission.value for permission in set(Permission) - set(PERMISSION_DEFINITIONS))
-    extra = sorted(permission.value for permission in set(PERMISSION_DEFINITIONS) - set(Permission))
-    raise RuntimeError(f"Permission definition coverage mismatch. missing={missing} extra={extra}")
+    missing = sorted(
+        permission.value for permission in set(Permission) - set(PERMISSION_DEFINITIONS)
+    )
+    extra = sorted(
+        permission.value for permission in set(PERMISSION_DEFINITIONS) - set(Permission)
+    )
+    raise RuntimeError(
+        f"Permission definition coverage mismatch. missing={missing} extra={extra}"
+    )
 
 _mismatched_permission_definitions = sorted(
     permission.value
@@ -227,5 +220,6 @@ _mismatched_permission_definitions = sorted(
     if definition.permission != permission
 )
 if _mismatched_permission_definitions:
-    raise RuntimeError(f"Permission metadata key mismatch: {_mismatched_permission_definitions}")
-
+    raise RuntimeError(
+        f"Permission metadata key mismatch: {_mismatched_permission_definitions}"
+    )

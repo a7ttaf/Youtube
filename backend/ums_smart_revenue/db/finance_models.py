@@ -67,6 +67,9 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
     source_report_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     gross_revenue_usd: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
     net_revenue_usd: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    shorts_revenue_usd: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    longform_revenue_usd: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
+    subscription_revenue_usd: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     views: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
     watch_time_minutes: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, server_default=text("0"))
     confidence_score: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False, server_default=text("1"))
@@ -98,6 +101,24 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
         CheckConstraint(
             "net_revenue_usd IS NULL OR net_revenue_usd >= 0",
             name="ck_monthly_channel_revenue_facts_net_nonnegative",
+        ),
+        CheckConstraint(
+            "shorts_revenue_usd IS NULL OR shorts_revenue_usd >= 0",
+            name="ck_monthly_channel_revenue_facts_shorts_nonnegative",
+        ),
+        CheckConstraint(
+            "longform_revenue_usd IS NULL OR longform_revenue_usd >= 0",
+            name="ck_monthly_channel_revenue_facts_longform_nonnegative",
+        ),
+        CheckConstraint(
+            "subscription_revenue_usd IS NULL OR subscription_revenue_usd >= 0",
+            name="ck_monthly_channel_revenue_facts_subscription_nonnegative",
+        ),
+        CheckConstraint(
+            "COALESCE(shorts_revenue_usd, 0) + "
+            "COALESCE(longform_revenue_usd, 0) + "
+            "COALESCE(subscription_revenue_usd, 0) <= gross_revenue_usd",
+            name="ck_monthly_channel_revenue_facts_format_total",
         ),
         CheckConstraint("views >= 0", name="ck_monthly_channel_revenue_facts_views_nonnegative"),
         CheckConstraint(
@@ -315,4 +336,70 @@ class AdSensePaymentORM(FinanceBase):
         ),
         Index("ix_adsense_payments_month_date", "month", "payment_date"),
         Index("ix_adsense_payments_source_report", "source_report_id"),
+    )
+
+
+class CurrencyExchangeRateORM(FinanceBase):
+    __tablename__ = "currency_exchange_rates"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    rate_date: Mapped[date] = mapped_column(Date, nullable=False)
+    base_currency: Mapped[str] = mapped_column(Text, nullable=False)
+    quote_currency: Mapped[str] = mapped_column(Text, nullable=False)
+    rate: Mapped[Decimal] = mapped_column(Numeric(18, 10), nullable=False)
+    provider_key: Mapped[str] = mapped_column(Text, nullable=False)
+    source_report_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload: Mapped[dict[str, object]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+    )
+    imported_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    imported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "rate_date",
+            "base_currency",
+            "quote_currency",
+            "provider_key",
+            name="uq_currency_exchange_rate_provider_date_pair",
+        ),
+        CheckConstraint(
+            "length(base_currency) = 3 "
+            "AND base_currency = upper(base_currency) "
+            "AND substr(base_currency, 1, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(base_currency, 2, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(base_currency, 3, 1) BETWEEN 'A' AND 'Z' "
+            "AND length(quote_currency) = 3 "
+            "AND quote_currency = upper(quote_currency) "
+            "AND substr(quote_currency, 1, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(quote_currency, 2, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(quote_currency, 3, 1) BETWEEN 'A' AND 'Z' "
+            "AND base_currency <> quote_currency",
+            name="ck_currency_exchange_rates_currency_pair",
+        ),
+        CheckConstraint("rate > 0", name="ck_currency_exchange_rates_rate_positive"),
+        Index(
+            "ix_currency_exchange_rates_pair_date",
+            "base_currency",
+            "quote_currency",
+            "rate_date",
+        ),
+        Index("ix_currency_exchange_rates_provider", "provider_key"),
+        Index("ix_currency_exchange_rates_source_report", "source_report_id"),
     )

@@ -113,7 +113,7 @@ class AccessScopeORM(SecurityBase):
     __table_args__ = (
         CheckConstraint(
             "scope_type IN ('global', 'sector', 'company', 'channel', "
-            "'finance-month', 'export', 'connector', 'graph-read')",
+            "'finance-month', 'export', 'connector')",
             name="ck_access_scopes_scope_type",
         ),
         CheckConstraint(

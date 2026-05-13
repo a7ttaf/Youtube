@@ -1,7 +1,18 @@
 from datetime import datetime
 from uuid import UUID
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, Text, UniqueConstraint, Uuid, func, text
+from sqlalchemy import (
+    BigInteger,
+    Boolean,
+    CheckConstraint,
+    DateTime,
+    Index,
+    Text,
+    UniqueConstraint,
+    Uuid,
+    func,
+    text,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -12,16 +23,29 @@ class ReportBase(DeclarativeBase):
 class RawReportFileORM(ReportBase):
     __tablename__ = "raw_report_files"
 
-    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
     source: Mapped[str] = mapped_column(Text, nullable=False)
     report_type: Mapped[str] = mapped_column(Text, nullable=False)
     report_month: Mapped[str] = mapped_column(Text, nullable=False)
     file_url: Mapped[str] = mapped_column(Text, nullable=False)
     checksum: Mapped[str] = mapped_column(Text, nullable=False)
-    parse_status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'DOWNLOADED'"))
-    downloaded_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
-    downloaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    parse_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'DOWNLOADED'")
+    )
+    downloaded_by: Mapped[UUID | None] = mapped_column(
+        Uuid(as_uuid=True), nullable=True
+    )
+    downloaded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -52,25 +76,52 @@ class RawReportFileORM(ReportBase):
 class ExportJobORM(ReportBase):
     __tablename__ = "export_jobs"
 
-    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
     export_type: Mapped[str] = mapped_column(Text, nullable=False)
     scope_type: Mapped[str] = mapped_column(Text, nullable=False)
     scope_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     month: Mapped[str] = mapped_column(Text, nullable=False)
-    currency: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'USD'"))
+    currency: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'USD'")
+    )
     requested_by: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'QUEUED'"))
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'QUEUED'")
+    )
     file_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    month_lock_status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'OPEN'"))
-    include_confidence_notes: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    include_manual_override_notes: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    artifact_filename: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifact_content_type: Mapped[str | None] = mapped_column(Text, nullable=True)
+    artifact_byte_size: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    artifact_checksum_sha256: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    month_lock_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'OPEN'")
+    )
+    include_confidence_notes: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    include_manual_override_notes: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    completed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
 
     __table_args__ = (
         CheckConstraint(
-            "export_type IN ('FINANCE_EXCEL', 'EXECUTIVE_PDF', 'BRANDED_SLIDE_PACK', 'ANALYTICS_SUMMARY_CSV')",
+            "export_type IN ('FINANCE_EXCEL', 'EXECUTIVE_PDF', "
+            "'BRANDED_SLIDE_PACK', 'ANALYTICS_SUMMARY_CSV')",
             name="ck_export_jobs_export_type",
         ),
         CheckConstraint(
@@ -78,7 +129,8 @@ class ExportJobORM(ReportBase):
             name="ck_export_jobs_scope_type",
         ),
         CheckConstraint(
-            "(scope_type = 'global' AND scope_id IS NULL) OR (scope_type <> 'global' AND scope_id IS NOT NULL)",
+            "(scope_type = 'global' AND scope_id IS NULL) OR "
+            "(scope_type <> 'global' AND scope_id IS NOT NULL)",
             name="ck_export_jobs_scope",
         ),
         CheckConstraint(
@@ -91,8 +143,22 @@ class ExportJobORM(ReportBase):
             name="ck_export_jobs_month_format",
         ),
         CheckConstraint("currency = 'USD'", name="ck_export_jobs_currency_usd"),
-        CheckConstraint("status IN ('QUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED')", name="ck_export_jobs_status"),
-        CheckConstraint("month_lock_status IN ('OPEN', 'LOCKED')", name="ck_export_jobs_month_lock_status"),
+        CheckConstraint(
+            "status IN ('QUEUED', 'RUNNING', 'COMPLETED', 'FAILED', 'CANCELLED')",
+            name="ck_export_jobs_status",
+        ),
+        CheckConstraint(
+            "artifact_byte_size IS NULL OR artifact_byte_size >= 0",
+            name="ck_export_jobs_artifact_byte_size",
+        ),
+        CheckConstraint(
+            "artifact_checksum_sha256 IS NULL OR length(artifact_checksum_sha256) = 64",
+            name="ck_export_jobs_artifact_checksum_sha256",
+        ),
+        CheckConstraint(
+            "month_lock_status IN ('OPEN', 'LOCKED')",
+            name="ck_export_jobs_month_lock_status",
+        ),
         Index("ix_export_jobs_requested_by_created", "requested_by", "created_at"),
         Index("ix_export_jobs_scope_month", "scope_type", "scope_id", "month"),
     )

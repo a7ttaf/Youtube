@@ -61,6 +61,23 @@ Highest deduction percentage
 Lowest confidence numbers
 ```
 
+### 3.1 Smart Issue Panel
+
+Foundation API:
+
+```text
+GET /channels/issues
+```
+
+The channel issue panel starts with scoped registry health checks. It shows only
+channels visible to the caller and currently covers missing company, missing
+sector, revenue-required outside-CMS channels, and revenue-required channels not
+assigned to an active group. Finance reconciliation issues remain sourced from
+month-specific revenue endpoints. Month smart alerts also surface source-backed
+revenue movement anomalies from SQL monthly revenue facts so finance users can
+see channels whose current gross revenue moved materially from the prior month
+before exporting.
+
 ### 4. Outside-CMS Monitor
 
 Shows:
@@ -72,6 +89,18 @@ Revenue source status
 Missing official revenue
 Recommended action
 ```
+
+Foundation API:
+
+```text
+GET /channels/outside-cms
+```
+
+The endpoint is scoped by `analytics.view` using the same global, sector,
+company, and channel boundaries as the channel registry list. It returns no
+money amounts; it exposes operational revenue-source status so analysts and
+managers can see which outside-CMS channels need CMS linking or official manual
+revenue import.
 
 ### 5. Monthly Close
 
@@ -87,19 +116,7 @@ Allocation method
 Lock month
 ```
 
-### 6. Graph Explorer
-
-Views:
-
-```text
-UMS hierarchy graph
-Revenue flow graph
-Payment gap graph
-Outside-CMS problem graph
-Issue graph
-```
-
-### 7. Export Center
+### 6. Export Center
 
 Exports:
 

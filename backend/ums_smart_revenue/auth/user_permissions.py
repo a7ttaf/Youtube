@@ -30,7 +30,6 @@ _FINANCE_DATA_SCOPE_TYPES = _ORG_SCOPE_TYPES | frozenset(
 )
 _EXPORT_SCOPE_TYPES = _ORG_SCOPE_TYPES | frozenset({ScopeType.EXPORT.value})
 _CONNECTOR_SCOPE_TYPES = frozenset({ScopeType.GLOBAL.value, ScopeType.CONNECTOR.value})
-_GRAPH_SCOPE_TYPES = _ORG_SCOPE_TYPES | frozenset({ScopeType.GRAPH_READ.value})
 _GLOBAL_SCOPE_TYPES = frozenset({ScopeType.GLOBAL.value})
 
 PERMISSION_SCOPE_TYPES: dict[Permission, frozenset[str]] = {
@@ -57,8 +56,6 @@ PERMISSION_SCOPE_TYPES: dict[Permission, frozenset[str]] = {
     Permission.RUN_CONNECTOR_JOBS: _CONNECTOR_SCOPE_TYPES,
     Permission.MANAGE_CONNECTORS: _CONNECTOR_SCOPE_TYPES,
     Permission.VIEW_RAW_FILES: _CONNECTOR_SCOPE_TYPES,
-    Permission.VIEW_GRAPH: _GRAPH_SCOPE_TYPES,
-    Permission.VIEW_GRAPH_FINANCE: _GRAPH_SCOPE_TYPES,
     Permission.VIEW_AUDIT_LOG: _GLOBAL_SCOPE_TYPES,
     Permission.VIEW_SENSITIVE_AUDIT_PAYLOADS: _GLOBAL_SCOPE_TYPES,
     Permission.MANAGE_USERS: _GLOBAL_SCOPE_TYPES,

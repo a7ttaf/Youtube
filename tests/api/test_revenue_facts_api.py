@@ -6,10 +6,13 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
-from ums_smart_revenue.db.finance_models import FinanceBase, FinanceMonthCloseORM, MonthlyChannelRevenueFactORM
+from ums_smart_revenue.db.finance_models import (
+    FinanceBase,
+    FinanceMonthCloseORM,
+    MonthlyChannelRevenueFactORM,
+)
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
-
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000006101")
 COMPANY_ID = UUID("00000000-0000-0000-0000-000000006201")
@@ -89,6 +92,9 @@ def test_system_integration_user_imports_monthly_revenue_fact_with_audit(tmp_pat
             "source_report_id": "cms-report-2026-03",
             "gross_revenue_usd": "1234.56",
             "net_revenue_usd": "987.65",
+            "shorts_revenue_usd": "234.56",
+            "longform_revenue_usd": "900.00",
+            "subscription_revenue_usd": "50.00",
             "views": 250000,
             "watch_time_minutes": "7200.50",
             "confidence_score": "0.9825",
@@ -105,11 +111,18 @@ def test_system_integration_user_imports_monthly_revenue_fact_with_audit(tmp_pat
     assert response.json()["month"] == "2026-03"
     assert response.json()["youtube_channel_id"] == "channel-tv-a"
     assert response.json()["gross_revenue_usd"] == "1234.56"
+    assert response.json()["shorts_revenue_usd"] == "234.56"
+    assert response.json()["longform_revenue_usd"] == "900"
+    assert response.json()["subscription_revenue_usd"] == "50"
     assert response.json()["audit_event"]["event_type"] == "REPORT_IMPORTED"
     assert response.json()["audit_event"]["sensitive"] is True
     assert fact.imported_by == USER_ID
     assert fact.gross_revenue_usd == Decimal("1234.56")
+    assert fact.shorts_revenue_usd == Decimal("234.56")
+    assert fact.longform_revenue_usd == Decimal("900.00")
+    assert fact.subscription_revenue_usd == Decimal("50.00")
     assert audit_log.entity_id == "channel-tv-a:2026-03:YOUTUBE_CMS"
+    assert audit_log.details["shorts_revenue_usd"] == "234.56"
     assert audit_log.sensitive is True
 
 
@@ -171,9 +184,37 @@ def test_finance_viewer_reads_channel_month_facts_with_revenue_audit(tmp_path):
     assert response.json()["month"] == "2026-03"
     assert response.json()["youtube_channel_id"] == "channel-tv-a"
     assert response.json()["facts"][0]["net_revenue_usd"] == "987.65"
+    assert response.json()["facts"][0]["shorts_revenue_usd"] is None
     assert response.json()["audit_event"]["event_type"] == "REVENUE_VIEWED"
     assert audit_log.event_type == "REVENUE_VIEWED"
     assert audit_log.sensitive is True
+
+
+def test_import_rejects_revenue_breakdown_above_gross(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/facts",
+        headers=auth_headers("system_integration_user", "connector", "youtube-cms"),
+        json={
+            "month": "2026-03",
+            "youtube_channel_id": "channel-tv-a",
+            "source_kind": "YOUTUBE_CMS",
+            "connector_key": "youtube-cms",
+            "gross_revenue_usd": "100.00",
+            "shorts_revenue_usd": "80.00",
+            "longform_revenue_usd": "40.00",
+            "reason": "Reject inconsistent official revenue breakdown",
+        },
+    )
+
+    assert response.status_code == 422
+    assert (
+        response.json()["detail"]
+        == "revenue format breakdown total must be <= gross_revenue_usd"
+    )
 
 
 def test_company_manager_cannot_read_revenue_facts(tmp_path):

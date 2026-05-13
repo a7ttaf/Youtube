@@ -1,6 +1,6 @@
-from dataclasses import dataclass
-from datetime import datetime
 import re
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -9,12 +9,22 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM
 from ums_smart_revenue.db.report_models import ExportJobORM
 
-
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
-FINANCE_EXPORT_TYPES = frozenset({"FINANCE_EXCEL", "EXECUTIVE_PDF", "BRANDED_SLIDE_PACK"})
+FINANCE_EXPORT_TYPES = frozenset(
+    {"FINANCE_EXCEL", "EXECUTIVE_PDF", "BRANDED_SLIDE_PACK"}
+)
 ANALYTICS_EXPORT_TYPES = frozenset({"ANALYTICS_SUMMARY_CSV"})
 ALLOWED_EXPORT_TYPES = FINANCE_EXPORT_TYPES | ANALYTICS_EXPORT_TYPES
-ALLOWED_EXPORT_SCOPE_TYPES = frozenset({"global", "sector", "company", "channel", "group"})
+ALLOWED_EXPORT_SCOPE_TYPES = frozenset(
+    {"global", "sector", "company", "channel", "group"}
+)
+ALLOWED_EXPORT_ARTIFACT_URI_PREFIXES = (
+    "file-store://",
+    "s3://",
+    "gs://",
+    "azure://",
+    "blob://",
+)
 MAX_EXPORT_JOB_PAGE_SIZE = 100
 
 
@@ -34,6 +44,11 @@ class ExportJobEntry:
     include_manual_override_notes: bool
     created_at: datetime
     completed_at: datetime | None
+    artifact_filename: str | None = None
+    artifact_content_type: str | None = None
+    artifact_byte_size: int | None = None
+    artifact_checksum_sha256: str | None = None
+    failure_reason: str | None = None
 
     def to_api(self) -> dict[str, object]:
         return {
@@ -46,11 +61,18 @@ class ExportJobEntry:
             "requested_by": self.requested_by,
             "status": self.status,
             "file_url": self.file_url,
+            "artifact_filename": self.artifact_filename,
+            "artifact_content_type": self.artifact_content_type,
+            "artifact_byte_size": self.artifact_byte_size,
+            "artifact_checksum_sha256": self.artifact_checksum_sha256,
+            "failure_reason": self.failure_reason,
             "month_lock_status": self.month_lock_status,
             "include_confidence_notes": self.include_confidence_notes,
             "include_manual_override_notes": self.include_manual_override_notes,
             "created_at": self.created_at.isoformat(),
-            "completed_at": self.completed_at.isoformat() if self.completed_at else None,
+            "completed_at": self.completed_at.isoformat()
+            if self.completed_at
+            else None,
         }
 
 
@@ -91,7 +113,9 @@ class SqlAlchemyExportJobRepository:
         include_manual_override_notes: bool,
     ) -> ExportJobEntry:
         normalized_export_type = _normalize_export_type(export_type)
-        normalized_scope_type, normalized_scope_id = _normalize_scope(scope_type, scope_id)
+        normalized_scope_type, normalized_scope_id = _normalize_scope(
+            scope_type, scope_id
+        )
         _validate_month(month)
         normalized_currency = _normalize_currency(currency)
         actor_uuid = _parse_uuid(actor_user_id)
@@ -116,10 +140,56 @@ class SqlAlchemyExportJobRepository:
         return self._to_entry(row)
 
     def get_job(self, export_id: str) -> ExportJobEntry:
-        export_uuid = _parse_uuid(export_id, field_name="export_id")
-        row = self._session.get(ExportJobORM, export_uuid)
-        if row is None:
-            raise ExportJobNotFoundError("Export job not found")
+        return self._to_entry(self._get_row(export_id))
+
+    def complete_artifact(
+        self,
+        *,
+        export_id: str,
+        file_url: str,
+        filename: str,
+        content_type: str,
+        byte_size: int,
+        checksum_sha256: str,
+    ) -> ExportJobEntry:
+        row = self._get_row(export_id)
+        now = datetime.now(UTC)
+        row.status = "COMPLETED"
+        row.file_url = _normalize_artifact_uri(file_url)
+        row.artifact_filename = _normalize_required_string(
+            filename, "artifact_filename"
+        )
+        row.artifact_content_type = _normalize_required_string(
+            content_type, "artifact_content_type"
+        )
+        row.artifact_byte_size = _normalize_artifact_byte_size(byte_size)
+        row.artifact_checksum_sha256 = _normalize_sha256(checksum_sha256)
+        row.failure_reason = None
+        row.completed_at = now
+        row.updated_at = now
+        self._session.flush()
+        return self._to_entry(row)
+
+    def fail_job(
+        self,
+        *,
+        export_id: str,
+        failure_reason: str,
+    ) -> ExportJobEntry:
+        row = self._get_row(export_id)
+        now = datetime.now(UTC)
+        row.status = "FAILED"
+        row.file_url = None
+        row.artifact_filename = None
+        row.artifact_content_type = None
+        row.artifact_byte_size = None
+        row.artifact_checksum_sha256 = None
+        row.failure_reason = _normalize_required_string(
+            failure_reason, "failure_reason"
+        )
+        row.completed_at = now
+        row.updated_at = now
+        self._session.flush()
         return self._to_entry(row)
 
     def list_jobs(
@@ -130,13 +200,19 @@ class SqlAlchemyExportJobRepository:
         offset: int = 0,
     ) -> ExportJobPage:
         if limit < 1 or limit > MAX_EXPORT_JOB_PAGE_SIZE:
-            raise ExportJobValidationError(f"limit must be between 1 and {MAX_EXPORT_JOB_PAGE_SIZE}")
+            raise ExportJobValidationError(
+                f"limit must be between 1 and {MAX_EXPORT_JOB_PAGE_SIZE}"
+            )
         if offset < 0:
             raise ExportJobValidationError("offset must be greater than or equal to 0")
 
-        statement = select(ExportJobORM).order_by(ExportJobORM.created_at.desc(), ExportJobORM.id.desc())
+        statement = select(ExportJobORM).order_by(
+            ExportJobORM.created_at.desc(), ExportJobORM.id.desc()
+        )
         if requested_by is not None:
-            statement = statement.where(ExportJobORM.requested_by == _parse_uuid(requested_by))
+            statement = statement.where(
+                ExportJobORM.requested_by == _parse_uuid(requested_by)
+            )
 
         rows = self._session.scalars(statement.limit(limit + 1).offset(offset)).all()
         return ExportJobPage(
@@ -150,6 +226,13 @@ class SqlAlchemyExportJobRepository:
         row = self._session.get(FinanceMonthCloseORM, month)
         return row.status if row is not None else "OPEN"
 
+    def _get_row(self, export_id: str) -> ExportJobORM:
+        export_uuid = _parse_uuid(export_id, field_name="export_id")
+        row = self._session.get(ExportJobORM, export_uuid)
+        if row is None:
+            raise ExportJobNotFoundError("Export job not found")
+        return row
+
     @staticmethod
     def _to_entry(row: ExportJobORM) -> ExportJobEntry:
         return ExportJobEntry(
@@ -162,6 +245,11 @@ class SqlAlchemyExportJobRepository:
             requested_by=str(row.requested_by),
             status=row.status,
             file_url=row.file_url,
+            artifact_filename=row.artifact_filename,
+            artifact_content_type=row.artifact_content_type,
+            artifact_byte_size=row.artifact_byte_size,
+            artifact_checksum_sha256=row.artifact_checksum_sha256,
+            failure_reason=row.failure_reason,
             month_lock_status=row.month_lock_status,
             include_confidence_notes=row.include_confidence_notes,
             include_manual_override_notes=row.include_manual_override_notes,
@@ -188,22 +276,30 @@ def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | 
         raise ExportJobValidationError(f"Unknown export scope_type: {scope_type}")
     if normalized_scope_type == "global":
         if normalized_scope_id:
-            raise ExportJobValidationError("scope_id must be omitted for global exports")
+            raise ExportJobValidationError(
+                "scope_id must be omitted for global exports"
+            )
         return normalized_scope_type, None
     if not normalized_scope_id:
-        raise ExportJobValidationError(f"scope_id is required for export scope_type: {normalized_scope_type}")
+        raise ExportJobValidationError(
+            f"scope_id is required for export scope_type: {normalized_scope_type}"
+        )
     return normalized_scope_type, normalized_scope_id
 
 
 def _validate_month(month: str) -> None:
     if not MONTH_PATTERN.fullmatch(month):
-        raise ExportJobValidationError("month must use YYYY-MM with a calendar month from 01 to 12")
+        raise ExportJobValidationError(
+            "month must use YYYY-MM with a calendar month from 01 to 12"
+        )
 
 
 def _normalize_currency(value: str) -> str:
     normalized = _normalize_required_string(value, "currency").upper()
     if normalized != "USD":
-        raise ExportJobValidationError("currency must be USD until exchange-rate support is implemented")
+        raise ExportJobValidationError(
+            "currency must be USD until exchange-rate support is implemented"
+        )
     return normalized
 
 
@@ -211,6 +307,34 @@ def _normalize_required_string(value: str, field_name: str) -> str:
     normalized = value.strip()
     if not normalized:
         raise ExportJobValidationError(f"{field_name} must not be blank")
+    return normalized
+
+
+def _normalize_artifact_uri(value: str) -> str:
+    normalized = _normalize_required_string(value, "file_url")
+    if not normalized.startswith(ALLOWED_EXPORT_ARTIFACT_URI_PREFIXES):
+        raise ExportJobValidationError(
+            "file_url must point to approved artifact storage"
+        )
+    return normalized
+
+
+def _normalize_artifact_byte_size(value: int) -> int:
+    if value < 0:
+        raise ExportJobValidationError(
+            "artifact_byte_size must be greater than or equal to 0"
+        )
+    return value
+
+
+def _normalize_sha256(value: str) -> str:
+    normalized = _normalize_required_string(value, "artifact_checksum_sha256").lower()
+    if len(normalized) != 64 or not all(
+        char in "0123456789abcdef" for char in normalized
+    ):
+        raise ExportJobValidationError(
+            "artifact_checksum_sha256 must be a 64-character hex digest"
+        )
     return normalized
 
 

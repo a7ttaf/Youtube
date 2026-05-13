@@ -30,16 +30,27 @@
 7. Recommend CMS linking or manual official import.
 ```
 
+Current foundation support:
+
+- `GET /channels/outside-cms` lists outside-CMS channels visible to the caller's
+  `analytics.view` scope.
+- Missing official revenue is true only when revenue is required and the
+  channel does not have `OFFICIAL_CMS_REVENUE` or `OFFICIAL_MANUAL_IMPORT`.
+- The monitor recommends CMS linking or official manual import when official
+  revenue is missing; manual-import channels remain visible so operations can
+  keep the import current and continue pursuing CMS linkage.
+
 ## 3. Recalculation workflow
 
 ```text
 1. User selects month.
 2. User selects allocation method.
-3. System recalculates deductions and net revenue.
-4. System updates confidence levels.
-5. System generates explanations.
-6. User reviews differences.
-7. User accepts or reverts.
+3. System validates finance permissions and source coverage.
+4. System returns a dry-run recalculation preview with no financial writes.
+5. User reviews blockers and source coverage.
+6. Later full engine: system recalculates deductions and net revenue.
+7. Later full engine: system updates confidence levels and explanations.
+8. Later full engine: user accepts or reverts persisted results.
 ```
 
 ## 4. Export workflow
@@ -56,17 +67,7 @@
 9. User downloads report.
 ```
 
-## 5. Graph sync workflow
-
-```text
-1. Read updated SQL/warehouse rows.
-2. Build graph nodes and relationships.
-3. Upsert into Neo4j using sync writer.
-4. Run validation checks.
-5. Dashboard reads graph through read-only user/API.
-```
-
-## 6. Manual override workflow
+## 5. Manual override workflow
 
 ```text
 1. Finance/admin opens month close.

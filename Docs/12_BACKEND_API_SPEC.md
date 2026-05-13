@@ -17,7 +17,6 @@ Define initial API endpoints for the UMS Smart Revenue Control Center.
 /finance-close
 /adsense
 /exports
-/graph
 /audit
 ```
 
@@ -44,6 +43,25 @@ PATCH /channels/{channel_id}
 GET /channels/issues
 GET /channels/outside-cms
 ```
+
+`GET /channels/outside-cms` is an implemented monitor endpoint for active
+channels with `cms_status=OUTSIDE_CMS`. It requires `analytics.view` for the
+caller scope and returns only channels visible through the caller's global,
+sector, company, or channel access. The response contains an `items` array with
+channel identity, company, content owner, `revenue_required`,
+`revenue_source_status`, `missing_official_revenue`, and `recommended_action`,
+plus a `summary` with outside-CMS, revenue-required, and missing-official-revenue
+counts. It does not expose revenue amounts or finalized payment data.
+
+`GET /channels/issues` is an implemented metadata-only registry health feed for
+the smart issue panel. It requires `analytics.view` and applies the same global,
+sector, company, and channel visibility boundaries as `GET /channels`. It returns
+`items` with channel identity, `issue_type`, severity, message, and recommended
+action, plus a `summary` with total issue count, affected channel count, and
+issue-type counts. The foundation checks currently cover missing company,
+missing sector, revenue-required outside-CMS channels, and revenue-required
+channels that are not in any active group. It does not expose revenue amounts,
+payment data, or revenue-fact-backed reconciliation issues.
 
 ### Groups
 
@@ -108,9 +126,27 @@ GET /revenue/months/{month}/bank-reconciliation
 POST /revenue/months/{month}/bank-reconciliation
 GET /revenue/months/{month}/smart-alerts
 GET /revenue/months/{month}/net-revenue?scope_type=company&scope_id=123&currency=USD
+POST /revenue/facts
+GET /revenue/channels/{channel_id}/months/{month}/facts
 POST /revenue/channels/{channel_id}/months/{month}/explain?metric=adjusted_gross_revenue_usd
 POST /revenue/recalculate
 ```
+
+`POST /revenue/facts` is an implemented connector-controlled import endpoint
+for monthly channel revenue facts. It requires `connectors.run_jobs` for the
+connector scope, validates connector/source-kind compatibility, rejects locked
+finance months, and audits `REPORT_IMPORTED`. The payload accepts optional
+official `shorts_revenue_usd`, `longform_revenue_usd`, and
+`subscription_revenue_usd` values when supplied by YouTube/AdSense reports.
+Each component must be a finite non-negative USD decimal and the known component
+sum must not exceed `gross_revenue_usd`. Null component values mean the source
+did not provide that breakdown; the backend does not infer missing format
+revenue from gross revenue.
+
+`GET /revenue/channels/{channel_id}/months/{month}/facts` is an implemented
+guarded revenue read for channel/month source facts. It requires
+`finance.view_revenue` for the channel scope, audits `REVENUE_VIEWED`, and
+returns the same optional revenue-format component fields as stored in SQL.
 
 `GET /revenue/months/{month}/payment-match` is an implemented holding-level
 finance read that compares selected monthly YouTube revenue facts against paid
@@ -155,10 +191,13 @@ state. It requires global `finance.view_revenue`, global
 finance-month scope, and `finance.view_bank_reconciliation` for the requested
 finance-month scope. The response includes alert codes such as
 `MISSING_REVENUE_SOURCE`, `PAYMENT_NOT_MATCHED`, `BANK_AMOUNT_MISSING`,
-`UNEXPLAINED_GAP_HIGH`, `MONTH_NOT_LOCKED`, and `MANUAL_OVERRIDE_USED`. Reads
-are audited as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, and
-`BANK_RECONCILIATION_VIEWED`. This endpoint does not calculate net revenue,
-allocate bank gaps, or use Neo4j as a financial source of truth.
+`UNEXPLAINED_GAP_HIGH`, `REVENUE_TREND_ANOMALY`, `MONTH_NOT_LOCKED`, and
+`MANUAL_OVERRIDE_USED`. `REVENUE_TREND_ANOMALY` compares each channel's selected
+primary current-month SQL revenue fact with the selected primary previous-month
+SQL revenue fact and reports only channel ids plus current/prior gross revenue
+and percent movement. Reads are audited as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, and
+`BANK_RECONCILIATION_VIEWED`. This endpoint does not calculate net revenue or
+allocate bank gaps.
 
 `GET /revenue/months/{month}/net-revenue` is an implemented read-only net
 revenue foundation for `global`, `sector`, `company`, and `channel` scopes. It
@@ -168,7 +207,19 @@ uses the selected primary SQL revenue fact's official `net_revenue_usd` plus
 approved manual revenue overrides. Missing source net values are returned as
 `NET_REVENUE_SOURCE_MISSING` channel issues and counted at month level. The
 endpoint does not persist calculated rows, allocate bank/payment gaps, invent
-tax values, or use Neo4j as a financial source of truth.
+tax values, or depend on a graph database.
+
+`POST /revenue/recalculate` is an implemented dry-run recalculation request
+foundation for allocation-method review. The request includes `month`,
+`allocation_method`, `scope_type`, optional `scope_id`, `currency`, `dry_run`,
+and `reason`. It requires `finance.view_revenue` for the selected data scope
+and `finance.change_allocation_rule` for the requested finance month, then
+audits `RECALCULATION_REQUESTED`. In the current foundation `dry_run` must be
+`true`: the response validates the allocation method, reports scoped source
+coverage counts, reports blockers such as missing net revenue for post-tax
+methods, and returns `NO_WRITES_PERFORMED`. It intentionally does not persist
+calculated revenue rows, apply allocation deltas, invent tax data, or mutate
+month-close allocation metadata.
 
 ### Finance close
 
@@ -217,6 +268,28 @@ duplicating it. Sync is rejected for locked finance months.
 `GET /adsense/payments` requires global `finance.view_finalized_payments` and is
 audited as `PAYMENT_VIEWED`. It returns payment metadata only; it does not expose
 bank reconciliation data and does not calculate revenue.
+
+### Exchange rates
+
+```http
+POST /exchange-rates/sync
+GET /exchange-rates/latest?base_currency=EUR&quote_currency=USD&as_of_date=2026-04-22&provider_key=ecb
+```
+
+`POST /exchange-rates/sync` is an implemented FX-rate ingestion foundation for
+connector or scheduled jobs. It requires `connectors.run_jobs` on the requested
+`provider_key` connector scope, requires a non-empty reason, upserts by
+`(rate_date, base_currency, quote_currency, provider_key)`, stores the raw
+provider payload in SQL for traceability, and audits `EXCHANGE_RATE_SYNCED`.
+Responses expose normalized rate metadata but do not expose raw payload values.
+
+`GET /exchange-rates/latest` returns the latest stored rate on or before
+`as_of_date` for a currency pair, optionally restricted to one `provider_key`.
+It requires global `finance.view_revenue` because these rates can affect future
+finance normalization. This endpoint reads SQL source-of-truth FX rows only. It
+does not fetch an external provider, choose the final corporate FX policy, or
+apply rates to AdSense payment, bank reconciliation, export, or net-revenue
+calculations yet.
 
 ### Connectors
 
@@ -293,9 +366,12 @@ and SQL source summaries as the preview endpoint, then generates an on-demand
 XLSX response with media type
 `application/vnd.openxmlformats-officedocument.spreadsheetml.sheet` and an
 attachment filename. It audits `REVENUE_VIEWED`, `PAYMENT_VIEWED`,
-`BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`. The endpoint does not
-persist the generated workbook, upload it to object storage, update `file_url`,
-or mark the export job complete in this foundation phase.
+`BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`. The endpoint persists
+the generated workbook through the configured export artifact store, records a
+`file-store://exports/{export_id}/{filename}` `file_url`, filename, content type,
+byte size, SHA-256 checksum, and marks the export job `COMPLETED`. If artifact
+storage fails, the endpoint marks the job `FAILED`, records `failure_reason`,
+returns `503`, and does not emit `EXPORT_DOWNLOADED`.
 
 `GET /exports/{export_id}/executive.pdf` supports `EXECUTIVE_PDF` export jobs.
 It uses the same finance export, revenue visibility, finalized-payment, and
@@ -304,9 +380,9 @@ on-demand PDF response with media type `application/pdf` and an attachment
 filename. The report sections are sourced from SQL-backed net revenue, payment
 matching, bank reconciliation, finance month-close state, and smart-alert
 summaries. It audits `REVENUE_VIEWED`, `PAYMENT_VIEWED`,
-`BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`. The endpoint does not
-persist the generated PDF, upload it to object storage, update `file_url`, or
-mark the export job complete in this foundation phase.
+`BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`. The endpoint persists
+the generated PDF through the same artifact store and marks the export job
+`COMPLETED` with artifact metadata.
 
 `GET /exports/{export_id}/branded-slide-pack.pptx` supports
 `BRANDED_SLIDE_PACK` export jobs. It uses the same finance export, revenue
@@ -316,9 +392,9 @@ download, then generates an on-demand PPTX response with media type
 an attachment filename. The 10-slide deck is sourced from SQL-backed net
 revenue, payment matching, bank reconciliation, finance month-close state, and
 smart-alert summaries. It audits `REVENUE_VIEWED`, `PAYMENT_VIEWED`,
-`BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`. The endpoint does not
-persist the generated deck, upload it to object storage, update `file_url`, or
-mark the export job complete in this foundation phase.
+`BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`. The endpoint persists
+the generated deck through the same artifact store and marks the export job
+`COMPLETED` with artifact metadata.
 
 ### Audit
 
@@ -331,19 +407,10 @@ Audit event reads require `audit.view`. Sensitive audit `details` are masked unl
 
 `GET /audit/events` uses newest-first cursor pagination. `limit` defaults to `50` and is capped at `100`; when `pagination.has_more` is true, clients pass `pagination.next_cursor.created_at` as `cursor_created_at` and `pagination.next_cursor.id` as `cursor_id` to continue from the same `(created_at, id)` position. Older unpaginated and `page`/`page_size` examples are outdated. `AUDIT_LOG_VIEWED` records created by audit reads are stored, but this listing excludes them from the paginated result set so read-generated audit entries cannot shift the pages a client is iterating. `audit.view` and `audit.view_sensitive_payloads` only affect visibility within that filtered result set.
 
-### Graph
-
-```http
-GET /graph/hierarchy
-GET /graph/revenue-flow?month=2026-03&scope_type=company&scope_id=123
-GET /graph/issues?month=2026-03
-GET /graph/outside-cms
-```
-
 ## API rules
 
 - Backend enforces permissions.
-- UI cannot directly access Neo4j for restricted views.
+- Backend does not expose graph/Neo4j endpoints in the active roadmap.
 - Every money API must support currency parameter.
 - Every money API must return confidence and source metadata.
 - Export APIs may run async jobs or return guarded on-demand artifacts,

@@ -24,11 +24,11 @@ Every number shown in the product must have:
 
 ```text
 Operational DB / Warehouse = source of truth
-Neo4j = read-only graph projection
+SQL-backed query/read models = explanations, hierarchy, reconciliation, exports
 Dashboard = smart UI + calculations + exports
 ```
 
-Neo4j should not be the main business database. It should be used for graph exploration, relationship discovery, hierarchy visualization, and problem investigation.
+Neo4j and graph projections are removed from the active architecture. Relationship, hierarchy, ownership, and issue-tracing views must be served from SQL/warehouse-backed read models with the same application permissions as finance and analytics APIs.
 
 ## Files
 
@@ -36,8 +36,8 @@ Neo4j should not be the main business database. It should be used for graph expl
 |---|---|
 | `01_IMPLEMENTATION_PLAN.md` | Delivery phases and acceptance gates |
 | `02_TARGET_ARCHITECTURE.md` | System architecture |
-| `03_DATA_STORES_AND_NEO4J.md` | Database and Neo4j read-model design |
-| `04_NEO4J_GRAPH_MODEL.md` | Nodes, relationships, Cypher examples |
+| `03_DATA_STORES_AND_NEO4J.md` | Active data-store decision and retired Neo4j note |
+| `04_NEO4J_GRAPH_MODEL.md` | Retired graph-model note |
 | `05_CONNECTORS_YOUTUBE_ADSENSE.md` | YouTube / AdSense connector scope |
 | `06_CHANNEL_REGISTRY_GROUPS.md` | Channel registry and flexible grouping |
 | `07_REVENUE_RECONCILIATION_ENGINE.md` | Gross/final/net revenue calculation engine |

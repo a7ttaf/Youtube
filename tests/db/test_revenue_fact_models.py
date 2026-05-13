@@ -4,9 +4,11 @@ from uuid import UUID, uuid4
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.finance_models import FinanceBase, MonthlyChannelRevenueFactORM
+from ums_smart_revenue.db.finance_models import (
+    FinanceBase,
+    MonthlyChannelRevenueFactORM,
+)
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
-
 
 USER_ID = UUID("00000000-0000-0000-0000-000000007001")
 CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-000000007002")
@@ -48,6 +50,9 @@ def test_monthly_channel_revenue_fact_model_persists_canonical_values():
                 source_report_id="cms-report-2026-03",
                 gross_revenue_usd=Decimal("1234.56"),
                 net_revenue_usd=Decimal("987.65"),
+                shorts_revenue_usd=Decimal("234.56"),
+                longform_revenue_usd=Decimal("900.00"),
+                subscription_revenue_usd=Decimal("50.00"),
                 views=250000,
                 watch_time_minutes=Decimal("7200.50"),
                 confidence_score=Decimal("0.9825"),
@@ -61,6 +66,9 @@ def test_monthly_channel_revenue_fact_model_persists_canonical_values():
     assert fact.youtube_channel_id == "channel-tv-a"
     assert fact.source_kind == "YOUTUBE_CMS"
     assert fact.gross_revenue_usd == Decimal("1234.56")
+    assert fact.shorts_revenue_usd == Decimal("234.56")
+    assert fact.longform_revenue_usd == Decimal("900.00")
+    assert fact.subscription_revenue_usd == Decimal("50.00")
     assert fact.views == 250000
     assert fact.imported_by == USER_ID
 

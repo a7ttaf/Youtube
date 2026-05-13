@@ -6,7 +6,6 @@ Created the first technical foundation for the UMS Smart Revenue Control Center 
 - permission matrix with scope and audit rules;
 - backend Python authorization constants, models, seed definitions, scoped access policy helpers, guard helpers, audit event definitions, and UI-facing metadata;
 - PostgreSQL starter schema and seed SQL for users, roles, permissions, scopes, assignments, grants, connector credentials, and audit logs;
-- read-only Neo4j dashboard service stub that enforces application permissions and post-query scope filtering;
 - pytest coverage for the core positive and negative permission cases.
 
 Continuation update:
@@ -235,6 +234,14 @@ Twenty-ninth continuation update:
 - audits branded slide-pack downloads as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, `BANK_RECONCILIATION_VIEWED`, and `EXPORT_DOWNLOADED`;
 - keeps generated slide packs ephemeral in this phase: no object-storage upload, no `file_url` update, and no export-job completion mutation.
 
+Thirtieth continuation update:
+- added filesystem-backed persistent export artifact storage with object-storage-like `file-store://exports/{export_id}/{filename}` URIs;
+- added export job artifact metadata fields for filename, content type, byte size, SHA-256 checksum, and failure reason;
+- added repository transitions that mark generated workbook, executive PDF, and branded slide-pack jobs `COMPLETED` after artifact persistence;
+- added failure handling that marks a job `FAILED` when artifact storage is unavailable and does not emit `EXPORT_DOWNLOADED`;
+- kept finance export generation guarded by the existing revenue export, revenue visibility, finalized-payment, and bank-reconciliation permission checks;
+- kept SQL/PostgreSQL as source of truth and did not add Neo4j or fake revenue logic.
+
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`
 - `Docs/implementation/CODEX_PHASE_1_SUMMARY.md`
@@ -299,6 +306,8 @@ Twenty-ninth continuation update:
 - `backend/ums_smart_revenue/db/alembic/versions/20260510_0008_export_jobs.py`
 - `backend/ums_smart_revenue/db/alembic/versions/20260512_0002_adsense_payments.py`
 - `backend/ums_smart_revenue/db/alembic/versions/20260513_0001_bank_reconciliation.py`
+- `backend/ums_smart_revenue/db/alembic/versions/20260513_0002_retire_graph_permissions.py`
+- `backend/ums_smart_revenue/db/alembic/versions/20260513_0003_export_artifact_metadata.py`
 - `backend/ums_smart_revenue/config/__init__.py`
 - `backend/ums_smart_revenue/config/settings.py`
 - `backend/ums_smart_revenue/config/version_baseline.py`
@@ -319,10 +328,8 @@ Twenty-ninth continuation update:
 - `backend/ums_smart_revenue/org/channel_registry.py`
 - `backend/ums_smart_revenue/org/sql_channel_groups.py`
 - `backend/ums_smart_revenue/org/sql_channel_registry.py`
-- `backend/ums_smart_revenue/graph/__init__.py`
-- `backend/ums_smart_revenue/graph/readonly_service.py`
-- `backend/ums_smart_revenue/graph/cypher.py`
 - `backend/ums_smart_revenue/reports/__init__.py`
+- `backend/ums_smart_revenue/reports/artifact_storage.py`
 - `backend/ums_smart_revenue/reports/exports.py`
 - `backend/ums_smart_revenue/reports/raw_files.py`
 - `tests/conftest.py`
@@ -358,6 +365,7 @@ Twenty-ninth continuation update:
 - `tests/db/test_adsense_payment_models.py`
 - `tests/db/test_bank_reconciliation_migration.py`
 - `tests/db/test_bank_reconciliation_models.py`
+- `tests/db/test_export_artifact_migration.py`
 - `tests/db/test_export_job_migration.py`
 - `tests/db/test_export_job_models.py`
 - `tests/db/test_explanation_migration.py`
@@ -373,9 +381,9 @@ Twenty-ninth continuation update:
 - `tests/finance/test_bank_reconciliation.py`
 - `tests/finance/test_net_revenue.py`
 - `tests/finance/test_smart_alerts.py`
-- `tests/graph/test_readonly_service.py`
 - `tests/org/test_sql_channel_registry.py`
 - `tests/reports/test_branded_slide_pack.py`
+- `tests/reports/test_artifact_storage.py`
 - `tests/reports/test_executive_pdf.py`
 - `tests/reports/test_finance_workbook_preview.py`
 - `alembic.ini`
@@ -402,7 +410,7 @@ The foundation defines these initial roles:
 The model separates platform administration from finance visibility. Corporate Admin can manage users, registry, groups, settings, and templates but cannot view finance by default. Finance Admin controls revenue, payments, bank reconciliation, overrides, allocation rules, exports, and month locking. Assistant Analysts receive analytics only unless explicitly granted finance permission.
 
 ## Permission Matrix Summary
-Permissions are grouped around analytics, finance, finance control, exports, registry, connectors, raw files, graph reads, audit, users, roles, and platform settings. Sensitive permissions are flagged for audit-on-use.
+Permissions are grouped around analytics, finance, finance control, exports, registry, connectors, raw files, audit, users, roles, and platform settings. Sensitive permissions are flagged for audit-on-use.
 
 Scopes supported:
 - `global`
@@ -412,7 +420,6 @@ Scopes supported:
 - `finance-month`
 - `export`
 - `connector`
-- `graph-read`
 
 Organization scope inheritance is explicit:
 - global includes everything;
@@ -428,12 +435,11 @@ The backend now supports checks including:
 - `can_export_finance_report(user, scope, org_index)`
 - `can_lock_month(user, month)`
 - `can_change_allocation_rule(user, month)`
-- `can_view_neo4j_graph(user, scope, org_index, contains_finance=False)`
 - `can_manage_connectors(user)`
 - `can_assign_roles(user)`
 
-## Neo4j Security Summary
-Neo4j remains read-only for dashboard users. The backend graph service checks app permissions before graph access and filters returned rows by the requested scope. Finance graph views require both graph finance permission and underlying revenue visibility. Dashboard graph code has no write method.
+## Retired Graph Summary
+Neo4j and graph-specific permissions are retired from the active architecture. The backend no longer contains a graph service package, graph-read scope, graph permissions, or graph API helper. Relationship and hierarchy views must be SQL/warehouse-backed and use the same authorization checks as the underlying finance and analytics APIs.
 
 ## Tests Added
 Pytest coverage includes:
@@ -445,10 +451,9 @@ Pytest coverage includes:
 - Finance Viewer cannot lock month or change allocation rules.
 - Finance Admin can lock month and change allocation rules.
 - Connector Admin can manage connectors while Revenue Operations Admin cannot.
-- Finance graph reads require finance visibility.
 - Corporate Admin can assign roles without default finance visibility.
-- Neo4j revenue flow results are filtered to the authorized company.
-- Neo4j finance graph rejects Assistant Analyst without finance visibility.
+- Retired graph permissions are absent from the active role catalog.
+- The active SQLAlchemy security model no longer allows `graph-read` scopes.
 - SQL-backed channel registry methods read, create, remap, and persist channel rows.
 - SQL-loaded organization access indexes derive sector/company/channel scope maps from active database rows.
 - FastAPI can run channel endpoints against a configured database URL and commit route writes.
@@ -548,6 +553,11 @@ Pytest coverage includes:
 - Finance workbook preview returns the planned sheet manifest and source-backed executive summary from existing finance services.
 - Finance Admin can download a generated `FINANCE_EXCEL` workbook with the planned sheet names and source-backed values.
 - Finance workbook downloads are audited as sensitive export-download activity.
+- Finance Admin can download generated executive PDFs and branded slide packs with source-backed management summaries.
+- Generated workbook, PDF, and slide-pack downloads persist artifact files, `file_url`, filename, content type, byte size, SHA-256 checksum, and mark jobs `COMPLETED`.
+- Artifact storage failure marks the export job `FAILED` with `failure_reason` and emits no `EXPORT_DOWNLOADED` audit event.
+- The filesystem artifact store writes atomically under the configured root and rejects unsafe filenames.
+- The export artifact Alembic migration adds metadata and checksum/byte-size constraints.
 
 ## Commands Run
 - `git status --short --branch` failed because this workspace is not a Git repository.
@@ -762,8 +772,124 @@ Pytest coverage includes:
 - `git diff --check` passed with CRLF conversion warnings only after branded slide-pack generation.
 - `python -B -m pytest tests/reports/test_branded_slide_pack.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-branded-slide-refactor-final"` passed with 3 tests after slide-shape cleanup.
 
+## Neo4j Retirement Update
+- Retired Neo4j and graph projections from the active roadmap, target architecture, API map, role model, permission matrix, and version baseline.
+- Removed the active graph package, graph policy helper, graph permissions, graph-read scope helper, graph dependency, and graph service tests.
+- Added `20260513_0002_retire_graph_permissions.py` to delete retired graph permissions/scopes from existing databases and tighten the active `access_scopes` check constraint.
+- Updated seed SQL to clean retired graph rows when reapplied and to stop granting graph permissions to any role.
+
+## Neo4j Retirement Validation
+- `python -m ruff check ...` on the changed auth, API, config, DB, migration, and focused test files passed.
+- `python -B -m pytest tests/auth/test_policy.py tests/auth/test_user_permissions_repository.py tests/api/test_user_permissions_api.py tests/db/test_security_orm.py tests/db/test_retire_graph_migration.py tests/test_version_baseline.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-retire-graph-focused-2"` passed with 27 tests.
+- `python -B -m pytest tests/auth tests/db tests/test_version_baseline.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-retire-graph-auth-db"` passed with 58 tests.
+- `python -B -m pytest tests/api/test_user_access_read_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-retire-graph-user-access-read"` passed with 18 tests.
+- `python -B -m pytest tests/api/test_user_accounts_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-retire-graph-user-accounts"` passed with 35 tests.
+- `python -B -m pytest tests/api/test_user_roles_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-retire-graph-user-roles"` passed with 9 tests.
+- `python -B -m pytest tests/api/test_user_permissions_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-retire-graph-user-permissions"` passed with 7 tests.
+- `python -B -m pytest tests/finance tests/org tests/reports tests/test_version_baseline.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-retire-graph-domain-reports"` passed with 54 tests.
+- `python -B -m pytest tests/api/test_app.py tests/api/test_guarded_routes.py tests/api/test_database_principals.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-retire-graph-api-core"` passed with 29 tests.
+- `python -B -m alembic -c alembic.ini upgrade head --sql > "$env:TEMP\ums-retire-graph-alembic.sql"` rendered migrations through `20260513_0002`; the final `access_scopes` check constraint contains only `global`, `sector`, `company`, `channel`, `finance-month`, `export`, and `connector`.
+- The combined `tests/api/test_user_access_read_api.py tests/api/test_user_accounts_api.py tests/api/test_user_roles_api.py tests/api/test_user_permissions_api.py` command timed out locally; the same files passed when split by file.
+- `rg` verified there are no active references to `VIEW_GRAPH`, `GRAPH_FINANCE`, `can_view_neo4j`, `ums_smart_revenue.graph`, `neo4j==`, `neo4j_driver`, or `neo4j_enterprise` in `backend`, `tests`, or `pyproject.toml`.
+- `git diff --check` passed after LF normalization, with only expected Windows CRLF conversion warnings.
+
+## Export Artifact Storage Validation
+- `pytest tests/api/test_export_preview_api.py -k "persists_artifact or storage_failure"` first failed with the expected red state: successful downloads left jobs `QUEUED`, and storage failure was not detected.
+- `pytest tests/api/test_export_preview_api.py -k "persists_artifact or storage_failure"` passed with 2 tests after implementation.
+- `python -m ruff check backend/ums_smart_revenue/reports/artifact_storage.py backend/ums_smart_revenue/reports/exports.py backend/ums_smart_revenue/api/exports.py backend/ums_smart_revenue/db/report_models.py tests/reports/test_artifact_storage.py tests/api/test_export_preview_api.py tests/db/test_export_job_models.py tests/db/test_export_artifact_migration.py` passed.
+- `pytest tests/api/test_export_preview_api.py` passed with 15 tests.
+- `pytest tests/api/test_exports_api.py` passed with 9 tests.
+- `pytest tests/reports/test_artifact_storage.py tests/reports/test_finance_workbook_preview.py tests/reports/test_executive_pdf.py tests/reports/test_branded_slide_pack.py` passed with 13 tests.
+- `pytest tests/db/test_export_job_models.py tests/db/test_export_artifact_migration.py tests/db/test_export_job_migration.py` passed with 3 tests.
+- `python -B -m alembic -c alembic.ini upgrade head --sql > "$env:TEMP\ums-export-artifacts-alembic.sql"` rendered migrations through `20260513_0003`, including `artifact_filename` and `artifact_checksum_sha256`.
+- `git diff --check` passed with Windows CRLF conversion warnings only.
+
+## Outside-CMS Monitor Validation
+- Added the scoped `GET /channels/outside-cms` foundation endpoint for the dashboard monitor. It returns only analytics-visible outside-CMS channels, operational revenue-source status, missing-official-revenue flags, recommended actions, and summary counts. It does not expose revenue amounts or finalized payment data.
+- Extended `ChannelRegistryEntry` and the SQL-backed channel registry mapping to carry `content_owner_id` and `revenue_source_status` from the SQL `youtube_channels` source of truth.
+- `pytest tests/api/test_channels_api.py -k "outside_cms_monitor"` first failed with the expected red state: `/channels/outside-cms` returned `404`.
+- `pytest tests/org/test_sql_channel_registry.py -k outside_cms_revenue_metadata` first failed with the expected red state: `ChannelRegistryEntry` did not expose `content_owner_id`.
+- `python -m ruff check backend/ums_smart_revenue/api/channels.py backend/ums_smart_revenue/org/channel_registry.py backend/ums_smart_revenue/org/sql_channel_registry.py tests/api/test_channels_api.py tests/org/test_sql_channel_registry.py` passed after scoped formatting cleanup.
+- `python -B -m pytest tests/api/test_channels_api.py tests/org/test_sql_channel_registry.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-outside-cms-focused-style-final"` passed with 19 tests.
+- `python -B -m pytest tests/org -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-outside-cms-org-style-final"` passed with 10 tests.
+- `python -B -m pytest tests/api/test_channels_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-outside-cms-channel-file"` passed with 13 tests.
+- `tests/api/test_finance_close_api.py` is very slow on this Windows checkout. A full-file run timed out locally, so the channel-readiness cases were validated individually: missing required revenue facts, performance-only channels, and lock-time recheck after a channel becomes revenue-required each passed.
+- `git diff --check` passed with Windows CRLF conversion warnings only after normalizing `backend/ums_smart_revenue/org/sql_channel_registry.py`.
+
+## Channel Smart Issues Validation
+- Added `GET /channels/issues` as a scoped metadata-only registry health feed for the dashboard smart issue panel. It currently reports missing company, missing sector, revenue-required outside-CMS channels, and revenue-required channels not assigned to an active group. It does not expose revenue amounts, payment data, or month-specific reconciliation facts.
+- Added `backend/ums_smart_revenue/org/channel_issues.py` for deterministic issue classification and summary counts.
+- Moved shared group registry dependencies into `backend/ums_smart_revenue/api/registry_dependencies.py` so `/groups`, exports, and `/channels/issues` use the same in-memory or SQL-backed group store without circular API imports.
+- `python -B -m pytest tests/api/test_channels_api.py -k "channel_issues" -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-channel-issues-red"` first failed with the expected red state: `/channels/issues` returned `404`.
+- `python -B -m pytest tests/api/test_channels_api.py -k "channel_issues" -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-channel-issues-green"` passed with 2 selected tests after implementation.
+- `python -B -m pytest tests/api/test_groups_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-channel-issues-groups-smoke"` passed with 7 tests after the shared group dependency refactor.
+- `python -m ruff check backend/ums_smart_revenue/api/channels.py backend/ums_smart_revenue/api/groups.py backend/ums_smart_revenue/api/registry_dependencies.py backend/ums_smart_revenue/org/channel_issues.py tests/api/test_channels_api.py tests/api/test_groups_api.py` passed after formatting cleanup.
+- `python -B -m pytest tests/api/test_channels_api.py tests/api/test_groups_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-channel-issues-api-files-after-format"` passed with 22 tests.
+- Final validation reran the same API files split by file after a combined run timed out locally: `tests/api/test_channels_api.py` passed with 15 tests and `tests/api/test_groups_api.py` passed with 7 tests.
+- `python -B -m pytest tests/api/test_app.py tests/api/test_guarded_routes.py tests/api/test_sql_backed_channel_dependencies.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-channel-issues-core-app"` passed with 11 tests.
+- After LF normalization, `git diff --check` passed with Windows CRLF conversion warnings only, and `python -B -m pytest tests/api/test_channels_api.py tests/api/test_groups_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-channel-issues-post-lf"` passed with 22 tests.
+
+## Recalculation Dry-Run Foundation Validation
+- Added `POST /revenue/recalculate` as a guarded dry-run recalculation request foundation. It requires scoped `finance.view_revenue`, `finance.change_allocation_rule` for the finance month, and a reason; audits `RECALCULATION_REQUESTED`; returns allocation-method validation, scoped source coverage, blockers, and `NO_WRITES_PERFORMED`.
+- Added `backend/ums_smart_revenue/finance/recalculation.py` for deterministic allocation-method validation and source/blocker summaries without financial writes or invented revenue/tax/payment-gap calculations.
+- Added `tests/api/test_revenue_recalculation_api.py` covering successful audited preview, finance-viewer denial, committed-write rejection, and unknown allocation-method rejection.
+- Updated the reconciliation/API/workflow/backlog docs to state the current endpoint is a dry-run foundation, not the full persisted allocation engine.
+- `python -B -m pytest tests/api/test_revenue_recalculation_api.py -q` first failed with the expected red state: `/revenue/recalculate` returned `404`.
+- `python -B -m pytest tests/api/test_revenue_recalculation_api.py -q` passed with 4 tests after implementation.
+- `python -m ruff check backend/ums_smart_revenue/finance/recalculation.py backend/ums_smart_revenue/auth/audit.py tests/api/test_revenue_recalculation_api.py` passed.
+- `python -m ruff check --select I backend/ums_smart_revenue/api/revenue.py` passed. A full lint of `api/revenue.py` still reports existing file-wide line-length debt unrelated to this slice.
+- `python -B -m pytest tests/api/test_revenue_recalculation_api.py tests/auth/test_audit_service.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-recalculation-audit"` passed with 8 tests.
+- `python -B -m pytest tests/api/test_finance_close_api.py -k "allocation_rule" -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-recalculation-finance-close"` passed with 4 selected tests.
+- `python -B -m pytest tests/api/test_net_revenue_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-recalculation-net-revenue"` passed with 3 tests.
+- `python -B -m pytest tests/api/test_revenue_facts_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-recalculation-facts-long"` passed with 13 tests after a shorter split run timed out locally.
+- `git diff --check` passed with Windows CRLF conversion warnings only.
+
+## Currency Exchange-Rate Foundation Validation
+- Added SQL source-of-truth FX-rate storage through `currency_exchange_rates` with provider/date/pair uniqueness, positive-rate constraints, ISO currency-pair constraints, source report references, raw provider payload storage, and importer metadata.
+- Added `backend/ums_smart_revenue/finance/exchange_rates.py` for deterministic rate normalization, provider/date/pair upsert, and latest-rate lookup on or before an `as_of_date`.
+- Added `POST /exchange-rates/sync` guarded by `connectors.run_jobs` for the provider connector scope, with required reason and `EXCHANGE_RATE_SYNCED` audit logging.
+- Added `GET /exchange-rates/latest` guarded by global `finance.view_revenue`; it reads stored SQL rates only and does not expose raw provider payloads.
+- Added `20260513_0004_currency_exchange_rates.py` and tests for the migration, ORM constraints, repository behavior, and API authorization/audit behavior.
+- `python -B -m pytest tests/finance/test_exchange_rates.py tests/api/test_exchange_rates_api.py tests/db/test_currency_exchange_rate_models.py tests/db/test_currency_exchange_rate_migration.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-fx-red"` first failed with expected missing-module/model import errors.
+- `python -B -m pytest tests/finance/test_exchange_rates.py tests/api/test_exchange_rates_api.py tests/db/test_currency_exchange_rate_models.py tests/db/test_currency_exchange_rate_migration.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-fx-green-2"` passed with 9 tests.
+- `python -m ruff check --fix backend/ums_smart_revenue/finance/exchange_rates.py backend/ums_smart_revenue/api/exchange_rates.py backend/ums_smart_revenue/db/alembic/versions/20260513_0004_currency_exchange_rates.py tests/finance/test_exchange_rates.py tests/api/test_exchange_rates_api.py tests/db/test_currency_exchange_rate_models.py tests/db/test_currency_exchange_rate_migration.py` passed.
+- `python -m ruff check --select I backend/ums_smart_revenue/db/finance_models.py backend/ums_smart_revenue/app.py backend/ums_smart_revenue/auth/audit.py` passed. A full lint of `db/finance_models.py` still reports existing file-wide line-length debt before the new FX class.
+
+## Smart Alert Trend Anomaly Validation
+- Added deterministic month-over-month revenue movement detection to the SQL-backed smart-alert engine.
+- `REVENUE_TREND_ANOMALY` compares each channel's selected primary current-month revenue fact against the selected primary previous-month revenue fact, skips zero-prior channels, and reports the channel id plus current gross revenue, previous gross revenue, and percent movement when the threshold is met.
+- The smart-alert API now reads previous-month revenue facts from the SQL source of truth and includes the anomaly alert only for callers already authorized to read sensitive month smart alerts.
+- `python -B -m pytest tests/finance/test_smart_alerts.py::test_smart_alerts_detect_month_over_month_revenue_anomaly tests/api/test_smart_alerts_api.py::test_month_smart_alerts_include_month_over_month_revenue_anomaly -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-anomaly-red"` first failed with missing `current_revenue_facts` support and no API anomaly alert.
+- `python -B -m pytest tests/finance/test_smart_alerts.py::test_smart_alerts_detect_month_over_month_revenue_anomaly tests/api/test_smart_alerts_api.py::test_month_smart_alerts_include_month_over_month_revenue_anomaly -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-anomaly-green-1"` passed with 2 tests after implementation.
+- `python -B -m pytest tests/finance/test_smart_alerts.py tests/api/test_smart_alerts_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-anomaly-smart-alerts"` passed with 8 tests.
+- `python -m ruff check backend/ums_smart_revenue/finance/smart_alerts.py tests/finance/test_smart_alerts.py tests/api/test_smart_alerts_api.py` passed.
+- `python -m ruff check --select I,F backend/ums_smart_revenue/api/revenue.py` passed. A full lint of `api/revenue.py` still reports existing file-wide line-length debt unrelated to this slice.
+- The combined adjacent API regression command timed out locally, so adjacent route coverage was split by file and focused case.
+- `python -B -m pytest tests/finance/test_smart_alerts.py tests/api/test_smart_alerts_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-anomaly-smart-alerts-final-seq"` passed with 8 tests.
+- `python -B -m pytest tests/api/test_payment_match_api.py::test_finance_viewer_reads_payment_match_with_revenue_and_payment_audits -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-anomaly-payment-one"` passed with 1 test.
+- `python -B -m pytest tests/api/test_bank_reconciliation_api.py::test_finance_viewer_reads_bank_reconciliation_summary_with_audit -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-anomaly-bank-one"` passed with 1 test.
+- `python -B -m pytest tests/api/test_revenue_facts_api.py::test_finance_viewer_reads_channel_month_facts_with_revenue_audit -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-anomaly-revenue-facts-one"` passed with 1 test.
+- `git diff --check` passed with Windows CRLF conversion warnings only.
+
+## Shorts Revenue Breakdown Foundation Validation
+- Added optional official `shorts_revenue_usd`, `longform_revenue_usd`, and `subscription_revenue_usd` columns to SQL monthly channel revenue facts through `20260513_0005_revenue_format_breakdown.py`.
+- Extended revenue fact import/read models so connector imports can store official format component values and finance reads can see them through existing guarded revenue-fact APIs.
+- Added validation that revenue-format component values must be finite non-negative decimals and that the known component total cannot exceed gross revenue. Null remains "not provided" and is not inferred from gross revenue.
+- `python -B -m pytest tests/db/test_revenue_format_breakdown_migration.py tests/db/test_revenue_fact_models.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-shorts-db-red"` first failed with the expected missing migration and missing ORM fields.
+- `python -B -m pytest tests/api/test_revenue_facts_api.py::test_system_integration_user_imports_monthly_revenue_fact_with_audit tests/api/test_revenue_facts_api.py::test_import_rejects_revenue_breakdown_above_gross tests/api/test_revenue_facts_api.py::test_finance_viewer_reads_channel_month_facts_with_revenue_audit -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-shorts-api-red"` first failed with missing API fields and missing gross-bound validation.
+- `python -B -m pytest tests/db/test_revenue_format_breakdown_migration.py tests/db/test_revenue_fact_models.py tests/db/test_revenue_fact_migration.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-shorts-db-final"` passed with 4 tests.
+- `python -B -m pytest tests/api/test_revenue_facts_api.py::test_system_integration_user_imports_monthly_revenue_fact_with_audit tests/api/test_revenue_facts_api.py::test_import_rejects_revenue_breakdown_above_gross tests/api/test_revenue_facts_api.py::test_finance_viewer_reads_channel_month_facts_with_revenue_audit -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-shorts-api-final"` passed with 3 tests.
+- `python -B -m pytest tests/api/test_revenue_facts_api.py::test_system_integration_user_imports_monthly_revenue_fact_with_audit tests/api/test_revenue_facts_api.py::test_import_rejects_revenue_breakdown_above_gross tests/api/test_revenue_facts_api.py::test_finance_viewer_reads_channel_month_facts_with_revenue_audit -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-shorts-api-audit-final"` passed with 3 tests after adding the new component fields to sensitive import audit details.
+- `python -B -m pytest tests/api/test_revenue_facts_api.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-shorts-revenue-facts-api-file"` passed with 14 tests.
+- `python -B -m pytest tests/finance/test_revenue_summary.py tests/finance/test_revenue_reconciliation.py tests/finance/test_net_revenue.py tests/finance/test_smart_alerts.py tests/finance/test_payment_matching.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-shorts-finance-final"` passed with 20 tests.
+- `python -B -m pytest tests/finance/test_revenue_facts.py -q -p no:cacheprovider --basetemp "$env:TEMP\ums-pytest-shorts-revenue-facts-service"` passed with 2 tests.
+- `python -m ruff check --select I,F backend/ums_smart_revenue/finance/revenue_facts.py backend/ums_smart_revenue/db/finance_models.py backend/ums_smart_revenue/api/revenue.py tests/api/test_revenue_facts_api.py tests/db/test_revenue_fact_models.py tests/db/test_revenue_format_breakdown_migration.py backend/ums_smart_revenue/db/alembic/versions/20260513_0005_revenue_format_breakdown.py` passed.
+- `python -m ruff check backend/ums_smart_revenue/db/alembic/versions/20260513_0005_revenue_format_breakdown.py tests/db/test_revenue_format_breakdown_migration.py` passed.
+- `python -B -m alembic -c alembic.ini upgrade head --sql > "$env:TEMP\ums-shorts-breakdown-alembic.sql"` rendered migrations through `20260513_0005`, including `shorts_revenue_usd` and `ck_monthly_channel_revenue_facts_format_total`.
+- `git diff --check` passed with Windows CRLF conversion warnings only.
+
 ## Remaining Next Steps
-- Implement persistent export artifact storage and job completion transitions for generated workbooks, PDFs, and slide packs.
+- Replace the local filesystem export artifact store with the chosen production object-storage adapter while preserving the current `file_url` and checksum metadata contract.
 - Expand SQL audit persistence to each new sensitive endpoint as those routes are added.
 - Add broader integration tests around real API routes as modules are built.
 - Add a concrete secret-manager adapter after UMS chooses the provider; the current foundation stores external encrypted secret references only.

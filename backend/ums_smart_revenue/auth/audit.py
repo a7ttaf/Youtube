@@ -18,6 +18,7 @@ class AuditEventType(StrEnum):
     MANUAL_OVERRIDE_CREATED = "MANUAL_OVERRIDE_CREATED"
     MANUAL_OVERRIDE_APPROVED = "MANUAL_OVERRIDE_APPROVED"
     ALLOCATION_RULE_CHANGED = "ALLOCATION_RULE_CHANGED"
+    RECALCULATION_REQUESTED = "RECALCULATION_REQUESTED"
     EXPORT_CREATED = "EXPORT_CREATED"
     EXPORT_DOWNLOADED = "EXPORT_DOWNLOADED"
     USER_ACCOUNT_CHANGED = "USER_ACCOUNT_CHANGED"
@@ -25,12 +26,12 @@ class AuditEventType(StrEnum):
     USER_PERMISSION_CHANGED = "USER_PERMISSION_CHANGED"
     CONNECTOR_JOB_RUN = "CONNECTOR_JOB_RUN"
     CONNECTOR_SETTINGS_CHANGED = "CONNECTOR_SETTINGS_CHANGED"
+    EXCHANGE_RATE_SYNCED = "EXCHANGE_RATE_SYNCED"
     RAW_FILE_VIEWED = "RAW_FILE_VIEWED"
     REVENUE_VIEWED = "REVENUE_VIEWED"
     PAYMENT_VIEWED = "PAYMENT_VIEWED"
     BANK_RECONCILIATION_RECORDED = "BANK_RECONCILIATION_RECORDED"
     BANK_RECONCILIATION_VIEWED = "BANK_RECONCILIATION_VIEWED"
-    GRAPH_FINANCE_VIEWED = "GRAPH_FINANCE_VIEWED"
     AUDIT_LOG_VIEWED = "AUDIT_LOG_VIEWED"
 
 
@@ -79,6 +80,11 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
         reason_required=True,
         permission=Permission.CHANGE_ALLOCATION_RULE,
     ),
+    AuditEventType.RECALCULATION_REQUESTED: AuditEventDefinition(
+        AuditEventType.RECALCULATION_REQUESTED,
+        reason_required=True,
+        permission=Permission.CHANGE_ALLOCATION_RULE,
+    ),
     AuditEventType.EXPORT_CREATED: AuditEventDefinition(
         AuditEventType.EXPORT_CREATED,
         permission=Permission.EXPORT_REVENUE_REPORT,
@@ -119,6 +125,11 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
         reason_required=True,
         permission=Permission.MANAGE_CONNECTORS,
     ),
+    AuditEventType.EXCHANGE_RATE_SYNCED: AuditEventDefinition(
+        AuditEventType.EXCHANGE_RATE_SYNCED,
+        reason_required=True,
+        permission=Permission.RUN_CONNECTOR_JOBS,
+    ),
     AuditEventType.RAW_FILE_VIEWED: AuditEventDefinition(
         AuditEventType.RAW_FILE_VIEWED,
         permission=Permission.VIEW_RAW_FILES,
@@ -139,10 +150,6 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     AuditEventType.BANK_RECONCILIATION_VIEWED: AuditEventDefinition(
         AuditEventType.BANK_RECONCILIATION_VIEWED,
         permission=Permission.VIEW_BANK_RECONCILIATION,
-    ),
-    AuditEventType.GRAPH_FINANCE_VIEWED: AuditEventDefinition(
-        AuditEventType.GRAPH_FINANCE_VIEWED,
-        permission=Permission.VIEW_GRAPH_FINANCE,
     ),
     AuditEventType.AUDIT_LOG_VIEWED: AuditEventDefinition(
         AuditEventType.AUDIT_LOG_VIEWED,

@@ -1,3 +1,4 @@
+import hashlib
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from io import BytesIO
@@ -280,8 +281,7 @@ def test_group_scoped_finance_workbook_records_channel_revenue_audit(tmp_path):
 
     assert response.status_code == 200
     assert ("REVENUE_VIEWED", "channel", "channel-tv-a") in {
-        (event.event_type, event.scope_type, event.scope_id)
-        for event in audit_scopes
+        (event.event_type, event.scope_type, event.scope_id) for event in audit_scopes
     }
 
 
@@ -397,6 +397,84 @@ def test_finance_admin_downloads_generated_finance_workbook_with_audit(tmp_path)
     assert all(event.sensitive for event in audit_events)
 
 
+def test_finance_workbook_download_persists_artifact_and_completes_job(
+    tmp_path,
+    monkeypatch,
+):
+    artifact_dir = tmp_path / "export-artifacts"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        f"/exports/{EXPORT_ID}/finance-workbook.xlsx",
+        headers=auth_headers("finance_admin"),
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, EXPORT_ID)
+
+    expected_filename = "ums-finance-2026-03-global.xlsx"
+    expected_uri = f"file-store://exports/{EXPORT_ID}/{expected_filename}"
+    persisted_file = artifact_dir / "exports" / str(EXPORT_ID) / expected_filename
+    assert response.status_code == 200
+    assert export_job is not None
+    assert export_job.status == "COMPLETED"
+    assert export_job.completed_at is not None
+    assert export_job.file_url == expected_uri
+    assert export_job.artifact_filename == expected_filename
+    assert export_job.artifact_content_type == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
+    assert export_job.artifact_byte_size == len(response.content)
+    assert (
+        export_job.artifact_checksum_sha256
+        == hashlib.sha256(response.content).hexdigest()
+    )
+    assert export_job.failure_reason is None
+    assert persisted_file.read_bytes() == response.content
+
+
+def test_finance_workbook_storage_failure_marks_export_failed_without_download_audit(
+    tmp_path,
+    monkeypatch,
+):
+    artifact_root_file = tmp_path / "not-a-directory"
+    artifact_root_file.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_root_file))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(
+        create_app(database_url=database_url),
+        raise_server_exceptions=False,
+    )
+
+    response = client.get(
+        f"/exports/{EXPORT_ID}/finance-workbook.xlsx",
+        headers=auth_headers("finance_admin"),
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, EXPORT_ID)
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Export artifact storage unavailable"
+    assert export_job is not None
+    assert export_job.status == "FAILED"
+    assert export_job.completed_at is not None
+    assert export_job.file_url is None
+    assert export_job.artifact_filename is None
+    assert export_job.artifact_content_type is None
+    assert export_job.artifact_byte_size is None
+    assert export_job.artifact_checksum_sha256 is None
+    assert export_job.failure_reason == "artifact storage unavailable"
+    assert audit_events == []
+
+
 def test_export_operator_cannot_download_finance_workbook(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -416,7 +494,12 @@ def test_export_operator_cannot_download_finance_workbook(tmp_path):
     assert audit_events == []
 
 
-def test_finance_admin_downloads_generated_executive_pdf_with_audit(tmp_path):
+def test_finance_admin_downloads_generated_executive_pdf_with_audit(
+    tmp_path,
+    monkeypatch,
+):
+    artifact_dir = tmp_path / "export-artifacts"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
     database_url = build_database_url(tmp_path)
     seed_database(database_url, export_type="EXECUTIVE_PDF")
     client = TestClient(create_app(database_url=database_url))
@@ -434,9 +517,7 @@ def test_finance_admin_downloads_generated_executive_pdf_with_audit(tmp_path):
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/pdf"
-    assert "ums-executive-2026-03-global.pdf" in response.headers[
-        "content-disposition"
-    ]
+    assert "ums-executive-2026-03-global.pdf" in response.headers["content-disposition"]
     assert response.content.startswith(b"%PDF-")
     text = _extract_pdf_text(response.content)
     assert "UMS Executive Finance Report" in text
@@ -452,6 +533,13 @@ def test_finance_admin_downloads_generated_executive_pdf_with_audit(tmp_path):
         "REVENUE_VIEWED",
     }
     assert all(event.sensitive for event in audit_events)
+    _assert_persisted_export_artifact(
+        database_url=database_url,
+        artifact_dir=artifact_dir,
+        filename="ums-executive-2026-03-global.pdf",
+        content_type="application/pdf",
+        content=response.content,
+    )
 
 
 def test_export_operator_cannot_download_executive_pdf(tmp_path):
@@ -473,7 +561,12 @@ def test_export_operator_cannot_download_executive_pdf(tmp_path):
     assert audit_events == []
 
 
-def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(tmp_path):
+def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(
+    tmp_path,
+    monkeypatch,
+):
+    artifact_dir = tmp_path / "export-artifacts"
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
     database_url = build_database_url(tmp_path)
     seed_database(database_url, export_type="BRANDED_SLIDE_PACK")
     client = TestClient(create_app(database_url=database_url))
@@ -493,9 +586,7 @@ def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(tmp_pat
     assert response.headers["content-type"] == (
         "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     )
-    assert "ums-branded-2026-03-global.pptx" in response.headers[
-        "content-disposition"
-    ]
+    assert "ums-branded-2026-03-global.pptx" in response.headers["content-disposition"]
     presentation = Presentation(BytesIO(response.content))
     slide_text = "\n".join(_slide_texts(presentation))
     assert len(presentation.slides) == 10
@@ -511,6 +602,15 @@ def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(tmp_pat
         "REVENUE_VIEWED",
     }
     assert all(event.sensitive for event in audit_events)
+    _assert_persisted_export_artifact(
+        database_url=database_url,
+        artifact_dir=artifact_dir,
+        filename="ums-branded-2026-03-global.pptx",
+        content_type=(
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+        ),
+        content=response.content,
+    )
 
 
 def test_export_operator_cannot_download_branded_slide_pack(tmp_path):
@@ -542,3 +642,29 @@ def _slide_texts(presentation: Presentation) -> list[str]:
         "\n".join(shape.text for shape in slide.shapes if hasattr(shape, "text"))
         for slide in presentation.slides
     ]
+
+
+def _assert_persisted_export_artifact(
+    *,
+    database_url: str,
+    artifact_dir,
+    filename: str,
+    content_type: str,
+    content: bytes,
+) -> None:
+    expected_uri = f"file-store://exports/{EXPORT_ID}/{filename}"
+    persisted_file = artifact_dir / "exports" / str(EXPORT_ID) / filename
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, EXPORT_ID)
+
+    assert export_job is not None
+    assert export_job.status == "COMPLETED"
+    assert export_job.completed_at is not None
+    assert export_job.file_url == expected_uri
+    assert export_job.artifact_filename == filename
+    assert export_job.artifact_content_type == content_type
+    assert export_job.artifact_byte_size == len(content)
+    assert export_job.artifact_checksum_sha256 == hashlib.sha256(content).hexdigest()
+    assert export_job.failure_reason is None
+    assert persisted_file.read_bytes() == content

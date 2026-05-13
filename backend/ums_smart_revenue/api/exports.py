@@ -2,6 +2,7 @@ from dataclasses import dataclass
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
@@ -53,6 +54,10 @@ from ums_smart_revenue.finance.smart_alerts import (
     build_monthly_smart_alert_summary,
 )
 from ums_smart_revenue.org.channel_groups import ChannelGroupRegistryStore
+from ums_smart_revenue.reports.artifact_storage import (
+    ExportArtifactStorageError,
+    FileSystemExportArtifactStore,
+)
 from ums_smart_revenue.reports.branded_slide_pack import (
     BrandedSlidePackValidationError,
     build_branded_slide_pack_pptx,
@@ -65,6 +70,7 @@ from ums_smart_revenue.reports.executive_pdf import (
 )
 from ums_smart_revenue.reports.exports import (
     MAX_EXPORT_JOB_PAGE_SIZE,
+    ExportJobEntry,
     ExportJobNotFoundError,
     ExportJobValidationError,
     SqlAlchemyExportJobRepository,
@@ -125,6 +131,10 @@ def current_export_job_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyExportJobRepository:
     return SqlAlchemyExportJobRepository(session)
+
+
+def current_export_artifact_store() -> FileSystemExportArtifactStore:
+    return FileSystemExportArtifactStore.from_environment()
 
 
 @router.post("", status_code=status.HTTP_202_ACCEPTED)
@@ -348,6 +358,9 @@ def download_finance_workbook(
     repository: Annotated[
         SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
     ],
+    artifact_store: Annotated[
+        FileSystemExportArtifactStore, Depends(current_export_artifact_store)
+    ],
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> Response:
@@ -396,6 +409,20 @@ def download_finance_workbook(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
 
+    filename = f"ums-finance-{export_job.month}-{export_job.scope_type}.xlsx"
+    content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    export_job, storage_failure_response = _persist_generated_export_artifact(
+        repository=repository,
+        artifact_store=artifact_store,
+        export_job=export_job,
+        content=workbook_bytes,
+        filename=filename,
+        content_type=content_type,
+    )
+    if storage_failure_response is not None:
+        return storage_failure_response
+    assert export_job is not None
+
     _record_finance_export_artifact_audit(
         audit_sink=audit_sink,
         user=user,
@@ -404,12 +431,9 @@ def download_finance_workbook(
         artifact_type="finance_workbook_xlsx",
         include_download_event=True,
     )
-    filename = f"ums-finance-{export_job.month}-{export_job.scope_type}.xlsx"
     return Response(
         content=workbook_bytes,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-        ),
+        media_type=content_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
@@ -424,6 +448,9 @@ def download_executive_pdf(
     ],
     repository: Annotated[
         SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
+    ],
+    artifact_store: Annotated[
+        FileSystemExportArtifactStore, Depends(current_export_artifact_store)
     ],
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
@@ -480,6 +507,20 @@ def download_executive_pdf(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
 
+    filename = f"ums-executive-{export_job.month}-{export_job.scope_type}.pdf"
+    content_type = "application/pdf"
+    export_job, storage_failure_response = _persist_generated_export_artifact(
+        repository=repository,
+        artifact_store=artifact_store,
+        export_job=export_job,
+        content=pdf_bytes,
+        filename=filename,
+        content_type=content_type,
+    )
+    if storage_failure_response is not None:
+        return storage_failure_response
+    assert export_job is not None
+
     _record_finance_export_artifact_audit(
         audit_sink=audit_sink,
         user=user,
@@ -488,10 +529,9 @@ def download_executive_pdf(
         artifact_type="executive_pdf",
         include_download_event=True,
     )
-    filename = f"ums-executive-{export_job.month}-{export_job.scope_type}.pdf"
     return Response(
         content=pdf_bytes,
-        media_type="application/pdf",
+        media_type=content_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
@@ -506,6 +546,9 @@ def download_branded_slide_pack(
     ],
     repository: Annotated[
         SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
+    ],
+    artifact_store: Annotated[
+        FileSystemExportArtifactStore, Depends(current_export_artifact_store)
     ],
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
@@ -562,6 +605,22 @@ def download_branded_slide_pack(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
 
+    filename = f"ums-branded-{export_job.month}-{export_job.scope_type}.pptx"
+    content_type = (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    )
+    export_job, storage_failure_response = _persist_generated_export_artifact(
+        repository=repository,
+        artifact_store=artifact_store,
+        export_job=export_job,
+        content=pptx_bytes,
+        filename=filename,
+        content_type=content_type,
+    )
+    if storage_failure_response is not None:
+        return storage_failure_response
+    assert export_job is not None
+
     _record_finance_export_artifact_audit(
         audit_sink=audit_sink,
         user=user,
@@ -570,12 +629,9 @@ def download_branded_slide_pack(
         artifact_type="branded_slide_pack_pptx",
         include_download_event=True,
     )
-    filename = f"ums-branded-{export_job.month}-{export_job.scope_type}.pptx"
     return Response(
         content=pptx_bytes,
-        media_type=(
-            "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        ),
+        media_type=content_type,
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
 
@@ -600,6 +656,42 @@ def _build_finance_workbook_preview_for_export(
         bank_reconciliation=source_summaries.bank_reconciliation,
         smart_alerts=source_summaries.smart_alerts,
     )
+
+
+def _persist_generated_export_artifact(
+    *,
+    repository: SqlAlchemyExportJobRepository,
+    artifact_store: FileSystemExportArtifactStore,
+    export_job: ExportJobEntry,
+    content: bytes,
+    filename: str,
+    content_type: str,
+) -> tuple[ExportJobEntry | None, JSONResponse | None]:
+    try:
+        artifact = artifact_store.save(
+            export_id=export_job.id,
+            filename=filename,
+            content_type=content_type,
+            content=content,
+        )
+    except ExportArtifactStorageError:
+        repository.fail_job(
+            export_id=export_job.id,
+            failure_reason="artifact storage unavailable",
+        )
+        return None, JSONResponse(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            content={"detail": "Export artifact storage unavailable"},
+        )
+    completed_job = repository.complete_artifact(
+        export_id=export_job.id,
+        file_url=artifact.file_url,
+        filename=artifact.filename,
+        content_type=artifact.content_type,
+        byte_size=artifact.byte_size,
+        checksum_sha256=artifact.checksum_sha256,
+    )
+    return completed_job, None
 
 
 def _build_finance_source_summaries_for_export(
@@ -688,6 +780,16 @@ def _record_finance_export_artifact_audit(
         "scope_type": export_job.scope_type,
         "scope_id": export_job.scope_id,
     }
+    if export_job.file_url:
+        details.update(
+            {
+                "file_url": export_job.file_url,
+                "artifact_filename": export_job.artifact_filename,
+                "artifact_content_type": export_job.artifact_content_type,
+                "artifact_byte_size": export_job.artifact_byte_size,
+                "artifact_checksum_sha256": export_job.artifact_checksum_sha256,
+            }
+        )
     audit_records = [
         record_audit_event(
             sink=audit_sink,

@@ -160,6 +160,50 @@ def test_finance_viewer_reads_month_smart_alerts_with_sensitive_audits(tmp_path)
     assert all(log.sensitive is True for log in audit_logs)
 
 
+def test_month_smart_alerts_include_month_over_month_revenue_anomaly(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            MonthlyChannelRevenueFactORM(
+                id=uuid4(),
+                month="2026-02",
+                youtube_channel_id="channel-tv-a",
+                source_kind="YOUTUBE_CMS",
+                source_report_id="cms-report-2026-02",
+                gross_revenue_usd=Decimal("2000.00"),
+                net_revenue_usd=Decimal("1800.00"),
+                views=300000,
+                watch_time_minutes=Decimal("9200.50"),
+                confidence_score=Decimal("0.9825"),
+                imported_by=USER_ID,
+            )
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/smart-alerts",
+        headers=auth_headers("finance_viewer", "global"),
+    )
+
+    assert response.status_code == 200
+    anomaly = [
+        alert
+        for alert in response.json()["alerts"]
+        if alert["code"] == "REVENUE_TREND_ANOMALY"
+    ][0]
+    assert anomaly["details"]["channels"] == [
+        {
+            "youtube_channel_id": "channel-tv-a",
+            "current_gross_revenue_usd": "1000",
+            "previous_gross_revenue_usd": "2000",
+            "change_percent": "-50",
+        }
+    ]
+
+
 def test_assistant_cannot_read_month_smart_alerts(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

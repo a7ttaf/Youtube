@@ -1,8 +1,8 @@
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class RoleKey(str, Enum):
+class RoleKey(StrEnum):
     SUPER_OWNER = "super_owner"
     CORPORATE_ADMIN = "corporate_admin"
     REVENUE_OPERATIONS_ADMIN = "revenue_operations_admin"
@@ -74,19 +74,19 @@ ROLE_DEFINITIONS: dict[RoleKey, RoleDefinition] = {
     RoleKey.TV_SECTOR_MANAGER: RoleDefinition(
         RoleKey.TV_SECTOR_MANAGER,
         "TV Sector Manager",
-        "Sector-scoped management role for TV analytics and graph views.",
+        "Sector-scoped management role for TV analytics and report operations.",
         allowed_scope_types=_GLOBAL_OR_SECTOR,
     ),
     RoleKey.NEWS_SECTOR_MANAGER: RoleDefinition(
         RoleKey.NEWS_SECTOR_MANAGER,
         "News Sector Manager",
-        "Sector-scoped management role for News analytics and graph views.",
+        "Sector-scoped management role for News analytics and report operations.",
         allowed_scope_types=_GLOBAL_OR_SECTOR,
     ),
     RoleKey.COMPANY_MANAGER: RoleDefinition(
         RoleKey.COMPANY_MANAGER,
         "Company Manager",
-        "Company-scoped manager for analytics and non-finance graph views.",
+        "Company-scoped manager for assigned company analytics.",
         allowed_scope_types=frozenset({"global", "sector", "company"}),
     ),
     RoleKey.CHANNEL_MANAGER: RoleDefinition(
@@ -138,4 +138,3 @@ _missing_definitions = set(RoleKey) - set(ROLE_DEFINITIONS)
 if _missing_definitions:
     missing = ", ".join(sorted(role.value for role in _missing_definitions))
     raise RuntimeError(f"Missing role definitions for: {missing}")
-

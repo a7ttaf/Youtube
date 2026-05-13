@@ -3,7 +3,7 @@
 ## Purpose
 Generate management-ready Excel, PDF, and branded slide reports.
 
-Current backend behavior: the foundation records queued export-job metadata, produces a read-only finance workbook preview for `FINANCE_EXCEL` export jobs, can generate an on-demand `.xlsx` workbook download from that preview, can generate an on-demand executive `.pdf` for `EXECUTIVE_PDF` export jobs, and can generate an on-demand `.pptx` branded slide pack for `BRANDED_SLIDE_PACK` export jobs. The workbook, PDF, and slide pack use SQL-backed finance summaries only. It does not generate CSV files yet, does not persist generated artifacts, and does not mark export jobs complete.
+Current backend behavior: the foundation records queued export-job metadata, produces a read-only finance workbook preview for `FINANCE_EXCEL` export jobs, can generate and persist a `.xlsx` workbook download from that preview, can generate and persist an executive `.pdf` for `EXECUTIVE_PDF` export jobs, and can generate and persist a `.pptx` branded slide pack for `BRANDED_SLIDE_PACK` export jobs. The workbook, PDF, and slide pack use SQL-backed finance summaries only. It does not generate CSV files yet and does not upload to external object storage yet; generated artifacts are persisted through the configured export artifact store and recorded on the export job as `file_url` metadata.
 
 ## Planned export outputs
 
@@ -84,11 +84,12 @@ pdf_header_footer
 - Queued export metadata records manual-override-note inclusion.
 - Finance workbook previews require revenue export permission, revenue visibility for the export scope, and finance-month scoped finalized-payment and bank-reconciliation visibility.
 - Finance workbook previews are audited as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, and `BANK_RECONCILIATION_VIEWED`.
-- Finance workbook downloads add an `EXPORT_DOWNLOADED` audit event and return an XLSX file without storing it in `file_url`.
+- Finance workbook downloads persist the XLSX artifact, update `file_url` and artifact metadata, mark the job `COMPLETED`, add an `EXPORT_DOWNLOADED` audit event, and return the file.
 - Executive PDF downloads require the same revenue, finalized-payment, and bank-reconciliation permissions as finance workbook downloads.
-- Executive PDF downloads add an `EXPORT_DOWNLOADED` audit event and return a PDF file without storing it in `file_url`.
+- Executive PDF downloads persist the PDF artifact, update `file_url` and artifact metadata, mark the job `COMPLETED`, add an `EXPORT_DOWNLOADED` audit event, and return the file.
 - Branded slide pack downloads require the same revenue, finalized-payment, and bank-reconciliation permissions as finance workbook downloads.
-- Branded slide pack downloads add an `EXPORT_DOWNLOADED` audit event and return a PPTX file without storing it in `file_url`.
+- Branded slide pack downloads persist the PPTX artifact, update `file_url` and artifact metadata, mark the job `COMPLETED`, add an `EXPORT_DOWNLOADED` audit event, and return the file.
+- Artifact storage failures mark the export job `FAILED` with a failure reason and do not emit `EXPORT_DOWNLOADED`.
 
 ## Export job fields
 
@@ -102,6 +103,11 @@ currency
 requested_by
 status
 file_url
+artifact_filename
+artifact_content_type
+artifact_byte_size
+artifact_checksum_sha256
+failure_reason
 month_lock_status
 include_confidence_notes
 include_manual_override_notes
@@ -113,13 +119,15 @@ updated_at
 Implementation note:
 The backend foundation supports finance export requests for `FINANCE_EXCEL`, `EXECUTIVE_PDF`, and `BRANDED_SLIDE_PACK`, plus non-financial `ANALYTICS_SUMMARY_CSV` requests for export operators. Finance exports require both revenue export permission and revenue visibility for the requested scope. Group exports are checked against every member channel. Currency is currently restricted to USD until an exchange-rate source is implemented.
 
-`GET /exports/{export_id}/finance-workbook-preview` is implemented for `FINANCE_EXCEL` only. It builds workbook-ready data from SQL source-of-truth rows: monthly revenue facts, approved/pending manual overrides, AdSense payment metadata, bank reconciliation receipt rows, finance month-close state, net-revenue summary, payment match summary, bank confirmation summary, and smart alerts. Month-wide AdSense payment and bank receipt rows are included only for global exports because phase 1 does not attribute cash receipts to sector, company, group, or channel scopes. It does not use Neo4j as a financial source of truth.
+`GET /exports/{export_id}/finance-workbook-preview` is implemented for `FINANCE_EXCEL` only. It builds workbook-ready data from SQL source-of-truth rows: monthly revenue facts, approved/pending manual overrides, AdSense payment metadata, bank reconciliation receipt rows, finance month-close state, net-revenue summary, payment match summary, bank confirmation summary, and smart alerts. Month-wide AdSense payment and bank receipt rows are included only for global exports because phase 1 does not attribute cash receipts to sector, company, group, or channel scopes. It does not depend on a graph database.
 
-`GET /exports/{export_id}/finance-workbook.xlsx` is implemented as an on-demand XLSX generator using pinned stable `openpyxl`. It writes the planned sheets from the same preview data and does not persist or upload the generated file in this phase.
+`GET /exports/{export_id}/finance-workbook.xlsx` is implemented as an on-demand XLSX generator using pinned stable `openpyxl`. It writes the planned sheets from the same preview data, persists the generated artifact through the export artifact store, records `file_url`, filename, content type, byte size, and SHA-256 checksum on the export job, and marks the job `COMPLETED`.
 
-`GET /exports/{export_id}/executive.pdf` is implemented as an on-demand executive PDF generator using pinned stable `ReportLab`. It writes the planned PDF sections from the same SQL-backed source summaries used by the finance workbook path. The PDF is guarded by the same finance export and sensitive finance read checks and does not persist or upload the generated file in this phase.
+`GET /exports/{export_id}/executive.pdf` is implemented as an on-demand executive PDF generator using pinned stable `ReportLab`. It writes the planned PDF sections from the same SQL-backed source summaries used by the finance workbook path. The PDF is guarded by the same finance export and sensitive finance read checks, persists artifact metadata, and marks the job `COMPLETED`.
 
-`GET /exports/{export_id}/branded-slide-pack.pptx` is implemented as an on-demand branded slide generator using pinned stable `python-pptx`. It writes the planned 10-slide management deck from the same SQL-backed source summaries used by the finance workbook and PDF paths. The slide pack is guarded by the same finance export and sensitive finance read checks and does not persist or upload the generated file in this phase.
+`GET /exports/{export_id}/branded-slide-pack.pptx` is implemented as an on-demand branded slide generator using pinned stable `python-pptx`. It writes the planned 10-slide management deck from the same SQL-backed source summaries used by the finance workbook and PDF paths. The slide pack is guarded by the same finance export and sensitive finance read checks, persists artifact metadata, and marks the job `COMPLETED`.
+
+The default artifact store writes to a local filesystem path and exposes object-storage-like `file-store://exports/{export_id}/{filename}` URIs. Set `UMS_EXPORT_ARTIFACT_DIR` to control the storage root in local and deployment environments; a future object-storage adapter can keep the same job metadata contract.
 
 ## Acceptance checks
 
@@ -129,4 +137,6 @@ The backend foundation supports finance export requests for `FINANCE_EXCEL`, `EX
 - Finance workbook downloads produce a valid XLSX file with the planned sheet names.
 - Executive PDF downloads produce a valid PDF with the planned management-summary sections.
 - Branded slide downloads produce a valid PPTX file with the planned 10-slide management deck.
+- Generated XLSX, PDF, and PPTX downloads persist artifact metadata, mark export jobs complete, and record SHA-256 checksums.
+- Artifact storage failure marks the export job failed without recording a download audit.
 - Export log records who created each report.
