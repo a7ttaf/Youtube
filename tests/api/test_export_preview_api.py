@@ -397,6 +397,25 @@ def test_finance_admin_downloads_generated_finance_workbook_with_audit(tmp_path)
     assert all(event.sensitive for event in audit_events)
 
 
+def test_export_operator_cannot_download_finance_workbook(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        f"/exports/{EXPORT_ID}/finance-workbook.xlsx",
+        headers=auth_headers("export_operator"),
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: exports.revenue"
+    assert audit_events == []
+
+
 def test_finance_admin_downloads_generated_executive_pdf_with_audit(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url, export_type="EXECUTIVE_PDF")
