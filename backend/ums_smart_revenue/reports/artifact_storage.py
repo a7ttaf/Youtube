@@ -14,6 +14,7 @@ DEFAULT_EXPORT_ARTIFACT_DIR = (
     Path(tempfile.gettempdir()) / "ums-smart-revenue-export-artifacts"
 )
 EXPORT_ARTIFACT_URI_PREFIX = "file-store://"
+DEFAULT_MAX_ARTIFACT_SIZE_BYTES = 500 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -32,8 +33,16 @@ class ExportArtifactStorageError(RuntimeError):
 class FileSystemExportArtifactStore:
     """Store generated artifacts on disk behind an object-storage-like URI."""
 
-    def __init__(self, root_dir: Path | str | None = None):
+    def __init__(
+        self,
+        root_dir: Path | str | None = None,
+        *,
+        max_artifact_size_bytes: int = DEFAULT_MAX_ARTIFACT_SIZE_BYTES,
+    ):
         self._root_dir = Path(root_dir) if root_dir is not None else _default_root_dir()
+        if max_artifact_size_bytes < 1:
+            raise ExportArtifactStorageError("max_artifact_size_bytes must be positive")
+        self._max_artifact_size_bytes = max_artifact_size_bytes
 
     @classmethod
     def from_environment(cls) -> FileSystemExportArtifactStore:
@@ -55,6 +64,11 @@ class FileSystemExportArtifactStore:
         normalized_content_type = _normalize_content_type(content_type)
         if not content:
             raise ExportArtifactStorageError("artifact content must not be empty")
+        if len(content) > self._max_artifact_size_bytes:
+            raise ExportArtifactStorageError(
+                "artifact size exceeds limit: "
+                f"{len(content)} > {self._max_artifact_size_bytes}"
+            )
 
         relative_path = Path("exports") / normalized_export_id / normalized_filename
         target_path = self._root_dir / relative_path

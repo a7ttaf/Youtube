@@ -34,6 +34,7 @@ class CurrencyExchangeRateEntry:
     provider_key: str
     source_report_id: str | None
     imported_by: str | None
+    raw_payload: dict[str, object] | None = None
 
     @property
     def audit_entity_id(self) -> str:
@@ -54,11 +55,6 @@ class CurrencyExchangeRateEntry:
             "imported_by": self.imported_by,
             "raw_payload": self.raw_payload if include_raw_payload else None,
         }
-
-    @property
-    def raw_payload(self) -> None:
-        return None
-
 
 class ExchangeRateError(ValueError):
     pass
@@ -94,10 +90,26 @@ class SqlAlchemyExchangeRateRepository:
         )
         normalized_source_report_id = _normalize_optional_string(source_report_id)
         actor_uuid = _parse_uuid(actor_user_id)
+        normalized_rates = [_normalize_rate_input(rate_input) for rate_input in rates]
+        seen_rate_keys: set[tuple[date, str, str, str]] = set()
+        for normalized in normalized_rates:
+            rate_key = (
+                normalized.rate_date,
+                normalized.base_currency,
+                normalized.quote_currency,
+                normalized_provider,
+            )
+            if rate_key in seen_rate_keys:
+                raise ExchangeRateValidationError(
+                    "duplicate exchange rate in batch for "
+                    f"{normalized.rate_date.isoformat()} "
+                    f"{normalized.base_currency}/{normalized.quote_currency} "
+                    f"from {normalized_provider}"
+                )
+            seen_rate_keys.add(rate_key)
 
         entries: list[CurrencyExchangeRateEntry] = []
-        for rate_input in rates:
-            normalized = _normalize_rate_input(rate_input)
+        for normalized in normalized_rates:
             now = datetime.now(UTC)
             insert_statement = _dialect_insert(
                 self._session.get_bind().dialect.name
@@ -160,6 +172,8 @@ class SqlAlchemyExchangeRateRepository:
             )
             .order_by(
                 CurrencyExchangeRateORM.rate_date.desc(),
+                CurrencyExchangeRateORM.updated_at.desc(),
+                CurrencyExchangeRateORM.imported_at.desc(),
                 CurrencyExchangeRateORM.provider_key,
             )
             .limit(1)
@@ -182,6 +196,7 @@ class SqlAlchemyExchangeRateRepository:
             provider_key=row.provider_key,
             source_report_id=row.source_report_id,
             imported_by=str(row.imported_by) if row.imported_by else None,
+            raw_payload=dict(row.raw_payload or {}),
         )
 
 

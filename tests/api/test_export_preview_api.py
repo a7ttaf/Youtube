@@ -475,6 +475,59 @@ def test_finance_workbook_storage_failure_marks_export_failed_without_download_a
     assert audit_events == []
 
 
+def test_finance_workbook_storage_failure_preserves_completed_export(
+    tmp_path,
+    monkeypatch,
+):
+    artifact_root_file = tmp_path / "not-a-directory"
+    artifact_root_file.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_root_file))
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    completed_at = datetime(2026, 4, 30, 10, 0)
+    existing_filename = "ums-finance-2026-03-global.xlsx"
+    existing_uri = f"file-store://exports/{EXPORT_ID}/{existing_filename}"
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, EXPORT_ID)
+        assert export_job is not None
+        export_job.status = "COMPLETED"
+        export_job.completed_at = completed_at
+        export_job.file_url = existing_uri
+        export_job.artifact_filename = existing_filename
+        export_job.artifact_content_type = (
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+        export_job.artifact_byte_size = 42
+        export_job.artifact_checksum_sha256 = "a" * 64
+        session.commit()
+    client = TestClient(
+        create_app(database_url=database_url),
+        raise_server_exceptions=False,
+    )
+
+    response = client.get(
+        f"/exports/{EXPORT_ID}/finance-workbook.xlsx",
+        headers=auth_headers("finance_admin"),
+    )
+
+    with Session(engine) as session:
+        export_job = session.get(ExportJobORM, EXPORT_ID)
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Export artifact storage unavailable"
+    assert export_job is not None
+    assert export_job.status == "COMPLETED"
+    assert export_job.completed_at == completed_at
+    assert export_job.file_url == existing_uri
+    assert export_job.artifact_filename == existing_filename
+    assert export_job.artifact_byte_size == 42
+    assert export_job.artifact_checksum_sha256 == "a" * 64
+    assert export_job.failure_reason is None
+    assert audit_events == []
+
+
 def test_export_operator_cannot_download_finance_workbook(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

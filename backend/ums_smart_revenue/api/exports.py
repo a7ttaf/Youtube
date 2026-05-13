@@ -11,7 +11,7 @@ from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_principal_from_headers,
 )
-from ums_smart_revenue.api.groups import current_group_registry
+from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
 from ums_smart_revenue.api.revenue import current_org_access_index
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
@@ -143,7 +143,7 @@ def request_export(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     group_registry: Annotated[
-        ChannelGroupRegistryStore, Depends(current_group_registry)
+        ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)
     ],
     repository: Annotated[
         SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
@@ -234,7 +234,7 @@ def get_export(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     group_registry: Annotated[
-        ChannelGroupRegistryStore, Depends(current_group_registry)
+        ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)
     ],
     repository: Annotated[
         SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
@@ -282,7 +282,7 @@ def preview_finance_workbook(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     group_registry: Annotated[
-        ChannelGroupRegistryStore, Depends(current_group_registry)
+        ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)
     ],
     repository: Annotated[
         SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
@@ -353,7 +353,7 @@ def download_finance_workbook(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     group_registry: Annotated[
-        ChannelGroupRegistryStore, Depends(current_group_registry)
+        ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)
     ],
     repository: Annotated[
         SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
@@ -444,7 +444,7 @@ def download_executive_pdf(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     group_registry: Annotated[
-        ChannelGroupRegistryStore, Depends(current_group_registry)
+        ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)
     ],
     repository: Annotated[
         SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
@@ -542,7 +542,7 @@ def download_branded_slide_pack(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     group_registry: Annotated[
-        ChannelGroupRegistryStore, Depends(current_group_registry)
+        ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)
     ],
     repository: Annotated[
         SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
@@ -675,10 +675,11 @@ def _persist_generated_export_artifact(
             content=content,
         )
     except ExportArtifactStorageError:
-        repository.fail_job(
-            export_id=export_job.id,
-            failure_reason="artifact storage unavailable",
-        )
+        if not _has_completed_artifact(export_job):
+            repository.fail_job(
+                export_id=export_job.id,
+                failure_reason="artifact storage unavailable",
+            )
         return None, JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"detail": "Export artifact storage unavailable"},
@@ -692,6 +693,10 @@ def _persist_generated_export_artifact(
         checksum_sha256=artifact.checksum_sha256,
     )
     return completed_job, None
+
+
+def _has_completed_artifact(export_job: ExportJobEntry) -> bool:
+    return export_job.status == "COMPLETED" and export_job.file_url is not None
 
 
 def _build_finance_source_summaries_for_export(

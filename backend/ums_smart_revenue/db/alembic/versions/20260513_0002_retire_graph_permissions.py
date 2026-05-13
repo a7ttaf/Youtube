@@ -5,7 +5,7 @@ Revises: 20260513_0001
 Create Date: 2026-05-13
 """
 
-from alembic import op
+from alembic import op, util
 
 revision = "20260513_0002"
 down_revision = "20260513_0001"
@@ -56,23 +56,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    op.drop_constraint(
-        "ck_access_scopes_scope_type",
-        "access_scopes",
-        type_="check",
-    )
-    op.create_check_constraint(
-        "ck_access_scopes_scope_type",
-        "access_scopes",
-        "scope_type IN ('global', 'sector', 'company', 'channel', "
-        "'finance-month', 'export', 'connector', 'graph-read')",
-    )
-    op.execute(
-        """
-        INSERT INTO permissions (key, label, sensitive, audit_on_use)
-        VALUES
-            ('graph.view', 'View graph', false, false),
-            ('graph.view_finance', 'View finance graph', true, true)
-        ON CONFLICT (key) DO NOTHING
-        """
+    raise util.CommandError(
+        "Irreversible migration: upgrade() deletes graph-read scopes and grants; "
+        "restore from backup if rollback is required."
     )

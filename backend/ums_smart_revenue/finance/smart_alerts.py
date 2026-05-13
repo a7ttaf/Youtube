@@ -241,7 +241,7 @@ def _revenue_trend_anomaly_details(
         change_ratio = (
             current.gross_revenue_usd - previous.gross_revenue_usd
         ) / previous.gross_revenue_usd
-        if abs(change_ratio) < threshold_percent:
+        if abs(change_ratio) <= threshold_percent:
             continue
         channels.append(
             {

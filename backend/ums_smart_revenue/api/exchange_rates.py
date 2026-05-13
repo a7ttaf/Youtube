@@ -138,6 +138,7 @@ def get_latest_exchange_rate(
         SqlAlchemyExchangeRateRepository,
         Depends(current_exchange_rate_repository),
     ],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
     base_currency: Annotated[str, Query(min_length=1)],
     quote_currency: Annotated[str, Query(min_length=1)],
     as_of_date: date,
@@ -161,7 +162,24 @@ def get_latest_exchange_rate(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Exchange rate not found",
         )
-    return entry.to_api()
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="currency_exchange_rate",
+        entity_id=entry.id,
+        scope=AccessScope.global_scope(),
+        reason="Read latest currency exchange rate",
+        details={
+            "base_currency": entry.base_currency,
+            "quote_currency": entry.quote_currency,
+            "provider_key": entry.provider_key,
+            "as_of_date": as_of_date.isoformat(),
+        },
+    )
+    response = entry.to_api()
+    response["audit_event"] = audit_record_to_api(record)
+    return response
 
 
 def _require_permission(

@@ -38,3 +38,20 @@ def test_file_system_export_artifact_store_rejects_unsafe_filename(tmp_path):
             content_type="application/octet-stream",
             content=b"export-bytes",
         )
+
+
+def test_file_system_export_artifact_store_rejects_content_over_configured_limit(
+    tmp_path,
+):
+    store = FileSystemExportArtifactStore(tmp_path, max_artifact_size_bytes=4)
+    export_id = str(uuid4())
+
+    with pytest.raises(ExportArtifactStorageError, match="artifact size exceeds limit"):
+        store.save(
+            export_id=export_id,
+            filename="finance.xlsx",
+            content_type="application/octet-stream",
+            content=b"12345",
+        )
+
+    assert not (tmp_path / "exports").exists()

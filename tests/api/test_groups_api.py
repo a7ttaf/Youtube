@@ -144,6 +144,18 @@ def test_company_manager_lists_only_groups_fully_inside_scope(tmp_path):
     assert response.json()[0]["channel_ids"] == ["group-channel-tv"]
 
 
+def test_groups_endpoint_fails_closed_without_sql_registry():
+    client = TestClient(create_app())
+
+    response = client.get(
+        "/groups",
+        headers=auth_headers("corporate_admin", "global"),
+    )
+
+    assert response.status_code == 503
+    assert response.json()["detail"] == "database session not configured"
+
+
 def test_data_steward_can_create_group_inside_scope_and_audit(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

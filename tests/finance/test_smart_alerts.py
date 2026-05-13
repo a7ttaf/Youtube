@@ -194,7 +194,7 @@ def test_smart_alerts_detect_month_over_month_revenue_anomaly():
         close_status="LOCKED",
         manual_overrides=[],
         current_revenue_facts=[
-            revenue_fact(month="2026-03", amount="1000.00"),
+            revenue_fact(month="2026-03", amount="900.00"),
         ],
         previous_revenue_facts=[
             revenue_fact(month="2026-02", amount="2000.00"),
@@ -209,11 +209,44 @@ def test_smart_alerts_detect_month_over_month_revenue_anomaly():
         "channels": [
             {
                 "youtube_channel_id": "channel-tv-a",
-                "current_gross_revenue_usd": "1000",
+                "current_gross_revenue_usd": "900",
                 "previous_gross_revenue_usd": "2000",
-                "change_percent": "-50",
+                "change_percent": "-55",
             }
         ],
+    }
+
+
+def test_smart_alerts_ignore_revenue_change_equal_to_threshold():
+    summary = build_alerts(
+        payment_match=payment_summary(
+            status="PAYMENT_MATCHED",
+            payment_gap_usd=Decimal("0.0000"),
+            issues=[],
+        ),
+        bank_reconciliation=bank_summary(
+            status="BANK_CONFIRMED",
+            bank_received_amount_usd=Decimal("900.0000"),
+            bank_gap_usd=Decimal("0.0000"),
+            entry_count=1,
+            issues=[],
+        ),
+        close_status="LOCKED",
+        manual_overrides=[],
+        current_revenue_facts=[
+            revenue_fact(month="2026-03", amount="1000.00"),
+        ],
+        previous_revenue_facts=[
+            revenue_fact(month="2026-02", amount="2000.00"),
+        ],
+    )
+
+    assert summary.to_api() == {
+        "month": "2026-03",
+        "status": "CLEAR",
+        "highest_severity": None,
+        "alert_count": 0,
+        "alerts": [],
     }
 
 

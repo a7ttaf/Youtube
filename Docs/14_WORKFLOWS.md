@@ -48,9 +48,9 @@ Current foundation support:
 3. System validates finance permissions and source coverage.
 4. System returns a dry-run recalculation preview with no financial writes.
 5. User reviews blockers and source coverage.
-6. Later full engine: system recalculates deductions and net revenue.
-7. Later full engine: system updates confidence levels and explanations.
-8. Later full engine: user accepts or reverts persisted results.
+6. Planned / not yet implemented: system recalculates deductions and net revenue after an explicit confirm action is added.
+7. Planned / not yet implemented: system updates confidence levels and explanations after recalculation persistence is available.
+8. Planned / not yet implemented: user accepts or reverts persisted results after the confirmation endpoint exists.
 ```
 
 ## 4. Export workflow

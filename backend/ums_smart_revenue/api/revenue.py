@@ -1,3 +1,4 @@
+import re
 from datetime import date
 from decimal import Decimal
 from typing import Annotated
@@ -80,6 +81,7 @@ from ums_smart_revenue.finance.smart_alerts import (
 from ums_smart_revenue.org.access_index import load_org_access_index_from_session
 
 router = APIRouter(prefix="/revenue", tags=["revenue"])
+MONTH_VALUE_PATTERN = re.compile(r"^\d{4}-\d{2}$")
 _AUDIT_SINK = InMemoryAuditSink()
 _REVENUE_SOURCE_KINDS_BY_CONNECTOR_KEY = {
     "youtube-cms": {RevenueFactSourceKind.YOUTUBE_CMS.value},
@@ -1175,6 +1177,10 @@ def _intersect_channel_sets(left: set[str] | None, right: set[str] | None) -> se
 
 
 def _previous_month(month: str) -> str:
+    if not MONTH_VALUE_PATTERN.fullmatch(month):
+        raise RevenueFactValidationError(
+            "month must use YYYY-MM with a calendar month from 01 to 12"
+        )
     try:
         year_value, month_value = month.split("-", maxsplit=1)
         year = int(year_value)

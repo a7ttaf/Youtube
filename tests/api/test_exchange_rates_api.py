@@ -129,10 +129,18 @@ def test_finance_viewer_reads_latest_exchange_rate(tmp_path):
         headers=auth_headers("finance_viewer", "global"),
     )
 
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+
     assert response.status_code == 200
     assert response.json()["rate_date"] == "2026-04-20"
     assert response.json()["rate"] == "1.08"
     assert response.json()["raw_payload"] is None
+    assert audit_log.event_type == "REVENUE_VIEWED"
+    assert audit_log.entity_type == "currency_exchange_rate"
+    assert audit_log.entity_id == response.json()["id"]
+    assert audit_log.scope_type == "global"
+    assert audit_log.sensitive is True
 
 
 def test_finance_viewer_cannot_sync_exchange_rates(tmp_path):

@@ -1,12 +1,12 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.finance_models import FinanceBase
+from ums_smart_revenue.db.finance_models import CurrencyExchangeRateORM, FinanceBase
 from ums_smart_revenue.finance.exchange_rates import (
     CurrencyExchangeRateInput,
     ExchangeRateValidationError,
@@ -57,6 +57,36 @@ def test_exchange_rate_repository_upserts_provider_rate():
     assert second[0].base_currency == "EUR"
     assert second[0].quote_currency == "USD"
     assert second[0].source_report_id == "ecb-2026-04-22-corrected"
+    assert second[0].to_api(include_raw_payload=True)["raw_payload"] == {"version": 2}
+
+
+def test_exchange_rate_repository_rejects_duplicate_rate_keys_in_batch():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    FinanceBase.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        repository = SqlAlchemyExchangeRateRepository(session)
+
+        with pytest.raises(ExchangeRateValidationError, match="duplicate exchange rate"):
+            repository.sync_rates(
+                rates=[
+                    CurrencyExchangeRateInput(
+                        rate_date=date(2026, 4, 22),
+                        base_currency="EUR",
+                        quote_currency="USD",
+                        rate=Decimal("1.0845"),
+                    ),
+                    CurrencyExchangeRateInput(
+                        rate_date=date(2026, 4, 22),
+                        base_currency="eur",
+                        quote_currency="usd",
+                        rate=Decimal("1.0850"),
+                    ),
+                ],
+                provider_key="ecb",
+                actor_user_id=str(USER_ID),
+                source_report_id="ecb-duplicate",
+            )
 
 
 def test_exchange_rate_repository_returns_latest_rate_on_or_before_date():
@@ -94,6 +124,62 @@ def test_exchange_rate_repository_returns_latest_rate_on_or_before_date():
     assert latest is not None
     assert latest.rate_date == date(2026, 4, 20)
     assert latest.rate == Decimal("1.0800000000")
+
+
+def test_exchange_rate_repository_prefers_most_recent_provider_when_latest_date_ties():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    FinanceBase.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        repository = SqlAlchemyExchangeRateRepository(session)
+        repository.sync_rates(
+            rates=[
+                CurrencyExchangeRateInput(
+                    rate_date=date(2026, 4, 22),
+                    base_currency="EUR",
+                    quote_currency="USD",
+                    rate=Decimal("1.0800"),
+                )
+            ],
+            provider_key="aa-old-provider",
+            actor_user_id=str(USER_ID),
+            source_report_id=None,
+        )
+        repository.sync_rates(
+            rates=[
+                CurrencyExchangeRateInput(
+                    rate_date=date(2026, 4, 22),
+                    base_currency="EUR",
+                    quote_currency="USD",
+                    rate=Decimal("1.0900"),
+                )
+            ],
+            provider_key="zz-new-provider",
+            actor_user_id=str(USER_ID),
+            source_report_id=None,
+        )
+        older = session.scalars(
+            select(CurrencyExchangeRateORM).where(
+                CurrencyExchangeRateORM.provider_key == "aa-old-provider"
+            )
+        ).one()
+        newer = session.scalars(
+            select(CurrencyExchangeRateORM).where(
+                CurrencyExchangeRateORM.provider_key == "zz-new-provider"
+            )
+        ).one()
+        older.updated_at = datetime(2026, 4, 22, 8, 0, tzinfo=UTC)
+        newer.updated_at = datetime(2026, 4, 22, 9, 0, tzinfo=UTC)
+        session.flush()
+        latest = repository.get_latest_rate(
+            base_currency="EUR",
+            quote_currency="USD",
+            as_of_date=date(2026, 4, 22),
+        )
+
+    assert latest is not None
+    assert latest.provider_key == "zz-new-provider"
+    assert latest.rate == Decimal("1.0900000000")
 
 
 def test_exchange_rate_repository_rejects_invalid_rate():

@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
 from ums_smart_revenue.api.channels import current_channel_registry
-from ums_smart_revenue.api.groups import current_group_registry
+from ums_smart_revenue.api.registry_dependencies import current_group_registry
 from ums_smart_revenue.api.revenue import current_org_access_index
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.org.bootstrap_registry import (

@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.api.registry_dependencies import (
-    current_group_registry,
+    sql_group_registry_from_session,
 )
 from ums_smart_revenue.api.revenue import current_org_access_index
 from ums_smart_revenue.auth.audit import AuditEventType
@@ -57,7 +57,7 @@ class GroupMembersRequest(BaseModel):
 @router.get("")
 def list_groups(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    registry: Annotated[ChannelGroupRegistryStore, Depends(current_group_registry)],
+    registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> list[dict[str, object]]:
     return [
@@ -71,7 +71,7 @@ def list_groups(
 def create_group(
     payload: GroupCreateRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    registry: Annotated[ChannelGroupRegistryStore, Depends(current_group_registry)],
+    registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
@@ -103,7 +103,7 @@ def update_group(
     group_id: str,
     payload: GroupUpdateRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    registry: Annotated[ChannelGroupRegistryStore, Depends(current_group_registry)],
+    registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
@@ -135,7 +135,7 @@ def add_group_members(
     group_id: str,
     payload: GroupMembersRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    registry: Annotated[ChannelGroupRegistryStore, Depends(current_group_registry)],
+    registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
@@ -165,7 +165,7 @@ def remove_group_member(
     channel_id: str,
     reason: Annotated[str, Query(min_length=1)],
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    registry: Annotated[ChannelGroupRegistryStore, Depends(current_group_registry)],
+    registry: Annotated[ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:

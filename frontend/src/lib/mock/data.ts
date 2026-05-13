@@ -263,7 +263,7 @@ export const EXPORTS_ROWS = [
 ];
 
 export const EXPORTS_GUARDRAILS = [
-  { tone: "green" as Severity, title: "Revenue cells permission checked", sub: "Assistant Analyst receives masked finance exports", badge: { text: "On", tone: "green" as Severity } },
+  { tone: "green" as Severity, title: "Revenue cells permission checked", sub: "Assistant Analyst receives server-filtered finance exports", badge: { text: "On", tone: "green" as Severity } },
   { tone: "amber" as Severity, title: "Confidence notes required", sub: "Allocated and overridden values require explanations", badge: { text: "Open", tone: "amber" as Severity } },
   { tone: "red" as Severity, title: "Raw appendix restricted", sub: "Only Audit Viewer plus raw file grant can open source files", badge: { text: "Blocked", tone: "red" as Severity } },
 ];

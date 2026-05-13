@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useState } from "react";
 import {
   AUDIT_EVENTS,
   AUDIT_SUMMARY,
@@ -35,6 +35,36 @@ import type { Role, Severity, ViewKey } from "@/lib/mock/data";
 import { BrandIcon, LockIcon, NAV_ICONS, RefreshIcon } from "./icons";
 
 /* ------------------------------------------------------------------ shared */
+
+const RESTRICTED_FINANCE_VALUE = "Restricted";
+
+type ChannelRow = (typeof CHANNELS)[number];
+
+const FALLBACK_CHANNEL: ChannelRow = {
+  id: "unavailable",
+  avatar: "--",
+  name: "No channel selected",
+  code: "No channel",
+  company: "No company scope",
+  cms: { text: "No data", tone: "red" as Severity },
+  gross: RESTRICTED_FINANCE_VALUE,
+  tax: RESTRICTED_FINANCE_VALUE,
+  deductions: RESTRICTED_FINANCE_VALUE,
+  net: RESTRICTED_FINANCE_VALUE,
+  confidence: { text: "Restricted", tone: "red" as Severity },
+  issue: null,
+};
+
+function restrictChannelFinance(channel: ChannelRow): ChannelRow {
+  return {
+    ...channel,
+    gross: RESTRICTED_FINANCE_VALUE,
+    tax: RESTRICTED_FINANCE_VALUE,
+    deductions: RESTRICTED_FINANCE_VALUE,
+    net: RESTRICTED_FINANCE_VALUE,
+    confidence: { text: "Restricted", tone: "red" as Severity },
+  };
+}
 
 function Badge({ tone, children }: { tone: Severity; children: React.ReactNode }) {
   return <span className={`badge ${tone}`}>{children}</span>;
@@ -74,16 +104,19 @@ function SummaryTile({
   value,
   note,
   finance,
+  canViewFinance = true,
 }: {
   label: string;
   value: string;
   note: string;
   finance?: boolean;
+  canViewFinance?: boolean;
 }) {
+  const displayValue = finance && !canViewFinance ? RESTRICTED_FINANCE_VALUE : value;
   return (
     <article className="summary-tile">
       <span>{label}</span>
-      <strong className={finance ? "finance-data" : undefined}>{value}</strong>
+      <strong className={finance ? "finance-data" : undefined}>{displayValue}</strong>
       <small>{note}</small>
     </article>
   );
@@ -100,13 +133,11 @@ export default function AppShell() {
     "Revenue Flow",
   );
 
-  const masked = role !== "finance";
+  const canViewFinance = role === "finance";
   const copy = VIEW_COPY[view];
 
-  const switchView = useCallback((v: ViewKey) => setView(v), []);
-
   return (
-    <div className={`app${masked ? " hidden-finance" : ""}`}>
+    <div className="app">
       {/* ============================================================ sidebar */}
       <aside className="sidebar" aria-label="Primary navigation">
         <div className="brand">
@@ -130,7 +161,7 @@ export default function AppShell() {
                   type="button"
                   className={`nav-item${active ? " is-active" : ""}`}
                   aria-current={active ? "page" : undefined}
-                  onClick={() => switchView(item.key)}
+                  onClick={() => setView(item.key)}
                 >
                   {NAV_ICONS[item.icon]}
                   <span>{item.label}</span>
@@ -153,9 +184,9 @@ export default function AppShell() {
             <option value="company">Company Manager</option>
           </select>
           <div className="role-meta" aria-label="Role permission state">
-            <span className={`role-state${masked ? " is-restricted" : ""}`}>
-              <Dot tone={masked ? "red" : "green"} />
-              <span>{masked ? "Money masked" : "Money visible"}</span>
+            <span className={`role-state${canViewFinance ? "" : " is-restricted"}`}>
+              <Dot tone={canViewFinance ? "green" : "red"} />
+              <span>{canViewFinance ? "Money visible" : "Money withheld"}</span>
             </span>
             <span className="role-state">
               <Dot tone="amber" />
@@ -179,7 +210,7 @@ export default function AppShell() {
                 Source <strong>A Official</strong>
               </span>
               <span className="cue amber">
-                Bank gap <strong>$31.4K</strong>
+                Bank gap <strong>{canViewFinance ? "$31.4K" : RESTRICTED_FINANCE_VALUE}</strong>
               </span>
               <span className="cue red">
                 Export blockers <strong>2</strong>
@@ -219,12 +250,19 @@ export default function AppShell() {
             setSelected={setSelected}
             revenueTab={revenueTab}
             setRevenueTab={setRevenueTab}
+            canViewFinance={canViewFinance}
           />
         )}
-        {view === "registry" && <RegistryView />}
-        {view === "close" && <CloseView />}
-        {view === "trace" && <TraceView traceTab={traceTab} setTraceTab={setTraceTab} />}
-        {view === "exports" && <ExportsView />}
+        {view === "registry" && <RegistryView canViewFinance={canViewFinance} />}
+        {view === "close" && <CloseView canViewFinance={canViewFinance} />}
+        {view === "trace" && (
+          <TraceView
+            traceTab={traceTab}
+            setTraceTab={setTraceTab}
+            canViewFinance={canViewFinance}
+          />
+        )}
+        {view === "exports" && <ExportsView canViewFinance={canViewFinance} />}
         {view === "connectors" && <ConnectorsView />}
         {view === "audit" && <AuditView />}
 
@@ -241,19 +279,33 @@ function CommandView({
   setSelected,
   revenueTab,
   setRevenueTab,
+  canViewFinance,
 }: {
   selected: string;
   setSelected: (s: string) => void;
   revenueTab: "Net" | "Gross" | "Allocated";
   setRevenueTab: (t: "Net" | "Gross" | "Allocated") => void;
+  canViewFinance: boolean;
 }) {
-  const selectedChannel = CHANNELS.find((c) => c.name === selected) ?? CHANNELS[0];
+  const visibleKpis = KPIS.map((k) =>
+    k.finance && !canViewFinance
+      ? { ...k, value: RESTRICTED_FINANCE_VALUE, note: ["Finance role required", "Server filtered"] }
+      : k,
+  );
+  const visibleChannels = canViewFinance
+    ? CHANNELS
+    : CHANNELS.map((channel) => restrictChannelFinance(channel));
+  const visibleExplainRows = canViewFinance
+    ? EXPLAIN_ROWS
+    : EXPLAIN_ROWS.map((row) => ({ ...row, value: RESTRICTED_FINANCE_VALUE }));
+  const selectedChannel =
+    visibleChannels.find((c) => c.name === selected) ?? visibleChannels[0] ?? FALLBACK_CHANNEL;
 
   return (
     <>
       {/* status strip */}
       <section className="status-strip" aria-label="Revenue summary">
-        {KPIS.map((k) => (
+        {visibleKpis.map((k) => (
           <article key={k.id} className={`metric ${k.tone}`}>
             <header>
               <span className="metric-label">{k.label}</span>
@@ -315,7 +367,7 @@ function CommandView({
                   </tr>
                 </thead>
                 <tbody>
-                  {CHANNELS.map((c) => {
+                  {visibleChannels.map((c) => {
                     const isSel = c.name === selected;
                     return (
                       <tr
@@ -440,7 +492,7 @@ function CommandView({
               net = gross + adjustments - tax - allocated_deductions + manual_adjustments
             </div>
             <div className="explain-list" role="list">
-              {EXPLAIN_ROWS.map((r) => (
+              {visibleExplainRows.map((r) => (
                 <ItemRow
                   key={r.title}
                   tone={r.tone}
@@ -499,12 +551,12 @@ function WorkflowRail() {
 
 /* ------------------------------------------------------------------ registry */
 
-function RegistryView() {
+function RegistryView({ canViewFinance }: { canViewFinance: boolean }) {
   return (
     <section className="view-page" aria-labelledby="registryTitle">
       <div className="view-summary" aria-label="Registry summary">
         {REGISTRY_SUMMARY.map((s) => (
-          <SummaryTile key={s.label} {...s} />
+          <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
         ))}
       </div>
 
@@ -617,11 +669,13 @@ function RegistryView() {
 
 /* ------------------------------------------------------------------ close */
 
-function CloseView() {
+function CloseView({ canViewFinance }: { canViewFinance: boolean }) {
   return (
     <section className="view-page" aria-labelledby="closeViewTitle">
       <div className="view-summary" aria-label="Month close summary">
-        {CLOSE_SUMMARY.map((s) => <SummaryTile key={s.label} {...s} />)}
+        {CLOSE_SUMMARY.map((s) => (
+          <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
+        ))}
       </div>
 
       <div className="view-grid">
@@ -719,14 +773,18 @@ function CloseView() {
 function TraceView({
   traceTab,
   setTraceTab,
+  canViewFinance,
 }: {
   traceTab: "Revenue Flow" | "Issues" | "Ownership";
   setTraceTab: (t: "Revenue Flow" | "Issues" | "Ownership") => void;
+  canViewFinance: boolean;
 }) {
   return (
     <section className="view-page" aria-labelledby="traceViewTitle">
       <div className="view-summary" aria-label="Trace summary">
-        {TRACE_SUMMARY.map((s) => <SummaryTile key={s.label} {...s} />)}
+        {TRACE_SUMMARY.map((s) => (
+          <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
+        ))}
       </div>
 
       <div className="view-grid wide-side">
@@ -818,11 +876,13 @@ function TraceView({
 
 /* ------------------------------------------------------------------ exports */
 
-function ExportsView() {
+function ExportsView({ canViewFinance }: { canViewFinance: boolean }) {
   return (
     <section className="view-page" aria-labelledby="exportsTitle">
       <div className="view-summary" aria-label="Export summary">
-        {EXPORTS_SUMMARY.map((s) => <SummaryTile key={s.label} {...s} />)}
+        {EXPORTS_SUMMARY.map((s) => (
+          <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
+        ))}
       </div>
 
       <div className="view-grid">

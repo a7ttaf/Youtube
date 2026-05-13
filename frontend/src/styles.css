@@ -111,6 +111,7 @@
   padding: 0; margin: -1px;
   overflow: hidden;
   clip: rect(0,0,0,0);
+  clip-path: inset(50%);
   white-space: nowrap;
   border: 0;
 }
@@ -1016,15 +1017,6 @@ tbody tr:hover .avatar { border-color: color-mix(in oklch, var(--primary) 30%, v
   font-family: var(--font-mono);
   font-size: 11px;
   white-space: nowrap;
-}
-
-/* Restricted finance data */
-.finance-data { transition: filter 260ms var(--ease-out-expo), color 260ms var(--ease-out-expo), text-shadow 260ms var(--ease-out-expo); }
-.hidden-finance .finance-data {
-  color: transparent;
-  text-shadow: 0 0 8px color-mix(in oklch, var(--muted) 60%, transparent);
-  user-select: none;
-  position: relative;
 }
 
 /* Reduced motion */

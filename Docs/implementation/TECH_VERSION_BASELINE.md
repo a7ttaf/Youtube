@@ -8,7 +8,7 @@ Use latest stable/LTS runtime versions and current stable package releases at th
 For this project:
 - Runtime platforms use stable or LTS releases.
 - Backend dependencies are pinned exactly in `pyproject.toml` until a lockfile workflow is introduced.
-- Frontend versions are recorded as the target baseline, but no frontend app has been scaffolded yet.
+- A Vite preview frontend app has been scaffolded and verified with React; its runtime floor is Node.js `>=22.12.0`.
 - PostgreSQL remains the financial source of truth.
 - Neo4j is not part of the active architecture.
 

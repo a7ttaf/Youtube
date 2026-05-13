@@ -22,3 +22,6 @@ def test_retire_graph_migration_removes_permissions_and_graph_scope():
     )
     assert "DELETE FROM access_scopes WHERE scope_type = 'graph-read'" in migration
     assert "'finance-month', 'export', 'connector')" in migration
+    assert "Irreversible migration" in migration
+    assert "graph-read scopes and grants" in migration
+    assert "INSERT INTO permissions" not in migration

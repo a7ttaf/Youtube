@@ -3,7 +3,7 @@
 ## Purpose
 Generate management-ready Excel, PDF, and branded slide reports.
 
-Current backend behavior: the foundation records queued export-job metadata, produces a read-only finance workbook preview for `FINANCE_EXCEL` export jobs, can generate and persist a `.xlsx` workbook download from that preview, can generate and persist an executive `.pdf` for `EXECUTIVE_PDF` export jobs, and can generate and persist a `.pptx` branded slide pack for `BRANDED_SLIDE_PACK` export jobs. The workbook, PDF, and slide pack use SQL-backed finance summaries only. It does not generate CSV files yet and does not upload to external object storage yet; generated artifacts are persisted through the configured export artifact store and recorded on the export job as `file_url` metadata.
+Current backend behavior: The foundation records queued export-job metadata and produces read-only finance workbook previews for `FINANCE_EXCEL` export jobs. It can generate and persist `.xlsx` workbook downloads from those previews, executive `.pdf` reports for `EXECUTIVE_PDF` jobs, and `.pptx` branded slide packs for `BRANDED_SLIDE_PACK` jobs. Workbook, PDF, and slide artifacts use SQL-backed finance summaries only. Generated artifacts are persisted through the configured export artifact store and recorded on the export job with `file_url` plus full artifact metadata: filename, content type, byte size, and SHA-256 checksum. CSV export generation and external object storage uploads are not yet implemented.
 
 ## Planned export outputs
 
