@@ -36,6 +36,19 @@ import { BrandIcon, LockIcon, NAV_ICONS, RefreshIcon } from "./icons";
 
 /* ------------------------------------------------------------------ shared */
 
+const ROLE_LABELS: Record<Role, string> = {
+  finance: "Finance Admin",
+  assistant: "Assistant Analyst",
+  company: "Company Manager",
+};
+
+// In production this value is hydrated from the server-authenticated session claim.
+const SERVER_AUTHENTICATED_SESSION = {
+  role: "finance" as Role,
+};
+
+const CAN_PREVIEW_ROLES = import.meta.env.DEV;
+
 const RESTRICTED_FINANCE_VALUE = "Restricted";
 
 type ChannelRow = (typeof CHANNELS)[number];
@@ -126,14 +139,16 @@ function SummaryTile({
 
 export default function AppShell() {
   const [view, setView] = useState<ViewKey>("command");
-  const [role, setRole] = useState<Role>("finance");
+  const authenticatedRole = SERVER_AUTHENTICATED_SESSION.role;
+  const [previewRole, setPreviewRole] = useState<Role>(authenticatedRole);
   const [selected, setSelected] = useState<string>("UMS Drama");
   const [revenueTab, setRevenueTab] = useState<"Net" | "Gross" | "Allocated">("Net");
   const [traceTab, setTraceTab] = useState<"Revenue Flow" | "Issues" | "Ownership">(
     "Revenue Flow",
   );
 
-  const canViewFinance = role === "finance";
+  const displayedRole = CAN_PREVIEW_ROLES ? previewRole : authenticatedRole;
+  const canViewFinance = authenticatedRole === "finance";
   const copy = VIEW_COPY[view];
 
   return (
@@ -174,15 +189,23 @@ export default function AppShell() {
 
         <div className="role-card">
           <label htmlFor="roleSelect">Current role</label>
-          <select
-            id="roleSelect"
-            value={role}
-            onChange={(e) => setRole(e.target.value as Role)}
-          >
-            <option value="finance">Finance Admin</option>
-            <option value="assistant">Assistant Analyst</option>
-            <option value="company">Company Manager</option>
-          </select>
+          {CAN_PREVIEW_ROLES ? (
+            <select
+              id="roleSelect"
+              value={previewRole}
+              onChange={(e) => setPreviewRole(e.target.value as Role)}
+            >
+              {(Object.entries(ROLE_LABELS) as [Role, string][]).map(
+                ([value, label]) => (
+                  <option key={value} value={value}>
+                    {label}
+                  </option>
+                ),
+              )}
+            </select>
+          ) : (
+            <output id="roleSelect">{ROLE_LABELS[authenticatedRole]}</output>
+          )}
           <div className="role-meta" aria-label="Role permission state">
             <span className={`role-state${canViewFinance ? "" : " is-restricted"}`}>
               <Dot tone={canViewFinance ? "green" : "red"} />
@@ -260,7 +283,7 @@ export default function AppShell() {
             traceTab={traceTab}
             setTraceTab={setTraceTab}
             canViewFinance={canViewFinance}
-            role={role}
+            role={displayedRole}
           />
         )}
         {view === "exports" && <ExportsView canViewFinance={canViewFinance} />}

@@ -261,11 +261,16 @@ def _parse_uuid(value: str) -> UUID:
 
 def _quantize_rate(value: Decimal) -> Decimal:
     try:
-        return value.quantize(Decimal("0.0000000001"))
+        quantized = value.quantize(Decimal("0.0000000001"))
     except InvalidOperation as exc:
         raise ExchangeRateValidationError(
             f"rate has too many significant digits: {value}"
         ) from exc
+    if quantized <= 0:
+        raise ExchangeRateValidationError(
+            f"rate rounds to zero after quantization: {value}"
+        )
+    return quantized
 
 
 def _decimal_to_api(value: Decimal) -> str:

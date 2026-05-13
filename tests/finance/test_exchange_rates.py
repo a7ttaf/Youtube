@@ -260,3 +260,30 @@ def test_exchange_rate_repository_validates_batch_before_upsert():
             )
 
         assert session.scalars(select(CurrencyExchangeRateORM)).all() == []
+
+
+def test_exchange_rate_repository_rejects_rate_that_quantizes_to_zero():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    FinanceBase.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        repository = SqlAlchemyExchangeRateRepository(session)
+        with pytest.raises(
+            ExchangeRateValidationError,
+            match="rate rounds to zero after quantization:",
+        ):
+            repository.sync_rates(
+                rates=[
+                    CurrencyExchangeRateInput(
+                        rate_date=date(2026, 4, 22),
+                        base_currency="EUR",
+                        quote_currency="USD",
+                        rate=Decimal("0.00000000001"),
+                    )
+                ],
+                provider_key="ecb",
+                actor_user_id=str(USER_ID),
+                source_report_id=None,
+            )
+
+        assert session.scalars(select(CurrencyExchangeRateORM)).all() == []

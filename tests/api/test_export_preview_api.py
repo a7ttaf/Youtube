@@ -39,6 +39,12 @@ GROUP_ID = UUID("00000000-0000-0000-0000-000000023501")
 OTHER_USER_ID = UUID("00000000-0000-0000-0000-000000023601")
 
 
+def _utc_timestamp(value: datetime) -> float:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC).timestamp()
+    return value.astimezone(UTC).timestamp()
+
+
 def auth_headers(role: str, scope_type: str = "global") -> dict[str, str]:
     return {
         "x-user-id": str(USER_ID),
@@ -519,7 +525,8 @@ def test_finance_workbook_storage_failure_preserves_completed_export(
     assert response.json()["detail"] == "Export artifact storage unavailable"
     assert export_job is not None
     assert export_job.status == "COMPLETED"
-    assert export_job.completed_at == completed_at.replace(tzinfo=None)
+    assert export_job.completed_at is not None
+    assert _utc_timestamp(export_job.completed_at) == _utc_timestamp(completed_at)
     assert export_job.file_url == existing_uri
     assert export_job.artifact_filename == existing_filename
     assert export_job.artifact_content_type == (
