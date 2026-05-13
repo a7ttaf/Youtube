@@ -241,6 +241,12 @@ def test_scoped_finance_workbook_omits_month_wide_cash_without_attribution(tmp_p
         headers=auth_headers("finance_admin"),
     )
 
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_events = session.scalars(
+            select(AuditLogORM).order_by(AuditLogORM.event_type)
+        ).all()
+
     assert response.status_code == 200
     payload = response.json()
     assert payload["executive_summary"]["total_net_revenue_usd"] == "930"
@@ -250,6 +256,7 @@ def test_scoped_finance_workbook_omits_month_wide_cash_without_attribution(tmp_p
     assert payload["executive_summary"]["bank_reconciliation_status"] == (
         "MISSING_ADSENSE_PAYMENT"
     )
+    assert [event.event_type for event in audit_events] == ["REVENUE_VIEWED"]
 
 
 def test_group_scoped_finance_workbook_records_channel_revenue_audit(tmp_path):

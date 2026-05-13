@@ -704,28 +704,29 @@ def _record_finance_export_artifact_audit(
         )
         for revenue_scope in revenue_scopes
     ]
-    audit_records.extend(
-        [
-            record_audit_event(
-                sink=audit_sink,
-                actor=user,
-                event_type=AuditEventType.PAYMENT_VIEWED,
-                entity_type="export_job",
-                entity_id=export_job.id,
-                scope=month_scope,
-                details=details,
-            ),
-            record_audit_event(
-                sink=audit_sink,
-                actor=user,
-                event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
-                entity_type="export_job",
-                entity_id=export_job.id,
-                scope=month_scope,
-                details=details,
-            ),
-        ]
-    )
+    if export_job.scope_type == "global":
+        audit_records.extend(
+            [
+                record_audit_event(
+                    sink=audit_sink,
+                    actor=user,
+                    event_type=AuditEventType.PAYMENT_VIEWED,
+                    entity_type="export_job",
+                    entity_id=export_job.id,
+                    scope=month_scope,
+                    details=details,
+                ),
+                record_audit_event(
+                    sink=audit_sink,
+                    actor=user,
+                    event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
+                    entity_type="export_job",
+                    entity_id=export_job.id,
+                    scope=month_scope,
+                    details=details,
+                ),
+            ]
+        )
     if include_download_event:
         audit_records.append(
             record_audit_event(
