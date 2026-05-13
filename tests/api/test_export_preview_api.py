@@ -464,8 +464,13 @@ def test_export_operator_cannot_download_executive_pdf(tmp_path):
         headers=auth_headers("export_operator"),
     )
 
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: exports.revenue"
+    assert audit_events == []
 
 
 def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(tmp_path):
@@ -518,8 +523,13 @@ def test_export_operator_cannot_download_branded_slide_pack(tmp_path):
         headers=auth_headers("export_operator"),
     )
 
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_events = session.scalars(select(AuditLogORM)).all()
+
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: exports.revenue"
+    assert audit_events == []
 
 
 def _extract_pdf_text(content: bytes) -> str:
