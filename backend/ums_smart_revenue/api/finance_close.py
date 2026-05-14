@@ -41,9 +41,9 @@ class AllocationRuleRequest(BaseModel):
     rule_payload: dict[str, object] = Field(default_factory=dict)
     reason: str = Field(min_length=1)
 
-    @field_validator("reason", mode="before")
+    @field_validator("allocation_method", "reason", mode="before")
     @classmethod
-    def strip_reason(cls, value):
+    def strip_required_fields(cls, value):
         return _strip_required_string(value)
 
 
