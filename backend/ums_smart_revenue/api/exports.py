@@ -151,11 +151,12 @@ def request_export(
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     try:
-        _require_export_permissions(
+        _require_export_access_permissions(
             user=user,
             export_type=payload.export_type,
             scope_type=payload.scope_type,
             scope_id=payload.scope_id,
+            month=payload.month,
             org_index=org_index,
             group_registry=group_registry,
         )
@@ -253,26 +254,26 @@ def get_export(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
 
-    if export_job.requested_by != user.user_id:
-        try:
-            _require_export_permissions(
-                user=user,
-                export_type=export_job.export_type,
-                scope_type=export_job.scope_type,
-                scope_id=export_job.scope_id,
-                org_index=org_index,
-                group_registry=group_registry,
-            )
-        except KeyError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_404_NOT_FOUND,
-                detail=str(exc).strip("'"),
-            ) from exc
-        except ExportJobValidationError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-                detail=str(exc),
-            ) from exc
+    try:
+        _require_export_access_permissions(
+            user=user,
+            export_type=export_job.export_type,
+            scope_type=export_job.scope_type,
+            scope_id=export_job.scope_id,
+            month=export_job.month,
+            org_index=org_index,
+            group_registry=group_registry,
+        )
+    except KeyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc).strip("'"),
+        ) from exc
+    except ExportJobValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
     return export_job.to_api()
 
 
@@ -712,8 +713,13 @@ def _build_finance_source_summaries_for_export(
         org_index=org_index,
         group_registry=group_registry,
     )
-    facts = SqlAlchemyRevenueFactRepository(session).list_month_facts(
+    revenue_repository = SqlAlchemyRevenueFactRepository(session)
+    facts = revenue_repository.list_month_facts(
         month=export_job.month,
+        youtube_channel_ids=channel_ids,
+    )
+    previous_facts = revenue_repository.list_month_facts(
+        month=_previous_month(export_job.month),
         youtube_channel_ids=channel_ids,
     )
     manual_overrides = SqlAlchemyManualOverrideRepository(session).list_month_overrides(
@@ -754,6 +760,8 @@ def _build_finance_source_summaries_for_export(
         bank_reconciliation=bank_reconciliation,
         close_status=close_status,
         manual_overrides=manual_overrides,
+        current_revenue_facts=facts,
+        previous_revenue_facts=previous_facts,
     )
     return _FinanceExportSourceSummaries(
         net_revenue=net_revenue,
@@ -885,6 +893,36 @@ def _require_export_permissions(
         user=user,
         export_permission=export_permission,
         view_permission=view_permission,
+        scope_type=scope_type,
+        scope_id=scope_id,
+        org_index=org_index,
+        group_registry=group_registry,
+    )
+
+
+def _require_export_access_permissions(
+    *,
+    user: UserPrincipal,
+    export_type: str,
+    scope_type: str,
+    scope_id: str | None,
+    month: str,
+    org_index: OrgAccessIndex,
+    group_registry: ChannelGroupRegistryStore,
+) -> None:
+    if is_finance_export_type(export_type):
+        _require_finance_export_artifact_permissions(
+            user=user,
+            scope_type=scope_type,
+            scope_id=scope_id,
+            month=month,
+            org_index=org_index,
+            group_registry=group_registry,
+        )
+        return
+    _require_export_permissions(
+        user=user,
+        export_type=export_type,
         scope_type=scope_type,
         scope_id=scope_id,
         org_index=org_index,
@@ -1051,3 +1089,12 @@ def _has_any_export_permission(user: UserPrincipal) -> bool:
         ):
             return True
     return False
+
+
+def _previous_month(month: str) -> str:
+    year_value, month_value = month.split("-", maxsplit=1)
+    year = int(year_value)
+    month_number = int(month_value)
+    if month_number == 1:
+        return f"{year - 1:04d}-12"
+    return f"{year:04d}-{month_number - 1:02d}"

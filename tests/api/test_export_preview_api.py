@@ -67,6 +67,7 @@ def seed_database(
     scope_id: str | None = None,
     requested_by: UUID = USER_ID,
     include_group: bool = False,
+    include_previous_fact: bool = False,
 ) -> None:
     resolved_scope_id = scope_id
     if resolved_scope_id is None and scope_type == "company":
@@ -176,6 +177,22 @@ def seed_database(
                 include_manual_override_notes=True,
             ),
         ]
+        if include_previous_fact:
+            rows.append(
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-02",
+                    youtube_channel_id="channel-tv-a",
+                    source_kind="YOUTUBE_CMS",
+                    source_report_id="cms-report-2026-02",
+                    gross_revenue_usd=Decimal("100.00"),
+                    net_revenue_usd=Decimal("88.00"),
+                    views=200000,
+                    watch_time_minutes=Decimal("6200.50"),
+                    confidence_score=Decimal("0.9800"),
+                    imported_by=USER_ID,
+                )
+            )
         if include_group:
             rows.extend(
                 [
@@ -264,6 +281,26 @@ def test_scoped_finance_workbook_omits_month_wide_cash_without_attribution(tmp_p
         "MISSING_ADSENSE_PAYMENT"
     )
     assert [event.event_type for event in audit_events] == ["REVENUE_VIEWED"]
+
+
+def test_finance_export_preview_includes_revenue_trend_alerts(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url, include_previous_fact=True)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        f"/exports/{EXPORT_ID}/finance-workbook-preview",
+        headers=auth_headers("finance_admin"),
+    )
+
+    assert response.status_code == 200
+    alerts = response.json()["source_summaries"]["smart_alerts"]["alerts"]
+    trend_alert = next(
+        (alert for alert in alerts if alert["code"] == "REVENUE_TREND_ANOMALY"),
+        None,
+    )
+    assert trend_alert is not None
+    assert trend_alert["details"]["channels"][0]["youtube_channel_id"] == "channel-tv-a"
 
 
 def test_group_scoped_finance_workbook_records_channel_revenue_audit(tmp_path):

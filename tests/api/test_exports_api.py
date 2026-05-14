@@ -1,10 +1,14 @@
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
+from ums_smart_revenue.auth.permissions import Permission
+from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.db.finance_models import FinanceBase, FinanceMonthCloseORM
 from ums_smart_revenue.db.org_models import (
     ChannelGroupMemberORM,
@@ -15,7 +19,6 @@ from ums_smart_revenue.db.org_models import (
 )
 from ums_smart_revenue.db.report_models import ExportJobORM, ReportBase
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
-
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000012001")
 COMPANY_A_ID = UUID("00000000-0000-0000-0000-000000012101")
@@ -90,7 +93,7 @@ def test_finance_admin_requests_finance_export_with_audit_and_lock_snapshot(tmp_
 
     response = client.post(
         "/exports",
-        headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
+        headers=auth_headers("finance_admin"),
         json={
             "export_type": "FINANCE_EXCEL",
             "scope_type": "company",
@@ -140,6 +143,49 @@ def test_export_operator_cannot_request_finance_export_without_finance_visibilit
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: exports.revenue"
+
+
+def test_finance_export_request_requires_artifact_read_permissions(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="limited-finance-export@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.EXPORT_REVENUE_REPORT,
+                AccessScope.company(str(COMPANY_A_ID)),
+            ),
+            PermissionGrant(
+                Permission.VIEW_REVENUE,
+                AccessScope.company(str(COMPANY_A_ID)),
+            ),
+        ),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/exports",
+        json={
+            "export_type": "FINANCE_EXCEL",
+            "scope_type": "company",
+            "scope_id": str(COMPANY_A_ID),
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Finance workbook without month data permissions",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_count = session.scalar(select(func.count()).select_from(ExportJobORM))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Missing permission: finance.view_finalized_payments"
+    )
+    assert export_count == 0
 
 
 def test_export_operator_can_request_analytics_export_for_assigned_company(tmp_path):
@@ -217,7 +263,7 @@ def test_export_request_rejects_non_usd_currency_until_exchange_rates_exist(tmp_
 
     response = client.post(
         "/exports",
-        headers=auth_headers("finance_admin", "company", str(COMPANY_A_ID)),
+        headers=auth_headers("finance_admin"),
         json={
             "export_type": "FINANCE_EXCEL",
             "scope_type": "company",
@@ -304,6 +350,39 @@ def test_export_operator_can_get_own_export_job(tmp_path):
     assert response.status_code == 200
     assert response.json()["id"] == create_response.json()["id"]
     assert response.json()["file_url"] is None
+
+
+def test_get_export_enforces_scope_even_for_job_owner(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    export_id = uuid4()
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            ExportJobORM(
+                id=export_id,
+                export_type="ANALYTICS_SUMMARY_CSV",
+                scope_type="company",
+                scope_id=str(COMPANY_B_ID),
+                month="2026-03",
+                currency="USD",
+                requested_by=USER_ID,
+                status="QUEUED",
+                month_lock_status="LOCKED",
+                include_confidence_notes=True,
+                include_manual_override_notes=True,
+            )
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        f"/exports/{export_id}",
+        headers=auth_headers("export_operator", "company", str(COMPANY_A_ID)),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: exports.analytics"
 
 
 def test_user_without_export_permission_cannot_probe_export_ids(tmp_path):

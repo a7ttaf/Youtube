@@ -99,9 +99,24 @@ class SqlAlchemyAdSensePaymentRepository:
         actor_uuid = _parse_uuid(actor_user_id)
         normalized_source_report_id = _normalize_optional_string(source_report_id)
 
-        entries: list[AdSensePaymentEntry] = []
+        normalized_payments: list[AdSensePaymentInput] = []
+        seen_payment_keys: set[tuple[str, str]] = set()
         for payment in payments:
             normalized_payment = _normalize_payment(payment)
+            payment_key = (
+                normalized_payment.month,
+                normalized_payment.payment_name,
+            )
+            if payment_key in seen_payment_keys:
+                raise AdSensePaymentValidationError(
+                    "duplicate AdSense payment in batch: "
+                    f"{normalized_payment.month}:{normalized_payment.payment_name}"
+                )
+            seen_payment_keys.add(payment_key)
+            normalized_payments.append(normalized_payment)
+
+        entries: list[AdSensePaymentEntry] = []
+        for normalized_payment in normalized_payments:
             self._require_month_open(normalized_payment.month)
             now = datetime.now(UTC)
             insert_statement = _dialect_insert(

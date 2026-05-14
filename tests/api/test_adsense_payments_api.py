@@ -139,6 +139,36 @@ def test_adsense_payment_sync_is_idempotent_for_same_month_payment_name(tmp_path
     assert payment_amount == Decimal("931.250000")
 
 
+def test_adsense_payment_sync_rejects_duplicate_keys_within_batch(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    payload = payment_payload("930.00")
+    payload["payments"].append(
+        {
+            **payload["payments"][0],
+            "payment_amount": "931.25",
+            "raw_payload": {"paymentId": "pay_2026_03_duplicate", "source": "adsense"},
+        }
+    )
+
+    response = client.post(
+        "/adsense/sync-payments",
+        headers=auth_headers("system_integration_user", "connector", "adsense"),
+        json=payload,
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        payment_count = session.execute(
+            text("SELECT COUNT(*) FROM adsense_payments")
+        ).scalar_one()
+
+    assert response.status_code == 422
+    assert "duplicate AdSense payment in batch" in response.json()["detail"]
+    assert payment_count == 0
+
+
 def test_finance_viewer_lists_adsense_payments_with_audit(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
