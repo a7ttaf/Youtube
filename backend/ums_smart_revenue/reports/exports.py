@@ -113,6 +113,10 @@ class ExportJobValidationError(ExportJobError):
     pass
 
 
+class ExportJobTerminalStateError(ExportJobValidationError):
+    """Raised when a terminal-status job is asked to transition again."""
+
+
 class SqlAlchemyExportJobRepository:
     def __init__(self, session: Session):
         self._session = session
@@ -208,7 +212,7 @@ class SqlAlchemyExportJobRepository:
     ) -> ExportJobEntry:
         row = self._get_row_for_update(export_id)
         if row.status in _TERMINAL_EXPORT_JOB_STATUSES:
-            raise ExportJobValidationError(
+            raise ExportJobTerminalStateError(
                 f"Export job {export_id} is already in terminal status {row.status}"
             )
         now = datetime.now(UTC)
@@ -236,7 +240,7 @@ class SqlAlchemyExportJobRepository:
     ) -> ExportJobEntry:
         row = self._get_row_for_update(export_id)
         if row.status in _TERMINAL_EXPORT_JOB_STATUSES:
-            raise ExportJobValidationError(
+            raise ExportJobTerminalStateError(
                 f"Export job {export_id} is already in terminal status {row.status}"
             )
         now = datetime.now(UTC)

@@ -76,6 +76,7 @@ from ums_smart_revenue.reports.exports import (
     MAX_EXPORT_JOB_PAGE_SIZE,
     ExportJobEntry,
     ExportJobNotFoundError,
+    ExportJobTerminalStateError,
     ExportJobValidationError,
     ExportJobVisibilityFilter,
     SqlAlchemyExportJobRepository,
@@ -773,6 +774,25 @@ def _persist_generated_export_artifact(
             byte_size=artifact.byte_size,
             checksum_sha256=artifact.checksum_sha256,
         )
+    except ExportJobTerminalStateError as exc:
+        # ================================================================
+        # Purpose: A concurrent writer finalized this export between our
+        #   non-terminal read and the terminal-state guard inside
+        #   complete_artifact. The artifact we just wrote occupies the
+        #   same on-disk path, so keep it (do not _discard_saved_artifact)
+        #   and return the now-terminal row instead of re-raising.
+        # Database/ORM: Re-reads the export row to surface the
+        #   first writer's persisted metadata.
+        # Standards: Concurrent writers must not destroy each other's
+        #   data on a race that the terminal-state guard already caught.
+        # Blast Radius: Download response payload after a re-download race.
+        # ================================================================
+        logger.warning(
+            "Export %s completed concurrently; preserving artifact: %s",
+            export_job.id,
+            exc,
+        )
+        return repository.get_job(export_job.id), None
     except Exception:
         logger.exception("Export artifact completion failed for export %s", export_job.id)
         _discard_saved_artifact(artifact_store=artifact_store, file_url=artifact.file_url)
@@ -1101,6 +1121,10 @@ def _require_export_scope_permissions(
     # Blast Radius: Export read/download access control.
     # ====================================================================
     if scope_channel_ids is not None and scope_type != "global":
+        if not scope_channel_ids:
+            raise ExportJobValidationError(
+                "scoped exports require at least one channel"
+            )
         for channel_id in scope_channel_ids:
             channel_scope = AccessScope.channel(channel_id)
             _require_permission(user, export_permission, channel_scope, org_index)
