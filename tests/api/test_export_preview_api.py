@@ -580,10 +580,15 @@ def test_finance_workbook_storage_failure_marks_export_failed_without_download_a
     assert audit_events == []
 
 
-def test_finance_workbook_storage_failure_preserves_completed_export(
+def test_finance_workbook_download_returns_503_when_persisted_artifact_missing(
     tmp_path,
     monkeypatch,
 ):
+    """A COMPLETED export with an unreadable persisted artifact must return
+    503 instead of regenerating bytes that would no longer match the
+    persisted checksum recorded in audit metadata. The persisted DB row is
+    preserved so an operator can rehydrate the artifact out of band.
+    """
     artifact_root_file = tmp_path / "not-a-directory"
     artifact_root_file.write_text("not a directory", encoding="utf-8")
     monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_root_file))
@@ -620,23 +625,18 @@ def test_finance_workbook_storage_failure_preserves_completed_export(
         export_job = session.get(ExportJobORM, EXPORT_ID)
         audit_events = session.scalars(select(AuditLogORM)).all()
 
-    assert response.status_code == 200
-    assert response.headers["content-type"] == (
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    assert response.status_code == 503
+    assert response.json()["detail"] == "Export artifact storage unavailable"
     assert export_job is not None
     assert export_job.status == "COMPLETED"
     assert export_job.completed_at is not None
     assert _utc_timestamp(export_job.completed_at) == _utc_timestamp(completed_at)
     assert export_job.file_url == existing_uri
     assert export_job.artifact_filename == existing_filename
-    assert export_job.artifact_content_type == (
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
     assert export_job.artifact_byte_size == 42
     assert export_job.artifact_checksum_sha256 == "a" * 64
     assert export_job.failure_reason is None
-    assert "EXPORT_DOWNLOADED" in {event.event_type for event in audit_events}
+    assert "EXPORT_DOWNLOADED" not in {event.event_type for event in audit_events}
 
 
 def test_persist_generated_export_artifact_cleans_up_when_completion_fails(tmp_path):

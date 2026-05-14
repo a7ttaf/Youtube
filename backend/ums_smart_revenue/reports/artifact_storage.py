@@ -73,13 +73,29 @@ class FileSystemExportArtifactStore:
         relative_path = Path("exports") / normalized_export_id / normalized_filename
         target_path = self._root_dir / relative_path
         temp_path = target_path.with_name(f".{target_path.name}.{uuid4().hex}.tmp")
+        # ================================================================
+        # Purpose: First-writer-wins persistence. The temp file is written
+        #   then linked into place with os.link so a concurrent second
+        #   writer cannot stomp the first writer's bytes on disk. A second
+        #   writer observes FileExistsError, drops its temp file, and
+        #   leaves the persisted artifact intact for the caller's
+        #   terminal-state guard upstream to handle.
+        # Database/ORM: None (filesystem only).
+        # Standards: Atomic, idempotent writes for finance artifact bytes.
+        # Blast Radius: Export artifact on-disk integrity.
+        # ================================================================
         try:
             target_path.parent.mkdir(parents=True, exist_ok=True)
             temp_path.write_bytes(content)
-            temp_path.replace(target_path)
+            try:
+                os.link(temp_path, target_path)
+            except FileExistsError:
+                pass
         except OSError as exc:
             _discard_temp_file(temp_path)
             raise ExportArtifactStorageError("artifact storage unavailable") from exc
+        finally:
+            _discard_temp_file(temp_path)
 
         return ExportArtifactMetadata(
             file_url=f"{EXPORT_ARTIFACT_URI_PREFIX}{relative_path.as_posix()}",

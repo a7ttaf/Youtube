@@ -388,6 +388,11 @@ def preview_finance_workbook(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
         ) from exc
+    except ExportArtifactStorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Export artifact storage unavailable",
+        ) from exc
     except (
         AdSensePaymentValidationError,
         BankReconciliationValidationError,
@@ -486,6 +491,11 @@ def download_finance_workbook(
     except ExportJobNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except ExportArtifactStorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Export artifact storage unavailable",
         ) from exc
     except (
         AdSensePaymentValidationError,
@@ -592,6 +602,11 @@ def download_executive_pdf(
     except ExportJobNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except ExportArtifactStorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Export artifact storage unavailable",
         ) from exc
     except (
         AdSensePaymentValidationError,
@@ -700,6 +715,11 @@ def download_branded_slide_pack(
     except ExportJobNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
+    except ExportArtifactStorageError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Export artifact storage unavailable",
         ) from exc
     except (
         AdSensePaymentValidationError,
@@ -848,7 +868,10 @@ def _serve_persisted_artifact_bytes(
     #   can short-circuit regenerating the workbook/PDF/PPTX on every
     #   download. The on-disk artifact is the source of truth once the
     #   job has been finalized; regenerating would drift from the
-    #   persisted checksum recorded in audit metadata.
+    #   persisted checksum recorded in audit metadata. If the on-disk
+    #   file is missing for a COMPLETED row, the storage error
+    #   propagates so the caller returns a 503 instead of serving fresh
+    #   bytes that no longer match the persisted checksum.
     # Database/ORM: None (FileSystemExportArtifactStore filesystem read).
     # Standards: Idempotent downloads, audit metadata integrity.
     # Blast Radius: Workbook/PDF/PPTX download response bytes.
@@ -863,15 +886,7 @@ def _serve_persisted_artifact_bytes(
         or not export_job.artifact_content_type
     ):
         return None
-    try:
-        artifact_bytes = artifact_store.read(file_url=export_job.file_url)
-    except ExportArtifactStorageError:
-        logger.warning(
-            "Persisted export artifact unreadable for %s; falling back to regeneration",
-            export_job.id,
-            exc_info=True,
-        )
-        return None
+    artifact_bytes = artifact_store.read(file_url=export_job.file_url)
     return artifact_bytes, export_job.artifact_filename, export_job.artifact_content_type
 
 
