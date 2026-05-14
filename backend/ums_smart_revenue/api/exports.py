@@ -1,3 +1,4 @@
+import logging
 import re
 from dataclasses import dataclass
 from typing import Annotated
@@ -86,6 +87,7 @@ from ums_smart_revenue.reports.finance_workbook import (
 
 router = APIRouter(prefix="/exports", tags=["exports"])
 EXPORT_MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -678,23 +680,34 @@ def _persist_generated_export_artifact(
             content=content,
         )
     except ExportArtifactStorageError:
-        if not _has_completed_artifact(export_job):
-            repository.fail_job(
-                export_id=export_job.id,
-                failure_reason="artifact storage unavailable",
+        if _has_completed_artifact(export_job):
+            logger.warning(
+                "Export artifact save failed; preserving completed export %s",
+                export_job.id,
+                exc_info=True,
             )
+            return export_job, None
+        repository.fail_job(
+            export_id=export_job.id,
+            failure_reason="artifact storage unavailable",
+        )
         return None, JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"detail": "Export artifact storage unavailable"},
         )
-    completed_job = repository.complete_artifact(
-        export_id=export_job.id,
-        file_url=artifact.file_url,
-        filename=artifact.filename,
-        content_type=artifact.content_type,
-        byte_size=artifact.byte_size,
-        checksum_sha256=artifact.checksum_sha256,
-    )
+    try:
+        completed_job = repository.complete_artifact(
+            export_id=export_job.id,
+            file_url=artifact.file_url,
+            filename=artifact.filename,
+            content_type=artifact.content_type,
+            byte_size=artifact.byte_size,
+            checksum_sha256=artifact.checksum_sha256,
+        )
+    except Exception:
+        logger.exception("Export artifact completion failed for export %s", export_job.id)
+        _discard_saved_artifact(artifact_store=artifact_store, file_url=artifact.file_url)
+        raise
     return completed_job, None
 
 
@@ -706,6 +719,15 @@ def _require_persisted_export_job(export_job: ExportJobEntry | None) -> ExportJo
     if export_job is None:
         raise RuntimeError("_persist_generated_export_artifact returned no export job")
     return export_job
+
+
+def _discard_saved_artifact(
+    *, artifact_store: FileSystemExportArtifactStore, file_url: str
+) -> None:
+    try:
+        artifact_store.delete(file_url=file_url)
+    except ExportArtifactStorageError:
+        logger.warning("Saved export artifact cleanup failed: %s", file_url, exc_info=True)
 
 
 def _build_finance_source_summaries_for_export(

@@ -89,6 +89,14 @@ class FileSystemExportArtifactStore:
             checksum_sha256=hashlib.sha256(content).hexdigest(),
         )
 
+    def delete(self, *, file_url: str) -> None:
+        relative_path = _relative_path_from_file_url(file_url)
+        target_path = self._root_dir / relative_path
+        try:
+            target_path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise ExportArtifactStorageError("artifact cleanup unavailable") from exc
+
 
 def _default_root_dir() -> Path:
     return DEFAULT_EXPORT_ARTIFACT_DIR
@@ -118,6 +126,21 @@ def _normalize_content_type(value: str) -> str:
     if not normalized:
         raise ExportArtifactStorageError("artifact content_type is required")
     return normalized
+
+
+def _relative_path_from_file_url(value: str) -> Path:
+    if not value.startswith(EXPORT_ARTIFACT_URI_PREFIX):
+        raise ExportArtifactStorageError("artifact file_url is invalid")
+    relative = value[len(EXPORT_ARTIFACT_URI_PREFIX) :].strip()
+    relative_path = Path(relative)
+    if (
+        not relative
+        or relative_path.is_absolute()
+        or ".." in relative_path.parts
+        or relative_path.parts[:1] != ("exports",)
+    ):
+        raise ExportArtifactStorageError("artifact file_url is invalid")
+    return relative_path
 
 
 def _discard_temp_file(path: Path) -> None:

@@ -15,6 +15,7 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.exports import (
     _artifact_metadata_audit_details,
+    _persist_generated_export_artifact,
     _previous_month,
 )
 from ums_smart_revenue.app import create_app
@@ -36,6 +37,8 @@ from ums_smart_revenue.db.org_models import (
 from ums_smart_revenue.db.report_models import ExportJobORM, ReportBase
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 from ums_smart_revenue.finance.revenue_facts import RevenueFactValidationError
+from ums_smart_revenue.reports.artifact_storage import FileSystemExportArtifactStore
+from ums_smart_revenue.reports.exports import ExportJobEntry, ExportJobValidationError
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000023001")
 COMPANY_ID = UUID("00000000-0000-0000-0000-000000023101")
@@ -591,8 +594,10 @@ def test_finance_workbook_storage_failure_preserves_completed_export(
         export_job = session.get(ExportJobORM, EXPORT_ID)
         audit_events = session.scalars(select(AuditLogORM)).all()
 
-    assert response.status_code == 503
-    assert response.json()["detail"] == "Export artifact storage unavailable"
+    assert response.status_code == 200
+    assert response.headers["content-type"] == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
     assert export_job is not None
     assert export_job.status == "COMPLETED"
     assert export_job.completed_at is not None
@@ -605,7 +610,43 @@ def test_finance_workbook_storage_failure_preserves_completed_export(
     assert export_job.artifact_byte_size == 42
     assert export_job.artifact_checksum_sha256 == "a" * 64
     assert export_job.failure_reason is None
-    assert audit_events == []
+    assert "EXPORT_DOWNLOADED" in {event.event_type for event in audit_events}
+
+
+def test_persist_generated_export_artifact_cleans_up_when_completion_fails(tmp_path):
+    class FailingCompleteRepository:
+        def complete_artifact(self, **_kwargs):
+            raise ExportJobValidationError("completion failed")
+
+    artifact_dir = tmp_path / "artifacts"
+    export_job = ExportJobEntry(
+        id=str(EXPORT_ID),
+        export_type="FINANCE_EXCEL",
+        scope_type="global",
+        scope_id=None,
+        month="2026-03",
+        currency="USD",
+        requested_by=str(USER_ID),
+        status="QUEUED",
+        file_url=None,
+        month_lock_status="LOCKED",
+        include_confidence_notes=True,
+        include_manual_override_notes=True,
+        created_at=datetime(2026, 4, 30, 10, 0, tzinfo=UTC),
+        completed_at=None,
+    )
+
+    with pytest.raises(ExportJobValidationError, match="completion failed"):
+        _persist_generated_export_artifact(
+            repository=FailingCompleteRepository(),
+            artifact_store=FileSystemExportArtifactStore(artifact_dir),
+            export_job=export_job,
+            content=b"generated workbook",
+            filename="finance.xlsx",
+            content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        )
+
+    assert not (artifact_dir / "exports" / str(EXPORT_ID) / "finance.xlsx").exists()
 
 
 def test_export_operator_cannot_download_finance_workbook(tmp_path):
