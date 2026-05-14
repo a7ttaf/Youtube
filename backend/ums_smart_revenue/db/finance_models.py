@@ -17,6 +17,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from ums_smart_revenue.db.org_models import OrgBase
@@ -32,7 +33,11 @@ class FinanceMonthCloseORM(FinanceBase):
     month: Mapped[str] = mapped_column(Text, primary_key=True)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'OPEN'"))
     allocation_method: Mapped[str | None] = mapped_column(Text, nullable=True)
-    allocation_rule_payload: Mapped[dict[str, object]] = mapped_column(JSON, nullable=False, default=dict)
+    allocation_rule_payload: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=False,
+        default=dict,
+    )
     locked_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     unlocked_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)

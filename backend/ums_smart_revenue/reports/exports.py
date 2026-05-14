@@ -433,4 +433,9 @@ def _normalize_scope_channel_ids(
                 "scope_channel_ids must not contain blank entries"
             )
         cleaned.append(stripped)
-    return tuple(sorted(set(cleaned)))
+    result = tuple(sorted(set(cleaned)))
+    if not result:
+        raise ExportJobValidationError(
+            "scope_channel_ids must contain at least one channel"
+        )
+    return result

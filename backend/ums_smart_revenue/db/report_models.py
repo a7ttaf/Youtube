@@ -14,6 +14,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -92,7 +93,10 @@ class ExportJobORM(ReportBase):
     # Standards: Finance numbers must be deterministic per export id.
     # Blast Radius: Finance and analytics export reads.
     # ====================================================================
-    scope_channel_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
+    scope_channel_ids: Mapped[list[str] | None] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=True,
+    )
     month: Mapped[str] = mapped_column(Text, nullable=False)
     currency: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'USD'")

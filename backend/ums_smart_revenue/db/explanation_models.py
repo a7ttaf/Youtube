@@ -3,6 +3,7 @@ from decimal import Decimal
 from uuid import UUID
 
 from sqlalchemy import CheckConstraint, DateTime, Index, JSON, Numeric, Text, UniqueConstraint, Uuid, func, text
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -22,8 +23,16 @@ class NumberExplanationORM(ExplanationBase):
     currency: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'USD'"))
     formula: Mapped[str] = mapped_column(Text, nullable=False)
     confidence: Mapped[str] = mapped_column(Text, nullable=False)
-    components: Mapped[list[dict[str, object]]] = mapped_column(JSON, nullable=False, default=list)
-    warnings: Mapped[list[dict[str, object]]] = mapped_column(JSON, nullable=False, default=list)
+    components: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=False,
+        default=list,
+    )
+    warnings: Mapped[list[dict[str, object]]] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=False,
+        default=list,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
 
