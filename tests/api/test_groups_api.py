@@ -188,6 +188,46 @@ def test_data_steward_can_create_group_inside_scope_and_audit(tmp_path):
     assert audit_log.sensitive is True
 
 
+def test_create_group_rejects_unknown_channel_id(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/groups",
+        headers=auth_headers("corporate_admin", "global"),
+        json={
+            "name": "Unknown Channel Review",
+            "group_type": "CUSTOM_GROUP",
+            "channel_ids": ["missing-channel"],
+            "reason": "Reject unknown channel",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Channel not found: missing-channel"
+
+
+def test_create_group_rejects_blank_audit_reason(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/groups",
+        headers=auth_headers("corporate_admin", "global"),
+        json={
+            "name": "Blank Reason Review",
+            "group_type": "CUSTOM_GROUP",
+            "channel_ids": ["group-channel-tv"],
+            "reason": "   ",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["msg"] == "Value error, must not be blank"
+
+
 def test_data_steward_cannot_create_group_with_other_company_channel(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -256,6 +296,39 @@ def test_corporate_admin_can_add_and_remove_group_members_with_audit(tmp_path):
         "Add news channel for corporate group review",
         "Remove TV channel after review",
     ]
+
+
+def test_add_group_members_rejects_unknown_channel_id(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        f"/groups/{GROUP_TV_ID}/members",
+        headers=auth_headers("corporate_admin", "global"),
+        json={
+            "channel_ids": ["missing-channel"],
+            "reason": "Reject unknown channel",
+        },
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Channel not found: missing-channel"
+
+
+def test_remove_group_member_rejects_blank_audit_reason(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.delete(
+        f"/groups/{GROUP_TV_ID}/members/group-channel-tv",
+        headers=auth_headers("corporate_admin", "global"),
+        params={"reason": "   "},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "reason must not be blank"
 
 
 def test_malformed_group_id_returns_not_found(tmp_path):

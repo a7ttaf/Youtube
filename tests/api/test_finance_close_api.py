@@ -106,6 +106,29 @@ def test_finance_admin_can_lock_month_with_audit(tmp_path):
     assert audit_log.reason == "Final payment reconciliation completed"
 
 
+def test_finance_close_rejects_blank_lock_reason_before_state_change(tmp_path):
+    """Whitespace reasons are rejected before close-state mutation or audit."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/finance-close/2026-03/lock",
+        headers=auth_headers("finance_admin"),
+        json={"reason": "   "},
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        close = session.get(FinanceMonthCloseORM, "2026-03")
+        audit_logs = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["msg"] == "Value error, must not be blank"
+    assert close is None
+    assert audit_logs == []
+
+
 def test_finance_close_rejects_invalid_month_path(tmp_path):
     """Invalid month path values are rejected before close-state lookup."""
     database_url = build_database_url(tmp_path)

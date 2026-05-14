@@ -1,7 +1,7 @@
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies import current_principal_from_headers
@@ -42,16 +42,31 @@ class GroupCreateRequest(BaseModel):
     channel_ids: list[str] = Field(default_factory=list)
     reason: str = Field(min_length=1)
 
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip_reason(cls, value):
+        return _strip_required_string(value)
+
 
 class GroupUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1)
     active: bool | None = None
     reason: str = Field(min_length=1)
 
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip_reason(cls, value):
+        return _strip_required_string(value)
+
 
 class GroupMembersRequest(BaseModel):
     channel_ids: list[str] = Field(min_length=1)
     reason: str = Field(min_length=1)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip_reason(cls, value):
+        return _strip_required_string(value)
 
 
 @router.get("")
@@ -81,11 +96,14 @@ def create_group(
         channel_ids=payload.channel_ids,
         org_index=org_index,
     )
-    group = registry.create_group(
-        name=payload.name,
-        group_type=payload.group_type,
-        channel_ids=payload.channel_ids,
-    )
+    try:
+        group = registry.create_group(
+            name=payload.name,
+            group_type=payload.group_type,
+            channel_ids=payload.channel_ids,
+        )
+    except KeyError as exc:
+        raise _registry_not_found(exc) from exc
     record = _audit_group_change(
         audit_sink=audit_sink,
         user=user,
@@ -113,11 +131,14 @@ def update_group(
         channel_ids=list(group.channel_ids),
         org_index=org_index,
     )
-    updated = registry.update_group(
-        group_id=group_id,
-        name=payload.name,
-        active=payload.active,
-    )
+    try:
+        updated = registry.update_group(
+            group_id=group_id,
+            name=payload.name,
+            active=payload.active,
+        )
+    except KeyError as exc:
+        raise _registry_not_found(exc) from exc
     record = _audit_group_change(
         audit_sink=audit_sink,
         user=user,
@@ -146,7 +167,13 @@ def add_group_members(
         channel_ids=channel_ids,
         org_index=org_index,
     )
-    updated = registry.add_members(group_id=group_id, channel_ids=payload.channel_ids)
+    try:
+        updated = registry.add_members(
+            group_id=group_id,
+            channel_ids=payload.channel_ids,
+        )
+    except KeyError as exc:
+        raise _registry_not_found(exc) from exc
     record = _audit_group_change(
         audit_sink=audit_sink,
         user=user,
@@ -175,12 +202,16 @@ def remove_group_member(
         channel_ids=list(group.channel_ids),
         org_index=org_index,
     )
-    updated = registry.remove_member(group_id=group_id, channel_id=channel_id)
+    normalized_reason = _normalize_query_reason(reason)
+    try:
+        updated = registry.remove_member(group_id=group_id, channel_id=channel_id)
+    except KeyError as exc:
+        raise _registry_not_found(exc) from exc
     record = _audit_group_change(
         audit_sink=audit_sink,
         user=user,
         group=updated,
-        reason=reason,
+        reason=normalized_reason,
         action="member_removed",
     )
     response = updated.to_api()
@@ -194,6 +225,30 @@ def _validate_group_type(group_type: str) -> None:
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"Unknown group type: {group_type}",
         )
+
+
+def _strip_required_string(value):
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+    return value
+
+
+def _normalize_query_reason(reason: str) -> str:
+    try:
+        return _strip_required_string(reason)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="reason must not be blank",
+        ) from exc
+
+
+def _registry_not_found(exc: KeyError) -> HTTPException:
+    detail = str(exc.args[0]) if exc.args else "Registry resource not found"
+    return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=detail)
 
 
 def _can_view_group(

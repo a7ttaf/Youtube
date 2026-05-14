@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.audit_service import AuditRecord
-from ums_smart_revenue.db.security_models import AuditLogORM
+from ums_smart_revenue.db.security_models import AuditLogORM, UserORM
 
 
 class SqlAlchemyAuditSink:
@@ -16,6 +16,8 @@ class SqlAlchemyAuditSink:
     def append(self, record: AuditRecord) -> None:
         """Append one audit log row and flush so failures happen before commit."""
         user_id = _parse_uuid(record.user_id)
+        if self._session.get(UserORM, user_id) is None:
+            user_id = None
         self._session.add(
             AuditLogORM(
                 id=uuid4(),

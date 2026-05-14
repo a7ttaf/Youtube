@@ -14,7 +14,6 @@ from ums_smart_revenue.db.security_models import (
     UserRoleAssignmentORM,
 )
 
-
 ADMIN_ID = UUID("00000000-0000-0000-0000-000000014001")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000014002")
 COMPANY_ID = "company-tv-a"
@@ -91,6 +90,34 @@ def test_corporate_admin_assigns_scoped_assistant_role_with_audit(tmp_path):
     assert audit_log.event_type == "USER_ROLE_CHANGED"
     assert audit_log.reason == "Grant analytics support access"
     assert audit_log.sensitive is True
+
+
+def test_assign_role_rejects_unknown_actor_before_assignment_write(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    unknown_actor_id = UUID("00000000-0000-0000-0000-000000014999")
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        f"/users/{TARGET_ID}/roles",
+        headers=auth_headers("corporate_admin", user_id=unknown_actor_id),
+        json={
+            "role_key": "assistant_analyst",
+            "scope_type": "company",
+            "scope_id": COMPANY_ID,
+            "reason": "Reject unknown actor",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        assignments = session.scalars(select(UserRoleAssignmentORM)).all()
+        audit_logs = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Actor user not found"
+    assert assignments == []
+    assert audit_logs == []
 
 
 def test_assistant_cannot_assign_roles_or_probe_users(tmp_path):

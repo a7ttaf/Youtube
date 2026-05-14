@@ -42,12 +42,15 @@ const ROLE_LABELS: Record<Role, string> = {
   company: "Company Manager",
 };
 
-// In production this value is hydrated from the server-authenticated session claim.
-const SERVER_AUTHENTICATED_SESSION = {
-  role: "finance" as Role,
+type AuthenticatedSession = {
+  role?: Role;
 };
 
+// In production this value is hydrated from the server-authenticated session claim.
+const SERVER_AUTHENTICATED_SESSION: AuthenticatedSession = {};
+
 const CAN_PREVIEW_ROLES = import.meta.env.DEV;
+const DEFAULT_PREVIEW_ROLE: Role = "assistant";
 
 const RESTRICTED_FINANCE_VALUE = "Restricted";
 
@@ -135,12 +138,32 @@ function SummaryTile({
   );
 }
 
+function AccessDeniedState() {
+  return (
+    <div className="app">
+      <main className="main" aria-labelledby="accessDeniedTitle">
+        <section className="panel">
+          <div className="panel-header">
+            <div className="panel-title">
+              <strong id="accessDeniedTitle">Access denied</strong>
+              <span>Authenticated session role is required.</span>
+            </div>
+            <Badge tone="red">No session role</Badge>
+          </div>
+        </section>
+      </main>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ shell */
 
 export default function AppShell() {
   const [view, setView] = useState<ViewKey>("command");
   const authenticatedRole = SERVER_AUTHENTICATED_SESSION.role;
-  const [previewRole, setPreviewRole] = useState<Role>(authenticatedRole);
+  const [previewRole, setPreviewRole] = useState<Role>(
+    authenticatedRole ?? DEFAULT_PREVIEW_ROLE,
+  );
   const [selected, setSelected] = useState<string>("UMS Drama");
   const [revenueTab, setRevenueTab] = useState<"Net" | "Gross" | "Allocated">("Net");
   const [traceTab, setTraceTab] = useState<"Revenue Flow" | "Issues" | "Ownership">(
@@ -148,7 +171,11 @@ export default function AppShell() {
   );
 
   const displayedRole = CAN_PREVIEW_ROLES ? previewRole : authenticatedRole;
-  const canViewFinance = authenticatedRole === "finance";
+  if (!displayedRole) {
+    return <AccessDeniedState />;
+  }
+
+  const canViewFinance = displayedRole === "finance";
   const copy = VIEW_COPY[view];
 
   return (
@@ -204,7 +231,7 @@ export default function AppShell() {
               )}
             </select>
           ) : (
-            <output id="roleSelect">{ROLE_LABELS[authenticatedRole]}</output>
+            <output id="roleSelect">{ROLE_LABELS[displayedRole]}</output>
           )}
           <div className="role-meta" aria-label="Role permission state">
             <span className={`role-state${canViewFinance ? "" : " is-restricted"}`}>

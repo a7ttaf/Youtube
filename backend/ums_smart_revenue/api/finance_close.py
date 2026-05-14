@@ -2,7 +2,7 @@ import re
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
@@ -22,7 +22,6 @@ from ums_smart_revenue.finance.month_close_readiness import (
     SqlAlchemyFinanceCloseReadinessService,
 )
 
-
 router = APIRouter(prefix="/finance-close", tags=["finance-close"])
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
@@ -30,11 +29,21 @@ MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 class FinanceCloseReasonRequest(BaseModel):
     reason: str = Field(min_length=1)
 
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip_reason(cls, value):
+        return _strip_required_string(value)
+
 
 class AllocationRuleRequest(BaseModel):
     allocation_method: str = Field(min_length=1)
     rule_payload: dict[str, object] = Field(default_factory=dict)
     reason: str = Field(min_length=1)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip_reason(cls, value):
+        return _strip_required_string(value)
 
 
 def current_finance_month_close_repository(
@@ -47,6 +56,15 @@ def current_finance_close_readiness_service(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyFinanceCloseReadinessService:
     return SqlAlchemyFinanceCloseReadinessService(session)
+
+
+def _strip_required_string(value):
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+    return value
 
 
 @router.get("/{month}")

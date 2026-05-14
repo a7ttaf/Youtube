@@ -12,7 +12,6 @@ from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
-
 USER_ID = UUID("00000000-0000-0000-0000-000000002001")
 
 
@@ -75,3 +74,24 @@ def test_sql_audit_sink_rejects_invalid_actor_id():
             reason="Reject malformed actor",
             details={},
         )
+
+
+def test_sql_audit_sink_tolerates_unknown_valid_actor_id():
+    session = build_session()
+    sink = SqlAlchemyAuditSink(session)
+
+    record_audit_event(
+        sink=sink,
+        actor=principal(),
+        event_type=AuditEventType.CHANNEL_UPDATED,
+        entity_type="youtube_channel",
+        entity_id="channel-tv-a",
+        scope=AccessScope.company("company-tv-a"),
+        reason="Persist audit without local actor row",
+        details={"old_primary_company_id": "company-old"},
+    )
+    session.commit()
+
+    audit_log = session.scalars(select(AuditLogORM)).one()
+    assert audit_log.user_id is None
+    assert audit_log.reason == "Persist audit without local actor row"

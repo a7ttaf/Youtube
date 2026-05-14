@@ -9,8 +9,10 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.db.finance_models import CurrencyExchangeRateORM, FinanceBase
 from ums_smart_revenue.finance.exchange_rates import (
     CurrencyExchangeRateInput,
+    ExchangeRateError,
     ExchangeRateValidationError,
     SqlAlchemyExchangeRateRepository,
+    _dialect_insert,
 )
 
 USER_ID = UUID("00000000-0000-0000-0000-00000000e201")
@@ -58,6 +60,14 @@ def test_exchange_rate_repository_upserts_provider_rate():
     assert second[0].quote_currency == "USD"
     assert second[0].source_report_id == "ecb-2026-04-22-corrected"
     assert second[0].to_api(include_raw_payload=True)["raw_payload"] == {"version": 2}
+
+
+def test_unsupported_exchange_rate_dialect_raises_runtime_error_type():
+    with pytest.raises(ExchangeRateError) as exc_info:
+        _dialect_insert("mysql")
+
+    assert type(exc_info.value) is ExchangeRateError
+    assert "Unsupported database dialect" in str(exc_info.value)
 
 
 def test_exchange_rate_repository_rejects_duplicate_rate_keys_in_batch():

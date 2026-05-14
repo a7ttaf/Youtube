@@ -285,6 +285,6 @@ def _dialect_insert(dialect_name: str):
         return sqlite_insert
     if dialect_name == "postgresql":
         return postgresql_insert
-    raise ExchangeRateValidationError(
+    raise ExchangeRateError(
         f"Unsupported database dialect for exchange-rate upsert: {dialect_name}"
     )
