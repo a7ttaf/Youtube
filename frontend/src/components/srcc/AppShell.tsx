@@ -60,7 +60,7 @@ type AccessPermissions = {
 const SERVER_AUTHENTICATED_SESSION: AuthenticatedSession = {};
 
 const CAN_PREVIEW_ROLES =
-  import.meta.env.DEV || import.meta.env.VITE_CAN_PREVIEW_ROLES === "true";
+  import.meta.env.DEV || import.meta.env.VITE_ENABLE_ROLE_PREVIEW === "true";
 const DEFAULT_PREVIEW_ROLE: Role = "assistant";
 
 const RESTRICTED_FINANCE_VALUE = "Restricted";
