@@ -16,10 +16,10 @@ class SqlAlchemyAuditSink:
     def append(self, record: AuditRecord) -> None:
         """Append one audit log row and flush so failures happen before commit."""
         raw_actor_user_id = record.user_id
-        user_id = _parse_uuid(raw_actor_user_id)
+        user_id = _parse_uuid_or_none(raw_actor_user_id)
         details = dict(record.details or {})
-        if self._session.get(UserORM, user_id) is None:
-            details.setdefault("actor_user_id", raw_actor_user_id)
+        if user_id is None or self._session.get(UserORM, user_id) is None:
+            details["actor_user_id"] = raw_actor_user_id
             user_id = None
         self._session.add(
             AuditLogORM(
@@ -45,9 +45,9 @@ class SqlAlchemyAuditSink:
         self._session.expunge_all()
 
 
-def _parse_uuid(value: str) -> UUID:
-    """Parse audit actor ids before writing SQL foreign-key references."""
+def _parse_uuid_or_none(value: str) -> UUID | None:
+    """Parse audit actor ids when they can be represented as local user FKs."""
     try:
         return UUID(value)
-    except ValueError as exc:
-        raise ValueError(f"Invalid audit user_id: {value!r}") from exc
+    except ValueError:
+        return None

@@ -1,6 +1,5 @@
 from uuid import UUID
 
-import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -55,25 +54,29 @@ def test_sql_audit_sink_persists_sensitive_audit_record():
     assert audit_log.details["old_primary_company_id"] == "company-old"
 
 
-def test_sql_audit_sink_rejects_invalid_actor_id():
+def test_sql_audit_sink_tolerates_malformed_actor_id_with_details():
     session = build_session()
     sink = SqlAlchemyAuditSink(session)
 
-    with pytest.raises(ValueError, match="Invalid audit user_id"):
-        record_audit_event(
-            sink=sink,
-            actor=UserPrincipal(
-                user_id="not-a-uuid",
-                email="admin@example.com",
-                role_assignments=[RoleAssignment(role=RoleKey.CORPORATE_ADMIN, scope=AccessScope.global_scope())],
-            ),
-            event_type=AuditEventType.CHANNEL_UPDATED,
-            entity_type="youtube_channel",
-            entity_id="channel-tv-a",
-            scope=AccessScope.company("company-tv-a"),
-            reason="Reject malformed actor",
-            details={},
-        )
+    record_audit_event(
+        sink=sink,
+        actor=UserPrincipal(
+            user_id="not-a-uuid",
+            email="admin@example.com",
+            role_assignments=[RoleAssignment(role=RoleKey.CORPORATE_ADMIN, scope=AccessScope.global_scope())],
+        ),
+        event_type=AuditEventType.CHANNEL_UPDATED,
+        entity_type="youtube_channel",
+        entity_id="channel-tv-a",
+        scope=AccessScope.company("company-tv-a"),
+        reason="Persist audit for malformed actor",
+        details={},
+    )
+    session.commit()
+
+    audit_log = session.scalars(select(AuditLogORM)).one()
+    assert audit_log.user_id is None
+    assert audit_log.details["actor_user_id"] == "not-a-uuid"
 
 
 def test_sql_audit_sink_tolerates_unknown_valid_actor_id():

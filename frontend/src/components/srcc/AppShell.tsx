@@ -1099,11 +1099,13 @@ function ExportsView({ permissions }: { permissions: AccessPermissions }) {
 /* ------------------------------------------------------------------ connectors */
 
 function ConnectorsView({ permissions }: { permissions: AccessPermissions }) {
-  const { canRunConnectors } = permissions;
+  const { canRunConnectors, canViewFinance } = permissions;
   return (
     <section className="view-page" aria-labelledby="connectorsTitle">
       <div className="view-summary" aria-label="Connector summary">
-        {CONNECTORS_SUMMARY.map((s) => <SummaryTile key={s.label} {...s} />)}
+        {CONNECTORS_SUMMARY.map((s) => (
+          <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
+        ))}
       </div>
 
       <div className="view-grid">
@@ -1182,11 +1184,13 @@ function ConnectorsView({ permissions }: { permissions: AccessPermissions }) {
 /* ------------------------------------------------------------------ audit */
 
 function AuditView({ permissions }: { permissions: AccessPermissions }) {
-  const { canViewAudit } = permissions;
+  const { canViewAudit, canViewFinance } = permissions;
   return (
     <section className="view-page" aria-labelledby="auditTitle">
       <div className="view-summary" aria-label="Audit summary">
-        {AUDIT_SUMMARY.map((s) => <SummaryTile key={s.label} {...s} />)}
+        {AUDIT_SUMMARY.map((s) => (
+          <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
+        ))}
       </div>
 
       <div className="view-grid">

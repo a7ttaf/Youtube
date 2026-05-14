@@ -133,6 +133,7 @@ class AccessScopeORM(SecurityBase):
             "scope_type",
             unique=True,
             postgresql_where=text("scope_type = 'global' AND scope_id IS NULL"),
+            sqlite_where=text("scope_type = 'global' AND scope_id IS NULL"),
         ),
     )
 

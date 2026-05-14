@@ -325,18 +325,6 @@ def _can_manage_group_channels(
     )
 
 
-def _require_group(
-    registry: ChannelGroupRegistryStore, group_id: str
-) -> ChannelGroupEntry:
-    group = registry.get_group(group_id)
-    if group is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Group not found",
-        )
-    return group
-
-
 def _require_manageable_group(
     *,
     registry: ChannelGroupRegistryStore,
@@ -365,7 +353,6 @@ def _audit_group_change(
     reason: str,
     action: str,
 ):
-    normalized_reason = _normalize_query_reason(reason)
     return record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -373,7 +360,7 @@ def _audit_group_change(
         entity_type="channel_group",
         entity_id=group.id,
         scope=AccessScope.global_scope(),
-        reason=normalized_reason,
+        reason=reason,
         details={
             "action": action,
             "group_type": group.group_type,

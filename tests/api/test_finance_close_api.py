@@ -129,6 +129,31 @@ def test_finance_close_rejects_blank_lock_reason_before_state_change(tmp_path):
     assert audit_logs == []
 
 
+def test_finance_close_rejects_malformed_actor_id_before_state_change(tmp_path):
+    """Malformed actor ids return auth/input errors instead of close conflicts."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers("finance_admin")
+    headers["x-user-id"] = "not-a-uuid"
+
+    response = client.post(
+        "/finance-close/2026-03/lock",
+        headers=headers,
+        json={"reason": "Reject malformed actor id"},
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        close = session.get(FinanceMonthCloseORM, "2026-03")
+        audit_logs = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid request"
+    assert close is None
+    assert audit_logs == []
+
+
 def test_finance_close_rejects_invalid_month_path(tmp_path):
     """Invalid month path values are rejected before close-state lookup."""
     database_url = build_database_url(tmp_path)

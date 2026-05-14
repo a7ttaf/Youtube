@@ -1,5 +1,6 @@
 import re
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
@@ -106,6 +107,7 @@ def lock_finance_month(
     _validate_month(month)
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.LOCK_FINANCE_MONTH, scope)
+    _validate_actor_user_id(user.user_id)
     try:
         close = repository.lock_month(month=month, actor_user_id=user.user_id)
     except FinanceMonthCloseReadinessError as exc:
@@ -140,6 +142,7 @@ def unlock_finance_month(
     _validate_month(month)
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.UNLOCK_FINANCE_MONTH, scope)
+    _validate_actor_user_id(user.user_id)
     try:
         close = repository.unlock_month(month=month, actor_user_id=user.user_id)
     except ValueError as exc:
@@ -169,6 +172,7 @@ def record_allocation_rule(
     _validate_month(month)
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, scope)
+    _validate_actor_user_id(user.user_id)
     try:
         close = repository.record_allocation_rule(
             month=month,
@@ -205,6 +209,16 @@ def _validate_month(month: str) -> None:
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="month must use YYYY-MM with a calendar month from 01 to 12",
         )
+
+
+def _validate_actor_user_id(user_id: str) -> None:
+    try:
+        UUID(user_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid request",
+        ) from exc
 
 
 def _audit_finance_close(
