@@ -97,6 +97,16 @@ class FileSystemExportArtifactStore:
         except OSError as exc:
             raise ExportArtifactStorageError("artifact cleanup unavailable") from exc
 
+    def read(self, *, file_url: str) -> bytes:
+        relative_path = _relative_path_from_file_url(file_url)
+        target_path = self._root_dir / relative_path
+        try:
+            return target_path.read_bytes()
+        except FileNotFoundError as exc:
+            raise ExportArtifactStorageError("artifact missing from storage") from exc
+        except OSError as exc:
+            raise ExportArtifactStorageError("artifact storage unavailable") from exc
+
 
 def _default_root_dir() -> Path:
     return DEFAULT_EXPORT_ARTIFACT_DIR

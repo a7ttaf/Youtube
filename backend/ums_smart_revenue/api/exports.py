@@ -449,13 +449,36 @@ def download_finance_workbook(
             raise FinanceWorkbookPreviewValidationError(
                 "finance workbook download only supports FINANCE_EXCEL exports"
             )
-        preview = _build_finance_workbook_preview_for_export(
+        served = _serve_persisted_artifact_bytes(
             export_job=export_job,
-            session=session,
-            org_index=org_index,
-            group_registry=group_registry,
+            expected_export_type="FINANCE_EXCEL",
+            artifact_store=artifact_store,
         )
-        workbook_bytes = build_finance_workbook_xlsx(preview)
+        if served is not None:
+            workbook_bytes, filename, content_type = served
+        else:
+            preview = _build_finance_workbook_preview_for_export(
+                export_job=export_job,
+                session=session,
+                org_index=org_index,
+                group_registry=group_registry,
+            )
+            workbook_bytes = build_finance_workbook_xlsx(preview)
+            filename = f"ums-finance-{export_job.month}-{export_job.scope_type}.xlsx"
+            content_type = (
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            )
+            export_job, storage_failure_response = _persist_generated_export_artifact(
+                repository=repository,
+                artifact_store=artifact_store,
+                export_job=export_job,
+                content=workbook_bytes,
+                filename=filename,
+                content_type=content_type,
+            )
+            if storage_failure_response is not None:
+                return storage_failure_response
+            export_job = _require_persisted_export_job(export_job)
     except KeyError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc).strip("'")
@@ -477,20 +500,6 @@ def download_finance_workbook(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
-
-    filename = f"ums-finance-{export_job.month}-{export_job.scope_type}.xlsx"
-    content_type = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    export_job, storage_failure_response = _persist_generated_export_artifact(
-        repository=repository,
-        artifact_store=artifact_store,
-        export_job=export_job,
-        content=workbook_bytes,
-        filename=filename,
-        content_type=content_type,
-    )
-    if storage_failure_response is not None:
-        return storage_failure_response
-    export_job = _require_persisted_export_job(export_job)
 
     _record_finance_export_artifact_audit(
         audit_sink=audit_sink,
@@ -541,20 +550,41 @@ def download_executive_pdf(
             raise ExecutivePdfValidationError(
                 "executive PDF download only supports EXECUTIVE_PDF exports"
             )
-        source_summaries = _build_finance_source_summaries_for_export(
+        served = _serve_persisted_artifact_bytes(
             export_job=export_job,
-            session=session,
-            org_index=org_index,
-            group_registry=group_registry,
+            expected_export_type="EXECUTIVE_PDF",
+            artifact_store=artifact_store,
         )
-        report = build_executive_pdf_report(
-            export_job=export_job,
-            net_revenue=source_summaries.net_revenue,
-            payment_match=source_summaries.payment_match,
-            bank_reconciliation=source_summaries.bank_reconciliation,
-            smart_alerts=source_summaries.smart_alerts,
-        )
-        pdf_bytes = build_executive_pdf_bytes(report)
+        if served is not None:
+            pdf_bytes, filename, content_type = served
+        else:
+            source_summaries = _build_finance_source_summaries_for_export(
+                export_job=export_job,
+                session=session,
+                org_index=org_index,
+                group_registry=group_registry,
+            )
+            report = build_executive_pdf_report(
+                export_job=export_job,
+                net_revenue=source_summaries.net_revenue,
+                payment_match=source_summaries.payment_match,
+                bank_reconciliation=source_summaries.bank_reconciliation,
+                smart_alerts=source_summaries.smart_alerts,
+            )
+            pdf_bytes = build_executive_pdf_bytes(report)
+            filename = f"ums-executive-{export_job.month}-{export_job.scope_type}.pdf"
+            content_type = "application/pdf"
+            export_job, storage_failure_response = _persist_generated_export_artifact(
+                repository=repository,
+                artifact_store=artifact_store,
+                export_job=export_job,
+                content=pdf_bytes,
+                filename=filename,
+                content_type=content_type,
+            )
+            if storage_failure_response is not None:
+                return storage_failure_response
+            export_job = _require_persisted_export_job(export_job)
     except KeyError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc).strip("'")
@@ -576,20 +606,6 @@ def download_executive_pdf(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
-
-    filename = f"ums-executive-{export_job.month}-{export_job.scope_type}.pdf"
-    content_type = "application/pdf"
-    export_job, storage_failure_response = _persist_generated_export_artifact(
-        repository=repository,
-        artifact_store=artifact_store,
-        export_job=export_job,
-        content=pdf_bytes,
-        filename=filename,
-        content_type=content_type,
-    )
-    if storage_failure_response is not None:
-        return storage_failure_response
-    export_job = _require_persisted_export_job(export_job)
 
     _record_finance_export_artifact_audit(
         audit_sink=audit_sink,
@@ -640,20 +656,43 @@ def download_branded_slide_pack(
             raise BrandedSlidePackValidationError(
                 "branded slide pack download only supports BRANDED_SLIDE_PACK exports"
             )
-        source_summaries = _build_finance_source_summaries_for_export(
+        served = _serve_persisted_artifact_bytes(
             export_job=export_job,
-            session=session,
-            org_index=org_index,
-            group_registry=group_registry,
+            expected_export_type="BRANDED_SLIDE_PACK",
+            artifact_store=artifact_store,
         )
-        report = build_branded_slide_pack_report(
-            export_job=export_job,
-            net_revenue=source_summaries.net_revenue,
-            payment_match=source_summaries.payment_match,
-            bank_reconciliation=source_summaries.bank_reconciliation,
-            smart_alerts=source_summaries.smart_alerts,
-        )
-        pptx_bytes = build_branded_slide_pack_pptx(report)
+        if served is not None:
+            pptx_bytes, filename, content_type = served
+        else:
+            source_summaries = _build_finance_source_summaries_for_export(
+                export_job=export_job,
+                session=session,
+                org_index=org_index,
+                group_registry=group_registry,
+            )
+            report = build_branded_slide_pack_report(
+                export_job=export_job,
+                net_revenue=source_summaries.net_revenue,
+                payment_match=source_summaries.payment_match,
+                bank_reconciliation=source_summaries.bank_reconciliation,
+                smart_alerts=source_summaries.smart_alerts,
+            )
+            pptx_bytes = build_branded_slide_pack_pptx(report)
+            filename = f"ums-branded-{export_job.month}-{export_job.scope_type}.pptx"
+            content_type = (
+                "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+            )
+            export_job, storage_failure_response = _persist_generated_export_artifact(
+                repository=repository,
+                artifact_store=artifact_store,
+                export_job=export_job,
+                content=pptx_bytes,
+                filename=filename,
+                content_type=content_type,
+            )
+            if storage_failure_response is not None:
+                return storage_failure_response
+            export_job = _require_persisted_export_job(export_job)
     except KeyError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc).strip("'")
@@ -675,22 +714,6 @@ def download_branded_slide_pack(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
-
-    filename = f"ums-branded-{export_job.month}-{export_job.scope_type}.pptx"
-    content_type = (
-        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-    )
-    export_job, storage_failure_response = _persist_generated_export_artifact(
-        repository=repository,
-        artifact_store=artifact_store,
-        export_job=export_job,
-        content=pptx_bytes,
-        filename=filename,
-        content_type=content_type,
-    )
-    if storage_failure_response is not None:
-        return storage_failure_response
-    export_job = _require_persisted_export_job(export_job)
 
     _record_finance_export_artifact_audit(
         audit_sink=audit_sink,
@@ -812,6 +835,44 @@ def _persist_generated_export_artifact(
 
 def _has_completed_artifact(export_job: ExportJobEntry) -> bool:
     return export_job.status == "COMPLETED" and export_job.file_url is not None
+
+
+def _serve_persisted_artifact_bytes(
+    *,
+    export_job: ExportJobEntry,
+    expected_export_type: str,
+    artifact_store: FileSystemExportArtifactStore,
+) -> tuple[bytes, str, str] | None:
+    # ====================================================================
+    # Purpose: Return persisted bytes for a COMPLETED export so callers
+    #   can short-circuit regenerating the workbook/PDF/PPTX on every
+    #   download. The on-disk artifact is the source of truth once the
+    #   job has been finalized; regenerating would drift from the
+    #   persisted checksum recorded in audit metadata.
+    # Database/ORM: None (FileSystemExportArtifactStore filesystem read).
+    # Standards: Idempotent downloads, audit metadata integrity.
+    # Blast Radius: Workbook/PDF/PPTX download response bytes.
+    # ====================================================================
+    if export_job.export_type != expected_export_type:
+        return None
+    if not _has_completed_artifact(export_job):
+        return None
+    if (
+        not export_job.file_url
+        or not export_job.artifact_filename
+        or not export_job.artifact_content_type
+    ):
+        return None
+    try:
+        artifact_bytes = artifact_store.read(file_url=export_job.file_url)
+    except ExportArtifactStorageError:
+        logger.warning(
+            "Persisted export artifact unreadable for %s; falling back to regeneration",
+            export_job.id,
+            exc_info=True,
+        )
+        return None
+    return artifact_bytes, export_job.artifact_filename, export_job.artifact_content_type
 
 
 def _require_persisted_export_job(export_job: ExportJobEntry | None) -> ExportJobEntry:
