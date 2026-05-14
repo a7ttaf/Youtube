@@ -11,7 +11,6 @@ import {
   CONNECTOR_HEALTH,
   CONNECTOR_JOBS,
   CREDENTIAL_CONTROLS,
-  EXPLAIN_ROWS,
   EXPORTS_GUARDRAILS,
   EXPORTS_ROWS,
   EXPORTS_SUMMARY,
@@ -51,9 +50,57 @@ type AccessPermissions = {
   canViewFinance: boolean;
   canManageRegistry: boolean;
   canCloseMonth: boolean;
-  canCreateExports: boolean;
+  canCreateGlobalExports: boolean;
+  canCreateScopedExports: boolean;
+  canRequestRawExports: boolean;
   canRunConnectors: boolean;
   canViewAudit: boolean;
+};
+
+const REVENUE_TABS = ["Net", "Gross", "Allocated"] as const;
+type RevenueTab = (typeof REVENUE_TABS)[number];
+type ChannelAmountKey = "gross" | "tax" | "deductions" | "net";
+type ExportScope = (typeof EXPORTS_ROWS)[number]["scope"];
+
+const REVENUE_TAB_CONFIG: Record<
+  RevenueTab,
+  {
+    amountKey: ChannelAmountKey;
+    tableLabel: string;
+    kpiLabel: string;
+    kpiNote: string;
+    explanationTitle: string;
+    formula: string;
+    rowOrder: ChannelAmountKey[];
+  }
+> = {
+  Net: {
+    amountKey: "net",
+    tableLabel: "Net focus",
+    kpiLabel: "Selected net",
+    kpiNote: "After tax and allocation",
+    explanationTitle: "Net revenue explanation",
+    formula: "net = gross + adjustments - tax - allocated_deductions + manual_adjustments",
+    rowOrder: ["gross", "tax", "deductions", "net"],
+  },
+  Gross: {
+    amountKey: "gross",
+    tableLabel: "Gross focus",
+    kpiLabel: "Selected gross",
+    kpiNote: "Before tax and allocation",
+    explanationTitle: "Gross revenue explanation",
+    formula: "gross = source revenue before tax withholding and shared deductions",
+    rowOrder: ["gross", "tax", "deductions", "net"],
+  },
+  Allocated: {
+    amountKey: "deductions",
+    tableLabel: "Allocated focus",
+    kpiLabel: "Selected allocation",
+    kpiNote: "Shared deductions applied",
+    explanationTitle: "Allocation explanation",
+    formula: "allocated_deductions = payment_gap_share + channel_adjustments",
+    rowOrder: ["deductions", "gross", "tax", "net"],
+  },
 };
 
 // In production this value is hydrated from the server-authenticated session claim.
@@ -95,15 +142,77 @@ function restrictChannelFinance(channel: ChannelRow): ChannelRow {
 
 function permissionsForRole(role: Role): AccessPermissions {
   const finance = role === "finance";
+  const company = role === "company";
   return {
     role,
     canViewFinance: finance,
     canManageRegistry: finance,
     canCloseMonth: finance,
-    canCreateExports: finance,
+    canCreateGlobalExports: finance,
+    canCreateScopedExports: finance || company,
+    canRequestRawExports: finance,
     canRunConnectors: finance,
     canViewAudit: finance,
   };
+}
+
+function canCreateAnyExport(permissions: AccessPermissions) {
+  return (
+    permissions.canCreateGlobalExports ||
+    permissions.canCreateScopedExports ||
+    permissions.canRequestRawExports
+  );
+}
+
+function canCreateExportScope(permissions: AccessPermissions, scope: ExportScope) {
+  if (scope === "global") return permissions.canCreateGlobalExports;
+  if (scope === "scoped") return permissions.canCreateScopedExports;
+  return permissions.canRequestRawExports;
+}
+
+function explainRowsForChannel(
+  channel: ChannelRow,
+  revenueTab: RevenueTab,
+  canViewFinance: boolean,
+) {
+  const rows: Record<
+    ChannelAmountKey,
+    { key: ChannelAmountKey; tone: Severity; title: string; sub: string; value: string }
+  > = {
+    gross: {
+      key: "gross",
+      tone: channel.cms.tone,
+      title: "Gross revenue",
+      sub: `${channel.cms.text} source`,
+      value: channel.gross,
+    },
+    tax: {
+      key: "tax",
+      tone: "green",
+      title: "Tax withholding",
+      sub: "Official tax report",
+      value: channel.tax,
+    },
+    deductions: {
+      key: "deductions",
+      tone: channel.issue ? "amber" : "green",
+      title: "Allocated deductions",
+      sub: revenueTab === "Allocated" ? "Focused allocation view" : "Payment gap allocation",
+      value: channel.deductions,
+    },
+    net: {
+      key: "net",
+      tone: channel.confidence.tone,
+      title: "Net value",
+      sub: "Locked result row",
+      value: channel.net,
+    },
+  };
+
+  return REVENUE_TAB_CONFIG[revenueTab].rowOrder.map((key) => {
+    const row = rows[key];
+    return canViewFinance ? row : { ...row, value: RESTRICTED_FINANCE_VALUE };
+  });
 }
 
 function Badge({ tone, children }: { tone: Severity; children: React.ReactNode }) {
@@ -189,7 +298,7 @@ export default function AppShell() {
     authenticatedRole ?? DEFAULT_PREVIEW_ROLE,
   );
   const [selected, setSelected] = useState<string>("UMS Drama");
-  const [revenueTab, setRevenueTab] = useState<"Net" | "Gross" | "Allocated">("Net");
+  const [revenueTab, setRevenueTab] = useState<RevenueTab>("Net");
   const [traceTab, setTraceTab] = useState<"Revenue Flow" | "Issues" | "Ownership">(
     "Revenue Flow",
   );
@@ -315,7 +424,7 @@ export default function AppShell() {
             <button className="icon-button" aria-label="Refresh reports" title="Refresh reports">
               <RefreshIcon />
             </button>
-            <button className="primary-button" disabled={!permissions.canCreateExports}>
+            <button className="primary-button" disabled={!canCreateAnyExport(permissions)}>
               Create Export
             </button>
           </div>
@@ -361,23 +470,32 @@ function CommandView({
 }: {
   selected: string;
   setSelected: (s: string) => void;
-  revenueTab: "Net" | "Gross" | "Allocated";
-  setRevenueTab: (t: "Net" | "Gross" | "Allocated") => void;
+  revenueTab: RevenueTab;
+  setRevenueTab: (t: RevenueTab) => void;
   canViewFinance: boolean;
 }) {
-  const visibleKpis = KPIS.map((k) =>
-    k.finance && !canViewFinance
-      ? { ...k, value: RESTRICTED_FINANCE_VALUE, note: ["Finance role required", "Server filtered"] }
-      : k,
-  );
   const visibleChannels = canViewFinance
     ? CHANNELS
     : CHANNELS.map((channel) => restrictChannelFinance(channel));
-  const visibleExplainRows = canViewFinance
-    ? EXPLAIN_ROWS
-    : EXPLAIN_ROWS.map((row) => ({ ...row, value: RESTRICTED_FINANCE_VALUE }));
   const selectedChannel =
     visibleChannels.find((c) => c.name === selected) ?? visibleChannels[0] ?? FALLBACK_CHANNEL;
+  const revenueConfig = REVENUE_TAB_CONFIG[revenueTab];
+  const visibleKpis = KPIS.map((k) => {
+    const metric =
+      k.id === "net"
+        ? {
+            ...k,
+            label: revenueConfig.kpiLabel,
+            value: selectedChannel[revenueConfig.amountKey],
+            badge: selectedChannel.confidence,
+            note: [selectedChannel.name, revenueConfig.kpiNote],
+          }
+        : k;
+    return metric.finance && !canViewFinance
+      ? { ...metric, value: RESTRICTED_FINANCE_VALUE, note: ["Finance role required", "Server filtered"] }
+      : metric;
+  });
+  const visibleExplainRows = explainRowsForChannel(selectedChannel, revenueTab, canViewFinance);
 
   return (
     <>
@@ -415,7 +533,7 @@ function CommandView({
                 <span>Money values are source-linked and permission-gated</span>
               </div>
               <div className="segmented" role="tablist" aria-label="Revenue type">
-                {(["Net", "Gross", "Allocated"] as const).map((t) => (
+                {REVENUE_TABS.map((t) => (
                   <button
                     key={t}
                     type="button"
@@ -436,6 +554,7 @@ function CommandView({
                     <th scope="col">Channel</th>
                     <th scope="col">Company</th>
                     <th scope="col">CMS</th>
+                    <th scope="col">{revenueConfig.tableLabel}</th>
                     <th scope="col">Gross</th>
                     <th scope="col">Tax</th>
                     <th scope="col">Deductions</th>
@@ -486,6 +605,7 @@ function CommandView({
                         <td>
                           <Badge tone={c.cms.tone}>{c.cms.text}</Badge>
                         </td>
+                        <td className="money finance-data">{c[revenueConfig.amountKey]}</td>
                         <td className="money finance-data">{c.gross}</td>
                         <td className="money finance-data">{c.tax}</td>
                         <td className="money finance-data">{c.deductions}</td>
@@ -569,17 +689,17 @@ function CommandView({
             <div className="explain-head">
               <div>
                 <h2>{selectedChannel.name}</h2>
-                <p>Net revenue explanation, March 2026</p>
+                <p>{revenueConfig.explanationTitle}, March 2026</p>
               </div>
-              <Badge tone="blue">B Reconciled</Badge>
+              <Badge tone={selectedChannel.confidence.tone}>{selectedChannel.confidence.text}</Badge>
             </div>
             <div className="formula" role="text" aria-label="Revenue formula">
-              net = gross + adjustments - tax - allocated_deductions + manual_adjustments
+              {revenueConfig.formula}
             </div>
             <div className="explain-list" role="list">
               {visibleExplainRows.map((r) => (
                 <ItemRow
-                  key={r.title}
+                  key={r.key}
                   tone={r.tone}
                   title={r.title}
                   sub={r.sub}
@@ -1005,7 +1125,8 @@ function TraceView({
 /* ------------------------------------------------------------------ exports */
 
 function ExportsView({ permissions }: { permissions: AccessPermissions }) {
-  const { canCreateExports, canViewFinance } = permissions;
+  const { canViewFinance } = permissions;
+  const canCreateExport = canCreateAnyExport(permissions);
   return (
     <section className="view-page" aria-labelledby="exportsTitle">
       <div className="view-summary" aria-label="Export summary">
@@ -1021,7 +1142,7 @@ function ExportsView({ permissions }: { permissions: AccessPermissions }) {
               <strong id="exportsTitle">Export Center</strong>
               <span>Permission-controlled packages with locked month and audit requirements</span>
             </div>
-            <button className="primary-button" type="button" disabled={!canCreateExports}>
+            <button className="primary-button" type="button" disabled={!canCreateExport}>
               Create Export Job
             </button>
           </div>
@@ -1031,20 +1152,23 @@ function ExportsView({ permissions }: { permissions: AccessPermissions }) {
                 <tr><th>Package</th><th>Audience</th><th>Contains Money</th><th>Requires</th><th>Status</th><th>Action</th></tr>
               </thead>
               <tbody>
-                {EXPORTS_ROWS.map((r) => (
-                  <tr key={r.name}>
-                    <td>{r.name}</td>
-                    <td>{r.audience}</td>
-                    <td><Badge tone={r.money.tone}>{r.money.text}</Badge></td>
-                    <td>{r.requires}</td>
-                    <td><Badge tone={r.status.tone}>{r.status.text}</Badge></td>
-                    <td>
-                      <button className="mini-button" type="button" disabled={!canCreateExports}>
-                        {r.action}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
+                {EXPORTS_ROWS.map((r) => {
+                  const canCreatePackage = canCreateExportScope(permissions, r.scope);
+                  return (
+                    <tr key={r.name}>
+                      <td>{r.name}</td>
+                      <td>{r.audience}</td>
+                      <td><Badge tone={r.money.tone}>{r.money.text}</Badge></td>
+                      <td>{r.requires}</td>
+                      <td><Badge tone={r.status.tone}>{r.status.text}</Badge></td>
+                      <td>
+                        <button className="mini-button" type="button" disabled={!canCreatePackage}>
+                          {r.action}
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1080,7 +1204,7 @@ function ExportsView({ permissions }: { permissions: AccessPermissions }) {
                   <strong>
                     {m.chip ? (
                       <span className="code-chip">
-                        {canCreateExports ? m.chip : RESTRICTED_FINANCE_VALUE}
+                        {canCreateExport ? m.chip : RESTRICTED_FINANCE_VALUE}
                       </span>
                     ) : (
                       m.value

@@ -256,10 +256,10 @@ export const EXPORTS_SUMMARY = [
 ];
 
 export const EXPORTS_ROWS = [
-  { name: "Finance Workbook", audience: "Finance Admins", money: { text: "Sensitive", tone: "red" as Severity }, requires: "Locked month, revenue export permission", status: { text: "Notes due", tone: "amber" as Severity }, action: "Prepare" },
-  { name: "Executive PDF", audience: "Corporate leadership", money: { text: "Summary", tone: "blue" as Severity }, requires: "Finance viewer or higher", status: { text: "Ready", tone: "green" as Severity }, action: "Export" },
-  { name: "Brand Slide Deck", audience: "Brand partners", money: { text: "Scoped", tone: "amber" as Severity }, requires: "Company or channel export scope", status: { text: "Ready", tone: "green" as Severity }, action: "Export" },
-  { name: "Raw Appendix", audience: "Audit", money: { text: "Raw files", tone: "red" as Severity }, requires: "Raw report file permission", status: { text: "Blocked", tone: "red" as Severity }, action: "Request" },
+  { name: "Finance Workbook", scope: "global", audience: "Finance Admins", money: { text: "Sensitive", tone: "red" as Severity }, requires: "Locked month, revenue export permission", status: { text: "Notes due", tone: "amber" as Severity }, action: "Prepare" },
+  { name: "Executive PDF", scope: "global", audience: "Corporate leadership", money: { text: "Summary", tone: "blue" as Severity }, requires: "Finance viewer or higher", status: { text: "Ready", tone: "green" as Severity }, action: "Export" },
+  { name: "Brand Slide Deck", scope: "scoped", audience: "Brand partners", money: { text: "Scoped", tone: "amber" as Severity }, requires: "Company or channel export scope", status: { text: "Ready", tone: "green" as Severity }, action: "Export" },
+  { name: "Raw Appendix", scope: "raw", audience: "Audit", money: { text: "Raw files", tone: "red" as Severity }, requires: "Raw report file permission", status: { text: "Blocked", tone: "red" as Severity }, action: "Request" },
 ];
 
 export const EXPORTS_GUARDRAILS = [
