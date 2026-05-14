@@ -174,8 +174,18 @@ class SqlAlchemyExportJobRepository:
         self._session.flush()
         return self._to_entry(row)
 
-    def get_job(self, export_id: str) -> ExportJobEntry:
-        return self._to_entry(self._get_row(export_id))
+    def get_job(
+        self,
+        export_id: str,
+        *,
+        requested_by: str | None = None,
+    ) -> ExportJobEntry:
+        row = self._get_row(export_id)
+        if requested_by is not None and row.requested_by != _parse_uuid(
+            requested_by, field_name="requested_by"
+        ):
+            raise ExportJobNotFoundError("Export job not found")
+        return self._to_entry(row)
 
     # ========================================================================
     # Purpose: Transition an export job to COMPLETED atomically. Refuses the

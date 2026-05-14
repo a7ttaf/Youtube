@@ -365,11 +365,16 @@ def test_group_scoped_finance_workbook_records_channel_revenue_audit(tmp_path):
 
 
 def test_get_export_returns_not_found_for_missing_group_scope(tmp_path):
+    """Legacy group exports without a snapshot return 404 with the group
+    lookup error when the source group has been deleted. The caller in this
+    test owns the export so the requested_by ownership gate passes and the
+    request reaches the permission check.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(
         database_url,
         scope_type="group",
-        requested_by=OTHER_USER_ID,
+        requested_by=USER_ID,
         include_group=False,
     )
     client = TestClient(
@@ -384,6 +389,27 @@ def test_get_export_returns_not_found_for_missing_group_scope(tmp_path):
 
     assert response.status_code == 404
     assert response.json()["detail"] == f"Group not found: {GROUP_ID}"
+
+
+def test_get_export_returns_not_found_for_other_users_export(tmp_path):
+    """Codex P1: GET /exports/{id} must not leak another user's export
+    metadata even when the caller has matching scope permissions.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(
+        database_url,
+        scope_type="company",
+        requested_by=OTHER_USER_ID,
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        f"/exports/{EXPORT_ID}",
+        headers=auth_headers("finance_admin"),
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Export job not found"
 
 
 def test_export_operator_cannot_preview_finance_workbook(tmp_path):

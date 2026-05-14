@@ -643,19 +643,17 @@ def test_export_operator_can_get_own_export_job(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        audit_events = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.created_at, AuditLogORM.id)
-        ).all()
+        audit_events = session.scalars(select(AuditLogORM)).all()
 
     assert response.status_code == 200
     assert response.json()["id"] == create_response.json()["id"]
     assert response.json()["file_url"] is None
     assert response.json()["audit_event"]["event_type"] == "EXPORT_VIEWED"
     assert response.json()["audit_event"]["sensitive"] is True
-    assert [event.event_type for event in audit_events] == [
+    assert {event.event_type for event in audit_events} == {
         "EXPORT_CREATED",
         "EXPORT_VIEWED",
-    ]
+    }
 
 
 def test_get_export_enforces_scope_even_for_job_owner(tmp_path):

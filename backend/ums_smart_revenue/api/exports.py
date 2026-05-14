@@ -287,7 +287,7 @@ def get_export(
     if not _has_any_export_permission(user):
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
-        export_job = repository.get_job(export_id)
+        export_job = repository.get_job(export_id, requested_by=user.user_id)
     except ExportJobNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
@@ -359,7 +359,7 @@ def preview_finance_workbook(
     if not _has_any_export_permission(user):
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
-        export_job = repository.get_job(export_id)
+        export_job = repository.get_job(export_id, requested_by=user.user_id)
         _require_finance_export_artifact_permissions(
             user=user,
             scope_type=export_job.scope_type,
@@ -434,7 +434,7 @@ def download_finance_workbook(
     if not _has_any_export_permission(user):
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
-        export_job = repository.get_job(export_id)
+        export_job = repository.get_job(export_id, requested_by=user.user_id)
         _require_finance_export_artifact_permissions(
             user=user,
             scope_type=export_job.scope_type,
@@ -526,7 +526,7 @@ def download_executive_pdf(
     if not _has_any_export_permission(user):
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
-        export_job = repository.get_job(export_id)
+        export_job = repository.get_job(export_id, requested_by=user.user_id)
         _require_finance_export_artifact_permissions(
             user=user,
             scope_type=export_job.scope_type,
@@ -625,7 +625,7 @@ def download_branded_slide_pack(
     if not _has_any_export_permission(user):
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
-        export_job = repository.get_job(export_id)
+        export_job = repository.get_job(export_id, requested_by=user.user_id)
         _require_finance_export_artifact_permissions(
             user=user,
             scope_type=export_job.scope_type,
@@ -893,6 +893,8 @@ def _record_finance_export_artifact_audit(
         scope_type=export_job.scope_type,
         scope_id=export_job.scope_id,
         group_registry=group_registry,
+        scope_channel_ids=export_job.scope_channel_ids,
+        export_id=export_job.id,
     )
     month_scope = AccessScope.finance_month(export_job.month)
     details = {
@@ -978,16 +980,35 @@ def _audit_revenue_scopes_for_export(
     scope_type: str,
     scope_id: str | None,
     group_registry: ChannelGroupRegistryStore,
+    scope_channel_ids: tuple[str, ...] | None = None,
+    export_id: str | None = None,
 ) -> tuple[AccessScope, ...]:
+    # ====================================================================
+    # Purpose: Derive audit scopes for an export read/download. For group
+    #   exports we prefer the channel snapshot frozen on the row so the
+    #   audit trail mirrors the data actually returned. Falls back to
+    #   live group membership only for legacy rows; if the source group
+    #   has been deleted and no snapshot exists, we record a single
+    #   export-level audit instead of raising and blocking the read.
+    # Database/ORM: ChannelGroupRegistryStore (read-only fallback).
+    # Standards: Audit must succeed for any successfully-authorized read.
+    # Blast Radius: REVENUE_VIEWED audit scope tracking.
+    # ====================================================================
     if scope_type != "group":
         return (_access_scope_from_export_scope(scope_type, scope_id),)
     if not scope_id:
         raise ExportJobValidationError(
             "scope_id is required for export scope_type: group"
         )
+    if scope_channel_ids is not None:
+        return tuple(
+            AccessScope.channel(channel_id) for channel_id in scope_channel_ids
+        )
     group = group_registry.get_group(scope_id)
     if group is None:
-        raise KeyError(f"Group not found: {scope_id}")
+        if export_id is None:
+            raise KeyError(f"Group not found: {scope_id}")
+        return (AccessScope.export(export_id),)
     return tuple(AccessScope.channel(channel_id) for channel_id in group.channel_ids)
 
 
@@ -1068,34 +1089,37 @@ def _require_export_scope_permissions(
     group_registry: ChannelGroupRegistryStore,
     scope_channel_ids: tuple[str, ...] | None = None,
 ) -> None:
+    # ====================================================================
+    # Purpose: Authorize an export read or download against the frozen
+    #   channel snapshot when one exists for any non-global scope. This
+    #   keeps permission decisions in lockstep with the data the export
+    #   actually returns: post-creation membership edits to the source
+    #   group, sector, or company cannot widen or narrow access on
+    #   previously persisted exports.
+    # Database/ORM: ExportJobORM.scope_channel_ids, ChannelGroupORM.
+    # Standards: Authorization must mirror the resolved data set.
+    # Blast Radius: Export read/download access control.
+    # ====================================================================
+    if scope_channel_ids is not None and scope_type != "global":
+        for channel_id in scope_channel_ids:
+            channel_scope = AccessScope.channel(channel_id)
+            _require_permission(user, export_permission, channel_scope, org_index)
+            _require_permission(user, view_permission, channel_scope, org_index)
+        return
+
     if scope_type == "group":
-        # ================================================================
-        # Purpose: Authorize a group export against the channel set frozen
-        #   on the export row when one exists; fall back to the live group
-        #   membership only at job-creation time when no snapshot exists
-        #   yet. This keeps existing exports' permission decisions stable
-        #   even if the source group is edited or deleted afterward.
-        # Database/ORM: ExportJobORM.scope_channel_ids, ChannelGroupORM.
-        # Standards: Permission decisions must mirror the data the export
-        #   actually returns to the caller.
-        # Blast Radius: Group export read/download access control.
-        # ================================================================
-        if scope_channel_ids is not None:
-            channel_ids: tuple[str, ...] | list[str] = scope_channel_ids
-        else:
-            if not scope_id:
-                raise ExportJobValidationError(
-                    "scope_id is required for export scope_type: group"
-                )
-            group = group_registry.get_group(scope_id)
-            if group is None:
-                raise KeyError(f"Group not found: {scope_id}")
-            if not group.channel_ids:
-                raise ExportJobValidationError(
-                    "group exports require at least one channel"
-                )
-            channel_ids = group.channel_ids
-        for channel_id in channel_ids:
+        if not scope_id:
+            raise ExportJobValidationError(
+                "scope_id is required for export scope_type: group"
+            )
+        group = group_registry.get_group(scope_id)
+        if group is None:
+            raise KeyError(f"Group not found: {scope_id}")
+        if not group.channel_ids:
+            raise ExportJobValidationError(
+                "group exports require at least one channel"
+            )
+        for channel_id in group.channel_ids:
             channel_scope = AccessScope.channel(channel_id)
             _require_permission(user, export_permission, channel_scope, org_index)
             _require_permission(user, view_permission, channel_scope, org_index)
