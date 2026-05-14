@@ -13,6 +13,7 @@ class AuditEventType(StrEnum):
     REPORT_IMPORTED = "REPORT_IMPORTED"
     ADSENSE_PAYMENT_SYNCED = "ADSENSE_PAYMENT_SYNCED"
     MONTH_CLOSE_UPDATED = "MONTH_CLOSE_UPDATED"
+    MONTH_CLOSE_VIEWED = "MONTH_CLOSE_VIEWED"
     MONTH_LOCKED = "MONTH_LOCKED"
     MONTH_UNLOCKED = "MONTH_UNLOCKED"
     MANUAL_OVERRIDE_CREATED = "MANUAL_OVERRIDE_CREATED"
@@ -59,6 +60,9 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
         AuditEventType.GROUP_UPDATED,
         reason_required=True,
         permission=Permission.MANAGE_GROUPS,
+    ),
+    AuditEventType.MONTH_CLOSE_VIEWED: AuditEventDefinition(
+        AuditEventType.MONTH_CLOSE_VIEWED,
     ),
     AuditEventType.MONTH_LOCKED: AuditEventDefinition(
         AuditEventType.MONTH_LOCKED,

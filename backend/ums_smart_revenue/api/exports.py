@@ -215,6 +215,8 @@ def list_exports(
     limit: Annotated[int, Query(ge=1, le=MAX_EXPORT_JOB_PAGE_SIZE)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, object]:
+    if not _has_any_export_permission(user):
+        _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
         page = repository.list_jobs(
             requested_by=user.user_id, limit=limit, offset=offset

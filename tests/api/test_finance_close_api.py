@@ -191,6 +191,30 @@ def test_get_finance_close_does_not_create_missing_month(tmp_path):
     assert close is None
 
 
+def test_finance_close_read_records_audit_event(tmp_path):
+    """Reading finance-close state records sensitive access without mutating state."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(FinanceMonthCloseORM(month="2026-03", status="LOCKED", locked_by=USER_ID))
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/finance-close/2026-03", headers=auth_headers("finance_admin")
+    )
+
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "LOCKED"
+    assert audit_log.event_type == "MONTH_CLOSE_VIEWED"
+    assert audit_log.sensitive is True
+    assert audit_log.details["read_type"] == "summary"
+
+
 def test_finance_admin_cannot_lock_already_locked_month(tmp_path):
     """Locking an already locked month returns the close-state conflict."""
     database_url = build_database_url(tmp_path)
@@ -528,8 +552,14 @@ def test_finance_close_readiness_ignores_performance_only_channels(tmp_path):
         headers=auth_headers("finance_admin"),
     )
 
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+
     assert readiness.status_code == 200
     assert readiness.json() == {"month": "2026-03", "ready": True, "blockers": []}
+    assert audit_log.event_type == "MONTH_CLOSE_VIEWED"
+    assert audit_log.sensitive is True
+    assert audit_log.details["read_type"] == "readiness"
 
 
 def test_finance_viewer_cannot_lock_month(tmp_path):

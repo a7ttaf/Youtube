@@ -332,6 +332,33 @@ def test_export_list_returns_requesting_users_jobs_only(tmp_path):
     assert response.json()["pagination"] == {"limit": 10, "offset": 0, "returned": 1, "has_more": False}
 
 
+def test_user_without_export_permission_cannot_list_historical_export_jobs(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    create_response = client.post(
+        "/exports",
+        headers=auth_headers("export_operator", "company", str(COMPANY_A_ID)),
+        json={
+            "export_type": "ANALYTICS_SUMMARY_CSV",
+            "scope_type": "company",
+            "scope_id": str(COMPANY_A_ID),
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Scoped analytics export",
+        },
+    )
+
+    response = client.get(
+        "/exports?limit=10&offset=0",
+        headers=auth_headers("assistant_analyst", "company", str(COMPANY_A_ID)),
+    )
+
+    assert create_response.status_code == 202
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: exports.analytics"
+
+
 def test_export_operator_can_get_own_export_job(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

@@ -73,12 +73,24 @@ def get_finance_month_close(
     month: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     _validate_month(month)
-    _require_permission(user, Permission.VIEW_REVENUE, AccessScope.finance_month(month))
+    scope = AccessScope.finance_month(month)
+    _require_permission(user, Permission.VIEW_REVENUE, scope)
     close = repository.get(month)
     if close is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finance month close record not found")
+    record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.MONTH_CLOSE_VIEWED,
+        entity_type="finance_month_close",
+        entity_id=month,
+        scope=scope,
+        permission_override=Permission.VIEW_REVENUE,
+        details={"read_type": "summary", "status": close.status},
+    )
     return close.to_api()
 
 
@@ -90,10 +102,27 @@ def get_finance_close_readiness(
         SqlAlchemyFinanceCloseReadinessService,
         Depends(current_finance_close_readiness_service),
     ],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     _validate_month(month)
-    _require_permission(user, Permission.LOCK_FINANCE_MONTH, AccessScope.finance_month(month))
-    return readiness_service.check_month(month).to_api()
+    scope = AccessScope.finance_month(month)
+    _require_permission(user, Permission.LOCK_FINANCE_MONTH, scope)
+    readiness = readiness_service.check_month(month)
+    record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.MONTH_CLOSE_VIEWED,
+        entity_type="finance_month_close",
+        entity_id=month,
+        scope=scope,
+        permission_override=Permission.LOCK_FINANCE_MONTH,
+        details={
+            "read_type": "readiness",
+            "ready": readiness.ready,
+            "blocker_count": len(readiness.blockers),
+        },
+    )
+    return readiness.to_api()
 
 
 @router.post("/{month}/lock")
