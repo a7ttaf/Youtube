@@ -341,6 +341,83 @@ def test_export_operator_can_request_analytics_export_for_assigned_company(tmp_p
     assert audit_sink.records[0].permission == "exports.analytics"
 
 
+def test_export_list_combines_global_and_month_scoped_finance_permissions(tmp_path):
+    """Codex P2: a global finance permission must combine with a month-scoped
+    grant of the other finance permission. Previously the intersection of
+    month IDs collapsed to empty when one side was granted globally.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    finance_export_id = uuid4()
+    other_month_export_id = uuid4()
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                ExportJobORM(
+                    id=finance_export_id,
+                    export_type="FINANCE_EXCEL",
+                    scope_type="company",
+                    scope_id=str(COMPANY_A_ID),
+                    scope_channel_ids=["channel-a"],
+                    month="2026-03",
+                    currency="USD",
+                    requested_by=USER_ID,
+                    status="QUEUED",
+                    month_lock_status="LOCKED",
+                    include_confidence_notes=True,
+                    include_manual_override_notes=True,
+                ),
+                ExportJobORM(
+                    id=other_month_export_id,
+                    export_type="FINANCE_EXCEL",
+                    scope_type="company",
+                    scope_id=str(COMPANY_A_ID),
+                    scope_channel_ids=["channel-a"],
+                    month="2026-04",
+                    currency="USD",
+                    requested_by=USER_ID,
+                    status="QUEUED",
+                    month_lock_status="LOCKED",
+                    include_confidence_notes=True,
+                    include_manual_override_notes=True,
+                ),
+            ]
+        )
+        session.commit()
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="hybrid-finance-permissions@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.EXPORT_REVENUE_REPORT,
+                AccessScope.company(str(COMPANY_A_ID)),
+            ),
+            PermissionGrant(
+                Permission.VIEW_REVENUE,
+                AccessScope.company(str(COMPANY_A_ID)),
+            ),
+            PermissionGrant(
+                Permission.VIEW_FINALIZED_PAYMENTS,
+                AccessScope.global_scope(),
+            ),
+            PermissionGrant(
+                Permission.VIEW_BANK_RECONCILIATION,
+                AccessScope.finance_month("2026-03"),
+            ),
+        ),
+    )
+    client = TestClient(app)
+
+    response = client.get("/exports?limit=10")
+
+    assert response.status_code == 200
+    returned_ids = {item["id"] for item in response.json()["items"]}
+    assert str(finance_export_id) in returned_ids
+    assert str(other_month_export_id) not in returned_ids
+
+
 def test_company_manager_cannot_request_export_for_another_company(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

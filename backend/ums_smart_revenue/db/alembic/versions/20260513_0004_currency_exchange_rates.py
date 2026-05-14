@@ -7,6 +7,7 @@ Create Date: 2026-05-13
 
 import sqlalchemy as sa
 from alembic import op
+from sqlalchemy.dialects import postgresql
 
 revision = "20260513_0004"
 down_revision = "20260513_0003"
@@ -29,7 +30,11 @@ def upgrade() -> None:
         sa.Column("rate", sa.Numeric(18, 10), nullable=False),
         sa.Column("provider_key", sa.Text(), nullable=False),
         sa.Column("source_report_id", sa.Text(), nullable=True),
-        sa.Column("raw_payload", sa.JSON(), nullable=False),
+        sa.Column(
+            "raw_payload",
+            sa.JSON().with_variant(postgresql.JSONB(), "postgresql"),
+            nullable=False,
+        ),
         sa.Column("imported_by", sa.Uuid(), nullable=True),
         sa.Column(
             "imported_at",

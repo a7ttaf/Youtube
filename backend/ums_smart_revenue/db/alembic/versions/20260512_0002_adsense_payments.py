@@ -25,7 +25,11 @@ def upgrade() -> None:
         sa.Column("payment_amount", sa.Numeric(18, 6), nullable=False),
         sa.Column("payment_currency", sa.Text(), nullable=False),
         sa.Column("payment_status", sa.Text(), nullable=False, server_default=sa.text("'PAID'")),
-        sa.Column("raw_payload", sa.JSON(), nullable=False),
+        sa.Column(
+            "raw_payload",
+            sa.JSON().with_variant(postgresql.JSONB(), "postgresql"),
+            nullable=False,
+        ),
         sa.Column("source_report_id", sa.Text(), nullable=True),
         sa.Column("imported_by", postgresql.UUID(as_uuid=True), nullable=True),
         sa.Column("imported_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),

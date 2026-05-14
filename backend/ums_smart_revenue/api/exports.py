@@ -158,6 +158,25 @@ def request_export(
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     try:
+        # ================================================================
+        # Purpose: Resolve the channel set ONCE so the authorization
+        #   check, the audit trail, and the persisted snapshot all see
+        #   the same membership. Re-resolving live group/sector/company
+        #   data twice creates a window where a concurrent edit could
+        #   authorize the request against one set and persist another.
+        # Database/ORM: org_index, ChannelGroupRegistryStore.
+        # Standards: Authorization must mirror persisted data.
+        # Blast Radius: Group export authorization and snapshot drift.
+        # ================================================================
+        snapshot = _channel_ids_for_export_scope(
+            scope_type=payload.scope_type,
+            scope_id=payload.scope_id,
+            org_index=org_index,
+            group_registry=group_registry,
+        )
+        snapshot_tuple = (
+            tuple(sorted(snapshot)) if snapshot is not None else None
+        )
         _require_export_access_permissions(
             user=user,
             export_type=payload.export_type,
@@ -166,21 +185,7 @@ def request_export(
             month=payload.month,
             org_index=org_index,
             group_registry=group_registry,
-        )
-        # ================================================================
-        # Purpose: Freeze the channel membership for this export at
-        #   creation time so subsequent group/sector/company edits cannot
-        #   silently broaden or narrow the data returned by re-reads or
-        #   re-downloads of the same export_id.
-        # Database/ORM: ExportJobORM.scope_channel_ids (JSONB snapshot).
-        # Standards: Finance numbers must be deterministic per export id.
-        # Blast Radius: Export artifact regeneration, audit details.
-        # ================================================================
-        snapshot = _channel_ids_for_export_scope(
-            scope_type=payload.scope_type,
-            scope_id=payload.scope_id,
-            org_index=org_index,
-            group_registry=group_registry,
+            scope_channel_ids=snapshot_tuple,
         )
         export_job = repository.request_export(
             export_type=payload.export_type,
@@ -191,9 +196,7 @@ def request_export(
             actor_user_id=user.user_id,
             include_confidence_notes=payload.include_confidence_notes,
             include_manual_override_notes=payload.include_manual_override_notes,
-            scope_channel_ids=(
-                tuple(sorted(snapshot)) if snapshot is not None else None
-            ),
+            scope_channel_ids=snapshot_tuple,
         )
     except KeyError as exc:
         raise HTTPException(
@@ -1399,11 +1402,38 @@ def _has_export_permissions_for_scope(
 
 
 def _authorized_finance_artifact_months(user: UserPrincipal) -> frozenset[str] | None:
-    if _has_finance_artifact_month_permissions(user, "__all_months__"):
+    # ====================================================================
+    # Purpose: Combine global and month-scoped grants for the two
+    #   finance-month permissions the listing requires. A global grant
+    #   for either permission contributes "all months", which must
+    #   intersect cleanly with month-scoped grants of the other
+    #   permission instead of collapsing the intersection to empty.
+    # Database/ORM: None.
+    # Standards: Authorization must reflect the same months reachable
+    #   through the per-month permission checks.
+    # Blast Radius: GET /exports listing visibility.
+    # ====================================================================
+    payment_months = _authorized_finance_months_for_permission(
+        user, Permission.VIEW_FINALIZED_PAYMENTS
+    )
+    bank_months = _authorized_finance_months_for_permission(
+        user, Permission.VIEW_BANK_RECONCILIATION
+    )
+    if payment_months is None and bank_months is None:
         return None
-    payment_months = _granted_finance_months(user, Permission.VIEW_FINALIZED_PAYMENTS)
-    bank_months = _granted_finance_months(user, Permission.VIEW_BANK_RECONCILIATION)
+    if payment_months is None:
+        return frozenset(bank_months)
+    if bank_months is None:
+        return frozenset(payment_months)
     return frozenset(payment_months & bank_months)
+
+
+def _authorized_finance_months_for_permission(
+    user: UserPrincipal, permission: Permission
+) -> set[str] | None:
+    if has_permission(user, permission, AccessScope.global_scope()):
+        return None
+    return _granted_finance_months(user, permission)
 
 
 def _has_finance_artifact_month_permissions(user: UserPrincipal, month: str) -> bool:

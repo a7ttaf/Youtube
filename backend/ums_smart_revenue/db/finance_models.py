@@ -290,7 +290,7 @@ class AdSensePaymentORM(FinanceBase):
         server_default=text("'PAID'"),
     )
     raw_payload: Mapped[dict[str, object]] = mapped_column(
-        JSON,
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
         nullable=False,
         default=dict,
     )
@@ -359,7 +359,7 @@ class CurrencyExchangeRateORM(FinanceBase):
     provider_key: Mapped[str] = mapped_column(Text, nullable=False)
     source_report_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     raw_payload: Mapped[dict[str, object]] = mapped_column(
-        JSON,
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
         nullable=False,
         default=dict,
     )
