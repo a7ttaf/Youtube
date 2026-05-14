@@ -2,8 +2,10 @@ import hashlib
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from io import BytesIO
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from openpyxl import load_workbook
 from pptx import Presentation
@@ -11,6 +13,10 @@ from pypdf import PdfReader
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.exports import (
+    _artifact_metadata_audit_details,
+    _previous_month,
+)
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.finance_models import (
     AdSensePaymentORM,
@@ -29,6 +35,7 @@ from ums_smart_revenue.db.org_models import (
 )
 from ums_smart_revenue.db.report_models import ExportJobORM, ReportBase
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.finance.revenue_facts import RevenueFactValidationError
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000023001")
 COMPANY_ID = UUID("00000000-0000-0000-0000-000000023101")
@@ -301,6 +308,32 @@ def test_finance_export_preview_includes_revenue_trend_alerts(tmp_path):
     )
     assert trend_alert is not None
     assert trend_alert["details"]["channels"][0]["youtube_channel_id"] == "channel-tv-a"
+
+
+def test_artifact_metadata_audit_details_marks_incomplete_metadata():
+    details = _artifact_metadata_audit_details(
+        SimpleNamespace(
+            file_url="file-store://exports/export-id/finance.xlsx",
+            artifact_filename=None,
+            artifact_content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            artifact_byte_size=None,
+            artifact_checksum_sha256=None,
+        )
+    )
+
+    assert details["file_url"] == "file-store://exports/export-id/finance.xlsx"
+    assert details["artifact_metadata_complete"] is False
+    assert set(details["artifact_metadata_missing_fields"]) == {
+        "artifact_filename",
+        "artifact_byte_size",
+        "artifact_checksum_sha256",
+    }
+    assert "artifact_filename" not in details
+
+
+def test_export_previous_month_rejects_malformed_month():
+    with pytest.raises(RevenueFactValidationError, match="export month"):
+        _previous_month("2026-3")
 
 
 def test_group_scoped_finance_workbook_records_channel_revenue_audit(tmp_path):

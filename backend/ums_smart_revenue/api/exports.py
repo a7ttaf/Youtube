@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from typing import Annotated
 
@@ -84,6 +85,7 @@ from ums_smart_revenue.reports.finance_workbook import (
 )
 
 router = APIRouter(prefix="/exports", tags=["exports"])
+EXPORT_MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
 @dataclass(frozen=True)
@@ -422,7 +424,7 @@ def download_finance_workbook(
     )
     if storage_failure_response is not None:
         return storage_failure_response
-    assert export_job is not None
+    export_job = _require_persisted_export_job(export_job)
 
     _record_finance_export_artifact_audit(
         audit_sink=audit_sink,
@@ -520,7 +522,7 @@ def download_executive_pdf(
     )
     if storage_failure_response is not None:
         return storage_failure_response
-    assert export_job is not None
+    export_job = _require_persisted_export_job(export_job)
 
     _record_finance_export_artifact_audit(
         audit_sink=audit_sink,
@@ -620,7 +622,7 @@ def download_branded_slide_pack(
     )
     if storage_failure_response is not None:
         return storage_failure_response
-    assert export_job is not None
+    export_job = _require_persisted_export_job(export_job)
 
     _record_finance_export_artifact_audit(
         audit_sink=audit_sink,
@@ -698,6 +700,12 @@ def _persist_generated_export_artifact(
 
 def _has_completed_artifact(export_job: ExportJobEntry) -> bool:
     return export_job.status == "COMPLETED" and export_job.file_url is not None
+
+
+def _require_persisted_export_job(export_job: ExportJobEntry | None) -> ExportJobEntry:
+    if export_job is None:
+        raise RuntimeError("_persist_generated_export_artifact returned no export job")
+    return export_job
 
 
 def _build_finance_source_summaries_for_export(
@@ -794,15 +802,7 @@ def _record_finance_export_artifact_audit(
         "scope_id": export_job.scope_id,
     }
     if export_job.file_url:
-        details.update(
-            {
-                "file_url": export_job.file_url,
-                "artifact_filename": export_job.artifact_filename,
-                "artifact_content_type": export_job.artifact_content_type,
-                "artifact_byte_size": export_job.artifact_byte_size,
-                "artifact_checksum_sha256": export_job.artifact_checksum_sha256,
-            }
-        )
+        details.update(_artifact_metadata_audit_details(export_job))
     audit_records = [
         record_audit_event(
             sink=audit_sink,
@@ -851,6 +851,25 @@ def _record_finance_export_artifact_audit(
             )
         )
     return audit_records
+
+
+def _artifact_metadata_audit_details(export_job: ExportJobEntry) -> dict[str, object]:
+    details: dict[str, object] = {"file_url": export_job.file_url}
+    artifact_metadata = {
+        "artifact_filename": export_job.artifact_filename,
+        "artifact_content_type": export_job.artifact_content_type,
+        "artifact_byte_size": export_job.artifact_byte_size,
+        "artifact_checksum_sha256": export_job.artifact_checksum_sha256,
+    }
+    missing_fields = [
+        field_name for field_name, field_value in artifact_metadata.items() if field_value is None
+    ]
+    details["artifact_metadata_complete"] = not missing_fields
+    if missing_fields:
+        details["artifact_metadata_missing_fields"] = missing_fields
+    else:
+        details.update(artifact_metadata)
+    return details
 
 
 def _audit_revenue_scopes_for_export(
@@ -1092,6 +1111,10 @@ def _has_any_export_permission(user: UserPrincipal) -> bool:
 
 
 def _previous_month(month: str) -> str:
+    if not EXPORT_MONTH_PATTERN.fullmatch(month):
+        raise RevenueFactValidationError(
+            f"export month must use YYYY-MM with a calendar month from 01 to 12: {month!r}"
+        )
     year_value, month_value = month.split("-", maxsplit=1)
     year = int(year_value)
     month_number = int(month_value)
