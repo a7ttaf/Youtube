@@ -191,6 +191,7 @@ def request_export(
         entity_id=export_job.id,
         scope=AccessScope.export(export_job.id),
         reason=payload.reason,
+        permission_override=_audit_permission_for_export_type(export_job.export_type),
         details={
             "export_type": export_job.export_type,
             "scope_type": export_job.scope_type,
@@ -922,11 +923,7 @@ def _require_export_permissions(
     group_registry: ChannelGroupRegistryStore,
 ) -> None:
     finance_export = is_finance_export_type(export_type)
-    export_permission = (
-        Permission.EXPORT_REVENUE_REPORT
-        if finance_export
-        else Permission.EXPORT_ANALYTICS_REPORT
-    )
+    export_permission = _audit_permission_for_export_type(export_type)
     view_permission = (
         Permission.VIEW_REVENUE if finance_export else Permission.VIEW_ANALYTICS
     )
@@ -939,6 +936,12 @@ def _require_export_permissions(
         org_index=org_index,
         group_registry=group_registry,
     )
+
+
+def _audit_permission_for_export_type(export_type: str) -> Permission:
+    if is_finance_export_type(export_type):
+        return Permission.EXPORT_REVENUE_REPORT
+    return Permission.EXPORT_ANALYTICS_REPORT
 
 
 def _require_export_access_permissions(

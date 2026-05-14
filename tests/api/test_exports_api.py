@@ -4,8 +4,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, func, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.channels import current_audit_sink
 from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
 from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.scopes import AccessScope
@@ -191,7 +193,10 @@ def test_finance_export_request_requires_artifact_read_permissions(tmp_path):
 def test_export_operator_can_request_analytics_export_for_assigned_company(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    client = TestClient(create_app(database_url=database_url))
+    app = create_app(database_url=database_url)
+    audit_sink = InMemoryAuditSink()
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+    client = TestClient(app)
 
     response = client.post(
         "/exports",
@@ -210,6 +215,8 @@ def test_export_operator_can_request_analytics_export_for_assigned_company(tmp_p
     assert response.json()["export_type"] == "ANALYTICS_SUMMARY_CSV"
     assert response.json()["scope_id"] == str(COMPANY_A_ID)
     assert response.json()["status"] == "QUEUED"
+    assert audit_sink.records[0].event_type == "EXPORT_CREATED"
+    assert audit_sink.records[0].permission == "exports.analytics"
 
 
 def test_company_manager_cannot_request_export_for_another_company(tmp_path):

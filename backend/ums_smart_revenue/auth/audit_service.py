@@ -5,7 +5,7 @@ from typing import Protocol
 
 from ums_smart_revenue.auth.audit import AUDIT_EVENT_DEFINITIONS, AuditEventType
 from ums_smart_revenue.auth.models import UserPrincipal
-from ums_smart_revenue.auth.permissions import SENSITIVE_PERMISSIONS
+from ums_smart_revenue.auth.permissions import SENSITIVE_PERMISSIONS, Permission
 from ums_smart_revenue.auth.scopes import AccessScope
 
 
@@ -49,6 +49,7 @@ def record_audit_event(
     details: dict[str, object] | None = None,
     reason: str | None = None,
     request_id: str | None = None,
+    permission_override: Permission | None = None,
 ) -> AuditRecord:
     definition = AUDIT_EVENT_DEFINITIONS.get(event_type)
     normalized_reason = reason.strip() if reason is not None else None
@@ -57,7 +58,9 @@ def record_audit_event(
     if definition and definition.reason_required and not normalized_reason:
         raise ValueError(f"Audit event {event_type.value} requires a reason")
 
-    permission = definition.permission if definition else None
+    permission = permission_override
+    if permission is None:
+        permission = definition.permission if definition else None
     normalized_details = deepcopy(details) if details is not None else {}
     record = AuditRecord(
         user_id=actor.user_id,

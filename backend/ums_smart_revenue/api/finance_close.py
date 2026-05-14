@@ -172,7 +172,6 @@ def record_allocation_rule(
     _validate_month(month)
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, scope)
-    _validate_actor_user_id(user.user_id)
     try:
         close = repository.record_allocation_rule(
             month=month,

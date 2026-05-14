@@ -87,7 +87,6 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     ),
     AuditEventType.EXPORT_CREATED: AuditEventDefinition(
         AuditEventType.EXPORT_CREATED,
-        permission=Permission.EXPORT_REVENUE_REPORT,
     ),
     AuditEventType.EXPORT_DOWNLOADED: AuditEventDefinition(
         AuditEventType.EXPORT_DOWNLOADED,

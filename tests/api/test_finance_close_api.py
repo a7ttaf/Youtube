@@ -649,6 +649,36 @@ def test_finance_admin_can_record_allocation_rule_metadata_with_audit(tmp_path):
     assert audit_log.details["allocation_method"] == "gross_revenue_proportional"
 
 
+def test_allocation_rule_allows_non_uuid_gateway_actor_with_audit(tmp_path):
+    """Allocation writes do not persist actor UUIDs; audit stores raw gateway subject."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers("finance_admin")
+    headers["x-user-id"] = "gateway-subject-1"
+
+    response = client.post(
+        "/finance-close/2026-03/allocate",
+        headers=headers,
+        json={
+            "allocation_method": "gross_revenue_proportional",
+            "rule_payload": {"basis": "gross_revenue_usd"},
+            "reason": "Allocate with gateway subject",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        close = session.get(FinanceMonthCloseORM, "2026-03")
+        audit_log = session.scalars(select(AuditLogORM)).one()
+
+    assert response.status_code == 200
+    assert close.allocation_method == "gross_revenue_proportional"
+    assert audit_log.user_id is None
+    assert audit_log.event_type == "ALLOCATION_RULE_CHANGED"
+    assert audit_log.details["actor_user_id"] == "gateway-subject-1"
+
+
 def test_finance_admin_cannot_change_allocation_rule_on_locked_month(tmp_path):
     """Locked months reject allocation-rule metadata changes."""
     database_url = build_database_url(tmp_path)

@@ -3,6 +3,7 @@ import pytest
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditRecord, InMemoryAuditSink, record_audit_event
 from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
+from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope
 
@@ -87,4 +88,22 @@ def test_record_audit_event_marks_sensitive_event_and_scope():
     assert record.scope_type == "channel"
     assert record.scope_id == "channel-tv-a"
     assert sink.records == [record]
+
+
+def test_record_audit_event_accepts_permission_override():
+    sink = InMemoryAuditSink()
+
+    record = record_audit_event(
+        sink=sink,
+        actor=principal(),
+        event_type=AuditEventType.EXPORT_CREATED,
+        entity_type="export_job",
+        entity_id="export-1",
+        scope=AccessScope.export("export-1"),
+        details={"export_type": "ANALYTICS_SUMMARY_CSV"},
+        permission_override=Permission.EXPORT_ANALYTICS_REPORT,
+    )
+
+    assert record.permission == "exports.analytics"
+    assert record.sensitive is True
 
