@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM
@@ -82,6 +82,14 @@ class ExportJobPage:
     limit: int
     offset: int
     has_more: bool
+
+
+@dataclass(frozen=True)
+class ExportJobVisibilityFilter:
+    export_types: frozenset[str]
+    scope_type: str | None = None
+    scope_id: str | None = None
+    months: frozenset[str] | None = None
 
 
 class ExportJobError(ValueError):
@@ -196,6 +204,7 @@ class SqlAlchemyExportJobRepository:
         self,
         *,
         requested_by: str | None = None,
+        visibility_filters: tuple[ExportJobVisibilityFilter, ...] | None = None,
         limit: int = 50,
         offset: int = 0,
     ) -> ExportJobPage:
@@ -213,6 +222,15 @@ class SqlAlchemyExportJobRepository:
             statement = statement.where(
                 ExportJobORM.requested_by == _parse_uuid(requested_by)
             )
+        if visibility_filters is not None:
+            visibility_conditions = [
+                _visibility_filter_condition(visibility_filter)
+                for visibility_filter in visibility_filters
+                if visibility_filter.export_types
+            ]
+            if not visibility_conditions:
+                return ExportJobPage(items=[], limit=limit, offset=offset, has_more=False)
+            statement = statement.where(or_(*visibility_conditions))
 
         rows = self._session.scalars(statement.limit(limit + 1).offset(offset)).all()
         return ExportJobPage(
@@ -256,6 +274,19 @@ class SqlAlchemyExportJobRepository:
             created_at=row.created_at,
             completed_at=row.completed_at,
         )
+
+
+def _visibility_filter_condition(visibility_filter: ExportJobVisibilityFilter):
+    conditions = [ExportJobORM.export_type.in_(sorted(visibility_filter.export_types))]
+    if visibility_filter.scope_type is not None:
+        conditions.append(ExportJobORM.scope_type == visibility_filter.scope_type)
+        if visibility_filter.scope_id is None:
+            conditions.append(ExportJobORM.scope_id.is_(None))
+        else:
+            conditions.append(ExportJobORM.scope_id == visibility_filter.scope_id)
+    if visibility_filter.months is not None:
+        conditions.append(ExportJobORM.month.in_(sorted(visibility_filter.months)))
+    return and_(*conditions)
 
 
 def is_finance_export_type(export_type: str) -> bool:

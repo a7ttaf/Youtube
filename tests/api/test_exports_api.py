@@ -359,6 +359,67 @@ def test_user_without_export_permission_cannot_list_historical_export_jobs(tmp_p
     assert response.json()["detail"] == "Missing permission: exports.analytics"
 
 
+def test_export_list_applies_current_scope_and_type_permissions(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    company_a_analytics = client.post(
+        "/exports",
+        headers=auth_headers("export_operator", "company", str(COMPANY_A_ID)),
+        json={
+            "export_type": "ANALYTICS_SUMMARY_CSV",
+            "scope_type": "company",
+            "scope_id": str(COMPANY_A_ID),
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Scoped analytics export",
+        },
+    )
+    company_b_analytics = client.post(
+        "/exports",
+        headers=auth_headers("export_operator", "company", str(COMPANY_B_ID)),
+        json={
+            "export_type": "ANALYTICS_SUMMARY_CSV",
+            "scope_type": "company",
+            "scope_id": str(COMPANY_B_ID),
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Other company analytics export",
+        },
+    )
+    company_a_finance = client.post(
+        "/exports",
+        headers=auth_headers("finance_admin"),
+        json={
+            "export_type": "FINANCE_EXCEL",
+            "scope_type": "company",
+            "scope_id": str(COMPANY_A_ID),
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Finance export before role change",
+        },
+    )
+
+    response = client.get(
+        "/exports?limit=10&offset=0",
+        headers=auth_headers("export_operator", "company", str(COMPANY_A_ID)),
+    )
+
+    assert company_a_analytics.status_code == 202
+    assert company_b_analytics.status_code == 202
+    assert company_a_finance.status_code == 202
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == [
+        company_a_analytics.json()["id"]
+    ]
+    assert response.json()["pagination"] == {
+        "limit": 10,
+        "offset": 0,
+        "returned": 1,
+        "has_more": False,
+    }
+
+
 def test_export_operator_can_get_own_export_job(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
