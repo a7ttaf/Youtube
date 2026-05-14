@@ -327,6 +327,7 @@ def _audit_group_change(
     reason: str,
     action: str,
 ):
+    normalized_reason = _normalize_query_reason(reason)
     return record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -334,7 +335,7 @@ def _audit_group_change(
         entity_type="channel_group",
         entity_id=group.id,
         scope=AccessScope.global_scope(),
-        reason=reason,
+        reason=normalized_reason,
         details={
             "action": action,
             "group_type": group.group_type,
