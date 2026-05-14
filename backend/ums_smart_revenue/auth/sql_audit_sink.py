@@ -15,8 +15,11 @@ class SqlAlchemyAuditSink:
 
     def append(self, record: AuditRecord) -> None:
         """Append one audit log row and flush so failures happen before commit."""
-        user_id = _parse_uuid(record.user_id)
+        raw_actor_user_id = record.user_id
+        user_id = _parse_uuid(raw_actor_user_id)
+        details = dict(record.details or {})
         if self._session.get(UserORM, user_id) is None:
+            details.setdefault("actor_user_id", raw_actor_user_id)
             user_id = None
         self._session.add(
             AuditLogORM(
@@ -29,7 +32,7 @@ class SqlAlchemyAuditSink:
                 scope_id=record.scope_id,
                 request_id=record.request_id,
                 reason=record.reason,
-                details=record.details,
+                details=details,
                 sensitive=record.sensitive,
                 created_at=record.created_at,
             )

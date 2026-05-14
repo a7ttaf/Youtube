@@ -125,10 +125,10 @@ def update_group(
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
-    group = _require_group(registry, group_id)
-    _require_manage_group_channels(
+    _require_manageable_group(
+        registry=registry,
+        group_id=group_id,
         user=user,
-        channel_ids=list(group.channel_ids),
         org_index=org_index,
     )
     try:
@@ -160,7 +160,12 @@ def add_group_members(
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
-    group = _require_group(registry, group_id)
+    group = _require_manageable_group(
+        registry=registry,
+        group_id=group_id,
+        user=user,
+        org_index=org_index,
+    )
     channel_ids = list(dict.fromkeys([*group.channel_ids, *payload.channel_ids]))
     _require_manage_group_channels(
         user=user,
@@ -196,10 +201,10 @@ def remove_group_member(
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
-    group = _require_group(registry, group_id)
-    _require_manage_group_channels(
+    _require_manageable_group(
+        registry=registry,
+        group_id=group_id,
         user=user,
-        channel_ids=list(group.channel_ids),
         org_index=org_index,
     )
     normalized_reason = _normalize_query_reason(reason)
@@ -281,8 +286,26 @@ def _require_manage_group_channels(
     channel_ids: list[str],
     org_index: OrgAccessIndex,
 ) -> None:
+    if _can_manage_group_channels(
+        user=user,
+        channel_ids=channel_ids,
+        org_index=org_index,
+    ):
+        return
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"Missing permission: {Permission.MANAGE_GROUPS.value}",
+    )
+
+
+def _can_manage_group_channels(
+    *,
+    user: UserPrincipal,
+    channel_ids: list[str],
+    org_index: OrgAccessIndex,
+) -> bool:
     unique_channel_ids = list(dict.fromkeys(channel_ids))
-    allowed = (
+    return (
         has_permission(
             user,
             Permission.MANAGE_GROUPS,
@@ -300,11 +323,6 @@ def _require_manage_group_channels(
             for channel_id in unique_channel_ids
         )
     )
-    if not allowed:
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Missing permission: {Permission.MANAGE_GROUPS.value}",
-        )
 
 
 def _require_group(
@@ -312,6 +330,26 @@ def _require_group(
 ) -> ChannelGroupEntry:
     group = registry.get_group(group_id)
     if group is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Group not found",
+        )
+    return group
+
+
+def _require_manageable_group(
+    *,
+    registry: ChannelGroupRegistryStore,
+    group_id: str,
+    user: UserPrincipal,
+    org_index: OrgAccessIndex,
+) -> ChannelGroupEntry:
+    group = registry.get_group(group_id)
+    if group is None or not _can_manage_group_channels(
+        user=user,
+        channel_ids=list(group.channel_ids),
+        org_index=org_index,
+    ):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Group not found",

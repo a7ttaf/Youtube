@@ -144,12 +144,8 @@ class SqlAlchemyExchangeRateRepository:
                     "imported_by": actor_uuid,
                     "updated_at": now,
                 },
-            ).returning(CurrencyExchangeRateORM.id)
-            row_id = self._session.execute(statement).scalar_one()
-            row = self._session.get(CurrencyExchangeRateORM, row_id)
-            if row is None:
-                raise ExchangeRateValidationError("Exchange-rate upsert failed")
-            self._session.refresh(row)
+            ).returning(CurrencyExchangeRateORM)
+            row = self._session.execute(statement).scalar_one()
             entries.append(self._to_entry(row))
         return entries
 

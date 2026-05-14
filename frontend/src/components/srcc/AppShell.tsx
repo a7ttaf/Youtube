@@ -46,10 +46,21 @@ type AuthenticatedSession = {
   role?: Role;
 };
 
+type AccessPermissions = {
+  role: Role;
+  canViewFinance: boolean;
+  canManageRegistry: boolean;
+  canCloseMonth: boolean;
+  canCreateExports: boolean;
+  canRunConnectors: boolean;
+  canViewAudit: boolean;
+};
+
 // In production this value is hydrated from the server-authenticated session claim.
 const SERVER_AUTHENTICATED_SESSION: AuthenticatedSession = {};
 
-const CAN_PREVIEW_ROLES = import.meta.env.DEV;
+const CAN_PREVIEW_ROLES =
+  import.meta.env.DEV || import.meta.env.VITE_CAN_PREVIEW_ROLES === "true";
 const DEFAULT_PREVIEW_ROLE: Role = "assistant";
 
 const RESTRICTED_FINANCE_VALUE = "Restricted";
@@ -79,6 +90,19 @@ function restrictChannelFinance(channel: ChannelRow): ChannelRow {
     deductions: RESTRICTED_FINANCE_VALUE,
     net: RESTRICTED_FINANCE_VALUE,
     confidence: { text: "Restricted", tone: "red" as Severity },
+  };
+}
+
+function permissionsForRole(role: Role): AccessPermissions {
+  const finance = role === "finance";
+  return {
+    role,
+    canViewFinance: finance,
+    canManageRegistry: finance,
+    canCloseMonth: finance,
+    canCreateExports: finance,
+    canRunConnectors: finance,
+    canViewAudit: finance,
   };
 }
 
@@ -175,7 +199,8 @@ export default function AppShell() {
     return <AccessDeniedState />;
   }
 
-  const canViewFinance = displayedRole === "finance";
+  const permissions = permissionsForRole(displayedRole);
+  const canViewFinance = permissions.canViewFinance;
   const copy = VIEW_COPY[view];
 
   return (
@@ -290,7 +315,9 @@ export default function AppShell() {
             <button className="icon-button" aria-label="Refresh reports" title="Refresh reports">
               <RefreshIcon />
             </button>
-            <button className="primary-button">Create Export</button>
+            <button className="primary-button" disabled={!permissions.canCreateExports}>
+              Create Export
+            </button>
           </div>
         </header>
 
@@ -303,8 +330,8 @@ export default function AppShell() {
             canViewFinance={canViewFinance}
           />
         )}
-        {view === "registry" && <RegistryView canViewFinance={canViewFinance} />}
-        {view === "close" && <CloseView canViewFinance={canViewFinance} />}
+        {view === "registry" && <RegistryView permissions={permissions} />}
+        {view === "close" && <CloseView permissions={permissions} />}
         {view === "trace" && (
           <TraceView
             traceTab={traceTab}
@@ -313,9 +340,9 @@ export default function AppShell() {
             role={displayedRole}
           />
         )}
-        {view === "exports" && <ExportsView canViewFinance={canViewFinance} />}
-        {view === "connectors" && <ConnectorsView />}
-        {view === "audit" && <AuditView />}
+        {view === "exports" && <ExportsView permissions={permissions} />}
+        {view === "connectors" && <ConnectorsView permissions={permissions} />}
+        {view === "audit" && <AuditView permissions={permissions} />}
 
         {view === "command" && <WorkflowRail />}
       </main>
@@ -609,7 +636,8 @@ function WorkflowRail() {
 
 /* ------------------------------------------------------------------ registry */
 
-function RegistryView({ canViewFinance }: { canViewFinance: boolean }) {
+function RegistryView({ permissions }: { permissions: AccessPermissions }) {
+  const { canManageRegistry, canViewFinance } = permissions;
   return (
     <section className="view-page" aria-labelledby="registryTitle">
       <div className="view-summary" aria-label="Registry summary">
@@ -626,8 +654,12 @@ function RegistryView({ canViewFinance }: { canViewFinance: boolean }) {
               <span>Ownership, CMS status, revenue scope, and SQL lineage identity</span>
             </div>
             <div className="view-actions">
-              <button className="ghost-button" type="button">Bulk Import</button>
-              <button className="primary-button" type="button">Request Mapping Change</button>
+              <button className="ghost-button" type="button" disabled={!canManageRegistry}>
+                Bulk Import
+              </button>
+              <button className="primary-button" type="button" disabled={!canManageRegistry}>
+                Request Mapping Change
+              </button>
             </div>
           </div>
           <div className="permission-band">
@@ -636,7 +668,9 @@ function RegistryView({ canViewFinance }: { canViewFinance: boolean }) {
               <strong>Finance-visible mapping layer</strong>
               <span>Company managers see only assigned companies; sector managers see assigned sectors; every mapping change writes an audit event.</span>
             </span>
-            <Badge tone="blue">Scoped</Badge>
+            <Badge tone={canManageRegistry ? "blue" : "red"}>
+              {canManageRegistry ? "Scoped" : "Read only"}
+            </Badge>
           </div>
           <div className="table-wrap">
             <table aria-label="Channel registry">
@@ -662,9 +696,17 @@ function RegistryView({ canViewFinance }: { canViewFinance: boolean }) {
                     <td>{r.sector}</td>
                     <td><Badge tone={r.cms.tone}>{r.cms.text}</Badge></td>
                     <td>{r.source}</td>
-                    <td><span className="code-chip">{r.node}</span></td>
+                    <td>
+                      <span className="code-chip">
+                        {canManageRegistry ? r.node : RESTRICTED_FINANCE_VALUE}
+                      </span>
+                    </td>
                     <td><Badge tone={r.state.tone}>{r.state.text}</Badge></td>
-                    <td><button className="mini-button" type="button">{r.action}</button></td>
+                    <td>
+                      <button className="mini-button" type="button" disabled={!canManageRegistry}>
+                        {r.action}
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -684,24 +726,24 @@ function RegistryView({ canViewFinance }: { canViewFinance: boolean }) {
             <div className="form-grid">
               <div className="field-row">
                 <label htmlFor="registryChannel">Channel</label>
-                <select id="registryChannel"><option>Sports Extra</option><option>Music Stage</option></select>
+                <select id="registryChannel" disabled={!canManageRegistry}><option>Sports Extra</option><option>Music Stage</option></select>
               </div>
               <div className="field-row">
                 <label htmlFor="registryCompany">Company</label>
-                <select id="registryCompany"><option>TV Sector</option><option>Catalog Media</option></select>
+                <select id="registryCompany" disabled={!canManageRegistry}><option>TV Sector</option><option>Catalog Media</option></select>
               </div>
               <div className="field-row">
                 <label htmlFor="registryReason">Reason</label>
-                <input id="registryReason" defaultValue="March source evidence received" />
+                <input id="registryReason" defaultValue="March source evidence received" disabled={!canManageRegistry} />
               </div>
               <div className="field-row">
                 <label htmlFor="registryEffective">Effective month</label>
-                <select id="registryEffective"><option>Mar 2026</option><option>Apr 2026</option></select>
+                <select id="registryEffective" disabled={!canManageRegistry}><option>Mar 2026</option><option>Apr 2026</option></select>
               </div>
             </div>
             <div className="action-row">
-              <button className="ghost-button" type="button">Save Draft</button>
-              <button className="primary-button" type="button">Submit Approval</button>
+              <button className="ghost-button" type="button" disabled={!canManageRegistry}>Save Draft</button>
+              <button className="primary-button" type="button" disabled={!canManageRegistry}>Submit Approval</button>
             </div>
           </section>
 
@@ -727,7 +769,8 @@ function RegistryView({ canViewFinance }: { canViewFinance: boolean }) {
 
 /* ------------------------------------------------------------------ close */
 
-function CloseView({ canViewFinance }: { canViewFinance: boolean }) {
+function CloseView({ permissions }: { permissions: AccessPermissions }) {
+  const { canCloseMonth, canViewFinance } = permissions;
   return (
     <section className="view-page" aria-labelledby="closeViewTitle">
       <div className="view-summary" aria-label="Month close summary">
@@ -743,7 +786,9 @@ function CloseView({ canViewFinance }: { canViewFinance: boolean }) {
               <strong id="closeViewTitle">Month Close Workbench</strong>
               <span>Deterministic workflow from report ingestion to locked exports</span>
             </div>
-            <Badge tone="amber">Finance Admin</Badge>
+            <Badge tone={canCloseMonth ? "amber" : "red"}>
+              {canCloseMonth ? "Finance Admin" : "Restricted"}
+            </Badge>
           </div>
           <div className="detail-grid">
             {CLOSE_DETAILS.map((d) => (
@@ -766,7 +811,11 @@ function CloseView({ canViewFinance }: { canViewFinance: boolean }) {
                     <td><span className="code-chip">{c.evidence}</span></td>
                     <td>{c.action}</td>
                     <td><Badge tone={c.state.tone}>{c.state.text}</Badge></td>
-                    <td><button className="mini-button" type="button">{c.next}</button></td>
+                    <td>
+                      <button className="mini-button" type="button" disabled={!canCloseMonth}>
+                        {c.next}
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -781,25 +830,27 @@ function CloseView({ canViewFinance }: { canViewFinance: boolean }) {
                 <strong>Lock Controls</strong>
                 <span>Actions stay disabled until blockers are cleared</span>
               </div>
-              <Badge tone="red">Restricted</Badge>
+              <Badge tone={canCloseMonth ? "amber" : "red"}>
+                {canCloseMonth ? "Finance Admin" : "Restricted"}
+              </Badge>
             </div>
             <div className="form-grid">
               <div className="field-row">
                 <label htmlFor="closeMonth">Month</label>
-                <select id="closeMonth"><option>Mar 2026</option><option>Feb 2026</option></select>
+                <select id="closeMonth" disabled={!canCloseMonth}><option>Mar 2026</option><option>Feb 2026</option></select>
               </div>
               <div className="field-row">
                 <label htmlFor="closeReason">Reason</label>
-                <input id="closeReason" defaultValue="Export blockers remain open" />
+                <input id="closeReason" defaultValue="Export blockers remain open" disabled={!canCloseMonth} />
               </div>
               <div className="field-row">
                 <label htmlFor="closeApprover">Approver</label>
-                <select id="closeApprover"><option>Finance Admin required</option><option>Corporate Admin co-approval</option></select>
+                <select id="closeApprover" disabled={!canCloseMonth}><option>Finance Admin required</option><option>Corporate Admin co-approval</option></select>
               </div>
             </div>
             <div className="action-row">
-              <button className="danger-button" type="button">Request Unlock</button>
-              <button className="primary-button" type="button">Lock Month</button>
+              <button className="danger-button" type="button" disabled={!canCloseMonth}>Request Unlock</button>
+              <button className="primary-button" type="button" disabled={!canCloseMonth}>Lock Month</button>
             </div>
           </section>
 
@@ -953,7 +1004,8 @@ function TraceView({
 
 /* ------------------------------------------------------------------ exports */
 
-function ExportsView({ canViewFinance }: { canViewFinance: boolean }) {
+function ExportsView({ permissions }: { permissions: AccessPermissions }) {
+  const { canCreateExports, canViewFinance } = permissions;
   return (
     <section className="view-page" aria-labelledby="exportsTitle">
       <div className="view-summary" aria-label="Export summary">
@@ -969,7 +1021,9 @@ function ExportsView({ canViewFinance }: { canViewFinance: boolean }) {
               <strong id="exportsTitle">Export Center</strong>
               <span>Permission-controlled packages with locked month and audit requirements</span>
             </div>
-            <button className="primary-button" type="button">Create Export Job</button>
+            <button className="primary-button" type="button" disabled={!canCreateExports}>
+              Create Export Job
+            </button>
           </div>
           <div className="table-wrap">
             <table aria-label="Exports">
@@ -984,7 +1038,11 @@ function ExportsView({ canViewFinance }: { canViewFinance: boolean }) {
                     <td><Badge tone={r.money.tone}>{r.money.text}</Badge></td>
                     <td>{r.requires}</td>
                     <td><Badge tone={r.status.tone}>{r.status.text}</Badge></td>
-                    <td><button className="mini-button" type="button">{r.action}</button></td>
+                    <td>
+                      <button className="mini-button" type="button" disabled={!canCreateExports}>
+                        {r.action}
+                      </button>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -1019,7 +1077,15 @@ function ExportsView({ canViewFinance }: { canViewFinance: boolean }) {
               {EXPORT_META.map((m) => (
                 <div key={m.label} className="detail-cell">
                   <span>{m.label}</span>
-                  <strong>{m.chip ? <span className="code-chip">{m.chip}</span> : m.value}</strong>
+                  <strong>
+                    {m.chip ? (
+                      <span className="code-chip">
+                        {canCreateExports ? m.chip : RESTRICTED_FINANCE_VALUE}
+                      </span>
+                    ) : (
+                      m.value
+                    )}
+                  </strong>
                 </div>
               ))}
             </div>
@@ -1032,7 +1098,8 @@ function ExportsView({ canViewFinance }: { canViewFinance: boolean }) {
 
 /* ------------------------------------------------------------------ connectors */
 
-function ConnectorsView() {
+function ConnectorsView({ permissions }: { permissions: AccessPermissions }) {
+  const { canRunConnectors } = permissions;
   return (
     <section className="view-page" aria-labelledby="connectorsTitle">
       <div className="view-summary" aria-label="Connector summary">
@@ -1046,7 +1113,9 @@ function ConnectorsView() {
               <strong id="connectorsTitle">Connector Operations</strong>
               <span>OAuth credentials, API jobs, raw files, and ingestion windows</span>
             </div>
-            <button className="primary-button" type="button">Run Approved Job</button>
+            <button className="primary-button" type="button" disabled={!canRunConnectors}>
+              Run Approved Job
+            </button>
           </div>
           <div className="connector-health" aria-label="Connector health">
             {CONNECTOR_HEALTH.map((h) => (
@@ -1066,10 +1135,18 @@ function ConnectorsView() {
                 {CONNECTOR_JOBS.map((j) => (
                   <tr key={j.job}>
                     <td>{j.job}</td>
-                    <td><span className="code-chip">{j.credential}</span></td>
+                    <td>
+                      <span className="code-chip">
+                        {canRunConnectors ? j.credential : RESTRICTED_FINANCE_VALUE}
+                      </span>
+                    </td>
                     <td>{j.lastRun}</td>
-                    <td><span className="code-chip">{j.rawFile}</span></td>
-                    <td>{j.action}</td>
+                    <td>
+                      <span className="code-chip">
+                        {canRunConnectors ? j.rawFile : RESTRICTED_FINANCE_VALUE}
+                      </span>
+                    </td>
+                    <td>{canRunConnectors ? j.action : RESTRICTED_FINANCE_VALUE}</td>
                     <td><Badge tone={j.state.tone}>{j.state.text}</Badge></td>
                   </tr>
                 ))}
@@ -1085,7 +1162,9 @@ function ConnectorsView() {
                 <strong>Credential Controls</strong>
                 <span>No Google passwords stored; OAuth grants only</span>
               </div>
-              <Badge tone="red">Admin only</Badge>
+              <Badge tone={canRunConnectors ? "amber" : "red"}>
+                {canRunConnectors ? "Admin" : "Restricted"}
+              </Badge>
             </div>
             <div className="issue-list" role="list">
               {CREDENTIAL_CONTROLS.map((c) => (
@@ -1102,7 +1181,8 @@ function ConnectorsView() {
 
 /* ------------------------------------------------------------------ audit */
 
-function AuditView() {
+function AuditView({ permissions }: { permissions: AccessPermissions }) {
+  const { canViewAudit } = permissions;
   return (
     <section className="view-page" aria-labelledby="auditTitle">
       <div className="view-summary" aria-label="Audit summary">
@@ -1117,24 +1197,36 @@ function AuditView() {
               <span>Every sensitive action records actor, permission, scope, target, and result</span>
             </div>
             <div className="view-actions">
-              <select className="control" aria-label="Audit severity">
+              <select className="control" aria-label="Audit severity" disabled={!canViewAudit}>
                 <option>All sensitive</option><option>Denied</option><option>Exports</option>
               </select>
-              <button className="ghost-button" type="button">Download Audit View</button>
+              <button className="ghost-button" type="button" disabled={!canViewAudit}>Download Audit View</button>
             </div>
           </div>
           <div className="timeline" role="list">
-            {AUDIT_EVENTS.map((e) => (
-              <div key={e.time + e.title} className="timeline-item" role="listitem">
-                <span className="timeline-time">{e.time}</span>
-                <Dot tone={e.tone} />
+            {canViewAudit ? (
+              AUDIT_EVENTS.map((e) => (
+                <div key={e.time + e.title} className="timeline-item" role="listitem">
+                  <span className="timeline-time">{e.time}</span>
+                  <Dot tone={e.tone} />
+                  <span>
+                    <span className="item-title">{e.title}</span>
+                    <span className="item-sub">{e.sub}</span>
+                  </span>
+                  <Badge tone={e.badge.tone}>{e.badge.text}</Badge>
+                </div>
+              ))
+            ) : (
+              <div className="timeline-item" role="listitem">
+                <span className="timeline-time">--:--</span>
+                <Dot tone="red" />
                 <span>
-                  <span className="item-title">{e.title}</span>
-                  <span className="item-sub">{e.sub}</span>
+                  <span className="item-title">Audit view restricted</span>
+                  <span className="item-sub">Sensitive audit events require Finance Admin access</span>
                 </span>
-                <Badge tone={e.badge.tone}>{e.badge.text}</Badge>
+                <Badge tone="red">Restricted</Badge>
               </div>
-            ))}
+            )}
           </div>
         </section>
 

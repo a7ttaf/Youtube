@@ -228,6 +228,21 @@ def test_create_group_rejects_blank_audit_reason(tmp_path):
     assert response.json()["detail"][0]["msg"] == "Value error, must not be blank"
 
 
+def test_update_group_rejects_blank_audit_reason(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.patch(
+        f"/groups/{GROUP_TV_ID}",
+        headers=auth_headers("corporate_admin", "global"),
+        json={"name": "Renamed TV Group", "reason": "   "},
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["msg"] == "Value error, must not be blank"
+
+
 def test_data_steward_cannot_create_group_with_other_company_channel(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -246,6 +261,21 @@ def test_data_steward_cannot_create_group_with_other_company_channel(tmp_path):
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: registry.manage_groups"
+
+
+def test_data_steward_cannot_probe_group_outside_scope(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.patch(
+        f"/groups/{GROUP_MIXED_ID}",
+        headers=auth_headers("data_steward", "company", str(COMPANY_TV_ID)),
+        json={"name": "Probe Mixed Group", "reason": "Attempt scoped update"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Group not found"
 
 
 def test_corporate_admin_can_add_and_remove_group_members_with_audit(tmp_path):
@@ -314,6 +344,24 @@ def test_add_group_members_rejects_unknown_channel_id(tmp_path):
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Channel not found: missing-channel"
+
+
+def test_add_group_members_rejects_blank_audit_reason(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        f"/groups/{GROUP_TV_ID}/members",
+        headers=auth_headers("corporate_admin", "global"),
+        json={
+            "channel_ids": ["group-channel-news"],
+            "reason": "   ",
+        },
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["msg"] == "Value error, must not be blank"
 
 
 def test_remove_group_member_rejects_blank_audit_reason(tmp_path):
