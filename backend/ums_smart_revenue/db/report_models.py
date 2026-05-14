@@ -2,6 +2,7 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import (
+    JSON,
     BigInteger,
     Boolean,
     CheckConstraint,
@@ -82,6 +83,16 @@ class ExportJobORM(ReportBase):
     export_type: Mapped[str] = mapped_column(Text, nullable=False)
     scope_type: Mapped[str] = mapped_column(Text, nullable=False)
     scope_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # ====================================================================
+    # Purpose: Snapshot of YouTube channel IDs resolved at job creation so
+    #   re-reads and re-downloads return the same data even if the source
+    #   group/sector/company membership changes afterward. NULL means the
+    #   job covers "all channels" (global) or pre-snapshot legacy rows.
+    # Database/ORM: export_jobs.scope_channel_ids JSONB.
+    # Standards: Finance numbers must be deterministic per export id.
+    # Blast Radius: Finance and analytics export reads.
+    # ====================================================================
+    scope_channel_ids: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
     month: Mapped[str] = mapped_column(Text, nullable=False)
     currency: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'USD'")

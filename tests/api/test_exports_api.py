@@ -119,10 +119,71 @@ def test_finance_admin_requests_finance_export_with_audit_and_lock_snapshot(tmp_
     assert response.json()["file_url"] is None
     assert response.json()["month_lock_status"] == "LOCKED"
     assert response.json()["audit_event"]["event_type"] == "EXPORT_CREATED"
+    assert response.json()["scope_channel_ids"] == ["channel-a"]
     assert export_job.scope_id == str(COMPANY_A_ID)
+    assert export_job.scope_channel_ids == ["channel-a"]
     assert export_job.month_lock_status == "LOCKED"
     assert audit_log.event_type == "EXPORT_CREATED"
     assert audit_log.sensitive is True
+
+
+def test_group_export_request_freezes_member_channels_at_creation(tmp_path):
+    """Mutating a group after queueing an export must not change the snapshot.
+
+    Codex P2: snapshot group members when creating export jobs so reads and
+    downloads return deterministic data per export_id.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="finance-group-export@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.EXPORT_ANALYTICS_REPORT,
+                AccessScope.global_scope(),
+            ),
+            PermissionGrant(
+                Permission.VIEW_ANALYTICS,
+                AccessScope.global_scope(),
+            ),
+        ),
+    )
+    client = TestClient(app)
+
+    response = client.post(
+        "/exports",
+        json={
+            "export_type": "ANALYTICS_SUMMARY_CSV",
+            "scope_type": "group",
+            "scope_id": str(GROUP_ID),
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Group analytics snapshot",
+        },
+    )
+
+    assert response.status_code == 202
+    assert sorted(response.json()["scope_channel_ids"]) == ["channel-a", "channel-b"]
+    export_id = response.json()["id"]
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.execute(
+            ChannelGroupMemberORM.__table__.delete().where(
+                ChannelGroupMemberORM.channel_id == CHANNEL_B_ROW_ID
+            )
+        )
+        session.commit()
+
+    detail_response = client.get(f"/exports/{export_id}")
+
+    assert detail_response.status_code == 200
+    assert sorted(detail_response.json()["scope_channel_ids"]) == [
+        "channel-a",
+        "channel-b",
+    ]
 
 
 def test_export_operator_cannot_request_finance_export_without_finance_visibility(tmp_path):

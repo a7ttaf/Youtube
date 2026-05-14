@@ -330,6 +330,14 @@ GET /exports/{export_id}/executive.pdf
 GET /exports/{export_id}/branded-slide-pack.pptx
 ```
 
+`POST /exports`, `GET /exports/{export_id}`, and the `GET /exports` list
+include `scope_channel_ids`: an array of YouTube channel IDs frozen at job
+creation time for non-global exports (sector, company, channel, group). The
+field is `null` for `scope_type='global'` jobs and for pre-snapshot legacy
+rows. Subsequent edits to the source group, sector, or company membership do
+not change the data returned for the same `export_id`, keeping finance
+numbers deterministic per export.
+
 `GET /exports` is paginated. Query parameters are `limit` (default `50`, maximum `100`) and `offset` (default `0`). Requests above the maximum are rejected with `422`. Responses include paging metadata:
 
 ```json

@@ -167,6 +167,21 @@ def request_export(
             org_index=org_index,
             group_registry=group_registry,
         )
+        # ================================================================
+        # Purpose: Freeze the channel membership for this export at
+        #   creation time so subsequent group/sector/company edits cannot
+        #   silently broaden or narrow the data returned by re-reads or
+        #   re-downloads of the same export_id.
+        # Database/ORM: ExportJobORM.scope_channel_ids (JSONB snapshot).
+        # Standards: Finance numbers must be deterministic per export id.
+        # Blast Radius: Export artifact regeneration, audit details.
+        # ================================================================
+        snapshot = _channel_ids_for_export_scope(
+            scope_type=payload.scope_type,
+            scope_id=payload.scope_id,
+            org_index=org_index,
+            group_registry=group_registry,
+        )
         export_job = repository.request_export(
             export_type=payload.export_type,
             scope_type=payload.scope_type,
@@ -176,6 +191,9 @@ def request_export(
             actor_user_id=user.user_id,
             include_confidence_notes=payload.include_confidence_notes,
             include_manual_override_notes=payload.include_manual_override_notes,
+            scope_channel_ids=(
+                tuple(sorted(snapshot)) if snapshot is not None else None
+            ),
         )
     except KeyError as exc:
         raise HTTPException(
@@ -776,9 +794,19 @@ def _build_finance_source_summaries_for_export(
     org_index: OrgAccessIndex,
     group_registry: ChannelGroupRegistryStore,
 ) -> _FinanceExportSourceSummaries:
-    channel_ids = _channel_ids_for_export_scope(
-        scope_type=export_job.scope_type,
-        scope_id=export_job.scope_id,
+    # ====================================================================
+    # Purpose: Resolve the YouTube channel set the export was issued for.
+    #   Prefers the snapshot frozen on the export row so post-creation
+    #   group/sector/company edits cannot alter previously requested data.
+    #   Falls back to live resolution only for legacy rows that pre-date
+    #   the snapshot column.
+    # Database/ORM: Reads ExportJobORM.scope_channel_ids; org_index when
+    #   no snapshot exists.
+    # Standards: Finance number determinism.
+    # Blast Radius: Finance export numbers and audit trail.
+    # ====================================================================
+    channel_ids = _resolved_export_channel_ids(
+        export_job=export_job,
         org_index=org_index,
         group_registry=group_registry,
     )
@@ -1073,6 +1101,25 @@ def _require_finance_export_artifact_permissions(
         Permission.VIEW_BANK_RECONCILIATION,
         month_scope,
         org_index,
+    )
+
+
+def _resolved_export_channel_ids(
+    *,
+    export_job,
+    org_index: OrgAccessIndex,
+    group_registry: ChannelGroupRegistryStore,
+) -> set[str] | None:
+    if export_job.scope_type == "global":
+        return None
+    snapshot = getattr(export_job, "scope_channel_ids", None)
+    if snapshot is not None:
+        return set(snapshot)
+    return _channel_ids_for_export_scope(
+        scope_type=export_job.scope_type,
+        scope_id=export_job.scope_id,
+        org_index=org_index,
+        group_registry=group_registry,
     )
 
 

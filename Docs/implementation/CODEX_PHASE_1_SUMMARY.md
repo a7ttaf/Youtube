@@ -242,6 +242,13 @@ Thirtieth continuation update:
 - kept finance export generation guarded by the existing revenue export, revenue visibility, finalized-payment, and bank-reconciliation permission checks;
 - kept SQL/PostgreSQL as source of truth and did not add Neo4j or fake revenue logic.
 
+Thirty-first continuation update:
+- snapshotted the resolved YouTube channel IDs into `export_jobs.scope_channel_ids` at job creation so non-global exports cannot drift when their source group, sector, or company membership changes;
+- added Alembic migration `20260513_0006_export_job_scope_channel_snapshot.py` to introduce the nullable JSONB snapshot column;
+- exposed `scope_channel_ids` on `ExportJobEntry.to_api()` and the `POST /exports`, `GET /exports`, and `GET /exports/{export_id}` responses;
+- routed finance source-summary generation through the stored snapshot, falling back to live org-index/group resolution only for pre-snapshot legacy rows;
+- added a regression test proving that mutating a group after queueing an export does not change the channel set returned by re-reads of the same `export_id`.
+
 ## Files Created
 - `Docs/implementation/CODEX_PHASE_1_PLAN.md`
 - `Docs/implementation/CODEX_PHASE_1_SUMMARY.md`

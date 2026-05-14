@@ -49,6 +49,9 @@ class ExportJobEntry:
     artifact_byte_size: int | None = None
     artifact_checksum_sha256: str | None = None
     failure_reason: str | None = None
+    # Channel set resolved and frozen at job creation; None means global
+    # (all channels) or pre-snapshot legacy rows.
+    scope_channel_ids: tuple[str, ...] | None = None
 
     def to_api(self) -> dict[str, object]:
         return {
@@ -56,6 +59,11 @@ class ExportJobEntry:
             "export_type": self.export_type,
             "scope_type": self.scope_type,
             "scope_id": self.scope_id,
+            "scope_channel_ids": (
+                list(self.scope_channel_ids)
+                if self.scope_channel_ids is not None
+                else None
+            ),
             "month": self.month,
             "currency": self.currency,
             "requested_by": self.requested_by,
@@ -108,6 +116,15 @@ class SqlAlchemyExportJobRepository:
     def __init__(self, session: Session):
         self._session = session
 
+    # ========================================================================
+    # Purpose: Create an export job and freeze its resolved channel set so
+    #   later membership edits to the source group/sector/company cannot
+    #   change the data returned for the same export_id.
+    # Database/ORM: INSERT INTO export_jobs (..., scope_channel_ids).
+    # Standards: Validated inputs, parameterized SQLAlchemy ORM, typed
+    #   ExportJobValidationError at the boundary.
+    # Blast Radius: Finance numbers, audit trail, artifact generation.
+    # ========================================================================
     def request_export(
         self,
         *,
@@ -119,6 +136,7 @@ class SqlAlchemyExportJobRepository:
         actor_user_id: str,
         include_confidence_notes: bool,
         include_manual_override_notes: bool,
+        scope_channel_ids: tuple[str, ...] | frozenset[str] | None = None,
     ) -> ExportJobEntry:
         normalized_export_type = _normalize_export_type(export_type)
         normalized_scope_type, normalized_scope_id = _normalize_scope(
@@ -128,12 +146,20 @@ class SqlAlchemyExportJobRepository:
         normalized_currency = _normalize_currency(currency)
         actor_uuid = _parse_uuid(actor_user_id)
         month_lock_status = self._month_lock_status(month)
+        normalized_scope_channel_ids = _normalize_scope_channel_ids(
+            normalized_scope_type, scope_channel_ids
+        )
 
         row = ExportJobORM(
             id=uuid4(),
             export_type=normalized_export_type,
             scope_type=normalized_scope_type,
             scope_id=normalized_scope_id,
+            scope_channel_ids=(
+                list(normalized_scope_channel_ids)
+                if normalized_scope_channel_ids is not None
+                else None
+            ),
             month=month,
             currency=normalized_currency,
             requested_by=actor_uuid,
@@ -253,11 +279,18 @@ class SqlAlchemyExportJobRepository:
 
     @staticmethod
     def _to_entry(row: ExportJobORM) -> ExportJobEntry:
+        stored = row.scope_channel_ids
+        scope_channel_ids: tuple[str, ...] | None
+        if stored is None:
+            scope_channel_ids = None
+        else:
+            scope_channel_ids = tuple(stored)
         return ExportJobEntry(
             id=str(row.id),
             export_type=row.export_type,
             scope_type=row.scope_type,
             scope_id=row.scope_id,
+            scope_channel_ids=scope_channel_ids,
             month=row.month,
             currency=row.currency,
             requested_by=str(row.requested_by),
@@ -374,3 +407,30 @@ def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
         return UUID(value)
     except ValueError as exc:
         raise ExportJobValidationError(f"{field_name} must be a valid UUID") from exc
+
+
+def _normalize_scope_channel_ids(
+    scope_type: str,
+    scope_channel_ids: tuple[str, ...] | frozenset[str] | None,
+) -> tuple[str, ...] | None:
+    if scope_type == "global":
+        if scope_channel_ids is not None:
+            raise ExportJobValidationError(
+                "scope_channel_ids must be omitted for global exports"
+            )
+        return None
+    if scope_channel_ids is None:
+        return None
+    cleaned: list[str] = []
+    for channel_id in scope_channel_ids:
+        if not isinstance(channel_id, str):
+            raise ExportJobValidationError(
+                "scope_channel_ids must contain only strings"
+            )
+        stripped = channel_id.strip()
+        if not stripped:
+            raise ExportJobValidationError(
+                "scope_channel_ids must not contain blank entries"
+            )
+        cleaned.append(stripped)
+    return tuple(sorted(set(cleaned)))

@@ -1,0 +1,17 @@
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+MIGRATION_PATH = (
+    "backend/ums_smart_revenue/db/alembic/versions/"
+    "20260513_0006_export_job_scope_channel_snapshot.py"
+)
+
+
+def test_export_scope_channel_snapshot_migration_adds_jsonb_column():
+    migration = (PROJECT_ROOT / MIGRATION_PATH).read_text(encoding="utf-8")
+
+    assert 'revision = "20260513_0006"' in migration
+    assert 'down_revision = "20260513_0005"' in migration
+    assert '"scope_channel_ids"' in migration
+    assert "postgresql.JSONB" in migration
+    assert "nullable=True" in migration
