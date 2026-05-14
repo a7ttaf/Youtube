@@ -2,6 +2,7 @@
 // Static snapshot of the March 2026 close. All money values are display-only.
 
 export type Severity = "green" | "amber" | "red" | "blue" | "violet";
+export type WorkflowTone = Severity | "primary";
 export type ViewKey =
   | "command"
   | "registry"
@@ -148,26 +149,19 @@ export const CLOSE_STEPS = [
   { tone: "amber" as Severity, title: "Unresolved gap allocation", sub: "Post-tax proportional method selected", action: "Review" },
 ];
 
-export const EXPLAIN_ROWS = [
-  { tone: "green" as Severity, title: "Gross revenue", sub: "YouTube Reporting API", value: "$684,200" },
-  { tone: "green" as Severity, title: "Tax withholding", sub: "Official tax report", value: "-$41,900" },
-  { tone: "amber" as Severity, title: "Allocated deductions", sub: "Payment gap allocation", value: "-$32,400" },
-  { tone: "green" as Severity, title: "Net value", sub: "Locked result row", value: "$609,900" },
-];
-
 export const EXPORT_READINESS = [
   { tone: "amber" as Severity, title: "Confidence notes required", sub: "Allocated values must be included", badge: { text: "Open", tone: "amber" as Severity } },
   { tone: "red" as Severity, title: "Raw appendix restricted", sub: "Requires raw file permission", badge: { text: "Blocked", tone: "red" as Severity } },
 ];
 
-export const WORKFLOW_STEPS = [
+export const WORKFLOW_STEPS: Array<{ state: string; tone: WorkflowTone; label: string }> = [
   { state: "is-done", tone: "green", label: "Reports" },
   { state: "is-done", tone: "green", label: "Normalize" },
   { state: "is-done", tone: "green", label: "Payments" },
   { state: "is-current", tone: "primary", label: "Allocate" },
   { state: "", tone: "amber", label: "Lock" },
   { state: "", tone: "amber", label: "Export" },
-] as const;
+];
 
 export const REGISTRY_SUMMARY = [
   { label: "Active channels", value: "318", note: "300+ target registry, 12 pending review" },

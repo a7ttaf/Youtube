@@ -30,7 +30,7 @@ import {
   VIEW_COPY,
   WORKFLOW_STEPS,
 } from "@/lib/mock/data";
-import type { Role, Severity, ViewKey } from "@/lib/mock/data";
+import type { Role, Severity, ViewKey, WorkflowTone } from "@/lib/mock/data";
 import { BrandIcon, LockIcon, NAV_ICONS, RefreshIcon } from "./icons";
 
 /* ------------------------------------------------------------------ shared */
@@ -221,6 +221,10 @@ function Badge({ tone, children }: { tone: Severity; children: React.ReactNode }
 
 function Dot({ tone }: { tone?: Severity }) {
   return <span className={`dot${tone ? ` ${tone}` : ""}`} aria-hidden="true" />;
+}
+
+function workflowDotTone(tone: WorkflowTone): Severity | undefined {
+  return tone === "primary" ? undefined : tone;
 }
 
 function ItemRow({
@@ -744,7 +748,7 @@ function WorkflowRail() {
       <div className="steps" role="list">
         {WORKFLOW_STEPS.map((s) => (
           <span key={s.label} className={`step ${s.state}`} role="listitem">
-            <Dot tone={s.tone === "primary" ? undefined : (s.tone as Severity)} />
+            <Dot tone={workflowDotTone(s.tone)} />
             {s.label}
           </span>
         ))}
