@@ -757,10 +757,20 @@ def _persist_generated_export_artifact(
             content=content,
         )
     except ExportArtifactStorageError:
-        repository.fail_job(
-            export_id=export_job.id,
-            failure_reason="artifact storage unavailable",
-        )
+        try:
+            repository.fail_job(
+                export_id=export_job.id,
+                failure_reason="artifact storage unavailable",
+            )
+        except ExportJobTerminalStateError as terminal_exc:
+            # Another writer already finalized this export. Storage is still
+            # unavailable for this caller, so we surface a 503 without
+            # overriding the persisted terminal status.
+            logger.warning(
+                "Export %s reached terminal status during storage failure: %s",
+                export_job.id,
+                terminal_exc,
+            )
         return None, JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"detail": "Export artifact storage unavailable"},
@@ -1397,17 +1407,46 @@ def _candidate_export_scope_filters(
     org_index: OrgAccessIndex,
     group_registry: ChannelGroupRegistryStore,
 ) -> tuple[tuple[str, str | None], ...]:
+    # ====================================================================
+    # Purpose: Build the set of candidate (scope_type, scope_id) pairs the
+    #   user could potentially see in GET /exports listings. Grows out
+    #   from the user's actual sector/company/channel grants and expands
+    #   downward through org_index, instead of enumerating every channel,
+    #   company, and sector in the registry. Groups are added only when
+    #   they intersect the user's accessible channel set.
+    # Database/ORM: None (in-memory OrgAccessIndex + group registry).
+    # Standards: Permission decisions are still finalized by
+    #   _has_export_permissions_for_scope downstream; this function only
+    #   narrows the candidate set for that check.
+    # Blast Radius: GET /exports listing visibility, not authorization.
+    # ====================================================================
     candidates: set[tuple[str, str | None]] = set()
-    candidates.update(("sector", sector_id) for sector_id in org_index.company_sector.values())
-    candidates.update(("sector", sector_id) for sector_id in org_index.channel_sector.values())
-    candidates.update(("company", company_id) for company_id in org_index.company_sector)
-    candidates.update(("company", company_id) for company_id in org_index.channel_company.values())
-    candidates.update(("channel", channel_id) for channel_id in org_index.channel_company)
-    candidates.update(("channel", channel_id) for channel_id in org_index.channel_sector)
+    accessible_channels: set[str] = set()
     for scope in _principal_org_scopes(user):
-        candidates.add((scope.type.value, scope.id))
+        scope_type = scope.type.value
+        scope_id = scope.id
+        if not scope_id:
+            continue
+        candidates.add((scope_type, scope_id))
+        if scope_type == "sector":
+            for company_id, sector_id in org_index.company_sector.items():
+                if sector_id == scope_id:
+                    candidates.add(("company", company_id))
+            for channel_id, sector_id in org_index.channel_sector.items():
+                if sector_id == scope_id:
+                    candidates.add(("channel", channel_id))
+                    accessible_channels.add(channel_id)
+        elif scope_type == "company":
+            for channel_id, company_id in org_index.channel_company.items():
+                if company_id == scope_id:
+                    candidates.add(("channel", channel_id))
+                    accessible_channels.add(channel_id)
+        elif scope_type == "channel":
+            accessible_channels.add(scope_id)
     for group in group_registry.list_groups():
-        if group.channel_ids:
+        if group.channel_ids and any(
+            channel_id in accessible_channels for channel_id in group.channel_ids
+        ):
             candidates.add(("group", group.id))
     return tuple(sorted(candidates, key=lambda candidate: (candidate[0], candidate[1] or "")))
 
