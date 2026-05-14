@@ -186,6 +186,67 @@ def test_group_export_request_freezes_member_channels_at_creation(tmp_path):
     ]
 
 
+def test_group_export_read_uses_snapshot_authorization_after_group_deletion(tmp_path):
+    """Codex P1: GET /exports/{id} for a group export must remain accessible
+    when the source group is later deleted, because authorization should run
+    against the channel snapshot frozen at job creation time.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="finance-group-export@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.EXPORT_ANALYTICS_REPORT,
+                AccessScope.global_scope(),
+            ),
+            PermissionGrant(
+                Permission.VIEW_ANALYTICS,
+                AccessScope.global_scope(),
+            ),
+        ),
+    )
+    client = TestClient(app)
+
+    create_response = client.post(
+        "/exports",
+        json={
+            "export_type": "ANALYTICS_SUMMARY_CSV",
+            "scope_type": "group",
+            "scope_id": str(GROUP_ID),
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Group analytics snapshot before deletion",
+        },
+    )
+    assert create_response.status_code == 202
+    export_id = create_response.json()["id"]
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.execute(
+            ChannelGroupMemberORM.__table__.delete().where(
+                ChannelGroupMemberORM.group_id == GROUP_ID
+            )
+        )
+        session.execute(
+            ChannelGroupORM.__table__.delete().where(
+                ChannelGroupORM.id == GROUP_ID
+            )
+        )
+        session.commit()
+
+    detail_response = client.get(f"/exports/{export_id}")
+
+    assert detail_response.status_code == 200
+    assert sorted(detail_response.json()["scope_channel_ids"]) == [
+        "channel-a",
+        "channel-b",
+    ]
+
+
 def test_export_operator_cannot_request_finance_export_without_finance_visibility(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

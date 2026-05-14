@@ -26,6 +26,7 @@ ALLOWED_EXPORT_ARTIFACT_URI_PREFIXES = (
     "blob://",
 )
 MAX_EXPORT_JOB_PAGE_SIZE = 100
+_TERMINAL_EXPORT_JOB_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
 
 
 @dataclass(frozen=True)
@@ -176,6 +177,15 @@ class SqlAlchemyExportJobRepository:
     def get_job(self, export_id: str) -> ExportJobEntry:
         return self._to_entry(self._get_row(export_id))
 
+    # ========================================================================
+    # Purpose: Transition an export job to COMPLETED atomically. Refuses the
+    #   write when the row already sits in a terminal status so concurrent
+    #   re-generators cannot stomp each other's artifact metadata.
+    # Database/ORM: SELECT ... FOR UPDATE on PostgreSQL via SQLAlchemy; the
+    #   no-op SQLite SELECT FOR UPDATE keeps test behavior intact.
+    # Standards: Race-condition guard per project engineering rules.
+    # Blast Radius: Export artifact metadata, audit details.
+    # ========================================================================
     def complete_artifact(
         self,
         *,
@@ -186,7 +196,11 @@ class SqlAlchemyExportJobRepository:
         byte_size: int,
         checksum_sha256: str,
     ) -> ExportJobEntry:
-        row = self._get_row(export_id)
+        row = self._get_row_for_update(export_id)
+        if row.status in _TERMINAL_EXPORT_JOB_STATUSES:
+            raise ExportJobValidationError(
+                f"Export job {export_id} is already in terminal status {row.status}"
+            )
         now = datetime.now(UTC)
         row.status = "COMPLETED"
         row.file_url = _normalize_artifact_uri(file_url)
@@ -210,7 +224,11 @@ class SqlAlchemyExportJobRepository:
         export_id: str,
         failure_reason: str,
     ) -> ExportJobEntry:
-        row = self._get_row(export_id)
+        row = self._get_row_for_update(export_id)
+        if row.status in _TERMINAL_EXPORT_JOB_STATUSES:
+            raise ExportJobValidationError(
+                f"Export job {export_id} is already in terminal status {row.status}"
+            )
         now = datetime.now(UTC)
         row.status = "FAILED"
         row.file_url = None
@@ -277,6 +295,18 @@ class SqlAlchemyExportJobRepository:
             raise ExportJobNotFoundError("Export job not found")
         return row
 
+    def _get_row_for_update(self, export_id: str) -> ExportJobORM:
+        export_uuid = _parse_uuid(export_id, field_name="export_id")
+        statement = (
+            select(ExportJobORM)
+            .where(ExportJobORM.id == export_uuid)
+            .with_for_update()
+        )
+        row = self._session.execute(statement).scalar_one_or_none()
+        if row is None:
+            raise ExportJobNotFoundError("Export job not found")
+        return row
+
     @staticmethod
     def _to_entry(row: ExportJobORM) -> ExportJobEntry:
         stored = row.scope_channel_ids
@@ -310,6 +340,13 @@ class SqlAlchemyExportJobRepository:
 
 
 def _visibility_filter_condition(visibility_filter: ExportJobVisibilityFilter):
+    if (
+        visibility_filter.scope_type is None
+        and visibility_filter.scope_id is not None
+    ):
+        raise ExportJobValidationError(
+            "visibility filter must include scope_type when scope_id is set"
+        )
     conditions = [ExportJobORM.export_type.in_(sorted(visibility_filter.export_types))]
     if visibility_filter.scope_type is not None:
         conditions.append(ExportJobORM.scope_type == visibility_filter.scope_type)
@@ -420,7 +457,9 @@ def _normalize_scope_channel_ids(
             )
         return None
     if scope_channel_ids is None:
-        return None
+        raise ExportJobValidationError(
+            "scope_channel_ids must be provided for non-global exports"
+        )
     cleaned: list[str] = []
     for channel_id in scope_channel_ids:
         if not isinstance(channel_id, str):

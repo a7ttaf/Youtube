@@ -303,6 +303,7 @@ def get_export(
             month=export_job.month,
             org_index=org_index,
             group_registry=group_registry,
+            scope_channel_ids=export_job.scope_channel_ids,
         )
     except KeyError as exc:
         raise HTTPException(
@@ -363,6 +364,7 @@ def preview_finance_workbook(
             month=export_job.month,
             org_index=org_index,
             group_registry=group_registry,
+            scope_channel_ids=export_job.scope_channel_ids,
         )
         if export_job.export_type != "FINANCE_EXCEL":
             raise FinanceWorkbookPreviewValidationError(
@@ -437,6 +439,7 @@ def download_finance_workbook(
             month=export_job.month,
             org_index=org_index,
             group_registry=group_registry,
+            scope_channel_ids=export_job.scope_channel_ids,
         )
         if export_job.export_type != "FINANCE_EXCEL":
             raise FinanceWorkbookPreviewValidationError(
@@ -528,6 +531,7 @@ def download_executive_pdf(
             month=export_job.month,
             org_index=org_index,
             group_registry=group_registry,
+            scope_channel_ids=export_job.scope_channel_ids,
         )
         if export_job.export_type != "EXECUTIVE_PDF":
             raise ExecutivePdfValidationError(
@@ -626,6 +630,7 @@ def download_branded_slide_pack(
             month=export_job.month,
             org_index=org_index,
             group_registry=group_registry,
+            scope_channel_ids=export_job.scope_channel_ids,
         )
         if export_job.export_type != "BRANDED_SLIDE_PACK":
             raise BrandedSlidePackValidationError(
@@ -729,6 +734,17 @@ def _persist_generated_export_artifact(
     filename: str,
     content_type: str,
 ) -> tuple[ExportJobEntry | None, JSONResponse | None]:
+    # ====================================================================
+    # Purpose: First-time persistence of a generated export artifact. Jobs
+    #   that are already in a terminal status keep their frozen metadata;
+    #   the caller still returns the freshly rendered bytes for download.
+    # Database/ORM: complete_artifact / fail_job on ExportJobORM.
+    # Standards: Terminal jobs are append-only; concurrent re-downloads
+    #   must not overwrite finalized metadata.
+    # Blast Radius: Artifact filename, checksum, completed_at, audit.
+    # ====================================================================
+    if _has_completed_artifact(export_job):
+        return export_job, None
     try:
         artifact = artifact_store.save(
             export_id=export_job.id,
@@ -737,13 +753,6 @@ def _persist_generated_export_artifact(
             content=content,
         )
     except ExportArtifactStorageError:
-        if _has_completed_artifact(export_job):
-            logger.warning(
-                "Export artifact save failed; preserving completed export %s",
-                export_job.id,
-                exc_info=True,
-            )
-            return export_job, None
         repository.fail_job(
             export_id=export_job.id,
             failure_reason="artifact storage unavailable",
@@ -987,6 +996,7 @@ def _require_export_permissions(
     scope_id: str | None,
     org_index: OrgAccessIndex,
     group_registry: ChannelGroupRegistryStore,
+    scope_channel_ids: tuple[str, ...] | None = None,
 ) -> None:
     finance_export = is_finance_export_type(export_type)
     export_permission = _audit_permission_for_export_type(export_type)
@@ -1001,6 +1011,7 @@ def _require_export_permissions(
         scope_id=scope_id,
         org_index=org_index,
         group_registry=group_registry,
+        scope_channel_ids=scope_channel_ids,
     )
 
 
@@ -1019,6 +1030,7 @@ def _require_export_access_permissions(
     month: str,
     org_index: OrgAccessIndex,
     group_registry: ChannelGroupRegistryStore,
+    scope_channel_ids: tuple[str, ...] | None = None,
 ) -> None:
     if is_finance_export_type(export_type):
         _require_finance_export_artifact_permissions(
@@ -1028,6 +1040,7 @@ def _require_export_access_permissions(
             month=month,
             org_index=org_index,
             group_registry=group_registry,
+            scope_channel_ids=scope_channel_ids,
         )
         return
     _require_export_permissions(
@@ -1037,6 +1050,7 @@ def _require_export_access_permissions(
         scope_id=scope_id,
         org_index=org_index,
         group_registry=group_registry,
+        scope_channel_ids=scope_channel_ids,
     )
 
 
@@ -1049,18 +1063,36 @@ def _require_export_scope_permissions(
     scope_id: str | None,
     org_index: OrgAccessIndex,
     group_registry: ChannelGroupRegistryStore,
+    scope_channel_ids: tuple[str, ...] | None = None,
 ) -> None:
     if scope_type == "group":
-        if not scope_id:
-            raise ExportJobValidationError(
-                "scope_id is required for export scope_type: group"
-            )
-        group = group_registry.get_group(scope_id)
-        if group is None:
-            raise KeyError(f"Group not found: {scope_id}")
-        if not group.channel_ids:
-            raise ExportJobValidationError("group exports require at least one channel")
-        for channel_id in group.channel_ids:
+        # ================================================================
+        # Purpose: Authorize a group export against the channel set frozen
+        #   on the export row when one exists; fall back to the live group
+        #   membership only at job-creation time when no snapshot exists
+        #   yet. This keeps existing exports' permission decisions stable
+        #   even if the source group is edited or deleted afterward.
+        # Database/ORM: ExportJobORM.scope_channel_ids, ChannelGroupORM.
+        # Standards: Permission decisions must mirror the data the export
+        #   actually returns to the caller.
+        # Blast Radius: Group export read/download access control.
+        # ================================================================
+        if scope_channel_ids is not None:
+            channel_ids: tuple[str, ...] | list[str] = scope_channel_ids
+        else:
+            if not scope_id:
+                raise ExportJobValidationError(
+                    "scope_id is required for export scope_type: group"
+                )
+            group = group_registry.get_group(scope_id)
+            if group is None:
+                raise KeyError(f"Group not found: {scope_id}")
+            if not group.channel_ids:
+                raise ExportJobValidationError(
+                    "group exports require at least one channel"
+                )
+            channel_ids = group.channel_ids
+        for channel_id in channel_ids:
             channel_scope = AccessScope.channel(channel_id)
             _require_permission(user, export_permission, channel_scope, org_index)
             _require_permission(user, view_permission, channel_scope, org_index)
@@ -1079,6 +1111,7 @@ def _require_finance_export_artifact_permissions(
     month: str,
     org_index: OrgAccessIndex,
     group_registry: ChannelGroupRegistryStore,
+    scope_channel_ids: tuple[str, ...] | None = None,
 ) -> None:
     _require_export_scope_permissions(
         user=user,
@@ -1088,6 +1121,7 @@ def _require_finance_export_artifact_permissions(
         scope_id=scope_id,
         org_index=org_index,
         group_registry=group_registry,
+        scope_channel_ids=scope_channel_ids,
     )
     month_scope = AccessScope.finance_month(month)
     _require_permission(
