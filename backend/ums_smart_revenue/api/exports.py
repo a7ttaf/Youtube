@@ -245,6 +245,7 @@ def get_export(
     repository: Annotated[
         SqlAlchemyExportJobRepository, Depends(current_export_job_repository)
     ],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     if not _has_any_export_permission(user):
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
@@ -279,7 +280,28 @@ def get_export(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
-    return export_job.to_api()
+    details = {
+        "export_type": export_job.export_type,
+        "scope_type": export_job.scope_type,
+        "scope_id": export_job.scope_id,
+        "month": export_job.month,
+        "status": export_job.status,
+    }
+    if export_job.file_url:
+        details.update(_artifact_metadata_audit_details(export_job))
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.EXPORT_VIEWED,
+        entity_type="export_job",
+        entity_id=export_job.id,
+        scope=AccessScope.export(export_job.id),
+        permission_override=_audit_permission_for_export_type(export_job.export_type),
+        details=details,
+    )
+    response = export_job.to_api()
+    response["audit_event"] = audit_record_to_api(record)
+    return response
 
 
 @router.get("/{export_id}/finance-workbook-preview")

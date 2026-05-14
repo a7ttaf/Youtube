@@ -293,6 +293,7 @@ def create_channel(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     target_scope = AccessScope.company(payload.primary_company_id)
     if not has_permission(user, Permission.MANAGE_CHANNELS, target_scope, org_index):
@@ -316,7 +317,23 @@ def create_channel(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="Channel already exists"
         ) from exc
-    return channel.to_api()
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.CHANNEL_CREATED,
+        entity_type="youtube_channel",
+        entity_id=channel.youtube_channel_id,
+        scope=target_scope,
+        details={
+            "channel_name": channel.channel_name,
+            "primary_company_id": channel.primary_company_id,
+            "cms_status": channel.cms_status,
+            "revenue_required": channel.revenue_required,
+        },
+    )
+    response = channel.to_api()
+    response["audit_event"] = audit_record_to_api(record)
+    return response
 
 
 @router.patch("/{youtube_channel_id}/mapping")

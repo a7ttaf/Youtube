@@ -376,6 +376,8 @@ def test_data_steward_can_create_channel_inside_assigned_company():
     assert response.status_code == 201
     assert response.json()["youtube_channel_id"] == "channel-new"
     assert response.json()["primary_company_id"] == BOOTSTRAP_COMPANY_TV_ID
+    assert response.json()["audit_event"]["event_type"] == "CHANNEL_CREATED"
+    assert response.json()["audit_event"]["sensitive"] is True
 
 
 def test_channel_requests_reject_blank_strings():

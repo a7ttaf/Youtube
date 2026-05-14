@@ -20,6 +20,7 @@ class AuditEventType(StrEnum):
     ALLOCATION_RULE_CHANGED = "ALLOCATION_RULE_CHANGED"
     RECALCULATION_REQUESTED = "RECALCULATION_REQUESTED"
     EXPORT_CREATED = "EXPORT_CREATED"
+    EXPORT_VIEWED = "EXPORT_VIEWED"
     EXPORT_DOWNLOADED = "EXPORT_DOWNLOADED"
     USER_ACCOUNT_CHANGED = "USER_ACCOUNT_CHANGED"
     USER_ROLE_CHANGED = "USER_ROLE_CHANGED"
@@ -45,6 +46,10 @@ class AuditEventDefinition:
 # Events omitted here intentionally have no permission marker or reason requirement.
 # record_audit_event handles them via .get() and records them as non-sensitive.
 AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
+    AuditEventType.CHANNEL_CREATED: AuditEventDefinition(
+        AuditEventType.CHANNEL_CREATED,
+        permission=Permission.MANAGE_CHANNELS,
+    ),
     AuditEventType.CHANNEL_UPDATED: AuditEventDefinition(
         AuditEventType.CHANNEL_UPDATED,
         reason_required=True,
@@ -87,6 +92,9 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     ),
     AuditEventType.EXPORT_CREATED: AuditEventDefinition(
         AuditEventType.EXPORT_CREATED,
+    ),
+    AuditEventType.EXPORT_VIEWED: AuditEventDefinition(
+        AuditEventType.EXPORT_VIEWED,
     ),
     AuditEventType.EXPORT_DOWNLOADED: AuditEventDefinition(
         AuditEventType.EXPORT_DOWNLOADED,
