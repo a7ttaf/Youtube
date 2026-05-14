@@ -944,12 +944,12 @@ function TraceView({
           </div>
           <div style={{ padding: 13 }}>
             <div className="trace-canvas large" aria-label="SQL-scoped lineage mockup">
-              {TRACE_LINES_LARGE.map((l, i) => (
-                <span key={i} className="trace-line"
+              {TRACE_LINES_LARGE.map((l) => (
+                <span key={l.id} className="trace-line"
                   style={{ left: l.left, top: l.top, width: l.width, transform: `rotate(${l.rotate}deg)` }} />
               ))}
               {TRACE_NODES_LARGE.map((n) => (
-                <span key={n.text}
+                <span key={n.id}
                   className={`trace-node${n.finance ? " finance" : ""}`}
                   style={{ left: n.x, top: n.y }}>
                   {n.text}
@@ -1210,7 +1210,7 @@ function AuditView({ permissions }: { permissions: AccessPermissions }) {
           <div className="timeline" role="list">
             {canViewAudit ? (
               AUDIT_EVENTS.map((e) => (
-                <div key={e.time + e.title} className="timeline-item" role="listitem">
+                <div key={e.id} className="timeline-item" role="listitem">
                   <span className="timeline-time">{e.time}</span>
                   <Dot tone={e.tone} />
                   <span>

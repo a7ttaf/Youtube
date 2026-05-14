@@ -223,23 +223,23 @@ export const TRACE_SUMMARY = [
 ];
 
 export const TRACE_NODES_LARGE = [
-  { x: 48,  y: 82,  text: "UMS Holding" },
-  { x: 248, y: 94,  text: "TV Sector" },
-  { x: 388, y: 170, text: "United Studios" },
-  { x: 548, y: 126, text: "UMS Drama" },
-  { x: 526, y: 264, text: "Payment", finance: true },
-  { x: 300, y: 330, text: "Gap Allocation", finance: true },
-  { x: 156, y: 246, text: "Sports Extra" },
-  { x: 646, y: 294, text: "Export Row", finance: true },
+  { id: "holding", x: 48,  y: 82,  text: "UMS Holding" },
+  { id: "tv-sector", x: 248, y: 94,  text: "TV Sector" },
+  { id: "united-studios", x: 388, y: 170, text: "United Studios" },
+  { id: "ums-drama", x: 548, y: 126, text: "UMS Drama" },
+  { id: "payment", x: 526, y: 264, text: "Payment", finance: true },
+  { id: "gap-allocation", x: 300, y: 330, text: "Gap Allocation", finance: true },
+  { id: "sports-extra", x: 156, y: 246, text: "Sports Extra" },
+  { id: "export-row", x: 646, y: 294, text: "Export Row", finance: true },
 ];
 
 export const TRACE_LINES_LARGE = [
-  { left: 110, top: 100, width: 140, rotate: 8 },
-  { left: 260, top: 116, width: 138, rotate: 29 },
-  { left: 393, top: 194, width: 132, rotate: -18 },
-  { left: 232, top: 198, width: 122, rotate: 58 },
-  { left: 378, top: 326, width: 146, rotate: -24 },
-  { left: 520, top: 258, width: 116, rotate: 19 },
+  { id: "holding-to-tv-sector", left: 110, top: 100, width: 140, rotate: 8 },
+  { id: "tv-sector-to-united-studios", left: 260, top: 116, width: 138, rotate: 29 },
+  { id: "united-studios-to-payment", left: 393, top: 194, width: 132, rotate: -18 },
+  { id: "tv-sector-to-gap-allocation", left: 232, top: 198, width: 122, rotate: 58 },
+  { id: "gap-allocation-to-payment", left: 378, top: 326, width: 146, rotate: -24 },
+  { id: "payment-to-export-row", left: 520, top: 258, width: 116, rotate: 19 },
 ];
 
 export const TRACE_EVENTS = [
@@ -309,9 +309,9 @@ export const AUDIT_SUMMARY = [
 ];
 
 export const AUDIT_EVENTS = [
-  { time: "02:18:44", tone: "red" as Severity, title: "Revenue export file prepared", sub: "actor=finance.admin@ums, permission=export:revenue, scope=global:mar-2026, checksum=exp_8b3c41", badge: { text: "Sensitive", tone: "red" as Severity } },
-  { time: "02:03:11", tone: "amber" as Severity, title: "Manual override submitted", sub: "target=Kids Arabic, before and after values stored, reason required, approver pending", badge: { text: "Pending", tone: "amber" as Severity } },
-  { time: "01:55:08", tone: "green" as Severity, title: "Trace query filtered", sub: "allowed_companies=United Studios, hidden_entities=38, source=sql", badge: { text: "Trace", tone: "violet" as Severity } },
-  { time: "01:40:29", tone: "red" as Severity, title: "Denied bank reconciliation view", sub: "actor=assistant.analyst@ums, permission=view:bank_reconciliation, result=denied", badge: { text: "Denied", tone: "red" as Severity } },
-  { time: "01:22:51", tone: "green" as Severity, title: "Mapping change approved", sub: "channel=Sports Extra, company=TV Sector, approver=corporate.admin@ums", badge: { text: "Audit", tone: "blue" as Severity } },
+  { id: "export-file-prepared", time: "02:18:44", tone: "red" as Severity, title: "Revenue export file prepared", sub: "actor=finance.admin@ums, permission=export:revenue, scope=global:mar-2026, checksum=exp_8b3c41", badge: { text: "Sensitive", tone: "red" as Severity } },
+  { id: "manual-override-submitted", time: "02:03:11", tone: "amber" as Severity, title: "Manual override submitted", sub: "target=Kids Arabic, before and after values stored, reason required, approver pending", badge: { text: "Pending", tone: "amber" as Severity } },
+  { id: "trace-query-filtered", time: "01:55:08", tone: "green" as Severity, title: "Trace query filtered", sub: "allowed_companies=United Studios, hidden_entities=38, source=sql", badge: { text: "Trace", tone: "violet" as Severity } },
+  { id: "bank-reconciliation-denied", time: "01:40:29", tone: "red" as Severity, title: "Denied bank reconciliation view", sub: "actor=assistant.analyst@ums, permission=view:bank_reconciliation, result=denied", badge: { text: "Denied", tone: "red" as Severity } },
+  { id: "mapping-change-approved", time: "01:22:51", tone: "green" as Severity, title: "Mapping change approved", sub: "channel=Sports Extra, company=TV Sector, approver=corporate.admin@ums", badge: { text: "Audit", tone: "blue" as Severity } },
 ];
