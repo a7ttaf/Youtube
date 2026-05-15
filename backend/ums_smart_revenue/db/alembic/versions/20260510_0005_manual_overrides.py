@@ -41,13 +41,19 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         # Dialect-agnostic month format check. The original `~` regex was
         # PostgreSQL-only and broke SQLite-backed migration test harnesses;
-        # substr/BETWEEN runs identically on PostgreSQL and SQLite.
+        # substr/BETWEEN runs identically on PostgreSQL and SQLite. Each
+        # character is verified to be a digit (positions 1-4 and 6-7) before
+        # the two-digit month range check, because string BETWEEN is
+        # lexicographic and would otherwise admit values like "2026-0A"
+        # (since '0A' sorts between '01' and '12' byte-wise).
         sa.CheckConstraint(
             "length(month) = 7 AND substr(month, 5, 1) = '-' "
             "AND substr(month, 1, 1) BETWEEN '0' AND '9' "
             "AND substr(month, 2, 1) BETWEEN '0' AND '9' "
             "AND substr(month, 3, 1) BETWEEN '0' AND '9' "
             "AND substr(month, 4, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 6, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 7, 1) BETWEEN '0' AND '9' "
             "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
             name="ck_revenue_manual_overrides_month_format",
         ),
