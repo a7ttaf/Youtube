@@ -7,6 +7,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.finance_models import RevenueManualOverrideORM
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
@@ -76,7 +77,7 @@ class SqlAlchemyManualOverrideRepository:
         _validate_month(month)
         _validate_nonzero_adjustment(adjustment_revenue_usd)
         normalized_reason = _normalize_reason(reason)
-        actor_uuid = _parse_uuid(actor_user_id)
+        actor_uuid = _actor_identity_uuid(actor_user_id)
         self._require_active_channel(youtube_channel_id)
         self._require_month_open(month)
 
@@ -155,7 +156,7 @@ class SqlAlchemyManualOverrideRepository:
         actor_user_id: str,
         reason: str,
     ) -> RevenueManualOverrideEntry:
-        actor_uuid = _parse_uuid(actor_user_id)
+        actor_uuid = _actor_identity_uuid(actor_user_id)
         normalized_reason = _normalize_reason(reason)
         row = self._get_row(override_id, for_update=True)
         self._require_month_open(row.month, for_update=True)
@@ -229,6 +230,18 @@ def _normalize_reason(reason: str) -> str:
     if not normalized:
         raise ManualOverrideValidationError("reason must not be blank")
     return normalized
+
+
+def _actor_identity_uuid(value: str) -> UUID:
+    # Accept either a UUID literal or a trusted-gateway subject; the shared
+    # helper derives a deterministic UUID5 for the latter so header-auth
+    # deployments with non-UUID x-user-id values can still create or approve
+    # manual overrides. Entity IDs (e.g. manual_override_id) still use the
+    # strict _parse_uuid below since they must reference a real DB row.
+    try:
+        return actor_identity_uuid(value)
+    except ValueError as exc:
+        raise ManualOverrideValidationError(str(exc)) from exc
 
 
 def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:

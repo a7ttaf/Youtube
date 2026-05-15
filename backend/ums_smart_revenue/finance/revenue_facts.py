@@ -8,6 +8,7 @@ from uuid import UUID, uuid4
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.finance_models import MonthlyChannelRevenueFactORM
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
@@ -116,7 +117,7 @@ class SqlAlchemyRevenueFactRepository:
             confidence_score=confidence_score,
         )
         normalized_source_kind = _normalize_source_kind(source_kind)
-        actor_uuid = _parse_uuid(actor_user_id)
+        actor_uuid = _actor_identity_uuid(actor_user_id)
         self._require_active_channel_for_import(youtube_channel_id)
         self._require_month_open(month)
 
@@ -288,11 +289,15 @@ def _normalize_source_kind(source_kind: str) -> str:
         raise RevenueFactValidationError(f"Unknown revenue fact source_kind: {source_kind}") from exc
 
 
-def _parse_uuid(value: str) -> UUID:
+def _actor_identity_uuid(value: str) -> UUID:
+    # Accept either a UUID literal or a trusted-gateway subject; the shared
+    # helper derives a deterministic UUID5 for the latter so header-auth
+    # deployments with non-UUID x-user-id values can still write revenue
+    # facts. Blank values still raise (translated to the module's error).
     try:
-        return UUID(value)
+        return actor_identity_uuid(value)
     except ValueError as exc:
-        raise RevenueFactValidationError("actor_user_id must be a valid UUID") from exc
+        raise RevenueFactValidationError(str(exc)) from exc
 
 
 def _validate_metrics(*, views: int, watch_time_minutes: Decimal, confidence_score: Decimal) -> None:

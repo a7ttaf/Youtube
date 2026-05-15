@@ -1,11 +1,12 @@
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
+from uuid import UUID, uuid4
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM
 from ums_smart_revenue.db.report_models import ExportJobORM
 
@@ -27,11 +28,6 @@ ALLOWED_EXPORT_ARTIFACT_URI_PREFIXES = (
 )
 MAX_EXPORT_JOB_PAGE_SIZE = 100
 _TERMINAL_EXPORT_JOB_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
-_GATEWAY_ACTOR_NAMESPACE = uuid5(
-    NAMESPACE_URL, "ums-smart-revenue:trusted-gateway-actor"
-)
-
-
 @dataclass(frozen=True)
 class ExportJobEntry:
     id: str
@@ -467,11 +463,10 @@ def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
 
 
 def _actor_identity_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
-    normalized = _normalize_required_string(value, field_name)
     try:
-        return UUID(normalized)
-    except ValueError:
-        return uuid5(_GATEWAY_ACTOR_NAMESPACE, normalized)
+        return actor_identity_uuid(value, field_name=field_name)
+    except ValueError as exc:
+        raise ExportJobValidationError(str(exc)) from exc
 
 
 def _normalize_scope_channel_ids(

@@ -1,14 +1,14 @@
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-import re
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.report_models import RawReportFileORM
-
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 ALLOWED_PARSE_STATUSES = frozenset({"DOWNLOADED", "PARSED", "FAILED", "QUARANTINED"})
@@ -87,7 +87,7 @@ class SqlAlchemyRawReportFileRepository:
         normalized_storage_uri = _normalize_storage_uri(storage_uri)
         normalized_checksum = _normalize_required_string(checksum, "checksum")
         normalized_parse_status = _normalize_parse_status(parse_status)
-        actor_uuid = _parse_uuid(actor_user_id)
+        actor_uuid = _actor_identity_uuid(actor_user_id)
 
         row = RawReportFileORM(
             id=uuid4(),
@@ -200,7 +200,20 @@ def _normalize_parse_status(value: str) -> str:
     return normalized
 
 
-def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
+def _actor_identity_uuid(value: str) -> UUID:
+    # Accept either a UUID literal or a trusted-gateway subject; the shared
+    # helper derives a deterministic UUID5 for the latter so header-auth
+    # deployments with non-UUID x-user-id values can still register raw
+    # report files via connector ingestion. Entity IDs (raw_report_file_id)
+    # still use the strict _parse_uuid below since they must reference a
+    # real DB row.
+    try:
+        return actor_identity_uuid(value)
+    except ValueError as exc:
+        raise RawReportFileValidationError(str(exc)) from exc
+
+
+def _parse_uuid(value: str, *, field_name: str = "raw_report_file_id") -> UUID:
     try:
         return UUID(value)
     except ValueError as exc:

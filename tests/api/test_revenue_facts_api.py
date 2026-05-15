@@ -553,12 +553,17 @@ def test_import_rejects_invalid_source_kind(tmp_path):
     assert response.json()["detail"] == "Unknown revenue fact source_kind: ESTIMATED_FAKE_SOURCE"
 
 
-def test_import_rejects_malformed_actor_id(tmp_path):
+def test_import_accepts_gateway_subject_actor_id(tmp_path):
+    # Header-auth deployments can deliver non-UUID gateway subjects via
+    # x-user-id (e.g. service-account slugs). The revenue-fact repository
+    # used to reject these with 422; per the shared actor_identity_uuid
+    # helper the subject is now mapped to a deterministic uuid5 and the
+    # write succeeds with that value persisted to imported_by.
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
     headers = auth_headers("system_integration_user", "connector", "youtube-cms")
-    headers["x-user-id"] = "not-a-uuid"
+    headers["x-user-id"] = "gateway-service-account"
 
     response = client.post(
         "/revenue/facts",
@@ -570,9 +575,21 @@ def test_import_rejects_malformed_actor_id(tmp_path):
             "connector_key": "youtube-cms",
             "gross_revenue_usd": "1234.56",
             "views": 250000,
-            "reason": "Attempt import with malformed actor id",
+            "reason": "Accept gateway non-UUID actor for revenue facts",
         },
     )
 
-    assert response.status_code == 422
-    assert response.json()["detail"] == "actor_user_id must be a valid UUID"
+    assert response.status_code == 201
+    from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
+
+    expected_actor_uuid = actor_identity_uuid("gateway-service-account")
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        fact = session.scalars(
+            select(MonthlyChannelRevenueFactORM).where(
+                MonthlyChannelRevenueFactORM.month == "2026-03",
+                MonthlyChannelRevenueFactORM.youtube_channel_id == "channel-tv-a",
+                MonthlyChannelRevenueFactORM.source_kind == "YOUTUBE_CMS",
+            )
+        ).one()
+    assert fact.imported_by == expected_actor_uuid
