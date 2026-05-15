@@ -22,7 +22,10 @@ def upgrade() -> None:
             "scope_channel_ids",
             sa.JSON().with_variant(postgresql.JSONB(), "postgresql"),
             nullable=True,
-            comment="NULL = unresolved or global scope; [] = empty channel set; otherwise array of channel ID strings",
+            comment=(
+                "NULL = unresolved or global scope; "
+                "non-null = non-empty array of channel ID strings"
+            ),
         ),
     )
     op.create_check_constraint(
@@ -31,6 +34,7 @@ def upgrade() -> None:
         (
             "scope_channel_ids IS NULL OR ("
             "jsonb_typeof(scope_channel_ids) = 'array' "
+            "AND jsonb_array_length(scope_channel_ids) > 0 "
             "AND NOT EXISTS ("
             "SELECT 1 FROM jsonb_array_elements(scope_channel_ids) AS elem "
             "WHERE jsonb_typeof(elem) <> 'string'"
