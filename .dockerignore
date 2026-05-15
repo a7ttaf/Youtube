@@ -1,0 +1,64 @@
+**/.git
+**/.gitignore
+**/.gitattributes
+**/.github
+**/.coderabbit.yaml
+**/.sqlfluff
+
+# Documentation, mockups, planning
+Docs
+mockups
+README.md
+CONTRIBUTING.md
+SECURITY.md
+CODE_OF_CONDUCT.md
+CODEOWNERS
+CHANGELOG.md
+LICENSE
+PRODUCT.md
+DESIGN.md
+
+# Tests live outside the image — run them via the CI workflow or a sidecar.
+tests
+.pytest_cache
+.pytest-tmp
+.coverage
+htmlcov
+coverage.xml
+
+# Caches & venvs
+**/__pycache__
+**/*.pyc
+**/*.pyo
+**/.venv
+**/venv
+**/.uv-cache
+**/.mypy_cache
+**/.ruff_cache
+
+# Editor / OS junk
+**/.idea
+**/.vscode
+**/.DS_Store
+**/Thumbs.db
+
+# Local env / secrets — never bake into images
+**/.env
+**/.env.*
+**/secrets
+**/*.pem
+**/*.key
+**/*.crt
+
+# Docker meta itself
+Dockerfile
+.dockerignore
+docker-compose*.yml
+
+# Helm / deploy assets (not needed in the runtime image)
+deploy
+
+# Output artifacts
+dist
+build
+*.egg-info
