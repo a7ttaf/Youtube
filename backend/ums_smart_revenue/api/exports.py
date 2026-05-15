@@ -482,6 +482,11 @@ def download_finance_workbook(
             if storage_failure_response is not None:
                 return storage_failure_response
             export_job = _require_persisted_export_job(export_job)
+            workbook_bytes, filename, content_type = _require_persisted_artifact_bytes(
+                export_job=export_job,
+                expected_export_type="FINANCE_EXCEL",
+                artifact_store=artifact_store,
+            )
     except KeyError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc).strip("'")
@@ -593,6 +598,11 @@ def download_executive_pdf(
             if storage_failure_response is not None:
                 return storage_failure_response
             export_job = _require_persisted_export_job(export_job)
+            pdf_bytes, filename, content_type = _require_persisted_artifact_bytes(
+                export_job=export_job,
+                expected_export_type="EXECUTIVE_PDF",
+                artifact_store=artifact_store,
+            )
     except KeyError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc).strip("'")
@@ -706,6 +716,11 @@ def download_branded_slide_pack(
             if storage_failure_response is not None:
                 return storage_failure_response
             export_job = _require_persisted_export_job(export_job)
+            pptx_bytes, filename, content_type = _require_persisted_artifact_bytes(
+                export_job=export_job,
+                expected_export_type="BRANDED_SLIDE_PACK",
+                artifact_store=artifact_store,
+            )
     except KeyError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail=str(exc).strip("'")
@@ -782,7 +797,7 @@ def _persist_generated_export_artifact(
     # ====================================================================
     # Purpose: First-time persistence of a generated export artifact. Jobs
     #   that are already in a terminal status keep their frozen metadata;
-    #   the caller still returns the freshly rendered bytes for download.
+    #   the caller reloads persisted bytes for download.
     # Database/ORM: complete_artifact / fail_job on ExportJobORM.
     # Standards: Terminal jobs are append-only; concurrent re-downloads
     #   must not overwrite finalized metadata.
@@ -915,6 +930,22 @@ def _serve_persisted_artifact_bytes(
         )
     )
     return artifact_bytes, filename, content_type
+
+
+def _require_persisted_artifact_bytes(
+    *,
+    export_job: ExportJobEntry,
+    expected_export_type: str,
+    artifact_store: FileSystemExportArtifactStore,
+) -> tuple[bytes, str, str]:
+    served = _serve_persisted_artifact_bytes(
+        export_job=export_job,
+        expected_export_type=expected_export_type,
+        artifact_store=artifact_store,
+    )
+    if served is None:
+        raise ExportArtifactStorageError("persisted artifact unavailable")
+    return served
 
 
 def _require_persisted_export_job(export_job: ExportJobEntry | None) -> ExportJobEntry:

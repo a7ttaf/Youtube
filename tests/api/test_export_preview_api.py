@@ -18,6 +18,7 @@ from ums_smart_revenue.api.exports import (
     _artifact_metadata_audit_details,
     _persist_generated_export_artifact,
     _previous_month,
+    _require_persisted_artifact_bytes,
 )
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.finance_models import (
@@ -740,6 +741,101 @@ def test_persist_generated_export_artifact_rejects_stale_failed_terminal_row(tmp
     assert response is not None
     assert response.status_code == 409
     assert not (artifact_dir / "exports" / str(EXPORT_ID) / "finance.xlsx").exists()
+
+
+@pytest.mark.parametrize(
+    ("export_type", "filename", "content_type"),
+    [
+        ("EXECUTIVE_PDF", "executive.pdf", "application/pdf"),
+        (
+            "BRANDED_SLIDE_PACK",
+            "slides.pptx",
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ),
+    ],
+)
+def test_persisted_artifact_bytes_win_after_terminal_race(
+    tmp_path,
+    export_type: str,
+    filename: str,
+    content_type: str,
+):
+    artifact_dir = tmp_path / "artifacts"
+    persisted_bytes = b"first-writer-persisted-bytes"
+    generated_bytes = b"second-writer-generated-bytes"
+    artifact_path = artifact_dir / "exports" / str(EXPORT_ID) / filename
+    artifact_path.parent.mkdir(parents=True)
+    artifact_path.write_bytes(persisted_bytes)
+    file_url = f"file-store://exports/{EXPORT_ID}/{filename}"
+    completed_job = ExportJobEntry(
+        id=str(EXPORT_ID),
+        export_type=export_type,
+        scope_type="global",
+        scope_id=None,
+        month="2026-03",
+        currency="USD",
+        requested_by=str(USER_ID),
+        status="COMPLETED",
+        file_url=file_url,
+        month_lock_status="LOCKED",
+        include_confidence_notes=True,
+        include_manual_override_notes=True,
+        created_at=datetime(2026, 4, 30, 10, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 4, 30, 10, 1, tzinfo=UTC),
+        artifact_filename=filename,
+        artifact_content_type=content_type,
+        artifact_byte_size=len(persisted_bytes),
+        artifact_checksum_sha256=hashlib.sha256(persisted_bytes).hexdigest(),
+    )
+    queued_job = ExportJobEntry(
+        id=str(EXPORT_ID),
+        export_type=export_type,
+        scope_type="global",
+        scope_id=None,
+        month="2026-03",
+        currency="USD",
+        requested_by=str(USER_ID),
+        status="QUEUED",
+        file_url=None,
+        month_lock_status="LOCKED",
+        include_confidence_notes=True,
+        include_manual_override_notes=True,
+        created_at=datetime(2026, 4, 30, 10, 0, tzinfo=UTC),
+        completed_at=None,
+    )
+
+    class CompletedRaceRepository:
+        def complete_artifact(self, **_kwargs: object) -> NoReturn:
+            raise ExportJobTerminalStateError(
+                f"Export job {EXPORT_ID} is already in terminal status COMPLETED"
+            )
+
+        def get_job(self, export_id: str) -> ExportJobEntry:
+            assert export_id == str(EXPORT_ID)
+            return completed_job
+
+    export_job, response = _persist_generated_export_artifact(
+        repository=CompletedRaceRepository(),
+        artifact_store=FileSystemExportArtifactStore(artifact_dir),
+        export_job=queued_job,
+        content=generated_bytes,
+        filename=filename,
+        content_type=content_type,
+    )
+
+    assert response is None
+    assert export_job == completed_job
+    served_bytes, served_filename, served_content_type = (
+        _require_persisted_artifact_bytes(
+            export_job=export_job,
+            expected_export_type=export_type,
+            artifact_store=FileSystemExportArtifactStore(artifact_dir),
+        )
+    )
+    assert served_bytes == persisted_bytes
+    assert served_bytes != generated_bytes
+    assert served_filename == filename
+    assert served_content_type == content_type
 
 
 def test_export_operator_cannot_download_finance_workbook(tmp_path):
