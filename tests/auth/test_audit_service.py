@@ -106,4 +106,8 @@ def test_record_audit_event_accepts_permission_override():
 
     assert record.permission == "exports.analytics"
     assert record.sensitive is True
+    # Verify the override path also persisted the record via the sink (not just
+    # returned it), so a regression that constructs the record without writing
+    # it would still fail this test.
+    assert sink.records == [record]
 
