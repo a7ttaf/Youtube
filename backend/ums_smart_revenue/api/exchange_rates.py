@@ -1,3 +1,4 @@
+import hashlib
 import re
 from datetime import date
 from decimal import Decimal
@@ -123,10 +124,27 @@ def sync_exchange_rates(
             detail=str(exc),
         ) from exc
 
-    batch_entity_id = (
-        payload.source_report_id
-        or f"batch:{payload.provider_key}:{len(entries)}"
-    )
+    if payload.source_report_id:
+        batch_entity_id = payload.source_report_id
+    else:
+        # Stable digest of provider key + sorted (date, base, quote) tuples so
+        # different batches from the same provider don't collide just because
+        # they share a count, while remaining bounded for audit storage.
+        digest = hashlib.sha256()
+        digest.update(payload.provider_key.encode())
+        for entry in sorted(
+            entries,
+            key=lambda item: (
+                item.rate_date.isoformat(),
+                item.base_currency,
+                item.quote_currency,
+            ),
+        ):
+            digest.update(
+                f"|{entry.rate_date.isoformat()}|"
+                f"{entry.base_currency}|{entry.quote_currency}".encode()
+            )
+        batch_entity_id = f"batch:{payload.provider_key}:{digest.hexdigest()[:32]}"
     record = record_audit_event(
         sink=audit_sink,
         actor=user,

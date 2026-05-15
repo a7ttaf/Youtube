@@ -17,6 +17,7 @@ Define initial API endpoints for the UMS Smart Revenue Control Center.
 /finance-close
 /adsense
 /exports
+/exchange-rates
 /audit
 ```
 

@@ -233,13 +233,19 @@ def _revenue_trend_anomaly_details(
     current_by_channel = _select_primary_facts_by_channel(current_revenue_facts)
     previous_by_channel = _select_primary_facts_by_channel(previous_revenue_facts)
     channels: list[dict[str, object]] = []
-    for channel_id in sorted(current_by_channel.keys() & previous_by_channel.keys()):
-        current = current_by_channel[channel_id]
+    # Iterate previous_by_channel so channels that disappear in the current
+    # month are still surfaced as a 100% drop. Skipping them would silently
+    # mask one of the highest-signal regressions for revenue trend alerts.
+    for channel_id in sorted(previous_by_channel):
+        current = current_by_channel.get(channel_id)
         previous = previous_by_channel[channel_id]
         if previous.gross_revenue_usd == 0:
             continue
+        current_gross_revenue_usd = (
+            current.gross_revenue_usd if current is not None else Decimal("0")
+        )
         change_ratio = (
-            current.gross_revenue_usd - previous.gross_revenue_usd
+            current_gross_revenue_usd - previous.gross_revenue_usd
         ) / previous.gross_revenue_usd
         if abs(change_ratio) <= threshold_percent:
             continue
@@ -247,7 +253,7 @@ def _revenue_trend_anomaly_details(
             {
                 "youtube_channel_id": channel_id,
                 "current_gross_revenue_usd": _decimal_to_api(
-                    current.gross_revenue_usd
+                    current_gross_revenue_usd
                 ),
                 "previous_gross_revenue_usd": _decimal_to_api(
                     previous.gross_revenue_usd

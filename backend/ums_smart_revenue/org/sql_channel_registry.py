@@ -69,7 +69,9 @@ class SqlAlchemyChannelRegistry:
             cms_status=cms_status,
             content_owner_id=None,
             revenue_required=revenue_required,
-            revenue_source_status="MISSING_REVENUE_SOURCE",
+            revenue_source_status=(
+                "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
+            ),
             active=True,
         )
         self._session.add(row)

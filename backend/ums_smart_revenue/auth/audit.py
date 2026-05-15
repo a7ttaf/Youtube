@@ -63,6 +63,7 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     ),
     AuditEventType.MONTH_CLOSE_VIEWED: AuditEventDefinition(
         AuditEventType.MONTH_CLOSE_VIEWED,
+        permission=Permission.VIEW_REVENUE,
     ),
     AuditEventType.MONTH_LOCKED: AuditEventDefinition(
         AuditEventType.MONTH_LOCKED,

@@ -117,12 +117,16 @@ class ChannelRegistry:
             raise ChannelRegistryConflictError(
                 f"Channel already exists: {youtube_channel_id}"
             )
+        initial_revenue_source_status = (
+            "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
+        )
         channel = ChannelRegistryEntry(
             youtube_channel_id=youtube_channel_id,
             channel_name=channel_name,
             primary_company_id=normalized_company_id,
             cms_status=cms_status,
             revenue_required=revenue_required,
+            revenue_source_status=initial_revenue_source_status,
         )
         self._channels[youtube_channel_id] = channel
         return channel
