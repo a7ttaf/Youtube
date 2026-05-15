@@ -89,7 +89,7 @@ class SqlAlchemyExchangeRateRepository:
             "provider_key",
         )
         normalized_source_report_id = _normalize_optional_string(source_report_id)
-        actor_uuid = _parse_uuid(actor_user_id)
+        actor_uuid = _parse_uuid_or_none(actor_user_id)
         normalized_rates = [_normalize_rate_input(rate_input) for rate_input in rates]
         seen_rate_keys: set[tuple[date, str, str, str]] = set()
         for normalized in normalized_rates:
@@ -246,13 +246,12 @@ def _normalize_optional_string(value: str | None) -> str | None:
     return normalized or None
 
 
-def _parse_uuid(value: str) -> UUID:
+def _parse_uuid_or_none(value: str) -> UUID | None:
+    normalized = _normalize_required_string(value, "actor_user_id")
     try:
-        return UUID(value)
-    except ValueError as exc:
-        raise ExchangeRateValidationError(
-            "actor_user_id must be a valid UUID"
-        ) from exc
+        return UUID(normalized)
+    except ValueError:
+        return None
 
 
 def _quantize_rate(value: Decimal) -> Decimal:

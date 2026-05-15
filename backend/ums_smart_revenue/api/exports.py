@@ -247,13 +247,11 @@ def list_exports(
     if not _has_any_export_permission(user):
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
-        page = repository.list_jobs(
-            requested_by=user.user_id,
-            visibility_filters=_export_job_visibility_filters(
-                user=user,
-                org_index=org_index,
-                group_registry=group_registry,
-            ),
+        items, has_more = _list_authorized_export_jobs(
+            repository=repository,
+            user=user,
+            org_index=org_index,
+            group_registry=group_registry,
             limit=limit,
             offset=offset,
         )
@@ -262,12 +260,12 @@ def list_exports(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
     return {
-        "items": [item.to_api() for item in page.items],
+        "items": [item.to_api() for item in items],
         "pagination": {
-            "limit": page.limit,
-            "offset": page.offset,
-            "returned": len(page.items),
-            "has_more": page.has_more,
+            "limit": limit,
+            "offset": offset,
+            "returned": len(items),
+            "has_more": has_more,
         },
     }
 
@@ -845,7 +843,19 @@ def _persist_generated_export_artifact(
             export_job.id,
             exc,
         )
-        return repository.get_job(export_job.id), None
+        latest_job = repository.get_job(export_job.id)
+        if _has_completed_artifact(latest_job):
+            return latest_job, None
+        _discard_saved_artifact(artifact_store=artifact_store, file_url=artifact.file_url)
+        return None, JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content={
+                "detail": (
+                    "Export job is already in terminal status "
+                    f"{latest_job.status}"
+                )
+            },
+        )
     except Exception:
         logger.exception("Export artifact completion failed for export %s", export_job.id)
         _discard_saved_artifact(artifact_store=artifact_store, file_url=artifact.file_url)
@@ -1406,6 +1416,69 @@ def _has_any_export_permission(user: UserPrincipal) -> bool:
         ):
             return True
     return False
+
+
+def _list_authorized_export_jobs(
+    *,
+    repository: SqlAlchemyExportJobRepository,
+    user: UserPrincipal,
+    org_index: OrgAccessIndex,
+    group_registry: ChannelGroupRegistryStore,
+    limit: int,
+    offset: int,
+) -> tuple[list[ExportJobEntry], bool]:
+    items: list[ExportJobEntry] = []
+    skipped = 0
+    scan_offset = 0
+    while len(items) <= limit:
+        page = repository.list_jobs(
+            requested_by=user.user_id,
+            limit=MAX_EXPORT_JOB_PAGE_SIZE,
+            offset=scan_offset,
+        )
+        if not page.items:
+            break
+        for export_job in page.items:
+            if not _can_access_export_job(
+                user=user,
+                export_job=export_job,
+                org_index=org_index,
+                group_registry=group_registry,
+            ):
+                continue
+            if skipped < offset:
+                skipped += 1
+                continue
+            items.append(export_job)
+            if len(items) > limit:
+                break
+        if not page.has_more or len(items) > limit:
+            break
+        scan_offset += len(page.items)
+    return items[:limit], len(items) > limit
+
+
+def _can_access_export_job(
+    *,
+    user: UserPrincipal,
+    export_job: ExportJobEntry,
+    org_index: OrgAccessIndex,
+    group_registry: ChannelGroupRegistryStore,
+) -> bool:
+    try:
+        _require_export_access_permissions(
+            user=user,
+            export_type=export_job.export_type,
+            scope_type=export_job.scope_type,
+            scope_id=export_job.scope_id,
+            month=export_job.month,
+            org_index=org_index,
+            group_registry=group_registry,
+            scope_channel_ids=export_job.scope_channel_ids,
+        )
+    except (ExportJobValidationError, HTTPException, KeyError):
+        return False
+    return True
 
 
 def _export_job_visibility_filters(

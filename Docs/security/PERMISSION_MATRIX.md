@@ -40,7 +40,7 @@
 | Revenue Operations Admin | `global` | Analytics, confidence, connector health, run connector jobs, registry/groups, raw parser errors when granted. No payment/bank finance by default. |
 | Finance Admin | `global` or assigned finance scope | Revenue, payments, bank reconciliation, manual overrides, allocation rules, month lock/unlock, finance exports, audit finance events. |
 | Finance Approver | `global` or `finance-month` | Approve overrides, approve allocation changes, unlock month, view finance needed for approval. |
-| Finance Viewer | `global`, `sector`, `company`, or `finance-month` | Read-only revenue, finalized payments, bank reconciliation, finance export history. Cannot lock/unlock or edit. |
+| Finance Viewer | `global`, `sector`, `company`, or `channel` | Read-only revenue for the assigned organization scope. Finalized-payment and bank-reconciliation reads require a global role or separate finance-month grants. Cannot lock/unlock or edit. |
 | TV Sector Manager | `sector:TV` | TV analytics, confidence, analytics exports. Finance only by explicit direct grant or paired finance role. |
 | News Sector Manager | `sector:NEWS` | News analytics, confidence, analytics exports. Finance only by explicit direct grant or paired finance role. |
 | Company Manager | `company` | Company analytics, confidence, analytics exports. No cross-company visibility. Finance only by explicit grant. |
@@ -60,7 +60,7 @@
 - User account create/update requires `users.manage`, but service account lifecycle changes require Super Owner.
 - User account list and access-profile reads require `users.manage`; list responses use bounded cursor pagination and profile responses show active role assignments and direct grants only.
 - Finance direct grants require Finance Admin or Super Owner; connector/raw-file direct grants require Connector Admin or Super Owner; administrative direct grants require Super Owner.
-- Finalized-payment and bank-reconciliation permissions may be granted on organization scopes or a specific `finance-month`; month-scoped grants do not imply another month.
+- Finalized-payment and bank-reconciliation permissions may be granted globally or on a specific `finance-month`; month-scoped grants do not imply another month.
 - Export Operator requires underlying view permission for the export scope.
 - Raw report files require `raw_files.view` even when the user can view normalized analytics.
 - Service users cannot be used for browser/dashboard sessions.

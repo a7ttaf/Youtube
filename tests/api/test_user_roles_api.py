@@ -140,6 +140,28 @@ def test_assistant_cannot_assign_roles_or_probe_users(tmp_path):
     assert response.json()["detail"] == "Missing permission: roles.assign"
 
 
+def test_corporate_admin_assigns_company_scoped_export_operator(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        f"/users/{TARGET_ID}/roles",
+        headers=auth_headers("corporate_admin"),
+        json={
+            "role_key": "export_operator",
+            "scope_type": "company",
+            "scope_id": COMPANY_ID,
+            "reason": "Grant scoped export operations",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["role_key"] == "export_operator"
+    assert response.json()["scope_type"] == "company"
+    assert response.json()["scope_id"] == COMPANY_ID
+
+
 def test_corporate_admin_cannot_assign_finance_role(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)

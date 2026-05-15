@@ -3,6 +3,7 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from io import BytesIO
 from types import SimpleNamespace
+from typing import NoReturn
 from uuid import UUID, uuid4
 
 import pytest
@@ -38,7 +39,11 @@ from ums_smart_revenue.db.report_models import ExportJobORM, ReportBase
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 from ums_smart_revenue.finance.revenue_facts import RevenueFactValidationError
 from ums_smart_revenue.reports.artifact_storage import FileSystemExportArtifactStore
-from ums_smart_revenue.reports.exports import ExportJobEntry, ExportJobValidationError
+from ums_smart_revenue.reports.exports import (
+    ExportJobEntry,
+    ExportJobTerminalStateError,
+    ExportJobValidationError,
+)
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000023001")
 COMPANY_ID = UUID("00000000-0000-0000-0000-000000023101")
@@ -641,7 +646,7 @@ def test_finance_workbook_download_returns_503_when_persisted_artifact_missing(
 
 def test_persist_generated_export_artifact_cleans_up_when_completion_fails(tmp_path):
     class FailingCompleteRepository:
-        def complete_artifact(self, **_kwargs):
+        def complete_artifact(self, **_kwargs: object) -> NoReturn:
             raise ExportJobValidationError("completion failed")
 
     artifact_dir = tmp_path / "artifacts"
@@ -672,6 +677,68 @@ def test_persist_generated_export_artifact_cleans_up_when_completion_fails(tmp_p
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         )
 
+    assert not (artifact_dir / "exports" / str(EXPORT_ID) / "finance.xlsx").exists()
+
+
+def test_persist_generated_export_artifact_rejects_stale_failed_terminal_row(tmp_path):
+    failed_job = ExportJobEntry(
+        id=str(EXPORT_ID),
+        export_type="FINANCE_EXCEL",
+        scope_type="global",
+        scope_id=None,
+        month="2026-03",
+        currency="USD",
+        requested_by=str(USER_ID),
+        status="FAILED",
+        file_url=None,
+        month_lock_status="LOCKED",
+        include_confidence_notes=True,
+        include_manual_override_notes=True,
+        created_at=datetime(2026, 4, 30, 10, 0, tzinfo=UTC),
+        completed_at=datetime(2026, 4, 30, 10, 1, tzinfo=UTC),
+        failure_reason="artifact storage unavailable",
+    )
+
+    class FailedTerminalRepository:
+        def complete_artifact(self, **_kwargs: object) -> NoReturn:
+            raise ExportJobTerminalStateError(
+                f"Export job {EXPORT_ID} is already in terminal status FAILED"
+            )
+
+        def get_job(self, export_id: str) -> ExportJobEntry:
+            assert export_id == str(EXPORT_ID)
+            return failed_job
+
+    artifact_dir = tmp_path / "artifacts"
+    export_job = ExportJobEntry(
+        id=str(EXPORT_ID),
+        export_type="FINANCE_EXCEL",
+        scope_type="global",
+        scope_id=None,
+        month="2026-03",
+        currency="USD",
+        requested_by=str(USER_ID),
+        status="QUEUED",
+        file_url=None,
+        month_lock_status="LOCKED",
+        include_confidence_notes=True,
+        include_manual_override_notes=True,
+        created_at=datetime(2026, 4, 30, 10, 0, tzinfo=UTC),
+        completed_at=None,
+    )
+
+    persisted_job, response = _persist_generated_export_artifact(
+        repository=FailedTerminalRepository(),
+        artifact_store=FileSystemExportArtifactStore(artifact_dir),
+        export_job=export_job,
+        content=b"generated workbook",
+        filename="finance.xlsx",
+        content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    )
+
+    assert persisted_job is None
+    assert response is not None
+    assert response.status_code == 409
     assert not (artifact_dir / "exports" / str(EXPORT_ID) / "finance.xlsx").exists()
 
 

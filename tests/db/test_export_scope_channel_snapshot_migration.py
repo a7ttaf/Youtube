@@ -7,11 +7,11 @@ MIGRATION_PATH = (
 )
 
 
-def test_export_scope_channel_snapshot_migration_adds_jsonb_column():
+def test_export_scope_channel_snapshot_migration_adds_dialect_neutral_json_column():
     migration = (PROJECT_ROOT / MIGRATION_PATH).read_text(encoding="utf-8")
 
     assert 'revision = "20260513_0006"' in migration
     assert 'down_revision = "20260513_0005"' in migration
     assert '"scope_channel_ids"' in migration
-    assert "postgresql.JSONB" in migration
+    assert 'sa.JSON().with_variant(postgresql.JSONB(), "postgresql")' in migration
     assert "nullable=True" in migration

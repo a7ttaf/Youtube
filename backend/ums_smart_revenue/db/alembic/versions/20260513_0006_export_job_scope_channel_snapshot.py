@@ -18,7 +18,11 @@ depends_on = None
 def upgrade() -> None:
     op.add_column(
         "export_jobs",
-        sa.Column("scope_channel_ids", postgresql.JSONB(), nullable=True),
+        sa.Column(
+            "scope_channel_ids",
+            sa.JSON().with_variant(postgresql.JSONB(), "postgresql"),
+            nullable=True,
+        ),
     )
 
 

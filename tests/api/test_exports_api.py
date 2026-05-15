@@ -31,9 +31,14 @@ GROUP_ID = UUID("00000000-0000-0000-0000-000000012301")
 USER_ID = UUID("00000000-0000-0000-0000-000000012401")
 
 
-def auth_headers(role: str, scope_type: str = "global", scope_id: str | None = None) -> dict[str, str]:
+def auth_headers(
+    role: str,
+    scope_type: str = "global",
+    scope_id: str | None = None,
+    user_id: str | UUID = USER_ID,
+) -> dict[str, str]:
     headers = {
-        "x-user-id": str(USER_ID),
+        "x-user-id": str(user_id),
         "x-user-email": f"{role}@example.com",
         "x-role": role,
         "x-scope-type": scope_type,
@@ -178,12 +183,15 @@ def test_group_export_request_freezes_member_channels_at_creation(tmp_path):
         session.commit()
 
     detail_response = client.get(f"/exports/{export_id}")
+    list_response = client.get("/exports?limit=10")
 
     assert detail_response.status_code == 200
     assert sorted(detail_response.json()["scope_channel_ids"]) == [
         "channel-a",
         "channel-b",
     ]
+    assert list_response.status_code == 200
+    assert [item["id"] for item in list_response.json()["items"]] == [export_id]
 
 
 def test_group_export_read_uses_snapshot_authorization_after_group_deletion(tmp_path):
@@ -341,6 +349,38 @@ def test_export_operator_can_request_analytics_export_for_assigned_company(tmp_p
     assert audit_sink.records[0].permission == "exports.analytics"
 
 
+def test_non_uuid_gateway_actor_can_create_and_list_exports(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers(
+        "export_operator",
+        "company",
+        str(COMPANY_A_ID),
+        user_id="gateway-subject-export",
+    )
+
+    create_response = client.post(
+        "/exports",
+        headers=headers,
+        json={
+            "export_type": "ANALYTICS_SUMMARY_CSV",
+            "scope_type": "company",
+            "scope_id": str(COMPANY_A_ID),
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Scoped analytics export",
+        },
+    )
+    list_response = client.get("/exports?limit=10", headers=headers)
+
+    assert create_response.status_code == 202
+    assert list_response.status_code == 200
+    assert [item["id"] for item in list_response.json()["items"]] == [
+        create_response.json()["id"]
+    ]
+
+
 def test_export_list_combines_global_and_month_scoped_finance_permissions(tmp_path):
     """Codex P2: a global finance permission must combine with a month-scoped
     grant of the other finance permission. Previously the intersection of
@@ -416,6 +456,52 @@ def test_export_list_combines_global_and_month_scoped_finance_permissions(tmp_pa
     returned_ids = {item["id"] for item in response.json()["items"]}
     assert str(finance_export_id) in returned_ids
     assert str(other_month_export_id) not in returned_ids
+
+
+def test_export_list_uses_snapshot_authorization_for_channel_grants(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    export_id = uuid4()
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            ExportJobORM(
+                id=export_id,
+                export_type="ANALYTICS_SUMMARY_CSV",
+                scope_type="company",
+                scope_id=str(COMPANY_A_ID),
+                scope_channel_ids=["channel-a"],
+                month="2026-03",
+                currency="USD",
+                requested_by=USER_ID,
+                status="QUEUED",
+                month_lock_status="LOCKED",
+                include_confidence_notes=True,
+                include_manual_override_notes=True,
+            )
+        )
+        session.commit()
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="channel-snapshot-export@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.EXPORT_ANALYTICS_REPORT,
+                AccessScope.channel("channel-a"),
+            ),
+            PermissionGrant(
+                Permission.VIEW_ANALYTICS,
+                AccessScope.channel("channel-a"),
+            ),
+        ),
+    )
+    client = TestClient(app)
+
+    response = client.get("/exports?limit=10")
+
+    assert response.status_code == 200
+    assert [item["id"] for item in response.json()["items"]] == [str(export_id)]
 
 
 def test_company_manager_cannot_request_export_for_another_company(tmp_path):

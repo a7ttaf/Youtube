@@ -233,8 +233,11 @@ POST /finance-close/{month}/unlock
 
 The finance-close endpoints in the foundation control close state and
 allocation-rule metadata only. They must not calculate or expose revenue values
-without the reconciliation engine and finance permissions. Readiness checks are
-required before locking and currently block on pending manual overrides,
+without the reconciliation engine and finance permissions. `GET /finance-close/{month}`
+requires `finance.view_revenue` on any grantable revenue scope (`global`,
+`sector`, `company`, or `channel`) because close status is month-wide control
+metadata rather than scoped revenue data. Readiness checks are required before
+locking and currently block on pending manual overrides,
 unresolved reconciliation issues, and active registry channels marked
 `revenue_required` that have no monthly revenue facts (`MISSING_REVENUE_FACTS`). Channels marked
 performance-only or not revenue-required do not block month close.
@@ -265,9 +268,11 @@ The endpoint accepts up to 100 payment objects and upserts by `(month,
 payment_name)`, so connector reruns update the existing payment row instead of
 duplicating it. Sync is rejected for locked finance months.
 
-`GET /adsense/payments` requires global `finance.view_finalized_payments` and is
-audited as `PAYMENT_VIEWED`. It returns payment metadata only; it does not expose
-bank reconciliation data and does not calculate revenue.
+`GET /adsense/payments` requires global `finance.view_finalized_payments` when
+listing all months. When `month` is provided, the same permission on that
+`finance-month` scope is sufficient and the read is audited as `PAYMENT_VIEWED`
+for that scope. It returns payment metadata only; it does not expose bank
+reconciliation data and does not calculate revenue.
 
 ### Exchange rates
 

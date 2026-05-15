@@ -159,7 +159,7 @@ Twenty-first continuation update:
 - added AdSense payment SQL metadata with an Alembic migration for `adsense_payments`;
 - added a SQLAlchemy AdSense payment repository that validates official payment metadata and upserts by `(month, payment_name)` so connector reruns do not duplicate rows;
 - added FastAPI `/adsense/sync-payments` guarded by `connectors.run_jobs` on connector scope `adsense`;
-- added FastAPI `/adsense/payments` guarded by global `finance.view_finalized_payments`;
+- added FastAPI `/adsense/payments` guarded by global or requested finance-month `finance.view_finalized_payments`;
 - rejected AdSense payment sync for locked finance months;
 - audited payment sync as `ADSENSE_PAYMENT_SYNCED` and finalized-payment reads as `PAYMENT_VIEWED`;
 - kept this slice to payment metadata and did not add fake revenue calculations, bank matching, Google password storage, or Neo4j financial source-of-truth behavior.

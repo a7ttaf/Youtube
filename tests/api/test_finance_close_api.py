@@ -25,17 +25,19 @@ USER_ID = UUID("00000000-0000-0000-0000-000000005001")
 
 
 def auth_headers(
-    role: str, scope_type: str = "finance-month", scope_id: str = "2026-03"
+    role: str, scope_type: str = "finance-month", scope_id: str | None = "2026-03"
 ) -> dict[str, str]:
     """Build trusted-gateway headers for finance-close API tests."""
-    return {
+    headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "finance-close@example.com",
         "x-role": role,
         "x-scope-type": scope_type,
-        "x-scope-id": scope_id,
         "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
     }
+    if scope_id is not None:
+        headers["x-scope-id"] = scope_id
+    return headers
 
 
 def build_database_url(tmp_path) -> str:
@@ -179,7 +181,8 @@ def test_get_finance_close_does_not_create_missing_month(tmp_path):
     client = TestClient(create_app(database_url=database_url))
 
     response = client.get(
-        "/finance-close/2026-03", headers=auth_headers("finance_admin")
+        "/finance-close/2026-03",
+        headers=auth_headers("finance_viewer", "company", "company-tv-a"),
     )
 
     engine = create_engine(database_url)
@@ -202,7 +205,8 @@ def test_finance_close_read_records_audit_event(tmp_path):
     client = TestClient(create_app(database_url=database_url))
 
     response = client.get(
-        "/finance-close/2026-03", headers=auth_headers("finance_admin")
+        "/finance-close/2026-03",
+        headers=auth_headers("finance_viewer", "company", "company-tv-a"),
     )
 
     with Session(engine) as session:

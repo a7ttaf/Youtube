@@ -96,7 +96,7 @@ class SqlAlchemyAdSensePaymentRepository:
             raise AdSensePaymentValidationError(
                 "payments must contain at least one payment"
             )
-        actor_uuid = _parse_uuid(actor_user_id)
+        actor_uuid = _parse_uuid_or_none(actor_user_id)
         normalized_source_report_id = _normalize_optional_string(source_report_id)
 
         normalized_payments: list[AdSensePaymentInput] = []
@@ -301,13 +301,12 @@ def _dialect_insert(dialect_name: str):
     )
 
 
-def _parse_uuid(value: str) -> UUID:
+def _parse_uuid_or_none(value: str) -> UUID | None:
+    normalized = _normalize_required_string(value, "actor_user_id")
     try:
-        return UUID(value)
-    except ValueError as exc:
-        raise AdSensePaymentValidationError(
-            "actor_user_id must be a valid UUID"
-        ) from exc
+        return UUID(normalized)
+    except ValueError:
+        return None
 
 
 def _decimal_to_api(value: Decimal) -> str:

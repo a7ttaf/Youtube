@@ -158,7 +158,7 @@ def list_adsense_payments(
     limit: Annotated[int, Query(ge=1, le=MAX_ADSENSE_PAYMENT_PAGE_SIZE)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, object]:
-    scope = AccessScope.global_scope()
+    scope = AccessScope.finance_month(month) if month is not None else AccessScope.global_scope()
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, scope)
     try:
         page = repository.list_payments(month=month, limit=limit, offset=offset)

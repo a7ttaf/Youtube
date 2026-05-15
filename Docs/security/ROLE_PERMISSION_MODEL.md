@@ -115,7 +115,7 @@ Sensitive actions include:
 - Production authorization must use SQL-backed principals (`UMS_AUTHZ_SOURCE=database`) so persisted role assignments and direct permission grants are enforced at runtime.
 - Unknown or disabled database users must fail closed before route handlers run.
 - Money APIs require `VIEW_REVENUE` for the requested organization scope.
-- Payment APIs require `VIEW_FINALIZED_PAYMENTS`.
+- Payment APIs require `VIEW_FINALIZED_PAYMENTS` globally for all-month reads or on the requested `finance-month` for month-specific reads.
 - Bank reconciliation read APIs require `VIEW_BANK_RECONCILIATION` plus finalized-payment visibility for the requested finance-month scope when payment rows are part of the response.
 - Bank reconciliation write APIs require `MANAGE_BANK_RECONCILIATION` for the requested finance-month scope, a non-empty reason, an unlocked month, and audit logging.
 - Smart alert APIs that combine revenue, confidence, payment, and bank state require all underlying permissions and audit each sensitive data family viewed.
@@ -158,7 +158,7 @@ Sensitive actions include:
 - Exchange-rate sync requires `connectors.run_jobs` for the provider connector scope, a non-empty reason, and an `EXCHANGE_RATE_SYNCED` audit event. API responses must not expose raw provider payloads without raw-file permissions.
 
 ## Finance Close API Rules
-- Viewing finance-close status requires `finance.view_revenue` for the finance-month scope because close status affects finance workflows.
+- Viewing finance-close status requires `finance.view_revenue` on a grantable revenue scope because close status is month-wide control metadata, not scoped revenue data.
 - Locking a month requires `finance.lock_month`, a non-empty reason, and a `MONTH_LOCKED` audit event.
 - Month readiness must block locks while pending overrides, unresolved reconciliation issues, or missing facts for active revenue-required channels exist.
 - Unlocking a month requires `finance.unlock_month`, a non-empty reason, and a `MONTH_UNLOCKED` audit event.

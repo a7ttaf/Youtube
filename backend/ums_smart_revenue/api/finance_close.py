@@ -14,6 +14,7 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
+from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.finance.month_close import (
     FinanceMonthCloseEntry,
     FinanceMonthCloseReadinessError,
@@ -25,6 +26,7 @@ from ums_smart_revenue.finance.month_close_readiness import (
 
 router = APIRouter(prefix="/finance-close", tags=["finance-close"])
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_REVENUE_READ_SCOPE_TYPES = frozenset({"global", "sector", "company", "channel"})
 
 
 class FinanceCloseReasonRequest(BaseModel):
@@ -77,7 +79,7 @@ def get_finance_month_close(
 ) -> dict[str, object]:
     _validate_month(month)
     scope = AccessScope.finance_month(month)
-    _require_permission(user, Permission.VIEW_REVENUE, scope)
+    _require_finance_close_read_permission(user)
     close = repository.get(month)
     if close is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finance month close record not found")
@@ -229,6 +231,34 @@ def _require_permission(user: UserPrincipal, permission: Permission, scope: Acce
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Missing permission: {permission.value}",
         )
+
+
+def _require_finance_close_read_permission(user: UserPrincipal) -> None:
+    if user.disabled:
+        _raise_missing_permission(Permission.VIEW_REVENUE)
+    for grant in user.direct_permissions:
+        if (
+            grant.active
+            and grant.permission == Permission.VIEW_REVENUE
+            and grant.scope.type.value in _REVENUE_READ_SCOPE_TYPES
+        ):
+            return
+    for assignment in user.role_assignments:
+        if (
+            assignment.active
+            and Permission.VIEW_REVENUE
+            in ROLE_PERMISSIONS.get(assignment.role, frozenset())
+            and assignment.scope.type.value in _REVENUE_READ_SCOPE_TYPES
+        ):
+            return
+    _raise_missing_permission(Permission.VIEW_REVENUE)
+
+
+def _raise_missing_permission(permission: Permission) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"Missing permission: {permission.value}",
+    )
 
 
 def _validate_month(month: str) -> None:

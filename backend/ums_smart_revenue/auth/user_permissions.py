@@ -25,9 +25,7 @@ _ORG_SCOPE_TYPES = frozenset(
 _FINANCE_MONTH_SCOPE_TYPES = frozenset(
     {ScopeType.GLOBAL.value, ScopeType.FINANCE_MONTH.value}
 )
-_FINANCE_DATA_SCOPE_TYPES = _ORG_SCOPE_TYPES | frozenset(
-    {ScopeType.FINANCE_MONTH.value}
-)
+_FINANCE_DATA_SCOPE_TYPES = _FINANCE_MONTH_SCOPE_TYPES
 _EXPORT_SCOPE_TYPES = _ORG_SCOPE_TYPES | frozenset({ScopeType.EXPORT.value})
 _CONNECTOR_SCOPE_TYPES = frozenset({ScopeType.GLOBAL.value, ScopeType.CONNECTOR.value})
 _GLOBAL_SCOPE_TYPES = frozenset({ScopeType.GLOBAL.value})

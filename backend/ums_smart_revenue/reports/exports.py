@@ -1,7 +1,7 @@
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from uuid import UUID, uuid4
+from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
@@ -27,6 +27,9 @@ ALLOWED_EXPORT_ARTIFACT_URI_PREFIXES = (
 )
 MAX_EXPORT_JOB_PAGE_SIZE = 100
 _TERMINAL_EXPORT_JOB_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
+_GATEWAY_ACTOR_NAMESPACE = uuid5(
+    NAMESPACE_URL, "ums-smart-revenue:trusted-gateway-actor"
+)
 
 
 @dataclass(frozen=True)
@@ -149,7 +152,7 @@ class SqlAlchemyExportJobRepository:
         )
         _validate_month(month)
         normalized_currency = _normalize_currency(currency)
-        actor_uuid = _parse_uuid(actor_user_id)
+        actor_uuid = _actor_identity_uuid(actor_user_id)
         month_lock_status = self._month_lock_status(month)
         normalized_scope_channel_ids = _normalize_scope_channel_ids(
             normalized_scope_type, scope_channel_ids
@@ -185,7 +188,7 @@ class SqlAlchemyExportJobRepository:
         requested_by: str | None = None,
     ) -> ExportJobEntry:
         row = self._get_row(export_id)
-        if requested_by is not None and row.requested_by != _parse_uuid(
+        if requested_by is not None and row.requested_by != _actor_identity_uuid(
             requested_by, field_name="requested_by"
         ):
             raise ExportJobNotFoundError("Export job not found")
@@ -278,7 +281,8 @@ class SqlAlchemyExportJobRepository:
         )
         if requested_by is not None:
             statement = statement.where(
-                ExportJobORM.requested_by == _parse_uuid(requested_by)
+                ExportJobORM.requested_by
+                == _actor_identity_uuid(requested_by, field_name="requested_by")
             )
         if visibility_filters is not None:
             visibility_conditions = [
@@ -458,6 +462,14 @@ def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
         return UUID(value)
     except ValueError as exc:
         raise ExportJobValidationError(f"{field_name} must be a valid UUID") from exc
+
+
+def _actor_identity_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
+    normalized = _normalize_required_string(value, field_name)
+    try:
+        return UUID(normalized)
+    except ValueError:
+        return uuid5(_GATEWAY_ACTOR_NAMESPACE, normalized)
 
 
 def _normalize_scope_channel_ids(

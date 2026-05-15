@@ -105,7 +105,7 @@ ROLE_DEFINITIONS: dict[RoleKey, RoleDefinition] = {
         RoleKey.EXPORT_OPERATOR,
         "Export Operator",
         "Scoped export operator for approved analytics or finance exports.",
-        allowed_scope_types=frozenset({"global", "export"}),
+        allowed_scope_types=_ORG_SCOPES | frozenset({"export"}),
     ),
     RoleKey.AUDIT_VIEWER: RoleDefinition(
         RoleKey.AUDIT_VIEWER,

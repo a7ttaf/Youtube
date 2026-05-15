@@ -17,9 +17,10 @@ def auth_headers(
     role: str,
     scope_type: str = "global",
     scope_id: str | None = None,
+    user_id: str | UUID = USER_ID,
 ) -> dict[str, str]:
     headers = {
-        "x-user-id": str(USER_ID),
+        "x-user-id": str(user_id),
         "x-user-email": "exchange-rates@example.com",
         "x-role": role,
         "x-scope-type": scope_type,
@@ -89,6 +90,46 @@ def test_system_integration_user_syncs_exchange_rate_with_audit(tmp_path):
     assert audit_log.scope_type == "connector"
     assert audit_log.scope_id == "ecb"
     assert audit_log.sensitive is True
+
+
+def test_system_integration_user_syncs_exchange_rate_with_non_uuid_actor(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/exchange-rates/sync",
+        headers=auth_headers(
+            "system_integration_user",
+            "connector",
+            "ecb",
+            user_id="gateway-subject-ecb",
+        ),
+        json={
+            "provider_key": "ecb",
+            "source_report_id": "ecb-2026-04-22",
+            "reason": "Sync official daily FX rate",
+            "rates": [
+                {
+                    "rate_date": "2026-04-22",
+                    "base_currency": "EUR",
+                    "quote_currency": "USD",
+                    "rate": "1.0845",
+                    "raw_payload": {"source": "ecb"},
+                }
+            ],
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        rate = session.scalars(select(CurrencyExchangeRateORM)).one()
+        audit_log = session.scalars(select(AuditLogORM)).one()
+
+    assert response.status_code == 200
+    assert rate.imported_by is None
+    assert audit_log.user_id is None
+    assert audit_log.details["actor_user_id"] == "gateway-subject-ecb"
 
 
 def test_finance_viewer_reads_latest_exchange_rate(tmp_path):
