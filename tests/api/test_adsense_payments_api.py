@@ -217,7 +217,7 @@ def test_finance_viewer_lists_adsense_payments_with_audit(tmp_path):
     engine = create_engine(database_url)
     with Session(engine) as session:
         audit_logs = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.created_at)
+            select(AuditLogORM).order_by(AuditLogORM.created_at, AuditLogORM.id)
         ).all()
 
     assert create_response.status_code == 200
@@ -252,7 +252,7 @@ def test_finance_month_scoped_viewer_lists_matching_adsense_payments(tmp_path):
     engine = create_engine(database_url)
     with Session(engine) as session:
         audit_logs = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.created_at)
+            select(AuditLogORM).order_by(AuditLogORM.created_at, AuditLogORM.id)
         ).all()
 
     assert create_response.status_code == 200

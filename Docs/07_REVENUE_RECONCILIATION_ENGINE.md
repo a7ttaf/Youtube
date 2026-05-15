@@ -135,8 +135,16 @@ invent transfer, FX, tax, or payment-gap values.
 
 ## Acceptance checks
 
-- System can calculate net revenue for one month.
-- System can explain the difference between gross revenue and payment.
-- System can allocate unknown transfer/FX gap.
+- System can calculate net revenue for one month from existing official SQL
+  revenue facts only.
+- `POST /revenue/recalculate` is a read-only dry-run: it returns source
+  coverage and blockers tagged `NO_WRITES_PERFORMED`, audits
+  `RECALCULATION_REQUESTED`, and never creates `channel_net_revenue`,
+  allocation, transfer/FX, payment-gap, or tax rows.
+- Recalculation access requires both revenue visibility and the
+  allocation-rule management permission for the requested scope.
 - System can lock a month.
 - Locked month does not change unless explicitly unlocked.
+- Allocation of unknown transfer/FX gap, tax-table ingestion, and bank/payment
+  gap allocation are deferred until the full allocation engine ships and are
+  not part of this foundation's acceptance.

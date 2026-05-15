@@ -1,3 +1,4 @@
+import re
 from datetime import date
 from decimal import Decimal
 from typing import Annotated
@@ -26,6 +27,8 @@ from ums_smart_revenue.finance.adsense_payments import (
 )
 
 router = APIRouter(prefix="/adsense", tags=["adsense"])
+
+ADSENSE_MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
 class AdSensePaymentRequest(BaseModel):
@@ -158,8 +161,23 @@ def list_adsense_payments(
     limit: Annotated[int, Query(ge=1, le=MAX_ADSENSE_PAYMENT_PAGE_SIZE)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, object]:
-    scope = AccessScope.finance_month(month) if month is not None else AccessScope.global_scope()
+    normalized_month: str | None
+    if month is None:
+        normalized_month = None
+    else:
+        normalized_month = month.strip()
+        if not normalized_month or not ADSENSE_MONTH_PATTERN.fullmatch(normalized_month):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail="month must use YYYY-MM with a calendar month from 01 to 12",
+            )
+    scope = (
+        AccessScope.finance_month(normalized_month)
+        if normalized_month is not None
+        else AccessScope.global_scope()
+    )
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, scope)
+    month = normalized_month
     try:
         page = repository.list_payments(month=month, limit=limit, offset=offset)
     except AdSensePaymentValidationError as exc:

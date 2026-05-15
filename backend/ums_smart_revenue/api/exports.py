@@ -162,6 +162,21 @@ def request_export(
         )
         if not _has_export_permission_assignment(user, required_export_permission):
             _raise_missing_permission(required_export_permission)
+        # Pre-check channel-scope authorization before resolving the channel
+        # snapshot so an unauthorized caller cannot probe channel existence
+        # via 404 responses. Snapshot resolution can still raise 404 below,
+        # but only after the caller has proven channel access.
+        if payload.scope_type == "channel" and payload.scope_id:
+            _require_export_access_permissions(
+                user=user,
+                export_type=payload.export_type,
+                scope_type=payload.scope_type,
+                scope_id=payload.scope_id,
+                month=payload.month,
+                org_index=org_index,
+                group_registry=group_registry,
+                scope_channel_ids=(payload.scope_id,),
+            )
         # ================================================================
         # Purpose: Resolve the channel set ONCE so the authorization
         #   check, the audit trail, and the persisted snapshot all see
@@ -1564,6 +1579,10 @@ def _previous_month(month: str) -> str:
     year_value, month_value = month.split("-", maxsplit=1)
     year = int(year_value)
     month_number = int(month_value)
+    if year == 0 or month_number < 1 or month_number > 12:
+        raise RevenueFactValidationError(
+            f"export month must use YYYY-MM with a calendar month from 01 to 12: {month!r}"
+        )
     if month_number == 1:
         return f"{year - 1:04d}-12"
     return f"{year:04d}-{month_number - 1:02d}"

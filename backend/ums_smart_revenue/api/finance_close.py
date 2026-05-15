@@ -26,7 +26,9 @@ from ums_smart_revenue.finance.month_close_readiness import (
 
 router = APIRouter(prefix="/finance-close", tags=["finance-close"])
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
-_REVENUE_READ_SCOPE_TYPES = frozenset({"global", "sector", "company", "channel"})
+_REVENUE_READ_SCOPE_TYPES = frozenset(
+    {"global", "sector", "company", "channel", "finance-month"}
+)
 
 
 class FinanceCloseReasonRequest(BaseModel):

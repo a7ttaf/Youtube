@@ -171,6 +171,17 @@ class ExportJobORM(ReportBase):
             name="ck_export_jobs_artifact_checksum_sha256",
         ),
         CheckConstraint(
+            "(artifact_filename IS NULL "
+            "AND artifact_content_type IS NULL "
+            "AND artifact_byte_size IS NULL "
+            "AND artifact_checksum_sha256 IS NULL) "
+            "OR (artifact_filename IS NOT NULL "
+            "AND artifact_content_type IS NOT NULL "
+            "AND artifact_byte_size IS NOT NULL "
+            "AND artifact_checksum_sha256 IS NOT NULL)",
+            name="ck_export_jobs_artifact_all_or_none",
+        ),
+        CheckConstraint(
             "month_lock_status IN ('OPEN', 'LOCKED')",
             name="ck_export_jobs_month_lock_status",
         ),
