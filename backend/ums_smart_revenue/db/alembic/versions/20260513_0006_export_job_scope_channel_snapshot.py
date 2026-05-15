@@ -28,7 +28,14 @@ def upgrade() -> None:
     op.create_check_constraint(
         "ck_export_jobs_scope_channel_ids_is_array",
         "export_jobs",
-        "scope_channel_ids IS NULL OR jsonb_typeof(scope_channel_ids) = 'array'",
+        (
+            "scope_channel_ids IS NULL OR ("
+            "jsonb_typeof(scope_channel_ids) = 'array' "
+            "AND NOT EXISTS ("
+            "SELECT 1 FROM jsonb_array_elements(scope_channel_ids) AS elem "
+            "WHERE jsonb_typeof(elem) <> 'string'"
+            "))"
+        ),
     )
     op.create_index(
         "ix_export_jobs_scope_channel_ids",

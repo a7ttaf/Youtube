@@ -200,4 +200,10 @@ def _is_foreign_key_integrity_error(exc: IntegrityError) -> bool:
     if constraint_name in _ACTOR_FK_CONSTRAINTS:
         return True
     error_text = f"{exc.orig!s} {exc!s}".lower()
-    return any(name in error_text for name in _ACTOR_FK_CONSTRAINTS)
+    if any(name in error_text for name in _ACTOR_FK_CONSTRAINTS):
+        return True
+    # SQLite surfaces FK failures as "FOREIGN KEY constraint failed" without a
+    # constraint name; catch that form so test environments behave correctly.
+    return "foreign key constraint failed" in error_text or (
+        "foreign key" in error_text and "constraint failed" in error_text
+    )

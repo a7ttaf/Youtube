@@ -193,6 +193,10 @@ def _visible_channels_for_analytics(
     if authorized_channel_ids is None:
         return registry.list_channels()
     visible_channels = registry.list_channels_by_ids(authorized_channel_ids)
+    # Defense-in-depth: re-evaluate per-channel permission even though
+    # authorized_channel_ids was derived from the same org_index.  This guards
+    # against a registry returning IDs outside the computed set (e.g. a buggy
+    # list_channels_by_ids implementation) and keeps the access path fail-closed.
     return [
         channel
         for channel in visible_channels

@@ -42,7 +42,7 @@ class StaleUpdateRegistry:
         raise NotImplementedError
 
     def update_mapping(
-        self, *, youtube_channel_id: str, primary_company_id: str | None
+        self, *, youtube_channel_id: str, primary_company_id: str | None  # noqa: ARG002
     ) -> ChannelRegistryEntry:
         raise KeyError(youtube_channel_id)
 

@@ -247,6 +247,9 @@ class SqlAlchemyExportJobRepository:
             raise ExportJobTerminalStateError(
                 f"Export job {export_id} is already in terminal status {row.status}"
             )
+        normalized_failure_reason = _normalize_required_string(
+            failure_reason, "failure_reason"
+        )
         now = datetime.now(UTC)
         row.status = "FAILED"
         row.file_url = None
@@ -254,9 +257,7 @@ class SqlAlchemyExportJobRepository:
         row.artifact_content_type = None
         row.artifact_byte_size = None
         row.artifact_checksum_sha256 = None
-        row.failure_reason = _normalize_required_string(
-            failure_reason, "failure_reason"
-        )
+        row.failure_reason = normalized_failure_reason
         row.completed_at = now
         row.updated_at = now
         self._session.flush()
