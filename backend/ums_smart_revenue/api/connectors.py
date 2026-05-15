@@ -157,6 +157,8 @@ def _raise_missing_connector_permission(permission: Permission) -> None:
 
 
 def _manageable_connector_keys(user: UserPrincipal) -> frozenset[str] | None:
+    if user.disabled:
+        return frozenset()
     if has_permission(user, Permission.MANAGE_CONNECTORS, AccessScope.global_scope()):
         return None
     connector_keys: set[str] = set()

@@ -4,7 +4,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
+from ums_smart_revenue.auth.roles import RoleKey
+from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.db.org_models import OrgBase
 from ums_smart_revenue.db.security_models import SecurityBase, UserORM
 
@@ -113,3 +117,26 @@ def test_connector_scoped_admin_lists_only_their_connector_credentials(tmp_path)
     assert [item["connector_key"] for item in response.json()["items"]] == [
         "youtube_reporting"
     ]
+
+
+def test_disabled_connector_admin_cannot_list_connector_credentials(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="disabled-connector-admin@example.com",
+        role_assignments=(
+            RoleAssignment(
+                RoleKey.CONNECTOR_ADMIN,
+                AccessScope.connector("youtube_reporting"),
+            ),
+        ),
+        disabled=True,
+    )
+    client = TestClient(app)
+
+    response = client.get("/connectors/credentials")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: connectors.manage"

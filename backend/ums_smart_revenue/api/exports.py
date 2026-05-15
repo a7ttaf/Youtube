@@ -157,6 +157,11 @@ def request_export(
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     try:
+        required_export_permission = _audit_permission_for_export_type(
+            payload.export_type
+        )
+        if not _has_export_permission_assignment(user, required_export_permission):
+            _raise_missing_permission(required_export_permission)
         # ================================================================
         # Purpose: Resolve the channel set ONCE so the authorization
         #   check, the audit trail, and the persisted snapshot all see
@@ -1437,19 +1442,29 @@ def _raise_missing_permission(permission: Permission) -> None:
 
 
 def _has_any_export_permission(user: UserPrincipal) -> bool:
-    if user.disabled:
-        return False
     export_permissions = {
         Permission.EXPORT_ANALYTICS_REPORT,
         Permission.EXPORT_REVENUE_REPORT,
     }
+    return any(
+        _has_export_permission_assignment(user, permission)
+        for permission in export_permissions
+    )
+
+
+def _has_export_permission_assignment(
+    user: UserPrincipal,
+    permission: Permission,
+) -> bool:
+    if user.disabled:
+        return False
     for grant in user.direct_permissions:
-        if grant.active and grant.permission in export_permissions:
+        if grant.active and grant.permission == permission:
             return True
     for assignment in user.role_assignments:
         if (
             assignment.active
-            and ROLE_PERMISSIONS.get(assignment.role, frozenset()) & export_permissions
+            and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset())
         ):
             return True
     return False

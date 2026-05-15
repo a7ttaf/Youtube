@@ -165,6 +165,35 @@ def test_channel_export_request_rejects_unknown_channel_scope(tmp_path):
     assert audit_count == 0
 
 
+def test_export_request_denies_missing_export_permission_before_scope_lookup(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/exports",
+        headers=auth_headers("assistant_analyst"),
+        json={
+            "export_type": "ANALYTICS_SUMMARY_CSV",
+            "scope_type": "group",
+            "scope_id": "missing-group-id",
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Probe missing group",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_count = session.scalar(select(func.count()).select_from(ExportJobORM))
+        audit_count = session.scalar(select(func.count()).select_from(AuditLogORM))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: exports.analytics"
+    assert export_count == 0
+    assert audit_count == 0
+
+
 def test_group_export_request_freezes_member_channels_at_creation(tmp_path):
     """Mutating a group after queueing an export must not change the snapshot.
 
