@@ -857,6 +857,18 @@ def _has_completed_artifact(export_job: ExportJobEntry) -> bool:
     return export_job.status == "COMPLETED" and export_job.file_url is not None
 
 
+_DEFAULT_ARTIFACT_CONTENT_TYPES: dict[str, str] = {
+    "FINANCE_EXCEL": (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    ),
+    "EXECUTIVE_PDF": "application/pdf",
+    "BRANDED_SLIDE_PACK": (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    ),
+    "ANALYTICS_SUMMARY_CSV": "text/csv",
+}
+
+
 def _serve_persisted_artifact_bytes(
     *,
     export_job: ExportJobEntry,
@@ -868,26 +880,31 @@ def _serve_persisted_artifact_bytes(
     #   can short-circuit regenerating the workbook/PDF/PPTX on every
     #   download. The on-disk artifact is the source of truth once the
     #   job has been finalized; regenerating would drift from the
-    #   persisted checksum recorded in audit metadata. If the on-disk
-    #   file is missing for a COMPLETED row, the storage error
-    #   propagates so the caller returns a 503 instead of serving fresh
-    #   bytes that no longer match the persisted checksum.
+    #   persisted checksum recorded in audit metadata. If the row's
+    #   stored artifact_filename / artifact_content_type are missing
+    #   (legacy or manually-seeded rows), the helper derives both from
+    #   the file_url and the expected export type so the caller can
+    #   still serve the persisted bytes. If the on-disk file is missing
+    #   for a COMPLETED row, the storage error propagates so the
+    #   caller returns 503 instead of fresh bytes that no longer match
+    #   the persisted checksum.
     # Database/ORM: None (FileSystemExportArtifactStore filesystem read).
     # Standards: Idempotent downloads, audit metadata integrity.
     # Blast Radius: Workbook/PDF/PPTX download response bytes.
     # ====================================================================
     if export_job.export_type != expected_export_type:
         return None
-    if not _has_completed_artifact(export_job):
-        return None
-    if (
-        not export_job.file_url
-        or not export_job.artifact_filename
-        or not export_job.artifact_content_type
-    ):
+    if not _has_completed_artifact(export_job) or not export_job.file_url:
         return None
     artifact_bytes = artifact_store.read(file_url=export_job.file_url)
-    return artifact_bytes, export_job.artifact_filename, export_job.artifact_content_type
+    filename = export_job.artifact_filename or export_job.file_url.rsplit("/", 1)[-1]
+    content_type = (
+        export_job.artifact_content_type
+        or _DEFAULT_ARTIFACT_CONTENT_TYPES.get(
+            export_job.export_type, "application/octet-stream"
+        )
+    )
+    return artifact_bytes, filename, content_type
 
 
 def _require_persisted_export_job(export_job: ExportJobEntry | None) -> ExportJobEntry:

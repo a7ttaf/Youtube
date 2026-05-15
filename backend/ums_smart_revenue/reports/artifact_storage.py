@@ -84,25 +84,41 @@ class FileSystemExportArtifactStore:
         # Standards: Atomic, idempotent writes for finance artifact bytes.
         # Blast Radius: Export artifact on-disk integrity.
         # ================================================================
+        first_writer_wins = True
         try:
             target_path.parent.mkdir(parents=True, exist_ok=True)
             temp_path.write_bytes(content)
             try:
                 os.link(temp_path, target_path)
             except FileExistsError:
-                pass
+                first_writer_wins = False
         except OSError as exc:
             _discard_temp_file(temp_path)
             raise ExportArtifactStorageError("artifact storage unavailable") from exc
         finally:
             _discard_temp_file(temp_path)
 
+        if first_writer_wins:
+            byte_size = len(content)
+            checksum = hashlib.sha256(content).hexdigest()
+        else:
+            # Another writer's bytes already occupy this path. Return the
+            # metadata that actually describes the persisted file so callers
+            # cannot confuse the local input with what's now on disk.
+            try:
+                persisted_bytes = target_path.read_bytes()
+            except OSError as exc:
+                raise ExportArtifactStorageError(
+                    "artifact storage unavailable"
+                ) from exc
+            byte_size = len(persisted_bytes)
+            checksum = hashlib.sha256(persisted_bytes).hexdigest()
         return ExportArtifactMetadata(
             file_url=f"{EXPORT_ARTIFACT_URI_PREFIX}{relative_path.as_posix()}",
             filename=normalized_filename,
             content_type=normalized_content_type,
-            byte_size=len(content),
-            checksum_sha256=hashlib.sha256(content).hexdigest(),
+            byte_size=byte_size,
+            checksum_sha256=checksum,
         )
 
     def delete(self, *, file_url: str) -> None:
