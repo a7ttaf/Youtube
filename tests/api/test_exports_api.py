@@ -1,3 +1,5 @@
+import logging
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
@@ -6,11 +8,12 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import current_audit_sink
 from ums_smart_revenue.api.dependencies import current_principal_from_headers
+from ums_smart_revenue.api.exports import _list_authorized_export_jobs
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
 from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
-from ums_smart_revenue.auth.scopes import AccessScope
+from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.db.finance_models import FinanceBase, FinanceMonthCloseORM
 from ums_smart_revenue.db.org_models import (
     ChannelGroupMemberORM,
@@ -21,6 +24,7 @@ from ums_smart_revenue.db.org_models import (
 )
 from ums_smart_revenue.db.report_models import ExportJobORM, ReportBase
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.reports.exports import ExportJobEntry, ExportJobPage
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000012001")
 COMPANY_A_ID = UUID("00000000-0000-0000-0000-000000012101")
@@ -408,6 +412,75 @@ def test_non_uuid_gateway_actor_can_create_and_list_exports(tmp_path):
     assert [item["id"] for item in list_response.json()["items"]] == [
         create_response.json()["id"]
     ]
+
+
+def test_export_list_scan_limit_marks_has_more_and_logs_metric(caplog):
+    created_at = datetime(2026, 4, 30, 10, 0, tzinfo=UTC)
+
+    class PagedRepository:
+        def __init__(self) -> None:
+            self.offsets: list[int] = []
+
+        def list_jobs(
+            self,
+            *,
+            requested_by: str,
+            limit: int,
+            offset: int,
+        ) -> ExportJobPage:
+            assert requested_by == str(USER_ID)
+            self.offsets.append(offset)
+            return ExportJobPage(
+                items=[
+                    ExportJobEntry(
+                        id=str(uuid4()),
+                        export_type="ANALYTICS_SUMMARY_CSV",
+                        scope_type="global",
+                        scope_id=None,
+                        month="2026-03",
+                        currency="USD",
+                        requested_by=str(USER_ID),
+                        status="QUEUED",
+                        file_url=None,
+                        month_lock_status="LOCKED",
+                        include_confidence_notes=True,
+                        include_manual_override_notes=True,
+                        created_at=created_at,
+                        completed_at=None,
+                    )
+                ],
+                limit=limit,
+                offset=offset,
+                has_more=True,
+            )
+
+    class EmptyGroupRegistry:
+        def list_groups(self) -> list[object]:
+            return []
+
+        def get_group(self, group_id: str) -> None:
+            assert group_id
+            return None
+
+    repository = PagedRepository()
+    user = UserPrincipal(user_id=str(USER_ID), email="no-export-access@example.com")
+
+    with caplog.at_level(logging.WARNING):
+        items, has_more = _list_authorized_export_jobs(
+            repository=repository,
+            user=user,
+            org_index=OrgAccessIndex(),
+            group_registry=EmptyGroupRegistry(),
+            limit=10,
+            offset=0,
+            max_scan_pages=2,
+        )
+
+    assert items == []
+    assert has_more is True
+    assert repository.offsets == [0, 1]
+    assert "metric=export_job_scan_truncated" in caplog.text
+    assert "max_scan_pages=2" in caplog.text
 
 
 def test_export_list_combines_global_and_month_scoped_finance_permissions(tmp_path):

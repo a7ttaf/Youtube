@@ -71,14 +71,11 @@ from ums_smart_revenue.reports.executive_pdf import (
     build_executive_pdf_report,
 )
 from ums_smart_revenue.reports.exports import (
-    ANALYTICS_EXPORT_TYPES,
-    FINANCE_EXPORT_TYPES,
     MAX_EXPORT_JOB_PAGE_SIZE,
     ExportJobEntry,
     ExportJobNotFoundError,
     ExportJobTerminalStateError,
     ExportJobValidationError,
-    ExportJobVisibilityFilter,
     SqlAlchemyExportJobRepository,
     is_finance_export_type,
 )
@@ -92,6 +89,7 @@ from ums_smart_revenue.reports.finance_workbook import (
 router = APIRouter(prefix="/exports", tags=["exports"])
 EXPORT_MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 logger = logging.getLogger(__name__)
+MAX_AUTHORIZED_EXPORT_JOB_SCAN_PAGES = 10
 
 
 @dataclass(frozen=True)
@@ -1465,17 +1463,27 @@ def _list_authorized_export_jobs(
     group_registry: ChannelGroupRegistryStore,
     limit: int,
     offset: int,
+    max_scan_pages: int = MAX_AUTHORIZED_EXPORT_JOB_SCAN_PAGES,
 ) -> tuple[list[ExportJobEntry], bool]:
+    if max_scan_pages < 1:
+        raise ExportJobValidationError("max_scan_pages must be positive")
     items: list[ExportJobEntry] = []
     skipped = 0
     scan_offset = 0
-    while len(items) <= limit:
+    scan_pages = 0
+    scanned_items = 0
+    last_page_has_more = False
+    while len(items) <= limit and scan_pages < max_scan_pages:
         page = repository.list_jobs(
             requested_by=user.user_id,
             limit=MAX_EXPORT_JOB_PAGE_SIZE,
             offset=scan_offset,
         )
+        scan_pages += 1
+        scanned_items += len(page.items)
+        last_page_has_more = page.has_more
         if not page.items:
+            last_page_has_more = False
             break
         for export_job in page.items:
             if not _can_access_export_job(
@@ -1494,7 +1502,21 @@ def _list_authorized_export_jobs(
         if not page.has_more or len(items) > limit:
             break
         scan_offset += len(page.items)
-    return items[:limit], len(items) > limit
+    scan_truncated = (
+        last_page_has_more and len(items) <= limit and scan_pages >= max_scan_pages
+    )
+    if scan_truncated:
+        logger.warning(
+            "metric=export_job_scan_truncated user_id=%s scanned_pages=%s "
+            "scanned_items=%s limit=%s offset=%s max_scan_pages=%s",
+            user.user_id,
+            scan_pages,
+            scanned_items,
+            limit,
+            offset,
+            max_scan_pages,
+        )
+    return items[:limit], len(items) > limit or scan_truncated
 
 
 def _can_access_export_job(
@@ -1518,244 +1540,6 @@ def _can_access_export_job(
     except (ExportJobValidationError, HTTPException, KeyError):
         return False
     return True
-
-
-def _export_job_visibility_filters(
-    *,
-    user: UserPrincipal,
-    org_index: OrgAccessIndex,
-    group_registry: ChannelGroupRegistryStore,
-) -> tuple[ExportJobVisibilityFilter, ...]:
-    filters: list[ExportJobVisibilityFilter] = []
-    analytics_scopes = _authorized_export_scope_filters(
-        user=user,
-        export_permission=Permission.EXPORT_ANALYTICS_REPORT,
-        view_permission=Permission.VIEW_ANALYTICS,
-        org_index=org_index,
-        group_registry=group_registry,
-    )
-    filters.extend(
-        _visibility_filters_for_scopes(ANALYTICS_EXPORT_TYPES, analytics_scopes)
-    )
-
-    finance_scopes = _authorized_export_scope_filters(
-        user=user,
-        export_permission=Permission.EXPORT_REVENUE_REPORT,
-        view_permission=Permission.VIEW_REVENUE,
-        org_index=org_index,
-        group_registry=group_registry,
-    )
-    finance_months = _authorized_finance_artifact_months(user)
-    if finance_months is None or finance_months:
-        filters.extend(
-            _visibility_filters_for_scopes(
-                FINANCE_EXPORT_TYPES,
-                finance_scopes,
-                months=finance_months,
-            )
-        )
-    return tuple(filters)
-
-
-def _visibility_filters_for_scopes(
-    export_types: frozenset[str],
-    scopes: tuple[tuple[str | None, str | None], ...],
-    *,
-    months: frozenset[str] | None = None,
-) -> list[ExportJobVisibilityFilter]:
-    return [
-        ExportJobVisibilityFilter(
-            export_types=export_types,
-            scope_type=scope_type,
-            scope_id=scope_id,
-            months=months,
-        )
-        for scope_type, scope_id in scopes
-    ]
-
-
-def _authorized_export_scope_filters(
-    *,
-    user: UserPrincipal,
-    export_permission: Permission,
-    view_permission: Permission,
-    org_index: OrgAccessIndex,
-    group_registry: ChannelGroupRegistryStore,
-) -> tuple[tuple[str | None, str | None], ...]:
-    if _has_export_permissions_for_scope(
-        user=user,
-        export_permission=export_permission,
-        view_permission=view_permission,
-        scope_type="global",
-        scope_id=None,
-        org_index=org_index,
-        group_registry=group_registry,
-    ):
-        return ((None, None),)
-    return tuple(
-        scope_filter
-        for scope_filter in _candidate_export_scope_filters(user, org_index, group_registry)
-        if _has_export_permissions_for_scope(
-            user=user,
-            export_permission=export_permission,
-            view_permission=view_permission,
-            scope_type=scope_filter[0],
-            scope_id=scope_filter[1],
-            org_index=org_index,
-            group_registry=group_registry,
-        )
-    )
-
-
-def _candidate_export_scope_filters(
-    user: UserPrincipal,
-    org_index: OrgAccessIndex,
-    group_registry: ChannelGroupRegistryStore,
-) -> tuple[tuple[str, str | None], ...]:
-    # ====================================================================
-    # Purpose: Build the set of candidate (scope_type, scope_id) pairs the
-    #   user could potentially see in GET /exports listings. Grows out
-    #   from the user's actual sector/company/channel grants and expands
-    #   downward through org_index, instead of enumerating every channel,
-    #   company, and sector in the registry. Groups are added only when
-    #   they intersect the user's accessible channel set.
-    # Database/ORM: None (in-memory OrgAccessIndex + group registry).
-    # Standards: Permission decisions are still finalized by
-    #   _has_export_permissions_for_scope downstream; this function only
-    #   narrows the candidate set for that check.
-    # Blast Radius: GET /exports listing visibility, not authorization.
-    # ====================================================================
-    candidates: set[tuple[str, str | None]] = set()
-    accessible_channels: set[str] = set()
-    for scope in _principal_org_scopes(user):
-        scope_type = scope.type.value
-        scope_id = scope.id
-        if not scope_id:
-            continue
-        candidates.add((scope_type, scope_id))
-        if scope_type == "sector":
-            for company_id, sector_id in org_index.company_sector.items():
-                if sector_id == scope_id:
-                    candidates.add(("company", company_id))
-            for channel_id, sector_id in org_index.channel_sector.items():
-                if sector_id == scope_id:
-                    candidates.add(("channel", channel_id))
-                    accessible_channels.add(channel_id)
-        elif scope_type == "company":
-            for channel_id, company_id in org_index.channel_company.items():
-                if company_id == scope_id:
-                    candidates.add(("channel", channel_id))
-                    accessible_channels.add(channel_id)
-        elif scope_type == "channel":
-            accessible_channels.add(scope_id)
-    for group in group_registry.list_groups():
-        if group.channel_ids and any(
-            channel_id in accessible_channels for channel_id in group.channel_ids
-        ):
-            candidates.add(("group", group.id))
-    return tuple(sorted(candidates, key=lambda candidate: (candidate[0], candidate[1] or "")))
-
-
-def _principal_org_scopes(user: UserPrincipal) -> tuple[AccessScope, ...]:
-    scopes: list[AccessScope] = []
-    org_scope_types = {"sector", "company", "channel"}
-    for grant in user.direct_permissions:
-        if grant.active and grant.scope.type.value in org_scope_types and grant.scope.id:
-            scopes.append(grant.scope)
-    for assignment in user.role_assignments:
-        if assignment.active and assignment.scope.type.value in org_scope_types and assignment.scope.id:
-            scopes.append(assignment.scope)
-    return tuple(scopes)
-
-
-def _has_export_permissions_for_scope(
-    *,
-    user: UserPrincipal,
-    export_permission: Permission,
-    view_permission: Permission,
-    scope_type: str,
-    scope_id: str | None,
-    org_index: OrgAccessIndex,
-    group_registry: ChannelGroupRegistryStore,
-) -> bool:
-    try:
-        _require_export_scope_permissions(
-            user=user,
-            export_permission=export_permission,
-            view_permission=view_permission,
-            scope_type=scope_type,
-            scope_id=scope_id,
-            org_index=org_index,
-            group_registry=group_registry,
-        )
-    except (ExportJobValidationError, HTTPException, KeyError):
-        return False
-    return True
-
-
-def _authorized_finance_artifact_months(user: UserPrincipal) -> frozenset[str] | None:
-    # ====================================================================
-    # Purpose: Combine global and month-scoped grants for the two
-    #   finance-month permissions the listing requires. A global grant
-    #   for either permission contributes "all months", which must
-    #   intersect cleanly with month-scoped grants of the other
-    #   permission instead of collapsing the intersection to empty.
-    # Database/ORM: None.
-    # Standards: Authorization must reflect the same months reachable
-    #   through the per-month permission checks.
-    # Blast Radius: GET /exports listing visibility.
-    # ====================================================================
-    payment_months = _authorized_finance_months_for_permission(
-        user, Permission.VIEW_FINALIZED_PAYMENTS
-    )
-    bank_months = _authorized_finance_months_for_permission(
-        user, Permission.VIEW_BANK_RECONCILIATION
-    )
-    if payment_months is None and bank_months is None:
-        return None
-    if payment_months is None:
-        return frozenset(bank_months)
-    if bank_months is None:
-        return frozenset(payment_months)
-    return frozenset(payment_months & bank_months)
-
-
-def _authorized_finance_months_for_permission(
-    user: UserPrincipal, permission: Permission
-) -> set[str] | None:
-    if has_permission(user, permission, AccessScope.global_scope()):
-        return None
-    return _granted_finance_months(user, permission)
-
-
-def _has_finance_artifact_month_permissions(user: UserPrincipal, month: str) -> bool:
-    month_scope = AccessScope.finance_month(month)
-    return has_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope) and has_permission(
-        user,
-        Permission.VIEW_BANK_RECONCILIATION,
-        month_scope,
-    )
-
-
-def _granted_finance_months(user: UserPrincipal, permission: Permission) -> set[str]:
-    months: set[str] = set()
-    for grant in user.direct_permissions:
-        if (
-            grant.active
-            and grant.permission == permission
-            and grant.scope.type.value == "finance-month"
-            and grant.scope.id
-        ):
-            months.add(grant.scope.id)
-    for assignment in user.role_assignments:
-        if (
-            assignment.active
-            and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset())
-            and assignment.scope.type.value == "finance-month"
-            and assignment.scope.id
-        ):
-            months.add(assignment.scope.id)
-    return months
 
 
 def _previous_month(month: str) -> str:
