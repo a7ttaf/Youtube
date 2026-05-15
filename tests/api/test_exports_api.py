@@ -460,7 +460,6 @@ def test_export_list_scan_limit_marks_has_more_and_logs_metric(caplog):
 
         def get_group(self, group_id: str) -> None:
             assert group_id
-            return None
 
     repository = PagedRepository()
     user = UserPrincipal(user_id=str(USER_ID), email="no-export-access@example.com")

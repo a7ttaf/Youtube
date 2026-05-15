@@ -21,7 +21,6 @@ from ums_smart_revenue.reports.raw_files import (
     SqlAlchemyRawReportFileRepository,
 )
 
-
 router = APIRouter(prefix="/reports", tags=["reports"])
 
 
@@ -167,7 +166,11 @@ def get_raw_report_file(
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
     scope = AccessScope.connector(raw_file.source)
-    _require_permission(user, Permission.VIEW_RAW_FILES, scope)
+    if not has_permission(user, Permission.VIEW_RAW_FILES, scope):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Raw report file not found",
+        )
     record = record_audit_event(
         sink=audit_sink,
         actor=user,

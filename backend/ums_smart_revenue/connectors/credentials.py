@@ -5,8 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM
-
+from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM, UserORM
 
 SECRET_REF_PREFIXES = (
     "secret-manager://",
@@ -62,18 +61,31 @@ class SqlAlchemyConnectorCredentialRepository:
     def __init__(self, session: Session):
         self._session = session
 
-    def list_credentials(self, *, limit: int = 50, offset: int = 0) -> ConnectorCredentialPage:
+    def list_credentials(
+        self,
+        *,
+        limit: int = 50,
+        offset: int = 0,
+        connector_keys: frozenset[str] | None = None,
+    ) -> ConnectorCredentialPage:
         if limit < 1 or limit > MAX_CREDENTIAL_PAGE_SIZE:
             raise ConnectorCredentialValidationError(
                 f"limit must be between 1 and {MAX_CREDENTIAL_PAGE_SIZE}"
             )
         if offset < 0:
             raise ConnectorCredentialValidationError("offset must be greater than or equal to 0")
+        if connector_keys is not None and not connector_keys:
+            return ConnectorCredentialPage(items=[], limit=limit, offset=offset, has_more=False)
+        statement = select(ApiConnectorCredentialORM).order_by(
+            ApiConnectorCredentialORM.connector_key,
+            ApiConnectorCredentialORM.account_id,
+        )
+        if connector_keys is not None:
+            statement = statement.where(
+                ApiConnectorCredentialORM.connector_key.in_(sorted(connector_keys))
+            )
         rows = self._session.scalars(
-            select(ApiConnectorCredentialORM).order_by(
-                ApiConnectorCredentialORM.connector_key,
-                ApiConnectorCredentialORM.account_id,
-            ).limit(limit + 1).offset(offset)
+            statement.limit(limit + 1).offset(offset)
         ).all()
         visible_rows = rows[:limit]
         return ConnectorCredentialPage(
@@ -92,6 +104,10 @@ class SqlAlchemyConnectorCredentialRepository:
         actor_user_id: str,
     ) -> ConnectorCredentialEntry:
         actor_uuid = _parse_uuid(actor_user_id)
+        if self._session.get(UserORM, actor_uuid) is None:
+            raise ConnectorCredentialValidationError(
+                "actor_user_id does not reference an existing user"
+            )
         existing = self._session.scalars(
             select(ApiConnectorCredentialORM).where(
                 ApiConnectorCredentialORM.connector_key == connector_key,
@@ -120,6 +136,10 @@ class SqlAlchemyConnectorCredentialRepository:
             if _is_duplicate_credential_integrity_error(exc):
                 raise ConnectorCredentialConflictError(
                     f"Connector credential already exists: {connector_key}/{account_id}"
+                ) from exc
+            if _is_foreign_key_integrity_error(exc):
+                raise ConnectorCredentialValidationError(
+                    "actor_user_id does not reference an existing user"
                 ) from exc
             raise
         return self._to_entry(row)
@@ -166,3 +186,8 @@ def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:
         or "UNIQUE constraint failed: api_connector_credentials.connector_key, api_connector_credentials.account_id"
         in error_text
     )
+
+
+def _is_foreign_key_integrity_error(exc: IntegrityError) -> bool:
+    error_text = f"{exc.orig!s} {exc!s}".lower()
+    return "foreign key" in error_text

@@ -1507,9 +1507,8 @@ def _list_authorized_export_jobs(
     )
     if scan_truncated:
         logger.warning(
-            "metric=export_job_scan_truncated user_id=%s scanned_pages=%s "
+            "metric=export_job_scan_truncated scanned_pages=%s "
             "scanned_items=%s limit=%s offset=%s max_scan_pages=%s",
-            user.user_id,
             scan_pages,
             scanned_items,
             limit,

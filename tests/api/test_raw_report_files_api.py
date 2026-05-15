@@ -8,7 +8,6 @@ from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.report_models import RawReportFileORM, ReportBase
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
-
 USER_ID = UUID("00000000-0000-0000-0000-000000010001")
 
 
@@ -140,7 +139,9 @@ def test_raw_report_file_registration_rejects_inline_or_local_storage_reference(
     )
 
     assert response.status_code == 422
-    assert response.json()["detail"] == "storage_uri must point to approved object storage, not raw inline report content"
+    assert response.json()["detail"] == (
+        "storage_uri must point to approved object storage, not raw inline report content"
+    )
 
 
 def test_raw_report_file_registration_rejects_duplicate_artifact_metadata(tmp_path):
@@ -233,8 +234,8 @@ def test_connector_admin_cannot_view_other_connector_raw_file(tmp_path):
         headers=auth_headers("connector_admin", "connector", "youtube_reporting"),
     )
 
-    assert response.status_code == 403
-    assert response.json()["detail"] == "Missing permission: raw_files.view"
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Raw report file not found"
 
 
 def test_user_without_raw_file_permission_cannot_probe_raw_file_ids(tmp_path):
