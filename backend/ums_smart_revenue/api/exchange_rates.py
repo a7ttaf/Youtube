@@ -1,9 +1,10 @@
+import re
 from datetime import date
 from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
@@ -26,6 +27,17 @@ from ums_smart_revenue.finance.exchange_rates import (
 
 router = APIRouter(prefix="/exchange-rates", tags=["exchange-rates"])
 
+CURRENCY_CODE_PATTERN = re.compile(r"^[A-Z]{3}$")
+
+
+def _normalize_currency_code(value):
+    if isinstance(value, str):
+        normalized = value.strip().upper()
+        if not CURRENCY_CODE_PATTERN.fullmatch(normalized):
+            raise ValueError("must be a 3-letter uppercase ISO 4217 code")
+        return normalized
+    return value
+
 
 class ExchangeRateRequest(BaseModel):
     rate_date: date
@@ -37,7 +49,13 @@ class ExchangeRateRequest(BaseModel):
     @field_validator("base_currency", "quote_currency", mode="before")
     @classmethod
     def strip_required_strings(cls, value):
-        return _strip_required_string(value)
+        return _normalize_currency_code(_strip_required_string(value))
+
+    @model_validator(mode="after")
+    def check_currency_pair_distinct(self):
+        if self.base_currency == self.quote_currency:
+            raise ValueError("base_currency and quote_currency must differ")
+        return self
 
 
 class ExchangeRateSyncRequest(BaseModel):
@@ -149,9 +167,22 @@ def get_latest_exchange_rate(
 ) -> dict[str, object]:
     _require_permission(user, Permission.VIEW_REVENUE, AccessScope.global_scope())
     try:
+        normalized_base = _normalize_currency_code(base_currency)
+        normalized_quote = _normalize_currency_code(quote_currency)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"currency code {exc}",
+        ) from exc
+    if normalized_base == normalized_quote:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="base_currency and quote_currency must differ",
+        )
+    try:
         entry = repository.get_latest_rate(
-            base_currency=base_currency,
-            quote_currency=quote_currency,
+            base_currency=normalized_base,
+            quote_currency=normalized_quote,
             as_of_date=as_of_date,
             provider_key=provider_key,
         )

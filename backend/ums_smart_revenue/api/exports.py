@@ -1592,5 +1592,9 @@ def _previous_month(month: str) -> str:
             f"export month must use YYYY-MM with a calendar month from 01 to 12: {month!r}"
         )
     if month_number == 1:
+        if year == 1:
+            raise RevenueFactValidationError(
+                f"export month must use YYYY-MM with a calendar month from 01 to 12: {month!r}"
+            )
         return f"{year - 1:04d}-12"
     return f"{year:04d}-{month_number - 1:02d}"

@@ -30,6 +30,8 @@ Dashboard = smart UI + calculations + exports
 
 Neo4j and graph projections are removed from the active architecture. Relationship, hierarchy, ownership, and issue-tracing views must be served from SQL/warehouse-backed read models with the same application permissions as finance and analytics APIs.
 
+Operational rollout step: apply Alembic migration `20260513_0002_retire_graph_permissions` to drop the retired `graph-read` scope and `graph.*` permissions, then decommission any Neo4j instances after verifying the SQL/warehouse read models are active. Configuration referencing `graph-scope` must be removed from all deployments.
+
 ## Files
 
 | File | Purpose |

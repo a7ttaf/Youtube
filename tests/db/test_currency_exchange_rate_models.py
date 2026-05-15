@@ -37,6 +37,7 @@ def test_currency_exchange_rate_model_persists_provider_rate():
     assert rate.quote_currency == "USD"
     assert rate.rate == Decimal("1.0845000000")
     assert rate.provider_key == "ecb"
+    assert rate.source_report_id == "ecb-2026-04-22"
     assert rate.raw_payload == {"source": "ecb"}
     assert rate.imported_by == USER_ID
 
