@@ -496,16 +496,42 @@ def list_month_reconciliation_issues(
     limit: int = Query(default=100, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, object]:
-    revenue_channel_ids = _authorized_channel_ids_for_permission(user, Permission.VIEW_REVENUE, org_index)
-    confidence_channel_ids = _authorized_channel_ids_for_permission(user, Permission.VIEW_CONFIDENCE, org_index)
-    if revenue_channel_ids == set():
+    # Reject only when the caller has no relevant grant at all; a caller whose
+    # scoped grant currently maps to zero channels (e.g. sector/company with
+    # no active mapping) should see an empty queue, not 403.
+    if user.disabled or not _granted_scopes_for_permission(user, Permission.VIEW_REVENUE):
         _raise_missing_permission(Permission.VIEW_REVENUE)
-    if confidence_channel_ids == set():
+    if not _granted_scopes_for_permission(user, Permission.VIEW_CONFIDENCE):
         _raise_missing_permission(Permission.VIEW_CONFIDENCE)
 
+    revenue_channel_ids = _authorized_channel_ids_for_permission(user, Permission.VIEW_REVENUE, org_index)
+    confidence_channel_ids = _authorized_channel_ids_for_permission(user, Permission.VIEW_CONFIDENCE, org_index)
     visible_channel_ids = _intersect_channel_sets(revenue_channel_ids, confidence_channel_ids)
-    if visible_channel_ids == set():
-        _raise_missing_permission(Permission.VIEW_REVENUE)
+    if visible_channel_ids is not None and not visible_channel_ids:
+        record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.REVENUE_VIEWED,
+            entity_type="revenue_reconciliation_issue_queue",
+            entity_id=month,
+            scope=AccessScope.finance_month(month),
+            details={
+                "issue_count": 0,
+                "page_channel_count": 0,
+                "page_fact_count": 0,
+                "has_more": False,
+                "scoped_channel_count": 0,
+            },
+        )
+        empty_queue = build_revenue_reconciliation_issue_queue([], month=month)
+        response = empty_queue.to_api()
+        response["pagination"] = {
+            "limit": limit,
+            "offset": offset,
+            "next_offset": None,
+            "has_more": False,
+        }
+        return response
 
     try:
         page_size = limit + 1
