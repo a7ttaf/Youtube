@@ -66,6 +66,7 @@ def test_monthly_channel_revenue_fact_model_persists_canonical_values():
     assert fact.youtube_channel_id == "channel-tv-a"
     assert fact.source_kind == "YOUTUBE_CMS"
     assert fact.gross_revenue_usd == Decimal("1234.56")
+    assert fact.net_revenue_usd == Decimal("987.65")
     assert fact.shorts_revenue_usd == Decimal("234.56")
     assert fact.longform_revenue_usd == Decimal("900.00")
     assert fact.subscription_revenue_usd == Decimal("50.00")

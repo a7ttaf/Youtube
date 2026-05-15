@@ -1168,16 +1168,24 @@ def _audit_revenue_scopes_for_export(
     export_id: str | None = None,
 ) -> tuple[AccessScope, ...]:
     # ====================================================================
-    # Purpose: Derive audit scopes for an export read/download. For group
-    #   exports we prefer the channel snapshot frozen on the row so the
-    #   audit trail mirrors the data actually returned. Falls back to
-    #   live group membership only for legacy rows; if the source group
-    #   has been deleted and no snapshot exists, we record a single
-    #   export-level audit instead of raising and blocking the read.
+    # Purpose: Derive audit scopes for an export read/download. For any
+    #   non-global scoped export we prefer the channel snapshot frozen on
+    #   the row so the audit trail mirrors the data actually returned.
+    #   This protects against membership drift on company/sector/group
+    #   between job creation and read. Falls back to live group membership
+    #   only for legacy group rows; if the source group has been deleted
+    #   and no snapshot exists, we record a single export-level audit
+    #   instead of raising and blocking the read.
     # Database/ORM: ChannelGroupRegistryStore (read-only fallback).
     # Standards: Audit must succeed for any successfully-authorized read.
     # Blast Radius: REVENUE_VIEWED audit scope tracking.
     # ====================================================================
+    if scope_type == "global":
+        return (_access_scope_from_export_scope(scope_type, scope_id),)
+    if scope_channel_ids is not None:
+        return tuple(
+            AccessScope.channel(channel_id) for channel_id in scope_channel_ids
+        )
     if scope_type != "group":
         return (_access_scope_from_export_scope(scope_type, scope_id),)
     if not scope_id:
