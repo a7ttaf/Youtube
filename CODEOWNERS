@@ -1,0 +1,61 @@
+# CODEOWNERS — automatic reviewer assignment
+#
+# Format: <pattern>  <owner1> [<owner2> ...]
+#   owner can be @user, @org/team, or email
+#
+# Order matters: the LAST matching pattern wins.
+# Update teams below to match your GitHub org once teams exist.
+
+# ───── Default owner: anything not matched ─────
+*                                       @ums-smart-revenue/maintainers
+
+# ───── Specs & documentation ─────
+Docs/                                   @ums-smart-revenue/product @ums-smart-revenue/maintainers
+PRODUCT.md                              @ums-smart-revenue/product
+DESIGN.md                               @ums-smart-revenue/product @ums-smart-revenue/architecture
+*.md                                    @ums-smart-revenue/product
+
+# ───── Auth, RBAC, audit (highest scrutiny) ─────
+backend/ums_smart_revenue/auth/         @ums-smart-revenue/security @ums-smart-revenue/maintainers
+backend/ums_smart_revenue/api/security.py    @ums-smart-revenue/security @ums-smart-revenue/maintainers
+backend/ums_smart_revenue/api/audit.py       @ums-smart-revenue/security @ums-smart-revenue/maintainers
+backend/ums_smart_revenue/api/users.py       @ums-smart-revenue/security @ums-smart-revenue/maintainers
+Docs/security/                          @ums-smart-revenue/security
+SECURITY.md                             @ums-smart-revenue/security
+
+# ───── Finance domain (money-handling — extra review) ─────
+backend/ums_smart_revenue/finance/      @ums-smart-revenue/finance-engineering @ums-smart-revenue/maintainers
+backend/ums_smart_revenue/api/revenue.py     @ums-smart-revenue/finance-engineering
+backend/ums_smart_revenue/api/finance_close.py    @ums-smart-revenue/finance-engineering
+backend/ums_smart_revenue/api/adsense.py     @ums-smart-revenue/finance-engineering
+
+# ───── Database, migrations, models ─────
+backend/ums_smart_revenue/db/           @ums-smart-revenue/data-platform @ums-smart-revenue/maintainers
+backend/ums_smart_revenue/db/alembic/   @ums-smart-revenue/data-platform @ums-smart-revenue/maintainers
+alembic.ini                             @ums-smart-revenue/data-platform
+
+# ───── Connectors (Google APIs, ingestion) ─────
+backend/ums_smart_revenue/connectors/   @ums-smart-revenue/data-platform
+
+# ───── Reports / exports ─────
+backend/ums_smart_revenue/reports/      @ums-smart-revenue/finance-engineering
+
+# ───── Frontend (when it exists) ─────
+frontend/                               @ums-smart-revenue/frontend
+mockups/                                @ums-smart-revenue/frontend @ums-smart-revenue/design
+
+# ───── Infrastructure / DevOps ─────
+.github/                                @ums-smart-revenue/devops @ums-smart-revenue/maintainers
+.github/workflows/                      @ums-smart-revenue/devops
+Dockerfile                              @ums-smart-revenue/devops
+docker-compose.yml                      @ums-smart-revenue/devops
+deploy/                                 @ums-smart-revenue/devops
+.pre-commit-config.yaml                 @ums-smart-revenue/devops
+
+# ───── Tooling & dependency manifests ─────
+pyproject.toml                          @ums-smart-revenue/maintainers @ums-smart-revenue/devops
+uv.lock                                 @ums-smart-revenue/maintainers
+.coderabbit.yaml                        @ums-smart-revenue/maintainers
+
+# ───── Tests (a project-wide concern) ─────
+tests/                                  @ums-smart-revenue/qa @ums-smart-revenue/maintainers
