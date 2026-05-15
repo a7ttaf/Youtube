@@ -839,20 +839,15 @@ def _persist_generated_export_artifact(
             content=content,
         )
     except ExportArtifactStorageError:
-        try:
-            repository.fail_job(
-                export_id=export_job.id,
-                failure_reason="artifact storage unavailable",
-            )
-        except ExportJobTerminalStateError as terminal_exc:
-            # Another writer already finalized this export. Storage is still
-            # unavailable for this caller, so we surface a 503 without
-            # overriding the persisted terminal status.
-            logger.warning(
-                "Export %s reached terminal status during storage failure: %s",
-                export_job.id,
-                terminal_exc,
-            )
+        # Transient artifact-store failures (network blips, object-storage
+        # outages, disk-full) should not move the export into a terminal
+        # FAILED state — the next retry must be able to succeed once storage
+        # recovers. Leave the persisted status alone and return 503 so the
+        # caller can retry without first un-failing the job.
+        logger.warning(
+            "Export %s artifact storage unavailable; leaving job non-terminal for retry",
+            export_job.id,
+        )
         return None, JSONResponse(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={"detail": "Export artifact storage unavailable"},

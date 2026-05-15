@@ -549,10 +549,15 @@ def test_finance_workbook_download_persists_artifact_and_completes_job(
     assert persisted_file.read_bytes() == response.content
 
 
-def test_finance_workbook_storage_failure_marks_export_failed_without_download_audit(
+def test_finance_workbook_storage_failure_leaves_export_retryable_without_download_audit(
     tmp_path,
     monkeypatch,
 ):
+    # Transient artifact-store outages (here: the configured artifact
+    # directory is actually a regular file) must leave the export in its
+    # pre-failure status so the caller can retry once storage recovers. The
+    # endpoint surfaces 503 but does not terminalize the job — moving it to
+    # FAILED would force operators to un-fail before the next attempt.
     artifact_root_file = tmp_path / "not-a-directory"
     artifact_root_file.write_text("not a directory", encoding="utf-8")
     monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_root_file))
@@ -576,14 +581,14 @@ def test_finance_workbook_storage_failure_marks_export_failed_without_download_a
     assert response.status_code == 503
     assert response.json()["detail"] == "Export artifact storage unavailable"
     assert export_job is not None
-    assert export_job.status == "FAILED"
-    assert export_job.completed_at is not None
+    assert export_job.status == "QUEUED"
+    assert export_job.completed_at is None
     assert export_job.file_url is None
     assert export_job.artifact_filename is None
     assert export_job.artifact_content_type is None
     assert export_job.artifact_byte_size is None
     assert export_job.artifact_checksum_sha256 is None
-    assert export_job.failure_reason == "artifact storage unavailable"
+    assert export_job.failure_reason is None
     assert audit_events == []
 
 
