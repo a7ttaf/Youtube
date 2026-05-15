@@ -2,6 +2,7 @@ from datetime import datetime
 from uuid import UUID
 
 from sqlalchemy import (
+    DDL,
     JSON,
     BigInteger,
     Boolean,
@@ -11,6 +12,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    event,
     func,
     text,
 )
@@ -190,13 +192,31 @@ class ExportJobORM(ReportBase):
         # Mirror the migration 0006 GIN index on scope_channel_ids so ORM-built
         # schemas (e.g. ReportBase.metadata.create_all in tests) include the
         # PostgreSQL index. On SQLite postgresql_using is silently ignored and
-        # a plain b-tree index is created. The jsonb_typeof/length CHECK that
-        # accompanies this column in migration 0006 is PostgreSQL-specific and
-        # is intentionally not mirrored here; element validation lives in
-        # _normalize_scope_channel_ids at the application boundary.
+        # a plain b-tree index is created.
         Index(
             "ix_export_jobs_scope_channel_ids",
             "scope_channel_ids",
             postgresql_using="gin",
         ),
     )
+
+
+# Mirror the PostgreSQL-only CHECK from migration 0006 so ORM-built schemas on
+# Postgres enforce the same shape + non-empty rule. The DDL is registered with
+# execute_if(dialect="postgresql") so SQLite-backed create_all() — used by
+# tests/db/test_export_job_models.py — silently skips it (jsonb_typeof and
+# jsonb_array_length are PostgreSQL functions). Production uses migrations, so
+# this DDL is a parity guarantee for dev/test PostgreSQL parity, not the
+# authoritative constraint source.
+event.listen(
+    ExportJobORM.__table__,
+    "after_create",
+    DDL(
+        "ALTER TABLE export_jobs ADD CONSTRAINT "
+        "ck_export_jobs_scope_channel_ids_is_array "
+        "CHECK (scope_channel_ids IS NULL OR ("
+        "jsonb_typeof(scope_channel_ids) = 'array' "
+        "AND jsonb_array_length(scope_channel_ids) > 0"
+        "))"
+    ).execute_if(dialect="postgresql"),
+)

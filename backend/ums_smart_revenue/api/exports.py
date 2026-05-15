@@ -71,6 +71,7 @@ from ums_smart_revenue.reports.executive_pdf import (
     build_executive_pdf_report,
 )
 from ums_smart_revenue.reports.exports import (
+    ALLOWED_EXPORT_TYPES,
     MAX_EXPORT_JOB_PAGE_SIZE,
     ExportJobEntry,
     ExportJobNotFoundError,
@@ -157,6 +158,13 @@ def request_export(
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     try:
+        # Validate export_type at the trust boundary so a typo returns 422
+        # ("Unknown export_type") instead of falling through to the analytics
+        # permission gate and producing a 403 for users with finance grants.
+        if payload.export_type not in ALLOWED_EXPORT_TYPES:
+            raise ExportJobValidationError(
+                f"Unknown export_type: {payload.export_type}"
+            )
         required_export_permission = _audit_permission_for_export_type(
             payload.export_type
         )
@@ -1403,27 +1411,31 @@ def _channel_ids_for_export_scope(
             f"scope_id is required for export scope_type: {scope_type}"
         )
     if scope_type == "sector":
-        # Treat an unknown sector_id the same as "Sector not found" rather
-        # than returning an empty set, which would otherwise surface as
-        # 422 "scoped exports require at least one channel" and leak whether
-        # the sector currently has any channels.
-        channel_ids = {
+        # Raise KeyError only when the sector itself is unknown (404). When the
+        # sector exists but currently has no channels, return an empty set so
+        # the downstream "scoped exports require at least one channel" path
+        # produces a 422 with a clearer message than a generic 404.
+        known_sector_ids = set(org_index.channel_sector.values()) | set(
+            org_index.company_sector.values()
+        )
+        if scope_id not in known_sector_ids:
+            raise KeyError(f"Sector not found: {scope_id}")
+        return {
             channel_id
             for channel_id, sector_id in org_index.channel_sector.items()
             if sector_id == scope_id
         }
-        if not channel_ids:
-            raise KeyError(f"Sector not found: {scope_id}")
-        return channel_ids
     if scope_type == "company":
-        channel_ids = {
+        known_company_ids = set(org_index.channel_company.values()) | set(
+            org_index.company_sector
+        )
+        if scope_id not in known_company_ids:
+            raise KeyError(f"Company not found: {scope_id}")
+        return {
             channel_id
             for channel_id, company_id in org_index.channel_company.items()
             if company_id == scope_id
         }
-        if not channel_ids:
-            raise KeyError(f"Company not found: {scope_id}")
-        return channel_ids
     if scope_type == "channel":
         _require_known_channel_scope(scope_id, org_index)
         return {scope_id}
