@@ -28,16 +28,19 @@ def upgrade() -> None:
             ),
         ),
     )
+    # Element-type enforcement (every entry must be a JSON string) is delegated
+    # to the application's _normalize_scope_channel_ids in reports/exports.py.
+    # Restricting the CHECK to shape + non-empty avoids embedding jsonpath
+    # method-call syntax in a CHECK expression, where parser corner cases
+    # across PostgreSQL versions have caused review debate.
     op.create_check_constraint(
         "ck_export_jobs_scope_channel_ids_is_array",
         "export_jobs",
         (
             "scope_channel_ids IS NULL OR ("
             "jsonb_typeof(scope_channel_ids) = 'array' "
-            "AND jsonb_array_length(scope_channel_ids) > 0 "
-            "AND NOT jsonb_path_exists("
-            "scope_channel_ids, '$[*] ? (@.type() != \"string\")'"
-            "))"
+            "AND jsonb_array_length(scope_channel_ids) > 0"
+            ")"
         ),
     )
     op.create_index(

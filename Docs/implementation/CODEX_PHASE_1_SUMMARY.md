@@ -905,4 +905,4 @@ Pytest coverage includes:
 ## Unresolved Assumptions
 - Final identity provider is not specified.
 - Exact TV/News sector IDs are not specified, so tests use placeholder sector ids.
-- No frontend exists yet, so UI permission metadata is exposed as backend metadata functions rather than a frontend package.
+- Frontend is preview-only and not wired to live backend auth/data yet, so UI permission metadata is exposed as backend metadata functions rather than a frontend package.

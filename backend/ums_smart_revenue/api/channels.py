@@ -119,6 +119,7 @@ def list_channels(
     registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> list[dict[str, object]]:
+    _require_analytics_view_permission(user)
     return [
         channel.to_api()
         for channel in _visible_channels_for_analytics(
@@ -135,6 +136,7 @@ def list_outside_cms_channels(
     registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> dict[str, object]:
+    _require_analytics_view_permission(user)
     channels = [
         channel
         for channel in _visible_channels_for_analytics(
@@ -168,6 +170,7 @@ def list_channel_issues(
     ],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> dict[str, object]:
+    _require_analytics_view_permission(user)
     issues = build_channel_registry_issues(
         channels=_visible_channels_for_analytics(
             user=user,
@@ -181,6 +184,19 @@ def list_channel_issues(
         "items": [issue.to_api() for issue in issues],
         "summary": summarize_channel_registry_issues(issues),
     }
+
+
+def _require_analytics_view_permission(user: UserPrincipal) -> None:
+    # Explicit 403 instead of returning a silent empty result: analytics
+    # consumers without VIEW_ANALYTICS should fail authorization, not see
+    # an empty channel feed that could be mistaken for "no channels exist".
+    if user.disabled or not _granted_scopes_for_permission(
+        user, Permission.VIEW_ANALYTICS
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"Missing permission: {Permission.VIEW_ANALYTICS.value}",
+        )
 
 
 def _visible_channels_for_analytics(

@@ -105,13 +105,16 @@ def sync_exchange_rates(
             detail=str(exc),
         ) from exc
 
+    batch_entity_id = (
+        payload.source_report_id
+        or f"batch:{payload.provider_key}:{len(entries)}"
+    )
     record = record_audit_event(
         sink=audit_sink,
         actor=user,
         event_type=AuditEventType.EXCHANGE_RATE_SYNCED,
         entity_type="currency_exchange_rate_batch",
-        entity_id=payload.source_report_id
-        or ",".join(entry.audit_entity_id for entry in entries),
+        entity_id=batch_entity_id,
         scope=connector_scope,
         reason=payload.reason,
         details={
