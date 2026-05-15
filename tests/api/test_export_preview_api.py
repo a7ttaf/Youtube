@@ -330,7 +330,8 @@ def test_artifact_metadata_audit_details_marks_incomplete_metadata():
         )
     )
 
-    assert details["file_url"] == "file-store://exports/export-id/finance.xlsx"
+    assert details["artifact_locator_redacted"] is True
+    assert "file_url" not in details
     assert details["artifact_metadata_complete"] is False
     assert set(details["artifact_metadata_missing_fields"]) == {
         "artifact_filename",
@@ -639,6 +640,9 @@ def test_finance_workbook_download_returns_503_when_persisted_artifact_missing(
     assert _utc_timestamp(export_job.completed_at) == _utc_timestamp(completed_at)
     assert export_job.file_url == existing_uri
     assert export_job.artifact_filename == existing_filename
+    assert export_job.artifact_content_type == (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    )
     assert export_job.artifact_byte_size == 42
     assert export_job.artifact_checksum_sha256 == "a" * 64
     assert export_job.failure_reason is None

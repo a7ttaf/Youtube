@@ -1121,7 +1121,9 @@ def _record_finance_export_artifact_audit(
 
 
 def _artifact_metadata_audit_details(export_job: ExportJobEntry) -> dict[str, object]:
-    details: dict[str, object] = {"file_url": export_job.file_url}
+    details: dict[str, object] = {}
+    if export_job.file_url is not None:
+        details["artifact_locator_redacted"] = True
     artifact_metadata = {
         "artifact_filename": export_job.artifact_filename,
         "artifact_content_type": export_job.artifact_content_type,
@@ -1387,8 +1389,14 @@ def _channel_ids_for_export_scope(
             if company_id == scope_id
         }
     if scope_type == "channel":
+        _require_known_channel_scope(scope_id, org_index)
         return {scope_id}
     raise ExportJobValidationError(f"Unknown export scope_type: {scope_type}")
+
+
+def _require_known_channel_scope(scope_id: str, org_index: OrgAccessIndex) -> None:
+    if scope_id not in org_index.channel_company and scope_id not in org_index.channel_sector:
+        raise KeyError(f"Channel not found: {scope_id}")
 
 
 def _access_scope_from_export_scope(

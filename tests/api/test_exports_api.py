@@ -132,6 +132,35 @@ def test_finance_admin_requests_finance_export_with_audit_and_lock_snapshot(tmp_
     assert audit_log.sensitive is True
 
 
+def test_channel_export_request_rejects_unknown_channel_scope(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/exports",
+        headers=auth_headers("finance_admin"),
+        json={
+            "export_type": "FINANCE_EXCEL",
+            "scope_type": "channel",
+            "scope_id": "missing-channel",
+            "month": "2026-03",
+            "currency": "USD",
+            "reason": "Reject unknown channel",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        export_count = session.scalar(select(func.count()).select_from(ExportJobORM))
+        audit_count = session.scalar(select(func.count()).select_from(AuditLogORM))
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Channel not found: missing-channel"
+    assert export_count == 0
+    assert audit_count == 0
+
+
 def test_group_export_request_freezes_member_channels_at_creation(tmp_path):
     """Mutating a group after queueing an export must not change the snapshot.
 
