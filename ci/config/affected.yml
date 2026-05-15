@@ -1,0 +1,37 @@
+# File-to-test mapping rules for affected/incremental test selection.
+# Source file changes -> test file patterns to run.
+# Supports glob patterns.
+
+rules:
+  # JavaScript/TypeScript: src -> tests
+  - source: "src/**/*.ts"
+    tests: "tests/**/*.test.ts"
+    also: "src/**/*.spec.ts"
+  - source: "src/**/*.js"
+    tests: "tests/**/*.test.js"
+    also: "src/**/*.spec.js"
+  - source: "src/**/*.tsx"
+    tests: "tests/**/*.test.tsx"
+  - source: "src/**/*.jsx"
+    tests: "tests/**/*.test.jsx"
+
+  # Python: module -> test file
+  - source: "src/**/*.py"
+    tests: "tests/**/test_*.py"
+    also: "tests/**/*_test.py"
+  - source: "**/*.py"
+    tests: "tests/**/test_*.py"
+
+  # Go: package -> package tests
+  - source: "**/*.go"
+    tests: "**/*_test.go"
+
+  # Rust: module -> tests in same file + integration tests
+  - source: "src/**/*.rs"
+    tests: "tests/**/*.rs"
+
+  # CI scripts -> self-test
+  - source: "ci/**/*.sh"
+    tests: "ci/tests/**/*.bats"
+  - source: ".githooks/*"
+    tests: "ci/tests/**/*.bats"

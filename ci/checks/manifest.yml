@@ -1,0 +1,263 @@
+# CI Gate Check Manifest
+# Each check must expose: detect(), plan(), run(), report() functions
+# when its script is sourced, OR be a standalone script.
+#
+# Fields:
+#   id: unique identifier
+#   script: path relative to repo root
+#   description: human-readable description
+#   languages: which languages trigger this check (empty = always)
+#   requires_tool: tool that must be present (empty = always run)
+#   severity: blocker | warning | advisory
+#   phase: lint | typecheck | format | tests | coverage | security | hygiene
+#   pre_commit: whether this runs in pre-commit (fast) mode
+#   timeout_sec: per-check timeout
+
+checks:
+  - id: git-safety
+    script: ci/checks/git-safety.sh
+    description: "Whitespace, conflict markers, sensitive file detection"
+    languages: []
+    severity: blocker
+    phase: hygiene
+    pre_commit: true
+    timeout_sec: 30
+
+  - id: commit-hygiene
+    script: ci/checks/commit-hygiene.sh
+    description: "Conventional commit lint, max diff size, forbidden files"
+    languages: []
+    severity: blocker
+    phase: hygiene
+    pre_commit: true
+    timeout_sec: 30
+
+  - id: branch-protection
+    script: ci/checks/branch-protection.sh
+    description: "Local enforcement of branch protection rules"
+    languages: []
+    severity: blocker
+    phase: hygiene
+    pre_commit: false
+    timeout_sec: 30
+
+  - id: secrets
+    script: ci/checks/secrets.sh
+    description: "Secret/credential scanning with gitleaks + regex fallback"
+    languages: []
+    severity: blocker
+    phase: security
+    pre_commit: true
+    timeout_sec: 60
+
+  - id: lint-shell
+    script: ci/checks/lint.sh
+    description: "Shell script linting with shellcheck"
+    languages: [shell]
+    requires_tool: shellcheck
+    severity: blocker
+    phase: lint
+    pre_commit: true
+    timeout_sec: 60
+
+  - id: lint-js
+    script: ci/checks/lint.sh
+    description: "JavaScript/TypeScript linting with eslint"
+    languages: [javascript]
+    requires_tool: eslint
+    severity: blocker
+    phase: lint
+    pre_commit: true
+    timeout_sec: 120
+
+  - id: lint-python
+    script: ci/checks/lint.sh
+    description: "Python linting with ruff/flake8"
+    languages: [python]
+    requires_tool: ruff
+    severity: blocker
+    phase: lint
+    pre_commit: true
+    timeout_sec: 60
+
+  - id: lint-go
+    script: ci/checks/lint.sh
+    description: "Go linting with golangci-lint"
+    languages: [go]
+    requires_tool: golangci-lint
+    severity: blocker
+    phase: lint
+    pre_commit: true
+    timeout_sec: 120
+
+  - id: lint-docker
+    script: ci/checks/lint.sh
+    description: "Dockerfile linting with hadolint"
+    languages: [dockerfile]
+    requires_tool: hadolint
+    severity: warning
+    phase: lint
+    pre_commit: true
+    timeout_sec: 30
+
+  - id: lint-yaml
+    script: ci/checks/lint.sh
+    description: "YAML linting with yamllint"
+    languages: [yaml]
+    requires_tool: yamllint
+    severity: warning
+    phase: lint
+    pre_commit: true
+    timeout_sec: 30
+
+  - id: format-shell
+    script: ci/checks/format.sh
+    description: "Shell formatting check with shfmt"
+    languages: [shell]
+    requires_tool: shfmt
+    severity: blocker
+    phase: format
+    pre_commit: true
+    timeout_sec: 30
+
+  - id: format-js
+    script: ci/checks/format.sh
+    description: "JS/TS formatting check with prettier"
+    languages: [javascript]
+    requires_tool: prettier
+    severity: blocker
+    phase: format
+    pre_commit: true
+    timeout_sec: 60
+
+  - id: format-python
+    script: ci/checks/format.sh
+    description: "Python formatting check with black/ruff format"
+    languages: [python]
+    requires_tool: black
+    severity: blocker
+    phase: format
+    pre_commit: true
+    timeout_sec: 30
+
+  - id: format-go
+    script: ci/checks/format.sh
+    description: "Go formatting check with gofmt"
+    languages: [go]
+    requires_tool: gofmt
+    severity: blocker
+    phase: format
+    pre_commit: true
+    timeout_sec: 30
+
+  - id: typecheck-js
+    script: ci/checks/typecheck.sh
+    description: "TypeScript type checking with tsc"
+    languages: [javascript]
+    requires_tool: tsc
+    severity: blocker
+    phase: typecheck
+    pre_commit: false
+    timeout_sec: 120
+
+  - id: typecheck-python
+    script: ci/checks/typecheck.sh
+    description: "Python type checking with mypy/pyright"
+    languages: [python]
+    requires_tool: mypy
+    severity: warning
+    phase: typecheck
+    pre_commit: false
+    timeout_sec: 120
+
+  - id: typecheck-go
+    script: ci/checks/typecheck.sh
+    description: "Go vet"
+    languages: [go]
+    requires_tool: go
+    severity: blocker
+    phase: typecheck
+    pre_commit: false
+    timeout_sec: 60
+
+  - id: tests-js
+    script: ci/checks/tests.sh
+    description: "JavaScript tests with jest/vitest"
+    languages: [javascript]
+    severity: blocker
+    phase: tests
+    pre_commit: false
+    timeout_sec: 300
+
+  - id: tests-python
+    script: ci/checks/tests.sh
+    description: "Python tests with pytest"
+    languages: [python]
+    severity: blocker
+    phase: tests
+    pre_commit: false
+    timeout_sec: 300
+
+  - id: tests-go
+    script: ci/checks/tests.sh
+    description: "Go tests"
+    languages: [go]
+    severity: blocker
+    phase: tests
+    pre_commit: false
+    timeout_sec: 300
+
+  - id: tests-shell
+    script: ci/checks/tests.sh
+    description: "Shell tests with bats"
+    languages: [shell]
+    requires_tool: bats
+    severity: blocker
+    phase: tests
+    pre_commit: false
+    timeout_sec: 300
+
+  - id: sast
+    script: ci/checks/sast.sh
+    description: "SAST scanning with semgrep/bandit/gosec"
+    languages: []
+    severity: blocker
+    phase: security
+    pre_commit: false
+    timeout_sec: 300
+
+  - id: supply-chain
+    script: ci/checks/supply-chain.sh
+    description: "Lockfile integrity and drift detection"
+    languages: []
+    severity: warning
+    phase: security
+    pre_commit: false
+    timeout_sec: 120
+
+  - id: license
+    script: ci/checks/license.sh
+    description: "License compatibility checking"
+    languages: []
+    severity: warning
+    phase: security
+    pre_commit: false
+    timeout_sec: 60
+
+  - id: container
+    script: ci/checks/container.sh
+    description: "Container image security scanning"
+    languages: [dockerfile]
+    severity: warning
+    phase: security
+    pre_commit: false
+    timeout_sec: 300
+
+  - id: iac
+    script: ci/checks/iac.sh
+    description: "Infrastructure-as-Code scanning with tflint/checkov"
+    languages: [terraform]
+    severity: warning
+    phase: security
+    pre_commit: false
+    timeout_sec: 120

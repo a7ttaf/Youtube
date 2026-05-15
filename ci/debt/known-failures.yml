@@ -1,0 +1,19 @@
+version: 1
+
+known_failures: []
+
+# Example entry format:
+# known_failures:
+#   - id: PY-RUFF-ASYNC240-001
+#     type: ruff
+#     command: "ruff check ."
+#     status: known_debt
+#     first_seen: "2026-05-03"
+#     blocking: false
+#     owner: "project"
+#     reason: "Pre-existing ASYNC240 warnings."
+#     allowed_until: "2026-05-17"
+#     must_not_increase: true
+#     expected_count: 4
+#     signatures:
+#       - "ASYNC240"

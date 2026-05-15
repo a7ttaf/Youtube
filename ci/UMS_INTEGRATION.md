@@ -1,0 +1,87 @@
+# UMS Smart Revenue — Elite-CI integration notes
+
+This repository **vendors [Elite-CI](https://github.com/XGenerationy/Elite-CI)** as a local-first quality gate. The standard Elite-CI surface is preserved (`make verify`, `make ci-full`, `make install-hooks`, git hooks under `.githooks/`); this document captures only the deltas that make it work for the UMS Python stack.
+
+## Why local-first
+
+The default GitHub-hosted runners on `XGenerationy/Youtube` are billing-blocked. Rather than build a workflow that can never run, we gate quality at the developer's machine via `make verify` and the git pre-push hook.
+
+## What's enabled / disabled
+
+Edited in [`ci/config/checks.yml`](config/checks.yml):
+
+| Lane | State | Why |
+|---|---|---|
+| **lint-shell** | enabled | bash scripts in `ci/` and `.githooks/` |
+| **lint-python** | enabled | `ruff` over `backend/` and `tests/` |
+| **lint-yaml** | enabled | `.github/dependabot.yml`, `ci/config/*.yml` |
+| **lint-actions** | enabled | Future workflows |
+| **lint-markdown** | enabled (advisory) | The 19 design docs |
+| **typecheck-python** | enabled | `mypy` over `backend/ums_smart_revenue` |
+| **format-shell** | enabled | `shfmt` over `ci/` |
+| **format-python** | enabled | `ruff format --check` |
+| **tests-python** | enabled | `pytest` via the project's pyproject `[tool.pytest.ini_options]` |
+| **sast** / **secrets** / **supply-chain** / **license** | enabled | bandit / gitleaks / pip-audit / license-checker |
+| **commit-hygiene** / **branch-protection** | enabled | conventional commits, no direct main pushes |
+| **lint-js / typecheck-js / format-js / tests-js** | **disabled** | No JS in v1.0 (frontend lands in Phase 5) |
+| **lint-go / typecheck-go / format-go / tests-go** | **disabled** | No Go in the project |
+| **lint-rust / typecheck-rust / format-rust / tests-rust** | **disabled** | No Rust in the project |
+| **container** | **disabled** | Re-enable once Dockerfile lint (`hadolint`) is wanted in the gate |
+| **iac** | **disabled** | Re-enable once Helm/Terraform land in Phase S2 |
+
+Re-enable any of the disabled lanes by flipping `enabled: true` in `ci/config/checks.yml`.
+
+## How tools resolve
+
+`make verify` invokes preflight via `uv run bash` whenever `uv` is on PATH. `uv run` activates the project's managed venv (`.venv/Scripts` on Windows or `.venv/bin` on Linux/macOS) and ensures every tool — `ruff`, `mypy`, `pytest`, `sqlfluff`, `alembic`, `bandit`, `pip-audit` — is on PATH for the duration of the gate. No manual venv activation required.
+
+When `uv` is not installed, preflight falls back to bare `bash`. Elite-CI's Python lane then searches `.venv/bin/<tool>` first, then global PATH.
+
+## Day-to-day workflow
+
+```bash
+# Once, after cloning:
+uv sync --extra test --extra dev --extra lint   # provision the venv
+make install-hooks                              # wire git hooks
+
+# Before each push:
+make verify                                     # full gate, < 2 min on this codebase
+```
+
+Pre-push hook runs `make ci-full` automatically. If anything fails, the push is refused before it leaves your machine.
+
+## When the gate fails
+
+| Mode | Use when |
+|---|---|
+| `make ci-quick` | Pre-commit smoke. Fastest pass. |
+| `make ci-full` | Default. Full check suite incremental to your changeset. |
+| `make ci-all` | Ignore changeset filtering; check the entire tree. |
+| `make ci-fix` | Auto-format with ruff/shfmt where possible. |
+| `make ci-profile` | Show timing per check. |
+| `make ci-ship` | Tightest gate; same as the pre-push hook uses. |
+
+## When billing for GitHub-hosted Actions is restored
+
+If hosted runners become usable again, add a thin mirror workflow at `.github/workflows/elite-ci-mirror.yml` that runs `make verify` on `ubuntu-latest`. The local gate stays the source of truth; the workflow exists only to catch contributors who skipped hooks.
+
+## Upgrading vendored Elite-CI
+
+Re-fetch from upstream and merge:
+
+```bash
+git clone --depth=1 https://github.com/XGenerationy/Elite-CI.git /tmp/elite-ci
+# Diff and merge selectively:
+diff -ur ci /tmp/elite-ci/ci
+# Hand-merge using your tool of choice. Preserve:
+#   - ci/config/checks.yml (UMS lane toggles)
+#   - ci/UMS_INTEGRATION.md (this file)
+#   - ci/.gitignore (artifact rules)
+```
+
+The vendored copy is intentionally a checkpoint, not a live submodule, so UMS can pin a tested Elite-CI version and roll forward deliberately.
+
+## Tested on
+
+- Windows 11 + Git Bash + `uv` 0.11 (developer station).
+- Linux containers — covered when the mirror workflow is later enabled.

@@ -1,0 +1,26 @@
+# CI Gate Global Configuration
+# Controls parallelism, timeouts, and severity policy.
+
+# Maximum parallel check jobs (0 = auto-detect from nproc/hw.ncpu)
+parallelism: 0
+
+# Global timeout per check in seconds (0 = no timeout)
+default_timeout_sec: 300
+
+# Fast check budget for pre-commit (seconds)
+pre_commit_budget_sec: 10
+
+# Full gate budget for pre-push (seconds)
+pre_push_budget_sec: 120
+
+# Fail the entire gate if any blocker-severity check fails
+fail_fast_on_blocker: true
+
+# Run only checks relevant to changed files (set false to always run all)
+incremental: true
+
+# Allow caching (set false to disable)
+cache_enabled: true
+
+# Verbose output
+verbose: false
