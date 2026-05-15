@@ -186,6 +186,7 @@ def add_group_members(
         group_id=group_id,
         user=user,
         org_index=org_index,
+        prospective_channel_ids=payload.channel_ids,
     )
     channel_ids = list(dict.fromkeys([*group.channel_ids, *payload.channel_ids]))
     _require_manage_group_channels(
@@ -352,11 +353,26 @@ def _require_manageable_group(
     group_id: str,
     user: UserPrincipal,
     org_index: OrgAccessIndex,
+    prospective_channel_ids: list[str] | None = None,
 ) -> ChannelGroupEntry:
     group = registry.get_group(group_id)
-    if group is None or not _can_manage_group_channels(
+    if group is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Group not found",
+        )
+    # Evaluate management permission against the prospective (combined) channel
+    # set when callers are adding members. Otherwise an empty group whose
+    # previous channels a scoped manager could manage would always 404 on the
+    # next add, even when the new channels are within that manager's scope.
+    candidate_channel_ids = (
+        list(dict.fromkeys([*group.channel_ids, *prospective_channel_ids]))
+        if prospective_channel_ids
+        else list(group.channel_ids)
+    )
+    if not _can_manage_group_channels(
         user=user,
-        channel_ids=list(group.channel_ids),
+        channel_ids=candidate_channel_ids,
         org_index=org_index,
     ):
         raise HTTPException(

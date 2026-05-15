@@ -141,8 +141,10 @@ def sync_exchange_rates(
             ),
         ):
             digest.update(
-                f"|{entry.rate_date.isoformat()}|"
-                f"{entry.base_currency}|{entry.quote_currency}".encode()
+                (
+                    f"|{entry.rate_date.isoformat()}|"
+                    f"{entry.base_currency}|{entry.quote_currency}|{entry.rate}"
+                ).encode()
             )
         batch_entity_id = f"batch:{payload.provider_key}:{digest.hexdigest()[:32]}"
     record = record_audit_event(

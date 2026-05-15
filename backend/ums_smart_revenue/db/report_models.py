@@ -187,4 +187,16 @@ class ExportJobORM(ReportBase):
         ),
         Index("ix_export_jobs_requested_by_created", "requested_by", "created_at"),
         Index("ix_export_jobs_scope_month", "scope_type", "scope_id", "month"),
+        # Mirror the migration 0006 GIN index on scope_channel_ids so ORM-built
+        # schemas (e.g. ReportBase.metadata.create_all in tests) include the
+        # PostgreSQL index. On SQLite postgresql_using is silently ignored and
+        # a plain b-tree index is created. The jsonb_typeof/length CHECK that
+        # accompanies this column in migration 0006 is PostgreSQL-specific and
+        # is intentionally not mirrored here; element validation lives in
+        # _normalize_scope_channel_ids at the application boundary.
+        Index(
+            "ix_export_jobs_scope_channel_ids",
+            "scope_channel_ids",
+            postgresql_using="gin",
+        ),
     )

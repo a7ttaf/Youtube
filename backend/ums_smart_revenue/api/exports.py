@@ -1192,10 +1192,10 @@ def _audit_revenue_scopes_for_export(
         raise ExportJobValidationError(
             "scope_id is required for export scope_type: group"
         )
-    if scope_channel_ids is not None:
-        return tuple(
-            AccessScope.channel(channel_id) for channel_id in scope_channel_ids
-        )
+    # The earlier `scope_channel_ids is not None` branch above already returns
+    # for any non-global scope when a snapshot is present, so by the time we
+    # reach the group path scope_channel_ids is guaranteed to be None and we
+    # fall back to live group membership.
     group = group_registry.get_group(scope_id)
     if group is None:
         if export_id is None:

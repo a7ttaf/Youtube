@@ -41,3 +41,23 @@ dashboard hierarchy, issue, explanation, and report views
 ```
 
 No dashboard user or backend API should depend on a graph database for first-beta behavior.
+
+## Decommissioning Neo4j / graph projection
+
+Concrete rollout steps (run in order, one environment at a time):
+
+1. Disable any `/graph/*` routes at the API gateway or router (return 410 Gone
+   or remove the routes entirely). Confirm dashboard pages no longer link to
+   graph views.
+2. Stop and remove any scheduled `GraphSyncJob` / `SyncService` workers and
+   cron entries that backfilled the graph projection.
+3. Apply Alembic migration `20260513_0002_retire_graph_permissions` so the
+   retired `graph-read` scope and `graph.*` permissions are removed from the
+   SQL source of truth.
+4. Revoke and rotate any Neo4j credentials stored in the secret manager;
+   remove `graph-scope` configuration from all deployment manifests.
+5. Run a smoke test on the SQL/warehouse read models for relationship,
+   hierarchy, ownership, and issue-tracing views before tearing down the
+   Neo4j instances themselves.
+6. Decommission the Neo4j containers / clusters only after the smoke test
+   passes and metrics confirm zero traffic to the retired routes.

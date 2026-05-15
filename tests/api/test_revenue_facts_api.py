@@ -215,6 +215,16 @@ def test_import_rejects_revenue_breakdown_above_gross(tmp_path):
         response.json()["detail"]
         == "revenue format breakdown total must be <= gross_revenue_usd"
     )
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        facts = session.scalars(
+            select(MonthlyChannelRevenueFactORM).where(
+                MonthlyChannelRevenueFactORM.month == "2026-03",
+                MonthlyChannelRevenueFactORM.youtube_channel_id == "channel-tv-a",
+                MonthlyChannelRevenueFactORM.source_kind == "YOUTUBE_CMS",
+            )
+        ).all()
+    assert facts == []
 
 
 def test_company_manager_cannot_read_revenue_facts(tmp_path):

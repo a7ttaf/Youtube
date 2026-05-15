@@ -331,12 +331,12 @@ def test_global_channel_issues_include_registry_health_summary():
             "REVENUE_REQUIRED_NO_GROUP": 1,
         },
     }
-    issue_types_by_channel = {
-        item["youtube_channel_id"]: item["issue_type"] for item in payload["items"]
-    }
-    assert issue_types_by_channel["channel-orphan"] == "MISSING_COMPANY"
-    assert issue_types_by_channel["channel-missing-sector"] == "MISSING_SECTOR"
-    assert "channel-news-a" not in issue_types_by_channel
+    issue_tuples = [
+        (item["youtube_channel_id"], item["issue_type"]) for item in payload["items"]
+    ]
+    assert ("channel-orphan", "MISSING_COMPANY") in issue_tuples
+    assert ("channel-missing-sector", "MISSING_SECTOR") in issue_tuples
+    assert all(channel_id != "channel-news-a" for channel_id, _ in issue_tuples)
 
 
 def test_assistant_cannot_create_channel():
