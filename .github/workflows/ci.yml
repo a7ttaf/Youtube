@@ -1,0 +1,212 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  PYTHON_VERSION: "3.14"
+  PYTHONDONTWRITEBYTECODE: "1"
+  PIP_DISABLE_PIP_VERSION_CHECK: "1"
+
+jobs:
+  lint:
+    name: Lint (ruff + sqlfluff)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 1
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install Python ${{ env.PYTHON_VERSION }}
+        run: uv python install ${{ env.PYTHON_VERSION }}
+      - name: Sync dev dependencies
+        run: uv sync --extra dev --extra lint
+      - name: Ruff check
+        run: uv run ruff check .
+      - name: Ruff format check
+        run: uv run ruff format --check .
+      - name: SQLFluff lint
+        run: uv run sqlfluff lint backend/ums_smart_revenue/db || true
+        # `|| true` while SQL files are stabilised; remove once clean.
+
+  type-check:
+    name: Type check (mypy)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install Python ${{ env.PYTHON_VERSION }}
+        run: uv python install ${{ env.PYTHON_VERSION }}
+      - name: Sync deps
+        run: uv sync --extra dev --extra lint --extra test
+      - name: mypy
+        run: uv run mypy backend/ums_smart_revenue
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: ums
+          POSTGRES_PASSWORD: ums
+          POSTGRES_DB: ums_smart_revenue_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      UMS_DATABASE_URL: postgresql+asyncpg://ums:ums@localhost:5432/ums_smart_revenue_test
+      UMS_AUTHZ_SOURCE: headers
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install Python ${{ env.PYTHON_VERSION }}
+        run: uv python install ${{ env.PYTHON_VERSION }}
+      - name: Sync deps
+        run: uv sync --extra dev --extra test
+      - name: Run pytest with coverage
+        run: |
+          uv run pytest -q -p no:cacheprovider \
+            --basetemp .pytest-tmp \
+            --cov=backend/ums_smart_revenue \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            --cov-fail-under=80
+      - name: Upload coverage artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ github.run_id }}
+          path: coverage.xml
+          if-no-files-found: ignore
+
+  security:
+    name: Security (pip-audit + bandit)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install Python ${{ env.PYTHON_VERSION }}
+        run: uv python install ${{ env.PYTHON_VERSION }}
+      - name: Sync deps
+        run: uv sync --extra dev --extra test
+      - name: pip-audit (dependency CVEs)
+        run: uv run pip-audit --strict --progress-spinner off
+      - name: bandit (SAST)
+        run: uv run bandit -r backend/ums_smart_revenue -c pyproject.toml -ll
+
+  secrets-scan:
+    name: Secret scan (gitleaks)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+      - name: gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  migrations:
+    name: Alembic migration round-trip
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: ums
+          POSTGRES_PASSWORD: ums
+          POSTGRES_DB: ums_smart_revenue_migration
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      UMS_DATABASE_URL: postgresql+asyncpg://ums:ums@localhost:5432/ums_smart_revenue_migration
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Install Python ${{ env.PYTHON_VERSION }}
+        run: uv python install ${{ env.PYTHON_VERSION }}
+      - name: Sync deps
+        run: uv sync --extra dev --extra test
+      - name: Upgrade head
+        run: uv run alembic upgrade head
+      - name: Downgrade to base
+        run: uv run alembic downgrade base
+      - name: Upgrade head again
+        run: uv run alembic upgrade head
+
+  summary:
+    name: CI summary
+    needs: [lint, type-check, test, security, secrets-scan, migrations]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Aggregate result
+        run: |
+          echo "lint=${{ needs.lint.result }}"
+          echo "type-check=${{ needs['type-check'].result }}"
+          echo "test=${{ needs.test.result }}"
+          echo "security=${{ needs.security.result }}"
+          echo "secrets-scan=${{ needs['secrets-scan'].result }}"
+          echo "migrations=${{ needs.migrations.result }}"
+          if [[ "${{ needs.lint.result }}" != "success" ]] || \
+             [[ "${{ needs['type-check'].result }}" != "success" ]] || \
+             [[ "${{ needs.test.result }}" != "success" ]] || \
+             [[ "${{ needs.security.result }}" != "success" ]] || \
+             [[ "${{ needs['secrets-scan'].result }}" != "success" ]] || \
+             [[ "${{ needs.migrations.result }}" != "success" ]]; then
+            echo "::error::One or more required CI jobs failed."
+            exit 1
+          fi
