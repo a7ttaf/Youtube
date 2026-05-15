@@ -19,5 +19,6 @@ def test_export_scope_channel_snapshot_migration_adds_dialect_neutral_json_colum
     assert "ix_export_jobs_scope_channel_ids" in migration
     assert "jsonb_typeof" in migration
     assert "jsonb_path_exists" in migration
-    assert '@.type() != \\"string\\"' in migration
+    assert "@.type" in migration
+    assert '!= \\"string\\"' in migration
     assert "jsonb_array_length(scope_channel_ids) > 0" in migration

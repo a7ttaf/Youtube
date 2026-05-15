@@ -26,8 +26,8 @@ from ums_smart_revenue.finance.month_close_readiness import (
 
 router = APIRouter(prefix="/finance-close", tags=["finance-close"])
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
-_REVENUE_READ_SCOPE_TYPES = frozenset(
-    {"global", "sector", "company", "channel", "finance-month"}
+_BROADER_REVENUE_READ_SCOPE_TYPES = frozenset(
+    {"global", "sector", "company", "channel"}
 )
 
 
@@ -81,7 +81,7 @@ def get_finance_month_close(
 ) -> dict[str, object]:
     _validate_month(month)
     scope = AccessScope.finance_month(month)
-    _require_finance_close_read_permission(user)
+    _require_finance_close_read_permission(user, month)
     close = repository.get(month)
     if close is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finance month close record not found")
@@ -235,25 +235,33 @@ def _require_permission(user: UserPrincipal, permission: Permission, scope: Acce
         )
 
 
-def _require_finance_close_read_permission(user: UserPrincipal) -> None:
+def _require_finance_close_read_permission(user: UserPrincipal, month: str) -> None:
     if user.disabled:
         _raise_missing_permission(Permission.VIEW_REVENUE)
     for grant in user.direct_permissions:
-        if (
-            grant.active
-            and grant.permission == Permission.VIEW_REVENUE
-            and grant.scope.type.value in _REVENUE_READ_SCOPE_TYPES
-        ):
+        if not (grant.active and grant.permission == Permission.VIEW_REVENUE):
+            continue
+        if _scope_authorizes_month_close_read(grant.scope, month):
             return
     for assignment in user.role_assignments:
-        if (
-            assignment.active
-            and Permission.VIEW_REVENUE
-            in ROLE_PERMISSIONS.get(assignment.role, frozenset())
-            and assignment.scope.type.value in _REVENUE_READ_SCOPE_TYPES
+        if not assignment.active:
+            continue
+        if Permission.VIEW_REVENUE not in ROLE_PERMISSIONS.get(
+            assignment.role, frozenset()
         ):
+            continue
+        if _scope_authorizes_month_close_read(assignment.scope, month):
             return
     _raise_missing_permission(Permission.VIEW_REVENUE)
+
+
+def _scope_authorizes_month_close_read(scope: AccessScope, month: str) -> bool:
+    # finance-month grants only authorize the exact month they were granted for;
+    # broader scopes (global/sector/company/channel) authorize any month read.
+    scope_type = scope.type.value
+    if scope_type == "finance-month":
+        return scope.id == month
+    return scope_type in _BROADER_REVENUE_READ_SCOPE_TYPES
 
 
 def _raise_missing_permission(permission: Permission) -> None:
