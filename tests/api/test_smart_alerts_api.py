@@ -2,10 +2,12 @@ from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.revenue import _previous_month
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.finance_models import (
     AdSensePaymentORM,
@@ -15,6 +17,7 @@ from ums_smart_revenue.db.finance_models import (
 )
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.finance.revenue_facts import RevenueFactValidationError
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-00000000b101")
 COMPANY_ID = UUID("00000000-0000-0000-0000-00000000b201")
@@ -158,6 +161,85 @@ def test_finance_viewer_reads_month_smart_alerts_with_sensitive_audits(tmp_path)
         "REVENUE_VIEWED",
     ]
     assert all(log.sensitive is True for log in audit_logs)
+
+
+def test_month_smart_alerts_reject_non_padded_month(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-3/smart-alerts",
+        headers=auth_headers("finance_viewer", "global"),
+    )
+
+    assert response.status_code == 422
+    assert (
+        response.json()["detail"]
+        == "month must use YYYY-MM with a calendar month from 01 to 12"
+    )
+
+
+def test_previous_month_rejects_non_padded_month():
+    with pytest.raises(
+        RevenueFactValidationError,
+        match="month must use YYYY-MM with a calendar month from 01 to 12",
+    ):
+        _previous_month("2026-3")
+
+
+def test_month_smart_alerts_include_month_over_month_revenue_anomaly(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        current_fact = session.scalars(
+            select(MonthlyChannelRevenueFactORM).where(
+                MonthlyChannelRevenueFactORM.month == "2026-03"
+            )
+        ).one()
+        current_fact.gross_revenue_usd = Decimal("900.00")
+        session.add(
+            MonthlyChannelRevenueFactORM(
+                id=uuid4(),
+                month="2026-02",
+                youtube_channel_id="channel-tv-a",
+                source_kind="YOUTUBE_CMS",
+                source_report_id="cms-report-2026-02",
+                gross_revenue_usd=Decimal("2000.00"),
+                net_revenue_usd=Decimal("1800.00"),
+                views=300000,
+                watch_time_minutes=Decimal("9200.50"),
+                confidence_score=Decimal("0.9825"),
+                imported_by=USER_ID,
+            )
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/smart-alerts",
+        headers=auth_headers("finance_viewer", "global"),
+    )
+
+    assert response.status_code == 200
+    anomaly = next(
+        (
+            alert
+            for alert in response.json()["alerts"]
+            if alert["code"] == "REVENUE_TREND_ANOMALY"
+        ),
+        None,
+    )
+    assert anomaly is not None
+    assert anomaly["details"]["channels"] == [
+        {
+            "youtube_channel_id": "channel-tv-a",
+            "current_gross_revenue_usd": "900",
+            "previous_gross_revenue_usd": "2000",
+            "change_percent": "-55",
+        }
+    ]
 
 
 def test_assistant_cannot_read_month_smart_alerts(tmp_path):

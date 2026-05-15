@@ -3,7 +3,7 @@
 ## Security Position
 UMS Smart Revenue Control Center is a corporate finance and revenue operations platform. Authorization must protect money values, finalized payments, bank reconciliation data, export files, raw API/report files, connector controls, channel ownership mappings, and month-close state.
 
-The source of truth for permissions is the application database. SQL/PostgreSQL or warehouse tables remain the financial source of truth. Neo4j is a read-only graph projection and never grants access by itself.
+The source of truth for permissions is the application database. SQL/PostgreSQL or warehouse tables remain the financial source of truth. The active architecture does not include Neo4j or graph-specific permissions.
 
 Runtime authorization should use database-backed principals in production. In that mode the trusted gateway supplies only the authenticated user identity, and the application loads active role assignments, direct permission grants, and scopes from SQL. Header-provided role or scope claims are bootstrap/test conveniences only and must not be treated as the corporate source of truth.
 
@@ -12,26 +12,25 @@ Permissions can be granted at these scope levels:
 
 | Scope | Purpose |
 |---|---|
-| `global` | Entire UMS platform and every company, sector, channel, month, export, connector, and graph view. |
+| `global` | Entire UMS platform and every company, sector, channel, month, export, and connector. |
 | `sector` | A specific sector such as TV or News, including companies and channels assigned to that sector. |
 | `company` | A specific company and its mapped channels. |
 | `channel` | A specific YouTube channel. |
 | `finance-month` | A specific finance month such as `2026-03`; used for close, lock, unlock, override, and allocation decisions. |
 | `export` | A specific export job or export template domain. |
 | `connector` | A specific connector family such as YouTube Reporting, YouTube Analytics, YouTube Data, or AdSense. |
-| `graph-read` | A graph view type, still filtered through `global`, `sector`, `company`, or `channel` data permissions. |
 
 Scope inheritance is explicit:
 - `global` includes every scope.
 - `sector` includes companies and channels mapped to that sector.
 - `company` includes channels mapped to that company.
 - `channel` includes only the named channel.
-- `finance-month`, `export`, `connector`, and `graph-read` scopes do not imply organization visibility by themselves.
+- `finance-month`, `export`, and `connector` scopes do not imply organization visibility by themselves.
 
 ## Roles
 
 ### Super Owner
-Global break-glass owner. Can see all analytics, finance, raw files, graph views, users, exports, connectors, month locks, allocation rules, and audit logs. This role should be assigned to very few users and reviewed regularly.
+Global break-glass owner. Can see all analytics, finance, raw files, users, exports, connectors, month locks, allocation rules, and audit logs. This role should be assigned to very few users and reviewed regularly.
 
 ### Corporate Admin
 Global platform administrator for organization structure, users, channel registry, groups, export templates, and non-financial analytics. This role does not automatically include sensitive finance visibility unless paired with a finance role.
@@ -49,19 +48,19 @@ Second-control finance role for approving manual overrides, allocation rule chan
 Read-only finance role. Can view revenue, finalized payments, bank/payment reconciliation, and finance exports within granted scope. Cannot lock months, create overrides, change allocation rules, or manage connectors.
 
 ### TV Sector Manager
-Sector-scoped management role for TV. Can view TV analytics and scoped graph views. Finance visibility is optional and must be explicitly granted.
+Sector-scoped management role for TV. Can view TV analytics. Finance visibility is optional and must be explicitly granted.
 
 ### News Sector Manager
-Sector-scoped management role for News. Can view News analytics and scoped graph views. Finance visibility is optional and must be explicitly granted.
+Sector-scoped management role for News. Can view News analytics. Finance visibility is optional and must be explicitly granted.
 
 ### Company Manager
-Company-scoped role. Can view analytics and scoped graph views for assigned companies only. Finance visibility is optional and must be explicitly granted by Finance Admin or Super Owner.
+Company-scoped role. Can view analytics for assigned companies only. Finance visibility is optional and must be explicitly granted by Finance Admin or Super Owner.
 
 ### Channel Manager
 Channel-scoped role. Can view performance analytics and channel metadata for assigned channels only. Finance visibility is not included by default.
 
 ### Assistant Analyst
-Assigned-scope analyst role. Can view performance analytics, confidence labels, non-financial issue flags, and graph views for assigned scopes. Cannot view sensitive finance data, raw report files, finalized payments, bank reconciliation, or revenue exports unless explicitly granted.
+Assigned-scope analyst role. Can view performance analytics, confidence labels, and non-financial issue flags for assigned scopes. Cannot view sensitive finance data, raw report files, finalized payments, bank reconciliation, or revenue exports unless explicitly granted.
 
 ### Export Operator
 Scoped export execution role. Can create approved analytics exports and, when granted finance scope, finance exports. Cannot change allocation rules, create manual overrides, lock months, manage users, or administer connectors.
@@ -89,7 +88,6 @@ Scoped registry maintenance role. Can change channel/company/sector mappings and
 | Export | export analytics, export revenue, manage templates, view export history. |
 | Connectors | run connector jobs, manage OAuth/API settings, view connector health. |
 | Raw data | view raw API payloads, raw report files, parser errors. |
-| Graph | view hierarchy, revenue flow, issue graph, outside-CMS graph. |
 | Administration | assign roles, manage users, view audit logs, manage platform config. |
 
 ## Sensitive Actions
@@ -111,14 +109,13 @@ Sensitive actions include:
 - managing OAuth/API connector settings;
 - running connector jobs;
 - viewing raw API or report files;
-- reading Neo4j revenue-flow graphs that contain money values.
 
 ## Guard Rules
 - UI must never rely on hidden columns alone. Backend permissions decide every sensitive response.
 - Production authorization must use SQL-backed principals (`UMS_AUTHZ_SOURCE=database`) so persisted role assignments and direct permission grants are enforced at runtime.
 - Unknown or disabled database users must fail closed before route handlers run.
 - Money APIs require `VIEW_REVENUE` for the requested organization scope.
-- Payment APIs require `VIEW_FINALIZED_PAYMENTS`.
+- Payment APIs require `VIEW_FINALIZED_PAYMENTS` globally for all-month reads or on the requested `finance-month` for month-specific reads.
 - Bank reconciliation read APIs require `VIEW_BANK_RECONCILIATION` plus finalized-payment visibility for the requested finance-month scope when payment rows are part of the response.
 - Bank reconciliation write APIs require `MANAGE_BANK_RECONCILIATION` for the requested finance-month scope, a non-empty reason, an unlocked month, and audit logging.
 - Smart alert APIs that combine revenue, confidence, payment, and bank state require all underlying permissions and audit each sensitive data family viewed.
@@ -133,11 +130,9 @@ Sensitive actions include:
 - Service account lifecycle changes require Super Owner authority.
 - Role assignment APIs require `roles.assign`; Super Owner assignment requires an existing Super Owner, and finance role assignment requires Finance Admin or Super Owner authority.
 - Direct permission grant APIs require `roles.assign`, enforce the target permission family, and audit every grant or revocation as `USER_PERMISSION_CHANGED`.
-- Finance direct grants such as `finance.view_revenue`, `exports.revenue`, and `graph.view_finance` require Finance Admin or Super Owner.
+- Finance direct grants such as `finance.view_revenue` and `exports.revenue` require Finance Admin or Super Owner.
 - Connector and raw-file direct grants require Connector Admin or Super Owner.
 - Administrative direct grants such as `roles.assign`, `users.manage`, `platform.manage_settings`, and `audit.view_sensitive_payloads` require Super Owner.
-- Neo4j graph reads must pass through backend guards and filter nodes by the same organization scopes used for SQL reads.
-- Dashboard users never receive Neo4j write credentials.
 
 ## Channel Registry API Rules
 - Listing channels requires `analytics.view` for each returned channel scope; the backend filters rows rather than returning every channel and trusting the UI.
@@ -160,9 +155,10 @@ Sensitive actions include:
 - Connector job requests require `connectors.run_jobs` for the connector scope.
 - Connector job request endpoints in the foundation record and audit control-plane intent only; actual Google API execution belongs in the worker connector implementation.
 - Connector credential changes require a non-empty reason and produce `CONNECTOR_SETTINGS_CHANGED`; connector job requests produce `CONNECTOR_JOB_RUN`.
+- Exchange-rate sync requires `connectors.run_jobs` for the provider connector scope, a non-empty reason, and an `EXCHANGE_RATE_SYNCED` audit event. API responses must not expose raw provider payloads without raw-file permissions.
 
 ## Finance Close API Rules
-- Viewing finance-close status requires `finance.view_revenue` for the finance-month scope because close status affects finance workflows.
+- Viewing finance-close status requires `finance.view_revenue` on a grantable revenue scope because close status is month-wide control metadata, not scoped revenue data.
 - Locking a month requires `finance.lock_month`, a non-empty reason, and a `MONTH_LOCKED` audit event.
 - Month readiness must block locks while pending overrides, unresolved reconciliation issues, or missing facts for active revenue-required channels exist.
 - Unlocking a month requires `finance.unlock_month`, a non-empty reason, and a `MONTH_UNLOCKED` audit event.

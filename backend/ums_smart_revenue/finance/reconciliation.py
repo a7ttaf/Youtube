@@ -1,9 +1,8 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
-from decimal import Decimal, ROUND_HALF_UP
-from typing import Iterable
+from decimal import ROUND_HALF_UP, Decimal
 
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
-
 
 DEFAULT_VARIANCE_TOLERANCE_PERCENT = Decimal("0.02")
 SOURCE_PRIORITY = {
@@ -108,7 +107,9 @@ def build_revenue_reconciliation_preview(
     issues: list[ReconciliationIssue] = []
     if len(sorted_facts) == 1:
         status = "INSUFFICIENT_SOURCES"
-        confidence_score = (primary.confidence_score * Decimal("0.5")).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+        confidence_score = (primary.confidence_score * Decimal("0.5")).quantize(
+            Decimal("0.0001"), rounding=ROUND_HALF_UP
+        )
         issues.append(
             ReconciliationIssue(
                 issue_type="INSUFFICIENT_SOURCES",
@@ -185,7 +186,13 @@ def _average_confidence(facts: list[RevenueFactEntry]) -> Decimal:
 
 def _safe_percent(numerator: Decimal, denominator: Decimal) -> Decimal:
     if denominator == 0:
-        return Decimal("0.0000")
+        # With a zero baseline the ratio is undefined. If the numerator is also
+        # zero there is genuinely no variance to flag. If it is non-zero we
+        # have positive variance against a zero baseline (a primary source
+        # reporting $0 while another source reports a positive value) — return
+        # 1.0 = 100% so the reconciliation path flags the channel as a high
+        # variance instead of falling through to RECONCILED with 0%.
+        return Decimal("0.0000") if numerator == 0 else Decimal("1.0000")
     return (numerator / denominator).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
 

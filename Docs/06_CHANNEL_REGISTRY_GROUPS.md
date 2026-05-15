@@ -45,6 +45,11 @@ PERFORMANCE_ONLY
 MISSING_REVENUE_SOURCE
 ```
 
+The channel registry API carries `content_owner_id` and
+`revenue_source_status` through both in-memory and SQL-backed registry stores.
+The outside-CMS monitor uses these fields to show revenue-required channels
+that still need an official revenue source without exposing financial amounts.
+
 ## Group types
 
 ```text
@@ -74,6 +79,19 @@ SEASONAL_GROUP
 - Channel has revenue but no group.
 - Channel duplicated under conflicting primary companies.
 - Channel inactive but still appears in monthly report.
+
+Current foundation endpoint:
+
+```text
+GET /channels/issues
+```
+
+The implemented foundation covers registry/group metadata checks available from
+SQL channel and group tables: missing company, missing sector,
+revenue-required outside-CMS channels, and revenue-required channels with no
+active group. Revenue-fact-backed checks such as "has revenue but no group" and
+"inactive but appears in monthly report" must be added when the issue feed is
+joined to monthly revenue facts.
 
 ## Acceptance checks
 

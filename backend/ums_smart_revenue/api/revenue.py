@@ -1,3 +1,4 @@
+import re
 from datetime import date
 from decimal import Decimal
 from typing import Annotated
@@ -57,6 +58,10 @@ from ums_smart_revenue.finance.payment_matching import (
     build_monthly_payment_match_summary,
     normalize_payment_match_currency,
 )
+from ums_smart_revenue.finance.recalculation import (
+    RevenueRecalculationValidationError,
+    build_recalculation_preview,
+)
 from ums_smart_revenue.finance.reconciliation import (
     build_revenue_reconciliation_issue_queue,
     build_revenue_reconciliation_preview,
@@ -76,6 +81,7 @@ from ums_smart_revenue.finance.smart_alerts import (
 from ums_smart_revenue.org.access_index import load_org_access_index_from_session
 
 router = APIRouter(prefix="/revenue", tags=["revenue"])
+MONTH_VALUE_PATTERN = re.compile(r"^\d{4}-\d{2}$")
 _AUDIT_SINK = InMemoryAuditSink()
 _REVENUE_SOURCE_KINDS_BY_CONNECTOR_KEY = {
     "youtube-cms": {RevenueFactSourceKind.YOUTUBE_CMS.value},
@@ -103,6 +109,9 @@ class RevenueFactImportRequest(BaseModel):
     source_report_id: str | None = None
     gross_revenue_usd: Decimal = Field(ge=0)
     net_revenue_usd: Decimal | None = Field(default=None, ge=0)
+    shorts_revenue_usd: Decimal | None = Field(default=None, ge=0)
+    longform_revenue_usd: Decimal | None = Field(default=None, ge=0)
+    subscription_revenue_usd: Decimal | None = Field(default=None, ge=0)
     views: int = Field(default=0, ge=0)
     watch_time_minutes: Decimal = Field(default=Decimal("0"), ge=0)
     confidence_score: Decimal = Field(default=Decimal("1"), ge=0, le=1)
@@ -165,6 +174,38 @@ class BankReconciliationRecordRequest(BaseModel):
     @field_validator("notes", "source_report_id", mode="before")
     @classmethod
     def strip_optional_strings(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, str):
+            stripped = value.strip()
+            return stripped or None
+        return value
+
+
+class RevenueRecalculationRequest(BaseModel):
+    month: str
+    allocation_method: str = Field(min_length=1)
+    scope_type: str = Field(default="global", min_length=1)
+    scope_id: str | None = None
+    currency: str = Field(default="USD", min_length=1)
+    dry_run: bool = True
+    reason: str = Field(min_length=1)
+
+    @field_validator(
+        "month",
+        "allocation_method",
+        "scope_type",
+        "currency",
+        "reason",
+        mode="before",
+    )
+    @classmethod
+    def strip_required_strings(cls, value):
+        return _strip_required_string(value)
+
+    @field_validator("scope_id", mode="before")
+    @classmethod
+    def strip_optional_string(cls, value):
         if value is None:
             return None
         if isinstance(value, str):
@@ -240,6 +281,87 @@ def check_channel_revenue_authorization(
     )
 
 
+@router.post("/recalculate")
+def request_revenue_recalculation(
+    payload: RevenueRecalculationRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    revenue_repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
+    override_repository: Annotated[
+        SqlAlchemyManualOverrideRepository,
+        Depends(current_manual_override_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+) -> dict[str, object]:
+    target_scope, channel_ids = _revenue_read_scope_to_channel_ids(
+        scope_type=payload.scope_type,
+        scope_id=payload.scope_id,
+        org_index=org_index,
+    )
+    month_scope = AccessScope.finance_month(payload.month)
+    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, month_scope)
+    if not payload.dry_run:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="committed recalculation writes are not implemented; use dry_run=true",
+        )
+    try:
+        facts = revenue_repository.list_month_facts(
+            month=payload.month,
+            youtube_channel_ids=channel_ids,
+        )
+        overrides = override_repository.list_month_overrides(
+            month=payload.month,
+            youtube_channel_ids=channel_ids,
+        )
+        preview = build_recalculation_preview(
+            month=payload.month,
+            allocation_method=payload.allocation_method,
+            scope_type=payload.scope_type,
+            scope_id=payload.scope_id,
+            currency=payload.currency,
+            dry_run=payload.dry_run,
+            facts=facts,
+            manual_overrides=overrides,
+        )
+    except (
+        ManualOverrideValidationError,
+        RevenueFactValidationError,
+        RevenueRecalculationValidationError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    summary = preview.source_summary.to_api()
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.RECALCULATION_REQUESTED,
+        entity_type="revenue_recalculation_preview",
+        entity_id=f"{preview.month}:{preview.allocation_method}",
+        scope=month_scope,
+        reason=payload.reason,
+        details={
+            "status": preview.status,
+            "allocation_method": preview.allocation_method,
+            "scope_type": preview.scope_type,
+            "scope_id": preview.scope_id,
+            "revenue_fact_count": summary["revenue_fact_count"],
+            "source_channel_count": summary["source_channel_count"],
+            "write_status": preview.write_status,
+        },
+    )
+    response = preview.to_api()
+    response["audit_event"] = audit_record_to_api(record)
+    return response
+
+
 @router.post("/facts", status_code=status.HTTP_201_CREATED)
 def import_revenue_fact(
     payload: RevenueFactImportRequest,
@@ -258,6 +380,9 @@ def import_revenue_fact(
             source_report_id=payload.source_report_id,
             gross_revenue_usd=payload.gross_revenue_usd,
             net_revenue_usd=payload.net_revenue_usd,
+            shorts_revenue_usd=payload.shorts_revenue_usd,
+            longform_revenue_usd=payload.longform_revenue_usd,
+            subscription_revenue_usd=payload.subscription_revenue_usd,
             views=payload.views,
             watch_time_minutes=payload.watch_time_minutes,
             confidence_score=payload.confidence_score,
@@ -280,6 +405,11 @@ def import_revenue_fact(
             "connector_key": payload.connector_key,
             "source_report_id": payload.source_report_id,
             "gross_revenue_usd": fact.to_api()["gross_revenue_usd"],
+            "shorts_revenue_usd": fact.to_api()["shorts_revenue_usd"],
+            "longform_revenue_usd": fact.to_api()["longform_revenue_usd"],
+            "subscription_revenue_usd": fact.to_api()[
+                "subscription_revenue_usd"
+            ],
         },
     )
     return _with_audit_event(fact, record)
@@ -366,16 +496,42 @@ def list_month_reconciliation_issues(
     limit: int = Query(default=100, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, object]:
-    revenue_channel_ids = _authorized_channel_ids_for_permission(user, Permission.VIEW_REVENUE, org_index)
-    confidence_channel_ids = _authorized_channel_ids_for_permission(user, Permission.VIEW_CONFIDENCE, org_index)
-    if revenue_channel_ids == set():
+    # Reject only when the caller has no relevant grant at all; a caller whose
+    # scoped grant currently maps to zero channels (e.g. sector/company with
+    # no active mapping) should see an empty queue, not 403.
+    if user.disabled or not _granted_scopes_for_permission(user, Permission.VIEW_REVENUE):
         _raise_missing_permission(Permission.VIEW_REVENUE)
-    if confidence_channel_ids == set():
+    if not _granted_scopes_for_permission(user, Permission.VIEW_CONFIDENCE):
         _raise_missing_permission(Permission.VIEW_CONFIDENCE)
 
+    revenue_channel_ids = _authorized_channel_ids_for_permission(user, Permission.VIEW_REVENUE, org_index)
+    confidence_channel_ids = _authorized_channel_ids_for_permission(user, Permission.VIEW_CONFIDENCE, org_index)
     visible_channel_ids = _intersect_channel_sets(revenue_channel_ids, confidence_channel_ids)
-    if visible_channel_ids == set():
-        _raise_missing_permission(Permission.VIEW_REVENUE)
+    if visible_channel_ids is not None and not visible_channel_ids:
+        record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.REVENUE_VIEWED,
+            entity_type="revenue_reconciliation_issue_queue",
+            entity_id=month,
+            scope=AccessScope.finance_month(month),
+            details={
+                "issue_count": 0,
+                "page_channel_count": 0,
+                "page_fact_count": 0,
+                "has_more": False,
+                "scoped_channel_count": 0,
+            },
+        )
+        empty_queue = build_revenue_reconciliation_issue_queue([], month=month)
+        response = empty_queue.to_api()
+        response["pagination"] = {
+            "limit": limit,
+            "offset": offset,
+            "next_offset": None,
+            "has_more": False,
+        }
+        return response
 
     try:
         page_size = limit + 1
@@ -526,6 +682,9 @@ def get_month_smart_alerts(
     _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
     try:
         facts = revenue_repository.list_month_facts(month=month)
+        previous_facts = revenue_repository.list_month_facts(
+            month=_previous_month(month)
+        )
         payments = payment_repository.list_month_payments(month=month)
         bank_entries = bank_repository.list_month_entries(month=month)
         manual_overrides = override_repository.list_month_overrides(month=month)
@@ -558,6 +717,8 @@ def get_month_smart_alerts(
         bank_reconciliation=bank_reconciliation,
         close_status=close.status if close else "OPEN",
         manual_overrides=manual_overrides,
+        current_revenue_facts=facts,
+        previous_revenue_facts=previous_facts,
     )
     summary_api = summary.to_api()
     audit_details = {
@@ -1044,6 +1205,32 @@ def _intersect_channel_sets(left: set[str] | None, right: set[str] | None) -> se
     if right is None:
         return left
     return left & right
+
+
+def _previous_month(month: str) -> str:
+    if not MONTH_VALUE_PATTERN.fullmatch(month):
+        raise RevenueFactValidationError(
+            "month must use YYYY-MM with a calendar month from 01 to 12"
+        )
+    try:
+        year_value, month_value = month.split("-", maxsplit=1)
+        year = int(year_value)
+        month_number = int(month_value)
+    except ValueError as exc:
+        raise RevenueFactValidationError(
+            "month must use YYYY-MM with a calendar month from 01 to 12"
+        ) from exc
+    if year == 0 or month_number < 1 or month_number > 12:
+        raise RevenueFactValidationError(
+            "month must use YYYY-MM with a calendar month from 01 to 12"
+        )
+    if month_number == 1:
+        if year == 1:
+            raise RevenueFactValidationError(
+                "month must use YYYY-MM with a calendar month from 01 to 12"
+            )
+        return f"{year - 1:04d}-12"
+    return f"{year:04d}-{month_number - 1:02d}"
 
 
 def _revenue_read_scope_to_channel_ids(

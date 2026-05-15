@@ -1,7 +1,7 @@
 # Access Control and Security
 
 ## Purpose
-Control who can view analytics, finance, exports, configuration, and graph views.
+Control who can view analytics, finance, exports, configuration, raw files, users, and connector operations.
 
 ## Roles
 
@@ -45,8 +45,6 @@ DATA_STEWARD
 - Every export is logged.
 - Every manual override is logged.
 - Month unlock requires reason.
-- Graph views respect same backend permissions.
-- Neo4j direct access is restricted to admins and read-only graph users.
 
 ## Authorization modes
 
@@ -58,14 +56,6 @@ DATA_STEWARD
 Enable `UMS_AUTHZ_SOURCE=database` after users, roles, permissions, and scopes are configured in SQL, the trusted gateway is sending stable user IDs, and `UMS_TRUSTED_GATEWAY_TOKEN` is provisioned for the API and gateway. Missing trusted-gateway token configuration is a hard pre-deployment failure: protected routes return 503 until the token is configured. Switching from bootstrap/header mode to database mode is a breaking authorization behavior change: previously accepted header role/scope claims no longer grant access, and disabled or unregistered SQL users fail closed before route handlers run.
 
 Database-backed routes validate the trusted-gateway token and normalize `x-user-id` before allocating a SQLAlchemy session, so invalid gateway traffic cannot consume database connections. Database-mode principal reads run inside a loader-owned `SERIALIZABLE` transaction and PostgreSQL deployments set a transaction-local statement timeout before reading user, role, permission, and scope rows. Calls made with a pre-existing active session transaction fail closed so weaker caller isolation cannot bypass the principal-read contract or mix authorization reads with caller-owned writes. Principal loads accept up to 256 active role assignments and 512 active direct permission grants; larger principals fail closed. Retryable SQLAlchemy storage failures such as disconnects, operational errors, and timeouts are rolled back and retried once; non-transient SQLAlchemy failures, corrupt stored authorization data, and unexpected loader errors fail closed with 503 responses.
-
-## Neo4j roles
-
-```text
-neo4j_sync_writer     # only sync job can write graph projection
-neo4j_dashboard_reader # dashboard read-only access
-neo4j_admin           # technical admin only
-```
 
 ## Audit events
 
@@ -85,6 +75,8 @@ MONTH_UNLOCKED
 MANUAL_OVERRIDE_CREATED
 MANUAL_OVERRIDE_APPROVED
 ALLOCATION_RULE_CHANGED
+RECALCULATION_REQUESTED
+EXCHANGE_RATE_SYNCED
 EXPORT_CREATED
 USER_ACCOUNT_CHANGED
 USER_ROLE_CHANGED
@@ -93,7 +85,9 @@ CONNECTOR_JOB_RUN
 CONNECTOR_SETTINGS_CHANGED
 RAW_FILE_VIEWED
 REVENUE_VIEWED
-GRAPH_FINANCE_VIEWED
+PAYMENT_VIEWED
+BANK_RECONCILIATION_RECORDED
+BANK_RECONCILIATION_VIEWED
 AUDIT_LOG_VIEWED
 ```
 

@@ -10,7 +10,6 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "sqlalchemy": "2.0.49",
         "alembic": "1.18.4",
         "asyncpg": "0.31.0",
-        "neo4j_driver": "6.2.0",
         "celery": "5.6.3",
         "redis": "7.4.0",
         "openpyxl": "3.1.5",
@@ -22,7 +21,6 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
     },
     "datastores": {
         "postgresql": "18.3",
-        "neo4j_enterprise": "2026.04.0",
     },
     "frontend": {
         "next": "16.2.6",

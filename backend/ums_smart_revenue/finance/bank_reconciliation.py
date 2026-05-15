@@ -10,6 +10,7 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.finance_models import BankReconciliationEntryORM
 from ums_smart_revenue.finance.adsense_payments import AdSensePaymentEntry
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
@@ -145,7 +146,7 @@ class SqlAlchemyBankReconciliationRepository:
         )
         _validate_nonnegative_money(transfer_fee_usd, "transfer_fee_usd")
         _validate_finite_money(fx_difference_usd, "fx_difference_usd")
-        actor_uuid = _parse_uuid(actor_user_id)
+        actor_uuid = _actor_identity_uuid(actor_user_id)
         self._require_month_open(month)
 
         now = datetime.now(UTC)
@@ -384,6 +385,17 @@ def _validate_nonnegative_money(value: Decimal, field_name: str) -> None:
 def _validate_finite_money(value: Decimal, field_name: str) -> None:
     if not value.is_finite():
         raise BankReconciliationValidationError(f"{field_name} must be finite")
+
+
+def _actor_identity_uuid(value: str) -> UUID:
+    # Accept either a UUID literal or a trusted-gateway subject; the shared
+    # helper derives a deterministic UUID5 for the latter so header-auth
+    # deployments with non-UUID x-user-id values can still record bank
+    # reconciliation entries.
+    try:
+        return actor_identity_uuid(value)
+    except ValueError as exc:
+        raise BankReconciliationValidationError(str(exc)) from exc
 
 
 def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:

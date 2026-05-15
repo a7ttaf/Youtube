@@ -1,78 +1,63 @@
-# Data Stores and Neo4j Read-Model
+# Data Stores and Retired Neo4j Decision
 
-## Decision
-Use Neo4j, but only as a **read-only graph projection**.
+## Active Decision
+Do not use Neo4j or a graph database in the active UMS Smart Revenue Control Center roadmap.
 
-The primary data store remains SQL/warehouse. Neo4j is used for:
+The primary data store remains SQL/PostgreSQL or warehouse tables. Relationship, hierarchy, ownership, issue tracing, explanation, and export views must be served from SQL-backed read models or warehouse projections.
 
-- visualizing UMS hierarchy;
-- tracing channel → company → sector → payment/month;
-- finding missing data relationships;
-- exploring outside-CMS revenue problems;
-- running graph algorithms later if useful.
-
-## Store responsibilities
+## Store Responsibilities
 
 | Store | Responsibility | Writes allowed? |
 |---|---|---:|
-| PostgreSQL | Users, roles, configuration, channel registry, month close | Yes |
-| Warehouse / reporting tables | Raw reports, normalized facts, historical numbers | Yes |
+| PostgreSQL | Users, roles, configuration, channel registry, month close, reconciliation controls | Yes |
+| Warehouse / reporting tables | Raw reports, normalized facts, historical numbers, query read models | Yes |
 | Object storage | Raw CSVs, report files, export files | Yes |
-| Neo4j | Read-only graph copy for visualization and relationship queries | Sync job only |
 
-## Why not Neo4j as main DB?
+## Why Neo4j Is Retired
+The first foundation is a finance/revenue numbers engine. Adding a graph projection creates extra synchronization, security, audit, and review surface before the core SQL-backed reconciliation system is complete.
 
-Financial systems need:
+Financial workflows need:
 
 - deterministic calculations;
 - month locking;
 - audit trails;
-- exports;
+- permission-filtered exports;
 - SQL-style aggregation;
 - raw report storage;
 - reconciliation tables.
 
-A relational/warehouse model is better for this. Neo4j is better for relationships and graph exploration.
+Those requirements are handled directly by SQL/warehouse models in the active roadmap.
 
-## Neo4j sync design
+## Replacement Pattern
 
 ```text
 SQL / warehouse source tables
-    ↓
-Graph projection job
-    ↓
-Upsert nodes and relationships into Neo4j
-    ↓
-Dashboard calls backend /graph/* APIs
-    ↓
-Backend queries Neo4j with a read-only credential
+    ->
+bounded read-model queries
+    ->
+backend permission guards
+    ->
+dashboard hierarchy, issue, explanation, and report views
 ```
 
-## Sync frequency
+No dashboard user or backend API should depend on a graph database for first-beta behavior.
 
-| Data type | Sync style |
-|---|---|
-| Organization/channel registry | On change + nightly |
-| Monthly revenue facts | After revenue normalization |
-| Month-close values | After close/recalculation |
-| Alerts/issues | After data quality checks |
-| Payments | After AdSense sync |
+## Decommissioning Neo4j / graph projection
 
-## Read-only enforcement
+Concrete rollout steps (run in order, one environment at a time):
 
-- Dashboard code must not connect to Neo4j directly; all graph reads go through backend `/graph/*` APIs.
-- Backend graph APIs should use a read-only Neo4j user and enforce permissions, auditing, and scope filtering.
-- Only the sync service should have write privileges.
-- Users should not directly edit graph data.
-- Graph changes must come from source tables.
-
-## Better option to check
-
-Neo4j is the right default for this project. The better setup is not replacing Neo4j; it is combining:
-
-```text
-Neo4j Bloom/Explore = internal graph exploration
-Neo4j Visualization Library = embedded custom graph fed by backend /graph/* APIs
-```
-
-Use Bloom/Explore for analysts and admins. Use custom embedded graph views for management pages.
+1. Disable any `/graph/*` routes at the API gateway or router (return 410 Gone
+   or remove the routes entirely). Confirm dashboard pages no longer link to
+   graph views.
+2. Stop and remove any scheduled `GraphSyncJob` / `SyncService` workers and
+   cron entries that backfilled the graph projection.
+3. Apply Alembic migration `20260513_0002_retire_graph_permissions` so the
+   retired `graph-read` scope and `graph.*` permissions are removed from the
+   SQL source of truth.
+4. Revoke and rotate any Neo4j credentials stored in the secret manager;
+   remove `graph-scope` configuration from all deployment manifests.
+5. Run a smoke test on the SQL/warehouse read models for relationship,
+   hierarchy, ownership, and issue-tracing views before tearing down the
+   Neo4j instances themselves.
+6. Decommission the Neo4j containers / clusters only after the smoke test
+   passes and metrics confirm zero traffic to the retired routes.

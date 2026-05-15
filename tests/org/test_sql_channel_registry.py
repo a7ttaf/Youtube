@@ -9,7 +9,6 @@ from ums_smart_revenue.org.access_index import load_org_access_index_from_sessio
 from ums_smart_revenue.org.channel_registry import ChannelRegistryValidationError
 from ums_smart_revenue.org.sql_channel_registry import SqlAlchemyChannelRegistry
 
-
 SECTOR_TV_ID = UUID("00000000-0000-0000-0000-000000000101")
 COMPANY_TV_ID = UUID("00000000-0000-0000-0000-000000000201")
 COMPANY_NEWS_ID = UUID("00000000-0000-0000-0000-000000000202")
@@ -34,9 +33,23 @@ def build_session() -> Session:
 def seed_org(session: Session) -> None:
     session.add_all(
         [
-            OrgUnitORM(id=SECTOR_TV_ID, parent_id=None, type="SECTOR", name="TV", active=True),
-            OrgUnitORM(id=COMPANY_TV_ID, parent_id=SECTOR_TV_ID, type="COMPANY", name="TV Company", active=True),
-            OrgUnitORM(id=COMPANY_NEWS_ID, parent_id=SECTOR_TV_ID, type="COMPANY", name="News Company", active=True),
+            OrgUnitORM(
+                id=SECTOR_TV_ID, parent_id=None, type="SECTOR", name="TV", active=True
+            ),
+            OrgUnitORM(
+                id=COMPANY_TV_ID,
+                parent_id=SECTOR_TV_ID,
+                type="COMPANY",
+                name="TV Company",
+                active=True,
+            ),
+            OrgUnitORM(
+                id=COMPANY_NEWS_ID,
+                parent_id=SECTOR_TV_ID,
+                type="COMPANY",
+                name="News Company",
+                active=True,
+            ),
             OrgUnitORM(
                 id=COMPANY_INACTIVE_ID,
                 parent_id=SECTOR_TV_ID,
@@ -85,12 +98,45 @@ def test_sql_channel_registry_reads_and_writes_channel_rows():
     )
 
     persisted = session.scalars(
-        select(YouTubeChannelORM).where(YouTubeChannelORM.youtube_channel_id == "channel-tv-b")
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.youtube_channel_id == "channel-tv-b"
+        )
     ).one()
     assert created.youtube_channel_id == "channel-tv-b"
     assert updated.primary_company_id == str(COMPANY_NEWS_ID)
     assert persisted.primary_org_unit_id == COMPANY_NEWS_ID
-    assert [channel.youtube_channel_id for channel in registry.list_channels()] == ["channel-tv-a", "channel-tv-b"]
+    assert [channel.youtube_channel_id for channel in registry.list_channels()] == [
+        "channel-tv-a",
+        "channel-tv-b",
+    ]
+
+
+def test_sql_channel_registry_preserves_outside_cms_revenue_metadata():
+    session = build_session()
+    seed_org(session)
+    session.add(
+        YouTubeChannelORM(
+            id=UUID("00000000-0000-0000-0000-000000000303"),
+            youtube_channel_id="channel-outside-manual",
+            channel_name="Outside Manual",
+            primary_org_unit_id=COMPANY_TV_ID,
+            cms_status="OUTSIDE_CMS",
+            content_owner_id="content-owner-7",
+            revenue_required=True,
+            revenue_source_status="OFFICIAL_MANUAL_IMPORT",
+            active=True,
+        )
+    )
+    session.commit()
+    registry = SqlAlchemyChannelRegistry(session)
+
+    channel = registry.get_channel("channel-outside-manual")
+
+    assert channel is not None
+    assert channel.content_owner_id == "content-owner-7"
+    assert channel.revenue_source_status == "OFFICIAL_MANUAL_IMPORT"
+    assert channel.to_api()["content_owner_id"] == "content-owner-7"
+    assert channel.to_api()["revenue_source_status"] == "OFFICIAL_MANUAL_IMPORT"
 
 
 def test_sql_channel_registry_rejects_malformed_primary_company_id():
@@ -113,7 +159,10 @@ def test_sql_channel_registry_rejects_missing_company_id_on_create():
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
 
-    with pytest.raises(ChannelRegistryValidationError, match="primary_company_id must reference an existing org unit"):
+    with pytest.raises(
+        ChannelRegistryValidationError,
+        match="primary_company_id must reference an existing org unit",
+    ):
         registry.create_channel(
             youtube_channel_id="channel-missing-company",
             channel_name="Missing Company",
@@ -128,14 +177,19 @@ def test_sql_channel_registry_rejects_missing_company_id_on_update_and_rolls_bac
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
 
-    with pytest.raises(ChannelRegistryValidationError, match="primary_company_id must reference an existing org unit"):
+    with pytest.raises(
+        ChannelRegistryValidationError,
+        match="primary_company_id must reference an existing org unit",
+    ):
         registry.update_mapping(
             youtube_channel_id="channel-tv-a",
             primary_company_id=str(COMPANY_MISSING_ID),
         )
 
     persisted = session.scalars(
-        select(YouTubeChannelORM).where(YouTubeChannelORM.youtube_channel_id == "channel-tv-a")
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.youtube_channel_id == "channel-tv-a"
+        )
     ).one()
     assert persisted.primary_org_unit_id == COMPANY_TV_ID
 
@@ -146,7 +200,10 @@ def test_load_org_access_index_from_session_uses_active_sql_rows():
 
     index = load_org_access_index_from_session(session)
 
-    assert index.company_sector == {str(COMPANY_TV_ID): str(SECTOR_TV_ID), str(COMPANY_NEWS_ID): str(SECTOR_TV_ID)}
+    assert index.company_sector == {
+        str(COMPANY_TV_ID): str(SECTOR_TV_ID),
+        str(COMPANY_NEWS_ID): str(SECTOR_TV_ID),
+    }
     assert index.channel_company == {"channel-tv-a": str(COMPANY_TV_ID)}
     assert index.channel_sector == {"channel-tv-a": str(SECTOR_TV_ID)}
     assert str(COMPANY_INACTIVE_ID) not in index.company_sector

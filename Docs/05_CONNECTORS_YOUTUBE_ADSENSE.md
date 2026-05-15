@@ -30,6 +30,12 @@ fact_tax_monthly
 fact_shorts_revenue
 ```
 
+Foundation note: official Shorts, longform, and subscription revenue components
+are currently stored as optional USD component columns on
+`monthly_channel_revenue_facts` when the source report provides them. Null means
+the report did not provide that component; the backend must not infer a missing
+component from gross revenue.
+
 ## YouTube Analytics API connector
 
 ### Responsibilities

@@ -1,22 +1,22 @@
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from enum import Enum
-import re
+from enum import StrEnum
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.finance_models import MonthlyChannelRevenueFactORM
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 
-
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
-class RevenueFactSourceKind(str, Enum):
+class RevenueFactSourceKind(StrEnum):
     YOUTUBE_CMS = "YOUTUBE_CMS"
     YOUTUBE_ANALYTICS = "YOUTUBE_ANALYTICS"
     ADSENSE = "ADSENSE"
@@ -37,6 +37,9 @@ class RevenueFactEntry:
     watch_time_minutes: Decimal
     confidence_score: Decimal
     imported_by: str | None
+    shorts_revenue_usd: Decimal | None = None
+    longform_revenue_usd: Decimal | None = None
+    subscription_revenue_usd: Decimal | None = None
 
     @property
     def audit_entity_id(self) -> str:
@@ -51,6 +54,11 @@ class RevenueFactEntry:
             "source_report_id": self.source_report_id,
             "gross_revenue_usd": _decimal_to_api(self.gross_revenue_usd),
             "net_revenue_usd": _decimal_to_api(self.net_revenue_usd),
+            "shorts_revenue_usd": _decimal_to_api(self.shorts_revenue_usd),
+            "longform_revenue_usd": _decimal_to_api(self.longform_revenue_usd),
+            "subscription_revenue_usd": _decimal_to_api(
+                self.subscription_revenue_usd
+            ),
             "views": self.views,
             "watch_time_minutes": _decimal_to_api(self.watch_time_minutes),
             "confidence_score": _decimal_to_api(self.confidence_score),
@@ -87,6 +95,9 @@ class SqlAlchemyRevenueFactRepository:
         source_report_id: str | None,
         gross_revenue_usd: Decimal,
         net_revenue_usd: Decimal | None,
+        shorts_revenue_usd: Decimal | None = None,
+        longform_revenue_usd: Decimal | None = None,
+        subscription_revenue_usd: Decimal | None = None,
         views: int,
         watch_time_minutes: Decimal,
         confidence_score: Decimal,
@@ -96,6 +107,9 @@ class SqlAlchemyRevenueFactRepository:
         _validate_revenue_amounts(
             gross_revenue_usd=gross_revenue_usd,
             net_revenue_usd=net_revenue_usd,
+            shorts_revenue_usd=shorts_revenue_usd,
+            longform_revenue_usd=longform_revenue_usd,
+            subscription_revenue_usd=subscription_revenue_usd,
         )
         _validate_metrics(
             views=views,
@@ -103,7 +117,7 @@ class SqlAlchemyRevenueFactRepository:
             confidence_score=confidence_score,
         )
         normalized_source_kind = _normalize_source_kind(source_kind)
-        actor_uuid = _parse_uuid(actor_user_id)
+        actor_uuid = _actor_identity_uuid(actor_user_id)
         self._require_active_channel_for_import(youtube_channel_id)
         self._require_month_open(month)
 
@@ -127,6 +141,9 @@ class SqlAlchemyRevenueFactRepository:
         row.source_report_id = source_report_id
         row.gross_revenue_usd = gross_revenue_usd
         row.net_revenue_usd = net_revenue_usd
+        row.shorts_revenue_usd = shorts_revenue_usd
+        row.longform_revenue_usd = longform_revenue_usd
+        row.subscription_revenue_usd = subscription_revenue_usd
         row.views = views
         row.watch_time_minutes = watch_time_minutes
         row.confidence_score = confidence_score
@@ -250,6 +267,9 @@ class SqlAlchemyRevenueFactRepository:
             source_report_id=row.source_report_id,
             gross_revenue_usd=row.gross_revenue_usd,
             net_revenue_usd=row.net_revenue_usd,
+            shorts_revenue_usd=row.shorts_revenue_usd,
+            longform_revenue_usd=row.longform_revenue_usd,
+            subscription_revenue_usd=row.subscription_revenue_usd,
             views=row.views,
             watch_time_minutes=row.watch_time_minutes,
             confidence_score=row.confidence_score,
@@ -269,11 +289,15 @@ def _normalize_source_kind(source_kind: str) -> str:
         raise RevenueFactValidationError(f"Unknown revenue fact source_kind: {source_kind}") from exc
 
 
-def _parse_uuid(value: str) -> UUID:
+def _actor_identity_uuid(value: str) -> UUID:
+    # Accept either a UUID literal or a trusted-gateway subject; the shared
+    # helper derives a deterministic UUID5 for the latter so header-auth
+    # deployments with non-UUID x-user-id values can still write revenue
+    # facts. Blank values still raise (translated to the module's error).
     try:
-        return UUID(value)
+        return actor_identity_uuid(value)
     except ValueError as exc:
-        raise RevenueFactValidationError("actor_user_id must be a valid UUID") from exc
+        raise RevenueFactValidationError(str(exc)) from exc
 
 
 def _validate_metrics(*, views: int, watch_time_minutes: Decimal, confidence_score: Decimal) -> None:
@@ -289,11 +313,32 @@ def _validate_metrics(*, views: int, watch_time_minutes: Decimal, confidence_sco
         raise RevenueFactValidationError("confidence_score must be between 0 and 1")
 
 
-def _validate_revenue_amounts(*, gross_revenue_usd: Decimal, net_revenue_usd: Decimal | None) -> None:
+def _validate_revenue_amounts(
+    *,
+    gross_revenue_usd: Decimal,
+    net_revenue_usd: Decimal | None,
+    shorts_revenue_usd: Decimal | None,
+    longform_revenue_usd: Decimal | None,
+    subscription_revenue_usd: Decimal | None,
+) -> None:
     if not gross_revenue_usd.is_finite() or gross_revenue_usd < 0:
         raise RevenueFactValidationError("gross_revenue_usd must be a finite decimal >= 0")
     if net_revenue_usd is not None and (not net_revenue_usd.is_finite() or net_revenue_usd < 0):
         raise RevenueFactValidationError("net_revenue_usd must be a finite decimal >= 0")
+    format_values = (
+        shorts_revenue_usd,
+        longform_revenue_usd,
+        subscription_revenue_usd,
+    )
+    if any(value is not None and (not value.is_finite() or value < 0) for value in format_values):
+        raise RevenueFactValidationError(
+            "revenue format breakdown values must be finite decimals >= 0"
+        )
+    format_total = sum((value or Decimal("0")) for value in format_values)
+    if format_total > gross_revenue_usd:
+        raise RevenueFactValidationError(
+            "revenue format breakdown total must be <= gross_revenue_usd"
+        )
 
 
 def _decimal_to_api(value: Decimal | None) -> str | None:
