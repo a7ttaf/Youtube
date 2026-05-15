@@ -37,9 +37,8 @@ Database authorization rejects unknown users and disabled users before route cod
 
 ```http
 GET /channels
-GET /channels/{channel_id}
 POST /channels
-PATCH /channels/{channel_id}
+PATCH /channels/{youtube_channel_id}/mapping
 GET /channels/issues
 GET /channels/outside-cms
 ```

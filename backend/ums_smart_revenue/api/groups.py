@@ -42,16 +42,30 @@ class GroupCreateRequest(BaseModel):
     channel_ids: list[str] = Field(default_factory=list)
     reason: str = Field(min_length=1)
 
-    @field_validator("reason", mode="before")
+    @field_validator("name", "group_type", "reason", mode="before")
     @classmethod
-    def strip_reason(cls, value):
+    def strip_required_fields(cls, value):
         return _strip_required_string(value)
+
+    @field_validator("channel_ids", mode="before")
+    @classmethod
+    def strip_channel_ids(cls, value):
+        if isinstance(value, list):
+            return [_strip_required_string(v) if isinstance(v, str) else v for v in value]
+        return value
 
 
 class GroupUpdateRequest(BaseModel):
     name: str | None = Field(default=None, min_length=1)
     active: bool | None = None
     reason: str = Field(min_length=1)
+
+    @field_validator("name", mode="before")
+    @classmethod
+    def strip_name(cls, value):
+        if value is None:
+            return None
+        return _strip_required_string(value)
 
     @field_validator("reason", mode="before")
     @classmethod
@@ -62,6 +76,13 @@ class GroupUpdateRequest(BaseModel):
 class GroupMembersRequest(BaseModel):
     channel_ids: list[str] = Field(min_length=1)
     reason: str = Field(min_length=1)
+
+    @field_validator("channel_ids", mode="before")
+    @classmethod
+    def strip_channel_ids(cls, value):
+        if isinstance(value, list):
+            return [_strip_required_string(v) if isinstance(v, str) else v for v in value]
+        return value
 
     @field_validator("reason", mode="before")
     @classmethod

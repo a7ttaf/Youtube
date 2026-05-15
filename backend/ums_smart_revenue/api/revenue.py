@@ -304,6 +304,11 @@ def request_revenue_recalculation(
     month_scope = AccessScope.finance_month(payload.month)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, month_scope)
+    if not payload.dry_run:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="committed recalculation writes are not implemented; use dry_run=true",
+        )
     try:
         facts = revenue_repository.list_month_facts(
             month=payload.month,
@@ -1189,7 +1194,7 @@ def _previous_month(month: str) -> str:
         raise RevenueFactValidationError(
             "month must use YYYY-MM with a calendar month from 01 to 12"
         ) from exc
-    if month_number < 1 or month_number > 12:
+    if year == 0 or month_number < 1 or month_number > 12:
         raise RevenueFactValidationError(
             "month must use YYYY-MM with a calendar month from 01 to 12"
         )

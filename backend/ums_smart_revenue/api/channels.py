@@ -8,7 +8,7 @@ from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_principal_from_headers,
 )
-from ums_smart_revenue.api.registry_dependencies import current_group_registry
+from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
 from ums_smart_revenue.api.revenue import current_org_access_index
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import (
@@ -164,7 +164,7 @@ def list_channel_issues(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     registry: Annotated[ChannelRegistryStore, Depends(current_channel_registry)],
     group_registry: Annotated[
-        ChannelGroupRegistryStore, Depends(current_group_registry)
+        ChannelGroupRegistryStore, Depends(sql_group_registry_from_session)
     ],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> dict[str, object]:

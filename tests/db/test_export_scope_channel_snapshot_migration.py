@@ -15,3 +15,6 @@ def test_export_scope_channel_snapshot_migration_adds_dialect_neutral_json_colum
     assert '"scope_channel_ids"' in migration
     assert 'sa.JSON().with_variant(postgresql.JSONB(), "postgresql")' in migration
     assert "nullable=True" in migration
+    assert "ck_export_jobs_scope_channel_ids_is_array" in migration
+    assert "ix_export_jobs_scope_channel_ids" in migration
+    assert "jsonb_typeof" in migration

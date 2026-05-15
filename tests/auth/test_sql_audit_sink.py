@@ -77,6 +77,7 @@ def test_sql_audit_sink_tolerates_malformed_actor_id_with_details():
     audit_log = session.scalars(select(AuditLogORM)).one()
     assert audit_log.user_id is None
     assert audit_log.details["actor_user_id"] == "not-a-uuid"
+    assert audit_log.reason == "Persist audit for malformed actor"
 
 
 def test_sql_audit_sink_tolerates_unknown_valid_actor_id():

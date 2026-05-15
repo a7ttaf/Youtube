@@ -1,7 +1,7 @@
 from fastapi.testclient import TestClient
 
 from ums_smart_revenue.api.channels import current_channel_registry
-from ums_smart_revenue.api.registry_dependencies import current_group_registry
+from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
 from ums_smart_revenue.api.revenue import current_org_access_index
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.org.bootstrap_registry import (
@@ -241,7 +241,7 @@ def test_company_manager_reads_scoped_channel_issues_without_cross_company_leak(
             ),
         ]
     )
-    app.dependency_overrides[current_group_registry] = lambda: ChannelGroupRegistry()
+    app.dependency_overrides[sql_group_registry_from_session] = lambda: ChannelGroupRegistry()
     client = TestClient(app)
 
     response = client.get(
@@ -301,7 +301,7 @@ def test_global_channel_issues_include_registry_health_summary():
             ),
         ]
     )
-    app.dependency_overrides[current_group_registry] = lambda: ChannelGroupRegistry(
+    app.dependency_overrides[sql_group_registry_from_session] = lambda: ChannelGroupRegistry(
         [
             ChannelGroupEntry(
                 id="group-news",

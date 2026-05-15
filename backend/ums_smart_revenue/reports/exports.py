@@ -218,17 +218,18 @@ class SqlAlchemyExportJobRepository:
             raise ExportJobTerminalStateError(
                 f"Export job {export_id} is already in terminal status {row.status}"
             )
+        normalized_file_url = _normalize_artifact_uri(file_url)
+        normalized_filename = _normalize_required_string(filename, "artifact_filename")
+        normalized_content_type = _normalize_required_string(content_type, "artifact_content_type")
+        normalized_byte_size = _normalize_artifact_byte_size(byte_size)
+        normalized_checksum = _normalize_sha256(checksum_sha256)
         now = datetime.now(UTC)
         row.status = "COMPLETED"
-        row.file_url = _normalize_artifact_uri(file_url)
-        row.artifact_filename = _normalize_required_string(
-            filename, "artifact_filename"
-        )
-        row.artifact_content_type = _normalize_required_string(
-            content_type, "artifact_content_type"
-        )
-        row.artifact_byte_size = _normalize_artifact_byte_size(byte_size)
-        row.artifact_checksum_sha256 = _normalize_sha256(checksum_sha256)
+        row.file_url = normalized_file_url
+        row.artifact_filename = normalized_filename
+        row.artifact_content_type = normalized_content_type
+        row.artifact_byte_size = normalized_byte_size
+        row.artifact_checksum_sha256 = normalized_checksum
         row.failure_reason = None
         row.completed_at = now
         row.updated_at = now

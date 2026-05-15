@@ -22,3 +22,5 @@ def test_export_artifact_migration_adds_generated_artifact_metadata():
     assert '"failure_reason"' in migration
     assert "ck_export_jobs_artifact_byte_size" in migration
     assert "ck_export_jobs_artifact_checksum_sha256" in migration
+    assert "ck_export_jobs_artifact_content_type" in migration
+    assert "ck_export_jobs_artifact_all_or_none" in migration

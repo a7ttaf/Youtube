@@ -22,9 +22,27 @@ def upgrade() -> None:
             "scope_channel_ids",
             sa.JSON().with_variant(postgresql.JSONB(), "postgresql"),
             nullable=True,
+            comment="NULL = unresolved or global scope; [] = empty channel set; otherwise array of channel ID strings",
         ),
+    )
+    op.create_check_constraint(
+        "ck_export_jobs_scope_channel_ids_is_array",
+        "export_jobs",
+        "scope_channel_ids IS NULL OR jsonb_typeof(scope_channel_ids) = 'array'",
+    )
+    op.create_index(
+        "ix_export_jobs_scope_channel_ids",
+        "export_jobs",
+        ["scope_channel_ids"],
+        postgresql_using="gin",
     )
 
 
 def downgrade() -> None:
+    op.drop_index("ix_export_jobs_scope_channel_ids", table_name="export_jobs")
+    op.drop_constraint(
+        "ck_export_jobs_scope_channel_ids_is_array",
+        "export_jobs",
+        type_="check",
+    )
     op.drop_column("export_jobs", "scope_channel_ids")

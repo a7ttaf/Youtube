@@ -188,6 +188,16 @@ def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:
     )
 
 
+_ACTOR_FK_CONSTRAINTS = frozenset({
+    "fk_api_connector_credentials_created_by",
+    "fk_api_connector_credentials_updated_by",
+})
+
+
 def _is_foreign_key_integrity_error(exc: IntegrityError) -> bool:
+    diag = getattr(getattr(exc, "orig", None), "diag", None)
+    constraint_name = getattr(diag, "constraint_name", None)
+    if constraint_name in _ACTOR_FK_CONSTRAINTS:
+        return True
     error_text = f"{exc.orig!s} {exc!s}".lower()
-    return "foreign key" in error_text
+    return any(name in error_text for name in _ACTOR_FK_CONSTRAINTS)

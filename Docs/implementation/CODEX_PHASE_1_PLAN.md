@@ -7,7 +7,7 @@ The current repository started as the UMS Smart Revenue Control Center specifica
 - PostgreSQL or warehouse tables remain the financial source of truth.
 - No Neo4j, graph database, graph-read scope, or graph-specific permission is part of the active foundation.
 - This task creates a backend authorization foundation, not a complete app server.
-- Frontend does not exist yet, so UI-facing permission metadata will be exported from backend constants.
+- A frontend preview exists under `frontend/` (static scaffold); it is not a production app server. UI-facing permission metadata is exported from backend constants.
 - Alembic migration scaffolding is now present for the backend foundation; standalone SQL files remain as readable starter artifacts.
 - Existing spec files are under `Docs/` in this workspace, even though the requested logical paths use `/docs/`.
 
