@@ -1403,17 +1403,27 @@ def _channel_ids_for_export_scope(
             f"scope_id is required for export scope_type: {scope_type}"
         )
     if scope_type == "sector":
-        return {
+        # Treat an unknown sector_id the same as "Sector not found" rather
+        # than returning an empty set, which would otherwise surface as
+        # 422 "scoped exports require at least one channel" and leak whether
+        # the sector currently has any channels.
+        channel_ids = {
             channel_id
             for channel_id, sector_id in org_index.channel_sector.items()
             if sector_id == scope_id
         }
+        if not channel_ids:
+            raise KeyError(f"Sector not found: {scope_id}")
+        return channel_ids
     if scope_type == "company":
-        return {
+        channel_ids = {
             channel_id
             for channel_id, company_id in org_index.channel_company.items()
             if company_id == scope_id
         }
+        if not channel_ids:
+            raise KeyError(f"Company not found: {scope_id}")
+        return channel_ids
     if scope_type == "channel":
         _require_known_channel_scope(scope_id, org_index)
         return {scope_id}

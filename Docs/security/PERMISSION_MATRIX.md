@@ -75,7 +75,7 @@
 | Revenue Operations Admin | Yes | No | No | No | No | No | No | Yes | Analytics | Run jobs | Optional | Operational | No |
 | Finance Admin | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Read | Finance | Health | Optional | Finance | Finance roles |
 | Finance Approver | Yes | Yes | Yes | Yes | Approve | Unlock | Approve/change | Read | Finance | No | No | Finance | No |
-| Finance Viewer | Yes | Read | Read | Read | No | No | No | Read | View/export if granted | No | No | No | No |
+| Finance Viewer | Yes | Read | Read (global or finance-month grant) | Read (global or finance-month grant) | No | No | No | Read | View/export if granted | No | No | No | No |
 | TV Sector Manager | Sector | Optional | Optional | Optional | No | No | No | Read | Analytics | No | No | No | No |
 | News Sector Manager | Sector | Optional | Optional | Optional | No | No | No | Read | Analytics | No | No | No | No |
 | Company Manager | Company | Optional | Optional | Optional | No | No | No | Read | Analytics | No | No | No | No |

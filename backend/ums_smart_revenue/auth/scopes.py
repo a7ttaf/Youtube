@@ -63,6 +63,12 @@ class OrgAccessIndex:
             if granted_scope.id is None or target_scope.id is None:
                 return granted_scope.id is None and target_scope.id is None
             return granted_scope.id == target_scope.id
+        # Cross-type containment requires a real grant id; a malformed
+        # SECTOR/COMPANY/CHANNEL grant with id=None would otherwise compare
+        # equal to a missing mapping lookup (also None) and falsely
+        # authorize unrelated targets.
+        if granted_scope.id is None:
+            return False
         if (
             granted_scope.type == ScopeType.SECTOR
             and target_scope.type == ScopeType.COMPANY
