@@ -68,7 +68,7 @@ A PR is mergeable when **all** of the following are true:
 | Topic | Rule |
 |---|---|
 | Lint | `ruff` (config in `pyproject.toml`); no warnings ignored without inline justification. |
-| Types | `mypy --strict` on `backend/ums_smart_revenue/finance/`, `auth/`, `tenancy/`, `db/`. |
+| Types | `mypy --strict` on `backend/ums_smart_revenue/finance/`, `auth/`, `db/`. |
 | SQL | Prefer Postgres-compatible SQL; add a declared SQL linter before making it a required gate. |
 | Logging | `structlog` with bound context (`request_id`, `tenant_id`, `user_id`); never `print`. |
 | Errors | Raise domain-specific exceptions; never swallow without log + reraise. |
@@ -90,7 +90,7 @@ A PR is mergeable when **all** of the following are true:
 - **Never** edit an already-merged Alembic migration. Add a follow-up.
 - **Never** introduce a flag/feature/code path you don't intend to ship — no dead code, no half-stubs, no `pass # TODO`.
 - **Never** widen a permission decorator without a paired test that proves the negative.
-- **Never** commit a file containing a real token, key, or password. Run an available secret scanner before pushing until repository-managed hooks are added.
+- **Never** commit a file containing a real token, key, or password. Run `gitleaks detect --source . --redact` before pushing until repository-managed hooks are added; use Trivy for image scanning and Dependabot + `pip-audit` for dependency auditing when those gates are available.
 
 If a secret scanner flags something committed earlier in the branch, the answer is rotate the secret in upstream systems first, then rewrite history. Open a security incident, do not just `git push --force`.
 

@@ -12,7 +12,7 @@ This service ingests YouTube + AdSense data, reconciles it against bank movement
 |---|---|
 | Backend | Python 3.14 · FastAPI · SQLAlchemy 2 · Alembic |
 | Frontend | Next.js 16 · React 19 · TypeScript 6 *(in progress — Phase 5)* |
-| Storage | PostgreSQL 18 (single source of truth) · Redis 7 (cache + pub/sub) · MinIO (S3-compatible object store, future) |
+| Storage | PostgreSQL 18 (single source of truth) · Redis 8.6 (cache + pub/sub) · MinIO (S3-compatible object store, future) |
 | Background jobs | Celery 5.6 *(workers wired in Phase 2)* |
 | Multi-tenant | Postgres Row-Level Security with `tenant_id` column on every tenant-scoped table |
 | Multi-currency | AED · USD · EUR · GBP · SAR · EGP — extensible. All math in `Decimal`. |
@@ -25,7 +25,7 @@ For the long-form vision, read [PRODUCT.md](PRODUCT.md) and [DESIGN.md](DESIGN.m
 
 ## Quickstart
 
-> Requires Python 3.14, PostgreSQL 18, Redis 7, and [uv](https://docs.astral.sh/uv/) installed locally. Start PostgreSQL and Redis with your local service manager before launching the API.
+> Requires Python 3.14, PostgreSQL 18, Redis 8, and [uv](https://docs.astral.sh/uv/) installed locally. Start PostgreSQL and Redis with your local service manager before launching the API.
 
 ```powershell
 # 1) Install Python deps with uv
@@ -125,7 +125,7 @@ For the full role/permission matrix, see [Docs/security/PERMISSION_MATRIX.md](Do
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: branch from `main`, pass `uv run pytest`, `uv run ruff check`, `uv run mypy backend`, get a CodeRabbit pass, and request review from a `CODEOWNERS` reviewer for the touched area.
+See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: branch from `main`, pass `uv run pytest`, `uv run ruff check`, `uv run mypy backend`, run `gitleaks detect --source . --redact` before pushing, run `bandit -r backend/ums_smart_revenue` and `sqlfluff lint` when those local tools are installed or declared by the touched area, get a CodeRabbit pass, and request review from a `CODEOWNERS` reviewer.
 
 ## Security
 

@@ -62,8 +62,8 @@ Good-faith research conducted under this policy will not be subject to legal act
 
 ## Hardening posture
 
-- Role-based access control with 14 roles + 34 permissions; scope containment (channel / company / sector / finance-month / connector / global).
-- 24 audited event types; sensitive payload masking unless `audit.view_sensitive_payloads` is granted.
+- Role-based access control with 16 roles + 26 permissions; scope containment (channel / company / sector / finance-month / connector / global).
+- 30 audited event types; sensitive payload masking unless `audit.view_sensitive_payloads` is granted.
 - Postgres SERIALIZABLE isolation for principal reads; retryable failure handling; 256-role / 512-grant caps.
 - Locked-month immutability; manual overrides require a different-person approver.
 - Secrets via HashiCorp Vault / External Secrets Operator (no secrets in repo).
