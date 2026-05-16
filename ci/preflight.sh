@@ -332,6 +332,32 @@ _check_should_skip() {
   return 1
 }
 
+_compute_cache_key() {
+  local label="$1"
+  local tool_ver="unknown"
+  case "$label" in
+    node) tool_ver="$(ci::cache::tool_version node)" ;;
+    python) tool_ver="$(ci::cache::tool_version python3)" ;;
+    *) tool_ver="bash-$(bash --version | head -1)" ;;
+  esac
+
+  local files_hash=""
+  if [ -n "${_CI_CHANGESET_FILES_RAW:-}" ]; then
+    files_hash="$(_changeset_content_hash "$_CI_CHANGESET_FILES_RAW")"
+  else
+    files_hash="$(git rev-parse HEAD 2>/dev/null || echo 'none')"
+  fi
+
+  local config_hash=""
+  if [ -f "ci/config/checks.yml" ]; then
+    config_hash="$(ci::cache::_sha256_file ci/config/checks.yml)"
+  else
+    config_hash="none"
+  fi
+
+  ci::cache::key "$label" "$tool_ver" "$files_hash" "$config_hash"
+}
+
 # run_phase "label1:script1" "label2:script2" ...
 # Runs checks in parallel (using runner if available), waits, collects results.
 run_phase() {
@@ -367,25 +393,7 @@ run_phase() {
     # Try cache lookup before submitting
     local cache_key="" cache_hit=0
     if [ "${CI_GATE_CACHE_ENABLED:-1}" = "1" ] && type ci::cache::key >/dev/null 2>&1; then
-      local tool_ver="unknown"
-      case "$label" in
-        node) tool_ver="$(ci::cache::tool_version node)" ;;
-        python) tool_ver="$(ci::cache::tool_version python3)" ;;
-        *) tool_ver="bash-$(bash --version | head -1)" ;;
-      esac
-      local files_hash=""
-      if [ -n "${_CI_CHANGESET_FILES_RAW:-}" ]; then
-        files_hash="$(_changeset_content_hash "$_CI_CHANGESET_FILES_RAW")"
-      else
-        files_hash="$(git rev-parse HEAD 2>/dev/null || echo 'none')"
-      fi
-      local config_hash=""
-      if [ -f "ci/config/checks.yml" ]; then
-        config_hash="$(ci::cache::_sha256_file ci/config/checks.yml)"
-      else
-        config_hash="none"
-      fi
-      cache_key="$(ci::cache::key "$label" "$tool_ver" "$files_hash" "$config_hash")"
+      cache_key="$(_compute_cache_key "$label")"
       local cache_dest="${CI_REPORT_DIR}/.cache/${label}"
       if ci::cache::get "$cache_key" "$cache_dest"; then
         echo "  [cache hit] $label"
@@ -450,27 +458,8 @@ run_phase() {
       mkdir -p "$cache_dest"
       printf '%d' "$rc" > "$cache_dest/result.txt"
       printf '%s' "$output" > "$cache_dest/output.txt"
-      # Cache key was computed earlier; recompute for simplicity
-      local tool_ver="unknown"
-      case "$lbl" in
-        node) tool_ver="$(ci::cache::tool_version node)" ;;
-        python) tool_ver="$(ci::cache::tool_version python3)" ;;
-        *) tool_ver="bash-$(bash --version | head -1)" ;;
-      esac
-      local files_hash=""
-      if [ -n "${_CI_CHANGESET_FILES_RAW:-}" ]; then
-        files_hash="$(_changeset_content_hash "$_CI_CHANGESET_FILES_RAW")"
-      else
-        files_hash="$(git rev-parse HEAD 2>/dev/null || echo 'none')"
-      fi
-      local config_hash=""
-      if [ -f "ci/config/checks.yml" ]; then
-        config_hash="$(ci::cache::_sha256_file ci/config/checks.yml)"
-      else
-        config_hash="none"
-      fi
       local put_key
-      put_key="$(ci::cache::key "$lbl" "$tool_ver" "$files_hash" "$config_hash")"
+      put_key="$(_compute_cache_key "$lbl")"
       ci::cache::put "$put_key" "$cache_dest"
     fi
   done
