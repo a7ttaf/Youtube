@@ -28,7 +28,12 @@ target_metadata = [
 
 
 def get_database_url() -> str:
-    return os.environ.get("UMS_DATABASE_URL") or config.get_main_option("sqlalchemy.url")
+    url = os.environ.get("UMS_DATABASE_URL") or config.get_main_option("sqlalchemy.url")
+    if not url:
+        raise RuntimeError(
+            "Database URL not configured. Set UMS_DATABASE_URL or sqlalchemy.url in alembic.ini."
+        )
+    return url
 
 
 def is_async_database_url(url: str) -> bool:

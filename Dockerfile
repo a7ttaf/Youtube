@@ -15,14 +15,16 @@
 #     ums-smart-revenue:dev
 
 ARG PYTHON_VERSION=3.14
+ARG PYTHON_BASE_DIGEST=sha256:7a500125bc50693f2214e842a621440a1b1b9cbb2188f74ab045d29ed2ea5856
 ARG UV_VERSION=0.11.8
+ARG UV_IMAGE_DIGEST=sha256:3b7b60a81d3c57ef471703e5c83fd4aaa33abcd403596fb22ab07db85ae91347
 
 ############################
 # Stage 1 — builder
 ############################
-FROM ghcr.io/astral-sh/uv:${UV_VERSION} AS uv-bin
+FROM ghcr.io/astral-sh/uv:${UV_VERSION}@${UV_IMAGE_DIGEST} AS uv-bin
 
-FROM python:${PYTHON_VERSION}-slim AS builder
+FROM python:${PYTHON_VERSION}-slim@${PYTHON_BASE_DIGEST} AS builder
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
@@ -54,7 +56,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 ############################
 # Stage 2 — runtime
 ############################
-FROM python:${PYTHON_VERSION}-slim AS runtime
+FROM python:${PYTHON_VERSION}-slim@${PYTHON_BASE_DIGEST} AS runtime
 
 ARG APP_USER=app
 ARG APP_UID=10001
