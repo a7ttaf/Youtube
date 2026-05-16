@@ -4,10 +4,11 @@ This conftest is loaded automatically by pytest. It performs two duties:
 
 1. Makes the ``backend/`` source tree importable as ``ums_smart_revenue``.
 2. Provides a deterministic, **test-only** value for
-   ``UMS_TRUSTED_GATEWAY_TOKEN`` regardless of the surrounding environment.
+   ``UMS_TRUSTED_GATEWAY_TOKEN`` when the surrounding environment has not
+   provided one.
    Real secrets must never be committed to the repository (see SECURITY.md).
-   Tests that exercise authorization use this sentinel so host or CI
-   environment variables cannot change expected request headers.
+   Tests that exercise authorization can use this sentinel while CI remains
+   free to inject the value from its secret store.
 """
 
 from __future__ import annotations
@@ -33,13 +34,13 @@ _TEST_TOKEN_SENTINEL = "pytest-trusted-gateway-token"  # noqa: S105 — test sca
 
 
 def _ensure_test_gateway_token() -> None:
-    """Force the trusted-gateway token to the deterministic pytest sentinel.
+    """Provide a deterministic pytest sentinel when no token is configured.
 
-    This conftest only runs under pytest, so the sentinel keeps protected-route
-    tests isolated from host or CI environment variables while still exercising
-    app code that reads the setting.
+    This conftest only runs under pytest, so local tests get a stable fallback
+    while CI or operator-provided environment values remain authoritative.
     """
-    os.environ[TEST_TRUSTED_GATEWAY_TOKEN_ENV] = _TEST_TOKEN_SENTINEL
+    if not os.environ.get(TEST_TRUSTED_GATEWAY_TOKEN_ENV):
+        os.environ[TEST_TRUSTED_GATEWAY_TOKEN_ENV] = _TEST_TOKEN_SENTINEL
 
 
 _ensure_test_gateway_token()
