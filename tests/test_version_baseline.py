@@ -43,6 +43,7 @@ def test_stack_version_baseline_records_runtime_and_frontend_targets():
     assert STACK_VERSION_BASELINE["backend"]["pydantic"] == "2.13.4"
     assert STACK_VERSION_BASELINE["backend"]["sqlalchemy"] == "2.0.49"
     assert STACK_VERSION_BASELINE["backend"]["alembic"] == "1.18.4"
+    assert STACK_VERSION_BASELINE["backend"]["psycopg"] == "3.3.4"
     assert STACK_VERSION_BASELINE["backend"]["openpyxl"] == "3.1.5"
     assert STACK_VERSION_BASELINE["backend"]["reportlab"] == "4.5.1"
     assert STACK_VERSION_BASELINE["backend"]["python_pptx"] == "1.0.2"
