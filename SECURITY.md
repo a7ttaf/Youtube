@@ -16,14 +16,16 @@ We take the security of the UMS Smart Revenue Control Center seriously. The syst
 
 ### How to report
 
-Email the maintainers at **`security@ums-smart-revenue.local`** *(replace with the real address before publishing)* with:
+Open a private GitHub security advisory for this repository when the "Report a vulnerability" flow is available. If the UI is unavailable, contact a CODEOWNERS maintainer through GitHub and request a private encrypted intake channel before sharing exploit details. CODEOWNERS maintainers monitor vulnerability-intake notifications during merge windows and before releases.
+
+Include:
 
 - A description of the issue and the impact you've assessed.
 - Steps to reproduce — minimal, deterministic, with example payloads if applicable.
 - Affected versions, deployments, or branches.
 - Your name and contact for follow-up. Anonymous reports are accepted but slow down clarification.
 
-Use PGP if you can — public key fingerprint will be published here once a maintainer key is provisioned.
+For encrypted reports, ask the responding maintainer for their current PGP fingerprint inside the private advisory or maintainer channel before sending credentials, tokens, customer data, or proof-of-concept material.
 
 ### Our commitments
 

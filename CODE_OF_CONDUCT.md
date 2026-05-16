@@ -34,7 +34,7 @@ This Code of Conduct applies within all community spaces — the repository, iss
 
 ## Enforcement
 
-Instances of abusive, harassing, or otherwise unacceptable behavior may be reported to the maintainers at **`conduct@ums-smart-revenue.local`** *(replace with the real address before publishing)*. All complaints will be reviewed and investigated promptly and fairly. Maintainers are obligated to respect the privacy and security of the reporter of any incident.
+Instances of abusive, harassing, or otherwise unacceptable behavior should be reported privately to a CODEOWNERS maintainer through the repository's GitHub maintainer channel. Do not use public issues for sensitive conduct reports. CODEOWNERS maintainers monitor that channel during merge windows and before releases, review complaints promptly and fairly, and protect the privacy and security of the reporter of any incident.
 
 ## Enforcement Guidelines
 
