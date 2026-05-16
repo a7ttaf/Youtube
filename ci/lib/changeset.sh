@@ -133,16 +133,6 @@ ci::changeset::_json_escape() {
   printf '%s' "$s"
 }
 
-# ci::changeset::_checks_triggered_for_lang <lang> – echo space-sep check list
-ci::changeset::_checks_triggered_for_lang() {
-  local lang="$1"
-  local checks
-  checks="$(_CI_CHANGESET_ALWAYS_CHECKS="" ci::changeset::_checks_for_language "$lang")"
-  if [ -n "$checks" ]; then
-    printf '%s' "$checks"
-  fi
-}
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------

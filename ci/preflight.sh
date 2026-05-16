@@ -339,6 +339,8 @@ _check_should_skip() {
     local ck
     for ck in $_CI_CHANGESET_CHECKS; do
       _check_disabled_in_config "$ck" && continue
+      # Keep this reverse mapping aligned with ci::changeset::_checks_for_language.
+      # The gate submits coarse lane labels, while changeset emits fine-grained check ids.
       case "${label}:${ck}" in
         "$label:$label" | \
         node:lint-js | node:typecheck-js | node:format-js | node:tests-js | \
