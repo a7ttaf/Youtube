@@ -84,7 +84,7 @@ _container_run_trivy_image() {
   local rc=0
   trivy image --exit-code 1 "$image_name" 2>/dev/null || rc=$?
   if [ "$rc" -ne 0 ]; then
-    OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_PASS_WITH_KNOWN_DEBT")"
+    OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_NEW_ISSUE")"
   fi
 }
 

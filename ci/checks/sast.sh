@@ -96,13 +96,20 @@ _sast_run_cargo_audit() {
   if [ ! -f Cargo.toml ]; then
     return 0
   fi
-  if ! cargo audit --version >/dev/null 2>&1 && ! ci::common::command_exists cargo-audit; then
+  local use_cargo_subcommand=0
+  if cargo audit --version >/dev/null 2>&1; then
+    use_cargo_subcommand=1
+  elif ! ci::common::command_exists cargo-audit; then
     _sast_tool_skip "cargo-audit"
     return 0
   fi
   ci::log::info "Running cargo audit..."
   local rc=0
-  cargo audit || rc=$?
+  if [ "$use_cargo_subcommand" -eq 1 ]; then
+    cargo audit || rc=$?
+  else
+    cargo-audit || rc=$?
+  fi
   if [ "$rc" -ne 0 ]; then
     _sast_record_fail "cargo-audit"
   fi

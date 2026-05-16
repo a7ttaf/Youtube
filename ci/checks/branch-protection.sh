@@ -26,6 +26,34 @@ _bp_fail() {
   OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_NEW_ISSUE")"
 }
 
+_bp_commit_range() {
+  local old_sha="${CI_GATE_PUSH_OLD_SHA:-${GITHUB_EVENT_BEFORE:-}}"
+  local new_sha="${CI_GATE_PUSH_NEW_SHA:-HEAD}"
+  local zero_sha="0000000000000000000000000000000000000000"
+
+  if [ -n "$old_sha" ] && [ "$old_sha" != "$zero_sha" ] &&
+     git rev-parse --verify "${old_sha}^{commit}" >/dev/null 2>&1 &&
+     git rev-parse --verify "${new_sha}^{commit}" >/dev/null 2>&1; then
+    printf '%s..%s' "$old_sha" "$new_sha"
+    return 0
+  fi
+
+  local upstream base
+  upstream="$(git rev-parse --abbrev-ref --symbolic-full-name '@{upstream}' 2>/dev/null || true)"
+  if [ -n "$upstream" ]; then
+    base="$(git merge-base HEAD "$upstream" 2>/dev/null || true)"
+  fi
+  if [ -z "${base:-}" ]; then
+    base="$(git rev-parse HEAD~1 2>/dev/null || true)"
+  fi
+  if [ -n "${base:-}" ]; then
+    printf '%s..HEAD' "$base"
+    return 0
+  fi
+
+  return 1
+}
+
 _is_protected_branch() {
   local branch="$1"
   for protected in $CI_GATE_PROTECTED_BRANCHES; do
@@ -68,17 +96,25 @@ _bp_check_signed_commits() {
     ci::log::info "No HEAD commit; skipping signed commit check."
     return 0
   fi
-  ci::log::info "Checking commit signature..."
-  local sig_status
-  sig_status="$(git log -1 --pretty=%G? 2>/dev/null || echo "N")"
-  case "$sig_status" in
-    G|U|X|Y|E)
-      ci::log::info "Commit has a signature (status: ${sig_status})."
-      ;;
-    N|B|*)
-      _bp_fail "Commit is not signed. CI_GATE_REQUIRE_SIGNED_COMMITS=1 requires GPG/SSH signed commits."
-      ;;
-  esac
+  local range
+  if ! range="$(_bp_commit_range)"; then
+    ci::log::info "No push range available; skipping signed commit check."
+    return 0
+  fi
+
+  ci::log::info "Checking commit signatures in range: ${range}"
+  local sig_status commit found=0
+  while IFS=' ' read -r sig_status commit; do
+    [ -z "$commit" ] && continue
+    found=1
+    case "$sig_status" in
+      G|U|X|Y) ;;
+      *)
+        _bp_fail "Unsigned or unverified commit ${commit} (status: ${sig_status})."
+        ;;
+    esac
+  done < <(git log --pretty='%G? %H' "$range" 2>/dev/null || true)
+  [ "$found" -eq 1 ] || ci::log::info "No commits found in push range; skipping signed commit check."
 }
 
 # ---------------------------------------------------------------------------
@@ -99,9 +135,15 @@ _bp_check_linear_history() {
     return 0
   fi
 
-  ci::log::info "Checking for merge commits in recent history..."
+  local range
+  if ! range="$(_bp_commit_range)"; then
+    ci::log::info "No push range available; skipping linear-history check."
+    return 0
+  fi
+
+  ci::log::info "Checking for merge commits in range: ${range}"
   local merge_count
-  merge_count="$(git log --merges --oneline -10 2>/dev/null | wc -l | tr -d ' ' || echo 0)"
+  merge_count="$(git rev-list --count --merges "$range" 2>/dev/null || echo 0)"
   if [ "${merge_count:-0}" -gt 0 ]; then
     _bp_fail "Linear history required: ${merge_count} merge commit(s) found. Use rebase instead of merge."
   fi

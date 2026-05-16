@@ -46,9 +46,11 @@ ci::log::_json_escape() {
   # Replace \ first, then "
   s="${s//\\/\\\\}"
   s="${s//\"/\\\"}"
-  # Newlines and tabs
   s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
   s="${s//$'\t'/\\t}"
+  s="${s//$'\b'/\\b}"
+  s="${s//$'\f'/\\f}"
   printf '%s' "$s"
 }
 

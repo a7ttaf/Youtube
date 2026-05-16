@@ -61,5 +61,4 @@ teardown() {
     skip "changeset library not loaded"
   fi
   ci::changeset::should_ignore "node_modules/foo/bar.js"
-  [ $? -eq 0 ]
 }

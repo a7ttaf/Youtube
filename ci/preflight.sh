@@ -103,8 +103,20 @@ fi
 # Initialize runner if available
 _ensure_runner_init() {
   if type ci::runner::init >/dev/null 2>&1; then
-    ci::runner::init "$CI_REPORT_DIR"
+    ci::runner::init
   fi
+}
+
+_json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\b'/\\b}"
+  s="${s//$'\f'/\\f}"
+  printf '%s' "$s"
 }
 
 # ---------------------------------------------------------------------------
@@ -294,7 +306,7 @@ run_phase() {
       esac
       local files_hash=""
       if [ -n "${_CI_CHANGESET_FILES_RAW:-}" ]; then
-        files_hash="$(printf '%s' "$_CI_CHANGESET_FILES_RAW" | sha256sum | cut -d' ' -f1)"
+        files_hash="$(ci::cache::_sha256 "$_CI_CHANGESET_FILES_RAW")"
       else
         files_hash="$(git rev-parse HEAD 2>/dev/null || echo 'none')"
       fi
@@ -372,7 +384,7 @@ run_phase() {
       esac
       local files_hash=""
       if [ -n "${_CI_CHANGESET_FILES_RAW:-}" ]; then
-        files_hash="$(printf '%s' "$_CI_CHANGESET_FILES_RAW" | sha256sum | cut -d' ' -f1)"
+        files_hash="$(ci::cache::_sha256 "$_CI_CHANGESET_FILES_RAW")"
       else
         files_hash="$(git rev-parse HEAD 2>/dev/null || echo 'none')"
       fi
@@ -405,23 +417,14 @@ run_full_or_ship_checks() {
 run_mode() {
   # If lanes.conf exists and CI_GATE_USE_LANES=1, read it. Otherwise use hardcoded defaults.
   if [ "${CI_GATE_USE_LANES:-0}" = "1" ] && [ -f "ci/config/lanes.conf" ]; then
-    local lane_id="" lane_checks=""
-    while IFS='|' read -r lane_id _lane_name _lane_cmd lane_checks _lane_blocking _lane_desc; do
+    local lane_id="" lane_name="" lane_cmd="" lane_blocking="" lane_desc=""
+    while IFS='|' read -r lane_id lane_name lane_cmd lane_blocking lane_desc; do
       lane_id="$(echo "$lane_id" | tr -d ' ')"
+      lane_cmd="$(echo "$lane_cmd" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
       [ -z "$lane_id" ] && continue
-      case "$lane_id" in '#') continue ;; esac
-      local check_entries=""
-      local chk
-      for chk in $lane_checks; do
-        local script_path="./ci/checks/${chk}.sh"
-        [ -f "$script_path" ] || script_path="./ci/checks/${chk}"
-        if [ -n "$check_entries" ]; then
-          check_entries="${check_entries} \"${chk}:${script_path}\""
-        else
-          check_entries="\"${chk}:${script_path}\""
-        fi
-      done
-      eval "run_phase $check_entries"
+      case "$lane_id" in '#'* ) continue ;; esac
+      [ -z "$lane_cmd" ] && continue
+      run_phase "${lane_id}:${lane_cmd}"
     done < "ci/config/lanes.conf"
     return 0
   fi
@@ -633,27 +636,27 @@ printf '{
 printf '  "schema_version": 1,
 '
 printf '  "mode": "%s",
-' "$MODE"
+' "$(_json_escape "$MODE")"
 printf '  "branch": "%s",
-' "${BRANCH:-unknown}"
+' "$(_json_escape "${BRANCH:-unknown}")"
 printf '  "sha": "%s",
-' "${COMMIT_SHA:-unknown}"
+' "$(_json_escape "${COMMIT_SHA:-unknown}")"
 printf '  "start": "%s",
-' "$START_ISO"
+' "$(_json_escape "$START_ISO")"
 printf '  "finish": "%s",
-' "$FINISH_ISO"
+' "$(_json_escape "$FINISH_ISO")"
 printf '  "duration_sec": %d,
 ' "$DURATION_SEC"
 printf '  "result": "%s",
-' "$FINAL_RESULT_NAME"
+' "$(_json_escape "$FINAL_RESULT_NAME")"
 printf '  "known_debt_status": "%s",
-' "$KNOWN_DEBT_STATUS"
+' "$(_json_escape "$KNOWN_DEBT_STATUS")"
 printf '  "new_issue_status": "%s",
-' "$NEW_ISSUE_STATUS"
+' "$(_json_escape "$NEW_ISSUE_STATUS")"
 printf '  "security_status": "%s",
-' "$SECURITY_STATUS"
+' "$(_json_escape "$SECURITY_STATUS")"
 printf '  "build_status": "%s",
-' "$BUILD_STATUS"
+' "$(_json_escape "$BUILD_STATUS")"
 printf '  "checks": ['
 _json_first=1
 _sjidx=0
@@ -672,7 +675,7 @@ while [ "$_sjidx" -lt "${#_TIMING_LABELS[@]}" ]; do
     printf ',
 '
   fi
-  printf '    {"label":"%s","result":"%s","exit_code":%d,"duration_sec":%d}'     "$_sjlabel" "$_sjstatus" "$_sjrc" "$_sjdur"
+  printf '    {"label":"%s","result":"%s","exit_code":%d,"duration_sec":%d}'     "$(_json_escape "$_sjlabel")" "$(_json_escape "$_sjstatus")" "$_sjrc" "$_sjdur"
   _sjidx=$(( _sjidx + 1 ))
 done
 if [ "$_json_first" = "0" ]; then
@@ -706,7 +709,7 @@ while [ "$_tridx" -lt "${#_TIMING_LABELS[@]}" ]; do
     printf ',
 '
   fi
-  printf '  {"name":"%s","ph":"X","ts":%d,"dur":%d,"pid":1,"tid":1}'     "$_trlabel" "$_trts" "$_trdur"
+  printf '  {"name":"%s","ph":"X","ts":%d,"dur":%d,"pid":1,"tid":1}'     "$(_json_escape "$_trlabel")" "$_trts" "$_trdur"
   _tridx=$(( _tridx + 1 ))
 done
 printf '
@@ -770,7 +773,7 @@ while [ "$_saidx" -lt "${#_TIMING_LABELS[@]}" ]; do
     printf ',
 '
   fi
-  printf '      {"id":"%s","name":"%s","shortDescription":{"text":"CI check %s"}}' "$_salabel" "$_salabel" "$_salabel"
+  printf '      {"id":"%s","name":"%s","shortDescription":{"text":"CI check %s"}}' "$(_json_escape "$_salabel")" "$(_json_escape "$_salabel")" "$(_json_escape "$_salabel")"
   _saidx=$(( _saidx + 1 ))
 done
 if [ "$_rule_first" = "0" ]; then
@@ -794,7 +797,7 @@ while [ "$_saidx" -lt "${#_TIMING_LABELS[@]}" ]; do
       printf ',
 '
     fi
-    printf '      {"ruleId":"%s","level":"error","message":{"text":"Check %s failed with exit code %d"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"ci/reports/%s.log"}}}]}'       "$_salabel" "$_salabel" "$_sarc" "$_salabel"
+    printf '      {"ruleId":"%s","level":"error","message":{"text":"Check %s failed with exit code %d"},"locations":[{"physicalLocation":{"artifactLocation":{"uri":"ci/reports/%s.log"}}}]}'       "$(_json_escape "$_salabel")" "$(_json_escape "$_salabel")" "$_sarc" "$(_json_escape "$_salabel")"
   fi
   _saidx=$(( _saidx + 1 ))
 done

@@ -10,7 +10,7 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
-@test "preflight: --mode quick exits without error" {
+@test "preflight: --mode quick runs without crash" {
   run bash ci/preflight.sh --mode quick
   [ "$status" -eq 0 ] || [ "$status" -eq 1 ]
 }

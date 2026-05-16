@@ -106,15 +106,17 @@ ci::common::now_iso_utc() {
 ci::common::load_gate_config() {
   local config_file="${1:-ci/config/gate.yml}"
   [ -f "$config_file" ] || return 0
-  local key val
+  local key val trimmed
   while IFS= read -r line; do
-    case "$line" in
+    line="$(printf '%s' "$line" | sed 's/\r$//')"
+    trimmed="$(printf '%s' "$line" | sed 's/^[[:space:]]*//')"
+    case "$trimmed" in
       ''|'#'*) continue ;;
     esac
     key="${line%%:*}"
     val="${line#*:}"
-    key="$(printf '%s' "$key" | tr -d ' ')"
-    val="$(printf '%s' "$val" | sed 's/^[[:space:]]*//')"
+    key="$(printf '%s' "$key" | tr -d '[:space:]')"
+    val="$(printf '%s' "$val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     case "$key" in
       parallelism)
         [ -n "$val" ] && [ "$val" != "0" ] && export CI_GATE_PARALLEL="$val"
@@ -148,15 +150,17 @@ ci::common::load_gate_config() {
 ci::common::load_thresholds_config() {
   local config_file="${1:-ci/config/thresholds.yml}"
   [ -f "$config_file" ] || return 0
-  local key val
+  local key val trimmed
   while IFS= read -r line; do
-    case "$line" in
+    line="$(printf '%s' "$line" | sed 's/\r$//')"
+    trimmed="$(printf '%s' "$line" | sed 's/^[[:space:]]*//')"
+    case "$trimmed" in
       ''|'#'*) continue ;;
     esac
     key="${line%%:*}"
     val="${line#*:}"
-    key="$(printf '%s' "$key" | tr -d ' ')"
-    val="$(printf '%s' "$val" | sed 's/^[[:space:]]*//')"
+    key="$(printf '%s' "$key" | tr -d '[:space:]')"
+    val="$(printf '%s' "$val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     case "$key" in
       coverage_min_percent)
         [ -n "$val" ] && export CI_GATE_COVERAGE_MIN="$val"

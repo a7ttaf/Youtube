@@ -11,9 +11,9 @@ source "$ROOT_DIR/ci/lib/common.sh"
 # shellcheck source=ci/lib/impact.sh
 source "$ROOT_DIR/ci/lib/impact.sh"
 
-rc=0
-if ! ci::impact::generate "$@"; then
-  rc=$?
-fi
+set +e
+ci::impact::generate "$@"
+rc=$?
+set -e
 
 exit "$rc"

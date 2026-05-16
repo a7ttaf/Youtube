@@ -77,7 +77,7 @@ ci::cache::hit() {
   local key="$1"
   local entry_dir
   entry_dir="$(ci::cache::_entry_dir "$key")"
-  [ -f "${entry_dir}/result" ] && [ -f "${entry_dir}/meta.json" ]
+  [ -f "${entry_dir}/result.txt" ] && [ -f "${entry_dir}/meta.json" ]
 }
 
 # ci::cache::get  – restore cached result to dest_dir
@@ -105,14 +105,29 @@ ci::cache::put() {
   [ "${CI_GATE_NO_CACHE:-0}" = "1" ] && return 0
   local key="$1"
   local src_dir="$2"
-  local entry_dir
+  local entry_dir parent_dir tmp_dir old_dir
   entry_dir="$(ci::cache::_entry_dir "$key")"
+  parent_dir="$(dirname "$entry_dir")"
 
-  mkdir -p "$entry_dir"
-  cp -r "${src_dir}/." "${entry_dir}/"
+  mkdir -p "$parent_dir"
+  tmp_dir="$(mktemp -d "${parent_dir}/.${key}.tmp.XXXXXX")" || return 1
+  cp -r "${src_dir}/." "${tmp_dir}/"
   # Record store time (used by GC)
-  touch "${entry_dir}/meta.json"
-  return 0
+  touch "${tmp_dir}/meta.json"
+
+  old_dir=""
+  if [ -d "$entry_dir" ]; then
+    old_dir="${entry_dir}.old.$$"
+    rm -rf "$old_dir"
+    mv "$entry_dir" "$old_dir"
+  fi
+  if mv "$tmp_dir" "$entry_dir"; then
+    [ -n "$old_dir" ] && rm -rf "$old_dir"
+    return 0
+  fi
+  [ -n "$old_dir" ] && mv "$old_dir" "$entry_dir" 2>/dev/null || true
+  rm -rf "$tmp_dir"
+  return 1
 }
 
 # ci::cache::invalidate  – remove a single cache entry

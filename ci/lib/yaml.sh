@@ -28,7 +28,12 @@ ci::yaml::_strip_comment() {
       case "$ch" in
         "'") in_single=1; out="${out}${ch}" ;;
         '"') in_double=1; out="${out}${ch}" ;;
-        '#') break ;;
+        '#')
+          if [ -z "$out" ] || [ "$prev_ch" = " " ] || [ "$prev_ch" = $'\t' ]; then
+            break
+          fi
+          out="${out}${ch}"
+          ;;
         *)   out="${out}${ch}" ;;
       esac
     fi

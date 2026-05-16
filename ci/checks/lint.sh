@@ -254,8 +254,17 @@ lint::run_actions() {
     return 0
   fi
   ci::log::info "Running actionlint on GitHub Actions workflows..."
+  local workflow_files=()
+  local workflow_file
+  for workflow_file in .github/workflows/*.yml .github/workflows/*.yaml; do
+    [ -f "$workflow_file" ] && workflow_files+=("$workflow_file")
+  done
+  if [ "${#workflow_files[@]}" -eq 0 ]; then
+    ci::log::info "No GitHub Actions workflow YAML files found."
+    return 0
+  fi
   local rc=0
-  actionlint .github/workflows/*.yml 2>/dev/null || rc=$?
+  actionlint "${workflow_files[@]}" 2>/dev/null || rc=$?
   if [ "$rc" -ne 0 ]; then
     _lint_record_finding "actionlint" "actionlint reported workflow issues" "" 1
     OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_NEW_ISSUE")"

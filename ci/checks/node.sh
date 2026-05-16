@@ -22,22 +22,39 @@ if ! ci::common::command_exists node; then
 fi
 
 MANAGER=""
+LOCKFILE=""
 LOCKFILE_COUNT=0
 
 if [ -f pnpm-lock.yaml ]; then
   MANAGER="pnpm"
+  LOCKFILE="${LOCKFILE:-pnpm-lock.yaml}"
   LOCKFILE_COUNT=$((LOCKFILE_COUNT + 1))
 fi
 if [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
   MANAGER="${MANAGER:-npm}"
+  if [ -z "$LOCKFILE" ]; then
+    if [ -f npm-shrinkwrap.json ]; then
+      LOCKFILE="npm-shrinkwrap.json"
+    else
+      LOCKFILE="package-lock.json"
+    fi
+  fi
   LOCKFILE_COUNT=$((LOCKFILE_COUNT + 1))
 fi
 if [ -f yarn.lock ]; then
   MANAGER="${MANAGER:-yarn}"
+  LOCKFILE="${LOCKFILE:-yarn.lock}"
   LOCKFILE_COUNT=$((LOCKFILE_COUNT + 1))
 fi
 if [ -f bun.lockb ] || [ -f bun.lock ]; then
   MANAGER="${MANAGER:-bun}"
+  if [ -z "$LOCKFILE" ]; then
+    if [ -f bun.lock ]; then
+      LOCKFILE="bun.lock"
+    else
+      LOCKFILE="bun.lockb"
+    fi
+  fi
   LOCKFILE_COUNT=$((LOCKFILE_COUNT + 1))
 fi
 
@@ -50,14 +67,6 @@ if [ -z "$MANAGER" ]; then
   echo "No lockfile detected for package.json. Refusing mutable install."
   exit "$CI_RESULT_FAIL_INFRA"
 fi
-
-LOCKFILE=""
-case "$MANAGER" in
-  pnpm) LOCKFILE="pnpm-lock.yaml" ;;
-  npm) LOCKFILE="package-lock.json" ;;
-  yarn) LOCKFILE="yarn.lock" ;;
-  bun) LOCKFILE="bun.lockb" ;;
-esac
 
 SKIP_INSTALL=0
 if [ -n "$LOCKFILE" ] && [ -d "node_modules" ] && [ -f ".ci-gate/node_modules.hash" ]; then

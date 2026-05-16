@@ -31,6 +31,30 @@ if type ci::affected::get_affected_tests >/dev/null 2>&1 && [ -f "ci/config/affe
   fi
 fi
 
+_tests_filter_affected() {
+  local lang="$1"
+  local pattern
+  [ -n "$AFFECTED_TESTS" ] || return 0
+
+  while IFS= read -r pattern; do
+    [ -n "$pattern" ] || continue
+    case "$lang:$pattern" in
+      javascript:*.js|javascript:*.jsx|javascript:*.ts|javascript:*.tsx|javascript:*.mjs|javascript:*.cjs)
+        printf '%s\n' "$pattern"
+        ;;
+      python:*.py)
+        printf '%s\n' "$pattern"
+        ;;
+      go:*_test.go)
+        printf '%s\n' "$pattern"
+        ;;
+      rust:*.rs)
+        printf '%s\n' "$pattern"
+        ;;
+    esac
+  done <<< "$AFFECTED_TESTS"
+}
+
 _tests_tool_missing() {
   ci::log::info "skipped: ${1} not installed"
 }
@@ -54,8 +78,22 @@ tests::run_js() {
   mkdir -p "$JUNIT_DIR"
   local rc=0
   local jest_pattern=""
+  local js_tests=""
   if [ -n "$AFFECTED_TESTS" ]; then
-    jest_pattern="--testPathPattern=$(printf '%s' "$AFFECTED_TESTS" | tr '\n' '|')"
+    js_tests="$(_tests_filter_affected javascript)"
+    if [ -z "$js_tests" ]; then
+      ci::log::info "skipped: no affected JavaScript tests"
+      return 0
+    fi
+    while IFS= read -r pattern; do
+      [ -z "$pattern" ] && continue
+      if [ -n "$jest_pattern" ]; then
+        jest_pattern="${jest_pattern}|${pattern}"
+      else
+        jest_pattern="$pattern"
+      fi
+    done <<< "$js_tests"
+    [ -n "$jest_pattern" ] && jest_pattern="--testPathPattern=${jest_pattern}"
   fi
   if ci::common::command_exists jest; then
     JEST_JUNIT_OUTPUT_FILE="$JUNIT_DIR/js.xml" \
@@ -65,7 +103,7 @@ tests::run_js() {
     vitest run --reporter=junit --outputFile="$JUNIT_DIR/js.xml" || rc=$?
   else
     if ci::common::command_exists npx; then
-      npx --yes jest --ci ${jest_pattern:+$jest_pattern} 2>&1 || rc=$?
+      npx --no-install jest --ci ${jest_pattern:+$jest_pattern} 2>&1 || rc=$?
     else
       ci::log::info "skipped: no JS test runner (jest/vitest) found"
       return 0
@@ -93,10 +131,16 @@ tests::run_python() {
   mkdir -p "$JUNIT_DIR"
   local rc=0
   if [ -n "$AFFECTED_TESTS" ]; then
+    local python_tests=""
+    python_tests="$(_tests_filter_affected python)"
+    if [ -z "$python_tests" ]; then
+      ci::log::info "skipped: no affected Python tests"
+      return 0
+    fi
     local pytest_args=()
     while IFS= read -r pattern; do
       [ -n "$pattern" ] && pytest_args+=("$pattern")
-    done <<< "$AFFECTED_TESTS"
+    done <<< "$python_tests"
     pytest --junitxml="$JUNIT_DIR/python.xml" "${pytest_args[@]}" || rc=$?
   else
     pytest --junitxml="$JUNIT_DIR/python.xml" || rc=$?

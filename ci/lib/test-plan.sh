@@ -225,6 +225,7 @@ ci::test_plan::generate() {
     return "$CI_RESULT_FAIL_INFRA"
   fi
 
+  set +e
   if [ "${#TEST_PLAN_IMPACT_ARGS[@]}" -gt 0 ]; then
     CI_IMPACT_QUIET=1 ci::impact::generate "${TEST_PLAN_IMPACT_ARGS[@]}"
     impact_rc=$?
@@ -232,6 +233,7 @@ ci::test_plan::generate() {
     CI_IMPACT_QUIET=1 ci::impact::generate
     impact_rc=$?
   fi
+  set -e
   if [ "$impact_rc" -ne 0 ]; then
     return "$CI_RESULT_FAIL_INFRA"
   fi

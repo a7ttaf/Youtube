@@ -50,7 +50,7 @@ case "$HOOK_NAME" in
         ticket_candidate="${BRANCH#*/}"
         case "$ticket_candidate" in
           [A-Z]*-[0-9]*)
-            ticket="$ticket_candidate"
+            ticket="$(printf '%s\n' "$ticket_candidate" | grep -Eo '^[A-Z][A-Z0-9]*-[0-9]+' || true)"
             ;;
         esac
         ;;

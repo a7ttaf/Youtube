@@ -43,26 +43,33 @@ scan_file() {
     # Prevent the shared secret-pattern source file from matching its own
     # definitions; if this file moves, update this path check accordingly.
     if [ "$path" = "ci/checks/common.sh" ]; then
-      raw_hits="$(printf '%s\n' "$raw_hits" | grep -Ev 'SECRET_PATTERN=|STAGED_SECRET_PATTERN=|grep -RInE "')"
+      raw_hits="$(printf '%s\n' "$raw_hits" | grep -Ev 'SECRET_PATTERN=|STAGED_SECRET_PATTERN=|grep -RInE "' || true)"
     fi
     if [ -n "$raw_hits" ]; then
-      echo "Potential secret-like content in $path:"
-      printf '%s\n' "$raw_hits"
+      local hit_lines=""
+      hit_lines="$(printf '%s\n' "$raw_hits" | sed 's/:.*$//' | sort -n -u | tr '\n' ' ' | sed 's/[[:space:]]*$//')"
+      echo "Potential secret-like content in $path at line(s): ${hit_lines:-unknown}"
       matches=1
     fi
   fi
 }
 
-# Handle initial-commit repos with no HEAD: skip git diff --name-only and only
-# inspect staged paths from git diff --cached --name-only.
-while IFS= read -r path; do
-  scan_file "$path"
-done < <({
+scan_paths="$({
+  # Handle initial-commit repos with no HEAD: skip git diff --name-only and only
+  # inspect staged paths from git diff --cached --name-only.
   if git rev-parse --verify HEAD >/dev/null 2>&1; then
     git diff --name-only
   fi
   git diff --cached --name-only
-} | sort -u)
+} | sort -u)"
+
+if [ -z "$scan_paths" ]; then
+  scan_paths="$(git ls-files 2>/dev/null | sort -u || true)"
+fi
+
+while IFS= read -r path; do
+  scan_file "$path"
+done <<< "$scan_paths"
 
 if [ "$matches" -ne 0 ]; then
   exit "$CI_RESULT_FAIL_NEW_ISSUE"

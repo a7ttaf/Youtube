@@ -11,7 +11,7 @@ cd "$ROOT_DIR"
 
 ci::common::section "Check: build and script validation"
 
-script_globs='ci/*.sh ci/checks/*.sh ci/lib/*.sh .githooks/pre-push'
+script_globs='ci/*.sh ci/checks/*.sh ci/lib/*.sh ci/scripts/*.sh .githooks/*'
 root_script_targets='install.sh deploy.sh'
 
 collect_script_targets() {

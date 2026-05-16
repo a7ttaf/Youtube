@@ -84,7 +84,7 @@ _license_check_npm() {
       pkg_name="$(basename "$(dirname "$pkg_json")")"
       _license_violation "Disallowed license '${lic}' in npm package: ${pkg_name}"
     fi
-  done < <(find node_modules -maxdepth 2 -name 'package.json' 2>/dev/null || true)
+  done < <(find node_modules -maxdepth 3 -name 'package.json' 2>/dev/null || true)
 }
 
 # ---------------------------------------------------------------------------
@@ -104,20 +104,29 @@ _license_check_pip() {
     return 0
   fi
   local output rc=0
-  output="$(pip-licenses --format=csv 2>/dev/null)" || rc=$?
+  output="$(pip-licenses --format=json 2>/dev/null)" || rc=$?
   if [ "$rc" -ne 0 ]; then
     ci::log::info "pip-licenses failed; skipping"
     return 0
   fi
-  while IFS=',' read -r name _version lic _rest; do
-    # Strip surrounding quotes
-    lic="${lic//\"/}"
-    [ -z "$lic" ] && continue
-    if _is_disallowed_license "$lic"; then
-      name="${name//\"/}"
-      _license_violation "Disallowed license '${lic}' in Python package: ${name}"
-    fi
-  done < <(printf '%s\n' "$output" | tail -n +2)
+  if ci::common::command_exists python3; then
+    while IFS=$'\t' read -r name lic; do
+      [ -z "$lic" ] && continue
+      if _is_disallowed_license "$lic"; then
+        _license_violation "Disallowed license '${lic}' in Python package: ${name}"
+      fi
+    done < <(printf '%s' "$output" | python3 -c 'import json,sys; data=json.load(sys.stdin); [print("{}\t{}".format(row.get("Name",""), row.get("License",""))) for row in data]')
+  elif ci::common::command_exists jq; then
+    while IFS=$'\t' read -r name lic; do
+      [ -z "$lic" ] && continue
+      if _is_disallowed_license "$lic"; then
+        _license_violation "Disallowed license '${lic}' in Python package: ${name}"
+      fi
+    done < <(printf '%s' "$output" | jq -r '.[] | [.Name, .License] | @tsv')
+  else
+    ci::log::info "skipped: JSON parser not installed for pip-licenses output"
+    return 0
+  fi
 }
 
 # ---------------------------------------------------------------------------

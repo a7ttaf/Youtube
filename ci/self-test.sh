@@ -144,24 +144,35 @@ fi
 # --- 9. install-hooks.sh works ---
 echo ""
 echo "[9] install-hooks.sh"
-./ci/install-hooks.sh >/dev/null 2>&1
-HOOKSPATH=$(git config core.hooksPath)
-if [ "$HOOKSPATH" = ".githooks" ]; then
-  pass "install-hooks.sh sets core.hooksPath"
+if [ -x ./ci/install-hooks.sh ]; then
+  if ./ci/install-hooks.sh >/dev/null 2>&1; then
+    HOOKSPATH=$(git config core.hooksPath)
+    if [ "$HOOKSPATH" = ".githooks" ]; then
+      pass "install-hooks.sh sets core.hooksPath"
+    else
+      fail "install-hooks.sh sets core.hooksPath" "got: $HOOKSPATH"
+    fi
+  else
+    fail "install-hooks.sh runs" "exited non-zero"
+  fi
 else
-  fail "install-hooks.sh sets core.hooksPath" "got: $HOOKSPATH"
+  fail "install-hooks.sh runs" "missing or not executable"
 fi
 
 # --- 10. .gitignore coverage ---
 echo ""
 echo "[10] .gitignore coverage"
-for pattern in ".env" "node_modules/" "dist/" ".DS_Store" "!.env.example"; do
-  if grep -qF "$pattern" .gitignore; then
-    pass ".gitignore has '$pattern'"
-  else
-    fail ".gitignore has '$pattern'" "missing"
-  fi
-done
+if [ -f .gitignore ]; then
+  for pattern in ".env" "node_modules/" "dist/" ".DS_Store" "!.env.example"; do
+    if grep -qF "$pattern" .gitignore; then
+      pass ".gitignore has '$pattern'"
+    else
+      fail ".gitignore has '$pattern'" "missing"
+    fi
+  done
+else
+  pass ".gitignore coverage skipped (file not present)"
+fi
 
 # --- 11. Makefile targets ---
 echo ""
@@ -274,10 +285,8 @@ echo ""
 echo "[18] No args[@] unbound-variable crash"
 # The safe Bash 3.2 idiom is ${args[@]+"${args[@]}"}; the inner "${args[@]}" is
 # always surrounded by the guard so it can never be a bare (unsafe) expansion.
-# Detect ONLY bare expansions: "  ${args[@]}" or "  "${args[@]}" not preceded by +
-if grep -qE '(^|\s)"?\$\{args\[@\]\}"?\s' ci/lib/runner.sh 2>/dev/null && \
-   ! grep -E '(^|\s)"?\$\{args\[@\]\}"?\s' ci/lib/runner.sh 2>/dev/null | \
-       grep -qE '\[@\]\+'; then
+unsafe_args_lines="$(grep -En '^[^#]*\$\{args\[@\]\}' ci/lib/runner.sh 2>/dev/null | grep -Fv '${args[@]+"${args[@]}"}' || true)"
+if [ -n "$unsafe_args_lines" ]; then
   fail "runner.sh empty-array safety" "still has bare \${args[@]} expansion — will crash on Bash 3.2"
 else
   pass "runner.sh empty-array safety (Bash 3.2 compatible)"

@@ -49,7 +49,6 @@ ci::changeset::_default_branch() {
 
 # ci::changeset::_sniff_shebang <path> – detect language from shebang line
 ci::changeset::_sniff_shebang() {
-  trap - ERR
   local path="$1"
   [ -f "$path" ] || return 1
   local first_line
@@ -66,7 +65,6 @@ ci::changeset::_sniff_shebang() {
 
 # ci::changeset::_sniff_content <path> – last-resort content-based detection
 ci::changeset::_sniff_content() {
-  trap - ERR
   local path="$1"
   [ -f "$path" ] || return 1
   local head
@@ -120,6 +118,18 @@ ci::changeset::_add_unique() {
     fi
   done
   printf '%s' "$current"
+}
+
+ci::changeset::_json_escape() {
+  local s="$1"
+  s="${s//\\/\\\\}"
+  s="${s//\"/\\\"}"
+  s="${s//$'\n'/\\n}"
+  s="${s//$'\r'/\\r}"
+  s="${s//$'\t'/\\t}"
+  s="${s//$'\b'/\\b}"
+  s="${s//$'\f'/\\f}"
+  printf '%s' "$s"
 }
 
 # ci::changeset::_checks_triggered_for_lang <lang> – echo space-sep check list
@@ -224,20 +234,6 @@ ci::changeset::should_ignore() {
     done < "$CI_GATEIGNORE"
   fi
 
-  # path-rules.conf patterns (if present)
-  if [ -f "ci/config/path-rules.conf" ]; then
-    local pr_pattern
-    while IFS='|' read -r pr_pattern _pr_area _pr_risk _pr_lanes _pr_full _pr_reason; do
-      pr_pattern="$(echo "$pr_pattern" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
-      [ -z "$pr_pattern" ] && continue
-      case "$pr_pattern" in '#') continue ;; esac
-      # shellcheck disable=SC2254
-      case "$path" in
-        $pr_pattern) return 0 ;;
-      esac
-    done < "ci/config/path-rules.conf"
-  fi
-
   return 1
 }
 
@@ -247,6 +243,8 @@ ci::changeset::detect() {
   local mode="${1:-pre-commit}"
   _CI_CHANGESET_MODE="$mode"
   _CI_CHANGESET_FILES_RAW=""
+  _CI_CHANGESET_LANGUAGES=""
+  _CI_CHANGESET_CHECKS=""
 
   local raw_entries=""
   case "$mode" in
@@ -342,21 +340,24 @@ ci::changeset::emit_json() {
       checks_json=""
       local ck ck_first=1
       for ck in $file_checks; do
+        local escaped_ck
+        escaped_ck="$(ci::changeset::_json_escape "$ck")"
         generated_checks="$(ci::changeset::_add_unique "$generated_checks" "$ck")"
         if [ "$ck_first" = "1" ]; then
-          checks_json="\"${ck}\""
+          checks_json="\"${escaped_ck}\""
           ck_first=0
         else
-          checks_json="${checks_json},\"${ck}\""
+          checks_json="${checks_json},\"${escaped_ck}\""
         fi
       done
 
-      # Escape path for JSON
-      local escaped_path="${path//\\/\\\\}"
-      escaped_path="${escaped_path//\"/\\\"}"
+      local escaped_path escaped_lang escaped_status
+      escaped_path="$(ci::changeset::_json_escape "$path")"
+      escaped_lang="$(ci::changeset::_json_escape "$lang")"
+      escaped_status="$(ci::changeset::_json_escape "$status")"
 
       local file_entry
-      file_entry="{\"path\":\"${escaped_path}\",\"language\":\"${lang}\",\"change_type\":\"${status}\",\"checks_triggered\":[${checks_json}]}"
+      file_entry="{\"path\":\"${escaped_path}\",\"language\":\"${escaped_lang}\",\"change_type\":\"${escaped_status}\",\"checks_triggered\":[${checks_json}]}"
 
       if [ "$first" = "1" ]; then
         files_json="$file_entry"
@@ -371,11 +372,13 @@ ci::changeset::emit_json() {
   local languages_json="" lfirst=1
   local lword
   for lword in $generated_languages; do
+    local escaped_lword
+    escaped_lword="$(ci::changeset::_json_escape "$lword")"
     if [ "$lfirst" = "1" ]; then
-      languages_json="\"${lword}\""
+      languages_json="\"${escaped_lword}\""
       lfirst=0
     else
-      languages_json="${languages_json},\"${lword}\""
+      languages_json="${languages_json},\"${escaped_lword}\""
     fi
   done
 
@@ -383,13 +386,18 @@ ci::changeset::emit_json() {
   local checks_json_out="" cfirst=1
   local cword
   for cword in $generated_checks; do
+    local escaped_cword
+    escaped_cword="$(ci::changeset::_json_escape "$cword")"
     if [ "$cfirst" = "1" ]; then
-      checks_json_out="\"${cword}\""
+      checks_json_out="\"${escaped_cword}\""
       cfirst=0
     else
-      checks_json_out="${checks_json_out},\"${cword}\""
+      checks_json_out="${checks_json_out},\"${escaped_cword}\""
     fi
   done
+
+  _CI_CHANGESET_LANGUAGES="$generated_languages"
+  _CI_CHANGESET_CHECKS="$generated_checks"
 
 cat > "$CI_CHANGESET_JSON" <<EOF
 {

@@ -134,7 +134,7 @@ checks:
     script: ci/checks/format.sh
     description: "Python formatting check with black/ruff format"
     languages: [python]
-    requires_tool: black
+    requires_tool: ruff
     severity: blocker
     phase: format
     pre_commit: true

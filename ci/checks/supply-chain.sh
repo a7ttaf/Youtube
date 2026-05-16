@@ -32,16 +32,18 @@ _sc_check_npm() {
   if [ ! -f package.json ]; then
     return 0
   fi
-  if [ ! -f package-lock.json ] && [ ! -f yarn.lock ] && [ ! -f pnpm-lock.yaml ]; then
-    _sc_warn "package.json found but no lockfile (package-lock.json/yarn.lock/pnpm-lock.yaml)"
+  if [ ! -f package-lock.json ] && [ ! -f npm-shrinkwrap.json ] &&
+     [ ! -f yarn.lock ] && [ ! -f pnpm-lock.yaml ] &&
+     [ ! -f bun.lock ] && [ ! -f bun.lockb ]; then
+    _sc_warn "package.json found but no lockfile (package-lock.json/npm-shrinkwrap.json/yarn.lock/pnpm-lock.yaml/bun.lock/bun.lockb)"
     return 0
   fi
-  if [ -f package-lock.json ] && ci::common::command_exists npm; then
+  if { [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; } && ci::common::command_exists npm; then
     ci::log::info "Verifying npm lockfile integrity..."
     local rc=0
     npm ls --json >/dev/null 2>&1 || rc=$?
     if [ "$rc" -ne 0 ]; then
-      _sc_fail "package-lock.json appears out of sync with package.json (npm ls failed)"
+      _sc_fail "npm lockfile appears out of sync with package.json (npm ls failed)"
     else
       ci::log::info "npm lockfile OK"
     fi

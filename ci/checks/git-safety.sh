@@ -70,15 +70,15 @@ while IFS= read -r path; do
       echo "Sensitive file is staged: $path"
       SENSITIVE_FILE_MATCH=1
       ;;
-    node_modules/*)
+    node_modules/*|*/node_modules/*)
       echo "node_modules path is staged: $path"
       VENV_OR_NODE_MODULES_MATCH=1
       ;;
-    .venv/*|venv/*)
+    .venv/*|venv/*|*/.venv/*|*/venv/*)
       echo "Virtual environment path is staged: $path"
       VENV_OR_NODE_MODULES_MATCH=1
       ;;
-    dist/*|build/*|coverage/*|htmlcov/*)
+    dist/*|build/*|coverage/*|htmlcov/*|*/dist/*|*/build/*|*/coverage/*|*/htmlcov/*)
       echo "Build output path is staged (blocked by default): $path"
       BUILD_ARTIFACT_MATCH=1
       ;;

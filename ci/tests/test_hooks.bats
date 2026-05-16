@@ -6,7 +6,8 @@ setup() {
 
 @test "hook: hook-dispatch.sh exists and is executable" {
   [ -f "$REPO_ROOT/ci/hook-dispatch.sh" ]
-  [ -x "$REPO_ROOT/ci/hook-dispatch.sh" ] || bash -n "$REPO_ROOT/ci/hook-dispatch.sh"
+  [ -x "$REPO_ROOT/ci/hook-dispatch.sh" ]
+  bash -n "$REPO_ROOT/ci/hook-dispatch.sh"
 }
 
 @test "hook: pre-commit hook has correct syntax" {

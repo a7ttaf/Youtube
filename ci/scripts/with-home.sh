@@ -28,4 +28,24 @@ if [ "${HOME:-/}" = "/" ] || [ -z "${HOME:-}" ]; then
   fi
 fi
 
+if [ -z "${HOME:-}" ] || [ "$HOME" = "/" ]; then
+  echo "with-home: HOME is not set to a usable directory and USERPROFILE could not repair it." >&2
+  exit 1
+fi
+
+mkdir -p "$HOME" 2>/dev/null || {
+  echo "with-home: HOME is not creatable: $HOME" >&2
+  exit 1
+}
+
+if [ ! -d "$HOME" ] || [ ! -w "$HOME" ]; then
+  echo "with-home: HOME is not writable: $HOME" >&2
+  exit 1
+fi
+
+if [ "$#" -eq 0 ]; then
+  echo "with-home: missing command" >&2
+  exit 1
+fi
+
 exec "$@"

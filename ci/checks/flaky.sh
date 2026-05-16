@@ -10,6 +10,6 @@ FLAKY_RUNS="${CI_GATE_FLAKY_RUNS:-3}"
 echo "Running affected tests ${FLAKY_RUNS} times to detect flakes..."
 
 # Run tests multiple times, capture failing test names
-# This is a stub — expand with actual test runner integration
-echo "Flaky detection: stub (implement per-project test runner integration)"
-exit "$CI_RESULT_PASS"
+# TODO: Wire this to each project's real test runner before treating it as pass.
+echo "Flaky detection is not implemented; reporting known debt instead of PASS."
+exit "$CI_RESULT_PASS_WITH_KNOWN_DEBT"
