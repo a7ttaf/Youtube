@@ -41,9 +41,9 @@ _sc_check_npm() {
   if { [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; } && ci::common::command_exists npm; then
     ci::log::info "Verifying npm lockfile integrity..."
     local rc=0
-    npm ls --json >/dev/null 2>&1 || rc=$?
+    npm ci --dry-run >/dev/null 2>&1 || rc=$?
     if [ "$rc" -ne 0 ]; then
-      _sc_fail "npm lockfile appears out of sync with package.json (npm ls failed)"
+      _sc_fail "npm lockfile appears out of sync with package.json (npm ci --dry-run failed)"
     else
       ci::log::info "npm lockfile OK"
     fi

@@ -219,13 +219,31 @@ ci::common::load_thresholds_config() {
     val="$(printf '%s' "$val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     case "$key" in
       coverage_min_percent)
-        [ -n "$val" ] && export CI_GATE_COVERAGE_MIN="$val"
+        if [ -n "$val" ]; then
+          if ci::common::is_unsigned_int "$val"; then
+            export CI_GATE_COVERAGE_MIN="$val"
+          else
+            ci::common::warn_non_numeric_config "$key" "$val"
+          fi
+        fi
         ;;
       complexity_max)
-        [ -n "$val" ] && export CI_GATE_COMPLEXITY_MAX="$val"
+        if [ -n "$val" ]; then
+          if ci::common::is_unsigned_int "$val"; then
+            export CI_GATE_COMPLEXITY_MAX="$val"
+          else
+            ci::common::warn_non_numeric_config "$key" "$val"
+          fi
+        fi
         ;;
       bundle_size_max)
-        [ -n "$val" ] && export CI_GATE_BUNDLE_SIZE_MAX="$val"
+        if [ -n "$val" ]; then
+          if ci::common::is_unsigned_int "$val"; then
+            export CI_GATE_BUNDLE_SIZE_MAX="$val"
+          else
+            ci::common::warn_non_numeric_config "$key" "$val"
+          fi
+        fi
         ;;
     esac
   done < "$config_file"

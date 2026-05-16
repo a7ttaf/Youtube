@@ -11,8 +11,9 @@ cd "$ROOT_DIR"
 
 ci::common::section "Check: python lane"
 
+PYTHON_PACKAGE_DIR="${PYTHON_PACKAGE_DIR:-backend/ums_smart_revenue}"
 HAS_PYTHON_PROJECT=0
-if [ -f pyproject.toml ] || [ -f requirements.txt ] || [ -f pytest.ini ] || [ -f ruff.toml ] || [ -f setup.py ]; then
+if [ -d "$PYTHON_PACKAGE_DIR" ] || [ -f pyproject.toml ] || [ -f requirements.txt ] || [ -f pytest.ini ] || [ -f ruff.toml ] || [ -f setup.py ]; then
   HAS_PYTHON_PROJECT=1
 fi
 
@@ -70,13 +71,13 @@ fi
 if [ "$has_ruff_config" -eq 1 ]; then
   if [ -n "$RUFF_BIN" ]; then
     ruff_failed=0
-    echo "Running: $RUFF_BIN check ."
-    if ! "$RUFF_BIN" check .; then
+    echo "Running: $RUFF_BIN check $PYTHON_PACKAGE_DIR"
+    if ! "$RUFF_BIN" check "$PYTHON_PACKAGE_DIR"; then
       ruff_failed=1
     fi
     if "$RUFF_BIN" format --help >/dev/null 2>&1; then
-      echo "Running: $RUFF_BIN format --check ."
-      if ! "$RUFF_BIN" format --check .; then
+      echo "Running: $RUFF_BIN format --check $PYTHON_PACKAGE_DIR"
+      if ! "$RUFF_BIN" format --check "$PYTHON_PACKAGE_DIR"; then
         ruff_failed=1
       fi
     fi
@@ -129,8 +130,8 @@ elif [ "$has_pytest_indicators" -eq 1 ]; then
   exit "$CI_RESULT_FAIL_INFRA"
 fi
 
-echo "Running: python3 -m compileall ."
-python3 -m compileall -x '\.venv|__pycache__|\.mypy_cache|\.git|node_modules' . 1>/dev/null
+echo "Running: python3 -m compileall $PYTHON_PACKAGE_DIR"
+python3 -m compileall -x '\.venv|__pycache__|\.mypy_cache|\.git|node_modules' "$PYTHON_PACKAGE_DIR" 1>/dev/null
 
 echo "Python lane passed."
 exit "$CI_RESULT_PASS"

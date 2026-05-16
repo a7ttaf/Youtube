@@ -213,7 +213,7 @@ tests::run_shell() {
   ci::log::info "Running bats shell tests..."
   mkdir -p "$JUNIT_DIR"
   local rc=0
-  bats --formatter junit ci/tests/ > "$JUNIT_DIR/shell.xml" 2>&1 || rc=$?
+  bats --formatter junit ci/tests/ > "$JUNIT_DIR/shell.xml" 2> "$JUNIT_DIR/shell.stderr" || rc=$?
   [ "$rc" -ne 0 ] && _tests_record_failure "Shell" "exit code ${rc}"
   return 0
 }

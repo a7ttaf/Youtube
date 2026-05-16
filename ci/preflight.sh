@@ -128,6 +128,16 @@ _xml_escape() {
   printf '%s' "$s"
 }
 
+_html_escape() {
+  local s="$1"
+  s="${s//&/&amp;}"
+  s="${s//</&lt;}"
+  s="${s//>/&gt;}"
+  s="${s//\"/&quot;}"
+  s="${s//\'/&#39;}"
+  printf '%s' "$s"
+}
+
 _changeset_content_hash() {
   local entries="$1"
   local status path extra
@@ -508,7 +518,7 @@ if type ci::changeset::detect >/dev/null 2>&1; then
     ci::changeset::emit_json || true
   fi
   # Fast-exit if no relevant files changed (applies to every mode except --all).
-  if [ "$RUN_ALL" -eq 0 ] && [ -z "${_CI_CHANGESET_FILES_RAW:-}" ]; then
+  if [ "$RUN_ALL" -eq 0 ] && [ -z "${_CI_CHANGESET_LANGUAGES:-}" ]; then
     echo "No relevant changes detected. Skipping gate."
     exit 0
   fi
@@ -877,12 +887,16 @@ INDEX_HTML="${CI_REPORT_DIR}/index.html"
       -e 's/"/\&quot;/g' \
       -e "s/'/\&#39;/g" \
       "$_log_file" 2>/dev/null || true)"
-    _html_rows="${_html_rows}<tr class=\"${_hrclass}\"><td>${_hrlabel}</td><td>${_hrstatus}</td><td>${_hrdur}s</td><td><details><summary>show log</summary><pre>${_log_content}</pre></details></td></tr>"
+    _html_rows="${_html_rows}<tr class=\"${_hrclass}\"><td>$(_html_escape "$_hrlabel")</td><td>$(_html_escape "$_hrstatus")</td><td>${_hrdur}s</td><td><details><summary>show log</summary><pre>${_log_content}</pre></details></td></tr>"
     _hridx=$(( _hridx + 1 ))
   done
 
   _res_class="pass"
   [ "$AGG_RESULT" -ne 0 ] && _res_class="fail"
+  _mode_html="$(_html_escape "$MODE")"
+  _result_html="$(_html_escape "$FINAL_RESULT_NAME")"
+  _changed_files_html="$(_html_escape "$CHANGED_FILES")"
+  _next_action_html="$(_html_escape "$NEXT_ACTION")"
 
   cat << ENDHTML
 <!DOCTYPE html>
@@ -909,7 +923,7 @@ INDEX_HTML="${CI_REPORT_DIR}/index.html"
 </head>
 <body>
 <h1>CI Gate Report</h1>
-<p><strong>Mode:</strong> ${MODE} | <strong>Result:</strong> <span class="badge ${_res_class}">${FINAL_RESULT_NAME}</span> | <strong>Duration:</strong> ${DURATION_SEC}s</p>
+<p><strong>Mode:</strong> ${_mode_html} | <strong>Result:</strong> <span class="badge ${_res_class}">${_result_html}</span> | <strong>Duration:</strong> ${DURATION_SEC}s</p>
 <table>
 <thead><tr><th>Check</th><th>Status</th><th>Duration</th><th>Log</th></tr></thead>
 <tbody>
@@ -917,9 +931,9 @@ ${_html_rows}
 </tbody>
 </table>
 <h2>Changed Files</h2>
-<pre>${CHANGED_FILES}</pre>
+<pre>${_changed_files_html}</pre>
 <h2>Next Action</h2>
-<p>${NEXT_ACTION}</p>
+<p>${_next_action_html}</p>
 </body>
 </html>
 ENDHTML

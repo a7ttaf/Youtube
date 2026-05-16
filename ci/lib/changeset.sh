@@ -259,11 +259,17 @@ ci::changeset::detect() {
       local rc=$?
       set -e
       if [ $rc -ne 0 ] || [ -z "$push_range" ]; then
+        local default_branch merge_base
+        default_branch="$(ci::changeset::_default_branch)"
         set +e
-        push_range="$(git rev-parse HEAD~1 2>/dev/null)"
+        merge_base="$(git merge-base HEAD "origin/${default_branch}" 2>/dev/null)"
         rc=$?
         set -e
-        [ $rc -ne 0 ] && push_range=""
+        if [ $rc -eq 0 ] && [ -n "$merge_base" ]; then
+          push_range="$merge_base"
+        else
+          push_range=""
+        fi
       fi
       if [ -n "$push_range" ]; then
         committed_entries="$(git diff --name-status "${push_range}..HEAD" 2>/dev/null)" || true
