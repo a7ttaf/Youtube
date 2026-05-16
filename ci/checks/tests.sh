@@ -23,7 +23,11 @@ OVERALL_RESULT=$CI_RESULT_PASS
 # ---------------------------------------------------------------------------
 AFFECTED_TESTS=""
 if type ci::affected::get_affected_tests >/dev/null 2>&1 && [ -f "ci/config/affected.yml" ]; then
-  _changed_files="$(git diff --cached --name-only 2>/dev/null || git diff --name-only 2>/dev/null || true)"
+  _changed_files="$(git diff --cached --name-only 2>/dev/null || true)"
+  if [ -z "$_changed_files" ]; then
+    ci::log::info "No staged files found; falling back to unstaged changes for ad-hoc test selection."
+    _changed_files="$(git diff --name-only 2>/dev/null || true)"
+  fi
   if [ -n "$_changed_files" ]; then
     AFFECTED_TESTS="$(while IFS= read -r f; do
       [ -n "$f" ] && ci::affected::get_affected_tests "$f"
