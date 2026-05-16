@@ -67,13 +67,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     VIRTUAL_ENV=/opt/venv \
     APP_HOME=/srv/app
 
-# Minimal runtime deps. asyncpg implements the PostgreSQL protocol directly,
+# Minimal runtime deps. psycopg pulls its client bindings from the Python wheel,
 # so the runtime does not need libpq or the psql client.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        ca-certificates=20250419 \
-        curl=8.14.1-2+deb13u2 \
-        tini=0.19.0-3+b6 \
+        ca-certificates \
+        curl \
+        tini \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid ${APP_UID} ${APP_USER} \
@@ -101,4 +101,4 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "-m", "uvicorn", "ums_smart_revenue.app:app", \
      "--host", "0.0.0.0", "--port", "8000", \
-     "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1"]
+     "--proxy-headers"]

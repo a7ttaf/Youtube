@@ -12,17 +12,19 @@
 #
 # Secrets: never bake real credentials into this file. Compose variables come
 # from the invoking shell or a local --env-file such as .env.local. Keep those
-# files untracked. Production uses Helm + External Secrets Operator
-# (see deploy/helm/).
+# files untracked. Use UMS_DB_PASSWORD for Postgres and UMS_DB_PASSWORD_URLENC
+# for the app DSN when the password contains URI-reserved characters.
+# Production uses Helm + External Secrets Operator (see deploy/helm/).
 
 name: ums-smart-revenue
 
 x-app-env: &app-env
-  UMS_DATABASE_URL: postgresql+asyncpg://${UMS_DB_USER:?Set UMS_DB_USER}:${UMS_DB_PASSWORD:?Set UMS_DB_PASSWORD}@postgres:5432/${UMS_DB_NAME:?Set UMS_DB_NAME}
+  UMS_DATABASE_URL: postgresql+psycopg://${UMS_DB_USER:?Set UMS_DB_USER}:${UMS_DB_PASSWORD_URLENC:?Set UMS_DB_PASSWORD_URLENC}@postgres:5432/${UMS_DB_NAME:?Set UMS_DB_NAME}
   UMS_AUTHZ_SOURCE: ${UMS_AUTHZ_SOURCE:-headers}
   UMS_TRUSTED_GATEWAY_TOKEN: ${UMS_TRUSTED_GATEWAY_TOKEN:?Set UMS_TRUSTED_GATEWAY_TOKEN}
   UMS_CORS_ALLOWED_ORIGINS: ${UMS_CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
   UMS_RATE_LIMIT_PER_MINUTE: ${UMS_RATE_LIMIT_PER_MINUTE:-120}
+  FORWARDED_ALLOW_IPS: ${UMS_FORWARDED_ALLOW_IPS:-127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
   REDIS_URL: redis://redis:6379/0
   PYTHONDONTWRITEBYTECODE: "1"
   PYTHONUNBUFFERED: "1"

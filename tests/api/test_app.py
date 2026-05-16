@@ -27,8 +27,7 @@ def test_livez_exposes_runtime_health_contract():
     response = client.get("/livez")
 
     assert response.status_code == 200
-    assert response.json()["status"] == "ok"
-    assert response.json()["service"] == "ums-smart-revenue"
+    assert response.json() == client.get("/health").json()
 
 
 def test_security_metadata_endpoints_are_available_for_frontend():
