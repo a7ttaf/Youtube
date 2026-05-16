@@ -106,6 +106,8 @@ tests::run_js() {
     else
       jest --ci ${jest_pattern:+$jest_pattern} || rc=$?
     fi
+  elif ci::common::command_exists npx && npx --no-install vitest --version >/dev/null 2>&1; then
+    npx --no-install vitest run --reporter=junit --outputFile="$JUNIT_DIR/js.xml" || rc=$?
   elif ci::common::command_exists vitest; then
     vitest run --reporter=junit --outputFile="$JUNIT_DIR/js.xml" || rc=$?
   else

@@ -92,8 +92,15 @@ if [ "$SKIP_INSTALL" = "0" ]; then
     ;;
   yarn)
     ci::common::command_exists yarn || { echo "yarn lockfile found but yarn is missing."; exit "$CI_RESULT_FAIL_INFRA"; }
-    echo "Installing dependencies: yarn install --immutable"
-    yarn install --immutable
+    YARN_VERSION="$(yarn --version 2>/dev/null || echo "0")"
+    YARN_MAJOR="${YARN_VERSION%%.*}"
+    if [ "$YARN_MAJOR" = "1" ]; then
+      echo "Installing dependencies: yarn install --frozen-lockfile"
+      yarn install --frozen-lockfile
+    else
+      echo "Installing dependencies: yarn install --immutable"
+      yarn install --immutable
+    fi
     ;;
   bun)
     ci::common::command_exists bun || { echo "bun lockfile found but bun is missing."; exit "$CI_RESULT_FAIL_INFRA"; }

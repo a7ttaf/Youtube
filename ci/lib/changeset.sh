@@ -250,6 +250,9 @@ ci::changeset::detect() {
   case "$mode" in
     pre-commit)
       raw_entries="$(git diff --cached --name-status 2>/dev/null)" || true
+      if [ -z "$raw_entries" ]; then
+        raw_entries="$(git diff --name-status 2>/dev/null)" || true
+      fi
       ;;
     pre-push)
       local push_range
