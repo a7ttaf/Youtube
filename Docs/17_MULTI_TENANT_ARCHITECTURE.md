@@ -55,7 +55,7 @@ Every existing **operational** table receives a `tenant_id UUID NOT NULL` FK. Ta
 | Receives `tenant_id` | Stays platform-wide |
 |---|---|
 | `youtube_channels`, `channel_groups`, `channel_group_members` | `tenants`, `currencies` |
-| `org_units`, `channel_mappings` | `permissions` (definition catalog) |
+| `org_units`, `youtube_channels` | `permissions` (definition catalog) |
 | `monthly_channel_revenue_facts`, `revenue_manual_overrides`, `adsense_payments`, `bank_reconciliation_entries`, `finance_month_close` | `roles` (definition catalog) |
 | `raw_report_files`, `number_explanations`, `export_jobs`, `api_connector_credentials` | `platform_audit_logs` |
 | `users`, `user_role_assignments`, `user_permission_grants`, `access_scopes` | |
@@ -95,7 +95,7 @@ Connection-pool config: the app uses `app_tenant`. Platform endpoints route thro
 
 ## Request path
 
-```
+```text
 HTTP request
     │
     ▼
@@ -153,7 +153,7 @@ A SQLAlchemy transaction-begin hook issues `SET LOCAL app.current_tenant_id = ..
 - The `roles` table stays platform-wide as the **definition** catalog. A `RoleKey` (e.g. `FINANCE_ADMIN`) is the same concept everywhere.
 - `user_role_assignments` carries `tenant_id` because the same `RoleKey` is granted **per-tenant**. UMS's `FINANCE_ADMIN` ≠ Rotana's `FINANCE_ADMIN`.
 - Scope objects (`access_scopes`) are also tenant-scoped (every concrete `company`/`sector`/`channel` value belongs to a single tenant).
-- Existing global uniqueness on `access_scopes` must be replaced with tenant-scoped uniqueness. The current singleton `global` scope becomes unique on `(tenant_id, scope_type)`; concrete scopes use `(tenant_id, scope_type, scope_value)` so every tenant can have its own `global` scope and its own channel/company/sector identifiers.
+- Existing global uniqueness on `access_scopes` must be replaced with tenant-scoped uniqueness. The current singleton `global` scope becomes unique on `(tenant_id, scope_type)`; concrete scopes use `(tenant_id, scope_type, scope_id)` so every tenant can have its own `global` scope and its own channel/company/sector identifiers.
 
 ### New role: `PLATFORM_ADMIN`
 
@@ -176,13 +176,14 @@ Implemented as coordinated Alembic revisions in Phase S2. Transactional DDL/data
 
 1. Create `tenants` table. Seed UMS as `('00000000-0000-0000-0000-000000000001', 'ums', 'UMS', 'USD')`.
 2. Create `platform_admins` table.
-3. For each tenant-scoped table:
+3. Create `platform_audit_logs` for tenant lifecycle, platform-admin, and cross-tenant operational audit events.
+4. For each tenant-scoped table:
    1. Add `tenant_id UUID NULL`.
    2. Add the FK to `tenants(id)` ON DELETE RESTRICT with `NOT VALID`.
    3. Add `CHECK (tenant_id IS NOT NULL) NOT VALID`.
-4. Create `app_tenant` and `app_platform` Postgres roles.
-5. Enable RLS on each tenant-scoped table; install isolation policy.
-6. Grant the right read/write surface to each role.
+5. Create `app_tenant` and `app_platform` Postgres roles.
+6. Enable RLS on each tenant-scoped table; install isolation policy.
+7. Grant the right read/write surface to each role.
 
 ### `20260520_0001b_multi_tenant_backfill`
 
@@ -190,7 +191,7 @@ Implemented as coordinated Alembic revisions in Phase S2. Transactional DDL/data
 2. Backfills all existing rows to UMS's tenant_id in 5,000-10,000 row batches, committing each batch.
 3. Validates the `tenants(id)` FKs and `tenant_id IS NOT NULL` checks.
 4. Sets `tenant_id` `NOT NULL` in short lock windows after validation succeeds.
-5. Convert tenant-scoped inter-table FKs from single-column references to composite tenant-aware references. For example, `channel_mappings.org_unit_id -> org_units(id)` becomes `(tenant_id, org_unit_id) -> org_units(tenant_id, id)`, backed by a unique key on `org_units(tenant_id, id)`, so database RI cannot cross tenant boundaries even when RLS is bypassed. For nullable actor references that currently use `ON DELETE SET NULL`, use column-targeted `SET NULL` on the actor id only or keep an equivalent action that never tries to null the non-null `tenant_id`.
+5. Convert tenant-scoped inter-table FKs from single-column references to composite tenant-aware references. For example, `youtube_channels.primary_org_unit_id -> org_units(id)` becomes `(tenant_id, primary_org_unit_id) -> org_units(tenant_id, id)`, backed by a unique key on `org_units(tenant_id, id)`, so database RI cannot cross tenant boundaries even when RLS is bypassed. For nullable actor references that currently use `ON DELETE SET NULL`, use column-targeted `SET NULL` on the actor id only or keep an equivalent action that never tries to null the non-null `tenant_id`.
 6. Re-key tenant-owned singleton tables. `finance_month_close` changes from a global primary key on `month` to a tenant-scoped key on `(tenant_id, month)` so multiple tenants can lock the same calendar month independently.
 7. Set `lock_timeout` before every DDL step so the migration fails fast instead of blocking production traffic.
 8. Replace the existing global `uq_users_email_lower` index with a tenant-scoped unique index on `(tenant_id, lower(email))`.

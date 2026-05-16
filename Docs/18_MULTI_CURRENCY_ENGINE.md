@@ -40,7 +40,7 @@ from decimal import Decimal, getcontext
 getcontext().prec = 28
 ```
 
-`float` is treated as a bug in money modules. mypy strict + a lint rule (`ruff` `PLW1641`) flag it.
+`float` is treated as a bug in money modules. `mypy --strict` stays enabled, and a repo-local AST guard blocks `float` annotations, `float()` casts, and float literals in money modules; ruff alone does not provide this domain-specific guarantee.
 
 ---
 
@@ -53,15 +53,16 @@ CREATE TABLE currencies (
     code            CHAR(3) PRIMARY KEY,
     numeric_code    CHAR(3) NOT NULL,
     name            TEXT NOT NULL,
-    minor_unit      SMALLINT NOT NULL,           -- 2 for USD, 0 for JPY/UYI, ...
+    minor_unit      SMALLINT,                    -- 2 for USD, 0 for JPY/UYI, NULL for ISO "N.A."
     is_supported    BOOLEAN NOT NULL DEFAULT FALSE,
     activated_at    TIMESTAMPTZ,
     CONSTRAINT ck_currencies_code_upper CHECK (code = upper(code)),
-    CONSTRAINT ck_currencies_minor_unit CHECK (minor_unit BETWEEN 0 AND 6)
+    CONSTRAINT ck_currencies_minor_unit CHECK (minor_unit IS NULL OR minor_unit BETWEEN 0 AND 6),
+    CONSTRAINT ck_currencies_supported_minor_unit CHECK (is_supported = FALSE OR minor_unit IS NOT NULL)
 );
 ```
 
-**v1.0 supported set (`is_supported = TRUE`):** `AED`, `USD`, `EUR`, `GBP`, `SAR`, `EGP`. Any other ISO code can be flipped on by a platform admin without code changes — the seed inserts the full ISO 4217 list as unsupported rows.
+**v1.0 supported set (`is_supported = TRUE`):** `AED`, `USD`, `EUR`, `GBP`, `SAR`, `EGP`. Any other ISO code can be flipped on by a platform admin without code changes — the seed inserts the full ISO 4217 list as unsupported rows. ISO entries with minor unit `N.A.` are stored with `minor_unit = NULL` and cannot be marked supported until finance defines an explicit display/rounding rule.
 
 ---
 
@@ -140,7 +141,7 @@ The settings model is validated by a Pydantic schema at write time and backed by
 
 ### Sync job
 
-Celery beat task `workers/fx_sync_job.py` runs daily at 02:00 UTC per tenant; pulls yesterday's rates for all (base, quote) pairs used by that tenant's data; writes to `fx_rates`. Idempotent per tenant: the `(tenant_id, provider, base, quote, as_of_date)` unique constraint ensures retries do not duplicate rates while allowing tenant-specific provider choices and manual overrides.
+Celery beat task `workers/fx_sync_job.py` runs daily at 02:00 UTC per tenant; pulls yesterday's rates for all (base_code, quote_code) pairs used by that tenant's data; writes to `fx_rates`. Idempotent per tenant: the `(tenant_id, provider, base_code, quote_code, as_of_date)` unique constraint ensures retries do not duplicate rates while allowing tenant-specific provider choices and manual overrides.
 
 ---
 
@@ -219,7 +220,7 @@ This guarantees that re-running last March's executive PDF a year later produces
 
 ### Request a value in a specific currency
 
-```
+```http
 GET /revenue/months/2026-04/net-revenue?currency=AED
 GET /revenue/months/2026-04/net-revenue
     Accept-Currency: AED
@@ -256,7 +257,7 @@ If the requested currency equals the native currency, `fx` is `null`.
 
 ### Endpoints for the engine itself
 
-```
+```http
 GET  /platform/currencies              # supported codes
 GET  /fx/rates?base=USD&quote=AED&from=2026-01-01&to=2026-04-30
 POST /fx/rates/manual-upload           # CSV; requires MANAGE_FX_RATES permission
