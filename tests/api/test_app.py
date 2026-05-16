@@ -1,3 +1,5 @@
+import os
+
 from fastapi.testclient import TestClient
 
 from ums_smart_revenue.app import create_app
@@ -38,7 +40,7 @@ def test_security_metadata_endpoints_are_available_for_frontend():
         "x-user-email": "user@example.com",
         "x-role": "super_owner",
         "x-scope-type": "global",
-        "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
+        "x-ums-trusted-gateway-token": os.environ["UMS_TRUSTED_GATEWAY_TOKEN"],
     }
     roles = client.get("/security/roles", headers=headers)
     permissions = client.get("/security/permissions", headers=headers)

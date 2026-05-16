@@ -1,0 +1,11 @@
+{
+  "name": "ci-gate-fixture-node",
+  "version": "1.0.0",
+  "description": "Node fixture for CI gate tests",
+  "scripts": {
+    "test": "node --test",
+    "lint": "echo 'lint placeholder'",
+    "typecheck": "echo 'typecheck placeholder'"
+  },
+  "license": "MIT"
+}

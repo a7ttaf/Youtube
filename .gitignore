@@ -1,18 +1,227 @@
+# Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
 .pytest_cache/
 .pytest-tmp/
-.ruff_cache/
-.venv/
+cover/
 
-node_modules/
-frontend/node_modules/
-frontend/dist/
-dist/
+# Translations
+*.mo
+*.pot
 
-.claude/
-CLAUDE.md
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+.pybuilder/
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+# poetry.lock should be committed; keep it tracked. Block local installer junk only.
+
+# pdm
+.pdm.toml
+.pdm-python
+.pdm-build/
+
+# PEP 582
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
 .env
 .env.*
 !.env.example
 !.env.*.example
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# pytype static type analyzer
+.pytype/
+
+# Cython debug symbols
+cython_debug/
+
+# Ruff
+.ruff_cache/
+
+# OS files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+desktop.ini
+
+# IDEs
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# Node / frontend (for the future frontend/ workspace)
+node_modules/
+.next/
+out/
+build/
+.turbo/
+.pnpm-store/
+*.tsbuildinfo
+.eslintcache
+.parcel-cache/
+
+# Playwright
+test-results/
+playwright-report/
+playwright/.cache/
+
+# Storybook
+storybook-static/
+
+# Local secrets and dumps
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+*.dump
+*.sql.gz
+*.bak
+
+# Docker
+.docker/
+docker-compose.override.yml
+
+# Helm
+deploy/helm/*/charts/
+deploy/helm/*/Chart.lock
+
+# Terraform (future)
+*.tfstate
+*.tfstate.*
+*.tfvars
+.terraform/
+.terraform.lock.hcl
+
+# k8s local
+kubeconfig
+*.kubeconfig
+
+# Local agent / tool runtime
+.claude/
+CLAUDE.md
+
+# Generated reports
+reports/local/
+
+# Logs
+logs/
+*.log
+
+# Diagnostic / scratch
+scratch/
+tmp/
+.scratch/

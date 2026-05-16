@@ -1,0 +1,23 @@
+# Paths to ignore during CI checks.
+# These are applied in addition to .ci-gateignore.
+# Uses gitignore-style glob patterns.
+
+paths:
+  - node_modules/
+  - .venv/
+  - venv/
+  - vendor/
+  - dist/
+  - build/
+  - coverage/
+  - htmlcov/
+  - .mypy_cache/
+  - .pytest_cache/
+  - __pycache__/
+  - "*.pyc"
+  - .git/
+  - "*.egg-info/"
+  - target/
+  - .cargo/
+  - .gradle/
+  - .mvn/
