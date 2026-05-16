@@ -18,7 +18,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
         "uvicorn[standard]==0.46.0",
         "SQLAlchemy==2.0.49",
         "alembic==1.18.4",
-        "asyncpg==0.31.0",
+        "psycopg[binary]==3.3.4",
         "celery==5.6.3",
         "redis==7.4.0",
         "openpyxl==3.1.5",

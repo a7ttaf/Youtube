@@ -1,11 +1,8 @@
-import asyncio
 import os
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
-from sqlalchemy.engine import make_url
-from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from ums_smart_revenue.db.explanation_models import ExplanationBase
 from ums_smart_revenue.db.finance_models import FinanceBase
@@ -37,10 +34,6 @@ def get_database_url() -> str:
     return url
 
 
-def is_async_database_url(url: str) -> bool:
-    return make_url(url).drivername in {"postgresql+asyncpg", "sqlite+aiosqlite"}
-
-
 def run_migrations_offline() -> None:
     url = get_database_url()
     context.configure(
@@ -61,26 +54,9 @@ def do_run_migrations(connection) -> None:
         context.run_migrations()
 
 
-async def run_async_migrations_online(configuration: dict[str, str]) -> None:
-    connectable = async_engine_from_config(
-        configuration,
-        prefix="sqlalchemy.",
-        poolclass=pool.NullPool,
-    )
-
-    async with connectable.connect() as connection:
-        await connection.run_sync(do_run_migrations)
-
-    await connectable.dispose()
-
-
 def run_migrations_online() -> None:
     configuration = config.get_section(config.config_ini_section, {})
     configuration["sqlalchemy.url"] = get_database_url()
-
-    if is_async_database_url(configuration["sqlalchemy.url"]):
-        asyncio.run(run_async_migrations_online(configuration))
-        return
 
     connectable = engine_from_config(
         configuration,
