@@ -51,7 +51,7 @@ In scope:
 
 Out of scope:
 
-- Third-party dependencies — please report upstream first. We do triage transitive risk via Dependabot + `pip-audit` + Trivy.
+- Third-party dependencies — report them through this policy as well; we triage deployed impact, coordinate upstream disclosure when needed, and track mitigation via Dependabot + `pip-audit` + Trivy.
 - Social-engineering attacks against staff.
 - Denial-of-service requiring sustained traffic the service is not provisioned to receive.
 - Issues in unsupported branches.
