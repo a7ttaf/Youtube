@@ -21,6 +21,27 @@ ci::common::command_exists() {
   command -v "$1" >/dev/null 2>&1
 }
 
+ci::common::hash_file() {
+  local file="$1"
+  local hash crc
+  if ci::common::command_exists sha256sum; then
+    sha256sum "$file" | cut -d' ' -f1
+  elif ci::common::command_exists shasum; then
+    shasum -a 256 "$file" | cut -d' ' -f1
+  elif ci::common::command_exists openssl; then
+    openssl dgst -sha256 "$file" | sed 's/^.*= //'
+  elif ci::common::command_exists md5sum; then
+    hash="$(md5sum "$file" | cut -d' ' -f1)"
+    printf '%064s\n' "$hash" | tr ' ' 0
+  elif ci::common::command_exists cksum; then
+    crc="$(cksum "$file" | awk '{print $1}')"
+    printf '%064x\n' "$crc"
+  else
+    echo "No supported hashing tool found." >&2
+    return 1
+  fi
+}
+
 ci::common::result_name() {
   case "${1:-999}" in
     "$CI_RESULT_PASS") echo "PASS" ;;
@@ -102,6 +123,17 @@ ci::common::now_iso_utc() {
   date -u '+%Y-%m-%dT%H:%M:%SZ'
 }
 
+ci::common::is_unsigned_int() {
+  case "${1:-}" in
+    ''|*[!0-9]*) return 1 ;;
+    *) return 0 ;;
+  esac
+}
+
+ci::common::warn_non_numeric_config() {
+  printf 'Ignoring non-numeric gate config %s: %s\n' "$1" "$2" >&2
+}
+
 # ci::common::load_gate_config <file> – simple grep-based YAML parser for gate.yml
 ci::common::load_gate_config() {
   local config_file="${1:-ci/config/gate.yml}"
@@ -119,16 +151,40 @@ ci::common::load_gate_config() {
     val="$(printf '%s' "$val" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')"
     case "$key" in
       parallelism)
-        [ -n "$val" ] && [ "$val" != "0" ] && export CI_GATE_PARALLEL="$val"
+        if [ -n "$val" ]; then
+          if ci::common::is_unsigned_int "$val"; then
+            [ "$val" != "0" ] && export CI_GATE_PARALLEL="$val"
+          else
+            ci::common::warn_non_numeric_config "$key" "$val"
+          fi
+        fi
         ;;
       default_timeout_sec)
-        [ -n "$val" ] && export CI_GATE_TIMEOUT="$val"
+        if [ -n "$val" ]; then
+          if ci::common::is_unsigned_int "$val"; then
+            export CI_GATE_TIMEOUT="$val"
+          else
+            ci::common::warn_non_numeric_config "$key" "$val"
+          fi
+        fi
         ;;
       pre_commit_budget_sec)
-        [ -n "$val" ] && export CI_GATE_PRE_COMMIT_BUDGET="$val"
+        if [ -n "$val" ]; then
+          if ci::common::is_unsigned_int "$val"; then
+            export CI_GATE_PRE_COMMIT_BUDGET="$val"
+          else
+            ci::common::warn_non_numeric_config "$key" "$val"
+          fi
+        fi
         ;;
       pre_push_budget_sec)
-        [ -n "$val" ] && export CI_GATE_PRE_PUSH_BUDGET="$val"
+        if [ -n "$val" ]; then
+          if ci::common::is_unsigned_int "$val"; then
+            export CI_GATE_PRE_PUSH_BUDGET="$val"
+          else
+            ci::common::warn_non_numeric_config "$key" "$val"
+          fi
+        fi
         ;;
       fail_fast_on_blocker)
         if [ "$val" = "true" ]; then export CI_GATE_FAIL_FAST=1; else export CI_GATE_FAIL_FAST=0; fi

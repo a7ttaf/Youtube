@@ -84,9 +84,8 @@ while IFS= read -r path; do
       ;;
   esac
 
-  safe_path="./$path"
-  if [ -f "$safe_path" ]; then
-    size_bytes="$(wc -c < "$safe_path" 2>/dev/null || echo 0)"
+  if git cat-file -e ":$path" 2>/dev/null; then
+    size_bytes="$(git cat-file -s ":$path" 2>/dev/null || echo 0)"
     if [ "${size_bytes:-0}" -gt 5242880 ]; then
       echo "Large staged file detected (>5MB): $path (${size_bytes} bytes)"
       LARGE_ARTIFACT_MATCH=1
@@ -100,6 +99,13 @@ secret_cleanup() {
 }
 trap secret_cleanup EXIT INT TERM
 printf '%s\n' "^\+.*(${CI_CHECKS_SECRET_PATTERN})" > "$secret_pattern_file"
+if ! grep -E -f "$secret_pattern_file" /dev/null >/dev/null 2>&1; then
+  rc=$?
+  if [ "$rc" -eq 2 ]; then
+    echo "CI_CHECKS_SECRET_PATTERN is not a valid extended regex."
+    exit "$CI_RESULT_FAIL_INFRA"
+  fi
+fi
 if git diff --cached -U0 | grep -E -f "$secret_pattern_file" >/dev/null 2>&1; then
   echo "Potential secret-like value detected in staged additions."
   SECRET_PATTERN_MATCH=1

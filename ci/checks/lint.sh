@@ -62,9 +62,9 @@ lint::run_shell() {
   ci::log::info "Running shellcheck on shell scripts..."
   local files=()
   if [ -n "${CI_GATE_CHANGED_FILES:-}" ]; then
-    for f in $CI_GATE_CHANGED_FILES; do
+    while IFS= read -r f; do
       [[ "$f" == *.sh ]] && [ -f "$f" ] && files+=("$f")
-    done
+    done <<< "$CI_GATE_CHANGED_FILES"
   else
     while IFS= read -r f; do
       files+=("$f")
@@ -95,9 +95,9 @@ lint::run_js() {
   ci::log::info "Running eslint on JS/TS files..."
   local args=()
   if [ -n "${CI_GATE_CHANGED_FILES:-}" ]; then
-    for f in $CI_GATE_CHANGED_FILES; do
+    while IFS= read -r f; do
       case "$f" in *.js|*.ts|*.tsx|*.jsx) [ -f "$f" ] && args+=("$f") ;; esac
-    done
+    done <<< "$CI_GATE_CHANGED_FILES"
     if [ "${#args[@]}" -eq 0 ]; then
       ci::log::info "No JS/TS changed files to lint."
       return 0
@@ -124,9 +124,9 @@ lint::run_python() {
   if ci::common::command_exists ruff; then
     if [ -n "${CI_GATE_CHANGED_FILES:-}" ]; then
       local pyfiles=()
-      for f in $CI_GATE_CHANGED_FILES; do
+      while IFS= read -r f; do
         [[ "$f" == *.py ]] && [ -f "$f" ] && pyfiles+=("$f")
-      done
+      done <<< "$CI_GATE_CHANGED_FILES"
       if [ "${#pyfiles[@]}" -eq 0 ]; then
         ci::log::info "No Python changed files to lint."
         return 0

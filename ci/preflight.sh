@@ -119,6 +119,29 @@ _json_escape() {
   printf '%s' "$s"
 }
 
+_xml_escape() {
+  local s="$1"
+  s="${s//&/&amp;}"
+  s="${s//</&lt;}"
+  s="${s//>/&gt;}"
+  s="${s//\"/&quot;}"
+  printf '%s' "$s"
+}
+
+_changeset_content_hash() {
+  local entries="$1"
+  local status path extra
+  local files=()
+  while IFS=$'\t' read -r status path extra; do
+    [ -z "$path" ] && continue
+    case "$status" in
+      R*|C*) [ -n "$extra" ] && path="$extra" ;;
+    esac
+    [ -f "$path" ] && files+=("$path")
+  done <<< "$entries"
+  ci::cache::_sha256 "${entries}:$(ci::cache::hash_files "${files[@]}")"
+}
+
 # ---------------------------------------------------------------------------
 # Result tracking
 # ---------------------------------------------------------------------------
@@ -249,7 +272,15 @@ _check_should_skip() {
     local found=0
     local ck
     for ck in $_CI_CHANGESET_CHECKS; do
-      [ "$ck" = "$label" ] && found=1 && break
+      case "${label}:${ck}" in
+        "$label:$label" | \
+        node:lint-js | node:typecheck-js | node:format-js | node:tests-js | \
+        python:lint-python | python:typecheck-python | python:format-python | python:tests-python | \
+        build:lint-shell | build:format-shell | build:lint-docker | build:lint-yaml | build:lint-markdown | build:lint-actions)
+          found=1
+          break
+          ;;
+      esac
     done
     if [ "$found" = "0" ]; then
       # Always-run checks are never skipped by changeset
@@ -306,7 +337,7 @@ run_phase() {
       esac
       local files_hash=""
       if [ -n "${_CI_CHANGESET_FILES_RAW:-}" ]; then
-        files_hash="$(ci::cache::_sha256 "$_CI_CHANGESET_FILES_RAW")"
+        files_hash="$(_changeset_content_hash "$_CI_CHANGESET_FILES_RAW")"
       else
         files_hash="$(git rev-parse HEAD 2>/dev/null || echo 'none')"
       fi
@@ -329,10 +360,16 @@ run_phase() {
           # Write cached output to runner log file so get_output works
           local log_file="${CI_REPORT_DIR}/${label}.log"
           printf '%s' "$cached_output" > "$log_file"
-          printf '%d' "$$" > "${_CI_RUNNER_JOBS_DIR}/${label}.pid"
-          printf '%d' "$cached_rc" > "${_CI_RUNNER_JOBS_DIR}/${label}.rc"
-          printf '%s' "$(date '+%s')" > "${_CI_RUNNER_JOBS_DIR}/${label}.start"
-          printf '%s' "$(date '+%s')" > "${_CI_RUNNER_JOBS_DIR}/${label}.end"
+          if [ -z "${_CI_RUNNER_JOBS_DIR:-}" ]; then
+            _ensure_runner_init
+          fi
+          if [ -n "${_CI_RUNNER_JOBS_DIR:-}" ]; then
+            mkdir -p "$_CI_RUNNER_JOBS_DIR"
+            printf '%d' "$$" > "${_CI_RUNNER_JOBS_DIR}/${label}.pid"
+            printf '%d' "$cached_rc" > "${_CI_RUNNER_JOBS_DIR}/${label}.rc"
+            printf '%s' "$(date '+%s')" > "${_CI_RUNNER_JOBS_DIR}/${label}.start"
+            printf '%s' "$(date '+%s')" > "${_CI_RUNNER_JOBS_DIR}/${label}.end"
+          fi
         fi
       fi
     fi
@@ -384,7 +421,7 @@ run_phase() {
       esac
       local files_hash=""
       if [ -n "${_CI_CHANGESET_FILES_RAW:-}" ]; then
-        files_hash="$(ci::cache::_sha256 "$_CI_CHANGESET_FILES_RAW")"
+        files_hash="$(_changeset_content_hash "$_CI_CHANGESET_FILES_RAW")"
       else
         files_hash="$(git rev-parse HEAD 2>/dev/null || echo 'none')"
       fi
@@ -725,9 +762,9 @@ JUNIT_XML="${CI_REPORT_DIR}/junit.xml"
   _total_count="${#COMMANDS_RUN[@]}"
   printf '<?xml version="1.0" encoding="UTF-8"?>\n'
   printf '<testsuites name="ci-gate-%s" tests="%d" failures="%d" time="%d">\n' \
-    "$MODE" "$_total_count" "$_fail_count" "$DURATION_SEC"
+    "$(_xml_escape "$MODE")" "$_total_count" "$_fail_count" "$DURATION_SEC"
   printf '  <testsuite name="ci-gate-%s" tests="%d" failures="%d" time="%d">\n' \
-    "$MODE" "$_total_count" "$_fail_count" "$DURATION_SEC"
+    "$(_xml_escape "$MODE")" "$_total_count" "$_fail_count" "$DURATION_SEC"
   _juidx=0
   while [ "$_juidx" -lt "${#_TIMING_LABELS[@]}" ]; do
     _julabel="${_TIMING_LABELS[$_juidx]}"
@@ -735,11 +772,12 @@ JUNIT_XML="${CI_REPORT_DIR}/junit.xml"
     _juend="${_TIMING_ENDS[$_juidx]}"
     _jurc="${_TIMING_RESULTS[$_juidx]}"
     _judur=$(( _juend - _justart ))
+    _julabel_escaped="$(_xml_escape "$_julabel")"
     if [ "$_jurc" -eq 0 ] || [ "$_jurc" -eq 10 ]; then
-      printf '    <testcase name="%s" time="%d"/>\n' "$_julabel" "$_judur"
+      printf '    <testcase name="%s" time="%d"/>\n' "$_julabel_escaped" "$_judur"
     else
-      printf '    <testcase name="%s" time="%d">\n' "$_julabel" "$_judur"
-      printf '      <failure message="Check %s failed with exit code %d"/>\n' "$_julabel" "$_jurc"
+      printf '    <testcase name="%s" time="%d">\n' "$_julabel_escaped" "$_judur"
+      printf '      <failure message="Check %s failed with exit code %d"/>\n' "$_julabel_escaped" "$_jurc"
       printf '    </testcase>\n'
     fi
     _juidx=$(( _juidx + 1 ))

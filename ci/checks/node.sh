@@ -70,7 +70,7 @@ fi
 
 SKIP_INSTALL=0
 if [ -n "$LOCKFILE" ] && [ -d "node_modules" ] && [ -f ".ci-gate/node_modules.hash" ]; then
-  CURRENT_HASH="$(sha256sum "$LOCKFILE" | cut -d' ' -f1)"
+  CURRENT_HASH="$(ci::common::hash_file "$LOCKFILE")"
   CACHED_HASH="$(cat .ci-gate/node_modules.hash)"
   if [ "$CURRENT_HASH" = "$CACHED_HASH" ]; then
     echo "node_modules up to date. Skipping install."
@@ -103,10 +103,14 @@ if [ "$SKIP_INSTALL" = "0" ]; then
   esac
 
   mkdir -p .ci-gate
-  sha256sum "$LOCKFILE" | cut -d' ' -f1 > .ci-gate/node_modules.hash
+  ci::common::hash_file "$LOCKFILE" > .ci-gate/node_modules.hash
 fi
 
-PACKAGE_SCRIPTS="$(node -e "const p=require('./package.json'); console.log(Object.keys(p.scripts||{}).join('\n'))")"
+PACKAGE_SCRIPTS="$(node -e "try{const p=require('./package.json');console.log(Object.keys(p.scripts||{}).join('\n'))}catch(e){console.error('Invalid package.json:',e.message);process.exit(1)}" 2>&1)" || {
+  echo "$PACKAGE_SCRIPTS" >&2
+  echo "Failed to read scripts from package.json."
+  exit "$CI_RESULT_FAIL_INFRA"
+}
 
 script_exists() {
   local script_name="$1"

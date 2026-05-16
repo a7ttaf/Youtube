@@ -120,6 +120,7 @@ ci::yaml::get_nested() {
     case "$line" in
       ' '*|$'\t'*) : ;;
       *)
+        local stripped_tl
         stripped_tl="${stripped#"${stripped%%[! ]*}"}"
         if [ -z "$stripped_tl" ]; then
           continue

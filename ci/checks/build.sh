@@ -42,9 +42,9 @@ for script in "${syntax_targets[@]}"; do
 done
 
 if ci::common::command_exists shellcheck; then
-  echo "Running: shellcheck on CI scripts (advisory; hard-fail enforcement is in the CI workflow)"
+  echo "Running: shellcheck on CI scripts"
   if [ "${#syntax_targets[@]}" -gt 0 ]; then
-    shellcheck -x -e SC1090,SC1091,SC1094 "${syntax_targets[@]}" || true
+    shellcheck -x -e SC1090,SC1091,SC1094 "${syntax_targets[@]}"
   else
     echo "No shellcheck targets found."
   fi

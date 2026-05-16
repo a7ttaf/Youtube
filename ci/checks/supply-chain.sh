@@ -47,6 +47,8 @@ _sc_check_npm() {
     else
       ci::log::info "npm lockfile OK"
     fi
+  elif [ -f package-lock.json ] || [ -f npm-shrinkwrap.json ]; then
+    _sc_warn "npm lockfile present but npm is not installed; integrity check skipped"
   fi
 }
 

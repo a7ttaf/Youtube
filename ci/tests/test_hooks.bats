@@ -12,20 +12,24 @@ setup() {
 
 @test "hook: pre-commit hook has correct syntax" {
   [ -f "$REPO_ROOT/.githooks/pre-commit" ]
+  [ -x "$REPO_ROOT/.githooks/pre-commit" ]
   bash -n "$REPO_ROOT/.githooks/pre-commit"
 }
 
 @test "hook: commit-msg hook has correct syntax" {
   [ -f "$REPO_ROOT/.githooks/commit-msg" ]
+  [ -x "$REPO_ROOT/.githooks/commit-msg" ]
   bash -n "$REPO_ROOT/.githooks/commit-msg"
 }
 
 @test "hook: prepare-commit-msg hook has correct syntax" {
   [ -f "$REPO_ROOT/.githooks/prepare-commit-msg" ]
+  [ -x "$REPO_ROOT/.githooks/prepare-commit-msg" ]
   bash -n "$REPO_ROOT/.githooks/prepare-commit-msg"
 }
 
 @test "hook: pre-push hook has correct syntax" {
   [ -f "$REPO_ROOT/.githooks/pre-push" ]
+  [ -x "$REPO_ROOT/.githooks/pre-push" ]
   bash -n "$REPO_ROOT/.githooks/pre-push"
 }

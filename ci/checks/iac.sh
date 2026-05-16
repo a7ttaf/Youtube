@@ -40,7 +40,11 @@ _iac_run_tflint() {
   fi
   ci::log::info "Running tflint..."
   local rc=0
-  tflint --recursive 2>/dev/null || tflint || rc=$?
+  if tflint --help 2>/dev/null | grep -q -- '--recursive'; then
+    tflint --recursive || rc=$?
+  else
+    tflint || rc=$?
+  fi
   if [ "$rc" -ne 0 ]; then
     OVERALL_RESULT="$(ci::common::merge_results "$OVERALL_RESULT" "$CI_RESULT_FAIL_NEW_ISSUE")"
   fi

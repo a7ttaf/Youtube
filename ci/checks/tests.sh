@@ -96,9 +96,12 @@ tests::run_js() {
     [ -n "$jest_pattern" ] && jest_pattern="--testPathPattern=${jest_pattern}"
   fi
   if ci::common::command_exists jest; then
-    JEST_JUNIT_OUTPUT_FILE="$JUNIT_DIR/js.xml" \
-      jest --ci --reporters=default --reporters=jest-junit ${jest_pattern:+$jest_pattern} 2>/dev/null || \
-      jest --ci ${jest_pattern:+$jest_pattern} 2>&1 || rc=$?
+    if ci::common::command_exists node && node -e "require.resolve('jest-junit')" >/dev/null 2>&1; then
+      JEST_JUNIT_OUTPUT_FILE="$JUNIT_DIR/js.xml" \
+        jest --ci --reporters=default --reporters=jest-junit ${jest_pattern:+$jest_pattern} || rc=$?
+    else
+      jest --ci ${jest_pattern:+$jest_pattern} || rc=$?
+    fi
   elif ci::common::command_exists vitest; then
     vitest run --reporter=junit --outputFile="$JUNIT_DIR/js.xml" || rc=$?
   else

@@ -29,7 +29,7 @@ fi
 if [ -f requirements.txt ]; then
   SKIP_INSTALL=0
   if [ -d ".venv" ] && [ -f ".ci-gate/venv.hash" ]; then
-    CURRENT_HASH="$(sha256sum requirements.txt | cut -d' ' -f1)"
+    CURRENT_HASH="$(ci::common::hash_file requirements.txt)"
     CACHED_HASH="$(cat .ci-gate/venv.hash)"
     if [ "$CURRENT_HASH" = "$CACHED_HASH" ]; then
       echo ".venv up to date. Skipping install."
@@ -49,7 +49,7 @@ if [ -f requirements.txt ]; then
       exit "$CI_RESULT_FAIL_INFRA"
     fi
     mkdir -p .ci-gate
-    sha256sum requirements.txt | cut -d' ' -f1 > .ci-gate/venv.hash
+    ci::common::hash_file requirements.txt > .ci-gate/venv.hash
   fi
 fi
 

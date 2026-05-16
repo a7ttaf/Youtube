@@ -253,6 +253,7 @@ ci::changeset::detect() {
       ;;
     pre-push)
       local push_range
+      local committed_entries="" staged_entries=""
       set +e
       push_range="$(git rev-parse --abbrev-ref '@{push}' 2>/dev/null)"
       local rc=$?
@@ -265,7 +266,17 @@ ci::changeset::detect() {
         [ $rc -ne 0 ] && push_range=""
       fi
       if [ -n "$push_range" ]; then
-        raw_entries="$(git diff --name-status "${push_range}..HEAD" 2>/dev/null)" || true
+        committed_entries="$(git diff --name-status "${push_range}..HEAD" 2>/dev/null)" || true
+      fi
+      staged_entries="$(git diff --cached --name-status 2>/dev/null)" || true
+      raw_entries="$committed_entries"
+      if [ -n "$staged_entries" ]; then
+        if [ -n "$raw_entries" ]; then
+          raw_entries="${raw_entries}
+${staged_entries}"
+        else
+          raw_entries="$staged_entries"
+        fi
       fi
       ;;
     pr)
@@ -324,10 +335,19 @@ ci::changeset::emit_json() {
   local status path lang file_checks checks_json
 
   if [ -n "$_CI_CHANGESET_FILES_RAW" ]; then
-    while IFS=$'\t' read -r status path; do
+    while IFS=$'\t' read -r status path extra; do
       [ -z "$path" ] && continue
       # Rename status: R100\t... -> R
-      case "$status" in R*) status="R" ;; esac
+      case "$status" in
+        R*)
+          status="R"
+          [ -n "$extra" ] && path="$extra"
+          ;;
+        C*)
+          status="C"
+          [ -n "$extra" ] && path="$extra"
+          ;;
+      esac
 
       ci::changeset::should_ignore "$path" && continue
 

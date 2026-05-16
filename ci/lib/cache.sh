@@ -12,28 +12,51 @@ CI_GATE_CACHE_DIR="${CI_GATE_CACHE_DIR:-${HOME}/.cache/ci-gate}"
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+ci::cache::_pad_hex64() {
+  printf '%064s' "$1" | tr ' ' 0
+}
+
 # ci::cache::_sha256  – compute sha256 of a string
 ci::cache::_sha256() {
   local input="$1"
+  local hash crc
   if command -v sha256sum >/dev/null 2>&1; then
     printf '%s' "$input" | sha256sum | cut -d' ' -f1
   elif command -v shasum >/dev/null 2>&1; then
     printf '%s' "$input" | shasum -a 256 | cut -d' ' -f1
+  elif command -v openssl >/dev/null 2>&1; then
+    printf '%s' "$input" | openssl dgst -sha256 -r | awk '{print $1}'
+  elif command -v md5sum >/dev/null 2>&1; then
+    hash="$(printf '%s' "$input" | md5sum | cut -d' ' -f1)"
+    ci::cache::_pad_hex64 "$hash"
+  elif command -v cksum >/dev/null 2>&1; then
+    crc="$(printf '%s' "$input" | cksum | awk '{print $1}')"
+    printf '%064x' "$crc"
   else
-    # Fallback: use cksum (not cryptographic but better than nothing)
-    printf '%s' "$input" | cksum | cut -d' ' -f1
+    echo "No supported hashing tool found." >&2
+    return 1
   fi
 }
 
 # ci::cache::_sha256_file  – compute sha256 of a file
 ci::cache::_sha256_file() {
   local file="$1"
+  local hash crc
   if command -v sha256sum >/dev/null 2>&1; then
     sha256sum "$file" | cut -d' ' -f1
   elif command -v shasum >/dev/null 2>&1; then
     shasum -a 256 "$file" | cut -d' ' -f1
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 "$file" | sed 's/^.*= //'
+  elif command -v md5sum >/dev/null 2>&1; then
+    hash="$(md5sum "$file" | cut -d' ' -f1)"
+    ci::cache::_pad_hex64 "$hash"
+  elif command -v cksum >/dev/null 2>&1; then
+    crc="$(cksum "$file" | awk '{print $1}')"
+    printf '%064x' "$crc"
   else
-    cksum "$file" | cut -d' ' -f1
+    echo "No supported hashing tool found." >&2
+    return 1
   fi
 }
 
