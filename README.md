@@ -69,11 +69,6 @@ uv run pytest -q tests/api
 | `UMS_DATABASE_URL` | yes (prod) | none | SQLAlchemy URL for PostgreSQL. Use `postgresql+asyncpg://…` for the async driver. |
 | `UMS_AUTHZ_SOURCE` | no | `headers` | `headers` for dev/bootstrap, `database` for production (loads principal + roles from SQL). |
 | `UMS_TRUSTED_GATEWAY_TOKEN` | no | none | Shared secret asserted by the upstream identity gateway. Required in `database` mode. |
-| `UMS_DEFAULT_TENANT_SLUG` | no | `ums` | Slug of the default tenant when running in single-tenant mode. |
-| `UMS_CORS_ALLOWED_ORIGINS` | no | empty | Comma-separated list of allowed origins for browser clients. |
-| `UMS_OTLP_ENDPOINT` | no | none | OpenTelemetry collector endpoint (`http://otel-collector:4317`). |
-| `UMS_RATE_LIMIT_PER_MINUTE` | no | `120` | Per-principal rate cap. |
-| `REDIS_URL` | no | `redis://redis:6379/0` | Used by Celery + SSE pub/sub. |
 
 **Never commit `.env` files.** Use the `.env.example` template, copy locally, and let the secrets layer (Vault / External Secrets Operator) provide them in clusters.
 
@@ -130,7 +125,7 @@ For the full role/permission matrix, see [Docs/security/PERMISSION_MATRIX.md](Do
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: branch from `main`, pass `uv run pytest`, `uv run ruff check`, `uv run mypy backend`, `uv run bandit -r backend`, `uv run sqlfluff lint`, run `gitleaks` before push, get a CodeRabbit pass, and request review from a `CODEOWNERS` reviewer for the touched area.
+See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: branch from `main`, pass `uv run pytest`, `uv run ruff check`, `uv run mypy backend`, get a CodeRabbit pass, and request review from a `CODEOWNERS` reviewer for the touched area.
 
 ## Security
 

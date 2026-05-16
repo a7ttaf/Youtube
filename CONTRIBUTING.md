@@ -51,7 +51,7 @@ Scopes (common): `auth`, `revenue`, `finance-close`, `connectors`, `exports`, `d
 
 A PR is mergeable when **all** of the following are true:
 
-- [ ] **CI is green** (`ci.yml`).
+- [ ] **Project-declared validation is green** (`uv run pytest`, `uv run ruff check`, `uv run mypy backend`; plus CI workflows once they exist).
 - [ ] **CodeRabbit review** has no unresolved blocking comments.
 - [ ] **Tests cover the change** — unit + integration where boundaries are involved. Money math gets property-based coverage via `hypothesis`.
 - [ ] **`mypy` is strict-clean** on touched modules.
@@ -69,7 +69,7 @@ A PR is mergeable when **all** of the following are true:
 |---|---|
 | Lint | `ruff` (config in `pyproject.toml`); no warnings ignored without inline justification. |
 | Types | `mypy --strict` on `backend/ums_smart_revenue/finance/`, `auth/`, `tenancy/`, `db/`. |
-| SQL | `sqlfluff` Postgres dialect. |
+| SQL | Prefer Postgres-compatible SQL; add a declared SQL linter before making it a required gate. |
 | Logging | `structlog` with bound context (`request_id`, `tenant_id`, `user_id`); never `print`. |
 | Errors | Raise domain-specific exceptions; never swallow without log + reraise. |
 | Comments | Only where the **why** is non-obvious; describe invariants, not what the code does. |
@@ -90,9 +90,9 @@ A PR is mergeable when **all** of the following are true:
 - **Never** edit an already-merged Alembic migration. Add a follow-up.
 - **Never** introduce a flag/feature/code path you don't intend to ship — no dead code, no half-stubs, no `pass # TODO`.
 - **Never** widen a permission decorator without a paired test that proves the negative.
-- **Never** commit a file containing a real token, key, or password. Pre-commit `gitleaks` will catch most cases; treat it as a hard stop, not a hint.
+- **Never** commit a file containing a real token, key, or password. Run an available secret scanner before pushing until repository-managed hooks are added.
 
-If `gitleaks` flags something committed earlier in the branch, the answer is rotate the secret in upstream systems first, then rewrite history. Open a security incident, do not just `git push --force`.
+If a secret scanner flags something committed earlier in the branch, the answer is rotate the secret in upstream systems first, then rewrite history. Open a security incident, do not just `git push --force`.
 
 ## Reporting security issues
 
