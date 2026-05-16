@@ -8,6 +8,7 @@ from ums_smart_revenue.db.finance_models import FinanceBase
 from ums_smart_revenue.db.org_models import OrgBase
 from ums_smart_revenue.db.report_models import ReportBase
 from ums_smart_revenue.db.security_models import SecurityBase
+from ums_smart_revenue.db.tenant_models import TenantBase
 
 
 config = context.config
@@ -21,6 +22,7 @@ target_metadata = [
     FinanceBase.metadata,
     ReportBase.metadata,
     ExplanationBase.metadata,
+    TenantBase.metadata,
 ]
 
 
