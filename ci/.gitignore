@@ -1,0 +1,25 @@
+# Elite-CI artifacts — directory trees committed via .gitkeep, contents ignored.
+
+artifacts/*
+!artifacts/.gitkeep
+
+reports/*
+!reports/.gitkeep
+!reports/baseline-current-state.md
+!reports/junit/
+!reports/sarif/
+
+reports/junit/*
+!reports/junit/.gitkeep
+
+reports/sarif/*
+!reports/sarif/.gitkeep
+
+# Local cache used by lib/cache.sh
+.ci-gate/
+
+# Worktree-local uv dirs (only created on Windows when make's HOME is broken;
+# the Makefile points uv at these to keep its caches off $HOME=/).
+# These live in the repo root, not under ci/, so they're a no-op in this
+# nested .gitignore. The repo-root .gitignore (PR S1.1) lists them too.
+

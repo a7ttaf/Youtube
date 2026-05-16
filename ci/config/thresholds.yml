@@ -1,0 +1,27 @@
+# Quality thresholds enforced by the CI gate.
+
+coverage:
+  # Minimum overall line coverage percentage (0 to disable)
+  minimum_percent: 80
+  # Maximum allowed drop in coverage vs main branch
+  max_delta_percent: 5
+  # Per-language overrides
+  python_minimum_percent: 85
+  javascript_minimum_percent: 80
+  go_minimum_percent: 85
+
+diff:
+  # Maximum allowed lines changed in a single commit (0 to disable)
+  max_lines: 1000
+  # Warn (not fail) at this threshold
+  warn_lines: 500
+
+complexity:
+  # Maximum cyclomatic complexity per function (0 to disable)
+  max_per_function: 20
+
+commit:
+  # Maximum commit message subject line length
+  max_subject_length: 72
+  # Minimum commit message subject line length
+  min_subject_length: 10

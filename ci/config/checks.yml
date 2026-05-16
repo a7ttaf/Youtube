@@ -1,0 +1,202 @@
+# Per-check enable/disable toggles and overrides.
+# severity: blocker | warning | advisory
+# required: true means fail if tool is missing (default: false = skip gracefully)
+#
+# UMS configuration: only Python + shell + yaml + actions + markdown lanes are
+# enabled. JS / Go / Rust / IaC / container lanes are disabled because the
+# v1.0 stack is FastAPI / SQLAlchemy / Alembic on Python 3.14. Re-enable a
+# lane by flipping its `enabled` field to `true`. See ci/UMS_INTEGRATION.md.
+
+checks:
+  # --- Lint ---
+  lint-shell:
+    enabled: true
+    severity: blocker
+    required: false
+    tool: shellcheck
+    timeout_sec: 60
+
+  lint-js:
+    enabled: false  # UMS: no JS in v1.0 (frontend lands in Phase 5)
+    severity: blocker
+    required: false
+    tool: eslint
+
+  lint-python:
+    enabled: true
+    severity: blocker
+    required: false
+    tool: ruff
+
+  lint-go:
+    enabled: false  # UMS: no Go in this project
+    severity: blocker
+    required: false
+    tool: golangci-lint
+
+  lint-rust:
+    enabled: false  # UMS: no Rust in this project
+    severity: blocker
+    required: false
+    tool: clippy
+
+  lint-docker:
+    enabled: true
+    severity: warning
+    required: false
+    tool: hadolint
+
+  lint-yaml:
+    enabled: true
+    severity: warning
+    required: false
+    tool: yamllint
+
+  lint-markdown:
+    enabled: true
+    severity: advisory
+    required: false
+    tool: markdownlint
+
+  lint-actions:
+    enabled: true
+    severity: warning
+    required: false
+    tool: actionlint
+
+  # --- Typecheck ---
+  typecheck-js:
+    enabled: false  # UMS: no JS in v1.0
+    severity: blocker
+    required: false
+    tool: tsc
+
+  typecheck-python:
+    enabled: true
+    severity: warning
+    required: false
+    tool: mypy
+
+  typecheck-go:
+    enabled: false  # UMS: no Go in this project
+    severity: blocker
+    required: false
+    tool: go-vet
+
+  typecheck-rust:
+    enabled: false  # UMS: no Rust in this project
+    severity: blocker
+    required: false
+    tool: cargo-check
+
+  # --- Format ---
+  format-shell:
+    enabled: true
+    severity: blocker
+    required: false
+    tool: shfmt
+
+  format-js:
+    enabled: false  # UMS: no JS in v1.0
+    severity: blocker
+    required: false
+    tool: prettier
+
+  format-python:
+    enabled: true
+    severity: blocker
+    required: false
+    tool: ruff  # UMS uses `ruff format`, not black
+
+  format-go:
+    enabled: false  # UMS: no Go in this project
+    severity: blocker
+    required: false
+    tool: gofmt
+
+  format-rust:
+    enabled: false  # UMS: no Rust in this project
+    severity: blocker
+    required: false
+    tool: rustfmt
+
+  # --- Tests ---
+  tests-js:
+    enabled: false  # UMS: no JS in v1.0
+    severity: blocker
+    required: false
+
+  tests-python:
+    enabled: true
+    severity: blocker
+    required: false
+
+  tests-go:
+    enabled: false  # UMS: no Go in this project
+    severity: blocker
+    required: false
+
+  tests-rust:
+    enabled: false  # UMS: no Rust in this project
+    severity: blocker
+    required: false
+
+  tests-shell:
+    enabled: true
+    severity: blocker
+    required: false
+    tool: bats
+
+  # --- Coverage ---
+  coverage:
+    enabled: true
+    severity: warning
+    required: false
+
+  # --- Security/SAST ---
+  sast:
+    enabled: true
+    severity: blocker
+    required: false
+
+  # --- Secrets ---
+  secrets:
+    enabled: true
+    severity: blocker
+    required: false
+
+  # --- License ---
+  license:
+    enabled: true
+    severity: warning
+    required: false
+
+  # --- Supply Chain ---
+  supply-chain:
+    enabled: true
+    severity: warning
+    required: false
+
+  # --- Container ---
+  container:
+    enabled: false  # UMS: re-enable once hadolint is wired into the gate
+    severity: warning
+    required: false
+
+  # --- IaC ---
+  iac:
+    enabled: false  # UMS: re-enable once Helm/Terraform land in Phase S2
+    severity: warning
+    required: false
+
+  # --- Commit hygiene ---
+  commit-hygiene:
+    enabled: true
+    severity: blocker
+    required: false
+
+  # --- Branch protection simulation ---
+  branch-protection:
+    enabled: true
+    severity: blocker
+    required: false
