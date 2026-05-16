@@ -14,7 +14,7 @@ This service ingests YouTube + AdSense data, reconciles it against bank movement
 | Frontend | Next.js 16 · React 19 · TypeScript 6 *(in progress — Phase 5)* |
 | Storage | PostgreSQL 18 (single source of truth) · Redis 8.6 (cache + pub/sub) · MinIO (S3-compatible object store, future) |
 | Background jobs | Celery 5.6 *(workers wired in Phase 2)* |
-| Multi-tenant | Postgres Row-Level Security with `tenant_id` column on every tenant-scoped table |
+| Multi-tenant | Planned Phase S2: Postgres Row-Level Security with `tenant_id` on tenant-scoped tables |
 | Multi-currency | AED · USD · EUR · GBP · SAR · EGP — extensible. All math in `Decimal`. |
 | Auth modes | `headers` (dev / bootstrap) · `database` (production; SQL-backed principal) |
 | License | See [LICENSE](LICENSE) |
@@ -68,7 +68,7 @@ uv run pytest -q tests/api
 |---|---|---|---|
 | `UMS_DATABASE_URL` | yes (prod) | none | SQLAlchemy URL for PostgreSQL. Use `postgresql+asyncpg://…` for the async driver. |
 | `UMS_AUTHZ_SOURCE` | no | `headers` | `headers` for dev/bootstrap, `database` for production (loads principal + roles from SQL). |
-| `UMS_TRUSTED_GATEWAY_TOKEN` | no | none | Shared secret asserted by the upstream identity gateway. Required in `database` mode. |
+| `UMS_TRUSTED_GATEWAY_TOKEN` | yes for protected routes | none | Shared secret asserted by the upstream identity gateway. Required for both `headers` bootstrap auth and `database` auth. |
 
 **Never commit `.env` files.** Use the `.env.example` template, copy locally, and let the secrets layer (Vault / External Secrets Operator) provide them in clusters.
 
@@ -99,7 +99,7 @@ deploy/helm/              Helm chart for Kubernetes (in progress)
 
 ## How the auth model works (one-paragraph version)
 
-A `Principal` has `tenant_id`, roles, and direct permission grants. Roles are tenant-scoped (e.g. `FINANCE_ADMIN` of UMS ≠ `FINANCE_ADMIN` of Rotana). Each protected route declares the permission it needs (`require_permission(Permission.LOCK_FINANCE_MONTH)`) plus, often, a scope predicate (`can_view_channel_revenue(principal, channel_id)`). The `auth/policy.py` module is the single source of truth for that decision. Every sensitive read or write writes an `AuditLogEntry` with the actor, scope, sensitive flag, and (for writes) a non-blank reason. Production runs `UMS_AUTHZ_SOURCE=database` so headers cannot be spoofed.
+A `Principal` has a user id, email, role assignments, and direct permission grants. Role assignments and direct grants carry an access scope (global, company, sector, channel, finance month, or connector); tenant-id modeling is planned for Phase S2 and is not yet an implemented isolation guarantee. Each protected route declares the permission it needs (`require_permission(Permission.LOCK_FINANCE_MONTH)`) plus, often, a scope predicate (`can_view_channel_revenue(principal, channel_id)`). The `auth/policy.py` module is the single source of truth for that decision. Every sensitive read or write writes an `AuditLogEntry` with the actor, scope, sensitive flag, and (for writes) a non-blank reason. Production runs `UMS_AUTHZ_SOURCE=database` so headers cannot be spoofed.
 
 For the full role/permission matrix, see [Docs/security/PERMISSION_MATRIX.md](Docs/security/PERMISSION_MATRIX.md).
 
