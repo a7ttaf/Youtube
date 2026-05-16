@@ -4,6 +4,7 @@ from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from ums_smart_revenue.db.explanation_models import ExplanationBase
@@ -37,7 +38,7 @@ def get_database_url() -> str:
 
 
 def is_async_database_url(url: str) -> bool:
-    return "+asyncpg" in url or "+aiosqlite" in url
+    return make_url(url).drivername in {"postgresql+asyncpg", "sqlite+aiosqlite"}
 
 
 def run_migrations_offline() -> None:
