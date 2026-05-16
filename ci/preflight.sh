@@ -251,30 +251,58 @@ run_check() {
   _collect_check_result "$label" "$rc" "$output" "$check_start" "$check_end"
 }
 
-_check_should_skip() {
-  local label="$1"
+_check_disabled_in_config() {
+  local wanted="$1"
 
-  # 1. Respect checks.yml enabled: false
   if [ -f "ci/config/checks.yml" ]; then
-    local in_check=0 check_id="" enabled="true"
+    local in_checks=0 in_list_check=0 check_id="" enabled="true" line=""
     while IFS= read -r line; do
       case "$line" in
         ''|'#'*) continue ;;
       esac
+
+      if [[ "$line" =~ ^checks:[[:space:]]*$ ]]; then
+        in_checks=1
+        continue
+      fi
+
+      if [ "$in_checks" = "1" ] && [[ "$line" =~ ^[^[:space:]] ]]; then
+        in_checks=0
+        check_id=""
+      fi
+
+      if [ "$in_checks" = "1" ] && [[ "$line" =~ ^[[:space:]]{2}([A-Za-z0-9_-]+):[[:space:]]*(#.*)?$ ]]; then
+        check_id="${BASH_REMATCH[1]}"
+        enabled="true"
+        in_list_check=0
+        continue
+      fi
+
       if [[ "$line" =~ ^[[:space:]]*-[[:space:]]*id:[[:space:]]*(.*)$ ]]; then
-        in_check=1
+        in_list_check=1
         check_id="${BASH_REMATCH[1]}"
         check_id="$(echo "$check_id" | tr -d ' ' | tr -d '"')"
         enabled="true"
       fi
-      if [ "$in_check" = "1" ] && [[ "$line" =~ ^[[:space:]]*enabled:[[:space:]]*(.*)$ ]]; then
+      if { [ "$in_checks" = "1" ] || [ "$in_list_check" = "1" ]; } && [[ "$line" =~ ^[[:space:]]*enabled:[[:space:]]*(.*)$ ]]; then
         enabled="${BASH_REMATCH[1]}"
-        enabled="$(echo "$enabled" | tr -d ' ')"
+        enabled="$(echo "$enabled" | sed 's/[[:space:]]//g; s/#.*$//')"
       fi
-      if [ "$in_check" = "1" ] && [ "$check_id" = "$label" ] && [ "$enabled" = "false" ]; then
+      if [ "$check_id" = "$wanted" ] && [ "$enabled" = "false" ]; then
         return 0  # skip
       fi
     done < "ci/config/checks.yml"
+  fi
+
+  return 1
+}
+
+_check_should_skip() {
+  local label="$1"
+
+  # 1. Respect checks.yml enabled: false for the mapping-based schema.
+  if _check_disabled_in_config "$label"; then
+    return 0
   fi
 
   # 2. Skip by changeset if incremental and no relevant files changed
@@ -508,7 +536,8 @@ CHANGESET_MODE="pre-commit"
 case "$MODE" in
   quick) CHANGESET_MODE="pre-commit" ;;
   ship) CHANGESET_MODE="pre-push" ;;
-  full|debt) CHANGESET_MODE="pr" ;;
+  full) CHANGESET_MODE="all" ;;
+  debt) CHANGESET_MODE="pr" ;;
 esac
 [ "$RUN_ALL" -eq 1 ] && CHANGESET_MODE="all"
 
