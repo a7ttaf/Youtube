@@ -516,7 +516,10 @@ run_mode() {
 # ---- --fix preprocessing ----
 if [ "$RUN_FIX" -eq 1 ] && [ -f "./ci/checks/format.sh" ]; then
   echo "=== --fix: running format.sh with CI_GATE_FIX=1 ==="
-  CI_GATE_FIX=1 ./ci/checks/format.sh 2>&1 || true
+  if ! CI_GATE_FIX=1 ./ci/checks/format.sh 2>&1; then
+    echo "ERROR: --fix formatting step failed." >&2
+    exit "$CI_RESULT_FAIL_INFRA"
+  fi
   echo "=== --fix: format pass complete; continuing gate ==="
 fi
 

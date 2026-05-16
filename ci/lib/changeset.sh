@@ -245,6 +245,36 @@ ci::changeset::should_ignore() {
   return 1
 }
 
+ci::changeset::_populate_state_from_raw() {
+  local generated_languages="" generated_checks=""
+  generated_checks="$_CI_CHANGESET_ALWAYS_CHECKS"
+
+  if [ -n "$_CI_CHANGESET_FILES_RAW" ]; then
+    local status path extra lang file_checks ck
+    while IFS=$'\t' read -r status path extra; do
+      [ -z "$path" ] && continue
+      case "$status" in
+        R*|C*)
+          [ -n "$extra" ] && path="$extra"
+          ;;
+      esac
+
+      ci::changeset::should_ignore "$path" && continue
+
+      lang="$(ci::changeset::classify_file "$path")"
+      generated_languages="$(ci::changeset::_add_unique "$generated_languages" "$lang")"
+
+      file_checks="$(ci::changeset::_checks_for_language "$lang")"
+      for ck in $file_checks; do
+        generated_checks="$(ci::changeset::_add_unique "$generated_checks" "$ck")"
+      done
+    done <<< "$_CI_CHANGESET_FILES_RAW"
+  fi
+
+  _CI_CHANGESET_LANGUAGES="$generated_languages"
+  _CI_CHANGESET_CHECKS="$generated_checks"
+}
+
 # ci::changeset::detect <mode> – populate internal state
 # mode: pre-commit | pre-push | pr | all
 ci::changeset::detect() {
@@ -341,6 +371,7 @@ M	${f}"
   esac
 
   _CI_CHANGESET_FILES_RAW="$raw_entries"
+  ci::changeset::_populate_state_from_raw
 }
 
 # ci::changeset::emit_json – write structured JSON to CI_CHANGESET_JSON
