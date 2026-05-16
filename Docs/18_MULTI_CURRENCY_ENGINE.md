@@ -123,7 +123,7 @@ Implementations:
 | **Manual CSV upload** | `finance/fx/providers/manual_csv.py` | Finance uploads a `.csv` for unusual currencies or audit-mandated official rates. |
 | Future: **OANDA, XE, central bank feeds** | — | Pluggable; just implement the protocol. |
 
-Provider choice is **per-tenant**, configured in `tenants.fx_provider_settings JSONB`. Multiple providers can be enabled with a priority order.
+Provider choice is **per-tenant**, configured in `tenants.fx_provider_settings JSONB` on the `tenants` table. Multiple providers can be enabled with a priority order.
 
 Expected JSON shape:
 
@@ -175,8 +175,8 @@ class FxConversion:
 Conversion never mutates the source row. It returns an `FxConversion` envelope so the UI can render both the converted value and the source rate.
 
 **Rate lookup order:**
-1. Exact `(tenant_id, base, quote, as_of_date)` match.
-2. Most recent `(tenant_id, base, quote, on_or_before=as_of_date)` from preferred provider.
+1. Exact `(tenant_id, base, quote, as_of_date)` match using the tenant's `priority_order`; if multiple providers have that exact date, choose the first provider in priority order, then the newest `ingested_at` within that provider.
+2. Most recent `(tenant_id, base, quote, on_or_before=as_of_date)` from the first provider in priority order that has an eligible rate.
 3. Most recent across any allowed provider for the tenant.
 4. Cross-rate via USD pivot (`(base, USD)` * `(USD, quote)`).
 5. Failure → `FxRateUnavailable`.
@@ -190,7 +190,7 @@ Step 4 is only used when explicitly enabled per-tenant. Pivoted rates are marked
 When a finance month is locked:
 
 1. The conversion service is asked to compute the rate used for every monetary value in that month.
-2. The selected rates are persisted to `fx_locked_month_rates(tenant_id, month, base, quote, rate, provider, as_of_date)`.
+2. The selected rates are persisted to `fx_locked_month_rates(tenant_id, month, base, quote, as_of_date, rate, provider)`.
 3. Subsequent reads of locked-month values use the **locked rate**, not the live one.
 4. Unlocking the month deletes the locked rates and recomputes from current `fx_rates`. Unlock requires the standard reason + audit event.
 
@@ -204,11 +204,11 @@ CREATE TABLE fx_locked_month_rates (
     provider        TEXT NOT NULL,
     as_of_date      DATE NOT NULL,
     locked_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, month, base_code, quote_code),
+    PRIMARY KEY (tenant_id, month, base_code, quote_code, as_of_date),
     CONSTRAINT ck_fx_locked_month_rates_positive CHECK (rate > 0),
     CONSTRAINT ck_fx_locked_month_rates_distinct CHECK (base_code <> quote_code)
 );
-CREATE INDEX ix_fx_locked_month_rates_month ON fx_locked_month_rates (tenant_id, month);
+CREATE INDEX ix_fx_locked_month_rates_month ON fx_locked_month_rates (tenant_id, month, as_of_date);
 ```
 
 This guarantees that re-running last March's executive PDF a year later produces identical numbers.
@@ -295,16 +295,17 @@ Property-based tests via `hypothesis`:
 `20260520_0002_multi_currency_engine`:
 
 1. Create `currencies`, seed full ISO 4217 list, flip the v1.0 set to `is_supported = TRUE`.
-2. Create `fx_rates`, `fx_locked_month_rates`.
-3. For each monetary column on a tenant-scoped table:
+2. Add `tenants.fx_provider_settings JSONB` if it was not already created by the tenant foundation migration, with the object-shape check shown above.
+3. Create `fx_rates`, `fx_locked_month_rates`.
+4. For each monetary column on a tenant-scoped table:
    1. Add distinct paired columns named from the source field, e.g. `bank_received_amount_native` and `bank_received_amount_currency_iso4217` for `bank_received_amount_usd`. Do not reuse generic `amount_native` / `currency_iso4217` names on tables with more than one monetary value.
    2. Backfill only non-null source values: `<field>_native = <field>_usd`, `<field>_currency_iso4217 = 'USD'`.
    3. Preserve original nullability. If `<field>_usd` was NOT NULL, validate a `CHECK (<field>_native IS NOT NULL AND <field>_currency_iso4217 IS NOT NULL)` before setting both new columns `NOT NULL`. If the original field was nullable, leave both nullable and add `CHECK ((<field>_native IS NULL) = (<field>_currency_iso4217 IS NULL))` so unknown monetary values remain representable.
    4. Add FK on `<field>_currency_iso4217 → currencies(code)`.
-4. Validate the `tenants.primary_currency` column created by `20260520_0001_multi_tenant_foundation`; do not add it a second time.
-5. Add `users.preferred_currency CHAR(3) NULL`.
-6. Add FK constraints `tenants.primary_currency -> currencies(code)` and `users.preferred_currency -> currencies(code)` after `currencies` is seeded, using `NOT VALID` then `VALIDATE CONSTRAINT` for existing installs.
-7. Add `Permission.MANAGE_FX_RATES` row in `permissions`.
+5. Validate the `tenants.primary_currency` column created by `20260520_0001_multi_tenant_foundation`; do not add it a second time.
+6. Add `users.preferred_currency CHAR(3) NULL`.
+7. Add FK constraints `tenants.primary_currency -> currencies(code)` and `users.preferred_currency -> currencies(code)` after `currencies` is seeded, using `NOT VALID` then `VALIDATE CONSTRAINT` for existing installs.
+8. Add `Permission.MANAGE_FX_RATES` row in `permissions`.
 
 The original `*_usd` columns are kept for one release as deprecated; flagged in `pyproject.toml` removal-target list.
 

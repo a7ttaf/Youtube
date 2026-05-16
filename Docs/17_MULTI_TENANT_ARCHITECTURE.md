@@ -37,11 +37,13 @@ CREATE TABLE tenants (
     slug             TEXT NOT NULL UNIQUE,             -- 'ums', 'rotana'
     display_name     TEXT NOT NULL,
     primary_currency CHAR(3) NOT NULL DEFAULT 'USD',   -- ISO 4217
+    fx_provider_settings JSONB NOT NULL DEFAULT '{"providers":["ECB"],"priority_order":["ECB"],"usd_pivot_enabled":false}'::jsonb,
     status           TEXT NOT NULL DEFAULT 'ACTIVE',   -- ACTIVE|SUSPENDED|ARCHIVED
     onboarding_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT ck_tenants_slug_lower CHECK (slug = lower(slug)),
+    CONSTRAINT ck_tenants_fx_provider_settings_object CHECK (jsonb_typeof(fx_provider_settings) = 'object'),
     CONSTRAINT ck_tenants_status CHECK (status IN ('ACTIVE','SUSPENDED','ARCHIVED'))
 );
 ```
@@ -54,8 +56,8 @@ Every existing **operational** table receives a `tenant_id UUID NOT NULL` FK. Ta
 |---|---|
 | `youtube_channels`, `channel_groups`, `channel_group_members` | `tenants`, `currencies` |
 | `org_units`, `channel_mappings` | `permissions` (definition catalog) |
-| `revenue_facts`, `manual_revenue_overrides`, `adsense_payments`, `bank_reconciliation_entries`, `finance_month_close` | `roles` (definition catalog) |
-| `raw_report_files`, `number_explanations`, `export_jobs` | `platform_audit_logs` |
+| `monthly_channel_revenue_facts`, `revenue_manual_overrides`, `adsense_payments`, `bank_reconciliation_entries`, `finance_month_close` | `roles` (definition catalog) |
+| `raw_report_files`, `number_explanations`, `export_jobs`, `api_connector_credentials` | `platform_audit_logs` |
 | `users`, `user_role_assignments`, `user_permission_grants`, `access_scopes` | |
 | `audit_logs` (tenant-scoped audit) | |
 
@@ -68,17 +70,17 @@ The existing global `uq_users_email_lower` constraint must be replaced by a tena
 A short example for one table:
 
 ```sql
-ALTER TABLE revenue_facts ENABLE ROW LEVEL SECURITY;
+ALTER TABLE monthly_channel_revenue_facts ENABLE ROW LEVEL SECURITY;
 
-CREATE POLICY revenue_facts_tenant_isolation
-    ON revenue_facts
+CREATE POLICY monthly_channel_revenue_facts_tenant_isolation
+    ON monthly_channel_revenue_facts
     USING       (tenant_id = current_setting('app.current_tenant_id')::uuid)
     WITH CHECK  (tenant_id = current_setting('app.current_tenant_id')::uuid);
 
-GRANT SELECT, INSERT, UPDATE, DELETE ON revenue_facts TO app_tenant;
+GRANT SELECT, INSERT, UPDATE, DELETE ON monthly_channel_revenue_facts TO app_tenant;
 ```
 
-The same policy template applies to all tenant-scoped tables. Migration files generate them with a helper function.
+The same policy template applies to all tenant-scoped tables. Migration files generate them with a helper function. `current_setting('app.current_tenant_id')` intentionally omits `missing_ok`; if the GUC is not set, Postgres raises an error and the policy fails closed instead of leaking rows.
 
 ### The two Postgres roles
 
@@ -140,7 +142,7 @@ Tenant resolution is cached in Redis with a short TTL keyed by `slug`.
 
 ### Setting the GUC
 
-A SQLAlchemy transaction-begin hook issues `SET LOCAL app.current_tenant_id = ...` once per transaction, using the tenant from the `contextvars.ContextVar`. Do **not** use `before_cursor_execute`: it is statement-scoped and would re-run a transaction-scoped setting on every query. `SET LOCAL` is cleared automatically on commit or rollback, and pooled connections must never retain tenant state outside the transaction.
+A SQLAlchemy transaction-begin hook issues `SET LOCAL app.current_tenant_id = ...` once per transaction, using the tenant from the `contextvars.ContextVar`. Do **not** use `before_cursor_execute`: it is statement-scoped and would re-run a transaction-scoped setting on every query. Always use `SET LOCAL`, not plain `SET`: `SET LOCAL` is cleared automatically on commit or rollback, while plain `SET` can persist tenant context across pooled connections and route later requests to the wrong tenant.
 
 ---
 
@@ -168,7 +170,7 @@ A SQLAlchemy transaction-begin hook issues `SET LOCAL app.current_tenant_id = ..
 
 ## Migration plan
 
-Implemented as coordinated Alembic revisions in Phase S2. Transactional DDL/data-shape changes stay inside normal Alembic transactions; concurrent indexes are split into explicit autocommit revisions because PostgreSQL rejects `CREATE INDEX CONCURRENTLY` inside `context.begin_transaction()`.
+Implemented as coordinated Alembic revisions in Phase S2. Transactional DDL/data-shape changes stay inside normal Alembic transactions; long backfills and concurrent indexes are split into explicit autocommit/data revisions because PostgreSQL rejects `CREATE INDEX CONCURRENTLY` inside `context.begin_transaction()` and per-batch commits are not real inside one Alembic transaction.
 
 ### `20260520_0001_multi_tenant_foundation`
 
@@ -176,17 +178,24 @@ Implemented as coordinated Alembic revisions in Phase S2. Transactional DDL/data
 2. Create `platform_admins` table.
 3. For each tenant-scoped table:
    1. Add `tenant_id UUID NULL`.
-   2. Backfill all existing rows to UMS's tenant_id in 5,000-10,000 row batches, committing each batch.
-   3. Add the FK to `tenants(id)` ON DELETE RESTRICT with `NOT VALID`, then `VALIDATE CONSTRAINT`.
-   4. Add `CHECK (tenant_id IS NOT NULL) NOT VALID`, then `VALIDATE CONSTRAINT`, before finally setting the column `NOT NULL` in a short lock window.
-   5. Convert tenant-scoped inter-table FKs from single-column references to composite tenant-aware references. For example, child tables reference `(tenant_id, parent_id)` against a parent-side unique key on `(tenant_id, id)` so database RI cannot cross tenant boundaries even when RLS is bypassed.
-   6. Re-key tenant-owned singleton tables. `finance_month_close` changes from a global primary key on `month` to a tenant-scoped key on `(tenant_id, month)` so multiple tenants can lock the same calendar month independently.
-   7. Set `lock_timeout` before every DDL step so the migration fails fast instead of blocking production traffic.
-4. Replace the existing global `uq_users_email_lower` index with a tenant-scoped unique index on `(tenant_id, lower(email))`.
-5. Replace global `access_scopes` uniqueness with tenant-scoped unique constraints as described above.
-6. Create `app_tenant` and `app_platform` Postgres roles.
-7. Enable RLS on each tenant-scoped table; install isolation policy.
-8. Grant the right read/write surface to each role.
+   2. Add the FK to `tenants(id)` ON DELETE RESTRICT with `NOT VALID`.
+   3. Add `CHECK (tenant_id IS NOT NULL) NOT VALID`.
+4. Create `app_tenant` and `app_platform` Postgres roles.
+5. Enable RLS on each tenant-scoped table; install isolation policy.
+6. Grant the right read/write surface to each role.
+
+### `20260520_0001b_multi_tenant_backfill`
+
+1. Runs as an explicit data migration outside the normal transaction wrapper.
+2. Backfills all existing rows to UMS's tenant_id in 5,000-10,000 row batches, committing each batch.
+3. Validates the `tenants(id)` FKs and `tenant_id IS NOT NULL` checks.
+4. Sets `tenant_id` `NOT NULL` in short lock windows after validation succeeds.
+5. Convert tenant-scoped inter-table FKs from single-column references to composite tenant-aware references. For example, `channel_mappings.org_unit_id -> org_units(id)` becomes `(tenant_id, org_unit_id) -> org_units(tenant_id, id)`, backed by a unique key on `org_units(tenant_id, id)`, so database RI cannot cross tenant boundaries even when RLS is bypassed. For nullable actor references that currently use `ON DELETE SET NULL`, use column-targeted `SET NULL` on the actor id only or keep an equivalent action that never tries to null the non-null `tenant_id`.
+6. Re-key tenant-owned singleton tables. `finance_month_close` changes from a global primary key on `month` to a tenant-scoped key on `(tenant_id, month)` so multiple tenants can lock the same calendar month independently.
+7. Set `lock_timeout` before every DDL step so the migration fails fast instead of blocking production traffic.
+8. Replace the existing global `uq_users_email_lower` index with a tenant-scoped unique index on `(tenant_id, lower(email))`.
+9. Replace global `access_scopes` uniqueness with tenant-scoped unique constraints as described above.
+10. Replace `api_connector_credentials` uniqueness with tenant-scoped uniqueness on `(tenant_id, connector_key, account_id)` so two tenants can hold overlapping connector account identifiers safely.
 
 ### `20260520_0001a_multi_tenant_indexes`
 
@@ -194,7 +203,7 @@ Implemented as coordinated Alembic revisions in Phase S2. Transactional DDL/data
 2. Adds read-path indexes `(tenant_id, ...)` with `CREATE INDEX CONCURRENTLY`.
 3. Contains no data backfill, no FK validation, and no `ALTER TABLE ... SET NOT NULL`.
 
-This migration is **reversible** in development but **destructive** in production after the NOT NULL step. Document the rollback caveat in the migration's docstring.
+The index migration is reversible in isolation with `DROP INDEX CONCURRENTLY`. Once the foundation/backfill migrations apply the production `tenant_id NOT NULL` constraints, the overall tenant_id schema change is destructive and cannot be fully reversed by simply dropping columns. Document that rollback caveat in the migration docstrings.
 
 ### Code changes alongside
 
@@ -231,7 +240,7 @@ This migration is **reversible** in development but **destructive** in productio
 ## Acceptance gates (Phase S2)
 
 - Tenant-isolation test suite green: zero cross-tenant data reachable through any endpoint.
-- `Second tenant can be seeded` — running `INSERT INTO tenants (slug, display_name) VALUES ('rotana', 'Rotana Holding')` followed by the user bootstrap is enough.
+- `Second tenant can be seeded` — running `INSERT INTO tenants (slug, display_name) VALUES ('rotana', 'Rotana Holding')` plus the bootstrap checklist is enough: create the first `SUPER_OWNER` user in `users`, grant the tenant-scoped `SUPER_OWNER` role, seed default access scopes for that tenant, and verify login resolves the new tenant.
 - All existing Phase 1 routes pass under both `headers` and `database` auth modes, with the resolved tenant carried through to the DB session.
 - RLS verified at DB level (a direct SQL query as `app_tenant` from outside the app cannot read another tenant's rows).
 
