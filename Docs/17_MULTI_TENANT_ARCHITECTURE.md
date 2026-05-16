@@ -55,7 +55,7 @@ Every existing **operational** table receives a `tenant_id UUID NOT NULL` FK. Ta
 | Receives `tenant_id` | Stays platform-wide |
 |---|---|
 | `youtube_channels`, `channel_groups`, `channel_group_members` | `tenants`, `currencies` |
-| `org_units`, `youtube_channels` | `permissions` (definition catalog) |
+| `org_units` | `permissions`, `role_permission_assignments` (definition catalog) |
 | `monthly_channel_revenue_facts`, `revenue_manual_overrides`, `adsense_payments`, `bank_reconciliation_entries`, `finance_month_close` | `roles` (definition catalog) |
 | `raw_report_files`, `number_explanations`, `export_jobs`, `api_connector_credentials` | `platform_audit_logs` |
 | `users`, `user_role_assignments`, `user_permission_grants`, `access_scopes` | |
@@ -171,6 +171,8 @@ A SQLAlchemy transaction-begin hook issues `SET LOCAL app.current_tenant_id = ..
 ## Migration plan
 
 Implemented as coordinated Alembic revisions in Phase S2. Transactional DDL/data-shape changes stay inside normal Alembic transactions; long backfills and concurrent indexes are split into explicit autocommit/data revisions because PostgreSQL rejects `CREATE INDEX CONCURRENTLY` inside `context.begin_transaction()` and per-batch commits are not real inside one Alembic transaction.
+
+Execution order is `20260520_0001_multi_tenant_foundation` → `20260520_0001b_multi_tenant_backfill` → `20260520_0001a_multi_tenant_indexes`. The suffixes are descriptive, not lexical; Alembic `down_revision` / `depends_on` values must encode this order explicitly.
 
 ### `20260520_0001_multi_tenant_foundation`
 

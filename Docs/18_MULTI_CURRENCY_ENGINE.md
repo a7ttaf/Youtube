@@ -175,11 +175,13 @@ class FxConversion:
 
 Conversion never mutates the source row. It returns an `FxConversion` envelope so the UI can render both the converted value and the source rate.
 
+**Identity conversions:** When `from_code == to_code`, the service short-circuits and returns an `FxConversion` with `rate = Decimal("1")`, `provider = "IDENTITY"`, and `rate_as_of = on_date`. This sentinel does not correspond to a provider table row and performs no database lookup.
+
 **Rate lookup order:**
-1. Exact `(tenant_id, base, quote, as_of_date)` match using the tenant's `priority_order`; if multiple providers have that exact date, choose the first provider in priority order, then the newest `ingested_at` within that provider.
-2. Most recent `(tenant_id, base, quote, on_or_before=as_of_date)` from the first provider in priority order that has an eligible rate.
+1. Exact `(tenant_id, base_code, quote_code, as_of_date)` match using the tenant's `priority_order`; if multiple providers have that exact date, choose the first provider in priority order, then the newest `ingested_at` within that provider.
+2. Most recent `(tenant_id, base_code, quote_code, on_or_before=as_of_date)` from the first provider in priority order that has an eligible rate.
 3. Most recent across any allowed provider for the tenant.
-4. Cross-rate via USD pivot (`(base, USD)` * `(USD, quote)`).
+4. Cross-rate via USD pivot (`(base_code, USD)` * `(USD, quote_code)`).
 5. Failure → `FxRateUnavailable`.
 
 Step 4 is only used when explicitly enabled per-tenant. Pivoted rates are marked in the `FxConversion` envelope so the explanation engine can label them `B_RECONCILED` instead of `A_OFFICIAL`.
@@ -191,9 +193,11 @@ Step 4 is only used when explicitly enabled per-tenant. Pivoted rates are marked
 When a finance month is locked:
 
 1. The conversion service is asked to compute the rate used for every monetary value in that month.
-2. The selected rates are persisted to `fx_locked_month_rates(tenant_id, month, base, quote, as_of_date, rate, provider)`.
+2. The selected rates are persisted to `fx_locked_month_rates(tenant_id, month, base_code, quote_code, as_of_date, rate, provider)`.
 3. Subsequent reads of locked-month values use the **locked rate**, not the live one.
 4. Unlocking the month deletes the locked rates and recomputes from current `fx_rates`. Unlock requires the standard reason + audit event.
+
+On read, the conversion service first checks whether `on_date` falls inside a locked finance month. If the month is locked, lookup is against `fx_locked_month_rates` rather than `fx_rates`, keyed by `(tenant_id, month, base_code, quote_code, as_of_date)`. When the original lock-time selection used "most recent on or before", the chosen `as_of_date` is persisted with the locked row and reused exactly; the read path never re-runs provider priority or recency selection for locked months.
 
 ```sql
 CREATE TABLE fx_locked_month_rates (
