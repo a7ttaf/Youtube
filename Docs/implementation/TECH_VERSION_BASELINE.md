@@ -26,7 +26,7 @@ For this project:
 |---|---:|
 | FastAPI | `0.136.1` |
 | Pydantic | `2.13.4` |
-| Uvicorn | `0.46.0` |
+| Uvicorn | `0.47.0` |
 | SQLAlchemy | `2.0.49` |
 | Alembic | `1.18.4` |
 | psycopg | `3.3.4` |

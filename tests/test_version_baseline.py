@@ -15,7 +15,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
     expected_dependencies = {
         "fastapi==0.136.1",
         "pydantic==2.13.4",
-        "uvicorn[standard]==0.46.0",
+        "uvicorn[standard]==0.47.0",
         "SQLAlchemy==2.0.49",
         "alembic==1.18.4",
         "psycopg[binary]==3.3.4",
