@@ -81,7 +81,7 @@ uv run pytest -q tests/api
 
 ## Project layout
 
-```
+```text
 backend/ums_smart_revenue/
 ├── app.py                FastAPI factory + router wiring + middleware
 ├── api/                  Routers: adsense, audit, channels, connectors, exports,
@@ -130,7 +130,7 @@ For the full role/permission matrix, see [Docs/security/PERMISSION_MATRIX.md](Do
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: branch from `main`, pass `uv run pytest`, `uv run ruff check`, `uv run mypy backend`, get a CodeRabbit pass, and request review from a `CODEOWNERS` reviewer for the touched area.
+See [CONTRIBUTING.md](CONTRIBUTING.md). The short version: branch from `main`, pass `uv run pytest`, `uv run ruff check`, `uv run mypy backend`, `uv run bandit -r backend`, `uv run sqlfluff lint`, run `gitleaks` before push, get a CodeRabbit pass, and request review from a `CODEOWNERS` reviewer for the touched area.
 
 ## Security
 

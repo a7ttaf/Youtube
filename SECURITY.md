@@ -16,7 +16,7 @@ We take the security of the UMS Smart Revenue Control Center seriously. The syst
 
 ### How to report
 
-Open a private GitHub security advisory for this repository when the "Report a vulnerability" flow is available. If the UI is unavailable, contact a CODEOWNERS maintainer through GitHub and request a private encrypted intake channel before sharing exploit details. CODEOWNERS maintainers monitor vulnerability-intake notifications during merge windows and before releases.
+Open a private GitHub security advisory for this repository when the "Report a vulnerability" flow is available. If the UI is unavailable, contact a CODEOWNERS maintainer through GitHub and request a private encrypted intake channel before sharing exploit details. Maintainers monitor vulnerability-intake notifications on an ongoing basis to meet the response SLAs below.
 
 Include:
 
