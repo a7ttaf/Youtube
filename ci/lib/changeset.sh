@@ -87,6 +87,7 @@ ci::changeset::_checks_for_language() {
     python)     printf 'lint-python typecheck-python format-python tests-python' ;;
     go)         printf 'lint-go typecheck-go format-go tests-go' ;;
     rust)       printf 'lint-rust typecheck-rust format-rust tests-rust' ;;
+    actions)    printf 'lint-actions' ;;
     ruby)       printf 'lint-ruby format-ruby tests-ruby' ;;
     java|kotlin) printf 'lint-java typecheck-java format-java tests-java' ;;
     csharp)     printf 'lint-csharp typecheck-csharp format-csharp tests-csharp' ;;
@@ -157,6 +158,13 @@ ci::changeset::classify_file() {
   ext="$(printf '%s' "$ext" | tr '[:upper:]' '[:lower:]')"
 
   # Special basenames first
+  case "$path" in
+    .github/workflows/*.yml|.github/workflows/*.yaml|.github/actions/*/action.yml|.github/actions/*/action.yaml)
+      printf 'actions'
+      return 0
+      ;;
+  esac
+
   case "$base" in
     Dockerfile|Dockerfile.*|*.dockerfile) printf 'dockerfile'; return 0 ;;
     Makefile|GNUmakefile|makefile)        printf 'make'; return 0 ;;
@@ -271,7 +279,15 @@ ci::changeset::detect() {
         if [ $rc -eq 0 ] && [ -n "$merge_base" ]; then
           push_range="$merge_base"
         else
-          push_range=""
+          set +e
+          merge_base="$(git merge-base HEAD "${default_branch}" 2>/dev/null)"
+          rc=$?
+          set -e
+          if [ $rc -eq 0 ] && [ -n "$merge_base" ]; then
+            push_range="$merge_base"
+          else
+            push_range=""
+          fi
         fi
       fi
       if [ -n "$push_range" ]; then
