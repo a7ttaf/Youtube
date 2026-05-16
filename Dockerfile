@@ -10,7 +10,7 @@
 #
 # Run:
 #   docker run --rm -p 8000:8000 \
-#     -e UMS_DATABASE_URL=postgresql+asyncpg://ums:ums@host.docker.internal:5432/ums_smart_revenue \
+#     --env-file .env.local \
 #     -e UMS_AUTHZ_SOURCE=headers \
 #     ums-smart-revenue:dev
 

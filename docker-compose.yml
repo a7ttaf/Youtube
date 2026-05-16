@@ -10,18 +10,19 @@
 # For interactive dev with hot reload, use the `dev` override profile:
 #   docker compose --profile dev up app-dev
 #
-# Secrets: never bake real credentials into this file. The values here are
-# *strictly local* and are listed in .env.example. Production uses Helm +
-# External Secrets Operator (see deploy/helm/).
+# Secrets: never bake real credentials into this file. Compose variables come
+# from the invoking shell or a local --env-file such as .env.local. Keep those
+# files untracked. Production uses Helm + External Secrets Operator
+# (see deploy/helm/).
 
 name: ums-smart-revenue
 
 x-app-env: &app-env
-  UMS_DATABASE_URL: postgresql+asyncpg://ums:ums@postgres:5432/ums_smart_revenue
-  UMS_AUTHZ_SOURCE: headers
-  UMS_TRUSTED_GATEWAY_TOKEN: dev-only-token-replace-via-vault
-  UMS_CORS_ALLOWED_ORIGINS: http://localhost:3000,http://localhost:5173
-  UMS_RATE_LIMIT_PER_MINUTE: "120"
+  UMS_DATABASE_URL: postgresql+asyncpg://${UMS_DB_USER:?Set UMS_DB_USER}:${UMS_DB_PASSWORD:?Set UMS_DB_PASSWORD}@postgres:5432/${UMS_DB_NAME:?Set UMS_DB_NAME}
+  UMS_AUTHZ_SOURCE: ${UMS_AUTHZ_SOURCE:-headers}
+  UMS_TRUSTED_GATEWAY_TOKEN: ${UMS_TRUSTED_GATEWAY_TOKEN:?Set UMS_TRUSTED_GATEWAY_TOKEN}
+  UMS_CORS_ALLOWED_ORIGINS: ${UMS_CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
+  UMS_RATE_LIMIT_PER_MINUTE: ${UMS_RATE_LIMIT_PER_MINUTE:-120}
   REDIS_URL: redis://redis:6379/0
   PYTHONDONTWRITEBYTECODE: "1"
   PYTHONUNBUFFERED: "1"
@@ -31,15 +32,15 @@ services:
     image: postgres:18-alpine@sha256:96d56f7f57c6aacd1fcb908bc83b345ec5f83231ee486dd66a1baadce274db88
     restart: unless-stopped
     environment:
-      POSTGRES_USER: ums
-      POSTGRES_PASSWORD: ums
-      POSTGRES_DB: ums_smart_revenue
+      POSTGRES_USER: ${UMS_DB_USER:?Set UMS_DB_USER}
+      POSTGRES_PASSWORD: ${UMS_DB_PASSWORD:?Set UMS_DB_PASSWORD}
+      POSTGRES_DB: ${UMS_DB_NAME:?Set UMS_DB_NAME}
     ports:
-      - "5432:5432"
+      - "127.0.0.1:${UMS_POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres-data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ums -d ums_smart_revenue"]
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
       interval: 5s
       timeout: 5s
       retries: 10
@@ -50,7 +51,7 @@ services:
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports:
-      - "6379:6379"
+      - "127.0.0.1:${UMS_REDIS_PORT:-6379}:6379"
     volumes:
       - redis-data:/data
     healthcheck:
@@ -92,7 +93,7 @@ services:
     environment:
       <<: *app-env
     ports:
-      - "8000:8000"
+      - "127.0.0.1:${UMS_APP_PORT:-8000}:8000"
     healthcheck:
       test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/health"]
       interval: 15s
@@ -119,7 +120,7 @@ services:
     environment:
       <<: *app-env
     ports:
-      - "8001:8000"
+      - "127.0.0.1:${UMS_APP_DEV_PORT:-8001}:8000"
     volumes:
       - ./backend:/srv/app/backend:ro
     command:

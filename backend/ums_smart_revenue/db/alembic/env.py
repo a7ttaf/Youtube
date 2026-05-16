@@ -1,7 +1,10 @@
+import asyncio
+import os
 from logging.config import fileConfig
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
+from sqlalchemy.ext.asyncio import async_engine_from_config
 
 from ums_smart_revenue.db.explanation_models import ExplanationBase
 from ums_smart_revenue.db.finance_models import FinanceBase
@@ -24,8 +27,16 @@ target_metadata = [
 ]
 
 
+def get_database_url() -> str:
+    return os.environ.get("UMS_DATABASE_URL") or config.get_main_option("sqlalchemy.url")
+
+
+def is_async_database_url(url: str) -> bool:
+    return "+asyncpg" in url or "+aiosqlite" in url
+
+
 def run_migrations_offline() -> None:
-    url = config.get_main_option("sqlalchemy.url")
+    url = get_database_url()
     context.configure(
         url=url,
         target_metadata=target_metadata,
@@ -37,8 +48,34 @@ def run_migrations_offline() -> None:
         context.run_migrations()
 
 
+def do_run_migrations(connection) -> None:
+    context.configure(connection=connection, target_metadata=target_metadata)
+
+    with context.begin_transaction():
+        context.run_migrations()
+
+
+async def run_async_migrations_online(configuration: dict[str, str]) -> None:
+    connectable = async_engine_from_config(
+        configuration,
+        prefix="sqlalchemy.",
+        poolclass=pool.NullPool,
+    )
+
+    async with connectable.connect() as connection:
+        await connection.run_sync(do_run_migrations)
+
+    await connectable.dispose()
+
+
 def run_migrations_online() -> None:
     configuration = config.get_section(config.config_ini_section, {})
+    configuration["sqlalchemy.url"] = get_database_url()
+
+    if is_async_database_url(configuration["sqlalchemy.url"]):
+        asyncio.run(run_async_migrations_online(configuration))
+        return
+
     connectable = engine_from_config(
         configuration,
         prefix="sqlalchemy.",
@@ -46,10 +83,7 @@ def run_migrations_online() -> None:
     )
 
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
-
-        with context.begin_transaction():
-            context.run_migrations()
+        do_run_migrations(connection)
 
 
 if context.is_offline_mode():
