@@ -76,6 +76,7 @@ class SqlAlchemyUserRoleAssignmentRepository:
         role = _parse_role(role_key)
         normalized_reason = _normalize_reason(reason)
         target_user = self._require_user(target_user_id)
+        self._require_actor_user(actor_user_id)
         self._require_assignable_role(target_user, role)
         _require_compatible_scope_type(role, scope_type)
         scope = self._get_or_create_scope(scope_type=scope_type, scope_id=scope_id)
@@ -141,6 +142,7 @@ class SqlAlchemyUserRoleAssignmentRepository:
         assignment_uuid = _parse_uuid(assignment_id, field_name="assignment_id")
         actor_user_id = _parse_uuid(revoked_by, field_name="revoked_by")
         normalized_reason = _normalize_reason(reason)
+        self._require_actor_user(actor_user_id)
         row = self._session.scalars(
             select(UserRoleAssignmentORM)
             .where(UserRoleAssignmentORM.id == assignment_uuid)
@@ -167,6 +169,10 @@ class SqlAlchemyUserRoleAssignmentRepository:
         if row is None:
             raise UserRoleAssignmentNotFoundError("User not found")
         return row
+
+    def _require_actor_user(self, user_id: UUID) -> None:
+        if self._session.get(UserORM, user_id) is None:
+            raise UserRoleAssignmentNotFoundError("Actor user not found")
 
     def _require_assignable_role(self, target_user: UserORM, role: RoleKey) -> None:
         definition = ROLE_DEFINITIONS[role]

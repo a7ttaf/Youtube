@@ -96,12 +96,27 @@ class SqlAlchemyAdSensePaymentRepository:
             raise AdSensePaymentValidationError(
                 "payments must contain at least one payment"
             )
-        actor_uuid = _parse_uuid(actor_user_id)
+        actor_uuid = _parse_uuid_or_none(actor_user_id)
         normalized_source_report_id = _normalize_optional_string(source_report_id)
 
-        entries: list[AdSensePaymentEntry] = []
+        normalized_payments: list[AdSensePaymentInput] = []
+        seen_payment_keys: set[tuple[str, str]] = set()
         for payment in payments:
             normalized_payment = _normalize_payment(payment)
+            payment_key = (
+                normalized_payment.month,
+                normalized_payment.payment_name,
+            )
+            if payment_key in seen_payment_keys:
+                raise AdSensePaymentValidationError(
+                    "duplicate AdSense payment in batch: "
+                    f"{normalized_payment.month}:{normalized_payment.payment_name}"
+                )
+            seen_payment_keys.add(payment_key)
+            normalized_payments.append(normalized_payment)
+
+        entries: list[AdSensePaymentEntry] = []
+        for normalized_payment in normalized_payments:
             self._require_month_open(normalized_payment.month)
             now = datetime.now(UTC)
             insert_statement = _dialect_insert(
@@ -119,21 +134,26 @@ class SqlAlchemyAdSensePaymentRepository:
                 imported_by=actor_uuid,
                 updated_at=now,
             )
+            update_values: dict[str, object] = {
+                "payment_date": normalized_payment.payment_date,
+                "payment_amount": normalized_payment.payment_amount,
+                "payment_currency": normalized_payment.payment_currency,
+                "payment_status": normalized_payment.payment_status,
+                "raw_payload": dict(normalized_payment.raw_payload),
+                "source_report_id": normalized_source_report_id,
+                "updated_at": now,
+            }
+            # Preserve existing imported_by attribution when the current actor
+            # cannot be resolved to a UUID. Setting imported_by=None on conflict
+            # would erase the original importer.
+            if actor_uuid is not None:
+                update_values["imported_by"] = actor_uuid
             statement = insert_statement.on_conflict_do_update(
                 index_elements=[
                     AdSensePaymentORM.month,
                     AdSensePaymentORM.payment_name,
                 ],
-                set_={
-                    "payment_date": normalized_payment.payment_date,
-                    "payment_amount": normalized_payment.payment_amount,
-                    "payment_currency": normalized_payment.payment_currency,
-                    "payment_status": normalized_payment.payment_status,
-                    "raw_payload": dict(normalized_payment.raw_payload),
-                    "source_report_id": normalized_source_report_id,
-                    "imported_by": actor_uuid,
-                    "updated_at": now,
-                },
+                set_=update_values,
             ).returning(AdSensePaymentORM.id)
             row_id = self._session.execute(statement).scalar_one()
             row = self._session.get(AdSensePaymentORM, row_id)
@@ -286,13 +306,12 @@ def _dialect_insert(dialect_name: str):
     )
 
 
-def _parse_uuid(value: str) -> UUID:
+def _parse_uuid_or_none(value: str) -> UUID | None:
+    normalized = _normalize_required_string(value, "actor_user_id")
     try:
-        return UUID(value)
-    except ValueError as exc:
-        raise AdSensePaymentValidationError(
-            "actor_user_id must be a valid UUID"
-        ) from exc
+        return UUID(normalized)
+    except ValueError:
+        return None
 
 
 def _decimal_to_api(value: Decimal) -> str:

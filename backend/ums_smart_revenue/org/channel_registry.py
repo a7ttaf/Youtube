@@ -12,6 +12,8 @@ class ChannelRegistryEntry:
     primary_company_id: str | None
     cms_status: str
     revenue_required: bool
+    content_owner_id: str | None = None
+    revenue_source_status: str = "MISSING_REVENUE_SOURCE"
     active: bool = True
 
     def to_api(self) -> dict[str, object]:
@@ -20,7 +22,9 @@ class ChannelRegistryEntry:
             "channel_name": self.channel_name,
             "primary_company_id": self.primary_company_id,
             "cms_status": self.cms_status,
+            "content_owner_id": self.content_owner_id,
             "revenue_required": self.revenue_required,
+            "revenue_source_status": self.revenue_source_status,
             "active": self.active,
         }
 
@@ -41,7 +45,9 @@ class ChannelRegistryStore(Protocol):
     def list_channels(self) -> list[ChannelRegistryEntry]:
         pass
 
-    def list_channels_by_ids(self, youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
+    def list_channels_by_ids(
+        self, youtube_channel_ids: set[str]
+    ) -> list[ChannelRegistryEntry]:
         pass
 
     def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
@@ -58,7 +64,9 @@ class ChannelRegistryStore(Protocol):
     ) -> ChannelRegistryEntry:
         pass
 
-    def update_mapping(self, *, youtube_channel_id: str, primary_company_id: str | None) -> ChannelRegistryEntry:
+    def update_mapping(
+        self, *, youtube_channel_id: str, primary_company_id: str | None
+    ) -> ChannelRegistryEntry:
         pass
 
 
@@ -67,7 +75,9 @@ class ChannelRegistry:
         self._channels: dict[str, ChannelRegistryEntry] = {}
         for channel in channels or []:
             if channel.youtube_channel_id in self._channels:
-                raise ChannelRegistryConflictError(f"Duplicate channel id: {channel.youtube_channel_id}")
+                raise ChannelRegistryConflictError(
+                    f"Duplicate channel id: {channel.youtube_channel_id}"
+                )
             self._channels[channel.youtube_channel_id] = channel
 
     def list_channels(self) -> list[ChannelRegistryEntry]:
@@ -76,7 +86,9 @@ class ChannelRegistry:
             key=lambda channel: channel.youtube_channel_id,
         )
 
-    def list_channels_by_ids(self, youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
+    def list_channels_by_ids(
+        self, youtube_channel_ids: set[str]
+    ) -> list[ChannelRegistryEntry]:
         return sorted(
             [
                 channel
@@ -98,21 +110,33 @@ class ChannelRegistry:
         cms_status: str,
         revenue_required: bool,
     ) -> ChannelRegistryEntry:
-        normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
+        normalized_company_id = _parse_optional_uuid(
+            primary_company_id, "primary_company_id"
+        )
         if youtube_channel_id in self._channels:
-            raise ChannelRegistryConflictError(f"Channel already exists: {youtube_channel_id}")
+            raise ChannelRegistryConflictError(
+                f"Channel already exists: {youtube_channel_id}"
+            )
+        initial_revenue_source_status = (
+            "MISSING_REVENUE_SOURCE" if revenue_required else "PERFORMANCE_ONLY"
+        )
         channel = ChannelRegistryEntry(
             youtube_channel_id=youtube_channel_id,
             channel_name=channel_name,
             primary_company_id=normalized_company_id,
             cms_status=cms_status,
             revenue_required=revenue_required,
+            revenue_source_status=initial_revenue_source_status,
         )
         self._channels[youtube_channel_id] = channel
         return channel
 
-    def update_mapping(self, *, youtube_channel_id: str, primary_company_id: str | None) -> ChannelRegistryEntry:
-        normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
+    def update_mapping(
+        self, *, youtube_channel_id: str, primary_company_id: str | None
+    ) -> ChannelRegistryEntry:
+        normalized_company_id = _parse_optional_uuid(
+            primary_company_id, "primary_company_id"
+        )
         existing = self._channels.get(youtube_channel_id)
         if existing is None:
             raise KeyError(youtube_channel_id)
@@ -122,6 +146,8 @@ class ChannelRegistry:
             primary_company_id=normalized_company_id,
             cms_status=existing.cms_status,
             revenue_required=existing.revenue_required,
+            content_owner_id=existing.content_owner_id,
+            revenue_source_status=existing.revenue_source_status,
             active=existing.active,
         )
         self._channels[youtube_channel_id] = updated
@@ -133,9 +159,13 @@ def bootstrap_channel_registry() -> ChannelRegistry:
         ChannelRegistryEntry(
             youtube_channel_id=channel.youtube_channel_id,
             channel_name=channel.youtube_channel_id,
-            primary_company_id=_parse_optional_uuid(channel.primary_org_unit_id, "primary_company_id"),
+            primary_company_id=_parse_optional_uuid(
+                channel.primary_org_unit_id, "primary_company_id"
+            ),
             cms_status="UNKNOWN",
             revenue_required=True,
+            content_owner_id=None,
+            revenue_source_status="MISSING_REVENUE_SOURCE",
             active=channel.active,
         )
         for channel in BOOTSTRAP_CHANNELS
@@ -149,4 +179,6 @@ def _parse_optional_uuid(value: str | None, field_name: str) -> str | None:
     try:
         return str(UUID(value))
     except ValueError as exc:
-        raise ChannelRegistryValidationError(f"{field_name} must be a valid UUID") from exc
+        raise ChannelRegistryValidationError(
+            f"{field_name} must be a valid UUID"
+        ) from exc

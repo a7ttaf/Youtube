@@ -1,5 +1,5 @@
-from sqlalchemy.dialects import postgresql
-from sqlalchemy.schema import CreateTable
+from sqlalchemy.dialects import postgresql, sqlite
+from sqlalchemy.schema import CreateIndex, CreateTable
 
 from ums_smart_revenue.db.security_models import SecurityBase
 
@@ -21,11 +21,20 @@ def test_security_orm_metadata_contains_required_tables():
 def test_user_role_assignments_model_has_scope_and_revocation_controls():
     table = SecurityBase.metadata.tables["user_role_assignments"]
 
-    assert {"user_id", "role_key", "scope_id", "assigned_by", "revoked_by", "revoked_at", "reason", "active"} <= set(
-        table.columns.keys()
-    )
+    assert {
+        "user_id",
+        "role_key",
+        "scope_id",
+        "assigned_by",
+        "revoked_by",
+        "revoked_at",
+        "reason",
+        "active",
+    } <= set(table.columns.keys())
     assert any(index.name == "uq_active_user_role_scope" for index in table.indexes)
-    assert any(index.name == "ix_user_role_assignments_user_id" for index in table.indexes)
+    assert any(
+        index.name == "ix_user_role_assignments_user_id" for index in table.indexes
+    )
 
 
 def test_postgresql_ddl_contains_sensitive_audit_and_connector_tables():
@@ -38,3 +47,18 @@ def test_postgresql_ddl_contains_sensitive_audit_and_connector_tables():
     assert "sensitive BOOLEAN" in ddl
     assert "api_connector_credentials" in ddl
     assert "encrypted_secret_ref" in ddl
+    assert "graph-read" not in ddl
+
+
+def test_sqlite_global_access_scope_singleton_index_is_partial():
+    table = SecurityBase.metadata.tables["access_scopes"]
+    index = next(
+        index
+        for index in table.indexes
+        if index.name == "uq_access_scopes_global_singleton"
+    )
+
+    ddl = str(CreateIndex(index).compile(dialect=sqlite.dialect()))
+
+    assert "CREATE UNIQUE INDEX uq_access_scopes_global_singleton" in ddl
+    assert "WHERE scope_type = 'global' AND scope_id IS NULL" in ddl

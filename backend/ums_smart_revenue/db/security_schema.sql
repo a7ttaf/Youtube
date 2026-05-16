@@ -43,8 +43,7 @@ CREATE TABLE IF NOT EXISTS access_scopes (
             'channel',
             'finance-month',
             'export',
-            'connector',
-            'graph-read'
+            'connector'
         )
     ),
     scope_id text NULL,

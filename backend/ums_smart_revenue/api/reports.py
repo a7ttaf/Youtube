@@ -21,7 +21,6 @@ from ums_smart_revenue.reports.raw_files import (
     SqlAlchemyRawReportFileRepository,
 )
 
-
 router = APIRouter(prefix="/reports", tags=["reports"])
 
 
@@ -162,12 +161,22 @@ def get_raw_report_file(
     try:
         raw_file = repository.get_file(raw_file_id)
     except RawReportFileNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        # Use the same 404 detail string as the unauthorized-scope branch
+        # below so callers cannot distinguish "file does not exist" from
+        # "file exists but you have no scope access" via the response body.
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Raw report file not found",
+        ) from exc
     except RawReportFileValidationError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
 
     scope = AccessScope.connector(raw_file.source)
-    _require_permission(user, Permission.VIEW_RAW_FILES, scope)
+    if not has_permission(user, Permission.VIEW_RAW_FILES, scope):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Raw report file not found",
+        )
     record = record_audit_event(
         sink=audit_sink,
         actor=user,

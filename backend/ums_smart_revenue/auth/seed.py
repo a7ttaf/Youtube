@@ -15,7 +15,6 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
             Permission.MANAGE_ORG_MAPPING,
             Permission.MANAGE_GROUPS,
             Permission.VIEW_CONNECTOR_HEALTH,
-            Permission.VIEW_GRAPH,
             Permission.VIEW_AUDIT_LOG,
             Permission.MANAGE_USERS,
             Permission.ASSIGN_ROLES,
@@ -32,7 +31,6 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
             Permission.MANAGE_GROUPS,
             Permission.VIEW_CONNECTOR_HEALTH,
             Permission.RUN_CONNECTOR_JOBS,
-            Permission.VIEW_GRAPH,
         }
     ),
     RoleKey.FINANCE_ADMIN: frozenset(
@@ -50,8 +48,6 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
             Permission.CHANGE_ALLOCATION_RULE,
             Permission.EXPORT_ANALYTICS_REPORT,
             Permission.EXPORT_REVENUE_REPORT,
-            Permission.VIEW_GRAPH,
-            Permission.VIEW_GRAPH_FINANCE,
             Permission.VIEW_AUDIT_LOG,
             Permission.ASSIGN_ROLES,
         }
@@ -68,8 +64,6 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
             Permission.UNLOCK_FINANCE_MONTH,
             Permission.CHANGE_ALLOCATION_RULE,
             Permission.EXPORT_REVENUE_REPORT,
-            Permission.VIEW_GRAPH,
-            Permission.VIEW_GRAPH_FINANCE,
             Permission.VIEW_AUDIT_LOG,
         }
     ),
@@ -80,8 +74,6 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
             Permission.VIEW_REVENUE,
             Permission.VIEW_FINALIZED_PAYMENTS,
             Permission.VIEW_BANK_RECONCILIATION,
-            Permission.VIEW_GRAPH,
-            Permission.VIEW_GRAPH_FINANCE,
         }
     ),
     RoleKey.TV_SECTOR_MANAGER: frozenset(
@@ -89,7 +81,6 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
             Permission.VIEW_ANALYTICS,
             Permission.VIEW_CONFIDENCE,
             Permission.EXPORT_ANALYTICS_REPORT,
-            Permission.VIEW_GRAPH,
         }
     ),
     RoleKey.NEWS_SECTOR_MANAGER: frozenset(
@@ -97,7 +88,6 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
             Permission.VIEW_ANALYTICS,
             Permission.VIEW_CONFIDENCE,
             Permission.EXPORT_ANALYTICS_REPORT,
-            Permission.VIEW_GRAPH,
         }
     ),
     RoleKey.COMPANY_MANAGER: frozenset(
@@ -105,7 +95,6 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
             Permission.VIEW_ANALYTICS,
             Permission.VIEW_CONFIDENCE,
             Permission.EXPORT_ANALYTICS_REPORT,
-            Permission.VIEW_GRAPH,
         }
     ),
     RoleKey.CHANNEL_MANAGER: frozenset(
@@ -113,14 +102,12 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
             Permission.VIEW_ANALYTICS,
             Permission.VIEW_CONFIDENCE,
             Permission.EXPORT_ANALYTICS_REPORT,
-            Permission.VIEW_GRAPH,
         }
     ),
     RoleKey.ASSISTANT_ANALYST: frozenset(
         {
             Permission.VIEW_ANALYTICS,
             Permission.VIEW_CONFIDENCE,
-            Permission.VIEW_GRAPH,
         }
     ),
     RoleKey.EXPORT_OPERATOR: frozenset(
@@ -156,7 +143,6 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
             Permission.MANAGE_CHANNELS,
             Permission.MANAGE_ORG_MAPPING,
             Permission.MANAGE_GROUPS,
-            Permission.VIEW_GRAPH,
         }
     ),
 }
@@ -164,8 +150,9 @@ ROLE_PERMISSIONS: dict[RoleKey, frozenset[Permission]] = {
 
 def initial_role_permission_rows() -> list[dict[str, str]]:
     rows: list[dict[str, str]] = []
-    for role, permissions in sorted(ROLE_PERMISSIONS.items(), key=lambda item: item[0].value):
+    for role, permissions in sorted(
+        ROLE_PERMISSIONS.items(), key=lambda item: item[0].value
+    ):
         for permission in sorted(permissions, key=lambda item: item.value):
             rows.append({"role": role.value, "permission": permission.value})
     return rows
-

@@ -35,6 +35,11 @@ def test_export_job_model_persists_queue_metadata():
     assert export_job.requested_by == requested_by
     assert export_job.status == "QUEUED"
     assert export_job.file_url is None
+    assert export_job.artifact_filename is None
+    assert export_job.artifact_content_type is None
+    assert export_job.artifact_byte_size is None
+    assert export_job.artifact_checksum_sha256 is None
+    assert export_job.failure_reason is None
     assert export_job.month_lock_status == "LOCKED"
     assert export_job.include_confidence_notes is True
     assert export_job.include_manual_override_notes is True

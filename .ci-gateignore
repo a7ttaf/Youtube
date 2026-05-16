@@ -1,0 +1,37 @@
+# .ci-gateignore - paths skipped by the CI gate
+# gitignore-style patterns
+
+# Dependencies
+node_modules/
+.venv/
+venv/
+vendor/
+
+# Build artifacts
+dist/
+build/
+coverage/
+htmlcov/
+target/
+*.egg-info/
+
+# Caches
+.mypy_cache/
+.pytest_cache/
+.pytest-tmp/
+.ruff_cache/
+__pycache__/
+*.pyc
+.cargo/
+
+# uv worktree-local dirs (Windows HOME workaround, see Makefile)
+.uv-cache/
+.uv-python/
+.uv-tool/
+
+# Elite-CI report/artifact tree
+ci/reports/
+ci/artifacts/
+
+# Generated files
+*.lock.bak

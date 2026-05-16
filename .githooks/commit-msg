@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -e
+ROOT_DIR="$(git rev-parse --show-toplevel 2>/dev/null || pwd)"
+exec "$ROOT_DIR/ci/hook-dispatch.sh" commit-msg "$@"

@@ -1,14 +1,17 @@
 from collections.abc import Iterable
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 
 from ums_smart_revenue.finance.bank_reconciliation import (
     MonthBankReconciliationSummary,
 )
 from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntry
 from ums_smart_revenue.finance.payment_matching import MonthlyPaymentMatchSummary
+from ums_smart_revenue.finance.reconciliation import SOURCE_PRIORITY
+from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 
 DEFAULT_HIGH_GAP_THRESHOLD_USD = Decimal("100.00")
+DEFAULT_REVENUE_TREND_ANOMALY_THRESHOLD_PERCENT = Decimal("0.50")
 _SEVERITY_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
 
 
@@ -56,10 +59,19 @@ def build_monthly_smart_alert_summary(
     bank_reconciliation: MonthBankReconciliationSummary,
     close_status: str | None,
     manual_overrides: Iterable[RevenueManualOverrideEntry],
+    current_revenue_facts: Iterable[RevenueFactEntry] = (),
+    previous_revenue_facts: Iterable[RevenueFactEntry] = (),
     high_gap_threshold_usd: Decimal = DEFAULT_HIGH_GAP_THRESHOLD_USD,
+    revenue_trend_anomaly_threshold_percent: Decimal = (
+        DEFAULT_REVENUE_TREND_ANOMALY_THRESHOLD_PERCENT
+    ),
 ) -> MonthlySmartAlertSummary:
     if high_gap_threshold_usd < 0:
         raise ValueError("high_gap_threshold_usd must be non-negative")
+    if revenue_trend_anomaly_threshold_percent < 0:
+        raise ValueError(
+            "revenue_trend_anomaly_threshold_percent must be non-negative"
+        )
     alerts: list[MonthlySmartAlert] = []
     normalized_close_status = close_status or "OPEN"
     overrides = list(manual_overrides)
@@ -142,6 +154,26 @@ def build_monthly_smart_alert_summary(
             )
         )
 
+    trend_details = _revenue_trend_anomaly_details(
+        current_revenue_facts=current_revenue_facts,
+        previous_revenue_facts=previous_revenue_facts,
+        threshold_percent=revenue_trend_anomaly_threshold_percent,
+    )
+    if trend_details:
+        alerts.append(
+            MonthlySmartAlert(
+                code="REVENUE_TREND_ANOMALY",
+                severity="HIGH",
+                message=(
+                    "One or more channels have month-over-month revenue "
+                    f"movement above threshold for {month}."
+                ),
+                source="revenue_facts",
+                confidence="D_ESTIMATED",
+                details=trend_details,
+            )
+        )
+
     if normalized_close_status != "LOCKED":
         alerts.append(
             MonthlySmartAlert(
@@ -192,10 +224,81 @@ def _high_gap_details(
     return details if len(details) > 1 else {}
 
 
+def _revenue_trend_anomaly_details(
+    *,
+    current_revenue_facts: Iterable[RevenueFactEntry],
+    previous_revenue_facts: Iterable[RevenueFactEntry],
+    threshold_percent: Decimal,
+) -> dict[str, object]:
+    current_by_channel = _select_primary_facts_by_channel(current_revenue_facts)
+    previous_by_channel = _select_primary_facts_by_channel(previous_revenue_facts)
+    channels: list[dict[str, object]] = []
+    # Iterate previous_by_channel so channels that disappear in the current
+    # month are still surfaced as a 100% drop. Skipping them would silently
+    # mask one of the highest-signal regressions for revenue trend alerts.
+    for channel_id in sorted(previous_by_channel):
+        current = current_by_channel.get(channel_id)
+        previous = previous_by_channel[channel_id]
+        if previous.gross_revenue_usd == 0:
+            continue
+        current_gross_revenue_usd = (
+            current.gross_revenue_usd if current is not None else Decimal("0")
+        )
+        change_ratio = (
+            current_gross_revenue_usd - previous.gross_revenue_usd
+        ) / previous.gross_revenue_usd
+        if abs(change_ratio) <= threshold_percent:
+            continue
+        channels.append(
+            {
+                "youtube_channel_id": channel_id,
+                "current_gross_revenue_usd": _decimal_to_api(
+                    current_gross_revenue_usd
+                ),
+                "previous_gross_revenue_usd": _decimal_to_api(
+                    previous.gross_revenue_usd
+                ),
+                "change_percent": _decimal_to_api(_to_percent(change_ratio)),
+            }
+        )
+    if not channels:
+        return {}
+    return {
+        "threshold_percent": _decimal_to_api(_to_percent(threshold_percent)),
+        "channel_count": len(channels),
+        "channels": channels,
+    }
+
+
+def _select_primary_facts_by_channel(
+    facts: Iterable[RevenueFactEntry],
+) -> dict[str, RevenueFactEntry]:
+    selected: dict[str, RevenueFactEntry] = {}
+    for fact in sorted(
+        facts,
+        key=lambda item: (
+            item.youtube_channel_id,
+            SOURCE_PRIORITY.get(item.source_kind, 99),
+            item.source_kind,
+            item.source_report_id or "",
+            item.id,
+        ),
+    ):
+        selected.setdefault(fact.youtube_channel_id, fact)
+    return selected
+
+
 def _highest_severity(alerts: list[MonthlySmartAlert]) -> str | None:
     if not alerts:
         return None
     return max(alerts, key=lambda alert: _SEVERITY_RANK[alert.severity]).severity
+
+
+def _to_percent(value: Decimal) -> Decimal:
+    return (value * Decimal("100")).quantize(
+        Decimal("0.0001"),
+        rounding=ROUND_HALF_UP,
+    )
 
 
 def _decimal_to_api(value: Decimal | None) -> str | None:

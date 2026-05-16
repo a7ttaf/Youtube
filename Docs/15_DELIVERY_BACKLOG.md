@@ -20,19 +20,17 @@
 
 - PDF export.
 - Branded slide export.
-- Neo4j graph sync.
-- Graph explorer pages.
 - Outside-CMS monitor.
-- Recalculation by allocation method.
+- Recalculation by allocation method dry-run foundation.
 - Month lock/unlock.
 - Manual override approval.
 - Audit dashboard.
 
 ## P2 — Advanced features
 
-- Automated currency rate integration.
-- More advanced anomaly detection.
-- Detailed Shorts revenue handling.
+- Automated currency rate integration foundation.
+- More advanced anomaly detection foundation for source-backed month-over-month revenue movement.
+- Detailed Shorts revenue handling foundation.
 - Custom report builder.
 - Saved dashboard views.
 - User-level favorite groups.

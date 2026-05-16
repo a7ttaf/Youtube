@@ -1,0 +1,257 @@
+# Multi-Tenant Architecture
+
+> Status: **planned** — to be implemented in Phase S2.
+> Drives data-model design from day one so additional tenants (e.g. Rotana Holding) can onboard without a re-migration.
+
+---
+
+## Why multi-tenant
+
+UMS is tenant #1. The system is being built so that **any additional holding** (Rotana Holding, future portfolio acquisitions, partner agencies) can be onboarded as a fully isolated tenant **without code changes or schema migrations**. Adding a tenant must be a configuration step, not a fork.
+
+This page describes the chosen approach, the data model, the request path, the authorization implications, and the migration sequence to move the existing single-tenant code base.
+
+---
+
+## Approach: shared schema + row-level security
+
+We evaluated three options:
+
+| Option | Isolation | Operational cost | Verdict |
+|---|---|---|---|
+| **Schema-per-tenant** (separate Postgres schemas) | Strong | High — N schemas, N migrations, N connection pools | ❌ Too expensive for the planned scale (≤ 50 tenants) |
+| **Database-per-tenant** | Strongest | Very high — N databases, N alembic histories | ❌ Overkill; loses cross-tenant platform reporting |
+| **Shared schema + `tenant_id` column + RLS** | Strong with RLS | Low — one schema, one migration, one pool | ✅ Chosen |
+
+Postgres **Row-Level Security** enforces tenant filtering at the database layer. The application **also** filters by tenant in code; RLS is defense in depth, not the sole gatekeeper.
+
+---
+
+## Tenant model
+
+### `tenants` table
+
+```sql
+CREATE TABLE tenants (
+    id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    slug             TEXT NOT NULL UNIQUE,             -- 'ums', 'rotana'
+    display_name     TEXT NOT NULL,
+    primary_currency CHAR(3) NOT NULL DEFAULT 'USD',   -- ISO 4217
+    fx_provider_settings JSONB NOT NULL DEFAULT '{"providers":["ECB"],"priority_order":["ECB"],"usd_pivot_enabled":false}'::jsonb,
+    status           TEXT NOT NULL DEFAULT 'ACTIVE',   -- ACTIVE|SUSPENDED|ARCHIVED
+    onboarding_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT ck_tenants_slug_lower CHECK (slug = lower(slug)),
+    CONSTRAINT ck_tenants_fx_provider_settings_object CHECK (jsonb_typeof(fx_provider_settings) = 'object'),
+    CONSTRAINT ck_tenants_status CHECK (status IN ('ACTIVE','SUSPENDED','ARCHIVED'))
+);
+```
+
+### Tenant-scoped tables
+
+Every existing **operational** table receives a `tenant_id UUID NOT NULL` FK. Tables that are inherently platform-wide do not.
+
+| Receives `tenant_id` | Stays platform-wide |
+|---|---|
+| `youtube_channels`, `channel_groups`, `channel_group_members` | `tenants`, `currencies` |
+| `org_units` | `permissions`, `role_permission_assignments` (definition catalog) |
+| `monthly_channel_revenue_facts`, `revenue_manual_overrides`, `adsense_payments`, `bank_reconciliation_entries`, `finance_month_close` | `roles` (definition catalog) |
+| `raw_report_files`, `number_explanations`, `export_jobs`, `api_connector_credentials` | `platform_audit_logs` |
+| `users`, `user_role_assignments`, `user_permission_grants`, `access_scopes` | |
+| `audit_logs` (tenant-scoped audit) | |
+
+> **Users sit inside a tenant.** A given email can have separate accounts in different tenants. SSO will map identity → tenant at login.
+
+The existing global `uq_users_email_lower` constraint must be replaced by a tenant-scoped unique key on `(tenant_id, lower(email))` before this invariant is enabled.
+
+### Row-Level Security policies
+
+A short example for one table:
+
+```sql
+ALTER TABLE monthly_channel_revenue_facts ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY monthly_channel_revenue_facts_tenant_isolation
+    ON monthly_channel_revenue_facts
+    USING       (tenant_id = current_setting('app.current_tenant_id')::uuid)
+    WITH CHECK  (tenant_id = current_setting('app.current_tenant_id')::uuid);
+
+GRANT SELECT, INSERT, UPDATE, DELETE ON monthly_channel_revenue_facts TO app_tenant;
+```
+
+The same policy template applies to all tenant-scoped tables. Migration files generate them with a helper function. `current_setting('app.current_tenant_id')` intentionally omits `missing_ok`; if the GUC is not set, Postgres raises an error and the policy fails closed instead of leaking rows.
+
+### The two Postgres roles
+
+| Role | Use |
+|---|---|
+| `app_tenant` | The app runs as this role. All queries are subject to RLS. Cannot bypass tenant isolation. |
+| `app_platform` | Reserved for platform-admin operations (tenant CRUD, cross-tenant reporting). Bypasses RLS by virtue of `BYPASSRLS`. Used by a small set of explicitly platform-level endpoints only. |
+
+Connection-pool config: the app uses `app_tenant`. Platform endpoints route through a separate, narrowly-scoped session factory using `app_platform`.
+
+---
+
+## Request path
+
+```text
+HTTP request
+    │
+    ▼
+TenantResolver middleware           (reads X-UMS-Tenant header or subdomain
+    │                                tenant.{host}; looks up `tenants.slug`)
+    ▼
+PrincipalResolver dependency        (validates user belongs to tenant)
+    │
+    ▼
+Session opened on `app_tenant` ────▶ executes
+    `SET LOCAL app.current_tenant_id = '<uuid>'`
+    once per transaction
+    │
+    ▼
+Router → repository → ORM
+    │
+    ▼
+Postgres applies RLS using
+    `app.current_tenant_id` GUC
+```
+
+### Tenant resolver
+
+Tenant slug resolution is **both header and subdomain based**. `X-UMS-Tenant` is accepted for internal service-to-service calls and local development; `tenant.{host}` is the browser-facing default. If both are present they must resolve to the same tenant slug, otherwise the resolver rejects the request with `400 Tenant mismatch`.
+
+```python
+# backend/ums_smart_revenue/tenancy/resolver.py (sketch)
+class TenantResolverMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request, call_next):
+        header_slug = request.headers.get("x-ums-tenant")
+        host_slug = self._slug_from_subdomain(request.url.hostname)
+        if header_slug and host_slug and header_slug != host_slug:
+            raise HTTPException(400, "Tenant mismatch")
+        slug = header_slug or host_slug
+        if not slug:
+            raise HTTPException(400, "Tenant not specified")
+        tenant = await self._resolve(slug)
+        request.state.tenant = tenant
+        TENANT_CTX.set(tenant)
+        return await call_next(request)
+```
+
+Tenant resolution is cached in Redis with a short TTL keyed by `slug`.
+
+### Setting the GUC
+
+A SQLAlchemy transaction-begin hook issues `SET LOCAL app.current_tenant_id = ...` once per transaction, using the tenant from the `contextvars.ContextVar`. Do **not** use `before_cursor_execute`: it is statement-scoped and would re-run a transaction-scoped setting on every query. Always use `SET LOCAL`, not plain `SET`: `SET LOCAL` is cleared automatically on commit or rollback, while plain `SET` can persist tenant context across pooled connections and route later requests to the wrong tenant.
+
+---
+
+## Authorization implications
+
+### Roles become tenant-scoped
+
+- The `roles` table stays platform-wide as the **definition** catalog. A `RoleKey` (e.g. `FINANCE_ADMIN`) is the same concept everywhere.
+- `user_role_assignments` carries `tenant_id` because the same `RoleKey` is granted **per-tenant**. UMS's `FINANCE_ADMIN` ≠ Rotana's `FINANCE_ADMIN`.
+- Scope objects (`access_scopes`) are also tenant-scoped (every concrete `company`/`sector`/`channel` value belongs to a single tenant).
+- Existing global uniqueness on `access_scopes` must be replaced with tenant-scoped uniqueness. The current singleton `global` scope becomes unique on `(tenant_id, scope_type)`; concrete scopes use `(tenant_id, scope_type, scope_id)` so every tenant can have its own `global` scope and its own channel/company/sector identifiers.
+
+### New role: `PLATFORM_ADMIN`
+
+- Lives outside any tenant. Manages tenants (create, suspend, archive), provisions the first super-owner per tenant, reads platform audit logs.
+- Cannot view tenant financial data without explicit per-tenant role assignment.
+- Stored in `platform_admins` (separate table; not in `users`) so it is impossible to assign tenant-bound resources to it accidentally.
+
+### Audit logs
+
+- Two tables: `audit_logs` (tenant-scoped, used by tenant operations) and `platform_audit_logs` (cross-tenant, platform-admin actions).
+- All sensitive-payload masking, reason-required rules, and append-only triggers apply equally to both.
+
+---
+
+## Migration plan
+
+Implemented as coordinated Alembic revisions in Phase S2. Transactional DDL/data-shape changes stay inside normal Alembic transactions; long backfills and concurrent indexes are split into explicit autocommit/data revisions because PostgreSQL rejects `CREATE INDEX CONCURRENTLY` inside `context.begin_transaction()` and per-batch commits are not real inside one Alembic transaction.
+
+Execution order is `20260520_0001_multi_tenant_foundation` → `20260520_0001b_multi_tenant_backfill` → `20260520_0001a_multi_tenant_indexes`. The suffixes are descriptive, not lexical; Alembic `down_revision` / `depends_on` values must encode this order explicitly.
+
+### `20260520_0001_multi_tenant_foundation`
+
+1. Create `tenants` table. Seed UMS as `('00000000-0000-0000-0000-000000000001', 'ums', 'UMS', 'USD')`.
+2. Create `platform_admins` table.
+3. Create `platform_audit_logs` for tenant lifecycle, platform-admin, and cross-tenant operational audit events.
+4. For each tenant-scoped table:
+   1. Add `tenant_id UUID NULL`.
+   2. Add the FK to `tenants(id)` ON DELETE RESTRICT with `NOT VALID`.
+   3. Add `CHECK (tenant_id IS NOT NULL) NOT VALID`.
+5. Create `app_tenant` and `app_platform` Postgres roles.
+6. Grant the right read/write surface to each role. Do not enable tenant-isolation RLS yet; existing rows are still `tenant_id = NULL` until the backfill revision completes.
+
+### `20260520_0001b_multi_tenant_backfill`
+
+1. Runs as an explicit data migration outside the normal transaction wrapper.
+2. Backfills all existing rows to UMS's tenant_id in 5,000-10,000 row batches, committing each batch.
+3. Validates the `tenants(id)` FKs and `tenant_id IS NOT NULL` checks.
+4. Sets `tenant_id` `NOT NULL` in short lock windows after validation succeeds.
+5. Convert tenant-scoped inter-table FKs from single-column references to composite tenant-aware references. For example, `youtube_channels.primary_org_unit_id -> org_units(id)` becomes `(tenant_id, primary_org_unit_id) -> org_units(tenant_id, id)`, backed by a unique key on `org_units(tenant_id, id)`, so database RI cannot cross tenant boundaries even when RLS is bypassed. For nullable actor references that currently use `ON DELETE SET NULL`, use column-targeted `SET NULL` on the actor id only or keep an equivalent action that never tries to null the non-null `tenant_id`.
+6. Add non-partial composite unique keys for tenant-aware FK targets, including `users(tenant_id, id)`, before any child table references them.
+7. Re-key tenant-owned singleton tables. `finance_month_close` changes from a global primary key on `month` to a tenant-scoped key on `(tenant_id, month)` so multiple tenants can lock the same calendar month independently.
+8. Set `lock_timeout` before every DDL step so the migration fails fast instead of blocking production traffic.
+9. Replace the existing global `uq_users_email_lower` index with a tenant-scoped unique index on `(tenant_id, lower(email))`.
+10. Replace global `access_scopes` uniqueness with tenant-scoped unique constraints as described above.
+11. Replace `api_connector_credentials` uniqueness with tenant-scoped uniqueness on `(tenant_id, connector_key, account_id)` so two tenants can hold overlapping connector account identifiers safely.
+12. Re-key every remaining tenant-owned unique constraint to include `tenant_id`; examples include `adsense_payments(month, payment_name)` -> `(tenant_id, month, payment_name)` and `bank_reconciliation_entries(month, bank_reference)` -> `(tenant_id, month, bank_reference)`.
+13. Enable RLS on each tenant-scoped table and install the final isolation policy only after backfill, `NOT NULL`, and tenant-scoped keys are in place.
+
+### `20260520_0001a_multi_tenant_indexes`
+
+1. Runs outside a transaction/autocommit block.
+2. Adds read-path indexes `(tenant_id, ...)` with `CREATE INDEX CONCURRENTLY`.
+3. Contains no data backfill, no FK validation, and no `ALTER TABLE ... SET NOT NULL`.
+
+The index migration is reversible in isolation with `DROP INDEX CONCURRENTLY`. Once the foundation/backfill migrations apply the production `tenant_id NOT NULL` constraints, the overall tenant_id schema change is destructive and cannot be fully reversed by simply dropping columns. Document that rollback caveat in the migration docstrings.
+
+### Code changes alongside
+
+1. Add `backend/ums_smart_revenue/tenancy/` package (`models.py`, `resolver.py`, `context.py`, `repository.py`).
+2. Extend `UserPrincipal` with `tenant_id`.
+3. Insert `TenantResolverMiddleware` into the app factory.
+4. Add the transaction-begin `SET LOCAL app.current_tenant_id` hook in `db/session.py`.
+5. Update every repository to assert `tenant_id == principal.tenant_id` on writes (defense-in-depth even though RLS will block).
+6. Add `tests/tenancy/test_isolation.py` — a full matrix proving tenant A cannot access tenant B via any endpoint.
+
+---
+
+## Operational concerns
+
+| Concern | Approach |
+|---|---|
+| **Connection pooling** | One pool per role (`app_tenant`, `app_platform`). SQLAlchemy's async engine, with pool size sized for tenant concurrency, not tenant count. |
+| **Backups** | Single physical backup. For tenant-slice restores, export schema with `pg_dump --schema-only -t <table_name> -h <host> -U <user> -d <dbname>` and export rows with `psql -h <host> -U <user> -d <dbname> -c "COPY (SELECT * FROM <table_name> WHERE tenant_id = '<tenant_uuid>') TO STDOUT"`; restore tooling replays schema first, then `COPY` data per tenant-scoped table. |
+| **Per-tenant disable** | `tenants.status = 'SUSPENDED'`: tenant resolver returns 423 Locked. Data stays in place. |
+| **Per-tenant offboarding** | `tenants.status = 'ARCHIVED'` → blocks new connectors, exports, and writes; reads still allowed for finance reconciliation completion. |
+| **Cross-tenant reporting** | Only platform-admin endpoints; explicit allowlist; audited. |
+| **Tenant onboarding CLI** | Phase 8 — `ums-admin tenant create <slug>` inserts the row, seeds default roles, provisions OAuth credential placeholders, configures FX provider, creates the bootstrap `SUPER_OWNER` user. < 30 minute end-to-end. |
+
+---
+
+## What this is NOT
+
+- **Not** a customer-facing SaaS multi-tenant model. There is no self-service signup; tenants are onboarded by platform admin.
+- **Not** a database-per-tenant strategy. Cost of N pgBackRest, N pgBouncer, N Alembic histories was rejected.
+- **Not** a feature-flag system. Tenant-specific behavior changes should be configuration-driven (per-tenant settings table) rather than coded branches.
+
+---
+
+## Acceptance gates (Phase S2)
+
+- Tenant-isolation test suite green: zero cross-tenant data reachable through any endpoint.
+- `Second tenant can be seeded` — running `INSERT INTO tenants (slug, display_name) VALUES ('rotana', 'Rotana Holding')` plus the bootstrap checklist is enough: create the first `SUPER_OWNER` user in `users`, grant the tenant-scoped `SUPER_OWNER` role, seed default access scopes for that tenant, and verify login resolves the new tenant.
+- All existing Phase 1 routes pass under both `headers` and `database` auth modes, with the resolved tenant carried through to the DB session.
+- RLS verified at DB level (a direct SQL query as `app_tenant` from outside the app cannot read another tenant's rows).
+
+---
+
+## Open decisions (resolve before Phase S2 lands)
+
+- Whether `platform_admins` reuses the same OIDC IdP as tenant users or has a separate one. (Recommend same with a dedicated `platform` group.)
+- Where per-tenant settings (theme, default currency, brand assets) live. (Recommend a `tenant_settings` JSONB column on `tenants`.)

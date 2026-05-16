@@ -1,8 +1,9 @@
 import re
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
@@ -13,6 +14,7 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
+from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.finance.month_close import (
     FinanceMonthCloseEntry,
     FinanceMonthCloseReadinessError,
@@ -22,19 +24,31 @@ from ums_smart_revenue.finance.month_close_readiness import (
     SqlAlchemyFinanceCloseReadinessService,
 )
 
-
 router = APIRouter(prefix="/finance-close", tags=["finance-close"])
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_BROADER_REVENUE_READ_SCOPE_TYPES = frozenset(
+    {"global", "sector", "company", "channel"}
+)
 
 
 class FinanceCloseReasonRequest(BaseModel):
     reason: str = Field(min_length=1)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip_reason(cls, value):
+        return _strip_required_string(value)
 
 
 class AllocationRuleRequest(BaseModel):
     allocation_method: str = Field(min_length=1)
     rule_payload: dict[str, object] = Field(default_factory=dict)
     reason: str = Field(min_length=1)
+
+    @field_validator("allocation_method", "reason", mode="before")
+    @classmethod
+    def strip_required_fields(cls, value):
+        return _strip_required_string(value)
 
 
 def current_finance_month_close_repository(
@@ -49,17 +63,38 @@ def current_finance_close_readiness_service(
     return SqlAlchemyFinanceCloseReadinessService(session)
 
 
+def _strip_required_string(value):
+    if isinstance(value, str):
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("must not be blank")
+        return stripped
+    return value
+
+
 @router.get("/{month}")
 def get_finance_month_close(
     month: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     _validate_month(month)
-    _require_permission(user, Permission.VIEW_REVENUE, AccessScope.finance_month(month))
+    scope = AccessScope.finance_month(month)
+    _require_finance_close_read_permission(user, month)
     close = repository.get(month)
     if close is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finance month close record not found")
+    record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.MONTH_CLOSE_VIEWED,
+        entity_type="finance_month_close",
+        entity_id=month,
+        scope=scope,
+        permission_override=Permission.VIEW_REVENUE,
+        details={"read_type": "summary", "status": close.status},
+    )
     return close.to_api()
 
 
@@ -71,10 +106,27 @@ def get_finance_close_readiness(
         SqlAlchemyFinanceCloseReadinessService,
         Depends(current_finance_close_readiness_service),
     ],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     _validate_month(month)
-    _require_permission(user, Permission.LOCK_FINANCE_MONTH, AccessScope.finance_month(month))
-    return readiness_service.check_month(month).to_api()
+    scope = AccessScope.finance_month(month)
+    _require_permission(user, Permission.LOCK_FINANCE_MONTH, scope)
+    readiness = readiness_service.check_month(month)
+    record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.MONTH_CLOSE_VIEWED,
+        entity_type="finance_month_close",
+        entity_id=month,
+        scope=scope,
+        permission_override=Permission.LOCK_FINANCE_MONTH,
+        details={
+            "read_type": "readiness",
+            "ready": readiness.ready,
+            "blocker_count": len(readiness.blockers),
+        },
+    )
+    return readiness.to_api()
 
 
 @router.post("/{month}/lock")
@@ -88,6 +140,7 @@ def lock_finance_month(
     _validate_month(month)
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.LOCK_FINANCE_MONTH, scope)
+    _validate_actor_user_id(user.user_id)
     try:
         close = repository.lock_month(month=month, actor_user_id=user.user_id)
     except FinanceMonthCloseReadinessError as exc:
@@ -122,6 +175,7 @@ def unlock_finance_month(
     _validate_month(month)
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.UNLOCK_FINANCE_MONTH, scope)
+    _validate_actor_user_id(user.user_id)
     try:
         close = repository.unlock_month(month=month, actor_user_id=user.user_id)
     except ValueError as exc:
@@ -181,12 +235,58 @@ def _require_permission(user: UserPrincipal, permission: Permission, scope: Acce
         )
 
 
+def _require_finance_close_read_permission(user: UserPrincipal, month: str) -> None:
+    if user.disabled:
+        _raise_missing_permission(Permission.VIEW_REVENUE)
+    for grant in user.direct_permissions:
+        if not (grant.active and grant.permission == Permission.VIEW_REVENUE):
+            continue
+        if _scope_authorizes_month_close_read(grant.scope, month):
+            return
+    for assignment in user.role_assignments:
+        if not assignment.active:
+            continue
+        if Permission.VIEW_REVENUE not in ROLE_PERMISSIONS.get(
+            assignment.role, frozenset()
+        ):
+            continue
+        if _scope_authorizes_month_close_read(assignment.scope, month):
+            return
+    _raise_missing_permission(Permission.VIEW_REVENUE)
+
+
+def _scope_authorizes_month_close_read(scope: AccessScope, month: str) -> bool:
+    # finance-month grants only authorize the exact month they were granted for;
+    # broader scopes (global/sector/company/channel) authorize any month read.
+    scope_type = scope.type.value
+    if scope_type == "finance-month":
+        return scope.id == month
+    return scope_type in _BROADER_REVENUE_READ_SCOPE_TYPES
+
+
+def _raise_missing_permission(permission: Permission) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"Missing permission: {permission.value}",
+    )
+
+
 def _validate_month(month: str) -> None:
     if not MONTH_PATTERN.fullmatch(month):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail="month must use YYYY-MM with a calendar month from 01 to 12",
         )
+
+
+def _validate_actor_user_id(user_id: str) -> None:
+    try:
+        UUID(user_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid request",
+        ) from exc
 
 
 def _audit_finance_close(

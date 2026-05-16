@@ -16,7 +16,6 @@ from ums_smart_revenue.db.security_models import (
     UserPermissionGrantORM,
 )
 
-
 ADMIN_ID = UUID("00000000-0000-0000-0000-000000015001")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000015002")
 COMPANY_ID = "company-tv-a"
@@ -139,6 +138,47 @@ def test_corporate_admin_cannot_grant_finance_permission(tmp_path):
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Finance permissions require Finance Admin or Super Owner"
+
+
+def test_finalized_payment_permission_rejects_org_scope_grant(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        f"/users/{TARGET_ID}/permissions",
+        headers=auth_headers("finance_admin"),
+        json={
+            "permission_key": "finance.view_finalized_payments",
+            "scope_type": "company",
+            "scope_id": COMPANY_ID,
+            "reason": "Attempt unusable payment visibility grant",
+        },
+    )
+
+    assert response.status_code == 422
+    assert "allowed: finance-month, global" in response.json()["detail"]
+
+
+def test_finalized_payment_permission_allows_finance_month_grant(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        f"/users/{TARGET_ID}/permissions",
+        headers=auth_headers("finance_admin"),
+        json={
+            "permission_key": "finance.view_finalized_payments",
+            "scope_type": "finance-month",
+            "scope_id": "2026-03",
+            "reason": "Temporary month payment visibility",
+        },
+    )
+
+    assert response.status_code == 201
+    assert response.json()["scope_type"] == "finance-month"
+    assert response.json()["scope_id"] == "2026-03"
 
 
 def test_assistant_cannot_grant_permissions_or_probe_users(tmp_path):

@@ -13,14 +13,13 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.connectors.credentials import (
-    ConnectorCredentialEntry,
-    ConnectorCredentialConflictError,
-    ConnectorCredentialValidationError,
     MAX_CREDENTIAL_PAGE_SIZE,
+    ConnectorCredentialConflictError,
+    ConnectorCredentialEntry,
+    ConnectorCredentialValidationError,
     SqlAlchemyConnectorCredentialRepository,
     is_external_secret_ref,
 )
-
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
 
@@ -63,8 +62,14 @@ def list_connector_credentials(
     limit: Annotated[int, Query(ge=1, le=MAX_CREDENTIAL_PAGE_SIZE)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, object]:
-    _require_connector_permission(user, Permission.MANAGE_CONNECTORS, AccessScope.global_scope())
-    page = repository.list_credentials(limit=limit, offset=offset)
+    connector_keys = _manageable_connector_keys(user)
+    if connector_keys is not None and not connector_keys:
+        _raise_missing_connector_permission(Permission.MANAGE_CONNECTORS)
+    page = repository.list_credentials(
+        limit=limit,
+        offset=offset,
+        connector_keys=connector_keys,
+    )
     return {
         "items": [credential.to_api() for credential in page.items],
         "pagination": {
@@ -141,10 +146,43 @@ def request_connector_job(
 
 def _require_connector_permission(user: UserPrincipal, permission: Permission, scope: AccessScope) -> None:
     if not has_permission(user, permission, scope):
-        raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail=f"Missing permission: {permission.value}",
-        )
+        _raise_missing_connector_permission(permission)
+
+
+def _raise_missing_connector_permission(permission: Permission) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=f"Missing permission: {permission.value}",
+    )
+
+
+def _manageable_connector_keys(user: UserPrincipal) -> frozenset[str] | None:
+    if user.disabled:
+        return frozenset()
+    if has_permission(user, Permission.MANAGE_CONNECTORS, AccessScope.global_scope()):
+        return None
+    connector_keys: set[str] = set()
+    for grant in user.direct_permissions:
+        if (
+            grant.active
+            and grant.permission == Permission.MANAGE_CONNECTORS
+            and grant.scope.type.value == "connector"
+            and grant.scope.id
+        ):
+            connector_keys.add(grant.scope.id)
+    for assignment in user.role_assignments:
+        if (
+            assignment.active
+            and assignment.scope.type.value == "connector"
+            and assignment.scope.id
+            and has_permission(
+                user,
+                Permission.MANAGE_CONNECTORS,
+                AccessScope.connector(assignment.scope.id),
+            )
+        ):
+            connector_keys.add(assignment.scope.id)
+    return frozenset(connector_keys)
 
 
 def _audit_connector_change(

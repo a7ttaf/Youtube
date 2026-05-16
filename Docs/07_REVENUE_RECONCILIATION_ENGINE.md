@@ -117,13 +117,34 @@ not applied. If a primary source has no net value, the API returns
 bank/payment gaps.
 
 This foundation does not yet persist `channel_net_revenue` rows, allocate
-transfer/FX/payment gaps, ingest tax tables, or use Neo4j as a financial source
-of truth.
+transfer/FX/payment gaps, ingest tax tables, or depend on a graph database.
+
+Monthly revenue facts may include official Shorts, longform, and subscription
+revenue component values when the source report provides them. These fields are
+stored and exposed for analysis, issue review, and export context, but they do
+not change gross/net calculations in this phase. Missing component fields remain
+null and must not be backfilled from gross revenue.
+
+The backend now also exposes `POST /revenue/recalculate` as a dry-run allocation
+review foundation. It accepts the finance month, allocation method, scoped data
+selection, currency, and reason; requires both revenue visibility and
+allocation-rule permission; and audits `RECALCULATION_REQUESTED`. The endpoint
+returns source coverage and blockers only, with `NO_WRITES_PERFORMED`, until the
+full allocation engine is implemented. It must not create financial rows or
+invent transfer, FX, tax, or payment-gap values.
 
 ## Acceptance checks
 
-- System can calculate net revenue for one month.
-- System can explain the difference between gross revenue and payment.
-- System can allocate unknown transfer/FX gap.
+- System can calculate net revenue for one month from existing official SQL
+  revenue facts only.
+- `POST /revenue/recalculate` is a read-only dry-run: it returns source
+  coverage and blockers tagged `NO_WRITES_PERFORMED`, audits
+  `RECALCULATION_REQUESTED`, and never creates `channel_net_revenue`,
+  allocation, transfer/FX, payment-gap, or tax rows.
+- Recalculation access requires both revenue visibility and the
+  allocation-rule management permission for the requested scope.
 - System can lock a month.
 - Locked month does not change unless explicitly unlocked.
+- Allocation of unknown transfer/FX gap, tax-table ingestion, and bank/payment
+  gap allocation are deferred until the full allocation engine ships and are
+  not part of this foundation's acceptance.

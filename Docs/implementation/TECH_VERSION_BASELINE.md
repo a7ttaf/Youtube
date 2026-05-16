@@ -8,9 +8,9 @@ Use latest stable/LTS runtime versions and current stable package releases at th
 For this project:
 - Runtime platforms use stable or LTS releases.
 - Backend dependencies are pinned exactly in `pyproject.toml` until a lockfile workflow is introduced.
-- Frontend versions are recorded as the target baseline, but no frontend app has been scaffolded yet.
+- A Vite preview frontend app has been scaffolded and verified with React; its runtime floor is Node.js `>=22.12.0`.
 - PostgreSQL remains the financial source of truth.
-- Neo4j remains a read-only graph projection.
+- Neo4j is not part of the active architecture.
 
 ## Runtime and Platform Baseline
 
@@ -19,7 +19,6 @@ For this project:
 | Python | `3.14.5` | Backend runtime target |
 | Node.js | `24.15.0` LTS | Future Next.js frontend runtime |
 | PostgreSQL | `18.3` | Source-of-truth operational database |
-| Neo4j Enterprise | `2026.04.0` | Read-only graph projection target |
 
 ## Backend Package Baseline
 
@@ -30,8 +29,7 @@ For this project:
 | Uvicorn | `0.46.0` |
 | SQLAlchemy | `2.0.49` |
 | Alembic | `1.18.4` |
-| asyncpg | `0.31.0` |
-| neo4j Python driver | `6.2.0` |
+| psycopg | `3.3.4` |
 | Celery | `5.6.3` |
 | Redis Python client | `7.4.0` |
 | openpyxl | `3.1.5` |
@@ -59,11 +57,21 @@ Checked on: `2026-05-10T20:34:52Z` (UTC)
 - Python downloads page: `https://www.python.org/downloads/`
 - Node.js releases page: `https://nodejs.org/en/about/releases/`
 - PostgreSQL home/releases page: `https://www.postgresql.org/`
-- Neo4j supported versions page: `https://neo4j.com/developer/kb/neo4j-supported-versions/`
 - PyPI JSON package metadata for backend packages: `https://pypi.org/pypi/<package>/json`
 - npm registry latest package metadata for frontend packages: `https://registry.npmjs.org/<package>/latest`
 
-Addendum checked on: `2026-05-13` (Africa/Cairo local date)
+Frontend design addendum checked on: `2026-05-13` (Africa/Cairo local date)
+
+- npm registry latest package metadata verified for the new Vite preview app:
+  React `19.2.6`, React DOM `19.2.6`, Vite `8.0.12`,
+  `@vitejs/plugin-react` `6.0.1`, Tailwind CSS `4.3.0`,
+  `@tailwindcss/vite` `4.3.0`, `tw-animate-css` `1.4.0`, and
+  TypeScript `6.0.3`.
+- The frontend preview uses Vite because the approved design source is a Vite
+  application. The runtime floor is Node.js `>=22.12.0`; the production target
+  remains Node.js 24 LTS.
+
+Backend package addendum checked on: `2026-05-13` (Africa/Cairo local date)
 
 - PyPI openpyxl release metadata: `https://pypi.org/pypi/openpyxl`
 - PyPI ReportLab release metadata: `https://pypi.org/pypi/reportlab`

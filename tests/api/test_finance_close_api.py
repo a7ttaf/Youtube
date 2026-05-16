@@ -25,17 +25,19 @@ USER_ID = UUID("00000000-0000-0000-0000-000000005001")
 
 
 def auth_headers(
-    role: str, scope_type: str = "finance-month", scope_id: str = "2026-03"
+    role: str, scope_type: str = "finance-month", scope_id: str | None = "2026-03"
 ) -> dict[str, str]:
     """Build trusted-gateway headers for finance-close API tests."""
-    return {
+    headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "finance-close@example.com",
         "x-role": role,
         "x-scope-type": scope_type,
-        "x-scope-id": scope_id,
         "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
     }
+    if scope_id is not None:
+        headers["x-scope-id"] = scope_id
+    return headers
 
 
 def build_database_url(tmp_path) -> str:
@@ -106,6 +108,54 @@ def test_finance_admin_can_lock_month_with_audit(tmp_path):
     assert audit_log.reason == "Final payment reconciliation completed"
 
 
+def test_finance_close_rejects_blank_lock_reason_before_state_change(tmp_path):
+    """Whitespace reasons are rejected before close-state mutation or audit."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/finance-close/2026-03/lock",
+        headers=auth_headers("finance_admin"),
+        json={"reason": "   "},
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        close = session.get(FinanceMonthCloseORM, "2026-03")
+        audit_logs = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["msg"] == "Value error, must not be blank"
+    assert close is None
+    assert audit_logs == []
+
+
+def test_finance_close_rejects_malformed_actor_id_before_state_change(tmp_path):
+    """Malformed actor ids return auth/input errors instead of close conflicts."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers("finance_admin")
+    headers["x-user-id"] = "not-a-uuid"
+
+    response = client.post(
+        "/finance-close/2026-03/lock",
+        headers=headers,
+        json={"reason": "Reject malformed actor id"},
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        close = session.get(FinanceMonthCloseORM, "2026-03")
+        audit_logs = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Invalid request"
+    assert close is None
+    assert audit_logs == []
+
+
 def test_finance_close_rejects_invalid_month_path(tmp_path):
     """Invalid month path values are rejected before close-state lookup."""
     database_url = build_database_url(tmp_path)
@@ -131,7 +181,8 @@ def test_get_finance_close_does_not_create_missing_month(tmp_path):
     client = TestClient(create_app(database_url=database_url))
 
     response = client.get(
-        "/finance-close/2026-03", headers=auth_headers("finance_admin")
+        "/finance-close/2026-03",
+        headers=auth_headers("finance_viewer", "company", "company-tv-a"),
     )
 
     engine = create_engine(database_url)
@@ -141,6 +192,31 @@ def test_get_finance_close_does_not_create_missing_month(tmp_path):
     assert response.status_code == 404
     assert response.json()["detail"] == "Finance month close record not found"
     assert close is None
+
+
+def test_finance_close_read_records_audit_event(tmp_path):
+    """Reading finance-close state records sensitive access without mutating state."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(FinanceMonthCloseORM(month="2026-03", status="LOCKED", locked_by=USER_ID))
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/finance-close/2026-03",
+        headers=auth_headers("finance_viewer", "company", "company-tv-a"),
+    )
+
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "LOCKED"
+    assert audit_log.event_type == "MONTH_CLOSE_VIEWED"
+    assert audit_log.sensitive is True
+    assert audit_log.details["read_type"] == "summary"
 
 
 def test_finance_admin_cannot_lock_already_locked_month(tmp_path):
@@ -480,8 +556,14 @@ def test_finance_close_readiness_ignores_performance_only_channels(tmp_path):
         headers=auth_headers("finance_admin"),
     )
 
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+
     assert readiness.status_code == 200
     assert readiness.json() == {"month": "2026-03", "ready": True, "blockers": []}
+    assert audit_log.event_type == "MONTH_CLOSE_VIEWED"
+    assert audit_log.sensitive is True
+    assert audit_log.details["read_type"] == "readiness"
 
 
 def test_finance_viewer_cannot_lock_month(tmp_path):
@@ -570,6 +652,33 @@ def test_export_operator_cannot_change_allocation_rule(tmp_path):
     )
 
 
+def test_finance_close_rejects_blank_allocation_method_before_state_change(tmp_path):
+    """Whitespace allocation methods are rejected before close-state mutation or audit."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/finance-close/2026-03/allocate",
+        headers=auth_headers("finance_admin"),
+        json={
+            "allocation_method": "   ",
+            "rule_payload": {"gap_type": "transfer_fee"},
+            "reason": "Reject blank allocation method",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        close = session.get(FinanceMonthCloseORM, "2026-03")
+        audit_logs = session.scalars(select(AuditLogORM)).all()
+
+    assert response.status_code == 422
+    assert response.json()["detail"][0]["msg"] == "Value error, must not be blank"
+    assert close is None
+    assert audit_logs == []
+
+
 def test_finance_admin_can_record_allocation_rule_metadata_with_audit(tmp_path):
     """Finance Admin can record allocation metadata with an audit event."""
     database_url = build_database_url(tmp_path)
@@ -599,6 +708,36 @@ def test_finance_admin_can_record_allocation_rule_metadata_with_audit(tmp_path):
     }
     assert audit_log.event_type == "ALLOCATION_RULE_CHANGED"
     assert audit_log.details["allocation_method"] == "gross_revenue_proportional"
+
+
+def test_allocation_rule_allows_non_uuid_gateway_actor_with_audit(tmp_path):
+    """Allocation writes do not persist actor UUIDs; audit stores raw gateway subject."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers("finance_admin")
+    headers["x-user-id"] = "gateway-subject-1"
+
+    response = client.post(
+        "/finance-close/2026-03/allocate",
+        headers=headers,
+        json={
+            "allocation_method": "gross_revenue_proportional",
+            "rule_payload": {"basis": "gross_revenue_usd"},
+            "reason": "Allocate with gateway subject",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        close = session.get(FinanceMonthCloseORM, "2026-03")
+        audit_log = session.scalars(select(AuditLogORM)).one()
+
+    assert response.status_code == 200
+    assert close.allocation_method == "gross_revenue_proportional"
+    assert audit_log.user_id is None
+    assert audit_log.event_type == "ALLOCATION_RULE_CHANGED"
+    assert audit_log.details["actor_user_id"] == "gateway-subject-1"
 
 
 def test_finance_admin_cannot_change_allocation_rule_on_locked_month(tmp_path):

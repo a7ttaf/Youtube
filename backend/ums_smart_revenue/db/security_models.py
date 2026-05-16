@@ -13,6 +13,7 @@ from sqlalchemy import (
     func,
     text,
 )
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -113,7 +114,7 @@ class AccessScopeORM(SecurityBase):
     __table_args__ = (
         CheckConstraint(
             "scope_type IN ('global', 'sector', 'company', 'channel', "
-            "'finance-month', 'export', 'connector', 'graph-read')",
+            "'finance-month', 'export', 'connector')",
             name="ck_access_scopes_scope_type",
         ),
         CheckConstraint(
@@ -133,6 +134,7 @@ class AccessScopeORM(SecurityBase):
             "scope_type",
             unique=True,
             postgresql_where=text("scope_type = 'global' AND scope_id IS NULL"),
+            sqlite_where=text("scope_type = 'global' AND scope_id IS NULL"),
         ),
     )
 
@@ -277,7 +279,10 @@ class AuditLogORM(SecurityBase):
     request_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     details: Mapped[dict[str, object]] = mapped_column(
-        JSON, nullable=False, default=dict, server_default=text("'{}'")
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
     )
     sensitive: Mapped[bool] = mapped_column(
         Boolean, nullable=False, server_default=text("false")

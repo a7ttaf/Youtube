@@ -1,0 +1,32 @@
+# Cache backend configuration.
+
+# Cache storage backend: local | s3 | gcs | http
+backend: local
+
+# Local cache directory (can be overridden by CI_GATE_CACHE_DIR env var)
+local_dir: ~/.cache/ci-gate
+
+# Maximum number of cached runs to keep per check
+max_entries: 50
+
+# Maximum total cache size in MB
+max_size_mb: 500
+
+# Cache TTL in hours (0 = never expire by time)
+ttl_hours: 168
+
+# S3 backend (stub - not active unless backend: s3)
+s3:
+  bucket: ""
+  prefix: ci-gate/
+  region: us-east-1
+
+# GCS backend (stub - not active unless backend: gcs)
+gcs:
+  bucket: ""
+  prefix: ci-gate/
+
+# HTTP backend (stub - not active unless backend: http)
+http:
+  base_url: ""
+  auth_header: ""

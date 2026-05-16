@@ -25,8 +25,6 @@
 | `connectors.run_jobs` | Run ingestion/sync jobs. | Yes |
 | `connectors.manage` | Manage OAuth/API connector configuration. | Yes |
 | `raw_files.view` | View raw API payloads and raw report files. | Yes |
-| `graph.view` | View Neo4j graph views through backend proxy. | No |
-| `graph.view_finance` | View graph nodes or edges containing money values. | Yes |
 | `audit.view` | View audit log entries. | Yes |
 | `audit.view_sensitive_payloads` | View unmasked sensitive audit payloads. | Yes |
 | `users.manage` | Create, update, disable, or reactivate user accounts. | Yes |
@@ -38,16 +36,16 @@
 | Role | Default Scope | Key Permissions |
 |---|---|---|
 | Super Owner | `global` | All permissions. |
-| Corporate Admin | `global` | Analytics, confidence, graph, users, role assignment below Super Owner, platform settings, registry, groups, export templates, audit metadata. No finance by default. |
+| Corporate Admin | `global` | Analytics, confidence, users, role assignment below Super Owner, platform settings, registry, groups, export templates, audit metadata. No finance by default. |
 | Revenue Operations Admin | `global` | Analytics, confidence, connector health, run connector jobs, registry/groups, raw parser errors when granted. No payment/bank finance by default. |
-| Finance Admin | `global` or assigned finance scope | Revenue, payments, bank reconciliation, manual overrides, allocation rules, month lock/unlock, finance exports, finance graph, audit finance events. |
+| Finance Admin | `global` or assigned finance scope | Revenue, payments, bank reconciliation, manual overrides, allocation rules, month lock/unlock, finance exports, audit finance events. |
 | Finance Approver | `global` or `finance-month` | Approve overrides, approve allocation changes, unlock month, view finance needed for approval. |
-| Finance Viewer | `global`, `sector`, `company`, or `finance-month` | Read-only revenue, finalized payments, bank reconciliation, finance graph, finance export history. Cannot lock/unlock or edit. |
-| TV Sector Manager | `sector:TV` | TV analytics, confidence, graph, analytics exports. Finance only by explicit direct grant or paired finance role. |
-| News Sector Manager | `sector:NEWS` | News analytics, confidence, graph, analytics exports. Finance only by explicit direct grant or paired finance role. |
-| Company Manager | `company` | Company analytics, confidence, graph, analytics exports. No cross-company visibility. Finance only by explicit grant. |
-| Channel Manager | `channel` | Channel analytics, confidence, graph, analytics export for assigned channels. No finance by default. |
-| Assistant Analyst | Assigned `sector`, `company`, or `channel` | Analytics, confidence, graph for assigned scope. No raw files, revenue, payments, bank data, or finance exports by default. |
+| Finance Viewer | `global`, `sector`, `company`, or `channel` | Read-only revenue for the assigned organization scope. Finalized-payment and bank-reconciliation reads require a global role or separate finance-month grants. Cannot lock/unlock or edit. |
+| TV Sector Manager | `sector:TV` | TV analytics, confidence, analytics exports. Finance only by explicit direct grant or paired finance role. |
+| News Sector Manager | `sector:NEWS` | News analytics, confidence, analytics exports. Finance only by explicit direct grant or paired finance role. |
+| Company Manager | `company` | Company analytics, confidence, analytics exports. No cross-company visibility. Finance only by explicit grant. |
+| Channel Manager | `channel` | Channel analytics, confidence, analytics export for assigned channels. No finance by default. |
+| Assistant Analyst | Assigned `sector`, `company`, or `channel` | Analytics and confidence for assigned scope. No raw files, revenue, payments, bank data, or finance exports by default. |
 | Export Operator | Assigned export and data scope | Create analytics exports; create revenue exports only where `finance.view_revenue` is also granted. Cannot edit finance rules. |
 | Audit Viewer | `global` or assigned scope | View audit logs and masked sensitive events. Unmasked payloads require separate permission. |
 | System Integration User | `connector` or `global` service scope | Run connector jobs, write ingestion audit events through backend services, view connector health. No dashboard login. |
@@ -62,30 +60,29 @@
 - User account create/update requires `users.manage`, but service account lifecycle changes require Super Owner.
 - User account list and access-profile reads require `users.manage`; list responses use bounded cursor pagination and profile responses show active role assignments and direct grants only.
 - Finance direct grants require Finance Admin or Super Owner; connector/raw-file direct grants require Connector Admin or Super Owner; administrative direct grants require Super Owner.
-- Finalized-payment and bank-reconciliation permissions may be granted on organization scopes or a specific `finance-month`; month-scoped grants do not imply another month.
+- Finalized-payment and bank-reconciliation permissions may be granted globally or on a specific `finance-month`; month-scoped grants do not imply another month.
 - Export Operator requires underlying view permission for the export scope.
-- Graph `revenue-flow` views require both `graph.view` and `graph.view_finance`.
 - Raw report files require `raw_files.view` even when the user can view normalized analytics.
 - Service users cannot be used for browser/dashboard sessions.
 - Locked month values are immutable until a permitted unlock with a reason is audited.
 
 ## Default Role Permission Summary
 
-| Role | Analytics | Finance | Payments | Bank Rec | Overrides | Month Lock | Allocation | Registry | Exports | Connectors | Raw Files | Graph | Audit | Users/Roles |
-|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| Super Owner | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
-| Corporate Admin | Yes | No | No | No | No | No | No | Yes | Analytics/templates | Health only | No | Non-finance | Metadata | Yes |
-| Revenue Operations Admin | Yes | No | No | No | No | No | No | Yes | Analytics | Run jobs | Optional | Non-finance | Operational | No |
-| Finance Admin | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Read | Finance | Health | Optional | Finance | Finance | Finance roles |
-| Finance Approver | Yes | Yes | Yes | Yes | Approve | Unlock | Approve/change | Read | Finance | No | No | Finance | Finance | No |
-| Finance Viewer | Yes | Read | Read | Read | No | No | No | Read | View/export if granted | No | No | Finance | No | No |
-| TV Sector Manager | Sector | Optional | Optional | Optional | No | No | No | Read | Analytics | No | No | Sector | No | No |
-| News Sector Manager | Sector | Optional | Optional | Optional | No | No | No | Read | Analytics | No | No | Sector | No | No |
-| Company Manager | Company | Optional | Optional | Optional | No | No | No | Read | Analytics | No | No | Company | No | No |
-| Channel Manager | Channel | No | No | No | No | No | No | Read | Analytics | No | No | Channel | No | No |
-| Assistant Analyst | Assigned | No | No | No | No | No | No | Read | Analytics | No | No | Assigned | No | No |
-| Export Operator | Assigned | If granted | If granted | If granted | No | No | No | Read | Yes | No | No | Assigned | Export events | No |
-| Audit Viewer | No | Masked if not granted | Masked if not granted | Masked if not granted | No | No | No | No | History | No | No | No | Yes | No |
-| System Integration User | Service | No dashboard | No dashboard | No dashboard | No | No | No | Service writes | No | Run jobs | Service only | No | Service events | No |
-| Connector Admin | No | No | No | No | No | No | No | No | No | Yes | Diagnostics | No | Connector events | No |
-| Data Steward | Scoped | No | No | No | No | No | No | Yes | No | No | No | Scoped hierarchy | Mapping events | No |
+| Role | Analytics | Finance | Payments | Bank Rec | Overrides | Month Lock | Allocation | Registry | Exports | Connectors | Raw Files | Audit | Users/Roles |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| Super Owner | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| Corporate Admin | Yes | No | No | No | No | No | No | Yes | Analytics/templates | Health only | No | Metadata | Yes |
+| Revenue Operations Admin | Yes | No | No | No | No | No | No | Yes | Analytics | Run jobs | Optional | Operational | No |
+| Finance Admin | Yes | Yes | Yes | Yes | Yes | Yes | Yes | Read | Finance | Health | Optional | Finance | Finance roles |
+| Finance Approver | Yes | Yes | Yes | Yes | Approve | Unlock | Approve/change | Read | Finance | No | No | Finance | No |
+| Finance Viewer | Yes | Read | Read (global or finance-month grant) | Read (global or finance-month grant) | No | No | No | Read | View/export if granted | No | No | No | No |
+| TV Sector Manager | Sector | Optional | Optional | Optional | No | No | No | Read | Analytics | No | No | No | No |
+| News Sector Manager | Sector | Optional | Optional | Optional | No | No | No | Read | Analytics | No | No | No | No |
+| Company Manager | Company | Optional | Optional | Optional | No | No | No | Read | Analytics | No | No | No | No |
+| Channel Manager | Channel | No | No | No | No | No | No | Read | Analytics | No | No | No | No |
+| Assistant Analyst | Assigned | No | No | No | No | No | No | Read | Analytics | No | No | No | No |
+| Export Operator | Assigned | If granted | If granted | If granted | No | No | No | Read | Yes | No | No | Export events | No |
+| Audit Viewer | No | Masked if not granted | Masked if not granted | Masked if not granted | No | No | No | No | History | No | No | Yes | No |
+| System Integration User | Service | No dashboard | No dashboard | No dashboard | No | No | No | Service writes | No | Run jobs | Service only | Service events | No |
+| Connector Admin | No | No | No | No | No | No | No | No | No | Yes | Diagnostics | Connector events | No |
+| Data Steward | Scoped | No | No | No | No | No | No | Yes | No | No | No | Mapping events | No |

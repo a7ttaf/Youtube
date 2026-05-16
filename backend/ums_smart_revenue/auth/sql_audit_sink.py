@@ -3,7 +3,7 @@ from uuid import UUID, uuid4
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.audit_service import AuditRecord
-from ums_smart_revenue.db.security_models import AuditLogORM
+from ums_smart_revenue.db.security_models import AuditLogORM, UserORM
 
 
 class SqlAlchemyAuditSink:
@@ -15,7 +15,12 @@ class SqlAlchemyAuditSink:
 
     def append(self, record: AuditRecord) -> None:
         """Append one audit log row and flush so failures happen before commit."""
-        user_id = _parse_uuid(record.user_id)
+        raw_actor_user_id = record.user_id
+        user_id = _parse_uuid_or_none(raw_actor_user_id)
+        details = dict(record.details or {})
+        if user_id is None or self._session.get(UserORM, user_id) is None:
+            details["actor_user_id"] = raw_actor_user_id
+            user_id = None
         self._session.add(
             AuditLogORM(
                 id=uuid4(),
@@ -27,7 +32,7 @@ class SqlAlchemyAuditSink:
                 scope_id=record.scope_id,
                 request_id=record.request_id,
                 reason=record.reason,
-                details=record.details,
+                details=details,
                 sensitive=record.sensitive,
                 created_at=record.created_at,
             )
@@ -40,9 +45,12 @@ class SqlAlchemyAuditSink:
         self._session.expunge_all()
 
 
-def _parse_uuid(value: str) -> UUID:
-    """Parse audit actor ids before writing SQL foreign-key references."""
+def _parse_uuid_or_none(value: str) -> UUID | None:
+    """Parse audit actor ids when they can be represented as local user FKs."""
     try:
         return UUID(value)
-    except ValueError as exc:
-        raise ValueError(f"Invalid audit user_id: {value!r}") from exc
+    except (ValueError, TypeError, AttributeError):
+        # ValueError covers malformed UUID strings; TypeError/AttributeError
+        # cover non-string inputs (None, int, etc.) that violate the str
+        # contract. All fall back to the fail-closed gateway-actor path.
+        return None

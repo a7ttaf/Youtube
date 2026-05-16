@@ -13,24 +13,27 @@ class AuditEventType(StrEnum):
     REPORT_IMPORTED = "REPORT_IMPORTED"
     ADSENSE_PAYMENT_SYNCED = "ADSENSE_PAYMENT_SYNCED"
     MONTH_CLOSE_UPDATED = "MONTH_CLOSE_UPDATED"
+    MONTH_CLOSE_VIEWED = "MONTH_CLOSE_VIEWED"
     MONTH_LOCKED = "MONTH_LOCKED"
     MONTH_UNLOCKED = "MONTH_UNLOCKED"
     MANUAL_OVERRIDE_CREATED = "MANUAL_OVERRIDE_CREATED"
     MANUAL_OVERRIDE_APPROVED = "MANUAL_OVERRIDE_APPROVED"
     ALLOCATION_RULE_CHANGED = "ALLOCATION_RULE_CHANGED"
+    RECALCULATION_REQUESTED = "RECALCULATION_REQUESTED"
     EXPORT_CREATED = "EXPORT_CREATED"
+    EXPORT_VIEWED = "EXPORT_VIEWED"
     EXPORT_DOWNLOADED = "EXPORT_DOWNLOADED"
     USER_ACCOUNT_CHANGED = "USER_ACCOUNT_CHANGED"
     USER_ROLE_CHANGED = "USER_ROLE_CHANGED"
     USER_PERMISSION_CHANGED = "USER_PERMISSION_CHANGED"
     CONNECTOR_JOB_RUN = "CONNECTOR_JOB_RUN"
     CONNECTOR_SETTINGS_CHANGED = "CONNECTOR_SETTINGS_CHANGED"
+    EXCHANGE_RATE_SYNCED = "EXCHANGE_RATE_SYNCED"
     RAW_FILE_VIEWED = "RAW_FILE_VIEWED"
     REVENUE_VIEWED = "REVENUE_VIEWED"
     PAYMENT_VIEWED = "PAYMENT_VIEWED"
     BANK_RECONCILIATION_RECORDED = "BANK_RECONCILIATION_RECORDED"
     BANK_RECONCILIATION_VIEWED = "BANK_RECONCILIATION_VIEWED"
-    GRAPH_FINANCE_VIEWED = "GRAPH_FINANCE_VIEWED"
     AUDIT_LOG_VIEWED = "AUDIT_LOG_VIEWED"
 
 
@@ -44,6 +47,10 @@ class AuditEventDefinition:
 # Events omitted here intentionally have no permission marker or reason requirement.
 # record_audit_event handles them via .get() and records them as non-sensitive.
 AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
+    AuditEventType.CHANNEL_CREATED: AuditEventDefinition(
+        AuditEventType.CHANNEL_CREATED,
+        permission=Permission.MANAGE_CHANNELS,
+    ),
     AuditEventType.CHANNEL_UPDATED: AuditEventDefinition(
         AuditEventType.CHANNEL_UPDATED,
         reason_required=True,
@@ -53,6 +60,10 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
         AuditEventType.GROUP_UPDATED,
         reason_required=True,
         permission=Permission.MANAGE_GROUPS,
+    ),
+    AuditEventType.MONTH_CLOSE_VIEWED: AuditEventDefinition(
+        AuditEventType.MONTH_CLOSE_VIEWED,
+        permission=Permission.VIEW_REVENUE,
     ),
     AuditEventType.MONTH_LOCKED: AuditEventDefinition(
         AuditEventType.MONTH_LOCKED,
@@ -79,8 +90,17 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
         reason_required=True,
         permission=Permission.CHANGE_ALLOCATION_RULE,
     ),
+    AuditEventType.RECALCULATION_REQUESTED: AuditEventDefinition(
+        AuditEventType.RECALCULATION_REQUESTED,
+        reason_required=True,
+        permission=Permission.CHANGE_ALLOCATION_RULE,
+    ),
     AuditEventType.EXPORT_CREATED: AuditEventDefinition(
         AuditEventType.EXPORT_CREATED,
+        permission=Permission.EXPORT_REVENUE_REPORT,
+    ),
+    AuditEventType.EXPORT_VIEWED: AuditEventDefinition(
+        AuditEventType.EXPORT_VIEWED,
         permission=Permission.EXPORT_REVENUE_REPORT,
     ),
     AuditEventType.EXPORT_DOWNLOADED: AuditEventDefinition(
@@ -119,6 +139,11 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
         reason_required=True,
         permission=Permission.MANAGE_CONNECTORS,
     ),
+    AuditEventType.EXCHANGE_RATE_SYNCED: AuditEventDefinition(
+        AuditEventType.EXCHANGE_RATE_SYNCED,
+        reason_required=True,
+        permission=Permission.RUN_CONNECTOR_JOBS,
+    ),
     AuditEventType.RAW_FILE_VIEWED: AuditEventDefinition(
         AuditEventType.RAW_FILE_VIEWED,
         permission=Permission.VIEW_RAW_FILES,
@@ -139,10 +164,6 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     AuditEventType.BANK_RECONCILIATION_VIEWED: AuditEventDefinition(
         AuditEventType.BANK_RECONCILIATION_VIEWED,
         permission=Permission.VIEW_BANK_RECONCILIATION,
-    ),
-    AuditEventType.GRAPH_FINANCE_VIEWED: AuditEventDefinition(
-        AuditEventType.GRAPH_FINANCE_VIEWED,
-        permission=Permission.VIEW_GRAPH_FINANCE,
     ),
     AuditEventType.AUDIT_LOG_VIEWED: AuditEventDefinition(
         AuditEventType.AUDIT_LOG_VIEWED,

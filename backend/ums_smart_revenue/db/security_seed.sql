@@ -5,6 +5,22 @@ INSERT INTO access_scopes (scope_type, scope_id, label)
 VALUES ('global', NULL, 'Global')
 ON CONFLICT DO NOTHING;
 
+DELETE FROM user_role_assignments
+WHERE scope_id IN (SELECT id FROM access_scopes WHERE scope_type = 'graph-read');
+
+DELETE FROM user_permission_grants
+WHERE scope_id IN (SELECT id FROM access_scopes WHERE scope_type = 'graph-read')
+   OR permission_key IN ('graph.view', 'graph.view_finance');
+
+DELETE FROM role_permission_assignments
+WHERE permission_key IN ('graph.view', 'graph.view_finance');
+
+DELETE FROM permissions
+WHERE key IN ('graph.view', 'graph.view_finance');
+
+DELETE FROM access_scopes
+WHERE scope_type = 'graph-read';
+
 INSERT INTO roles (key, label, description, service_only)
 VALUES
     ('super_owner', 'Super Owner', 'Global break-glass owner with every platform and finance permission.', false),
@@ -13,9 +29,9 @@ VALUES
     ('finance_admin', 'Finance Admin', 'Finance owner for revenue, reconciliation, overrides, and month close.', false),
     ('finance_approver', 'Finance Approver', 'Second-control approver for finance overrides and month unlocks.', false),
     ('finance_viewer', 'Finance Viewer', 'Read-only finance role for granted organization scopes.', false),
-    ('tv_sector_manager', 'TV Sector Manager', 'Sector-scoped management role for TV analytics and graph views.', false),
-    ('news_sector_manager', 'News Sector Manager', 'Sector-scoped management role for News analytics and graph views.', false),
-    ('company_manager', 'Company Manager', 'Company-scoped manager for analytics and non-finance graph views.', false),
+    ('tv_sector_manager', 'TV Sector Manager', 'Sector-scoped management role for TV analytics and report operations.', false),
+    ('news_sector_manager', 'News Sector Manager', 'Sector-scoped management role for News analytics and report operations.', false),
+    ('company_manager', 'Company Manager', 'Company-scoped manager for assigned company analytics.', false),
     ('channel_manager', 'Channel Manager', 'Channel-scoped manager for assigned channel analytics.', false),
     ('assistant_analyst', 'Assistant Analyst', 'Assigned-scope analyst for analytics without default finance access.', false),
     ('export_operator', 'Export Operator', 'Scoped export operator for approved analytics or finance exports.', false),
@@ -51,8 +67,6 @@ VALUES
     ('connectors.run_jobs', 'Run connector jobs', true, true),
     ('connectors.manage', 'Manage connectors', true, true),
     ('raw_files.view', 'View raw report files', true, true),
-    ('graph.view', 'View graph', false, false),
-    ('graph.view_finance', 'View finance graph', true, true),
     ('audit.view', 'View audit log', true, true),
     ('audit.view_sensitive_payloads', 'View sensitive audit payloads', true, true),
     ('users.manage', 'Manage users', true, true),
@@ -77,7 +91,6 @@ VALUES
     ('corporate_admin', 'registry.manage_org_mapping'),
     ('corporate_admin', 'registry.manage_groups'),
     ('corporate_admin', 'connectors.view_health'),
-    ('corporate_admin', 'graph.view'),
     ('corporate_admin', 'audit.view'),
     ('corporate_admin', 'users.manage'),
     ('corporate_admin', 'roles.assign'),
@@ -90,7 +103,6 @@ VALUES
     ('revenue_operations_admin', 'registry.manage_groups'),
     ('revenue_operations_admin', 'connectors.view_health'),
     ('revenue_operations_admin', 'connectors.run_jobs'),
-    ('revenue_operations_admin', 'graph.view'),
     ('finance_admin', 'analytics.view'),
     ('finance_admin', 'analytics.view_confidence'),
     ('finance_admin', 'finance.view_revenue'),
@@ -104,8 +116,6 @@ VALUES
     ('finance_admin', 'finance.change_allocation_rule'),
     ('finance_admin', 'exports.analytics'),
     ('finance_admin', 'exports.revenue'),
-    ('finance_admin', 'graph.view'),
-    ('finance_admin', 'graph.view_finance'),
     ('finance_admin', 'audit.view'),
     ('finance_admin', 'roles.assign'),
     ('finance_approver', 'analytics.view'),
@@ -118,35 +128,26 @@ VALUES
     ('finance_approver', 'finance.unlock_month'),
     ('finance_approver', 'finance.change_allocation_rule'),
     ('finance_approver', 'exports.revenue'),
-    ('finance_approver', 'graph.view'),
-    ('finance_approver', 'graph.view_finance'),
     ('finance_approver', 'audit.view'),
     ('finance_viewer', 'analytics.view'),
     ('finance_viewer', 'analytics.view_confidence'),
     ('finance_viewer', 'finance.view_revenue'),
     ('finance_viewer', 'finance.view_finalized_payments'),
     ('finance_viewer', 'finance.view_bank_reconciliation'),
-    ('finance_viewer', 'graph.view'),
-    ('finance_viewer', 'graph.view_finance'),
     ('tv_sector_manager', 'analytics.view'),
     ('tv_sector_manager', 'analytics.view_confidence'),
     ('tv_sector_manager', 'exports.analytics'),
-    ('tv_sector_manager', 'graph.view'),
     ('news_sector_manager', 'analytics.view'),
     ('news_sector_manager', 'analytics.view_confidence'),
     ('news_sector_manager', 'exports.analytics'),
-    ('news_sector_manager', 'graph.view'),
     ('company_manager', 'analytics.view'),
     ('company_manager', 'analytics.view_confidence'),
     ('company_manager', 'exports.analytics'),
-    ('company_manager', 'graph.view'),
     ('channel_manager', 'analytics.view'),
     ('channel_manager', 'analytics.view_confidence'),
     ('channel_manager', 'exports.analytics'),
-    ('channel_manager', 'graph.view'),
     ('assistant_analyst', 'analytics.view'),
     ('assistant_analyst', 'analytics.view_confidence'),
-    ('assistant_analyst', 'graph.view'),
     ('export_operator', 'analytics.view'),
     ('export_operator', 'analytics.view_confidence'),
     ('export_operator', 'exports.analytics'),
@@ -161,7 +162,6 @@ VALUES
     ('data_steward', 'analytics.view_confidence'),
     ('data_steward', 'registry.manage_channels'),
     ('data_steward', 'registry.manage_org_mapping'),
-    ('data_steward', 'registry.manage_groups'),
-    ('data_steward', 'graph.view')
+    ('data_steward', 'registry.manage_groups')
 ON CONFLICT DO NOTHING;
 

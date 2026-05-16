@@ -15,7 +15,7 @@ Do not start with a normal dashboard. Start with the **data and calculation engi
 - YouTube channels only.
 - No title/show mapping in the first release.
 - No Content ID fingerprint/claims module in the first release.
-- Neo4j is read-only graph projection, not source of truth.
+- No Neo4j or graph projection layer in the active roadmap.
 
 ### Outputs
 - Final stack decision.
@@ -130,27 +130,7 @@ Do not start with a normal dashboard. Start with the **data and calculation engi
 
 ---
 
-## Phase 6 — Neo4j graph read-model
-
-### Build
-- SQL/warehouse → Neo4j sync job.
-- Read-only graph database.
-- Graph model for Holding → Sector → Company → Channel → Month → Payment.
-- Bloom/Explore perspectives or embedded custom graph.
-- Graph problem queries.
-
-### Outputs
-- Organization graph.
-- Revenue flow graph.
-- Missing-data graph.
-- Outside-CMS graph.
-
-### Acceptance gate
-- User can visually trace one channel from company to payment/reconciliation status.
-
----
-
-## Phase 7 — Export center
+## Phase 6 — Export center
 
 ### Build
 - Excel export.
@@ -169,7 +149,7 @@ Do not start with a normal dashboard. Start with the **data and calculation engi
 
 ---
 
-## Phase 8 — Hardening
+## Phase 7 — Hardening
 
 ### Build
 - Audit logs.

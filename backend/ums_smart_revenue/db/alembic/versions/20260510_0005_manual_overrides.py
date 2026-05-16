@@ -5,10 +5,9 @@ Revises: 20260510_0004
 Create Date: 2026-05-10
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects import postgresql
-
 
 revision = "20260510_0005"
 down_revision = "20260510_0004"
@@ -40,8 +39,22 @@ def upgrade() -> None:
         sa.Column("approved_at", sa.DateTime(timezone=True), nullable=True),
         sa.Column("approval_reason", sa.Text(), nullable=True),
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        # Dialect-agnostic month format check. The original `~` regex was
+        # PostgreSQL-only and broke SQLite-backed migration test harnesses;
+        # substr/BETWEEN runs identically on PostgreSQL and SQLite. Each
+        # character is verified to be a digit (positions 1-4 and 6-7) before
+        # the two-digit month range check, because string BETWEEN is
+        # lexicographic and would otherwise admit values like "2026-0A"
+        # (since '0A' sorts between '01' and '12' byte-wise).
         sa.CheckConstraint(
-            "month ~ '^[0-9]{4}-(0[1-9]|1[0-2])$'",
+            "length(month) = 7 AND substr(month, 5, 1) = '-' "
+            "AND substr(month, 1, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 2, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 3, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 4, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 6, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 7, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
             name="ck_revenue_manual_overrides_month_format",
         ),
         sa.CheckConstraint("adjustment_revenue_usd <> 0", name="ck_revenue_manual_overrides_adjustment_nonzero"),

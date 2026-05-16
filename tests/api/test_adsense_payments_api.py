@@ -16,9 +16,10 @@ def auth_headers(
     role: str,
     scope_type: str = "global",
     scope_id: str | None = None,
+    user_id: str | UUID = USER_ID,
 ) -> dict[str, str]:
     headers = {
-        "x-user-id": str(USER_ID),
+        "x-user-id": str(user_id),
         "x-user-email": "adsense-payments@example.com",
         "x-role": role,
         "x-scope-type": scope_type,
@@ -107,6 +108,35 @@ def test_system_integration_user_syncs_adsense_payment_with_audit(tmp_path):
     assert audit_log.sensitive is True
 
 
+def test_system_integration_user_sync_accepts_non_uuid_gateway_actor(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/adsense/sync-payments",
+        headers=auth_headers(
+            "system_integration_user",
+            "connector",
+            "adsense",
+            user_id="gateway-subject-adsense",
+        ),
+        json=payment_payload(),
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        payment_row = (
+            session.execute(text("SELECT * FROM adsense_payments")).mappings().one()
+        )
+        audit_log = session.scalars(select(AuditLogORM)).one()
+
+    assert response.status_code == 200
+    assert payment_row["imported_by"] is None
+    assert audit_log.user_id is None
+    assert audit_log.details["actor_user_id"] == "gateway-subject-adsense"
+
+
 def test_adsense_payment_sync_is_idempotent_for_same_month_payment_name(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -139,6 +169,36 @@ def test_adsense_payment_sync_is_idempotent_for_same_month_payment_name(tmp_path
     assert payment_amount == Decimal("931.250000")
 
 
+def test_adsense_payment_sync_rejects_duplicate_keys_within_batch(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    payload = payment_payload("930.00")
+    payload["payments"].append(
+        {
+            **payload["payments"][0],
+            "payment_amount": "931.25",
+            "raw_payload": {"paymentId": "pay_2026_03_duplicate", "source": "adsense"},
+        }
+    )
+
+    response = client.post(
+        "/adsense/sync-payments",
+        headers=auth_headers("system_integration_user", "connector", "adsense"),
+        json=payload,
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        payment_count = session.execute(
+            text("SELECT COUNT(*) FROM adsense_payments")
+        ).scalar_one()
+
+    assert response.status_code == 422
+    assert "duplicate AdSense payment in batch" in response.json()["detail"]
+    assert payment_count == 0
+
+
 def test_finance_viewer_lists_adsense_payments_with_audit(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -157,7 +217,7 @@ def test_finance_viewer_lists_adsense_payments_with_audit(tmp_path):
     engine = create_engine(database_url)
     with Session(engine) as session:
         audit_logs = session.scalars(
-            select(AuditLogORM).order_by(AuditLogORM.created_at)
+            select(AuditLogORM).order_by(AuditLogORM.created_at, AuditLogORM.id)
         ).all()
 
     assert create_response.status_code == 200
@@ -169,8 +229,53 @@ def test_finance_viewer_lists_adsense_payments_with_audit(tmp_path):
         "ADSENSE_PAYMENT_SYNCED",
         "PAYMENT_VIEWED",
     ]
-    assert audit_logs[-1].scope_type == "global"
+    assert audit_logs[-1].scope_type == "finance-month"
+    assert audit_logs[-1].scope_id == "2026-03"
     assert audit_logs[-1].sensitive is True
+
+
+def test_finance_month_scoped_viewer_lists_matching_adsense_payments(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    create_response = client.post(
+        "/adsense/sync-payments",
+        headers=auth_headers("system_integration_user", "connector", "adsense"),
+        json=payment_payload(),
+    )
+
+    response = client.get(
+        "/adsense/payments?month=2026-03",
+        headers=auth_headers("finance_viewer", "finance-month", "2026-03"),
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_logs = session.scalars(
+            select(AuditLogORM).order_by(AuditLogORM.created_at, AuditLogORM.id)
+        ).all()
+
+    assert create_response.status_code == 200
+    assert response.status_code == 200
+    assert response.json()["items"][0]["month"] == "2026-03"
+    assert audit_logs[-1].scope_type == "finance-month"
+    assert audit_logs[-1].scope_id == "2026-03"
+
+
+def test_finance_month_scoped_viewer_cannot_list_another_month(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/adsense/payments?month=2026-04",
+        headers=auth_headers("finance_viewer", "finance-month", "2026-03"),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Missing permission: finance.view_finalized_payments"
+    )
 
 
 def test_assistant_cannot_view_adsense_payments(tmp_path):
