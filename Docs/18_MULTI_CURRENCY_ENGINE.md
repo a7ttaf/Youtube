@@ -72,6 +72,7 @@ CREATE TABLE currencies (
 ```sql
 CREATE TABLE fx_rates (
     id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
     provider        TEXT NOT NULL,                -- 'ECB', 'EXCHANGERATE_HOST', 'MANUAL_CSV'
     base_code       CHAR(3) NOT NULL REFERENCES currencies(code),
     quote_code      CHAR(3) NOT NULL REFERENCES currencies(code),
@@ -81,11 +82,11 @@ CREATE TABLE fx_rates (
     ingested_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
     ingested_by     UUID REFERENCES users(id),    -- NULL for automated sync
     CONSTRAINT uq_fx_rates_unique
-        UNIQUE (provider, base_code, quote_code, as_of_date),
+        UNIQUE (tenant_id, provider, base_code, quote_code, as_of_date),
     CONSTRAINT ck_fx_rates_positive_rate CHECK (rate > 0),
     CONSTRAINT ck_fx_rates_distinct CHECK (base_code <> quote_code)
 );
-CREATE INDEX ix_fx_rates_lookup ON fx_rates (base_code, quote_code, as_of_date DESC);
+CREATE INDEX ix_fx_rates_lookup ON fx_rates (tenant_id, base_code, quote_code, as_of_date DESC);
 ```
 
 **Semantics:** rate is `quote_per_base` — i.e. 1 unit of `base_code` is worth `rate` units of `quote_code`. To convert an amount: `target = amount_native * rate(native -> target, on_date)`.
@@ -117,7 +118,7 @@ Provider choice is **per-tenant**, configured in `tenants.fx_provider_settings J
 
 ### Sync job
 
-Celery beat task `workers/fx_sync_job.py` runs daily at 02:00 UTC per tenant; pulls yesterday's rates for all (base, quote) pairs used by that tenant's data; writes to `fx_rates`. Idempotent: the `(provider, base, quote, as_of_date)` unique constraint ensures retries don't duplicate.
+Celery beat task `workers/fx_sync_job.py` runs daily at 02:00 UTC per tenant; pulls yesterday's rates for all (base, quote) pairs used by that tenant's data; writes to `fx_rates`. Idempotent per tenant: the `(tenant_id, provider, base, quote, as_of_date)` unique constraint ensures retries do not duplicate rates while allowing tenant-specific provider choices and manual overrides.
 
 ---
 
@@ -152,8 +153,8 @@ class FxConversion:
 Conversion never mutates the source row. It returns an `FxConversion` envelope so the UI can render both the converted value and the source rate.
 
 **Rate lookup order:**
-1. Exact `(base, quote, as_of_date)` match.
-2. Most recent `(base, quote, on_or_before=as_of_date)` from preferred provider.
+1. Exact `(tenant_id, base, quote, as_of_date)` match.
+2. Most recent `(tenant_id, base, quote, on_or_before=as_of_date)` from preferred provider.
 3. Most recent across any allowed provider for the tenant.
 4. Cross-rate via USD pivot (`(base, USD)` * `(USD, quote)`).
 5. Failure → `FxRateUnavailable`.
@@ -242,7 +243,7 @@ A new `Permission.MANAGE_FX_RATES` is added in the same Phase S2 migration.
 Property-based tests via `hypothesis`:
 
 1. **Round-trip consistency**: `convert(amount, A, B) → convert(result, B, A)` yields the original amount within rounding tolerance (`abs(diff) ≤ 10^-minor_unit`).
-2. **Identity**: `convert(x, A, A) == FxConversion(amount=x, rate=1)`.
+2. **Identity**: `convert(x, A, A)` returns `FxConversion(amount_native=x, amount_converted=x, from_code=A, to_code=A, rate=Decimal("1"), rate_as_of=on_date, provider="IDENTITY")`.
 3. **Sum invariance**: `sum(convert(x_i, A, B))` differs from `convert(sum(x_i), A, B)` by at most the rounding tolerance × N.
 4. **Locked-month immutability**: after a month is locked, any subsequent conversion of any value in that month uses the locked rate, regardless of `fx_rates` changes.
 5. **Pivoted rate consistency**: a USD-pivoted rate (`A→USD→B`) is within 0.5% of the direct rate when both are available (sanity check on provider data).
@@ -262,9 +263,10 @@ Property-based tests via `hypothesis`:
    3. Backfill `amount_native = <existing_usd_column>`, `currency_iso4217 = 'USD'`.
    4. Mark both NOT NULL.
    5. Add FK on `currency_iso4217 → currencies(code)`.
-4. Add `tenants.primary_currency CHAR(3) NOT NULL DEFAULT 'USD'`.
+4. Validate the `tenants.primary_currency` column created by `20260520_0001_multi_tenant_foundation`; do not add it a second time.
 5. Add `users.preferred_currency CHAR(3) NULL`.
-6. Add `Permission.MANAGE_FX_RATES` row in `permissions`.
+6. Add FK constraints `tenants.primary_currency -> currencies(code)` and `users.preferred_currency -> currencies(code)` after `currencies` is seeded, using `NOT VALID` then `VALIDATE CONSTRAINT` for existing installs.
+7. Add `Permission.MANAGE_FX_RATES` row in `permissions`.
 
 The original `*_usd` columns are kept for one release as deprecated; flagged in `pyproject.toml` removal-target list.
 

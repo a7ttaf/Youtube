@@ -52,7 +52,7 @@ Every existing **operational** table receives a `tenant_id UUID NOT NULL` FK. Ta
 
 | Receives `tenant_id` | Stays platform-wide |
 |---|---|
-| `youtube_channels`, `channel_groups`, `channel_group_members` | `tenants`, `currencies`, `fx_rates` |
+| `youtube_channels`, `channel_groups`, `channel_group_members` | `tenants`, `currencies` |
 | `org_units`, `channel_mappings` | `permissions` (definition catalog) |
 | `revenue_facts`, `manual_revenue_overrides`, `adsense_payments`, `bank_reconciliation_entries`, `finance_month_close` | `roles` (definition catalog) |
 | `raw_report_files`, `number_explanations`, `export_jobs` | `platform_audit_logs` |
@@ -60,6 +60,8 @@ Every existing **operational** table receives a `tenant_id UUID NOT NULL` FK. Ta
 | `audit_logs` (tenant-scoped audit) | |
 
 > **Users sit inside a tenant.** A given email can have separate accounts in different tenants. SSO will map identity → tenant at login.
+
+The existing global `uq_users_email_lower` constraint must be replaced by a tenant-scoped unique key on `(tenant_id, lower(email))` before this invariant is enabled.
 
 ### Row-Level Security policies
 
@@ -103,7 +105,7 @@ PrincipalResolver dependency        (validates user belongs to tenant)
     ▼
 Session opened on `app_tenant` ────▶ executes
     `SET LOCAL app.current_tenant_id = '<uuid>'`
-    once per request
+    once per transaction
     │
     ▼
 Router → repository → ORM
@@ -114,6 +116,8 @@ Postgres applies RLS using
 ```
 
 ### Tenant resolver
+
+Tenant slug resolution is **both header and subdomain based**. `X-UMS-Tenant` is accepted for internal service-to-service calls and local development; `tenant.{host}` is the browser-facing default. If both are present they must resolve to the same tenant slug, otherwise the resolver rejects the request with `400 Tenant mismatch`.
 
 ```python
 # backend/ums_smart_revenue/tenancy/resolver.py (sketch)
@@ -135,7 +139,7 @@ Tenant resolution is cached in Redis with a short TTL keyed by `slug`.
 
 ### Setting the GUC
 
-A SQLAlchemy `before_cursor_execute` event handler issues `SET LOCAL app.current_tenant_id = ...` at the start of each transaction, using the tenant from the `contextvars.ContextVar`.
+A SQLAlchemy transaction-begin hook issues `SET LOCAL app.current_tenant_id = ...` once per transaction, using the tenant from the `contextvars.ContextVar`. Do **not** use `before_cursor_execute`: it is statement-scoped and would re-run a transaction-scoped setting on every query. `SET LOCAL` is cleared automatically on commit or rollback, and pooled connections must never retain tenant state outside the transaction.
 
 ---
 
@@ -170,13 +174,15 @@ Implemented as two coordinated Alembic revisions in Phase S2:
 2. Create `platform_admins` table.
 3. For each tenant-scoped table:
    1. Add `tenant_id UUID NULL`.
-   2. Backfill all existing rows to UMS's tenant_id.
-   3. Add NOT NULL constraint.
-   4. Add FK to `tenants(id)` ON DELETE RESTRICT.
-   5. Add composite index `(tenant_id, ...)` matching the existing access pattern.
-4. Create `app_tenant` and `app_platform` Postgres roles.
-5. Enable RLS on each tenant-scoped table; install isolation policy.
-6. Grant the right read/write surface to each role.
+   2. Backfill all existing rows to UMS's tenant_id in 5,000-10,000 row batches, committing each batch.
+   3. Add the FK to `tenants(id)` ON DELETE RESTRICT with `NOT VALID`, then `VALIDATE CONSTRAINT`.
+   4. Add `CHECK (tenant_id IS NOT NULL) NOT VALID`, then `VALIDATE CONSTRAINT`, before finally setting the column `NOT NULL` in a short lock window.
+   5. Add composite indexes `(tenant_id, ...)` matching the existing access pattern with `CREATE INDEX CONCURRENTLY`.
+   6. Set `lock_timeout` before every DDL step so the migration fails fast instead of blocking production traffic.
+4. Replace the existing global `uq_users_email_lower` index with a tenant-scoped unique index on `(tenant_id, lower(email))`.
+5. Create `app_tenant` and `app_platform` Postgres roles.
+6. Enable RLS on each tenant-scoped table; install isolation policy.
+7. Grant the right read/write surface to each role.
 
 This migration is **reversible** in development but **destructive** in production after the NOT NULL step. Document the rollback caveat in the migration's docstring.
 
@@ -185,7 +191,7 @@ This migration is **reversible** in development but **destructive** in productio
 1. Add `backend/ums_smart_revenue/tenancy/` package (`models.py`, `resolver.py`, `context.py`, `repository.py`).
 2. Extend `UserPrincipal` with `tenant_id`.
 3. Insert `TenantResolverMiddleware` into the app factory.
-4. Add the `SET LOCAL app.current_tenant_id` hook in `db/session.py`.
+4. Add the transaction-begin `SET LOCAL app.current_tenant_id` hook in `db/session.py`.
 5. Update every repository to assert `tenant_id == principal.tenant_id` on writes (defense-in-depth even though RLS will block).
 6. Add `tests/tenancy/test_isolation.py` — a full matrix proving tenant A cannot access tenant B via any endpoint.
 
@@ -196,7 +202,7 @@ This migration is **reversible** in development but **destructive** in productio
 | Concern | Approach |
 |---|---|
 | **Connection pooling** | One pool per role (`app_tenant`, `app_platform`). SQLAlchemy's async engine, with pool size sized for tenant concurrency, not tenant count. |
-| **Backups** | Single physical backup; restore-into-staging tooling can filter by tenant via `pg_dump --table=... --where="tenant_id='...'"` if a single-tenant slice is needed. |
+| **Backups** | Single physical backup. For tenant-slice restores, export schema with `pg_dump --schema-only -t <table_name> -h <host> -U <user> -d <dbname>` and export rows with `psql -h <host> -U <user> -d <dbname> -c "COPY (SELECT * FROM <table_name> WHERE tenant_id = '<tenant_uuid>') TO STDOUT"`; restore tooling replays schema first, then `COPY` data per tenant-scoped table. |
 | **Per-tenant disable** | `tenants.status = 'SUSPENDED'`: tenant resolver returns 423 Locked. Data stays in place. |
 | **Per-tenant offboarding** | `tenants.status = 'ARCHIVED'` → blocks new connectors, exports, and writes; reads still allowed for finance reconciliation completion. |
 | **Cross-tenant reporting** | Only platform-admin endpoints; explicit allowlist; audited. |
@@ -223,6 +229,5 @@ This migration is **reversible** in development but **destructive** in productio
 
 ## Open decisions (resolve before Phase S2 lands)
 
-- Tenant slug source for inbound requests: header-only, subdomain-only, or both. (Recommend both.)
 - Whether `platform_admins` reuses the same OIDC IdP as tenant users or has a separate one. (Recommend same with a dedicated `platform` group.)
 - Where per-tenant settings (theme, default currency, brand assets) live. (Recommend a `tenant_settings` JSONB column on `tenants`.)
