@@ -301,16 +301,17 @@ Property-based tests via `hypothesis`:
 
 1. Create `currencies`, seed full ISO 4217 list, flip the v1.0 set to `is_supported = TRUE`.
 2. Add `tenants.fx_provider_settings JSONB` if it was not already created by the tenant foundation migration, with the object-shape check shown above.
-3. Create `fx_rates`, `fx_locked_month_rates`.
-4. For each monetary column on a tenant-scoped table:
+3. Ensure `users(tenant_id, id)` has a non-partial unique key from the tenant foundation/backfill migration before creating `fx_rates`, because `fx_rates(tenant_id, ingested_by)` references that exact column set.
+4. Create `fx_rates`, `fx_locked_month_rates`.
+5. For each monetary column on a tenant-scoped table:
    1. Add distinct paired columns named from the source field, e.g. `bank_received_amount_native` and `bank_received_amount_currency_iso4217` for `bank_received_amount_usd`. Do not reuse generic `amount_native` / `currency_iso4217` names on tables with more than one monetary value.
    2. Backfill only non-null source values: `<field>_native = <field>_usd`, `<field>_currency_iso4217 = 'USD'`.
    3. Preserve original nullability. If `<field>_usd` was NOT NULL, validate a `CHECK (<field>_native IS NOT NULL AND <field>_currency_iso4217 IS NOT NULL)` before setting both new columns `NOT NULL`. If the original field was nullable, leave both nullable and add `CHECK ((<field>_native IS NULL) = (<field>_currency_iso4217 IS NULL))` so unknown monetary values remain representable.
    4. Add FK on `<field>_currency_iso4217 → currencies(code)`.
-5. Validate the `tenants.primary_currency` column created by `20260520_0001_multi_tenant_foundation`; do not add it a second time.
-6. Add `users.preferred_currency CHAR(3) NULL`.
-7. Add FK constraints `tenants.primary_currency -> currencies(code)` and `users.preferred_currency -> currencies(code)` after `currencies` is seeded, using `NOT VALID` then `VALIDATE CONSTRAINT` for existing installs.
-8. Add `Permission.MANAGE_FX_RATES` row in `permissions`.
+6. Validate the `tenants.primary_currency` column created by `20260520_0001_multi_tenant_foundation`; do not add it a second time.
+7. Add `users.preferred_currency CHAR(3) NULL`.
+8. Add FK constraints `tenants.primary_currency -> currencies(code)` and `users.preferred_currency -> currencies(code)` after `currencies` is seeded, using `NOT VALID` then `VALIDATE CONSTRAINT` for existing installs.
+9. Add `Permission.MANAGE_FX_RATES` row in `permissions`.
 
 The original `*_usd` columns are kept for one release as deprecated; flagged in `pyproject.toml` removal-target list.
 

@@ -184,8 +184,7 @@ Execution order is `20260520_0001_multi_tenant_foundation` → `20260520_0001b_m
    2. Add the FK to `tenants(id)` ON DELETE RESTRICT with `NOT VALID`.
    3. Add `CHECK (tenant_id IS NOT NULL) NOT VALID`.
 5. Create `app_tenant` and `app_platform` Postgres roles.
-6. Enable RLS on each tenant-scoped table; install isolation policy.
-7. Grant the right read/write surface to each role.
+6. Grant the right read/write surface to each role. Do not enable tenant-isolation RLS yet; existing rows are still `tenant_id = NULL` until the backfill revision completes.
 
 ### `20260520_0001b_multi_tenant_backfill`
 
@@ -194,11 +193,14 @@ Execution order is `20260520_0001_multi_tenant_foundation` → `20260520_0001b_m
 3. Validates the `tenants(id)` FKs and `tenant_id IS NOT NULL` checks.
 4. Sets `tenant_id` `NOT NULL` in short lock windows after validation succeeds.
 5. Convert tenant-scoped inter-table FKs from single-column references to composite tenant-aware references. For example, `youtube_channels.primary_org_unit_id -> org_units(id)` becomes `(tenant_id, primary_org_unit_id) -> org_units(tenant_id, id)`, backed by a unique key on `org_units(tenant_id, id)`, so database RI cannot cross tenant boundaries even when RLS is bypassed. For nullable actor references that currently use `ON DELETE SET NULL`, use column-targeted `SET NULL` on the actor id only or keep an equivalent action that never tries to null the non-null `tenant_id`.
-6. Re-key tenant-owned singleton tables. `finance_month_close` changes from a global primary key on `month` to a tenant-scoped key on `(tenant_id, month)` so multiple tenants can lock the same calendar month independently.
-7. Set `lock_timeout` before every DDL step so the migration fails fast instead of blocking production traffic.
-8. Replace the existing global `uq_users_email_lower` index with a tenant-scoped unique index on `(tenant_id, lower(email))`.
-9. Replace global `access_scopes` uniqueness with tenant-scoped unique constraints as described above.
-10. Replace `api_connector_credentials` uniqueness with tenant-scoped uniqueness on `(tenant_id, connector_key, account_id)` so two tenants can hold overlapping connector account identifiers safely.
+6. Add non-partial composite unique keys for tenant-aware FK targets, including `users(tenant_id, id)`, before any child table references them.
+7. Re-key tenant-owned singleton tables. `finance_month_close` changes from a global primary key on `month` to a tenant-scoped key on `(tenant_id, month)` so multiple tenants can lock the same calendar month independently.
+8. Set `lock_timeout` before every DDL step so the migration fails fast instead of blocking production traffic.
+9. Replace the existing global `uq_users_email_lower` index with a tenant-scoped unique index on `(tenant_id, lower(email))`.
+10. Replace global `access_scopes` uniqueness with tenant-scoped unique constraints as described above.
+11. Replace `api_connector_credentials` uniqueness with tenant-scoped uniqueness on `(tenant_id, connector_key, account_id)` so two tenants can hold overlapping connector account identifiers safely.
+12. Re-key every remaining tenant-owned unique constraint to include `tenant_id`; examples include `adsense_payments(month, payment_name)` -> `(tenant_id, month, payment_name)` and `bank_reconciliation_entries(month, bank_reference)` -> `(tenant_id, month, bank_reference)`.
+13. Enable RLS on each tenant-scoped table and install the final isolation policy only after backfill, `NOT NULL`, and tenant-scoped keys are in place.
 
 ### `20260520_0001a_multi_tenant_indexes`
 
