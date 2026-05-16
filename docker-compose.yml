@@ -28,7 +28,7 @@ x-app-env: &app-env
 
 services:
   postgres:
-    image: postgres:18-alpine
+    image: postgres:18-alpine@sha256:96d56f7f57c6aacd1fcb908bc83b345ec5f83231ee486dd66a1baadce274db88
     restart: unless-stopped
     environment:
       POSTGRES_USER: ums
@@ -46,7 +46,7 @@ services:
     networks: [ums-net]
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes"]
     ports:
@@ -72,7 +72,7 @@ services:
     environment:
       <<: *app-env
     entrypoint: ["/usr/bin/tini", "--"]
-    command: ["uv", "run", "alembic", "upgrade", "head"]
+    command: ["alembic", "upgrade", "head"]
     working_dir: /srv/app
     networks: [ums-net]
 
@@ -94,7 +94,7 @@ services:
     ports:
       - "8000:8000"
     healthcheck:
-      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/livez"]
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/health"]
       interval: 15s
       timeout: 4s
       retries: 5
@@ -114,6 +114,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
     environment:
       <<: *app-env
     ports:

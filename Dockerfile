@@ -38,20 +38,18 @@ COPY --from=uv-bin /uv /usr/local/bin/uv
 
 # Install only the manifests first to maximize Docker layer cache hits.
 COPY pyproject.toml ./
-COPY uv.lock* ./
+COPY uv.lock ./uv.lock
 
 # Install runtime deps into /opt/venv (no project source yet).
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --no-install-project --extra test || \
-    uv sync --no-dev --no-install-project --extra test
+    uv sync --frozen --no-dev --no-install-project
 
 # Copy the source tree and install the project itself.
 COPY backend ./backend
 COPY alembic.ini ./alembic.ini
 
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --frozen --no-dev --extra test || \
-    uv sync --no-dev --extra test
+    uv sync --frozen --no-dev
 
 ############################
 # Stage 2 — runtime
@@ -67,15 +65,13 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     VIRTUAL_ENV=/opt/venv \
     APP_HOME=/srv/app
 
-# Minimal runtime deps. libpq is needed because asyncpg uses libpq protocols
-# even though the driver is pure-Python — keeping this ready avoids surprises
-# if the runtime ever needs the psql client for debugging migrations.
+# Minimal runtime deps. asyncpg implements the PostgreSQL protocol directly,
+# so the runtime does not need libpq or the psql client.
 RUN apt-get update \
  && apt-get install -y --no-install-recommends \
-        ca-certificates \
-        curl \
-        libpq5 \
-        tini \
+        ca-certificates=20250419 \
+        curl=8.14.1-2+deb13u2 \
+        tini=0.19.0-3+b6 \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/* \
  && groupadd --system --gid ${APP_UID} ${APP_USER} \
@@ -97,10 +93,10 @@ USER ${APP_USER}
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl --fail --silent --max-time 4 http://localhost:8000/livez || exit 1
+    CMD curl --fail --silent --max-time 4 http://localhost:8000/health || exit 1
 
 # tini reaps zombies + forwards signals cleanly.
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["python", "-m", "uvicorn", "ums_smart_revenue.app:app", \
      "--host", "0.0.0.0", "--port", "8000", \
-     "--proxy-headers", "--forwarded-allow-ips", "*"]
+     "--proxy-headers", "--forwarded-allow-ips", "127.0.0.1"]
