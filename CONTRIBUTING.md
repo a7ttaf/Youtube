@@ -51,7 +51,7 @@ Scopes (common): `auth`, `revenue`, `finance-close`, `connectors`, `exports`, `d
 
 A PR is mergeable when **all** of the following are true:
 
-- [ ] **Project-declared validation is green** (`uv run pytest`, `uv run ruff check`, `uv run mypy backend`; plus CI workflows once they exist).
+- [ ] **Project-declared validation is green** (`uv run pytest`, `uv run ruff check`, `uv run mypy backend`, `gitleaks detect --source . --redact`; plus CI workflows once they exist).
 - [ ] **CodeRabbit review** has no unresolved blocking comments.
 - [ ] **Tests cover the change** — unit + integration where boundaries are involved. Money math gets property-based coverage via `hypothesis`.
 - [ ] **`mypy` is strict-clean** on touched modules.
