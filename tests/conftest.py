@@ -4,11 +4,10 @@ This conftest is loaded automatically by pytest. It performs two duties:
 
 1. Makes the ``backend/`` source tree importable as ``ums_smart_revenue``.
 2. Provides a deterministic, **test-only** value for
-   ``UMS_TRUSTED_GATEWAY_TOKEN`` when the surrounding environment hasn't
-   supplied one. Real secrets must never be committed to the repository
-   (see SECURITY.md). Tests that exercise authorization simulate the
-   upstream identity gateway by reading whatever value is in the
-   environment; CI may override it with a per-job secret.
+   ``UMS_TRUSTED_GATEWAY_TOKEN`` regardless of the surrounding environment.
+   Real secrets must never be committed to the repository (see SECURITY.md).
+   Tests that exercise authorization use this sentinel so host or CI
+   environment variables cannot change expected request headers.
 """
 
 from __future__ import annotations
@@ -20,8 +19,10 @@ from pathlib import Path
 import pytest
 
 BACKEND_PATH = Path(__file__).resolve().parents[1] / "backend"
-if str(BACKEND_PATH) not in sys.path:
-    sys.path.insert(0, str(BACKEND_PATH))
+_backend_path = str(BACKEND_PATH)
+if _backend_path in sys.path:
+    sys.path.remove(_backend_path)
+sys.path.insert(0, _backend_path)
 
 TEST_TRUSTED_GATEWAY_TOKEN_ENV = "UMS_TRUSTED_GATEWAY_TOKEN"
 # Sentinel value used only when running tests. The prefix makes any leak
@@ -32,15 +33,13 @@ _TEST_TOKEN_SENTINEL = "pytest-trusted-gateway-token"  # noqa: S105 — test sca
 
 
 def _ensure_test_gateway_token() -> None:
-    """Populate the trusted-gateway token only when the env doesn't set one.
+    """Force the trusted-gateway token to the deterministic pytest sentinel.
 
-    Real environments (CI, staging, prod) always supply the value from a
-    secret store; the local pytest run uses the sentinel so the app code
-    that reads the variable is exercised without ever needing a real
-    credential.
+    This conftest only runs under pytest, so the sentinel keeps protected-route
+    tests isolated from host or CI environment variables while still exercising
+    app code that reads the setting.
     """
-    if not os.environ.get(TEST_TRUSTED_GATEWAY_TOKEN_ENV):
-        os.environ[TEST_TRUSTED_GATEWAY_TOKEN_ENV] = _TEST_TOKEN_SENTINEL
+    os.environ[TEST_TRUSTED_GATEWAY_TOKEN_ENV] = _TEST_TOKEN_SENTINEL
 
 
 _ensure_test_gateway_token()
