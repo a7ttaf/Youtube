@@ -297,11 +297,39 @@ _check_disabled_in_config() {
   return 1
 }
 
+_checks_for_lane_label() {
+  local label="$1"
+  case "$label" in
+    node) printf 'lint-js typecheck-js format-js tests-js' ;;
+    python) printf 'lint-python typecheck-python format-python tests-python' ;;
+    security) printf 'sast secrets supply-chain' ;;
+    build) printf 'lint-shell format-shell lint-docker lint-yaml lint-markdown lint-actions' ;;
+    branch-protection) printf 'branch-protection' ;;
+    *) printf '' ;;
+  esac
+}
+
+_all_related_checks_disabled() {
+  local label="$1"
+  local related check_id any=0
+  related="$(_checks_for_lane_label "$label")"
+  [ -z "$related" ] && return 1
+
+  for check_id in $related; do
+    any=1
+    if ! _check_disabled_in_config "$check_id"; then
+      return 1
+    fi
+  done
+
+  [ "$any" = "1" ]
+}
+
 _check_should_skip() {
   local label="$1"
 
   # 1. Respect checks.yml enabled: false for the mapping-based schema.
-  if _check_disabled_in_config "$label"; then
+  if _check_disabled_in_config "$label" || _all_related_checks_disabled "$label"; then
     return 0
   fi
 
@@ -310,6 +338,7 @@ _check_should_skip() {
     local found=0
     local ck
     for ck in $_CI_CHANGESET_CHECKS; do
+      _check_disabled_in_config "$ck" && continue
       case "${label}:${ck}" in
         "$label:$label" | \
         node:lint-js | node:typecheck-js | node:format-js | node:tests-js | \
@@ -472,7 +501,7 @@ run_common_checks() {
 }
 
 run_full_or_ship_checks() {
-  run_phase     "git-safety:./ci/checks/git-safety.sh"     "changed-files:./ci/checks/changed-files.sh"
+  run_phase     "git-safety:./ci/checks/git-safety.sh"     "changed-files:./ci/checks/changed-files.sh"     "branch-protection:./ci/checks/branch-protection.sh"
   run_phase     "security:./ci/checks/security.sh"
   run_phase     "node:./ci/checks/node.sh"     "python:./ci/checks/python.sh"     "build:./ci/checks/build.sh"
   run_phase     "debt:./ci/checks/debt.sh"

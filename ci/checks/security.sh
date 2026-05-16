@@ -43,7 +43,7 @@ scan_file() {
     # Prevent the shared secret-pattern source file from matching its own
     # definitions; if this file moves, update this path check accordingly.
     if [ "$path" = "ci/checks/common.sh" ]; then
-      raw_hits="$(printf '%s\n' "$raw_hits" | grep -Ev 'SECRET_PATTERN=|STAGED_SECRET_PATTERN=|grep -RInE "' || true)"
+      raw_hits="$(printf '%s\n' "$raw_hits" | grep -Ev "SECRET_PATTERN=|STAGED_SECRET_PATTERN=|grep -RInE \"|^[0-9]+:[[:space:]]*'.*'[[:space:]]*$" || true)"
     fi
     if [ -n "$raw_hits" ]; then
       local hit_lines=""

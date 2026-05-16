@@ -12,6 +12,8 @@ source "$ROOT_DIR/ci/lib/common.sh"
 source "$ROOT_DIR/ci/lib/log.sh"
 # shellcheck source=ci/lib/junit.sh
 source "$ROOT_DIR/ci/lib/junit.sh"
+# shellcheck source=ci/lib/affected.sh
+source "$ROOT_DIR/ci/lib/affected.sh" 2>/dev/null || true
 
 cd "$ROOT_DIR"
 

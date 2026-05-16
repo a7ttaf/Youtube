@@ -58,12 +58,15 @@ case "$HOOK_NAME" in
 
     if [ -n "$ticket" ]; then
       first_line="$(head -1 "$COMMIT_MSG_FILE")"
+      conventional_subject_re='^([a-z]+(\([^)]*\))?):[[:space:]]*(.*)$'
       case "$first_line" in
-        "$ticket"*) ;;
+        *"$ticket"*) ;;
         *)
-          printf '%s: %s\n' "$ticket" "$first_line" > "${COMMIT_MSG_FILE}.tmp"
-          tail -n +2 "$COMMIT_MSG_FILE" >> "${COMMIT_MSG_FILE}.tmp"
-          mv "${COMMIT_MSG_FILE}.tmp" "$COMMIT_MSG_FILE"
+          if [[ "$first_line" =~ $conventional_subject_re ]]; then
+            printf '%s: %s %s\n' "${BASH_REMATCH[1]}" "$ticket" "${BASH_REMATCH[3]}" > "${COMMIT_MSG_FILE}.tmp"
+            tail -n +2 "$COMMIT_MSG_FILE" >> "${COMMIT_MSG_FILE}.tmp"
+            mv "${COMMIT_MSG_FILE}.tmp" "$COMMIT_MSG_FILE"
+          fi
           ;;
       esac
     fi
