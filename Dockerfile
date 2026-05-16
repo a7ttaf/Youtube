@@ -93,7 +93,7 @@ USER ${APP_USER}
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \
-    CMD curl --fail --silent --max-time 4 http://localhost:8000/health || exit 1
+    CMD curl --fail --silent --max-time 4 http://localhost:8000/livez || exit 1
 
 # tini reaps zombies + forwards signals cleanly.
 ENTRYPOINT ["/usr/bin/tini", "--"]

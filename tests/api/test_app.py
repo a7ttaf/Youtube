@@ -21,6 +21,16 @@ def test_health_exposes_latest_stable_backend_baseline():
     }
 
 
+def test_livez_exposes_runtime_health_contract():
+    client = TestClient(create_app())
+
+    response = client.get("/livez")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+    assert response.json()["service"] == "ums-smart-revenue"
+
+
 def test_security_metadata_endpoints_are_available_for_frontend():
     client = TestClient(create_app())
 
