@@ -107,6 +107,7 @@ celerybeat.pid
 .env
 .env.*
 !.env.example
+!.env.*.example
 .venv
 env/
 venv/
@@ -212,7 +213,6 @@ kubeconfig
 # Local agent / tool runtime
 .claude/
 CLAUDE.md
-
 
 # Generated reports
 reports/local/

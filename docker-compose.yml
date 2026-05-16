@@ -1,0 +1,146 @@
+# UMS Smart Revenue Control Center — local development stack.
+#
+# Usage:
+#   docker compose up -d                # full stack (postgres, redis, app, migrate)
+#   docker compose run --rm migrate     # apply migrations once
+#   docker compose logs -f app          # follow the app logs
+#   docker compose down -v              # tear down + drop volumes
+#
+# `app` is the FastAPI service running with --reload disabled by default.
+# For interactive dev with hot reload, use the `dev` override profile:
+#   docker compose --profile dev up app-dev
+#
+# Secrets: never bake real credentials into this file. Compose variables come
+# from the invoking shell or a local --env-file such as .env.local. Keep those
+# files untracked. Use UMS_DB_PASSWORD for Postgres and UMS_DB_PASSWORD_URLENC
+# for the app DSN when the password contains URI-reserved characters.
+# Production uses Helm + External Secrets Operator (see deploy/helm/).
+
+name: ums-smart-revenue
+
+x-app-env: &app-env
+  UMS_DATABASE_URL: postgresql+psycopg://${UMS_DB_USER:?Set UMS_DB_USER}:${UMS_DB_PASSWORD_URLENC:?Set UMS_DB_PASSWORD_URLENC}@postgres:5432/${UMS_DB_NAME:?Set UMS_DB_NAME}
+  UMS_AUTHZ_SOURCE: ${UMS_AUTHZ_SOURCE:-headers}
+  UMS_TRUSTED_GATEWAY_TOKEN: ${UMS_TRUSTED_GATEWAY_TOKEN:?Set UMS_TRUSTED_GATEWAY_TOKEN}
+  UMS_CORS_ALLOWED_ORIGINS: ${UMS_CORS_ALLOWED_ORIGINS:-http://localhost:3000,http://localhost:5173}
+  UMS_RATE_LIMIT_PER_MINUTE: ${UMS_RATE_LIMIT_PER_MINUTE:-120}
+  FORWARDED_ALLOW_IPS: ${UMS_FORWARDED_ALLOW_IPS:-127.0.0.1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16}
+  REDIS_URL: redis://redis:6379/0
+  PYTHONDONTWRITEBYTECODE: "1"
+  PYTHONUNBUFFERED: "1"
+
+services:
+  postgres:
+    image: postgres:18-alpine@sha256:96d56f7f57c6aacd1fcb908bc83b345ec5f83231ee486dd66a1baadce274db88
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${UMS_DB_USER:?Set UMS_DB_USER}
+      POSTGRES_PASSWORD: ${UMS_DB_PASSWORD:?Set UMS_DB_PASSWORD}
+      POSTGRES_DB: ${UMS_DB_NAME:?Set UMS_DB_NAME}
+    ports:
+      - "127.0.0.1:${UMS_POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [ums-net]
+
+  redis:
+    image: redis:7-alpine@sha256:6ab0b6e7381779332f97b8ca76193e45b0756f38d4c0dcda72dbb3c32061ab99
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    ports:
+      - "127.0.0.1:${UMS_REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [ums-net]
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ums-smart-revenue:dev
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      <<: *app-env
+    entrypoint: ["/usr/bin/tini", "--"]
+    command: ["alembic", "upgrade", "head"]
+    working_dir: /srv/app
+    networks: [ums-net]
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ums-smart-revenue:dev
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *app-env
+    ports:
+      - "127.0.0.1:${UMS_APP_PORT:-8000}:8000"
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:8000/livez"]
+      interval: 15s
+      timeout: 4s
+      retries: 5
+      start_period: 20s
+    networks: [ums-net]
+
+  # Optional dev variant with source bind-mount + reload. Activate with:
+  #   docker compose --profile dev up app-dev
+  app-dev:
+    profiles: ["dev"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ums-smart-revenue:dev
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    environment:
+      <<: *app-env
+    ports:
+      - "127.0.0.1:${UMS_APP_DEV_PORT:-8001}:8000"
+    volumes:
+      - ./backend:/srv/app/backend:ro
+    command:
+      - "python"
+      - "-m"
+      - "uvicorn"
+      - "ums_smart_revenue.app:app"
+      - "--host"
+      - "0.0.0.0"
+      - "--port"
+      - "8000"
+      - "--reload"
+    networks: [ums-net]
+
+volumes:
+  postgres-data:
+  redis-data:
+
+networks:
+  ums-net:
+    driver: bridge

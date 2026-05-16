@@ -95,8 +95,7 @@ def create_app(
     app.include_router(security_router)
     app.include_router(users_router)
 
-    @app.get("/health", tags=["system"])
-    def health() -> dict[str, object]:
+    def health_payload() -> dict[str, object]:
         """Return service and pinned runtime health metadata."""
         return {
             "status": "ok",
@@ -107,6 +106,14 @@ def create_app(
                 "pydantic": STACK_VERSION_BASELINE["backend"]["pydantic"],
             },
         }
+
+    @app.get("/health", tags=["system"])
+    def health() -> dict[str, object]:
+        return health_payload()
+
+    @app.get("/livez", tags=["system"])
+    def livez() -> dict[str, object]:
+        return health_payload()
 
     return app
 
