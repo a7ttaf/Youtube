@@ -6,7 +6,7 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
     "backend": {
         "fastapi": "0.136.1",
         "pydantic": "2.13.4",
-        "uvicorn": "0.46.0",
+        "uvicorn": "0.47.0",
         "sqlalchemy": "2.0.49",
         "alembic": "1.18.4",
         "psycopg": "3.3.4",
