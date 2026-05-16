@@ -25,31 +25,17 @@ For the long-form vision, read [PRODUCT.md](PRODUCT.md) and [DESIGN.md](DESIGN.m
 
 ## Quickstart
 
-> Requires Python 3.14, PostgreSQL 18, Redis 7, and [uv](https://docs.astral.sh/uv/) installed locally. The fastest path is to use `docker compose` (below) which provisions everything for you.
-
-### Option A — Docker (recommended)
-
-```powershell
-# Spin up Postgres + Redis + the app
-docker compose up -d
-
-# Run migrations (sidecar)
-docker compose run --rm migrate
-
-# Open the API docs
-start http://localhost:8000/docs
-```
-
-### Option B — Bare metal
+> Requires Python 3.14, PostgreSQL 18, Redis 7, and [uv](https://docs.astral.sh/uv/) installed locally. Start PostgreSQL and Redis with your local service manager before launching the API.
 
 ```powershell
 # 1) Install Python deps with uv
 uv sync --extra dev --extra test --extra lint
 
-# 2) Start Postgres + Redis (e.g. via docker compose for just deps)
-docker compose up -d postgres redis
+# 2) Start Postgres + Redis outside this repo.
+#    Verify the database accepts connections before running migrations.
 
 # 3) Configure environment (see below for the full env-var matrix)
+$env:PYTHONPATH = (Resolve-Path "backend").Path
 $env:UMS_DATABASE_URL = "postgresql+asyncpg://ums:ums@localhost:5432/ums_smart_revenue"
 $env:UMS_AUTHZ_SOURCE = "headers"
 $env:UMS_TRUSTED_GATEWAY_TOKEN = "dev-only-token-set-locally"
