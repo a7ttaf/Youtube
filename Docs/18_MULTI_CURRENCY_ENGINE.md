@@ -80,14 +80,23 @@ CREATE TABLE fx_rates (
     as_of_date      DATE NOT NULL,                -- the day this rate applies
     source_ref      TEXT,                         -- raw provider reference
     ingested_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    ingested_by     UUID REFERENCES users(id),    -- NULL for automated sync
+    ingested_by     UUID,                         -- tenant user for manual CSV uploads
+    ingested_by_platform_admin UUID,              -- platform admin for cross-tenant ops
     CONSTRAINT uq_fx_rates_unique
         UNIQUE (tenant_id, provider, base_code, quote_code, as_of_date),
+    CONSTRAINT fk_fx_rates_ingested_by_tenant
+        FOREIGN KEY (tenant_id, ingested_by) REFERENCES users(tenant_id, id),
+    CONSTRAINT fk_fx_rates_ingested_by_platform_admin
+        FOREIGN KEY (ingested_by_platform_admin) REFERENCES platform_admins(id),
     CONSTRAINT ck_fx_rates_positive_rate CHECK (rate > 0),
-    CONSTRAINT ck_fx_rates_distinct CHECK (base_code <> quote_code)
+    CONSTRAINT ck_fx_rates_distinct CHECK (base_code <> quote_code),
+    CONSTRAINT ck_fx_rates_one_manual_actor
+        CHECK (NOT (ingested_by IS NOT NULL AND ingested_by_platform_admin IS NOT NULL))
 );
 CREATE INDEX ix_fx_rates_lookup ON fx_rates (tenant_id, base_code, quote_code, as_of_date DESC);
 ```
+
+Automated sync leaves both actor columns NULL. Manual tenant-user uploads set `ingested_by`; platform-wide uploads set `ingested_by_platform_admin`. Tenant-user provenance is constrained by `(tenant_id, ingested_by)` so a rate row cannot point at a user from another tenant.
 
 **Semantics:** rate is `quote_per_base` — i.e. 1 unit of `base_code` is worth `rate` units of `quote_code`. To convert an amount: `target = amount_native * rate(native -> target, on_date)`.
 
@@ -115,6 +124,19 @@ Implementations:
 | Future: **OANDA, XE, central bank feeds** | — | Pluggable; just implement the protocol. |
 
 Provider choice is **per-tenant**, configured in `tenants.fx_provider_settings JSONB`. Multiple providers can be enabled with a priority order.
+
+Expected JSON shape:
+
+```json
+{
+  "providers": ["ECB", "EXCHANGERATE_HOST", "MANUAL_CSV"],
+  "priority_order": ["MANUAL_CSV", "ECB", "EXCHANGERATE_HOST"],
+  "usd_pivot_enabled": false,
+  "manual_csv_requires_approval": true
+}
+```
+
+The settings model is validated by a Pydantic schema at write time and backed by a database `CHECK (jsonb_typeof(fx_provider_settings) = 'object')` so malformed scalar/list values cannot be stored.
 
 ### Sync job
 
@@ -171,6 +193,23 @@ When a finance month is locked:
 2. The selected rates are persisted to `fx_locked_month_rates(tenant_id, month, base, quote, rate, provider, as_of_date)`.
 3. Subsequent reads of locked-month values use the **locked rate**, not the live one.
 4. Unlocking the month deletes the locked rates and recomputes from current `fx_rates`. Unlock requires the standard reason + audit event.
+
+```sql
+CREATE TABLE fx_locked_month_rates (
+    tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    month           DATE NOT NULL,
+    base_code       CHAR(3) NOT NULL REFERENCES currencies(code),
+    quote_code      CHAR(3) NOT NULL REFERENCES currencies(code),
+    rate            NUMERIC(20, 10) NOT NULL,
+    provider        TEXT NOT NULL,
+    as_of_date      DATE NOT NULL,
+    locked_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    PRIMARY KEY (tenant_id, month, base_code, quote_code),
+    CONSTRAINT ck_fx_locked_month_rates_positive CHECK (rate > 0),
+    CONSTRAINT ck_fx_locked_month_rates_distinct CHECK (base_code <> quote_code)
+);
+CREATE INDEX ix_fx_locked_month_rates_month ON fx_locked_month_rates (tenant_id, month);
+```
 
 This guarantees that re-running last March's executive PDF a year later produces identical numbers.
 
@@ -258,11 +297,10 @@ Property-based tests via `hypothesis`:
 1. Create `currencies`, seed full ISO 4217 list, flip the v1.0 set to `is_supported = TRUE`.
 2. Create `fx_rates`, `fx_locked_month_rates`.
 3. For each monetary column on a tenant-scoped table:
-   1. Add `amount_native NUMERIC(20,6) NULL`.
-   2. Add `currency_iso4217 CHAR(3) NULL`.
-   3. Backfill `amount_native = <existing_usd_column>`, `currency_iso4217 = 'USD'`.
-   4. Mark both NOT NULL.
-   5. Add FK on `currency_iso4217 → currencies(code)`.
+   1. Add distinct paired columns named from the source field, e.g. `bank_received_amount_native` and `bank_received_amount_currency_iso4217` for `bank_received_amount_usd`. Do not reuse generic `amount_native` / `currency_iso4217` names on tables with more than one monetary value.
+   2. Backfill only non-null source values: `<field>_native = <field>_usd`, `<field>_currency_iso4217 = 'USD'`.
+   3. Preserve original nullability. If `<field>_usd` was NOT NULL, validate a `CHECK (<field>_native IS NOT NULL AND <field>_currency_iso4217 IS NOT NULL)` before setting both new columns `NOT NULL`. If the original field was nullable, leave both nullable and add `CHECK ((<field>_native IS NULL) = (<field>_currency_iso4217 IS NULL))` so unknown monetary values remain representable.
+   4. Add FK on `<field>_currency_iso4217 → currencies(code)`.
 4. Validate the `tenants.primary_currency` column created by `20260520_0001_multi_tenant_foundation`; do not add it a second time.
 5. Add `users.preferred_currency CHAR(3) NULL`.
 6. Add FK constraints `tenants.primary_currency -> currencies(code)` and `users.preferred_currency -> currencies(code)` after `currencies` is seeded, using `NOT VALID` then `VALIDATE CONSTRAINT` for existing installs.

@@ -123,10 +123,11 @@ Tenant slug resolution is **both header and subdomain based**. `X-UMS-Tenant` is
 # backend/ums_smart_revenue/tenancy/resolver.py (sketch)
 class TenantResolverMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
-        slug = (
-            request.headers.get("x-ums-tenant")
-            or self._slug_from_subdomain(request.url.hostname)
-        )
+        header_slug = request.headers.get("x-ums-tenant")
+        host_slug = self._slug_from_subdomain(request.url.hostname)
+        if header_slug and host_slug and header_slug != host_slug:
+            raise HTTPException(400, "Tenant mismatch")
+        slug = header_slug or host_slug
         if not slug:
             raise HTTPException(400, "Tenant not specified")
         tenant = await self._resolve(slug)
@@ -150,6 +151,7 @@ A SQLAlchemy transaction-begin hook issues `SET LOCAL app.current_tenant_id = ..
 - The `roles` table stays platform-wide as the **definition** catalog. A `RoleKey` (e.g. `FINANCE_ADMIN`) is the same concept everywhere.
 - `user_role_assignments` carries `tenant_id` because the same `RoleKey` is granted **per-tenant**. UMS's `FINANCE_ADMIN` ≠ Rotana's `FINANCE_ADMIN`.
 - Scope objects (`access_scopes`) are also tenant-scoped (every concrete `company`/`sector`/`channel` value belongs to a single tenant).
+- Existing global uniqueness on `access_scopes` must be replaced with tenant-scoped uniqueness. The current singleton `global` scope becomes unique on `(tenant_id, scope_type)`; concrete scopes use `(tenant_id, scope_type, scope_value)` so every tenant can have its own `global` scope and its own channel/company/sector identifiers.
 
 ### New role: `PLATFORM_ADMIN`
 
@@ -166,7 +168,7 @@ A SQLAlchemy transaction-begin hook issues `SET LOCAL app.current_tenant_id = ..
 
 ## Migration plan
 
-Implemented as two coordinated Alembic revisions in Phase S2:
+Implemented as coordinated Alembic revisions in Phase S2. Transactional DDL/data-shape changes stay inside normal Alembic transactions; concurrent indexes are split into explicit autocommit revisions because PostgreSQL rejects `CREATE INDEX CONCURRENTLY` inside `context.begin_transaction()`.
 
 ### `20260520_0001_multi_tenant_foundation`
 
@@ -177,12 +179,20 @@ Implemented as two coordinated Alembic revisions in Phase S2:
    2. Backfill all existing rows to UMS's tenant_id in 5,000-10,000 row batches, committing each batch.
    3. Add the FK to `tenants(id)` ON DELETE RESTRICT with `NOT VALID`, then `VALIDATE CONSTRAINT`.
    4. Add `CHECK (tenant_id IS NOT NULL) NOT VALID`, then `VALIDATE CONSTRAINT`, before finally setting the column `NOT NULL` in a short lock window.
-   5. Add composite indexes `(tenant_id, ...)` matching the existing access pattern with `CREATE INDEX CONCURRENTLY`.
-   6. Set `lock_timeout` before every DDL step so the migration fails fast instead of blocking production traffic.
+   5. Convert tenant-scoped inter-table FKs from single-column references to composite tenant-aware references. For example, child tables reference `(tenant_id, parent_id)` against a parent-side unique key on `(tenant_id, id)` so database RI cannot cross tenant boundaries even when RLS is bypassed.
+   6. Re-key tenant-owned singleton tables. `finance_month_close` changes from a global primary key on `month` to a tenant-scoped key on `(tenant_id, month)` so multiple tenants can lock the same calendar month independently.
+   7. Set `lock_timeout` before every DDL step so the migration fails fast instead of blocking production traffic.
 4. Replace the existing global `uq_users_email_lower` index with a tenant-scoped unique index on `(tenant_id, lower(email))`.
-5. Create `app_tenant` and `app_platform` Postgres roles.
-6. Enable RLS on each tenant-scoped table; install isolation policy.
-7. Grant the right read/write surface to each role.
+5. Replace global `access_scopes` uniqueness with tenant-scoped unique constraints as described above.
+6. Create `app_tenant` and `app_platform` Postgres roles.
+7. Enable RLS on each tenant-scoped table; install isolation policy.
+8. Grant the right read/write surface to each role.
+
+### `20260520_0001a_multi_tenant_indexes`
+
+1. Runs outside a transaction/autocommit block.
+2. Adds read-path indexes `(tenant_id, ...)` with `CREATE INDEX CONCURRENTLY`.
+3. Contains no data backfill, no FK validation, and no `ALTER TABLE ... SET NOT NULL`.
 
 This migration is **reversible** in development but **destructive** in production after the NOT NULL step. Document the rollback caveat in the migration's docstring.
 
