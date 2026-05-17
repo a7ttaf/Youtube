@@ -1,5 +1,10 @@
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
+from ums_smart_revenue.auth.platform_admin import (
+    PlatformAdminPrincipal,
+    PlatformAdminStatus,
+    Principal,
+)
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 
@@ -110,4 +115,28 @@ def can_run_connector_job(user: UserPrincipal, connector_id: str) -> bool:
 
 def can_assign_roles(user: UserPrincipal) -> bool:
     return has_permission(user, Permission.ASSIGN_ROLES, AccessScope.global_scope())
+
+
+def is_platform_admin(principal: Principal) -> bool:
+    """Return True when the principal is a live platform admin.
+
+    Used by the platform-admin route surface (introduced in a later S2
+    slice) to refuse tenant-user callers. ``UserPrincipal`` always
+    returns False — platform admins live exclusively in the
+    ``platform_admins`` table.
+    """
+    if not isinstance(principal, PlatformAdminPrincipal):
+        return False
+    return principal.status == PlatformAdminStatus.ACTIVE
+
+
+def can_manage_tenants(principal: Principal) -> bool:
+    """Authorisation predicate for tenant CRUD endpoints.
+
+    Currently equivalent to :func:`is_platform_admin`. Kept as a
+    distinct function so the call sites read intent rather than role
+    membership, and so we can split it later (e.g. read-only platform
+    auditors) without churn at every consumer.
+    """
+    return is_platform_admin(principal)
 

@@ -27,6 +27,12 @@ class UserPrincipal:
     direct_permissions: tuple[PermissionGrant, ...] = field(default_factory=tuple)
     is_service_account: bool = False
     disabled: bool = False
+    # Tenant the user belongs to. None during the pre-S2.4 window where some
+    # routes still run without tenant resolution; will become required when
+    # the resolver middleware is installed by create_app() and `users.tenant_id`
+    # is populated. Stored as the string form of the tenant UUID, matching
+    # the existing `user_id: str` convention.
+    tenant_id: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "role_assignments", tuple(self.role_assignments))
