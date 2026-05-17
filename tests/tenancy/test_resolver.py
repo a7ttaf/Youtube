@@ -612,6 +612,14 @@ class OptionsLookupError(AssertionError):
         super().__init__("OPTIONS must bypass tenant lookup")
 
 
+class ExecutorSubmissionError(RuntimeError):
+    """Stable exception raised when blocking-work submission fails in tests."""
+
+    def __init__(self) -> None:
+        """Create a deterministic message for executor failure assertions."""
+        super().__init__("executor unavailable")
+
+
 class _ScalarResult:
     """Tiny stand-in for SQLAlchemy's scalar result object."""
 
@@ -859,6 +867,90 @@ def test_authorizer_timeout_fails_closed_and_logs(caplog: pytest.LogCaptureFixtu
     assert response.json() == {"detail": "Tenant access denied"}
     assert response.headers["vary"] == TENANT_HEADER
     assert "Tenant authorization callback timed out" in caplog.text
+
+
+def test_authorizer_executor_failures_fail_closed_and_log(
+    caplog: pytest.LogCaptureFixture,
+):
+    """Authorization executor failures deny access instead of escaping."""
+    engine = _build_engine()
+    _seed(engine, slug="ums")
+    app = FastAPI()
+    factory = sessionmaker(engine, expire_on_commit=False)
+    caplog.set_level(logging.WARNING, logger="ums_smart_revenue.tenancy.resolver")
+
+    class BrokenAuthorizationExecutorMiddleware(TenantResolverMiddleware):
+        """Resolver variant that fails only authorization offload submission."""
+
+        def _submit_blocking(
+            self,
+            loop: asyncio.AbstractEventLoop,
+            func: Callable[..., object],
+            *args: object,
+        ) -> asyncio.Future:
+            """Raise once the authorization callback is submitted."""
+            if getattr(func, "__name__", "") == "_is_authorized":
+                raise ExecutorSubmissionError
+            return super()._submit_blocking(loop, func, *args)
+
+    app.add_middleware(
+        BrokenAuthorizationExecutorMiddleware,
+        session_factory=factory,
+        authorize_tenant=lambda _scope, _slug: True,
+    )
+
+    @app.get("/whoami")
+    def whoami() -> dict[str, object]:
+        """Return context if authorization executor failure allows access."""
+        return {"tenant": get_current_tenant()}
+
+    client = TestClient(app)
+
+    response = client.get("/whoami", headers={TENANT_HEADER: "ums"})
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Tenant access denied"}
+    assert response.headers["vary"] == TENANT_HEADER
+    assert "Tenant authorization execution failed" in caplog.text
+    assert "executor unavailable" in caplog.text
+
+
+def test_blocking_submission_failures_release_admission_slot():
+    """Executor submission failures do not leak blocking-work slots."""
+    calls: list[str] = []
+
+    class BrokenSubmissionMiddleware(TenantResolverMiddleware):
+        """Resolver variant that always fails executor submission."""
+
+        def _submit_blocking(
+            self,
+            loop: asyncio.AbstractEventLoop,
+            func: Callable[..., object],
+            *args: object,
+        ) -> asyncio.Future:
+            """Raise before a future can receive the done callback."""
+            calls.append(func.__name__)
+            raise ExecutorSubmissionError
+
+    middleware = BrokenSubmissionMiddleware(
+        FastAPI(),
+        session_factory=lambda: None,
+        authorize_tenant=lambda _scope, _slug: True,
+        max_blocking_tasks=1,
+    )
+
+    async def run_twice() -> None:
+        """Run two failing submissions through the same one-slot limiter."""
+        for _ in range(2):
+            with pytest.raises(ExecutorSubmissionError):
+                await middleware._run_blocking_with_timeout(
+                    lambda: None,
+                    timeout=0.01,
+                )
+
+    asyncio.run(run_twice())
+
+    assert calls == ["<lambda>", "<lambda>"]
 
 
 def test_corrupt_tenant_registry_rows_fail_closed_and_log(

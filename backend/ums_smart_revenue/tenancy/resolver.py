@@ -275,6 +275,18 @@ class TenantResolverMiddleware:
                 },
             )
             return False
+        except Exception as exc:
+            _LOGGER.warning(
+                "Tenant authorization execution failed: %s",
+                exc,
+                extra={
+                    "path": scope.get("path"),
+                    "scope_type": scope.get("type"),
+                    "tenant_slug": normalised_slug,
+                },
+                exc_info=True,
+            )
+            return False
 
     async def _run_blocking_with_timeout(
         self,
@@ -285,9 +297,22 @@ class TenantResolverMiddleware:
         """Run blocking work with bounded admission and request timeout."""
         await asyncio.wait_for(self._blocking_tasks.acquire(), timeout=timeout)
         loop = asyncio.get_running_loop()
-        future = loop.run_in_executor(None, partial(func, *args))
+        try:
+            future = self._submit_blocking(loop, func, *args)
+        except BaseException:
+            self._blocking_tasks.release()
+            raise
         future.add_done_callback(lambda _future: self._blocking_tasks.release())
         return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+
+    def _submit_blocking(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        func: Callable[..., object],
+        *args: object,
+    ) -> asyncio.Future:
+        """Submit blocking work to the loop executor."""
+        return loop.run_in_executor(None, partial(func, *args))
 
 
 def _normalise_bypass_paths(bypass_paths: Iterable[str]) -> tuple[str, ...]:
