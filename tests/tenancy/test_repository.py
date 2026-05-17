@@ -146,7 +146,7 @@ def test_suspended_status_is_propagated_to_domain():
 def test_to_domain_rejects_naive_datetimes():
     from ums_smart_revenue.tenancy.repository import _to_domain
 
-    row = _make_tenant_row(created_at=datetime(2026, 1, 1))
+    row = _make_tenant_row(created_at=datetime.now(UTC).replace(tzinfo=None))
 
     with pytest.raises(ValueError, match="invalid timezone for created_at"):
         _to_domain(row)

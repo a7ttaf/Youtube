@@ -80,7 +80,7 @@ class TenantResolverMiddleware:
     ) -> None:
         self.app = app
         self._session_factory = session_factory
-        self._bypass_paths: tuple[str, ...] = tuple(bypass_paths)
+        self._bypass_paths = _normalise_bypass_paths(bypass_paths)
         self._authorize_tenant = authorize_tenant or _deny_tenant_access
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -94,7 +94,7 @@ class TenantResolverMiddleware:
 
         raw_slug = Headers(scope=scope).get(TENANT_HEADER, "")
         normalised_slug = raw_slug.strip().lower()
-        if normalised_slug and not self._authorize_tenant(scope, normalised_slug):
+        if normalised_slug and not self._is_authorized(scope, normalised_slug):
             await _ResolverError(
                 status_code=403,
                 detail="Tenant access denied",
@@ -147,6 +147,29 @@ class TenantResolverMiddleware:
 
     def _should_bypass(self, path: str) -> bool:
         return any(path == bp or path.startswith(bp + "/") for bp in self._bypass_paths)
+
+    def _is_authorized(self, scope: Scope, normalised_slug: str) -> bool:
+        try:
+            return self._authorize_tenant(scope, normalised_slug)
+        except Exception:
+            return False
+
+
+def _normalise_bypass_paths(bypass_paths: Iterable[str]) -> tuple[str, ...]:
+    if isinstance(bypass_paths, str):
+        raise ValueError("bypass_paths must be an iterable of path strings")
+
+    normalised_paths: list[str] = []
+    for path in bypass_paths:
+        if not isinstance(path, str):
+            raise ValueError("bypass path must be a string")
+        normalised = path.strip().rstrip("/")
+        if not normalised or normalised == "/":
+            raise ValueError("bypass path must not be empty or root")
+        if not normalised.startswith("/"):
+            raise ValueError("bypass path must start with '/'")
+        normalised_paths.append(normalised)
+    return tuple(dict.fromkeys(normalised_paths))
 
 
 def _deny_tenant_access(_scope: Scope, _slug: str) -> bool:

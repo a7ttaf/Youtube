@@ -5,6 +5,7 @@ from collections.abc import Iterator
 from datetime import UTC, datetime
 from uuid import uuid4
 
+import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
@@ -226,6 +227,68 @@ def test_missing_tenant_authorizer_denies_by_default():
     assert get_current_tenant() is None
 
 
+def test_tenant_authorizer_errors_fail_closed():
+    engine = _build_engine()
+    _seed(engine, slug="ums")
+    app = FastAPI()
+    factory = sessionmaker(engine, expire_on_commit=False)
+
+    def broken_authorizer(_scope, _slug) -> bool:
+        raise RuntimeError("authorization service unavailable")
+
+    app.add_middleware(
+        TenantResolverMiddleware,
+        session_factory=factory,
+        authorize_tenant=broken_authorizer,
+    )
+
+    @app.get("/whoami")
+    def whoami() -> dict[str, object]:
+        return {"tenant": get_current_tenant()}
+
+    client = TestClient(app)
+
+    response = client.get("/whoami", headers={TENANT_HEADER: "ums"})
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Tenant access denied"}
+    assert get_current_tenant() is None
+
+
+def test_bypass_paths_reject_empty_root_and_relative_entries():
+    app = FastAPI()
+
+    invalid_bypass_sets = [
+        ("",),
+        ("/",),
+        ("health",),
+        ("/health", ""),
+    ]
+
+    for bypass_paths in invalid_bypass_sets:
+        with pytest.raises(ValueError, match="bypass path|bypass_paths"):
+            TenantResolverMiddleware(
+                app,
+                session_factory=lambda: None,
+                bypass_paths=bypass_paths,
+                authorize_tenant=lambda _scope, _slug: True,
+            )
+
+
+def test_bypass_paths_are_normalised_before_matching():
+    middleware = TenantResolverMiddleware(
+        FastAPI(),
+        session_factory=lambda: None,
+        bypass_paths=("/health/", "/docs//", "/health"),
+        authorize_tenant=lambda _scope, _slug: True,
+    )
+
+    assert middleware._should_bypass("/health")
+    assert middleware._should_bypass("/health/live")
+    assert middleware._should_bypass("/docs")
+    assert middleware._bypass_paths == ("/health", "/docs")
+
+
 def test_streaming_response_keeps_tenant_context_until_body_consumed():
     engine = _build_engine()
     _seed(engine, slug="ums")
@@ -253,7 +316,7 @@ def test_resolver_runs_blocking_lookup_off_event_loop_thread():
     observed: dict[str, int] = {}
 
     class RecordingTenantResolverMiddleware(TenantResolverMiddleware):
-        def _resolve(self, raw_slug: str) -> Tenant:
+        def _resolve(self, _raw_slug: str) -> Tenant:
             observed["resolve_thread"] = threading.get_ident()
             return tenant
 
