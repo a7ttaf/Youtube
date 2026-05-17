@@ -833,7 +833,7 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
     }
     for table in EXPECTED_TABLES:
         if table not in special_tables:
-            Table(table, metadata, Column("id", Text()))
+            Table(table, metadata, Column("id", Text(), primary_key=True))
 
     metadata.create_all(connection)
     connection.execute(
