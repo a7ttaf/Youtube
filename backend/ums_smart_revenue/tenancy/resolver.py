@@ -152,18 +152,7 @@ class TenantResolverMiddleware:
                     detail=f"Tenant {raw_slug.strip().lower()!r} not found",
                 ) from None
 
-            if tenant.status == TenantStatus.SUSPENDED:
-                raise _ResolverError(
-                    status_code=423,
-                    detail=f"Tenant {tenant.slug!r} is suspended",
-                )
-            if tenant.status == TenantStatus.ARCHIVED:
-                raise _ResolverError(
-                    status_code=410,
-                    detail=f"Tenant {tenant.slug!r} is archived",
-                )
-
-            return tenant
+            return _ensure_active_tenant(tenant)
         finally:
             session.close()
 
@@ -205,6 +194,26 @@ def _normalise_bypass_paths(bypass_paths: Iterable[str]) -> tuple[str, ...]:
             raise ValueError("bypass path must start with '/'")
         normalised_paths.append(normalised)
     return tuple(dict.fromkeys(normalised_paths))
+
+
+def _ensure_active_tenant(tenant: Tenant) -> Tenant:
+    """Return active tenants and reject every non-active lifecycle state."""
+    if tenant.status == TenantStatus.ACTIVE:
+        return tenant
+    if tenant.status == TenantStatus.SUSPENDED:
+        raise _ResolverError(
+            status_code=423,
+            detail=f"Tenant {tenant.slug!r} is suspended",
+        )
+    if tenant.status == TenantStatus.ARCHIVED:
+        raise _ResolverError(
+            status_code=410,
+            detail=f"Tenant {tenant.slug!r} is archived",
+        )
+    raise _ResolverError(
+        status_code=500,
+        detail=f"Tenant {tenant.slug!r} has invalid status {tenant.status!r}",
+    )
 
 
 def _deny_tenant_access(_scope: Scope, _slug: str) -> bool:

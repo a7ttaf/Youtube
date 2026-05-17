@@ -4,6 +4,7 @@ import logging
 import threading
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from typing import cast
 from uuid import uuid4
 
 import pytest
@@ -25,6 +26,7 @@ from ums_smart_revenue.tenancy import (
     TenantStatus,
     get_current_tenant,
 )
+from ums_smart_revenue.tenancy.resolver import _ensure_active_tenant, _ResolverError
 
 
 def _build_engine() -> Engine:
@@ -342,6 +344,14 @@ class TenantRegistryUnavailableError(RuntimeError):
         super().__init__("tenant registry session unavailable")
 
 
+class DatabaseOfflineError(RuntimeError):
+    """Stable exception raised by the database failure test."""
+
+    def __init__(self) -> None:
+        """Create a deterministic message for log assertions."""
+        super().__init__("database offline")
+
+
 class _ScalarResult:
     """Tiny stand-in for SQLAlchemy's scalar result object."""
 
@@ -374,7 +384,7 @@ class _BrokenDatabaseSession:
 
     def scalars(self, _statement: object) -> object:
         """Raise a representative database error from the lookup path."""
-        raise OperationalError("SELECT tenants", {}, RuntimeError("database offline"))
+        raise OperationalError("SELECT tenants", {}, DatabaseOfflineError())
 
     def close(self) -> None:
         """Record that the resolver cleaned up after the failed lookup."""
@@ -440,6 +450,7 @@ def test_bypass_paths_reject_empty_root_and_relative_entries():
     app = FastAPI()
 
     invalid_bypass_sets = [
+        "health",
         ("",),
         ("/",),
         ("health",),
@@ -454,6 +465,27 @@ def test_bypass_paths_reject_empty_root_and_relative_entries():
                 bypass_paths=bypass_paths,
                 authorize_tenant=lambda _scope, _slug: True,
             )
+
+
+def test_unrecognised_tenant_status_fails_closed():
+    """Future tenant statuses are not treated as active by default."""
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        id=uuid4(),
+        slug="future",
+        display_name="Future",
+        primary_currency="USD",
+        status=cast(TenantStatus, "PAUSED"),
+        onboarding_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+
+    with pytest.raises(_ResolverError) as exc_info:
+        _ensure_active_tenant(tenant)
+
+    assert exc_info.value.status_code == 500
+    assert "invalid status" in exc_info.value.detail
 
 
 def test_bypass_paths_are_normalised_before_matching():
