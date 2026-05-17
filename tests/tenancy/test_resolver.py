@@ -186,6 +186,26 @@ def test_blank_tenant_header_returns_400():
     assert response.status_code == 400
 
 
+def test_duplicate_tenant_headers_return_400():
+    """Duplicate tenant headers are rejected instead of selecting one."""
+    engine = _build_engine()
+    _seed(engine, slug="ums")
+    client = TestClient(_build_app(engine))
+
+    response = client.get(
+        "/whoami",
+        headers=[
+            (TENANT_HEADER, "ums"),
+            (TENANT_HEADER, "rotana"),
+        ],
+    )
+
+    assert response.status_code == 400
+    assert response.json()["header"] == TENANT_HEADER
+    assert "exactly once" in response.json()["detail"]
+    assert response.headers["vary"] == TENANT_HEADER
+
+
 def test_invalid_tenant_headers_are_rejected_before_session_factory():
     """Bad tenant headers return 400 without opening registry sessions."""
     app = FastAPI()
@@ -1073,6 +1093,29 @@ def test_bypass_paths_are_normalised_before_matching():
     assert middleware._should_bypass("/health/live")
     assert middleware._should_bypass("/docs")
     assert middleware._bypass_paths == ("/health", "/docs")
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"lookup_timeout_seconds": True},
+        {"lookup_timeout_seconds": float("inf")},
+        {"lookup_timeout_seconds": float("nan")},
+        {"authorization_timeout_seconds": True},
+        {"authorization_timeout_seconds": float("inf")},
+        {"authorization_timeout_seconds": float("nan")},
+        {"max_blocking_tasks": True},
+    ],
+)
+def test_resolver_rejects_invalid_guardrail_settings(kwargs: dict[str, object]):
+    """Invalid timeout and concurrency settings fail at startup."""
+    with pytest.raises(ValueError):
+        TenantResolverMiddleware(
+            FastAPI(),
+            session_factory=lambda: None,
+            authorize_tenant=lambda _scope, _slug: True,
+            **kwargs,
+        )
 
 
 def test_streaming_response_keeps_tenant_context_until_body_consumed():

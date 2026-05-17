@@ -42,6 +42,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 from collections.abc import Callable, Iterable
 from concurrent.futures import CancelledError as FutureCancelledError
 from functools import partial
@@ -124,7 +125,15 @@ class TenantResolverMiddleware:
             return
 
         send_with_tenant_vary = _tenant_vary_send(send)
-        raw_slug = Headers(scope=scope).get(TENANT_HEADER, "")
+        tenant_headers = Headers(scope=scope).getlist(TENANT_HEADER)
+        if len(tenant_headers) > 1:
+            await _ResolverError(
+                status_code=400,
+                detail=f"{TENANT_HEADER} must be provided exactly once",
+                header=TENANT_HEADER,
+            ).to_response()(scope, receive, send_with_tenant_vary)
+            return
+        raw_slug = tenant_headers[0] if tenant_headers else ""
         try:
             normalised_slug = _normalise_tenant_slug(raw_slug)
         except _ResolverError as error:
@@ -343,18 +352,20 @@ def _normalise_bypass_paths(bypass_paths: Iterable[str]) -> tuple[str, ...]:
 
 def _validate_timeout(name: str, timeout_seconds: float) -> float:
     """Return a positive timeout value for resolver dependency calls."""
+    if isinstance(timeout_seconds, bool):
+        raise ValueError(f"{name} must be a positive number")
     try:
         timeout = float(timeout_seconds)
     except (TypeError, ValueError) as exc:
         raise ValueError(f"{name} must be a positive number") from exc
-    if timeout <= 0:
+    if not math.isfinite(timeout) or timeout <= 0:
         raise ValueError(f"{name} must be a positive number")
     return timeout
 
 
 def _validate_positive_int(name: str, value: int) -> int:
     """Return a positive integer configuration value."""
-    if not isinstance(value, int) or value <= 0:
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return value
 
