@@ -1,5 +1,6 @@
 """Integration tests for :class:`TenantResolverMiddleware`."""
 
+import asyncio
 import logging
 import threading
 from collections.abc import Callable, Iterator
@@ -181,6 +182,42 @@ def test_blank_tenant_header_returns_400():
     assert response.status_code == 400
 
 
+def test_invalid_tenant_headers_are_rejected_before_session_factory():
+    """Bad tenant headers return 400 without opening registry sessions."""
+    app = FastAPI()
+    calls: list[str] = []
+
+    def unexpected_session_factory() -> object:
+        """Record an unexpected lookup attempt before failing the test."""
+        calls.append("opened")
+        raise TenantRegistryUnavailableError
+
+    app.add_middleware(
+        TenantResolverMiddleware,
+        session_factory=unexpected_session_factory,
+        authorize_tenant=lambda _scope, _slug: True,
+    )
+
+    @app.get("/whoami")
+    def whoami() -> dict[str, object]:
+        """Return context if invalid headers unexpectedly reach the endpoint."""
+        return {"tenant": get_current_tenant()}
+
+    client = TestClient(app)
+
+    cases = (
+        {},
+        {TENANT_HEADER: "   "},
+        {TENANT_HEADER: "a" * (MAX_TENANT_SLUG_LENGTH + 1)},
+    )
+    for headers in cases:
+        response = client.get("/whoami", headers=headers)
+        assert response.status_code == 400
+        assert response.json()["header"] == TENANT_HEADER
+
+    assert calls == []
+
+
 def test_unknown_tenant_returns_404():
     """Unknown tenant slugs map to a not-found response."""
     engine = _build_engine()
@@ -268,7 +305,7 @@ def test_tenant_context_is_cleared_after_response():
 
 
 def test_tenant_authorizer_denies_before_context_is_set():
-    """Authorization denial happens before tenant context is exposed."""
+    """Authorization denial still happens before tenant context is exposed."""
     engine = _build_engine()
     _seed(engine, slug="ums")
     app = FastAPI()
@@ -290,6 +327,41 @@ def test_tenant_authorizer_denies_before_context_is_set():
 
     assert response.status_code == 403
     assert response.json() == {"detail": "Tenant access denied"}
+    assert get_current_tenant() is None
+
+
+def test_lookup_and_lifecycle_errors_precede_authorization_denial():
+    """Lookup and tenant lifecycle responses keep documented status mapping."""
+    engine = _build_engine()
+    _seed(engine, slug="active")
+    _seed(engine, slug="paused", status=TenantStatus.SUSPENDED)
+    _seed(engine, slug="retired", status=TenantStatus.ARCHIVED)
+    app = FastAPI()
+    factory = sessionmaker(engine, expire_on_commit=False)
+    app.add_middleware(
+        TenantResolverMiddleware,
+        session_factory=factory,
+        authorize_tenant=lambda _scope, _slug: False,
+    )
+
+    @app.get("/whoami")
+    def whoami() -> dict[str, object]:
+        """Return context if authorization or lifecycle checks are bypassed."""
+        return {"tenant": get_current_tenant()}
+
+    client = TestClient(app)
+
+    responses = {
+        "missing": client.get("/whoami", headers={TENANT_HEADER: "missing"}),
+        "paused": client.get("/whoami", headers={TENANT_HEADER: "paused"}),
+        "retired": client.get("/whoami", headers={TENANT_HEADER: "retired"}),
+        "active": client.get("/whoami", headers={TENANT_HEADER: "active"}),
+    }
+
+    assert responses["missing"].status_code == 404
+    assert responses["paused"].status_code == 423
+    assert responses["retired"].status_code == 410
+    assert responses["active"].status_code == 403
     assert get_current_tenant() is None
 
 
@@ -440,8 +512,8 @@ class _CloseRaisesSession:
     """Session fake whose cleanup fails after lookup validation fails."""
 
     def scalars(self, _statement: object) -> object:
-        """Fail the test if blank slug validation reaches database lookup."""
-        raise AssertionError
+        """Raise a representative database error from the lookup path."""
+        raise OperationalError("SELECT tenants", {}, DatabaseOfflineError())
 
     def close(self) -> None:
         """Raise a close failure that must not mask the lookup error."""
@@ -490,16 +562,59 @@ def test_sqlalchemy_lookup_errors_fail_closed_and_close_session(
 def test_session_close_errors_do_not_mask_lookup_errors(
     caplog: pytest.LogCaptureFixture,
 ):
-    """Session close failures preserve the original tenant validation response."""
+    """Session close failures preserve the original lookup failure response."""
     caplog.set_level(logging.WARNING, logger="ums_smart_revenue.tenancy.resolver")
     client = TestClient(_build_registry_failure_app(_CloseRaisesSession))
 
-    response = client.get("/whoami")
+    response = client.get("/whoami", headers={TENANT_HEADER: "ums"})
 
-    assert response.status_code == 400
-    assert response.json()["header"] == TENANT_HEADER
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Tenant registry unavailable"}
+    assert "Tenant registry lookup failed" in caplog.text
+    assert "database offline" in caplog.text
     assert "Tenant registry session close failed" in caplog.text
     assert "tenant registry close failed" in caplog.text
+
+
+def test_lookup_cancellation_is_reraised():
+    """Lookup cancellation escapes instead of becoming a synthetic 503."""
+    messages: list[dict[str, object]] = []
+
+    async def blocked_app(_scope: object, _receive: object, _send: object) -> None:
+        """Fail the test if cancellation lets the request reach the app."""
+        raise AssertionError
+
+    class CancellingTenantResolverMiddleware(TenantResolverMiddleware):
+        """Resolver variant that simulates request cancellation during lookup."""
+
+        def _resolve(self, _raw_slug: str) -> Tenant:
+            """Raise the cancellation signal the middleware must preserve."""
+            raise asyncio.CancelledError
+
+    middleware = CancellingTenantResolverMiddleware(
+        blocked_app,
+        session_factory=lambda: None,
+        authorize_tenant=lambda _scope, _slug: True,
+    )
+    scope = {
+        "type": "http",
+        "method": "GET",
+        "path": "/whoami",
+        "headers": [(TENANT_HEADER.lower().encode("ascii"), b"ums")],
+    }
+
+    async def receive() -> dict[str, object]:
+        """Return a minimal ASGI request event."""
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(message: dict[str, object]) -> None:
+        """Record any response messages emitted by the middleware."""
+        messages.append(message)
+
+    with pytest.raises(asyncio.CancelledError):
+        asyncio.run(middleware(scope, receive, send))
+
+    assert messages == []
 
 
 def test_corrupt_tenant_registry_rows_fail_closed_and_log(

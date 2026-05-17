@@ -7,8 +7,10 @@ the tenant's lifecycle status, and stores the resulting
 :class:`~ums_smart_revenue.tenancy.models.Tenant` in
 :data:`~ums_smart_revenue.tenancy.context.TENANT_CTX` for the duration
 of the request task. Callers must provide an ``authorize_tenant`` callback
-before non-bypassed requests can resolve tenant data; the default is deny-all
-until S2.3 wires the principal-to-tenant authorization contract.
+before non-bypassed requests can reach tenant-scoped application code; the
+default is deny-all until S2.3 wires the principal-to-tenant authorization
+contract. Tenant lookup runs before authorization so invalid slugs and
+non-active lifecycle states keep the documented response mapping.
 
 Status → response mapping:
 
@@ -16,6 +18,7 @@ Status → response mapping:
 * **Slug not in registry**           ``404 Not Found``
 * **Tenant status = SUSPENDED**      ``423 Locked``
 * **Tenant status = ARCHIVED**       ``410 Gone``
+* **Authorization denies active**    ``403 Forbidden``
 * **Tenant status = ACTIVE**         pass-through; contextvar set
 
 The resolver is intentionally **not** installed in the default
@@ -37,8 +40,10 @@ implementation hits the database once per non-bypassed request.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable, Iterable
+from concurrent.futures import CancelledError as FutureCancelledError
 
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
@@ -52,6 +57,7 @@ from ums_smart_revenue.tenancy.repository import (
     SqlAlchemyTenantRepository,
     TenantNotFoundError,
     TenantValidationError,
+    _normalise_slug,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -103,19 +109,19 @@ class TenantResolverMiddleware:
             return
 
         raw_slug = Headers(scope=scope).get(TENANT_HEADER, "")
-        normalised_slug = raw_slug.strip().lower()
-        if normalised_slug and not self._is_authorized(scope, normalised_slug):
-            await _ResolverError(
-                status_code=403,
-                detail="Tenant access denied",
-            ).to_response()(scope, receive, send)
-            return
-
         try:
-            tenant = await run_in_threadpool(self._resolve, raw_slug)
+            normalised_slug = _normalise_tenant_slug(raw_slug)
         except _ResolverError as error:
             await error.to_response()(scope, receive, send)
             return
+
+        try:
+            tenant = await run_in_threadpool(self._resolve, normalised_slug)
+        except _ResolverError as error:
+            await error.to_response()(scope, receive, send)
+            return
+        except (asyncio.CancelledError, FutureCancelledError):
+            raise
         except Exception as exc:
             _LOGGER.error(
                 "Tenant registry lookup failed: %s",
@@ -133,6 +139,13 @@ class TenantResolverMiddleware:
             ).to_response()(scope, receive, send)
             return
 
+        if not self._is_authorized(scope, normalised_slug):
+            await _ResolverError(
+                status_code=403,
+                detail="Tenant access denied",
+            ).to_response()(scope, receive, send)
+            return
+
         token = TENANT_CTX.set(tenant)
         try:
             await self.app(scope, receive, send)
@@ -141,21 +154,18 @@ class TenantResolverMiddleware:
 
     def _resolve(self, raw_slug: str) -> Tenant:
         """Open a tenant registry session and translate expected lookup outcomes."""
+        normalised_slug = _normalise_tenant_slug(raw_slug)
         session = self._session_factory()
         lookup_error: BaseException | None = None
         try:
             try:
-                tenant = SqlAlchemyTenantRepository(session).get_by_slug(raw_slug)
-            except TenantValidationError as exc:
-                raise _ResolverError(
-                    status_code=400,
-                    detail=str(exc),
-                    header=TENANT_HEADER,
-                ) from exc
+                tenant = SqlAlchemyTenantRepository(session).get_by_slug(
+                    normalised_slug
+                )
             except TenantNotFoundError:
                 raise _ResolverError(
                     status_code=404,
-                    detail=f"Tenant {raw_slug.strip().lower()!r} not found",
+                    detail=f"Tenant {normalised_slug!r} not found",
                 ) from None
 
             return _ensure_active_tenant(tenant)
@@ -224,6 +234,18 @@ def _normalise_bypass_paths(bypass_paths: Iterable[str]) -> tuple[str, ...]:
             raise ValueError("bypass path must start with '/'")
         normalised_paths.append(normalised)
     return tuple(dict.fromkeys(normalised_paths))
+
+
+def _normalise_tenant_slug(raw_slug: str) -> str:
+    """Normalize tenant slugs and translate invalid headers to resolver errors."""
+    try:
+        return _normalise_slug(raw_slug)
+    except TenantValidationError as exc:
+        raise _ResolverError(
+            status_code=400,
+            detail=str(exc),
+            header=TENANT_HEADER,
+        ) from exc
 
 
 def _ensure_active_tenant(tenant: Tenant) -> Tenant:
