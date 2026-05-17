@@ -37,6 +37,7 @@ implementation hits the database once per non-bypassed request.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable, Iterable
 
 from sqlalchemy.orm import Session
@@ -52,6 +53,8 @@ from ums_smart_revenue.tenancy.repository import (
     TenantNotFoundError,
     TenantValidationError,
 )
+
+_LOGGER = logging.getLogger(__name__)
 
 TENANT_HEADER = "X-UMS-Tenant"
 DEFAULT_BYPASS_PATHS: tuple[str, ...] = (
@@ -151,7 +154,17 @@ class TenantResolverMiddleware:
     def _is_authorized(self, scope: Scope, normalised_slug: str) -> bool:
         try:
             return self._authorize_tenant(scope, normalised_slug)
-        except Exception:
+        except Exception as exc:
+            _LOGGER.warning(
+                "Tenant authorization callback failed: %s",
+                exc,
+                extra={
+                    "path": scope.get("path"),
+                    "scope_type": scope.get("type"),
+                    "tenant_slug": normalised_slug,
+                },
+                exc_info=True,
+            )
             return False
 
 

@@ -1,5 +1,6 @@
 """Integration tests for :class:`TenantResolverMiddleware`."""
 
+import logging
 import threading
 from collections.abc import Iterator
 from datetime import UTC, datetime
@@ -227,14 +228,20 @@ def test_missing_tenant_authorizer_denies_by_default():
     assert get_current_tenant() is None
 
 
-def test_tenant_authorizer_errors_fail_closed():
+class AuthorizerUnavailableError(RuntimeError):
+    def __init__(self) -> None:
+        super().__init__("authorization service unavailable")
+
+
+def test_tenant_authorizer_errors_fail_closed(caplog: pytest.LogCaptureFixture):
     engine = _build_engine()
     _seed(engine, slug="ums")
     app = FastAPI()
     factory = sessionmaker(engine, expire_on_commit=False)
+    caplog.set_level(logging.WARNING, logger="ums_smart_revenue.tenancy.resolver")
 
     def broken_authorizer(_scope, _slug) -> bool:
-        raise RuntimeError("authorization service unavailable")
+        raise AuthorizerUnavailableError
 
     app.add_middleware(
         TenantResolverMiddleware,
@@ -253,6 +260,16 @@ def test_tenant_authorizer_errors_fail_closed():
     assert response.status_code == 403
     assert response.json() == {"detail": "Tenant access denied"}
     assert get_current_tenant() is None
+    assert "Tenant authorization callback failed" in caplog.text
+    assert "authorization service unavailable" in caplog.text
+    [record] = [
+        record
+        for record in caplog.records
+        if record.message.startswith("Tenant authorization callback failed")
+    ]
+    assert record.path == "/whoami"
+    assert record.scope_type == "http"
+    assert record.tenant_slug == "ums"
 
 
 def test_bypass_paths_reject_empty_root_and_relative_entries():
@@ -266,7 +283,7 @@ def test_bypass_paths_reject_empty_root_and_relative_entries():
     ]
 
     for bypass_paths in invalid_bypass_sets:
-        with pytest.raises(ValueError, match="bypass path|bypass_paths"):
+        with pytest.raises(ValueError, match=r"bypass path|bypass_paths"):
             TenantResolverMiddleware(
                 app,
                 session_factory=lambda: None,
