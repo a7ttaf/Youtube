@@ -254,6 +254,12 @@ def test_user_repository_access_profile_filters_by_current_tenant() -> None:
     assert [grant.scope_id for grant in profile.direct_permissions] == [
         "second-channel"
     ]
+    assert "default-company" not in {
+        assignment.scope_id for assignment in profile.role_assignments
+    }
+    assert "default-company" not in {
+        grant.scope_id for grant in profile.direct_permissions
+    }
 
 
 def _seed_access_profile_rows(session: Session) -> None:
@@ -313,6 +319,16 @@ def _seed_access_profile_rows(session: Session) -> None:
                 reason="Second tenant role",
                 active=True,
             ),
+            UserRoleAssignmentORM(
+                id=uuid4(),
+                tenant_id=DEFAULT_TENANT_ID,
+                user_id=SECOND_USER_ID,
+                role_key="company_manager",
+                scope_id=DEFAULT_SCOPE_ID,
+                assigned_by=DEFAULT_USER_ID,
+                reason="Cross-tenant role should be invisible",
+                active=True,
+            ),
             UserPermissionGrantORM(
                 id=uuid4(),
                 tenant_id=SECOND_TENANT_ID,
@@ -321,6 +337,16 @@ def _seed_access_profile_rows(session: Session) -> None:
                 scope_id=SECOND_PERMISSION_SCOPE_ID,
                 granted_by=SECOND_USER_ID,
                 reason="Second tenant permission",
+                active=True,
+            ),
+            UserPermissionGrantORM(
+                id=uuid4(),
+                tenant_id=DEFAULT_TENANT_ID,
+                user_id=SECOND_USER_ID,
+                permission_key="analytics.view_confidence",
+                scope_id=DEFAULT_SCOPE_ID,
+                granted_by=DEFAULT_USER_ID,
+                reason="Cross-tenant permission should be invisible",
                 active=True,
             ),
         ]
