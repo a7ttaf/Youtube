@@ -587,7 +587,7 @@ def test_lookup_cancellation_is_reraised():
     class CancellingTenantResolverMiddleware(TenantResolverMiddleware):
         """Resolver variant that simulates request cancellation during lookup."""
 
-        def _resolve(self, _raw_slug: str) -> Tenant:
+        def _resolve(self, _normalised_slug: str) -> Tenant:
             """Raise the cancellation signal the middleware must preserve."""
             raise asyncio.CancelledError
 
@@ -770,7 +770,7 @@ def test_resolver_runs_blocking_lookup_off_event_loop_thread():
     class RecordingTenantResolverMiddleware(TenantResolverMiddleware):
         """Resolver variant that records where blocking lookup executes."""
 
-        def _resolve(self, _raw_slug: str) -> Tenant:
+        def _resolve(self, _normalised_slug: str) -> Tenant:
             """Capture the thread used by middleware resolution."""
             observed["resolve_thread"] = threading.get_ident()
             return tenant

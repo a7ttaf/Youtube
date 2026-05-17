@@ -152,9 +152,8 @@ class TenantResolverMiddleware:
         finally:
             TENANT_CTX.reset(token)
 
-    def _resolve(self, raw_slug: str) -> Tenant:
-        """Open a tenant registry session and translate expected lookup outcomes."""
-        normalised_slug = _normalise_tenant_slug(raw_slug)
+    def _resolve(self, normalised_slug: str) -> Tenant:
+        """Open a tenant registry session for a validated slug."""
         session = self._session_factory()
         lookup_error: BaseException | None = None
         try:
