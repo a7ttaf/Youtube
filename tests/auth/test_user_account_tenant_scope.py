@@ -8,8 +8,10 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.users import (
+    USER_LIST_MAX_OFFSET,
     SqlAlchemyUserAccountRepository,
     UserAccountNotFoundError,
+    UserAccountValidationError,
 )
 from ums_smart_revenue.db.security_models import (
     AccessScopeORM,
@@ -97,6 +99,34 @@ def test_user_repository_filters_list_users_by_current_tenant() -> None:
     assert next_cursor is None
 
 
+def test_user_repository_uses_default_tenant_without_context() -> None:
+    """Verify bootstrap callers fall back to the default tenant id."""
+    session = build_session()
+    seed_users(session)
+
+    items, has_more, next_cursor = SqlAlchemyUserAccountRepository(
+        session
+    ).list_users(limit=10)
+
+    assert [item.id for item in items] == [str(DEFAULT_USER_ID)]
+    assert has_more is False
+    assert next_cursor is None
+
+
+def test_user_repository_returns_empty_page_for_empty_tenant() -> None:
+    """Verify tenant filters return an empty page instead of leaking rows."""
+    session = build_session()
+    seed_users(session)
+
+    items, has_more, next_cursor = SqlAlchemyUserAccountRepository(
+        session, tenant_id=uuid4()
+    ).list_users(limit=10)
+
+    assert items == ()
+    assert has_more is False
+    assert next_cursor is None
+
+
 def test_user_repository_email_conflict_is_tenant_scoped() -> None:
     """Verify an email used by another tenant does not block creation."""
     session = build_session()
@@ -132,6 +162,17 @@ def test_user_repository_explicit_tenant_overrides_request_context() -> None:
     assert account.id == str(DEFAULT_USER_ID)
 
 
+def test_user_repository_rejects_invalid_tenant_id() -> None:
+    """Verify malformed constructor tenant ids fail closed."""
+    session = build_session()
+
+    with pytest.raises(
+        UserAccountValidationError,
+        match="tenant_id must be a valid UUID",
+    ):
+        SqlAlchemyUserAccountRepository(session, tenant_id="not-a-uuid")
+
+
 def test_user_repository_rejects_cross_tenant_user_lookup() -> None:
     """Verify get_user cannot return a row from another tenant."""
     session = build_session()
@@ -144,6 +185,53 @@ def test_user_repository_rejects_cross_tenant_user_lookup() -> None:
             )
     finally:
         TENANT_CTX.reset(token)
+
+
+def test_user_repository_rejects_invalid_cursor_uuid() -> None:
+    """Verify cursor UUID parsing fails before running the list query."""
+    session = build_session()
+    seed_users(session)
+
+    with pytest.raises(
+        UserAccountValidationError,
+        match="cursor_id must be a valid UUID",
+    ):
+        SqlAlchemyUserAccountRepository(session).list_users(
+            cursor_email="shared@example.com",
+            cursor_id="not-a-uuid",
+        )
+
+
+@pytest.mark.parametrize("limit", [1, 100])
+def test_user_repository_accepts_pagination_boundaries(limit: int) -> None:
+    """Verify documented user-list page-size boundaries remain accepted."""
+    session = build_session()
+    seed_users(session)
+
+    items, _, _ = SqlAlchemyUserAccountRepository(session).list_users(limit=limit)
+
+    assert [item.id for item in items] == [str(DEFAULT_USER_ID)]
+
+
+def test_user_repository_rejects_page_size_above_boundary() -> None:
+    """Verify user-list page-size validation rejects the first invalid value."""
+    session = build_session()
+
+    with pytest.raises(UserAccountValidationError, match="limit must be between"):
+        SqlAlchemyUserAccountRepository(session).list_users(limit=101)
+
+
+def test_user_repository_rejects_offset_above_boundary() -> None:
+    """Verify user-list offset validation keeps unbounded offsets out."""
+    session = build_session()
+
+    with pytest.raises(
+        UserAccountValidationError,
+        match=f"offset must be less than or equal to {USER_LIST_MAX_OFFSET}",
+    ):
+        SqlAlchemyUserAccountRepository(session).list_users(
+            offset=USER_LIST_MAX_OFFSET + 1
+        )
 
 
 def test_user_repository_access_profile_filters_by_current_tenant() -> None:

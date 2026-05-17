@@ -3,11 +3,16 @@
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
+import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.audit import AuditEventType
-from ums_smart_revenue.auth.audit_log import SqlAlchemyAuditLogRepository
+from ums_smart_revenue.auth.audit_log import (
+    MAX_AUDIT_LOG_PAGE_SIZE,
+    AuditLogValidationError,
+    SqlAlchemyAuditLogRepository,
+)
 from ums_smart_revenue.auth.audit_service import record_audit_event
 from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
 from ums_smart_revenue.auth.roles import RoleKey
@@ -81,6 +86,30 @@ def test_audit_repository_filters_to_explicit_tenant_id() -> None:
     assert [item.event_type for item in page.items] == ["SECOND_TENANT_EVENT"]
 
 
+def test_audit_repository_uses_default_tenant_without_context() -> None:
+    """Verify bootstrap callers fall back to the default tenant id."""
+    session = build_session()
+    seed_audit_rows(session)
+
+    page = SqlAlchemyAuditLogRepository(session).list_events(limit=10)
+
+    assert [item.event_type for item in page.items] == ["DEFAULT_TENANT_EVENT"]
+
+
+def test_audit_repository_returns_empty_page_for_empty_tenant() -> None:
+    """Verify tenant filters return an empty page instead of leaking rows."""
+    session = build_session()
+    seed_audit_rows(session)
+
+    page = SqlAlchemyAuditLogRepository(session, tenant_id=uuid4()).list_events(
+        limit=10
+    )
+
+    assert page.items == []
+    assert page.has_more is False
+    assert page.next_cursor is None
+
+
 def test_audit_repository_explicit_tenant_overrides_request_context() -> None:
     """Verify constructor tenant ids win over any ambient request context."""
     session = build_session()
@@ -107,6 +136,47 @@ def test_audit_repository_uses_request_tenant_context_by_default() -> None:
         TENANT_CTX.reset(token)
 
     assert [item.event_type for item in page.items] == ["SECOND_TENANT_EVENT"]
+
+
+def test_audit_repository_rejects_invalid_tenant_id() -> None:
+    """Verify malformed constructor tenant ids fail closed."""
+    session = build_session()
+
+    with pytest.raises(AuditLogValidationError, match="tenant_id must be a valid UUID"):
+        SqlAlchemyAuditLogRepository(session, tenant_id="not-a-uuid")
+
+
+def test_audit_repository_rejects_invalid_cursor_uuid() -> None:
+    """Verify cursor UUID parsing fails before running the query."""
+    session = build_session()
+    seed_audit_rows(session)
+
+    with pytest.raises(AuditLogValidationError, match="cursor_id must be a valid UUID"):
+        SqlAlchemyAuditLogRepository(session).list_events(
+            cursor_created_at=CREATED_AT,
+            cursor_id="not-a-uuid",
+        )
+
+
+@pytest.mark.parametrize("limit", [1, MAX_AUDIT_LOG_PAGE_SIZE])
+def test_audit_repository_accepts_pagination_boundaries(limit: int) -> None:
+    """Verify documented audit page-size boundaries remain accepted."""
+    session = build_session()
+    seed_audit_rows(session)
+
+    page = SqlAlchemyAuditLogRepository(session).list_events(limit=limit)
+
+    assert page.limit == limit
+
+
+def test_audit_repository_rejects_page_size_above_boundary() -> None:
+    """Verify audit page-size validation rejects the first invalid value."""
+    session = build_session()
+
+    with pytest.raises(AuditLogValidationError, match="limit must be between"):
+        SqlAlchemyAuditLogRepository(session).list_events(
+            limit=MAX_AUDIT_LOG_PAGE_SIZE + 1
+        )
 
 
 def test_sql_audit_sink_uses_request_tenant_context_by_default() -> None:
