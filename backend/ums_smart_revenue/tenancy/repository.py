@@ -64,7 +64,7 @@ class SqlAlchemyTenantRepository:
 
     def get_by_slug(self, slug: str) -> Tenant:
         """Return the tenant identified by a normalized slug or raise if absent."""
-        normalised = _normalise_slug(slug)
+        normalised = normalise_slug(slug)
         row = self._session.scalars(
             select(TenantORM).where(TenantORM.slug == normalised)
         ).one_or_none()
@@ -80,7 +80,7 @@ class SqlAlchemyTenantRepository:
         return _to_domain(row)
 
 
-def _normalise_slug(slug: str) -> str:
+def normalise_slug(slug: str) -> str:
     """Trim and lowercase tenant slugs while rejecting blank input."""
     if not isinstance(slug, str):
         raise TenantValidationError("Tenant slug must be a string")
@@ -140,7 +140,7 @@ def _coerce_aware_datetime(row: TenantORM, field_name: str) -> datetime:
     """Return a UTC-aware datetime, repairing SQLite test rows only."""
     value = getattr(row, field_name)
     if value is None:
-        raise ValueError(f"invalid timezone for {field_name}")
+        raise ValueError(f"missing required datetime field {field_name}")
     if value.tzinfo is not None and value.utcoffset() is not None:
         return value.astimezone(UTC)
 

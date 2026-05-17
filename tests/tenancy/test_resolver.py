@@ -10,7 +10,7 @@ from typing import cast
 from uuid import uuid4
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request, WebSocket
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import create_engine, event
@@ -294,6 +294,85 @@ def test_options_requests_bypass_tenant_resolution_without_header():
     assert response.status_code == 200
     assert response.json() == {"status": "preflight"}
     assert get_current_tenant() is None
+
+
+def test_mutating_methods_and_streaming_bodies_resolve_tenant_context():
+    """Tenant resolution works for mutating methods and streamed bodies."""
+    engine = _build_engine()
+    _seed(engine, slug="ums")
+    app = FastAPI()
+    factory = sessionmaker(engine, expire_on_commit=False)
+    app.add_middleware(
+        TenantResolverMiddleware,
+        session_factory=factory,
+        authorize_tenant=lambda _scope, _slug: True,
+    )
+
+    @app.api_route("/mutate", methods=["POST", "PUT", "PATCH", "DELETE"])
+    async def mutate(request: Request) -> dict[str, object]:
+        """Echo method, body, and tenant context for non-GET requests."""
+        tenant = get_current_tenant()
+        body = await request.body()
+        return {
+            "method": request.method,
+            "body": body.decode("utf-8"),
+            "tenant": tenant.slug if tenant is not None else None,
+        }
+
+    def body_chunks() -> Iterator[bytes]:
+        """Yield a chunked request body for middleware pass-through coverage."""
+        yield b"streamed"
+        yield b"-body"
+
+    client = TestClient(app)
+    cases: list[tuple[str, object, str]] = [
+        ("POST", body_chunks(), "streamed-body"),
+        ("PUT", b"put-body", "put-body"),
+        ("PATCH", b"patch-body", "patch-body"),
+        ("DELETE", b"", ""),
+    ]
+
+    for method, content, expected_body in cases:
+        response = client.request(
+            method,
+            "/mutate",
+            headers={TENANT_HEADER: "ums"},
+            content=content,
+        )
+        assert response.status_code == 200
+        assert response.json() == {
+            "method": method,
+            "body": expected_body,
+            "tenant": "ums",
+        }
+        assert response.headers["vary"] == TENANT_HEADER
+
+
+def test_websocket_scopes_bypass_tenant_resolution_without_header():
+    """Non-HTTP ASGI scopes pass through without tenant lookup."""
+    app = FastAPI()
+
+    def unexpected_session_factory() -> object:
+        """Fail the test if websocket scope reaches tenant lookup."""
+        raise OptionsLookupError
+
+    app.add_middleware(
+        TenantResolverMiddleware,
+        session_factory=unexpected_session_factory,
+        authorize_tenant=lambda _scope, _slug: True,
+    )
+
+    @app.websocket("/ws")
+    async def websocket_probe(websocket: WebSocket) -> None:
+        """Return whether tenant context leaked into websocket handling."""
+        await websocket.accept()
+        await websocket.send_json({"tenant": get_current_tenant()})
+        await websocket.close()
+
+    client = TestClient(app)
+
+    with client.websocket_connect("/ws") as websocket:
+        assert websocket.receive_json() == {"tenant": None}
 
 
 def test_tenant_context_is_cleared_after_response():

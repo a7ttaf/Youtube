@@ -56,7 +56,7 @@ from ums_smart_revenue.tenancy.repository import (
     SqlAlchemyTenantRepository,
     TenantNotFoundError,
     TenantValidationError,
-    _normalise_slug,
+    normalise_slug,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -300,7 +300,7 @@ def _validate_timeout(name: str, timeout_seconds: float) -> float:
 def _normalise_tenant_slug(raw_slug: str) -> str:
     """Normalize tenant slugs and translate invalid headers to resolver errors."""
     try:
-        return _normalise_slug(raw_slug)
+        return normalise_slug(raw_slug)
     except TenantValidationError as exc:
         raise _ResolverError(
             status_code=400,

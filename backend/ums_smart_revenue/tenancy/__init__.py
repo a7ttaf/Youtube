@@ -18,6 +18,7 @@ from ums_smart_revenue.tenancy.repository import (
     TenantNotFoundError,
     TenantRepository,
     TenantValidationError,
+    normalise_slug,
 )
 from ums_smart_revenue.tenancy.resolver import (
     DEFAULT_BYPASS_PATHS,
@@ -38,5 +39,6 @@ __all__ = [
     "TenantStatus",
     "TenantValidationError",
     "get_current_tenant",
+    "normalise_slug",
     "require_current_tenant",
 ]

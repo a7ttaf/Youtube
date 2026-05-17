@@ -196,11 +196,11 @@ def test_to_domain_normalises_non_utc_datetimes():
 
 @pytest.mark.parametrize(
     ("field_name", "expected_error"),
-    (
+    [
         ("id", "invalid id"),
         ("slug", "invalid slug"),
         ("display_name", "invalid display_name"),
-    ),
+    ],
 )
 def test_to_domain_rejects_null_identity_fields(
     field_name: str, expected_error: str
