@@ -6,9 +6,11 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.security_models import AuditLogORM
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 
 MAX_AUDIT_LOG_PAGE_SIZE = 100
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 @dataclass(frozen=True)
@@ -64,6 +66,7 @@ class AuditLogValidationError(AuditLogError):
 class SqlAlchemyAuditLogRepository:
     def __init__(self, session: Session):
         self._session = session
+        self._tenant_id = _DEFAULT_TENANT_UUID
 
     def list_events(
         self,
@@ -81,7 +84,11 @@ class SqlAlchemyAuditLogRepository:
         if (cursor_created_at is None) != (cursor_id is None):
             raise AuditLogValidationError("cursor_created_at and cursor_id must be provided together")
 
-        statement = select(AuditLogORM).order_by(AuditLogORM.created_at.desc(), AuditLogORM.id.desc())
+        statement = (
+            select(AuditLogORM)
+            .where(AuditLogORM.tenant_id == self._tenant_id)
+            .order_by(AuditLogORM.created_at.desc(), AuditLogORM.id.desc())
+        )
         if event_type is not None:
             statement = statement.where(AuditLogORM.event_type == _normalize_required_string(event_type, "event_type"))
         if exclude_event_type is not None:

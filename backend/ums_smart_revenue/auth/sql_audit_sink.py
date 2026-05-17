@@ -4,6 +4,9 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.audit_service import AuditRecord
 from ums_smart_revenue.db.security_models import AuditLogORM
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 class SqlAlchemyAuditSink:
@@ -12,6 +15,7 @@ class SqlAlchemyAuditSink:
     def __init__(self, session: Session):
         """Bind audit writes to the same transaction as the guarded mutation."""
         self._session = session
+        self._tenant_id = _DEFAULT_TENANT_UUID
 
     def append(self, record: AuditRecord) -> None:
         """Append one audit log row and flush so failures happen before commit."""
@@ -19,6 +23,7 @@ class SqlAlchemyAuditSink:
         self._session.add(
             AuditLogORM(
                 id=uuid4(),
+                tenant_id=self._tenant_id,
                 user_id=user_id,
                 event_type=record.event_type,
                 entity_type=record.entity_type,
