@@ -6,7 +6,9 @@ request, looks the slug up via the configured
 the tenant's lifecycle status, and stores the resulting
 :class:`~ums_smart_revenue.tenancy.models.Tenant` in
 :data:`~ums_smart_revenue.tenancy.context.TENANT_CTX` for the duration
-of the request task.
+of the request task. Callers must provide an ``authorize_tenant`` callback
+before non-bypassed requests can resolve tenant data; the default is deny-all
+until S2.3 wires the principal-to-tenant authorization contract.
 
 Status → response mapping:
 
@@ -25,6 +27,7 @@ the middleware today can attach it explicitly::
     app.add_middleware(
         TenantResolverMiddleware,
         session_factory=session_factory,
+        authorize_tenant=principal_tenant_authorizer,
     )
 
 Caching note: per Docs/17 the resolver should cache tenant lookups in
@@ -37,6 +40,7 @@ from __future__ import annotations
 from collections.abc import Callable, Iterable
 
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -61,6 +65,7 @@ DEFAULT_BYPASS_PATHS: tuple[str, ...] = (
 
 
 SessionFactory = Callable[[], Session]
+TenantAuthorizer = Callable[[Scope, str], bool]
 
 
 class TenantResolverMiddleware:
@@ -71,10 +76,12 @@ class TenantResolverMiddleware:
         app: ASGIApp,
         session_factory: SessionFactory,
         bypass_paths: Iterable[str] = DEFAULT_BYPASS_PATHS,
+        authorize_tenant: TenantAuthorizer | None = None,
     ) -> None:
         self.app = app
         self._session_factory = session_factory
         self._bypass_paths: tuple[str, ...] = tuple(bypass_paths)
+        self._authorize_tenant = authorize_tenant or _deny_tenant_access
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -86,8 +93,16 @@ class TenantResolverMiddleware:
             return
 
         raw_slug = Headers(scope=scope).get(TENANT_HEADER, "")
+        normalised_slug = raw_slug.strip().lower()
+        if normalised_slug and not self._authorize_tenant(scope, normalised_slug):
+            await _ResolverError(
+                status_code=403,
+                detail="Tenant access denied",
+            ).to_response()(scope, receive, send)
+            return
+
         try:
-            tenant = self._resolve(raw_slug)
+            tenant = await run_in_threadpool(self._resolve, raw_slug)
         except _ResolverError as error:
             await error.to_response()(scope, receive, send)
             return
@@ -132,6 +147,10 @@ class TenantResolverMiddleware:
 
     def _should_bypass(self, path: str) -> bool:
         return any(path == bp or path.startswith(bp + "/") for bp in self._bypass_paths)
+
+
+def _deny_tenant_access(_scope: Scope, _slug: str) -> bool:
+    return False
 
 
 class _ResolverError(Exception):

@@ -16,14 +16,18 @@ is the production default.
 
 from __future__ import annotations
 
+import re
+from datetime import UTC, datetime
 from typing import Protocol
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, object_session
 
 from ums_smart_revenue.db.tenant_models import TenantORM
 from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
+
+CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 
 class TenantNotFoundError(LookupError):
@@ -77,13 +81,43 @@ def _normalise_slug(slug: str) -> str:
 
 
 def _to_domain(row: TenantORM) -> Tenant:
+    onboarding_at = _coerce_aware_datetime(row, "onboarding_at")
+    created_at = _coerce_aware_datetime(row, "created_at")
+    updated_at = _coerce_aware_datetime(row, "updated_at")
+    _validate_currency(row)
+    try:
+        status = TenantStatus(row.status)
+    except ValueError as exc:
+        raise ValueError(f"invalid tenant status: {row.status!r}") from exc
+
     return Tenant(
         id=row.id,
         slug=row.slug,
         display_name=row.display_name,
         primary_currency=row.primary_currency,
-        status=TenantStatus(row.status),
-        onboarding_at=row.onboarding_at,
-        created_at=row.created_at,
-        updated_at=row.updated_at,
+        status=status,
+        onboarding_at=onboarding_at,
+        created_at=created_at,
+        updated_at=updated_at,
     )
+
+
+def _coerce_aware_datetime(row: TenantORM, field_name: str) -> datetime:
+    value = getattr(row, field_name)
+    if value is None:
+        raise ValueError(f"invalid timezone for {field_name}")
+    if value.tzinfo is not None and value.utcoffset() is not None:
+        return value
+
+    session = object_session(row)
+    bind = session.get_bind() if session is not None else None
+    if bind is not None and bind.dialect.name == "sqlite":
+        # SQLite strips tzinfo from aware SQLAlchemy DateTime values.
+        return value.replace(tzinfo=UTC)
+
+    raise ValueError(f"invalid timezone for {field_name}")
+
+
+def _validate_currency(row: TenantORM) -> None:
+    if CURRENCY_RE.fullmatch(row.primary_currency or "") is None:
+        raise ValueError("invalid primary_currency: must be 3 uppercase letters")
