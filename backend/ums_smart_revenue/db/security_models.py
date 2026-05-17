@@ -145,16 +145,20 @@ class AccessScopeORM(SecurityBase):
         ),
         Index(
             "uq_access_scopes_scope_type_scope_id",
+            "tenant_id",
             "scope_type",
             "scope_id",
             unique=True,
             postgresql_where=text("scope_id IS NOT NULL"),
+            sqlite_where=text("scope_id IS NOT NULL"),
         ),
         Index(
             "uq_access_scopes_global_singleton",
+            "tenant_id",
             "scope_type",
             unique=True,
             postgresql_where=text("scope_type = 'global' AND scope_id IS NULL"),
+            sqlite_where=text("scope_type = 'global' AND scope_id IS NULL"),
         ),
         Index("ix_access_scopes_tenant_id", "tenant_id"),
     )

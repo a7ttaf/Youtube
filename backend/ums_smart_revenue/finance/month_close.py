@@ -8,8 +8,10 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 _FINANCE_MONTH_LOCK_KEY_PREFIX = "finance-month-close:"
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 @dataclass(frozen=True)
@@ -55,7 +57,7 @@ class SqlAlchemyFinanceMonthCloseRepository:
 
     def get(self, month: str) -> FinanceMonthCloseEntry | None:
         """Return the close row for month, or None when no row exists."""
-        row = self._session.get(FinanceMonthCloseORM, month)
+        row = self._session.get(FinanceMonthCloseORM, _month_close_key(month))
         return self._to_entry(row) if row is not None else None
 
     def get_or_create(self, month: str) -> FinanceMonthCloseEntry:
@@ -152,7 +154,10 @@ def get_or_create_month_close_row(
     """Return or create the close row, guarding month writers when requested."""
     if for_update:
         acquire_finance_month_advisory_lock(session, month)
-    statement = select(FinanceMonthCloseORM).where(FinanceMonthCloseORM.month == month)
+    statement = select(FinanceMonthCloseORM).where(
+        FinanceMonthCloseORM.tenant_id == _DEFAULT_TENANT_UUID,
+        FinanceMonthCloseORM.month == month,
+    )
     if for_update:
         statement = statement.with_for_update()
     row = session.scalars(statement).one_or_none()
@@ -160,7 +165,10 @@ def get_or_create_month_close_row(
         try:
             with session.begin_nested():
                 row = FinanceMonthCloseORM(
-                    month=month, status="OPEN", allocation_rule_payload={}
+                    tenant_id=_DEFAULT_TENANT_UUID,
+                    month=month,
+                    status="OPEN",
+                    allocation_rule_payload={},
                 )
                 session.add(row)
                 session.flush()
@@ -177,6 +185,10 @@ def acquire_finance_month_advisory_lock(session: Session, month: str) -> None:
         text("SELECT pg_advisory_xact_lock(:lock_key)"),
         {"lock_key": _finance_month_advisory_lock_key(month)},
     )
+
+
+def _month_close_key(month: str) -> tuple[UUID, str]:
+    return (_DEFAULT_TENANT_UUID, month)
 
 
 def _finance_month_advisory_lock_key(month: str) -> int:

@@ -28,17 +28,19 @@ What does *not* get ``tenant_id`` and why:
 * ``tenants`` / ``platform_admins`` — sit above the tenant model.
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects import postgresql
-
-from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
-
 
 revision = "20260517_0001"
 down_revision = "20260516_0001"
 branch_labels = None
 depends_on = None
+
+
+# Keep this historical migration self-contained and immutable. This matches
+# the UMS tenant seed value from 20260516_0001_tenants_foundation.py.
+UMS_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 
 
 # The canonical list of tenant-scoped operational tables. Order matters
@@ -73,9 +75,17 @@ TENANT_SCOPED_TABLES: tuple[str, ...] = (
 def upgrade() -> None:
     for table_name in TENANT_SCOPED_TABLES:
         _add_tenant_id_to(table_name)
+    _scope_access_scope_unique_indexes()
+    _scope_finance_month_close_primary_key()
+    _scope_channel_group_membership_constraints()
+    _scope_adsense_payment_unique_constraint()
 
 
 def downgrade() -> None:
+    _unscope_adsense_payment_unique_constraint()
+    _unscope_channel_group_membership_constraints()
+    _unscope_finance_month_close_primary_key()
+    _unscope_access_scope_unique_indexes()
     for table_name in reversed(TENANT_SCOPED_TABLES):
         _drop_tenant_id_from(table_name)
 
@@ -116,3 +126,144 @@ def _drop_tenant_id_from(table_name: str) -> None:
     with op.batch_alter_table(table_name) as batch_op:
         batch_op.drop_constraint(fk_name, type_="foreignkey")
         batch_op.drop_column("tenant_id")
+
+
+def _scope_access_scope_unique_indexes() -> None:
+    op.drop_index("uq_access_scopes_global_singleton", table_name="access_scopes")
+    op.drop_index("uq_access_scopes_scope_type_scope_id", table_name="access_scopes")
+    op.create_index(
+        "uq_access_scopes_scope_type_scope_id",
+        "access_scopes",
+        ["tenant_id", "scope_type", "scope_id"],
+        unique=True,
+        postgresql_where=sa.text("scope_id IS NOT NULL"),
+        sqlite_where=sa.text("scope_id IS NOT NULL"),
+    )
+    op.create_index(
+        "uq_access_scopes_global_singleton",
+        "access_scopes",
+        ["tenant_id", "scope_type"],
+        unique=True,
+        postgresql_where=sa.text("scope_type = 'global' AND scope_id IS NULL"),
+        sqlite_where=sa.text("scope_type = 'global' AND scope_id IS NULL"),
+    )
+
+
+def _unscope_access_scope_unique_indexes() -> None:
+    op.drop_index("uq_access_scopes_global_singleton", table_name="access_scopes")
+    op.drop_index("uq_access_scopes_scope_type_scope_id", table_name="access_scopes")
+    op.create_index(
+        "uq_access_scopes_scope_type_scope_id",
+        "access_scopes",
+        ["scope_type", "scope_id"],
+        unique=True,
+        postgresql_where=sa.text("scope_id IS NOT NULL"),
+        sqlite_where=sa.text("scope_id IS NOT NULL"),
+    )
+    op.create_index(
+        "uq_access_scopes_global_singleton",
+        "access_scopes",
+        ["scope_type"],
+        unique=True,
+        postgresql_where=sa.text("scope_type = 'global' AND scope_id IS NULL"),
+        sqlite_where=sa.text("scope_type = 'global' AND scope_id IS NULL"),
+    )
+
+
+def _scope_finance_month_close_primary_key() -> None:
+    with op.batch_alter_table("finance_month_close") as batch_op:
+        batch_op.drop_constraint("finance_month_close_pkey", type_="primary")
+        batch_op.create_primary_key(
+            "pk_finance_month_close",
+            ["tenant_id", "month"],
+        )
+
+
+def _unscope_finance_month_close_primary_key() -> None:
+    with op.batch_alter_table("finance_month_close") as batch_op:
+        batch_op.drop_constraint("pk_finance_month_close", type_="primary")
+        batch_op.create_primary_key("finance_month_close_pkey", ["month"])
+
+
+def _scope_channel_group_membership_constraints() -> None:
+    with op.batch_alter_table("youtube_channels") as batch_op:
+        batch_op.create_unique_constraint(
+            "uq_youtube_channels_tenant_id_id",
+            ["tenant_id", "id"],
+        )
+    with op.batch_alter_table("channel_groups") as batch_op:
+        batch_op.create_unique_constraint(
+            "uq_channel_groups_tenant_id_id",
+            ["tenant_id", "id"],
+        )
+    with op.batch_alter_table("channel_group_members") as batch_op:
+        batch_op.drop_constraint(
+            "channel_group_members_group_id_fkey",
+            type_="foreignkey",
+        )
+        batch_op.drop_constraint(
+            "channel_group_members_channel_id_fkey",
+            type_="foreignkey",
+        )
+        batch_op.create_foreign_key(
+            "fk_channel_group_members_tenant_group",
+            "channel_groups",
+            ["tenant_id", "group_id"],
+            ["tenant_id", "id"],
+            ondelete="CASCADE",
+        )
+        batch_op.create_foreign_key(
+            "fk_channel_group_members_tenant_channel",
+            "youtube_channels",
+            ["tenant_id", "channel_id"],
+            ["tenant_id", "id"],
+            ondelete="CASCADE",
+        )
+
+
+def _unscope_channel_group_membership_constraints() -> None:
+    with op.batch_alter_table("channel_group_members") as batch_op:
+        batch_op.drop_constraint(
+            "fk_channel_group_members_tenant_channel",
+            type_="foreignkey",
+        )
+        batch_op.drop_constraint(
+            "fk_channel_group_members_tenant_group",
+            type_="foreignkey",
+        )
+        batch_op.create_foreign_key(
+            "channel_group_members_group_id_fkey",
+            "channel_groups",
+            ["group_id"],
+            ["id"],
+            ondelete="CASCADE",
+        )
+        batch_op.create_foreign_key(
+            "channel_group_members_channel_id_fkey",
+            "youtube_channels",
+            ["channel_id"],
+            ["id"],
+            ondelete="CASCADE",
+        )
+    with op.batch_alter_table("channel_groups") as batch_op:
+        batch_op.drop_constraint("uq_channel_groups_tenant_id_id", type_="unique")
+    with op.batch_alter_table("youtube_channels") as batch_op:
+        batch_op.drop_constraint("uq_youtube_channels_tenant_id_id", type_="unique")
+
+
+def _scope_adsense_payment_unique_constraint() -> None:
+    with op.batch_alter_table("adsense_payments") as batch_op:
+        batch_op.drop_constraint("uq_adsense_payments_month_name", type_="unique")
+        batch_op.create_unique_constraint(
+            "uq_adsense_payments_month_name",
+            ["tenant_id", "month", "payment_name"],
+        )
+
+
+def _unscope_adsense_payment_unique_constraint() -> None:
+    with op.batch_alter_table("adsense_payments") as batch_op:
+        batch_op.drop_constraint("uq_adsense_payments_month_name", type_="unique")
+        batch_op.create_unique_constraint(
+            "uq_adsense_payments_month_name",
+            ["month", "payment_name"],
+        )

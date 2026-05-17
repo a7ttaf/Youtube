@@ -11,11 +11,13 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import AdSensePaymentORM
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 CURRENCY_PATTERN = re.compile(r"^[A-Z]{3}$")
 ALLOWED_PAYMENT_STATUSES = frozenset({"PAID", "PENDING", "UNPAID", "CANCELLED"})
 MAX_ADSENSE_PAYMENT_PAGE_SIZE = 100
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 @dataclass(frozen=True)
@@ -104,10 +106,11 @@ class SqlAlchemyAdSensePaymentRepository:
             normalized_payment = _normalize_payment(payment)
             self._require_month_open(normalized_payment.month)
             now = datetime.now(UTC)
-            insert_statement = _dialect_insert(
-                self._session.get_bind().dialect.name
-            )(AdSensePaymentORM).values(
+            insert_statement = _dialect_insert(self._session.get_bind().dialect.name)(
+                AdSensePaymentORM
+            ).values(
                 id=uuid4(),
+                tenant_id=_DEFAULT_TENANT_UUID,
                 month=normalized_payment.month,
                 payment_name=normalized_payment.payment_name,
                 payment_date=normalized_payment.payment_date,
@@ -121,6 +124,7 @@ class SqlAlchemyAdSensePaymentRepository:
             )
             statement = insert_statement.on_conflict_do_update(
                 index_elements=[
+                    AdSensePaymentORM.tenant_id,
                     AdSensePaymentORM.month,
                     AdSensePaymentORM.payment_name,
                 ],
