@@ -1,6 +1,6 @@
 """Behaviour tests for :class:`SqlAlchemyTenantRepository`."""
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta, timezone
 from uuid import UUID, uuid4
 
 import pytest
@@ -173,6 +173,25 @@ def test_to_domain_rejects_naive_datetimes():
 
     with pytest.raises(ValueError, match="invalid timezone for created_at"):
         _to_domain(row)
+
+
+def test_to_domain_normalises_non_utc_datetimes():
+    """Tenant rows with offset-aware datetimes are normalized to UTC."""
+    from ums_smart_revenue.tenancy.repository import _to_domain
+
+    offset_time = datetime(2026, 5, 17, 10, 30, tzinfo=timezone(timedelta(hours=2)))
+    row = _make_tenant_row(
+        onboarding_at=offset_time,
+        created_at=offset_time,
+        updated_at=offset_time,
+    )
+
+    tenant = _to_domain(row)
+
+    expected = datetime(2026, 5, 17, 8, 30, tzinfo=UTC)
+    assert tenant.onboarding_at == expected
+    assert tenant.created_at == expected
+    assert tenant.updated_at == expected
 
 
 def test_to_domain_rejects_invalid_currency():

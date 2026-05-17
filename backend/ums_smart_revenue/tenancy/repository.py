@@ -118,12 +118,12 @@ def _to_domain(row: TenantORM) -> Tenant:
 
 
 def _coerce_aware_datetime(row: TenantORM, field_name: str) -> datetime:
-    """Return a timezone-aware datetime, repairing SQLite test rows only."""
+    """Return a UTC-aware datetime, repairing SQLite test rows only."""
     value = getattr(row, field_name)
     if value is None:
         raise ValueError(f"invalid timezone for {field_name}")
     if value.tzinfo is not None and value.utcoffset() is not None:
-        return value
+        return value.astimezone(UTC)
 
     session = object_session(row)
     bind = session.get_bind() if session is not None else None
