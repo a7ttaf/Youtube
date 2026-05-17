@@ -34,6 +34,8 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.db.tenant_models import PlatformAdminORM
 
+PLATFORM_ADMIN_QUERY_TIMEOUT_MS = 5_000
+
 
 class PlatformAdminStatus(StrEnum):
     """Lifecycle states for a platform admin — mirrors the SQL CHECK constraint."""
@@ -88,6 +90,10 @@ class PlatformAdminDataValidationError(PlatformAdminLoadError):
     """Raised when a stored platform-admin row cannot be parsed."""
 
 
+class PlatformAdminTransactionError(PlatformAdminLoadError):
+    """Raised when a caller transaction prevents read isolation setup."""
+
+
 class SqlAlchemyPlatformAdminLoader:
     """Load platform-admin principals from SQL state.
 
@@ -103,6 +109,16 @@ class SqlAlchemyPlatformAdminLoader:
     def load(self, *, admin_id: str) -> PlatformAdminPrincipal:
         """Return a :class:`PlatformAdminPrincipal` or raise loudly."""
         parsed_id = _parse_uuid(admin_id)
+        if self._session.in_transaction():
+            raise PlatformAdminTransactionError(
+                "Platform-admin loads require a session without an active transaction"
+            )
+        with self._session.begin():
+            self._prepare_read_connection()
+            return self._load_principal(parsed_id)
+
+    def _load_principal(self, parsed_id: UUID) -> PlatformAdminPrincipal:
+        """Load and validate a platform-admin row inside the read transaction."""
         row = self._session.get(PlatformAdminORM, parsed_id)
         if row is None:
             raise PlatformAdminNotFoundError("Platform admin is not registered")
@@ -121,6 +137,17 @@ class SqlAlchemyPlatformAdminLoader:
             email=row.email,
             status=status,
         )
+
+    def _prepare_read_connection(self) -> None:
+        """Apply principal read isolation and timeout settings to the transaction."""
+        bind = self._session.get_bind()
+        connection = self._session.connection(
+            execution_options={"isolation_level": "SERIALIZABLE"}
+        )
+        if bind.dialect.name == "postgresql":
+            connection.exec_driver_sql(
+                f"SET LOCAL statement_timeout = {PLATFORM_ADMIN_QUERY_TIMEOUT_MS}"
+            )
 
 
 def _parse_uuid(value: str) -> UUID:

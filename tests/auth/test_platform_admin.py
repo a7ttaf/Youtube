@@ -1,6 +1,8 @@
 """Behaviour tests for :mod:`ums_smart_revenue.auth.platform_admin`."""
 
+from contextlib import nullcontext
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
@@ -10,10 +12,12 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.platform_admin import (
+    PLATFORM_ADMIN_QUERY_TIMEOUT_MS,
     PlatformAdminDisabledError,
     PlatformAdminNotFoundError,
     PlatformAdminPrincipal,
     PlatformAdminStatus,
+    PlatformAdminTransactionError,
     PlatformAdminValidationError,
     Principal,
     SqlAlchemyPlatformAdminLoader,
@@ -23,6 +27,53 @@ from ums_smart_revenue.auth.policy import (
     is_platform_admin,
 )
 from ums_smart_revenue.db.tenant_models import PlatformAdminORM, TenantBase
+
+
+class RecordingConnection:
+    """Connection double that records transaction-local SQL commands."""
+
+    def __init__(self) -> None:
+        """Initialize the recorded command list."""
+        self.executed_sql: list[str] = []
+
+    def exec_driver_sql(self, sql: str) -> None:
+        """Record raw SQL executed against the connection."""
+        self.executed_sql.append(sql)
+
+
+class FailingPlatformAdminSession:
+    """Session double that raises during platform-admin row lookup."""
+
+    def __init__(self, *, dialect_name: str = "sqlite") -> None:
+        """Initialize counters used to verify read-hardening behavior."""
+        self.connection_count = 0
+        self.dialect_name = dialect_name
+        self.get_count = 0
+        self.recording_connection = RecordingConnection()
+
+    def in_transaction(self) -> bool:
+        """Report no active transaction so the loader prepares isolation."""
+        return False
+
+    def get_bind(self) -> SimpleNamespace:
+        """Return a minimal bind with the dialect name used by the loader."""
+        return SimpleNamespace(dialect=SimpleNamespace(name=self.dialect_name))
+
+    def begin(self) -> nullcontext:
+        """Return a no-op context manager for the loader transaction scope."""
+        return nullcontext()
+
+    def connection(self, *, execution_options: dict[str, str]) -> RecordingConnection:
+        """Accept read isolation options before the failing lookup."""
+        assert execution_options == {"isolation_level": "SERIALIZABLE"}
+        self.connection_count += 1
+        return self.recording_connection
+
+    def get(self, *_args: object, **_kwargs: object) -> None:
+        """Raise after isolation setup so tests can observe the read contract."""
+        self.get_count += 1
+        raise RuntimeError("database unavailable")
+
 
 # ---------------------------------------------------------------------------
 # PlatformAdminPrincipal + PlatformAdminStatus
@@ -109,6 +160,35 @@ def test_loader_returns_active_admin() -> None:
     assert principal.admin_id == str(admin_id)
     assert principal.status == PlatformAdminStatus.ACTIVE
     assert principal.is_active is True
+
+
+def test_loader_uses_serializable_postgres_reads() -> None:
+    """Postgres platform-admin reads request serializable isolation and timeout."""
+    session = FailingPlatformAdminSession(dialect_name="postgresql")
+
+    with pytest.raises(RuntimeError):
+        SqlAlchemyPlatformAdminLoader(session).load(
+            admin_id="00000000-0000-0000-0000-000000000010"
+        )
+
+    assert PLATFORM_ADMIN_QUERY_TIMEOUT_MS == 5_000
+    assert session.connection_count == 1
+    assert session.recording_connection.executed_sql == [
+        f"SET LOCAL statement_timeout = {PLATFORM_ADMIN_QUERY_TIMEOUT_MS}"
+    ]
+    assert session.get_count == 1
+
+
+def test_loader_rejects_active_transaction_to_avoid_race_reads() -> None:
+    """Caller-owned transactions are rejected to avoid mixed-isolation reads."""
+    engine = _build_engine()
+
+    with (
+        Session(engine) as session,
+        session.begin(),
+        pytest.raises(PlatformAdminTransactionError),
+    ):
+        SqlAlchemyPlatformAdminLoader(session).load(admin_id=str(uuid4()))
 
 
 def test_loader_rejects_missing_admin() -> None:
