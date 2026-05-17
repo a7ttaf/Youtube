@@ -36,9 +36,7 @@ class OrgUnitORM(OrgBase):
     id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
-    parent_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("org_units.id", ondelete="RESTRICT"), nullable=True
-    )
+    parent_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     type: Mapped[str] = mapped_column(Text, nullable=False)
     name: Mapped[str] = mapped_column(Text, nullable=False)
     active: Mapped[bool] = mapped_column(
@@ -61,6 +59,13 @@ class OrgUnitORM(OrgBase):
     )
 
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_org_units_tenant_id_id"),
+        ForeignKeyConstraint(
+            ["tenant_id", "parent_id"],
+            ["org_units.tenant_id", "org_units.id"],
+            name="fk_org_units_tenant_parent",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             "type IN ('HOLDING', 'SECTOR', 'COMPANY')", name="ck_org_units_type"
         ),

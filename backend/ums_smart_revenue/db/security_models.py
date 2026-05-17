@@ -67,6 +67,7 @@ class UserORM(SecurityBase):
     )
 
     __table_args__ = (
+        UniqueConstraint("tenant_id", "id", name="uq_users_tenant_id_id"),
         CheckConstraint(
             "status IN ('active', 'disabled', 'service')", name="ck_users_status"
         ),

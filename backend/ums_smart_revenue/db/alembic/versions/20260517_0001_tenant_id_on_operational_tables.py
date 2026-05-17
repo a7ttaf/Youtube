@@ -80,9 +80,11 @@ def upgrade() -> None:
     _scope_finance_month_close_primary_key()
     _scope_channel_group_membership_constraints()
     _scope_adsense_payment_unique_constraint()
+    _scope_org_units_parent_fk()
 
 
 def downgrade() -> None:
+    _unscope_org_units_parent_fk()
     _unscope_adsense_payment_unique_constraint()
     _unscope_channel_group_membership_constraints()
     _unscope_finance_month_close_primary_key()
@@ -286,6 +288,9 @@ def _unscope_access_assignment_constraints() -> None:
 
 
 def _scope_tenant_unique_constraints() -> None:
+    with op.batch_alter_table("users") as batch_op:
+        batch_op.create_unique_constraint("uq_users_tenant_id_id", ["tenant_id", "id"])
+
     _drop_index("uq_users_email_lower", table_name="users")
     op.create_index(
         "uq_users_email_lower",
@@ -406,6 +411,9 @@ def _unscope_tenant_unique_constraints() -> None:
         unique=True,
     )
 
+    with op.batch_alter_table("users") as batch_op:
+        batch_op.drop_constraint("uq_users_tenant_id_id", type_="unique")
+
 
 def _scope_finance_month_close_primary_key() -> None:
     with op.batch_alter_table("finance_month_close") as batch_op:
@@ -503,4 +511,41 @@ def _unscope_adsense_payment_unique_constraint() -> None:
         batch_op.create_unique_constraint(
             "uq_adsense_payments_month_name",
             ["month", "payment_name"],
+        )
+
+
+def _scope_org_units_parent_fk() -> None:
+    # ============================================================================
+    # Purpose: Scope the org_units self-referential parent FK to be tenant-aware.
+    #          A (tenant_id, parent_id) -> (tenant_id, id) composite FK prevents
+    #          a child org_unit from referencing a parent in a different tenant.
+    # Database/ORM: org_units, OrgUnitORM.
+    # Standards: batch_alter_table for SQLite compat; unique constraint on
+    #            (tenant_id, id) is the composite FK target.
+    # Blast Radius: org hierarchy cross-tenant references now blocked at DB level.
+    # ============================================================================
+    with op.batch_alter_table("org_units") as batch_op:
+        batch_op.create_unique_constraint(
+            "uq_org_units_tenant_id_id", ["tenant_id", "id"]
+        )
+        batch_op.drop_constraint("org_units_parent_id_fkey", type_="foreignkey")
+        batch_op.create_foreign_key(
+            "fk_org_units_tenant_parent",
+            "org_units",
+            ["tenant_id", "parent_id"],
+            ["tenant_id", "id"],
+            ondelete="RESTRICT",
+        )
+
+
+def _unscope_org_units_parent_fk() -> None:
+    with op.batch_alter_table("org_units") as batch_op:
+        batch_op.drop_constraint("fk_org_units_tenant_parent", type_="foreignkey")
+        batch_op.drop_constraint("uq_org_units_tenant_id_id", type_="unique")
+        batch_op.create_foreign_key(
+            "org_units_parent_id_fkey",
+            "org_units",
+            ["parent_id"],
+            ["id"],
+            ondelete="RESTRICT",
         )

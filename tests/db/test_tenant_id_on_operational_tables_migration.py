@@ -230,6 +230,12 @@ def test_tenant_scoped_constraints_are_rewritten():
         assert permission_scope_fk["referred_columns"] == ["tenant_id", "id"]
         assert (permission_scope_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
+        user_uniques = {
+            constraint["name"]: constraint["column_names"]
+            for constraint in inspector.get_unique_constraints("users")
+        }
+        assert user_uniques["uq_users_tenant_id_id"] == ["tenant_id", "id"]
+
         user_email_index_sql = connection.execute(
             text(
                 "SELECT sql FROM sqlite_master "
@@ -349,6 +355,21 @@ def test_tenant_scoped_constraints_are_rewritten():
         assert tenant_channel_fk["referred_table"] == "youtube_channels"
         assert tenant_channel_fk["referred_columns"] == ["tenant_id", "id"]
         assert (tenant_channel_fk.get("options") or {}).get("ondelete") == "CASCADE"
+
+        org_units_uniques = {
+            constraint["name"]: constraint["column_names"]
+            for constraint in inspector.get_unique_constraints("org_units")
+        }
+        assert org_units_uniques["uq_org_units_tenant_id_id"] == ["tenant_id", "id"]
+
+        org_units_fks = {
+            fk["name"]: fk for fk in inspector.get_foreign_keys("org_units")
+        }
+        parent_fk = org_units_fks["fk_org_units_tenant_parent"]
+        assert parent_fk["constrained_columns"] == ["tenant_id", "parent_id"]
+        assert parent_fk["referred_table"] == "org_units"
+        assert parent_fk["referred_columns"] == ["tenant_id", "id"]
+        assert (parent_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
 
 def test_downgrade_removes_tenant_id_from_every_table():
@@ -471,6 +492,19 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
         api_connector_credentials.c.account_id,
         unique=True,
     )
+    org_units = Table(
+        "org_units",
+        metadata,
+        Column("id", Text(), primary_key=True),
+        Column("parent_id", Text(), nullable=True),
+        ForeignKeyConstraint(
+            ["parent_id"],
+            ["org_units.id"],
+            name="org_units_parent_id_fkey",
+            ondelete="RESTRICT",
+        ),
+    )
+    del org_units  # referenced only to register with metadata
     Table("youtube_channels", metadata, Column("id", Text(), primary_key=True))
     Table("channel_groups", metadata, Column("id", Text(), primary_key=True))
     Table(
@@ -582,6 +616,7 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
         "finance_month_close",
         "monthly_channel_revenue_facts",
         "number_explanations",
+        "org_units",
         "raw_report_files",
         "tenants",
         "user_permission_grants",
