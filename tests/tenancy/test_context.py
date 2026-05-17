@@ -15,6 +15,7 @@ from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 
 def _make_tenant(slug: str = "ums") -> Tenant:
+    """Build an immutable tenant for contextvar tests."""
     now = datetime.now(UTC)
     return Tenant(
         id=uuid4(),
@@ -29,15 +30,18 @@ def _make_tenant(slug: str = "ums") -> Tenant:
 
 
 def test_default_context_is_none():
+    """The tenant context defaults to no active tenant."""
     assert get_current_tenant() is None
 
 
 def test_require_current_tenant_raises_when_unset():
+    """The strict helper raises when middleware has not set a tenant."""
     with pytest.raises(TenantContextMissing):
         require_current_tenant()
 
 
 def test_set_and_get_round_trip():
+    """Setting the contextvar makes both read helpers return the tenant."""
     tenant = _make_tenant()
     token = TENANT_CTX.set(tenant)
     try:
@@ -48,6 +52,7 @@ def test_set_and_get_round_trip():
 
 
 def test_reset_restores_previous_value():
+    """Nested contextvar tokens restore the previous tenant in order."""
     first = _make_tenant("ums")
     second = _make_tenant("rotana")
 
@@ -73,6 +78,7 @@ def test_distinct_contexts_do_not_bleed():
     captured = {}
 
     def inner() -> None:
+        """Capture the tenant visible inside a copied context."""
         captured["inside"] = get_current_tenant()
 
     outer_ctx = contextvars.copy_context()

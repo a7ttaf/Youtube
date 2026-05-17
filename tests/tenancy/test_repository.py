@@ -18,10 +18,12 @@ from ums_smart_revenue.tenancy.repository import (
 
 
 def _make_engine() -> Engine:
+    """Create a SQLite engine with the tenant schema installed."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
 
     @event.listens_for(engine, "connect")
     def _enable_uuid(dbapi_connection, _connection_record) -> None:
+        """Expose PostgreSQL's UUID helper to SQLite-backed tests."""
         dbapi_connection.create_function("gen_random_uuid", 0, lambda: str(uuid4()))
 
     TenantBase.metadata.create_all(engine)
@@ -36,6 +38,7 @@ def _seed_tenant(
     primary_currency: str = "USD",
     status: TenantStatus = TenantStatus.ACTIVE,
 ) -> TenantORM:
+    """Insert a tenant row into the provided SQLAlchemy session."""
     now = datetime.now(UTC)
     row = TenantORM(
         id=uuid4(),
@@ -53,6 +56,7 @@ def _seed_tenant(
 
 
 def _make_tenant_row(**kwargs: object) -> TenantORM:
+    """Build a detached tenant row for domain-conversion tests."""
     now = datetime.now(UTC)
     return TenantORM(
         id=kwargs.get("id", uuid4()),
@@ -69,6 +73,7 @@ def _make_tenant_row(**kwargs: object) -> TenantORM:
 
 
 def test_get_by_slug_returns_active_tenant():
+    """Slug lookup returns an active tenant domain object."""
     engine = _make_engine()
     with Session(engine) as session, session.begin():
         seeded = _seed_tenant(session)
@@ -83,6 +88,7 @@ def test_get_by_slug_returns_active_tenant():
 
 
 def test_get_by_slug_normalises_whitespace_and_casing():
+    """Slug lookup trims whitespace and lowercases caller input."""
     engine = _make_engine()
     with Session(engine) as session, session.begin():
         _seed_tenant(session, slug="rotana")
@@ -92,6 +98,7 @@ def test_get_by_slug_normalises_whitespace_and_casing():
 
 
 def test_get_by_slug_rejects_blank():
+    """Blank tenant slugs are validation errors, not not-found results."""
     engine = _make_engine()
     with Session(engine) as session, session.begin():
         repository = SqlAlchemyTenantRepository(session)
@@ -102,6 +109,7 @@ def test_get_by_slug_rejects_blank():
 
 
 def test_get_by_slug_raises_not_found_for_unknown():
+    """Unknown tenant slugs raise the repository not-found exception."""
     engine = _make_engine()
     with Session(engine) as session, session.begin():
         repository = SqlAlchemyTenantRepository(session)
@@ -111,6 +119,7 @@ def test_get_by_slug_raises_not_found_for_unknown():
 
 
 def test_get_by_id_returns_tenant():
+    """UUID lookup returns the matching tenant domain object."""
     engine = _make_engine()
     with Session(engine) as session, session.begin():
         seeded = _seed_tenant(session, slug="news")
@@ -123,6 +132,7 @@ def test_get_by_id_returns_tenant():
 
 
 def test_get_by_id_raises_not_found_for_unknown_uuid():
+    """Unknown tenant UUIDs raise the repository not-found exception."""
     engine = _make_engine()
     with Session(engine) as session, session.begin():
         repository = SqlAlchemyTenantRepository(session)
@@ -132,6 +142,7 @@ def test_get_by_id_raises_not_found_for_unknown_uuid():
 
 
 def test_suspended_status_is_propagated_to_domain():
+    """Lifecycle status from the registry is preserved in the domain object."""
     engine = _make_engine()
     with Session(engine) as session, session.begin():
         _seed_tenant(session, slug="paused", status=TenantStatus.SUSPENDED)
@@ -144,6 +155,7 @@ def test_suspended_status_is_propagated_to_domain():
 
 
 def test_to_domain_rejects_naive_datetimes():
+    """Tenant rows with naive datetimes fail domain conversion."""
     from ums_smart_revenue.tenancy.repository import _to_domain
 
     row = _make_tenant_row(created_at=datetime.now(UTC).replace(tzinfo=None))
@@ -153,6 +165,7 @@ def test_to_domain_rejects_naive_datetimes():
 
 
 def test_to_domain_rejects_invalid_currency():
+    """Tenant rows with malformed currency codes fail domain conversion."""
     from ums_smart_revenue.tenancy.repository import _to_domain
 
     row = _make_tenant_row(primary_currency="usd")
@@ -165,6 +178,7 @@ def test_to_domain_rejects_invalid_currency():
 
 
 def test_to_domain_rejects_invalid_status():
+    """Tenant rows with unknown lifecycle status fail domain conversion."""
     from ums_smart_revenue.tenancy.repository import _to_domain
 
     row = _make_tenant_row(status="DELETED")

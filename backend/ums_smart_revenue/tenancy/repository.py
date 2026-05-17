@@ -45,17 +45,24 @@ class TenantValidationError(ValueError):
 class TenantRepository(Protocol):
     """Read interface required by :class:`TenantResolverMiddleware` and friends."""
 
-    def get_by_slug(self, slug: str) -> Tenant: ...
-    def get_by_id(self, tenant_id: UUID) -> Tenant: ...
+    def get_by_slug(self, slug: str) -> Tenant:
+        """Return a tenant by slug after applying repository normalization."""
+        ...
+
+    def get_by_id(self, tenant_id: UUID) -> Tenant:
+        """Return a tenant by stable UUID."""
+        ...
 
 
 class SqlAlchemyTenantRepository:
     """Production :class:`TenantRepository` over a SQLAlchemy session."""
 
     def __init__(self, session: Session) -> None:
+        """Bind repository operations to the caller-owned SQLAlchemy session."""
         self._session = session
 
     def get_by_slug(self, slug: str) -> Tenant:
+        """Return the tenant identified by a normalized slug or raise if absent."""
         normalised = _normalise_slug(slug)
         row = self._session.scalars(
             select(TenantORM).where(TenantORM.slug == normalised)
@@ -65,6 +72,7 @@ class SqlAlchemyTenantRepository:
         return _to_domain(row)
 
     def get_by_id(self, tenant_id: UUID) -> Tenant:
+        """Return the tenant identified by UUID or raise if absent."""
         row = self._session.get(TenantORM, tenant_id)
         if row is None:
             raise TenantNotFoundError(f"No tenant with id {tenant_id}")
@@ -72,6 +80,7 @@ class SqlAlchemyTenantRepository:
 
 
 def _normalise_slug(slug: str) -> str:
+    """Trim and lowercase tenant slugs while rejecting blank input."""
     if not isinstance(slug, str):
         raise TenantValidationError("Tenant slug must be a string")
     normalised = slug.strip().lower()
@@ -81,6 +90,7 @@ def _normalise_slug(slug: str) -> str:
 
 
 def _to_domain(row: TenantORM) -> Tenant:
+    """Convert an ORM tenant row into a validated immutable domain object."""
     onboarding_at = _coerce_aware_datetime(row, "onboarding_at")
     created_at = _coerce_aware_datetime(row, "created_at")
     updated_at = _coerce_aware_datetime(row, "updated_at")
@@ -103,6 +113,7 @@ def _to_domain(row: TenantORM) -> Tenant:
 
 
 def _coerce_aware_datetime(row: TenantORM, field_name: str) -> datetime:
+    """Return a timezone-aware datetime, repairing SQLite test rows only."""
     value = getattr(row, field_name)
     if value is None:
         raise ValueError(f"invalid timezone for {field_name}")
@@ -119,5 +130,6 @@ def _coerce_aware_datetime(row: TenantORM, field_name: str) -> datetime:
 
 
 def _validate_currency(row: TenantORM) -> None:
+    """Reject tenant rows with malformed ISO 4217 currency codes."""
     if CURRENCY_RE.fullmatch(row.primary_currency or "") is None:
         raise ValueError("invalid primary_currency: must be 3 uppercase letters")

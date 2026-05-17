@@ -47,7 +47,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ums_smart_revenue.tenancy.context import TENANT_CTX
-from ums_smart_revenue.tenancy.models import TenantStatus
+from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 from ums_smart_revenue.tenancy.repository import (
     SqlAlchemyTenantRepository,
     TenantNotFoundError,
@@ -81,12 +81,14 @@ class TenantResolverMiddleware:
         bypass_paths: Iterable[str] = DEFAULT_BYPASS_PATHS,
         authorize_tenant: TenantAuthorizer | None = None,
     ) -> None:
+        """Store resolver dependencies and validate the bypass path contract."""
         self.app = app
         self._session_factory = session_factory
         self._bypass_paths = _normalise_bypass_paths(bypass_paths)
         self._authorize_tenant = authorize_tenant or _deny_tenant_access
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Resolve the tenant, set request context, and fail closed on lookup errors."""
         if scope["type"] != "http":
             await self.app(scope, receive, send)
             return
@@ -109,6 +111,22 @@ class TenantResolverMiddleware:
         except _ResolverError as error:
             await error.to_response()(scope, receive, send)
             return
+        except Exception as exc:
+            _LOGGER.error(
+                "Tenant registry lookup failed: %s",
+                exc,
+                extra={
+                    "path": scope.get("path"),
+                    "scope_type": scope.get("type"),
+                    "tenant_slug": normalised_slug,
+                },
+                exc_info=True,
+            )
+            await _ResolverError(
+                status_code=503,
+                detail="Tenant registry unavailable",
+            ).to_response()(scope, receive, send)
+            return
 
         token = TENANT_CTX.set(tenant)
         try:
@@ -116,7 +134,8 @@ class TenantResolverMiddleware:
         finally:
             TENANT_CTX.reset(token)
 
-    def _resolve(self, raw_slug: str):
+    def _resolve(self, raw_slug: str) -> Tenant:
+        """Open a tenant registry session and translate expected lookup outcomes."""
         session = self._session_factory()
         try:
             try:
@@ -149,9 +168,11 @@ class TenantResolverMiddleware:
             session.close()
 
     def _should_bypass(self, path: str) -> bool:
+        """Return whether a path is explicitly exempt from tenant resolution."""
         return any(path == bp or path.startswith(bp + "/") for bp in self._bypass_paths)
 
     def _is_authorized(self, scope: Scope, normalised_slug: str) -> bool:
+        """Run the caller-supplied authorization hook and fail closed on errors."""
         try:
             return self._authorize_tenant(scope, normalised_slug)
         except Exception as exc:
@@ -169,6 +190,7 @@ class TenantResolverMiddleware:
 
 
 def _normalise_bypass_paths(bypass_paths: Iterable[str]) -> tuple[str, ...]:
+    """Validate bypass paths and return a deduplicated normalized tuple."""
     if isinstance(bypass_paths, str):
         raise ValueError("bypass_paths must be an iterable of path strings")
 
@@ -186,6 +208,7 @@ def _normalise_bypass_paths(bypass_paths: Iterable[str]) -> tuple[str, ...]:
 
 
 def _deny_tenant_access(_scope: Scope, _slug: str) -> bool:
+    """Default authorizer used until the caller provides a real tenancy policy."""
     return False
 
 
@@ -199,12 +222,14 @@ class _ResolverError(Exception):
         detail: str,
         header: str | None = None,
     ) -> None:
+        """Capture the JSON error contract produced by resolver failures."""
         self.status_code = status_code
         self.detail = detail
         self.header = header
         super().__init__(detail)
 
     def to_response(self) -> JSONResponse:
+        """Build the Starlette response returned to the client."""
         payload: dict[str, object] = {"detail": self.detail}
         if self.header is not None:
             payload["header"] = self.header

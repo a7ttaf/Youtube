@@ -2,7 +2,7 @@
 
 import logging
 import threading
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from uuid import uuid4
 
@@ -11,6 +11,7 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 from starlette.responses import StreamingResponse
@@ -27,6 +28,7 @@ from ums_smart_revenue.tenancy import (
 
 
 def _build_engine() -> Engine:
+    """Create a thread-shareable in-memory SQLite tenant registry."""
     # TestClient runs the ASGI app in a worker thread, so the middleware's
     # session_factory needs the SAME underlying SQLite in-memory connection
     # the test thread used for metadata.create_all. StaticPool + the
@@ -39,6 +41,7 @@ def _build_engine() -> Engine:
 
     @event.listens_for(engine, "connect")
     def _enable_uuid(dbapi_connection, _connection_record) -> None:
+        """Expose PostgreSQL's UUID helper to SQLite-backed tests."""
         dbapi_connection.create_function("gen_random_uuid", 0, lambda: str(uuid4()))
 
     TenantBase.metadata.create_all(engine)
@@ -46,6 +49,7 @@ def _build_engine() -> Engine:
 
 
 def _seed(engine: Engine, **kwargs: object) -> TenantORM:
+    """Insert one tenant row for resolver integration tests."""
     factory = sessionmaker(engine, expire_on_commit=False)
     now = datetime.now(UTC)
     row = TenantORM(
@@ -65,6 +69,23 @@ def _seed(engine: Engine, **kwargs: object) -> TenantORM:
     return row
 
 
+def _make_tenant_row(**kwargs: object) -> TenantORM:
+    """Build a detached tenant row for fake-session failure tests."""
+    now = datetime.now(UTC)
+    return TenantORM(
+        id=kwargs.get("id", uuid4()),
+        slug=kwargs.get("slug", "ums"),
+        display_name=kwargs.get("display_name", "UMS"),
+        primary_currency=kwargs.get("primary_currency", "USD"),
+        status=kwargs.get("status", TenantStatus.ACTIVE).value
+        if isinstance(kwargs.get("status", TenantStatus.ACTIVE), TenantStatus)
+        else kwargs.get("status", "ACTIVE"),
+        onboarding_at=kwargs.get("onboarding_at", now),
+        created_at=kwargs.get("created_at", now),
+        updated_at=kwargs.get("updated_at", now),
+    )
+
+
 def _build_app(engine: Engine) -> FastAPI:
     """Bare FastAPI app with the resolver middleware and a probe endpoint."""
 
@@ -79,6 +100,7 @@ def _build_app(engine: Engine) -> FastAPI:
 
     @app.get("/whoami")
     def whoami() -> dict[str, object]:
+        """Return the tenant visible from request context."""
         tenant = get_current_tenant()
         if tenant is None:
             return {"tenant": None}
@@ -86,11 +108,15 @@ def _build_app(engine: Engine) -> FastAPI:
 
     @app.get("/health")
     def health() -> dict[str, str]:
+        """Return a simple bypass-path health response."""
         return {"status": "ok"}
 
     @app.get("/stream")
     def stream() -> StreamingResponse:
+        """Stream the tenant slug while response body iteration is active."""
+
         def _gen() -> Iterator[str]:
+            """Yield the tenant slug from inside the streaming iterator."""
             tenant = get_current_tenant()
             yield tenant.slug if tenant is not None else "none"
 
@@ -99,7 +125,26 @@ def _build_app(engine: Engine) -> FastAPI:
     return app
 
 
+def _build_registry_failure_app(session_factory: Callable[[], object]) -> FastAPI:
+    """Build an app whose tenant registry dependency fails during resolution."""
+    app = FastAPI()
+    app.add_middleware(
+        TenantResolverMiddleware,
+        session_factory=session_factory,
+        authorize_tenant=lambda _scope, _slug: True,
+    )
+
+    @app.get("/whoami")
+    def whoami() -> dict[str, object]:
+        """Return the tenant if middleware unexpectedly lets the request through."""
+        tenant = get_current_tenant()
+        return {"tenant": tenant.slug if tenant is not None else None}
+
+    return app
+
+
 def test_active_tenant_request_succeeds_and_sets_context():
+    """A valid active tenant header resolves and reaches the endpoint."""
     engine = _build_engine()
     _seed(engine, slug="ums")
     client = TestClient(_build_app(engine))
@@ -111,6 +156,7 @@ def test_active_tenant_request_succeeds_and_sets_context():
 
 
 def test_missing_tenant_header_returns_400():
+    """Missing tenant headers are rejected as bad client input."""
     engine = _build_engine()
     _seed(engine, slug="ums")
     client = TestClient(_build_app(engine))
@@ -122,6 +168,7 @@ def test_missing_tenant_header_returns_400():
 
 
 def test_blank_tenant_header_returns_400():
+    """Blank tenant headers are rejected before registry lookup."""
     engine = _build_engine()
     _seed(engine, slug="ums")
     client = TestClient(_build_app(engine))
@@ -132,6 +179,7 @@ def test_blank_tenant_header_returns_400():
 
 
 def test_unknown_tenant_returns_404():
+    """Unknown tenant slugs map to a not-found response."""
     engine = _build_engine()
     _seed(engine, slug="ums")
     client = TestClient(_build_app(engine))
@@ -143,6 +191,7 @@ def test_unknown_tenant_returns_404():
 
 
 def test_suspended_tenant_returns_423():
+    """Suspended tenants are identified but blocked from request handling."""
     engine = _build_engine()
     _seed(engine, slug="paused", status=TenantStatus.SUSPENDED)
     client = TestClient(_build_app(engine))
@@ -154,6 +203,7 @@ def test_suspended_tenant_returns_423():
 
 
 def test_archived_tenant_returns_410():
+    """Archived tenants are identified but treated as gone."""
     engine = _build_engine()
     _seed(engine, slug="retired", status=TenantStatus.ARCHIVED)
     client = TestClient(_build_app(engine))
@@ -164,6 +214,7 @@ def test_archived_tenant_returns_410():
 
 
 def test_health_endpoint_bypasses_resolver():
+    """Configured health endpoints do not need a tenant header."""
     engine = _build_engine()
     client = TestClient(_build_app(engine))
 
@@ -174,6 +225,7 @@ def test_health_endpoint_bypasses_resolver():
 
 
 def test_tenant_context_is_cleared_after_response():
+    """Tenant context resets after the request task finishes."""
     engine = _build_engine()
     _seed(engine, slug="ums")
     client = TestClient(_build_app(engine))
@@ -185,6 +237,7 @@ def test_tenant_context_is_cleared_after_response():
 
 
 def test_tenant_authorizer_denies_before_context_is_set():
+    """Authorization denial happens before tenant context is exposed."""
     engine = _build_engine()
     _seed(engine, slug="ums")
     app = FastAPI()
@@ -197,6 +250,7 @@ def test_tenant_authorizer_denies_before_context_is_set():
 
     @app.get("/whoami")
     def whoami() -> dict[str, object]:
+        """Return raw context so the denial test can prove it is unset."""
         return {"tenant": get_current_tenant()}
 
     client = TestClient(app)
@@ -209,6 +263,7 @@ def test_tenant_authorizer_denies_before_context_is_set():
 
 
 def test_missing_tenant_authorizer_denies_by_default():
+    """The resolver fails closed when no authorization callback is supplied."""
     engine = _build_engine()
     _seed(engine, slug="ums")
     app = FastAPI()
@@ -217,6 +272,7 @@ def test_missing_tenant_authorizer_denies_by_default():
 
     @app.get("/whoami")
     def whoami() -> dict[str, object]:
+        """Return raw context if default-deny unexpectedly allows access."""
         return {"tenant": get_current_tenant()}
 
     client = TestClient(app)
@@ -229,11 +285,15 @@ def test_missing_tenant_authorizer_denies_by_default():
 
 
 class AuthorizerUnavailableError(RuntimeError):
+    """Stable exception raised by the authorizer failure test."""
+
     def __init__(self) -> None:
+        """Create a deterministic message for log assertions."""
         super().__init__("authorization service unavailable")
 
 
 def test_tenant_authorizer_errors_fail_closed(caplog: pytest.LogCaptureFixture):
+    """Authorization callback exceptions are logged and converted to 403."""
     engine = _build_engine()
     _seed(engine, slug="ums")
     app = FastAPI()
@@ -241,6 +301,7 @@ def test_tenant_authorizer_errors_fail_closed(caplog: pytest.LogCaptureFixture):
     caplog.set_level(logging.WARNING, logger="ums_smart_revenue.tenancy.resolver")
 
     def broken_authorizer(_scope, _slug) -> bool:
+        """Simulate an unavailable authorization dependency."""
         raise AuthorizerUnavailableError
 
     app.add_middleware(
@@ -251,6 +312,7 @@ def test_tenant_authorizer_errors_fail_closed(caplog: pytest.LogCaptureFixture):
 
     @app.get("/whoami")
     def whoami() -> dict[str, object]:
+        """Return raw context if fail-closed authorization breaks."""
         return {"tenant": get_current_tenant()}
 
     client = TestClient(app)
@@ -272,7 +334,109 @@ def test_tenant_authorizer_errors_fail_closed(caplog: pytest.LogCaptureFixture):
     assert record.tenant_slug == "ums"
 
 
+class TenantRegistryUnavailableError(RuntimeError):
+    """Stable exception raised when a registry session cannot be created."""
+
+    def __init__(self) -> None:
+        """Create a deterministic message for log assertions."""
+        super().__init__("tenant registry session unavailable")
+
+
+class _ScalarResult:
+    """Tiny stand-in for SQLAlchemy's scalar result object."""
+
+    def __init__(self, row: TenantORM) -> None:
+        """Store the row returned by ``one_or_none``."""
+        self._row = row
+
+    def one_or_none(self) -> TenantORM:
+        """Return the single fake tenant row."""
+        return self._row
+
+
+class _CorruptTenantSession:
+    """Session fake that returns a malformed tenant registry row."""
+
+    def scalars(self, _statement: object) -> _ScalarResult:
+        """Return a row that fails repository domain validation."""
+        return _ScalarResult(_make_tenant_row(primary_currency="usd"))
+
+    def close(self) -> None:
+        """Satisfy the resolver's session cleanup contract."""
+
+
+class _BrokenDatabaseSession:
+    """Session fake that raises a SQLAlchemy lookup failure."""
+
+    def __init__(self, closed: list[bool]) -> None:
+        """Track whether middleware still closes failed sessions."""
+        self._closed = closed
+
+    def scalars(self, _statement: object) -> object:
+        """Raise a representative database error from the lookup path."""
+        raise OperationalError("SELECT tenants", {}, RuntimeError("database offline"))
+
+    def close(self) -> None:
+        """Record that the resolver cleaned up after the failed lookup."""
+        self._closed.append(True)
+
+
+def test_session_factory_errors_fail_closed_and_log(
+    caplog: pytest.LogCaptureFixture,
+):
+    """Session factory failures return 503 instead of escaping middleware."""
+    caplog.set_level(logging.ERROR, logger="ums_smart_revenue.tenancy.resolver")
+
+    def broken_session_factory() -> object:
+        """Fail before a tenant repository session exists."""
+        raise TenantRegistryUnavailableError
+
+    client = TestClient(_build_registry_failure_app(broken_session_factory))
+
+    response = client.get("/whoami", headers={TENANT_HEADER: "ums"})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Tenant registry unavailable"}
+    assert "Tenant registry lookup failed" in caplog.text
+    assert "tenant registry session unavailable" in caplog.text
+
+
+def test_sqlalchemy_lookup_errors_fail_closed_and_close_session(
+    caplog: pytest.LogCaptureFixture,
+):
+    """SQLAlchemy errors from tenant lookup are logged and mapped to 503."""
+    caplog.set_level(logging.ERROR, logger="ums_smart_revenue.tenancy.resolver")
+    closed: list[bool] = []
+    client = TestClient(
+        _build_registry_failure_app(lambda: _BrokenDatabaseSession(closed))
+    )
+
+    response = client.get("/whoami", headers={TENANT_HEADER: "ums"})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Tenant registry unavailable"}
+    assert closed == [True]
+    assert "Tenant registry lookup failed" in caplog.text
+    assert "database offline" in caplog.text
+
+
+def test_corrupt_tenant_registry_rows_fail_closed_and_log(
+    caplog: pytest.LogCaptureFixture,
+):
+    """Malformed tenant rows from the repository are logged and mapped to 503."""
+    caplog.set_level(logging.ERROR, logger="ums_smart_revenue.tenancy.resolver")
+    client = TestClient(_build_registry_failure_app(_CorruptTenantSession))
+
+    response = client.get("/whoami", headers={TENANT_HEADER: "ums"})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Tenant registry unavailable"}
+    assert "Tenant registry lookup failed" in caplog.text
+    assert "invalid primary_currency" in caplog.text
+
+
 def test_bypass_paths_reject_empty_root_and_relative_entries():
+    """Unsafe bypass path values are rejected during middleware construction."""
     app = FastAPI()
 
     invalid_bypass_sets = [
@@ -293,6 +457,7 @@ def test_bypass_paths_reject_empty_root_and_relative_entries():
 
 
 def test_bypass_paths_are_normalised_before_matching():
+    """Bypass paths are deduplicated and stripped before path matching."""
     middleware = TenantResolverMiddleware(
         FastAPI(),
         session_factory=lambda: None,
@@ -307,6 +472,7 @@ def test_bypass_paths_are_normalised_before_matching():
 
 
 def test_streaming_response_keeps_tenant_context_until_body_consumed():
+    """Streaming responses can still read context during body iteration."""
     engine = _build_engine()
     _seed(engine, slug="ums")
     client = TestClient(_build_app(engine))
@@ -319,6 +485,7 @@ def test_streaming_response_keeps_tenant_context_until_body_consumed():
 
 
 def test_resolver_runs_blocking_lookup_off_event_loop_thread():
+    """Synchronous tenant lookup runs outside the async endpoint thread."""
     now = datetime.now(UTC)
     tenant = Tenant(
         id=uuid4(),
@@ -333,7 +500,10 @@ def test_resolver_runs_blocking_lookup_off_event_loop_thread():
     observed: dict[str, int] = {}
 
     class RecordingTenantResolverMiddleware(TenantResolverMiddleware):
+        """Resolver variant that records where blocking lookup executes."""
+
         def _resolve(self, _raw_slug: str) -> Tenant:
+            """Capture the thread used by middleware resolution."""
             observed["resolve_thread"] = threading.get_ident()
             return tenant
 
@@ -346,6 +516,7 @@ def test_resolver_runs_blocking_lookup_off_event_loop_thread():
 
     @app.get("/thread")
     async def thread_probe() -> dict[str, str]:
+        """Capture the endpoint thread and return the resolved tenant slug."""
         observed["endpoint_thread"] = threading.get_ident()
         return {"tenant": get_current_tenant().slug}
 
@@ -359,11 +530,13 @@ def test_resolver_runs_blocking_lookup_off_event_loop_thread():
 
 
 def test_default_bypass_paths_match_documented_set():
+    """The exported default bypass set matches the documented contract."""
     expected = {"/health", "/livez", "/readyz", "/docs", "/redoc", "/openapi.json"}
     assert set(DEFAULT_BYPASS_PATHS) == expected
 
 
 def test_slug_is_normalised_to_lowercase_on_resolution():
+    """Header whitespace and casing are normalized before tenant lookup."""
     engine = _build_engine()
     _seed(engine, slug="ums")
     client = TestClient(_build_app(engine))
