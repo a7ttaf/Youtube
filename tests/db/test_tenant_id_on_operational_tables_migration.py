@@ -91,6 +91,10 @@ def test_migration_adds_tenant_id_to_every_operational_table():
             assert columns["tenant_id"]["nullable"] is False, (
                 f"{table}.tenant_id should be NOT NULL"
             )
+            tenant_default = str(columns["tenant_id"].get("default") or "")
+            assert _strip_uuid(UMS_TENANT_ID) in _strip_uuid(tenant_default), (
+                f"{table}.tenant_id should default to the UMS tenant"
+            )
 
             index_names = {i["name"] for i in inspector.get_indexes(table)}
             assert f"ix_{table}_tenant_id" in index_names, (
