@@ -415,6 +415,9 @@ reviews:
           cases such as empty input, huge input, null/undefined, invalid enums, timezone/DST,
           pagination boundaries, duplicate requests, partial failures, retries, race conditions,
           cancellation, timeout behavior, or multi-tenant authorization boundaries.
+          Return PASS when the changed code or tests cover the relevant edge cases.
+          Do not return INCONCLUSIVE; if evidence is insufficient, emit a concrete warning
+          naming the missing edge case and the expected code or test coverage.
 
       - mode: error
         name: "Migration rollback safety"
