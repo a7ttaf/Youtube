@@ -168,9 +168,24 @@ def test_tenant_scoped_constraints_are_rewritten():
     engine = _build_engine()
     with engine.begin() as connection:
         _setup_minimal_pre_state(connection)
+        # Seed a row that must survive batch_alter_table with tenant_id backfilled.
+        connection.execute(
+            text(
+                "INSERT INTO access_scopes (id, scope_type)"
+                " VALUES ('as-pre', 'global')"
+            )
+        )
         _execute_migration(connection, _load_migration(TARGET_MIGRATION), "upgrade")
 
         inspector = inspect(connection)
+
+        # Pre-existing row must still exist and carry the UMS tenant default.
+        pre_row = connection.execute(
+            text("SELECT tenant_id FROM access_scopes WHERE id = 'as-pre'")
+        ).one()
+        assert _strip_uuid(str(pre_row.tenant_id)) == _strip_uuid(UMS_TENANT_ID), (
+            "access_scopes pre-existing row must be backfilled to UMS tenant_id"
+        )
 
         access_scope_indexes = {
             index["name"]: index["column_names"]
@@ -193,6 +208,27 @@ def test_tenant_scoped_constraints_are_rewritten():
             "tenant_id",
             "id",
         ]
+        # Verify partial index WHERE predicates survived the migration.
+        for idx_name, expected_where in (
+            (
+                "uq_access_scopes_scope_type_scope_id",
+                "scope_id IS NOT NULL",
+            ),
+            (
+                "uq_access_scopes_global_singleton",
+                "scope_type = 'global' AND scope_id IS NULL",
+            ),
+        ):
+            idx_sql = connection.execute(
+                text(
+                    "SELECT sql FROM sqlite_master"
+                    " WHERE type='index' AND name=:n"
+                ),
+                {"n": idx_name},
+            ).scalar_one()
+            assert expected_where in idx_sql, (
+                f"{idx_name} partial WHERE clause not preserved after migration"
+            )
 
         role_assignment_indexes = {
             index["name"]: index["column_names"]
