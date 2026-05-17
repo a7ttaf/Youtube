@@ -97,7 +97,8 @@ class TenantResolverMiddleware:
             await self.app(scope, receive, send)
             return
 
-        if self._should_bypass(scope["path"]):
+        path = str(scope.get("path") or "")
+        if self._should_bypass(path):
             await self.app(scope, receive, send)
             return
 
@@ -141,6 +142,7 @@ class TenantResolverMiddleware:
     def _resolve(self, raw_slug: str) -> Tenant:
         """Open a tenant registry session and translate expected lookup outcomes."""
         session = self._session_factory()
+        lookup_error: BaseException | None = None
         try:
             try:
                 tenant = SqlAlchemyTenantRepository(session).get_by_slug(raw_slug)
@@ -157,8 +159,20 @@ class TenantResolverMiddleware:
                 ) from None
 
             return _ensure_active_tenant(tenant)
+        except BaseException as exc:
+            lookup_error = exc
+            raise
         finally:
-            session.close()
+            try:
+                session.close()
+            except Exception as exc:
+                _LOGGER.warning(
+                    "Tenant registry session close failed: %s",
+                    exc,
+                    exc_info=True,
+                )
+                if lookup_error is None:
+                    raise
 
     def _should_bypass(self, path: str) -> bool:
         """Return whether a path is explicitly exempt from tenant resolution."""
@@ -167,7 +181,7 @@ class TenantResolverMiddleware:
     def _is_authorized(self, scope: Scope, normalised_slug: str) -> bool:
         """Run the caller-supplied authorization hook and fail closed on errors."""
         try:
-            return self._authorize_tenant(scope, normalised_slug)
+            decision = self._authorize_tenant(scope, normalised_slug)
         except Exception as exc:
             _LOGGER.warning(
                 "Tenant authorization callback failed: %s",
@@ -180,6 +194,18 @@ class TenantResolverMiddleware:
                 exc_info=True,
             )
             return False
+        if not isinstance(decision, bool):
+            _LOGGER.warning(
+                "Tenant authorization callback returned non-bool decision",
+                extra={
+                    "path": scope.get("path"),
+                    "scope_type": scope.get("type"),
+                    "tenant_slug": normalised_slug,
+                    "decision_type": type(decision).__name__,
+                },
+            )
+            return False
+        return decision
 
 
 def _normalise_bypass_paths(bypass_paths: Iterable[str]) -> tuple[str, ...]:

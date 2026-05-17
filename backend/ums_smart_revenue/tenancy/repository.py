@@ -28,6 +28,7 @@ from ums_smart_revenue.db.tenant_models import TenantORM
 from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
+MAX_TENANT_SLUG_LENGTH = 255
 
 
 class TenantNotFoundError(LookupError):
@@ -86,6 +87,10 @@ def _normalise_slug(slug: str) -> str:
     normalised = slug.strip().lower()
     if not normalised:
         raise TenantValidationError("Tenant slug must not be blank")
+    if len(normalised) > MAX_TENANT_SLUG_LENGTH:
+        raise TenantValidationError(
+            f"Tenant slug must be at most {MAX_TENANT_SLUG_LENGTH} characters"
+        )
     return normalised
 
 

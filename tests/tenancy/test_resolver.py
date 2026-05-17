@@ -26,6 +26,7 @@ from ums_smart_revenue.tenancy import (
     TenantStatus,
     get_current_tenant,
 )
+from ums_smart_revenue.tenancy.repository import MAX_TENANT_SLUG_LENGTH
 from ums_smart_revenue.tenancy.resolver import _ensure_active_tenant, _ResolverError
 
 
@@ -232,7 +233,7 @@ def test_options_requests_bypass_tenant_resolution_without_header():
 
     def unexpected_session_factory() -> object:
         """Fail the test if OPTIONS incorrectly reaches tenant lookup."""
-        raise AssertionError("OPTIONS must bypass tenant lookup")
+        raise OptionsLookupError
 
     app.add_middleware(
         TenantResolverMiddleware,
@@ -380,6 +381,22 @@ class DatabaseOfflineError(RuntimeError):
         super().__init__("database offline")
 
 
+class SessionCloseUnavailableError(RuntimeError):
+    """Stable exception raised by session close failure tests."""
+
+    def __init__(self) -> None:
+        """Create a deterministic message for log assertions."""
+        super().__init__("tenant registry close failed")
+
+
+class OptionsLookupError(AssertionError):
+    """Raised if OPTIONS incorrectly reaches tenant lookup in tests."""
+
+    def __init__(self) -> None:
+        """Create a deterministic message for preflight bypass assertions."""
+        super().__init__("OPTIONS must bypass tenant lookup")
+
+
 class _ScalarResult:
     """Tiny stand-in for SQLAlchemy's scalar result object."""
 
@@ -417,6 +434,18 @@ class _BrokenDatabaseSession:
     def close(self) -> None:
         """Record that the resolver cleaned up after the failed lookup."""
         self._closed.append(True)
+
+
+class _CloseRaisesSession:
+    """Session fake whose cleanup fails after lookup validation fails."""
+
+    def scalars(self, _statement: object) -> object:
+        """Fail the test if blank slug validation reaches database lookup."""
+        raise AssertionError
+
+    def close(self) -> None:
+        """Raise a close failure that must not mask the lookup error."""
+        raise SessionCloseUnavailableError
 
 
 def test_session_factory_errors_fail_closed_and_log(
@@ -458,6 +487,21 @@ def test_sqlalchemy_lookup_errors_fail_closed_and_close_session(
     assert "database offline" in caplog.text
 
 
+def test_session_close_errors_do_not_mask_lookup_errors(
+    caplog: pytest.LogCaptureFixture,
+):
+    """Session close failures preserve the original tenant validation response."""
+    caplog.set_level(logging.WARNING, logger="ums_smart_revenue.tenancy.resolver")
+    client = TestClient(_build_registry_failure_app(_CloseRaisesSession))
+
+    response = client.get("/whoami")
+
+    assert response.status_code == 400
+    assert response.json()["header"] == TENANT_HEADER
+    assert "Tenant registry session close failed" in caplog.text
+    assert "tenant registry close failed" in caplog.text
+
+
 def test_corrupt_tenant_registry_rows_fail_closed_and_log(
     caplog: pytest.LogCaptureFixture,
 ):
@@ -471,6 +515,55 @@ def test_corrupt_tenant_registry_rows_fail_closed_and_log(
     assert response.json() == {"detail": "Tenant registry unavailable"}
     assert "Tenant registry lookup failed" in caplog.text
     assert "invalid primary_currency" in caplog.text
+
+
+def test_oversized_tenant_header_returns_400():
+    """Oversized tenant slugs are rejected before registry lookup."""
+    engine = _build_engine()
+    client = TestClient(_build_app(engine))
+
+    response = client.get(
+        "/whoami",
+        headers={TENANT_HEADER: "a" * (MAX_TENANT_SLUG_LENGTH + 1)},
+    )
+
+    assert response.status_code == 400
+    assert "at most" in response.json()["detail"]
+
+
+def test_authorizer_non_bool_decisions_fail_closed(caplog: pytest.LogCaptureFixture):
+    """Authorization hooks must return bool decisions to allow tenant access."""
+    engine = _build_engine()
+    _seed(engine, slug="ums")
+    app = FastAPI()
+    factory = sessionmaker(engine, expire_on_commit=False)
+    caplog.set_level(logging.WARNING, logger="ums_smart_revenue.tenancy.resolver")
+    app.add_middleware(
+        TenantResolverMiddleware,
+        session_factory=factory,
+        authorize_tenant=lambda _scope, _slug: "allow",
+    )
+
+    @app.get("/whoami")
+    def whoami() -> dict[str, object]:
+        """Return raw context if non-bool authorization is accepted."""
+        return {"tenant": get_current_tenant()}
+
+    client = TestClient(app)
+
+    response = client.get("/whoami", headers={TENANT_HEADER: "ums"})
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Tenant access denied"}
+    assert get_current_tenant() is None
+    assert "non-bool decision" in caplog.text
+    [record] = [
+        record
+        for record in caplog.records
+        if record.message == "Tenant authorization callback returned non-bool decision"
+    ]
+    assert record.decision_type == "str"
+    assert record.tenant_slug == "ums"
 
 
 def test_bypass_paths_reject_empty_root_and_relative_entries():

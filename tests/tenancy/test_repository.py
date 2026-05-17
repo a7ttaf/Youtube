@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
 from ums_smart_revenue.tenancy.models import TenantStatus
 from ums_smart_revenue.tenancy.repository import (
+    MAX_TENANT_SLUG_LENGTH,
     SqlAlchemyTenantRepository,
     TenantNotFoundError,
     TenantValidationError,
@@ -106,6 +107,16 @@ def test_get_by_slug_rejects_blank():
         for bad in ("", "   ", "\t\n"):
             with pytest.raises(TenantValidationError):
                 repository.get_by_slug(bad)
+
+
+def test_get_by_slug_rejects_oversized_slug():
+    """Oversized tenant slugs fail validation before querying the registry."""
+    engine = _make_engine()
+    with Session(engine) as session, session.begin():
+        repository = SqlAlchemyTenantRepository(session)
+
+        with pytest.raises(TenantValidationError, match="at most"):
+            repository.get_by_slug("a" * (MAX_TENANT_SLUG_LENGTH + 1))
 
 
 def test_get_by_slug_raises_not_found_for_unknown():
