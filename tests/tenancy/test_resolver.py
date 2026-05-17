@@ -703,8 +703,9 @@ def test_sqlalchemy_lookup_errors_fail_closed_and_close_session(
 
 
 def test_tenant_lookup_timeout_returns_503(caplog: pytest.LogCaptureFixture):
-    """Slow tenant registry lookups time out with a fail-closed response."""
+    """Slow tenant lookups time out and keep blocking admission bounded."""
     now = datetime.now(UTC)
+    calls: list[str] = []
     tenant = Tenant(
         id=uuid4(),
         slug="ums",
@@ -721,6 +722,7 @@ def test_tenant_lookup_timeout_returns_503(caplog: pytest.LogCaptureFixture):
 
         def _resolve(self, _normalised_slug: str) -> Tenant:
             """Sleep longer than the configured lookup timeout."""
+            calls.append(_normalised_slug)
             time.sleep(0.05)
             return tenant
 
@@ -731,6 +733,7 @@ def test_tenant_lookup_timeout_returns_503(caplog: pytest.LogCaptureFixture):
         session_factory=lambda: None,
         authorize_tenant=lambda _scope, _slug: True,
         lookup_timeout_seconds=0.01,
+        max_blocking_tasks=1,
     )
 
     @app.get("/whoami")
@@ -738,13 +741,30 @@ def test_tenant_lookup_timeout_returns_503(caplog: pytest.LogCaptureFixture):
         """Return context if the timeout unexpectedly lets the request through."""
         return {"tenant": get_current_tenant()}
 
-    client = TestClient(app)
+    async def run_requests() -> list[object]:
+        """Issue overlapping requests against a one-slot blocking-work budget."""
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            return await asyncio.gather(
+                client.get("/whoami", headers={TENANT_HEADER: "ums"}),
+                client.get("/whoami", headers={TENANT_HEADER: "ums"}),
+            )
 
-    response = client.get("/whoami", headers={TENANT_HEADER: "ums"})
+    responses = asyncio.run(run_requests())
 
-    assert response.status_code == 503
-    assert response.json() == {"detail": "Tenant registry unavailable"}
-    assert response.headers["vary"] == TENANT_HEADER
+    assert [response.status_code for response in responses] == [503, 503]
+    assert [response.json() for response in responses] == [
+        {"detail": "Tenant registry unavailable"},
+        {"detail": "Tenant registry unavailable"},
+    ]
+    assert [response.headers["vary"] for response in responses] == [
+        TENANT_HEADER,
+        TENANT_HEADER,
+    ]
+    assert calls == ["ums"]
     assert "Tenant registry lookup timed out" in caplog.text
 
 

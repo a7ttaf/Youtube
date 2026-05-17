@@ -44,6 +44,7 @@ import asyncio
 import logging
 from collections.abc import Callable, Iterable
 from concurrent.futures import CancelledError as FutureCancelledError
+from functools import partial
 
 from sqlalchemy.orm import Session
 from starlette.datastructures import Headers, MutableHeaders
@@ -64,6 +65,7 @@ _LOGGER = logging.getLogger(__name__)
 TENANT_HEADER = "X-UMS-Tenant"
 DEFAULT_LOOKUP_TIMEOUT_SECONDS = 5.0
 DEFAULT_AUTHORIZATION_TIMEOUT_SECONDS = 2.0
+DEFAULT_MAX_BLOCKING_TASKS = 8
 DEFAULT_BYPASS_PATHS: tuple[str, ...] = (
     "/health",
     "/livez",
@@ -89,6 +91,7 @@ class TenantResolverMiddleware:
         authorize_tenant: TenantAuthorizer | None = None,
         lookup_timeout_seconds: float = DEFAULT_LOOKUP_TIMEOUT_SECONDS,
         authorization_timeout_seconds: float = DEFAULT_AUTHORIZATION_TIMEOUT_SECONDS,
+        max_blocking_tasks: int = DEFAULT_MAX_BLOCKING_TASKS,
     ) -> None:
         """Store resolver dependencies and validate the bypass path contract."""
         self.app = app
@@ -100,6 +103,9 @@ class TenantResolverMiddleware:
         )
         self._authorization_timeout_seconds = _validate_timeout(
             "authorization_timeout_seconds", authorization_timeout_seconds
+        )
+        self._blocking_tasks = asyncio.BoundedSemaphore(
+            _validate_positive_int("max_blocking_tasks", max_blocking_tasks)
         )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
@@ -126,8 +132,9 @@ class TenantResolverMiddleware:
             return
 
         try:
-            tenant = await asyncio.wait_for(
-                asyncio.to_thread(self._resolve, normalised_slug),
+            tenant = await self._run_blocking_with_timeout(
+                self._resolve,
+                normalised_slug,
                 timeout=self._lookup_timeout_seconds,
             )
         except _ResolverError as error:
@@ -249,8 +256,10 @@ class TenantResolverMiddleware:
     ) -> bool:
         """Run authorization off-loop and fail closed if it exceeds its budget."""
         try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(self._is_authorized, scope, normalised_slug),
+            return await self._run_blocking_with_timeout(
+                self._is_authorized,
+                scope,
+                normalised_slug,
                 timeout=self._authorization_timeout_seconds,
             )
         except (asyncio.CancelledError, FutureCancelledError):
@@ -266,6 +275,19 @@ class TenantResolverMiddleware:
                 },
             )
             return False
+
+    async def _run_blocking_with_timeout(
+        self,
+        func: Callable[..., object],
+        *args: object,
+        timeout: float,
+    ) -> object:
+        """Run blocking work with bounded admission and request timeout."""
+        await asyncio.wait_for(self._blocking_tasks.acquire(), timeout=timeout)
+        loop = asyncio.get_running_loop()
+        future = loop.run_in_executor(None, partial(func, *args))
+        future.add_done_callback(lambda _future: self._blocking_tasks.release())
+        return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
 
 
 def _normalise_bypass_paths(bypass_paths: Iterable[str]) -> tuple[str, ...]:
@@ -295,6 +317,13 @@ def _validate_timeout(name: str, timeout_seconds: float) -> float:
     if timeout <= 0:
         raise ValueError(f"{name} must be a positive number")
     return timeout
+
+
+def _validate_positive_int(name: str, value: int) -> int:
+    """Return a positive integer configuration value."""
+    if not isinstance(value, int) or value <= 0:
+        raise ValueError(f"{name} must be a positive integer")
+    return value
 
 
 def _normalise_tenant_slug(raw_slug: str) -> str:
