@@ -528,10 +528,15 @@ def _scope_org_units_parent_fk() -> None:
     #            (tenant_id, id) is the composite FK target.
     # Blast Radius: org hierarchy cross-tenant references now blocked at DB level.
     # ============================================================================
+    # SQLite validates the referenced key while Alembic copies rows into the
+    # temporary table used for the FK rewrite, so the composite target must
+    # exist before the self-referential composite FK is introduced.
     with op.batch_alter_table("org_units") as batch_op:
         batch_op.create_unique_constraint(
             "uq_org_units_tenant_id_id", ["tenant_id", "id"]
         )
+
+    with op.batch_alter_table("org_units") as batch_op:
         batch_op.drop_constraint("org_units_parent_id_fkey", type_="foreignkey")
         batch_op.create_foreign_key(
             "fk_org_units_tenant_parent",

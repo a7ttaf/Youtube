@@ -843,18 +843,13 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
 
 
 def _build_engine() -> Engine:
-    # FK enforcement (PRAGMA foreign_keys = ON) is intentionally NOT enabled here.
-    # Alembic's batch_alter_table rewrites tables by creating a temp table, copying
-    # data, then renaming — a pattern that causes SQLite to raise "foreign key
-    # mismatch" on self-referential tables (e.g., org_units → org_units) when FK
-    # enforcement is active. ON DELETE behaviour and constraint structure are still
-    # exercised through inspector metadata reflection (get_foreign_keys returns the
-    # ON DELETE action regardless of the PRAGMA setting). Full FK enforcement runs
-    # against PostgreSQL in CI.
     engine = create_engine("sqlite+pysqlite:///:memory:")
 
     @event.listens_for(engine, "connect")
     def _enable_uuid(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA foreign_keys=ON")
+        cursor.close()
         dbapi_connection.create_function("gen_random_uuid", 0, lambda: str(uuid4()))
 
     return engine
