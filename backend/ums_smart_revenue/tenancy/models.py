@@ -16,11 +16,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from enum import Enum
+from enum import StrEnum
 from uuid import UUID
 
 
-class TenantStatus(str, Enum):
+class TenantStatus(StrEnum):
     """Lifecycle states for a tenant — mirrors the SQL CHECK constraint."""
 
     ACTIVE = "ACTIVE"

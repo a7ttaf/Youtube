@@ -1,6 +1,6 @@
 """Behaviour tests for :class:`SqlAlchemyTenantRepository`."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -35,7 +35,7 @@ def _seed_tenant(
     primary_currency: str = "USD",
     status: TenantStatus = TenantStatus.ACTIVE,
 ) -> TenantORM:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     row = TenantORM(
         id=uuid4(),
         slug=slug,

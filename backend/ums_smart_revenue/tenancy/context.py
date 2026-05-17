@@ -26,12 +26,12 @@ from typing import Final
 
 from ums_smart_revenue.tenancy.models import Tenant
 
-TENANT_CTX: Final[contextvars.ContextVar["Tenant | None"]] = contextvars.ContextVar(
+TENANT_CTX: Final[contextvars.ContextVar[Tenant | None]] = contextvars.ContextVar(
     "ums_current_tenant", default=None
 )
 
 
-class TenantContextMissing(LookupError):
+class TenantContextMissing(LookupError):  # noqa: N818
     """Raised when code asks for the active tenant but none is set.
 
     Inheriting from :class:`LookupError` (rather than e.g. ``RuntimeError``)

@@ -1,6 +1,6 @@
 """Integration tests for :class:`TenantResolverMiddleware`."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 from fastapi import FastAPI
@@ -8,6 +8,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+from starlette.responses import StreamingResponse
 
 from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
 from ums_smart_revenue.tenancy import (
@@ -40,7 +41,7 @@ def _build_engine():
 
 def _seed(engine, **kwargs) -> TenantORM:
     factory = sessionmaker(engine, expire_on_commit=False)
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     row = TenantORM(
         id=kwargs.get("id", uuid4()),
         slug=kwargs.get("slug", "ums"),
@@ -76,6 +77,14 @@ def _build_app(engine) -> FastAPI:
     @app.get("/health")
     def health() -> dict[str, str]:
         return {"status": "ok"}
+
+    @app.get("/stream")
+    def stream() -> StreamingResponse:
+        def _gen():
+            tenant = get_current_tenant()
+            yield tenant.slug if tenant is not None else "none"
+
+        return StreamingResponse(_gen(), media_type="text/plain")
 
     return app
 
@@ -162,6 +171,18 @@ def test_tenant_context_is_cleared_after_response():
     response = client.get("/whoami", headers={TENANT_HEADER: "ums"})
     assert response.status_code == 200
     # After the request finishes, ambient context goes back to None.
+    assert get_current_tenant() is None
+
+
+def test_streaming_response_keeps_tenant_context_until_body_consumed():
+    engine = _build_engine()
+    _seed(engine, slug="ums")
+    client = TestClient(_build_app(engine))
+
+    with client.stream("GET", "/stream", headers={TENANT_HEADER: "ums"}) as response:
+        assert response.status_code == 200
+        assert list(response.iter_text()) == ["ums"]
+
     assert get_current_tenant() is None
 
 

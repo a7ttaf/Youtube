@@ -34,14 +34,12 @@ implementation hits the database once per non-bypassed request.
 
 from __future__ import annotations
 
-from collections.abc import Iterable
-from typing import Awaitable, Callable
+from collections.abc import Callable, Iterable
 
-from fastapi import Request
 from sqlalchemy.orm import Session
-from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse, Response
-from starlette.types import ASGIApp
+from starlette.datastructures import Headers
+from starlette.responses import JSONResponse
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import TenantStatus
@@ -65,7 +63,7 @@ DEFAULT_BYPASS_PATHS: tuple[str, ...] = (
 SessionFactory = Callable[[], Session]
 
 
-class TenantResolverMiddleware(BaseHTTPMiddleware):
+class TenantResolverMiddleware:
     """Resolve the active tenant for every request that hits a tenant-scoped route."""
 
     def __init__(
@@ -74,27 +72,29 @@ class TenantResolverMiddleware(BaseHTTPMiddleware):
         session_factory: SessionFactory,
         bypass_paths: Iterable[str] = DEFAULT_BYPASS_PATHS,
     ) -> None:
-        super().__init__(app)
+        self.app = app
         self._session_factory = session_factory
         self._bypass_paths: tuple[str, ...] = tuple(bypass_paths)
 
-    async def dispatch(  # type: ignore[override]
-        self,
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        if self._should_bypass(request.url.path):
-            return await call_next(request)
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-        raw_slug = request.headers.get(TENANT_HEADER, "")
+        if self._should_bypass(scope["path"]):
+            await self.app(scope, receive, send)
+            return
+
+        raw_slug = Headers(scope=scope).get(TENANT_HEADER, "")
         try:
             tenant = self._resolve(raw_slug)
         except _ResolverError as error:
-            return error.to_response()
+            await error.to_response()(scope, receive, send)
+            return
 
         token = TENANT_CTX.set(tenant)
         try:
-            return await call_next(request)
+            await self.app(scope, receive, send)
         finally:
             TENANT_CTX.reset(token)
 

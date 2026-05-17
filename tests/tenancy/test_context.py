@@ -1,6 +1,6 @@
 """Behaviour tests for the tenant contextvar."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import uuid4
 
 import pytest
@@ -15,7 +15,7 @@ from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 
 def _make_tenant(slug: str = "ums") -> Tenant:
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return Tenant(
         id=uuid4(),
         slug=slug,
@@ -52,13 +52,15 @@ def test_reset_restores_previous_value():
     second = _make_tenant("rotana")
 
     outer_token = TENANT_CTX.set(first)
-    inner_token = TENANT_CTX.set(second)
     try:
-        assert get_current_tenant() is second
+        inner_token = TENANT_CTX.set(second)
+        try:
+            assert get_current_tenant() is second
+        finally:
+            TENANT_CTX.reset(inner_token)
+        assert get_current_tenant() is first
     finally:
-        TENANT_CTX.reset(inner_token)
-    assert get_current_tenant() is first
-    TENANT_CTX.reset(outer_token)
+        TENANT_CTX.reset(outer_token)
     assert get_current_tenant() is None
 
 
