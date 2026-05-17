@@ -405,10 +405,12 @@ def test_tenant_scoped_constraints_are_rewritten():
         assert ura_ab_fk["constrained_columns"] == ["tenant_id", "assigned_by"]
         assert ura_ab_fk["referred_table"] == "users"
         assert ura_ab_fk["referred_columns"] == ["tenant_id", "id"]
+        assert (ura_ab_fk.get("options") or {}).get("ondelete") == "RESTRICT"
         ura_rb_fk = role_assign_fks["fk_user_role_assignments_tenant_revoked_by"]
         assert ura_rb_fk["constrained_columns"] == ["tenant_id", "revoked_by"]
         assert ura_rb_fk["referred_table"] == "users"
         assert ura_rb_fk["referred_columns"] == ["tenant_id", "id"]
+        assert (ura_rb_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
         perm_grant_fks = {
             fk["name"]: fk
@@ -423,10 +425,12 @@ def test_tenant_scoped_constraints_are_rewritten():
         assert upg_gb_fk["constrained_columns"] == ["tenant_id", "granted_by"]
         assert upg_gb_fk["referred_table"] == "users"
         assert upg_gb_fk["referred_columns"] == ["tenant_id", "id"]
+        assert (upg_gb_fk.get("options") or {}).get("ondelete") == "RESTRICT"
         upg_rb_fk = perm_grant_fks["fk_user_permission_grants_tenant_revoked_by"]
         assert upg_rb_fk["constrained_columns"] == ["tenant_id", "revoked_by"]
         assert upg_rb_fk["referred_table"] == "users"
         assert upg_rb_fk["referred_columns"] == ["tenant_id", "id"]
+        assert (upg_rb_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
         audit_fks = {
             fk["name"]: fk for fk in inspector.get_foreign_keys("audit_logs")
@@ -435,6 +439,7 @@ def test_tenant_scoped_constraints_are_rewritten():
         assert al_user_fk["constrained_columns"] == ["tenant_id", "user_id"]
         assert al_user_fk["referred_table"] == "users"
         assert al_user_fk["referred_columns"] == ["tenant_id", "id"]
+        assert (al_user_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
         connector_fks = {
             fk["name"]: fk
@@ -444,10 +449,12 @@ def test_tenant_scoped_constraints_are_rewritten():
         assert acc_cb_fk["constrained_columns"] == ["tenant_id", "created_by"]
         assert acc_cb_fk["referred_table"] == "users"
         assert acc_cb_fk["referred_columns"] == ["tenant_id", "id"]
+        assert (acc_cb_fk.get("options") or {}).get("ondelete") == "RESTRICT"
         acc_ub_fk = connector_fks["fk_api_connector_credentials_tenant_updated_by"]
         assert acc_ub_fk["constrained_columns"] == ["tenant_id", "updated_by"]
         assert acc_ub_fk["referred_table"] == "users"
         assert acc_ub_fk["referred_columns"] == ["tenant_id", "id"]
+        assert (acc_ub_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
 
 def test_downgrade_removes_tenant_id_from_every_table():
