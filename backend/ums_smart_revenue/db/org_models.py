@@ -4,9 +4,17 @@ from uuid import UUID
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Text, Uuid, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
 
 class OrgBase(DeclarativeBase):
     pass
+
+
+# Shared server_default for the tenant_id column added in migration
+# 20260517_0001. See backend/ums_smart_revenue/db/security_models.py for
+# the rationale (single source of truth for the UMS tenant id).
+_TENANT_ID_DEFAULT = text(f"'{UMS_TENANT_ID}'")
 
 
 class OrgUnitORM(OrgBase):
@@ -19,10 +27,14 @@ class OrgUnitORM(OrgBase):
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+    )
 
     __table_args__ = (
         CheckConstraint("type IN ('HOLDING', 'SECTOR', 'COMPANY')", name="ck_org_units_type"),
         Index("ix_org_units_parent_id", "parent_id"),
+        Index("ix_org_units_tenant_id", "tenant_id"),
     )
 
 
@@ -43,6 +55,9 @@ class YouTubeChannelORM(OrgBase):
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+    )
 
     __table_args__ = (
         CheckConstraint("cms_status IN ('INSIDE_CMS', 'OUTSIDE_CMS', 'UNKNOWN')", name="ck_youtube_channels_cms_status"),
@@ -57,6 +72,7 @@ class YouTubeChannelORM(OrgBase):
             name="ck_youtube_channels_revenue_source_status",
         ),
         Index("ix_youtube_channels_primary_org_unit_id", "primary_org_unit_id"),
+        Index("ix_youtube_channels_tenant_id", "tenant_id"),
     )
 
 
@@ -69,6 +85,9 @@ class ChannelGroupORM(OrgBase):
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("true"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -78,6 +97,7 @@ class ChannelGroupORM(OrgBase):
             ")",
             name="ck_channel_groups_group_type",
         ),
+        Index("ix_channel_groups_tenant_id", "tenant_id"),
     )
 
 
@@ -91,4 +111,11 @@ class ChannelGroupMemberORM(OrgBase):
     channel_id: Mapped[UUID] = mapped_column(
         ForeignKey("youtube_channels.id", ondelete="CASCADE"),
         primary_key=True,
+    )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+    )
+
+    __table_args__ = (
+        Index("ix_channel_group_members_tenant_id", "tenant_id"),
     )

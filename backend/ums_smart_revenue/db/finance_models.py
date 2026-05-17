@@ -20,10 +20,17 @@ from sqlalchemy import (
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from ums_smart_revenue.db.org_models import OrgBase
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 
 class FinanceBase(DeclarativeBase):
     metadata = OrgBase.metadata
+
+
+# Shared server_default for the tenant_id column added in migration
+# 20260517_0001. See backend/ums_smart_revenue/db/security_models.py for
+# the rationale (single source of truth for the UMS tenant id).
+_TENANT_ID_DEFAULT = text(f"'{UMS_TENANT_ID}'")
 
 
 class FinanceMonthCloseORM(FinanceBase):
@@ -38,6 +45,9 @@ class FinanceMonthCloseORM(FinanceBase):
     unlocked_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     unlocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -50,6 +60,7 @@ class FinanceMonthCloseORM(FinanceBase):
             name="ck_finance_month_close_month_format",
         ),
         CheckConstraint("status IN ('OPEN', 'LOCKED')", name="ck_finance_month_close_status"),
+        Index("ix_finance_month_close_tenant_id", "tenant_id"),
     )
 
 
@@ -73,6 +84,9 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
     imported_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -110,6 +124,7 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
         ),
         Index("ix_monthly_channel_revenue_facts_month", "month"),
         Index("ix_monthly_channel_revenue_facts_channel_month", "youtube_channel_id", "month"),
+        Index("ix_monthly_channel_revenue_facts_tenant_id", "tenant_id"),
     )
 
 
@@ -132,6 +147,9 @@ class RevenueManualOverrideORM(FinanceBase):
     approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     approval_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -156,6 +174,7 @@ class RevenueManualOverrideORM(FinanceBase):
         ),
         Index("ix_revenue_manual_overrides_month_status", "month", "status"),
         Index("ix_revenue_manual_overrides_channel_month", "youtube_channel_id", "month"),
+        Index("ix_revenue_manual_overrides_tenant_id", "tenant_id"),
     )
 
 
@@ -203,6 +222,9 @@ class BankReconciliationEntryORM(FinanceBase):
         server_default=func.now(),
         onupdate=func.now(),
     )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -241,6 +263,7 @@ class BankReconciliationEntryORM(FinanceBase):
         ),
         Index("ix_bank_reconciliation_entries_month", "month"),
         Index("ix_bank_reconciliation_entries_source_report", "source_report_id"),
+        Index("ix_bank_reconciliation_entries_tenant_id", "tenant_id"),
     )
 
 
@@ -281,6 +304,9 @@ class AdSensePaymentORM(FinanceBase):
         server_default=func.now(),
         onupdate=func.now(),
     )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -315,4 +341,5 @@ class AdSensePaymentORM(FinanceBase):
         ),
         Index("ix_adsense_payments_month_date", "month", "payment_date"),
         Index("ix_adsense_payments_source_report", "source_report_id"),
+        Index("ix_adsense_payments_tenant_id", "tenant_id"),
     )

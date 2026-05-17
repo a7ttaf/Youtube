@@ -4,9 +4,17 @@ from uuid import UUID
 from sqlalchemy import Boolean, CheckConstraint, DateTime, Index, Text, UniqueConstraint, Uuid, func, text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
 
 class ReportBase(DeclarativeBase):
     pass
+
+
+# Shared server_default for the tenant_id column added in migration
+# 20260517_0001. See backend/ums_smart_revenue/db/security_models.py for
+# the rationale (single source of truth for the UMS tenant id).
+_TENANT_ID_DEFAULT = text(f"'{UMS_TENANT_ID}'")
 
 
 class RawReportFileORM(ReportBase):
@@ -22,6 +30,9 @@ class RawReportFileORM(ReportBase):
     downloaded_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     downloaded_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+    )
 
     __table_args__ = (
         UniqueConstraint(
@@ -46,6 +57,7 @@ class RawReportFileORM(ReportBase):
         ),
         Index("ix_raw_report_files_source_month", "source", "report_month"),
         Index("ix_raw_report_files_report_type_month", "report_type", "report_month"),
+        Index("ix_raw_report_files_tenant_id", "tenant_id"),
     )
 
 
@@ -67,6 +79,9 @@ class ExportJobORM(ReportBase):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+    )
 
     __table_args__ = (
         CheckConstraint(
@@ -95,4 +110,5 @@ class ExportJobORM(ReportBase):
         CheckConstraint("month_lock_status IN ('OPEN', 'LOCKED')", name="ck_export_jobs_month_lock_status"),
         Index("ix_export_jobs_requested_by_created", "requested_by", "created_at"),
         Index("ix_export_jobs_scope_month", "scope_type", "scope_id", "month"),
+        Index("ix_export_jobs_tenant_id", "tenant_id"),
     )
