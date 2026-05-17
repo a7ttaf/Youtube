@@ -593,14 +593,24 @@ def _scope_user_fks() -> None:
     #          granted_by / created_by / updated_by FKs that reference users.id
     #          with composite FKs (tenant_id, <col>) → users(tenant_id, id).
     #          Prevents any user column from pointing at a user in a different
-    #          tenant. SET NULL semantics become RESTRICT because setting only
-    #          the user column to NULL while keeping tenant_id intact is not
-    #          possible with composite FK ON DELETE SET NULL semantics; users
-    #          are soft-deleted (disabled) rather than hard-deleted in practice.
+    #          tenant.
+    #
+    #          ON DELETE semantics for nullable actor columns (assigned_by,
+    #          revoked_by, granted_by, created_by, updated_by, audit_logs.user_id):
+    #          Changed from SET NULL → RESTRICT intentionally. PostgreSQL's
+    #          ON DELETE SET NULL on a composite FK nulls ALL FK columns,
+    #          including tenant_id. Since tenant_id is NOT NULL this would
+    #          immediately violate the constraint, making SET NULL semantically
+    #          impossible on a composite FK that includes a NOT NULL column.
+    #          RESTRICT is the safe default; the application layer soft-deletes
+    #          users (status = 'disabled') rather than hard-deleting them, so
+    #          RESTRICT only fires for inadvertent hard-deletes. downgrade()
+    #          restores the original single-column FKs with SET NULL.
     # Database/ORM: user_role_assignments, user_permission_grants, audit_logs,
     #              api_connector_credentials. Requires uq_users_tenant_id_id on
     #              users(tenant_id, id) — created by _scope_tenant_unique_constraints.
     # Blast Radius: Cross-tenant user references now blocked at DB level.
+    #              Hard-deleting a user now fails (use soft-delete / disable).
     # ============================================================================
     with op.batch_alter_table("user_role_assignments") as batch_op:
         batch_op.drop_constraint(

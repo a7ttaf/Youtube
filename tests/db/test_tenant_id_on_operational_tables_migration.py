@@ -457,6 +457,66 @@ def test_downgrade_removes_tenant_id_from_every_table():
                 f"{table} still has tenant_id after downgrade"
             )
 
+        # finance_month_close PK must be restored to (month,) only.
+        fmc_pk = inspector.get_pk_constraint("finance_month_close")
+        assert fmc_pk["constrained_columns"] == ["month"]
+
+        # access_scopes partial indexes must not include tenant_id after downgrade.
+        access_scope_idx = {
+            idx["name"]: idx["column_names"]
+            for idx in inspector.get_indexes("access_scopes")
+        }
+        assert "tenant_id" not in access_scope_idx.get(
+            "uq_access_scopes_scope_type_scope_id", []
+        )
+        assert "tenant_id" not in access_scope_idx.get(
+            "uq_access_scopes_global_singleton", []
+        )
+
+        # Nullable actor/audit FKs must be restored with SET NULL (original semantics).
+        # ON DELETE SET NULL is impossible on composite FKs that include a NOT NULL
+        # tenant_id, so downgrade reverts to single-column FKs with SET NULL.
+        def _ondelete(fk_dict: dict) -> str | None:
+            return (fk_dict.get("options") or {}).get("ondelete")
+
+        ura_fks = {
+            fk["name"]: fk
+            for fk in inspector.get_foreign_keys("user_role_assignments")
+        }
+        assert _ondelete(ura_fks["user_role_assignments_assigned_by_fkey"]) == (
+            "SET NULL"
+        )
+        assert _ondelete(ura_fks["user_role_assignments_revoked_by_fkey"]) == (
+            "SET NULL"
+        )
+
+        upg_fks = {
+            fk["name"]: fk
+            for fk in inspector.get_foreign_keys("user_permission_grants")
+        }
+        assert _ondelete(upg_fks["user_permission_grants_granted_by_fkey"]) == (
+            "SET NULL"
+        )
+        assert _ondelete(upg_fks["user_permission_grants_revoked_by_fkey"]) == (
+            "SET NULL"
+        )
+
+        audit_fks = {
+            fk["name"]: fk for fk in inspector.get_foreign_keys("audit_logs")
+        }
+        assert _ondelete(audit_fks["audit_logs_user_id_fkey"]) == "SET NULL"
+
+        acc_fks = {
+            fk["name"]: fk
+            for fk in inspector.get_foreign_keys("api_connector_credentials")
+        }
+        assert _ondelete(acc_fks["api_connector_credentials_created_by_fkey"]) == (
+            "SET NULL"
+        )
+        assert _ondelete(acc_fks["api_connector_credentials_updated_by_fkey"]) == (
+            "SET NULL"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Plumbing
@@ -783,6 +843,14 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
 
 
 def _build_engine() -> Engine:
+    # FK enforcement (PRAGMA foreign_keys = ON) is intentionally NOT enabled here.
+    # Alembic's batch_alter_table rewrites tables by creating a temp table, copying
+    # data, then renaming — a pattern that causes SQLite to raise "foreign key
+    # mismatch" on self-referential tables (e.g., org_units → org_units) when FK
+    # enforcement is active. ON DELETE behaviour and constraint structure are still
+    # exercised through inspector metadata reflection (get_foreign_keys returns the
+    # ON DELETE action regardless of the PRAGMA setting). Full FK enforcement runs
+    # against PostgreSQL in CI.
     engine = create_engine("sqlite+pysqlite:///:memory:")
 
     @event.listens_for(engine, "connect")
