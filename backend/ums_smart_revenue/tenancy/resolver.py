@@ -46,7 +46,6 @@ from collections.abc import Callable, Iterable
 from concurrent.futures import CancelledError as FutureCancelledError
 
 from sqlalchemy.orm import Session
-from starlette.concurrency import run_in_threadpool
 from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
@@ -63,6 +62,8 @@ from ums_smart_revenue.tenancy.repository import (
 _LOGGER = logging.getLogger(__name__)
 
 TENANT_HEADER = "X-UMS-Tenant"
+DEFAULT_LOOKUP_TIMEOUT_SECONDS = 5.0
+DEFAULT_AUTHORIZATION_TIMEOUT_SECONDS = 2.0
 DEFAULT_BYPASS_PATHS: tuple[str, ...] = (
     "/health",
     "/livez",
@@ -86,12 +87,20 @@ class TenantResolverMiddleware:
         session_factory: SessionFactory,
         bypass_paths: Iterable[str] = DEFAULT_BYPASS_PATHS,
         authorize_tenant: TenantAuthorizer | None = None,
+        lookup_timeout_seconds: float = DEFAULT_LOOKUP_TIMEOUT_SECONDS,
+        authorization_timeout_seconds: float = DEFAULT_AUTHORIZATION_TIMEOUT_SECONDS,
     ) -> None:
         """Store resolver dependencies and validate the bypass path contract."""
         self.app = app
         self._session_factory = session_factory
         self._bypass_paths = _normalise_bypass_paths(bypass_paths)
         self._authorize_tenant = authorize_tenant or _deny_tenant_access
+        self._lookup_timeout_seconds = _validate_timeout(
+            "lookup_timeout_seconds", lookup_timeout_seconds
+        )
+        self._authorization_timeout_seconds = _validate_timeout(
+            "authorization_timeout_seconds", authorization_timeout_seconds
+        )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Resolve the tenant, set request context, and fail closed on lookup errors."""
@@ -117,12 +126,30 @@ class TenantResolverMiddleware:
             return
 
         try:
-            tenant = await run_in_threadpool(self._resolve, normalised_slug)
+            tenant = await asyncio.wait_for(
+                asyncio.to_thread(self._resolve, normalised_slug),
+                timeout=self._lookup_timeout_seconds,
+            )
         except _ResolverError as error:
             await error.to_response()(scope, receive, send_with_tenant_vary)
             return
         except (asyncio.CancelledError, FutureCancelledError):
             raise
+        except TimeoutError:
+            _LOGGER.error(
+                "Tenant registry lookup timed out",
+                extra={
+                    "path": scope.get("path"),
+                    "scope_type": scope.get("type"),
+                    "tenant_slug": normalised_slug,
+                    "timeout_seconds": self._lookup_timeout_seconds,
+                },
+            )
+            await _ResolverError(
+                status_code=503,
+                detail="Tenant registry unavailable",
+            ).to_response()(scope, receive, send_with_tenant_vary)
+            return
         except Exception as exc:
             _LOGGER.error(
                 "Tenant registry lookup failed: %s",
@@ -140,7 +167,7 @@ class TenantResolverMiddleware:
             ).to_response()(scope, receive, send_with_tenant_vary)
             return
 
-        if not self._is_authorized(scope, normalised_slug):
+        if not await self._is_authorized_with_timeout(scope, normalised_slug):
             await _ResolverError(
                 status_code=403,
                 detail="Tenant access denied",
@@ -217,6 +244,29 @@ class TenantResolverMiddleware:
             return False
         return decision
 
+    async def _is_authorized_with_timeout(
+        self, scope: Scope, normalised_slug: str
+    ) -> bool:
+        """Run authorization off-loop and fail closed if it exceeds its budget."""
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(self._is_authorized, scope, normalised_slug),
+                timeout=self._authorization_timeout_seconds,
+            )
+        except (asyncio.CancelledError, FutureCancelledError):
+            raise
+        except TimeoutError:
+            _LOGGER.warning(
+                "Tenant authorization callback timed out",
+                extra={
+                    "path": scope.get("path"),
+                    "scope_type": scope.get("type"),
+                    "tenant_slug": normalised_slug,
+                    "timeout_seconds": self._authorization_timeout_seconds,
+                },
+            )
+            return False
+
 
 def _normalise_bypass_paths(bypass_paths: Iterable[str]) -> tuple[str, ...]:
     """Validate bypass paths and return a deduplicated normalized tuple."""
@@ -234,6 +284,17 @@ def _normalise_bypass_paths(bypass_paths: Iterable[str]) -> tuple[str, ...]:
             raise ValueError("bypass path must start with '/'")
         normalised_paths.append(normalised)
     return tuple(dict.fromkeys(normalised_paths))
+
+
+def _validate_timeout(name: str, timeout_seconds: float) -> float:
+    """Return a positive timeout value for resolver dependency calls."""
+    try:
+        timeout = float(timeout_seconds)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"{name} must be a positive number") from exc
+    if timeout <= 0:
+        raise ValueError(f"{name} must be a positive number")
+    return timeout
 
 
 def _normalise_tenant_slug(raw_slug: str) -> str:

@@ -96,25 +96,44 @@ def _normalise_slug(slug: str) -> str:
 
 def _to_domain(row: TenantORM) -> Tenant:
     """Convert an ORM tenant row into a validated immutable domain object."""
+    tenant_id = _require_uuid(row, "id")
+    slug = _require_nonblank_string(row, "slug")
+    display_name = _require_nonblank_string(row, "display_name")
     onboarding_at = _coerce_aware_datetime(row, "onboarding_at")
     created_at = _coerce_aware_datetime(row, "created_at")
     updated_at = _coerce_aware_datetime(row, "updated_at")
-    _validate_currency(row)
+    primary_currency = _validate_currency(row)
     try:
         status = TenantStatus(row.status)
     except ValueError as exc:
         raise ValueError(f"invalid tenant status: {row.status!r}") from exc
 
     return Tenant(
-        id=row.id,
-        slug=row.slug,
-        display_name=row.display_name,
-        primary_currency=row.primary_currency,
+        id=tenant_id,
+        slug=slug,
+        display_name=display_name,
+        primary_currency=primary_currency,
         status=status,
         onboarding_at=onboarding_at,
         created_at=created_at,
         updated_at=updated_at,
     )
+
+
+def _require_uuid(row: TenantORM, field_name: str) -> UUID:
+    """Return a required UUID field or raise a validation error."""
+    value = getattr(row, field_name)
+    if not isinstance(value, UUID):
+        raise ValueError(f"invalid {field_name}: must be a UUID")
+    return value
+
+
+def _require_nonblank_string(row: TenantORM, field_name: str) -> str:
+    """Return a required text field or raise a validation error."""
+    value = getattr(row, field_name)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"invalid {field_name}: must be a non-empty string")
+    return value
 
 
 def _coerce_aware_datetime(row: TenantORM, field_name: str) -> datetime:
@@ -134,7 +153,9 @@ def _coerce_aware_datetime(row: TenantORM, field_name: str) -> datetime:
     raise ValueError(f"invalid timezone for {field_name}")
 
 
-def _validate_currency(row: TenantORM) -> None:
-    """Reject tenant rows with malformed ISO 4217 currency codes."""
-    if CURRENCY_RE.fullmatch(row.primary_currency or "") is None:
+def _validate_currency(row: TenantORM) -> str:
+    """Return the ISO 4217 currency code or reject malformed values."""
+    value = row.primary_currency
+    if not isinstance(value, str) or CURRENCY_RE.fullmatch(value) is None:
         raise ValueError("invalid primary_currency: must be 3 uppercase letters")
+    return value

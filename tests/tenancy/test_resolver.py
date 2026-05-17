@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import threading
+import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from typing import cast
@@ -11,6 +12,7 @@ from uuid import uuid4
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import create_engine, event
 from sqlalchemy.engine import Engine
 from sqlalchemy.exc import OperationalError
@@ -306,6 +308,66 @@ def test_tenant_context_is_cleared_after_response():
     assert get_current_tenant() is None
 
 
+def test_concurrent_requests_keep_tenant_context_isolated():
+    """Overlapping tenant requests see only their own context values."""
+    now = datetime.now(UTC)
+    tenants = {
+        slug: Tenant(
+            id=uuid4(),
+            slug=slug,
+            display_name=slug.title(),
+            primary_currency="USD",
+            status=TenantStatus.ACTIVE,
+            onboarding_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+        for slug in ("alpha", "beta")
+    }
+
+    class StaticTenantResolverMiddleware(TenantResolverMiddleware):
+        """Resolver variant that avoids SQLite concurrency in this test."""
+
+        def _resolve(self, normalised_slug: str) -> Tenant:
+            """Return the tenant matching the normalized slug."""
+            return tenants[normalised_slug]
+
+    app = FastAPI()
+    app.add_middleware(
+        StaticTenantResolverMiddleware,
+        session_factory=lambda: None,
+        authorize_tenant=lambda _scope, _slug: True,
+    )
+
+    @app.get("/whoami")
+    async def whoami() -> dict[str, object]:
+        """Return the tenant visible after another request has overlapped."""
+        await asyncio.sleep(0.01)
+        tenant = get_current_tenant()
+        if tenant is None:
+            return {"tenant": None}
+        return {"tenant": {"slug": tenant.slug, "status": tenant.status.value}}
+
+    async def run_requests() -> list[dict[str, object]]:
+        """Issue two tenant-scoped requests against one ASGI app."""
+        transport = ASGITransport(app=app)
+        async with AsyncClient(
+            transport=transport,
+            base_url="http://testserver",
+        ) as client:
+            responses = await asyncio.gather(
+                client.get("/whoami", headers={TENANT_HEADER: "alpha"}),
+                client.get("/whoami", headers={TENANT_HEADER: "beta"}),
+            )
+        return [response.json() for response in responses]
+
+    alpha, beta = asyncio.run(run_requests())
+
+    assert alpha == {"tenant": {"slug": "alpha", "status": "ACTIVE"}}
+    assert beta == {"tenant": {"slug": "beta", "status": "ACTIVE"}}
+    assert get_current_tenant() is None
+
+
 def test_tenant_authorizer_denies_before_context_is_set():
     """Authorization denial still happens before tenant context is exposed."""
     engine = _build_engine()
@@ -561,6 +623,52 @@ def test_sqlalchemy_lookup_errors_fail_closed_and_close_session(
     assert "database offline" in caplog.text
 
 
+def test_tenant_lookup_timeout_returns_503(caplog: pytest.LogCaptureFixture):
+    """Slow tenant registry lookups time out with a fail-closed response."""
+    now = datetime.now(UTC)
+    tenant = Tenant(
+        id=uuid4(),
+        slug="ums",
+        display_name="UMS",
+        primary_currency="USD",
+        status=TenantStatus.ACTIVE,
+        onboarding_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+
+    class SlowTenantResolverMiddleware(TenantResolverMiddleware):
+        """Resolver variant that simulates a stalled registry lookup."""
+
+        def _resolve(self, _normalised_slug: str) -> Tenant:
+            """Sleep longer than the configured lookup timeout."""
+            time.sleep(0.05)
+            return tenant
+
+    app = FastAPI()
+    caplog.set_level(logging.ERROR, logger="ums_smart_revenue.tenancy.resolver")
+    app.add_middleware(
+        SlowTenantResolverMiddleware,
+        session_factory=lambda: None,
+        authorize_tenant=lambda _scope, _slug: True,
+        lookup_timeout_seconds=0.01,
+    )
+
+    @app.get("/whoami")
+    def whoami() -> dict[str, object]:
+        """Return context if the timeout unexpectedly lets the request through."""
+        return {"tenant": get_current_tenant()}
+
+    client = TestClient(app)
+
+    response = client.get("/whoami", headers={TENANT_HEADER: "ums"})
+
+    assert response.status_code == 503
+    assert response.json() == {"detail": "Tenant registry unavailable"}
+    assert response.headers["vary"] == TENANT_HEADER
+    assert "Tenant registry lookup timed out" in caplog.text
+
+
 def test_session_close_errors_do_not_mask_lookup_errors(
     caplog: pytest.LogCaptureFixture,
 ):
@@ -617,6 +725,41 @@ def test_lookup_cancellation_is_reraised():
         asyncio.run(middleware(scope, receive, send))
 
     assert messages == []
+
+
+def test_authorizer_timeout_fails_closed_and_logs(caplog: pytest.LogCaptureFixture):
+    """Slow authorization callbacks are denied and logged."""
+    engine = _build_engine()
+    _seed(engine, slug="ums")
+    app = FastAPI()
+    factory = sessionmaker(engine, expire_on_commit=False)
+    caplog.set_level(logging.WARNING, logger="ums_smart_revenue.tenancy.resolver")
+
+    def slow_authorizer(_scope, _slug) -> bool:
+        """Sleep longer than the configured authorization timeout."""
+        time.sleep(0.05)
+        return True
+
+    app.add_middleware(
+        TenantResolverMiddleware,
+        session_factory=factory,
+        authorize_tenant=slow_authorizer,
+        authorization_timeout_seconds=0.01,
+    )
+
+    @app.get("/whoami")
+    def whoami() -> dict[str, object]:
+        """Return context if timeout handling unexpectedly allows access."""
+        return {"tenant": get_current_tenant()}
+
+    client = TestClient(app)
+
+    response = client.get("/whoami", headers={TENANT_HEADER: "ums"})
+
+    assert response.status_code == 403
+    assert response.json() == {"detail": "Tenant access denied"}
+    assert response.headers["vary"] == TENANT_HEADER
+    assert "Tenant authorization callback timed out" in caplog.text
 
 
 def test_corrupt_tenant_registry_rows_fail_closed_and_log(

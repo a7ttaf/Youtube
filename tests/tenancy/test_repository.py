@@ -194,6 +194,27 @@ def test_to_domain_normalises_non_utc_datetimes():
     assert tenant.updated_at == expected
 
 
+@pytest.mark.parametrize(
+    ("field_name", "expected_error"),
+    (
+        ("id", "invalid id"),
+        ("slug", "invalid slug"),
+        ("display_name", "invalid display_name"),
+    ),
+)
+def test_to_domain_rejects_null_identity_fields(
+    field_name: str, expected_error: str
+):
+    """Tenant rows with missing identity fields fail domain conversion."""
+    from ums_smart_revenue.tenancy.repository import _to_domain
+
+    row = _make_tenant_row()
+    setattr(row, field_name, None)
+
+    with pytest.raises(ValueError, match=expected_error):
+        _to_domain(row)
+
+
 def test_to_domain_rejects_invalid_currency():
     """Tenant rows with malformed currency codes fail domain conversion."""
     from ums_smart_revenue.tenancy.repository import _to_domain

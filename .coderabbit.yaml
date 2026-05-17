@@ -399,6 +399,10 @@ reviews:
           Fail if public APIs, SDK types, CLI flags, webhooks, events, database schemas,
           environment variables, or configuration keys are changed incompatibly without
           documenting the breaking change in the PR description and relevant docs or changelog.
+          Return PASS when changes are backward-compatible, internal-only, test-only, or
+          limited to optional parameters with safe defaults. Do not return INCONCLUSIVE;
+          if evidence is insufficient, emit a concrete error naming the incompatible
+          public contract and the missing documentation or compatibility guard.
 
       - mode: warning
         name: "Behavior changes tested"
