@@ -23,10 +23,11 @@ class OrgBase(DeclarativeBase):
     pass
 
 
-# Shared server_default for the tenant_id column added in migration
-# 20260517_0001. See backend/ums_smart_revenue/db/security_models.py for
-# the rationale (single source of truth for the UMS tenant id).
+# Shared server_default and Python-side default for the tenant_id column added
+# in migration 20260517_0001. See security_models.py for the rationale.
+# Both required so new ORM instances carry the UUID before flush.
 _TENANT_ID_DEFAULT = text(f"'{UMS_TENANT_ID}'")
+_TENANT_ID_DEFAULT_VALUE = UUID(UMS_TENANT_ID)
 
 
 class OrgUnitORM(OrgBase):
@@ -53,7 +54,10 @@ class OrgUnitORM(OrgBase):
         onupdate=func.now(),
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
 
     __table_args__ = (
@@ -100,7 +104,10 @@ class YouTubeChannelORM(OrgBase):
         onupdate=func.now(),
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
 
     __table_args__ = (
@@ -149,7 +156,10 @@ class ChannelGroupORM(OrgBase):
         onupdate=func.now(),
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
 
     __table_args__ = (
@@ -181,7 +191,10 @@ class ChannelGroupMemberORM(OrgBase):
         primary_key=True,
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
 
     __table_args__ = (

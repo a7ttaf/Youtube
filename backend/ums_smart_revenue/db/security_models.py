@@ -31,6 +31,7 @@ class SecurityBase(DeclarativeBase):
 # keeps every model + migration in lockstep with the tenant #1 UUID
 # seeded in 20260516_0001.
 _TENANT_ID_DEFAULT = text(f"'{UMS_TENANT_ID}'")
+_TENANT_ID_DEFAULT_VALUE = UUID(UMS_TENANT_ID)
 
 
 class UserORM(SecurityBase):
@@ -59,7 +60,10 @@ class UserORM(SecurityBase):
         onupdate=func.now(),
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
 
     __table_args__ = (
@@ -71,7 +75,7 @@ class UserORM(SecurityBase):
             "OR (is_service_account = false AND status IN ('active', 'disabled'))",
             name="ck_users_service_account_status",
         ),
-        Index("uq_users_email_lower", func.lower(email), unique=True),
+        Index("uq_users_email_lower", "tenant_id", func.lower(email), unique=True),
         Index("ix_users_tenant_id", "tenant_id"),
     )
 
@@ -131,7 +135,10 @@ class AccessScopeORM(SecurityBase):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
 
     __table_args__ = (
@@ -222,7 +229,10 @@ class UserRoleAssignmentORM(SecurityBase):
         Boolean, nullable=False, server_default=text("true")
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
 
     __table_args__ = (
@@ -285,7 +295,10 @@ class UserPermissionGrantORM(SecurityBase):
         Boolean, nullable=False, server_default=text("true")
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
 
     __table_args__ = (
@@ -343,7 +356,10 @@ class AuditLogORM(SecurityBase):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
 
     __table_args__ = (
@@ -384,7 +400,10 @@ class ApiConnectorCredentialORM(SecurityBase):
         onupdate=func.now(),
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
 
     __table_args__ = (
@@ -394,6 +413,7 @@ class ApiConnectorCredentialORM(SecurityBase):
         ),
         Index(
             "uq_api_connector_credentials_connector_account",
+            "tenant_id",
             "connector_key",
             "account_id",
             unique=True,

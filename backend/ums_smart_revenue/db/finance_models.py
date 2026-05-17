@@ -132,6 +132,7 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
 
     __table_args__ = (
         UniqueConstraint(
+            "tenant_id",
             "month",
             "youtube_channel_id",
             "source_kind",
@@ -312,6 +313,7 @@ class BankReconciliationEntryORM(FinanceBase):
 
     __table_args__ = (
         UniqueConstraint(
+            "tenant_id",
             "month",
             "bank_reference",
             name="uq_bank_reconciliation_month_reference",

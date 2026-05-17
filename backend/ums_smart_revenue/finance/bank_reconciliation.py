@@ -14,9 +14,11 @@ from ums_smart_revenue.db.finance_models import BankReconciliationEntryORM
 from ums_smart_revenue.finance.adsense_payments import AdSensePaymentEntry
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 from ums_smart_revenue.finance.reconciliation import ReconciliationIssue
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 DEFAULT_BANK_RECONCILIATION_TOLERANCE_USD = Decimal("0.01")
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 class BankReconciliationError(ValueError):
@@ -54,9 +56,7 @@ class BankReconciliationEntry:
             "bank_received_date": self.bank_received_date.isoformat(),
             "bank_received_amount": _decimal_to_api(self.bank_received_amount),
             "bank_received_currency": self.bank_received_currency,
-            "bank_received_amount_usd": _decimal_to_api(
-                self.bank_received_amount_usd
-            ),
+            "bank_received_amount_usd": _decimal_to_api(self.bank_received_amount_usd),
             "transfer_fee_usd": _decimal_to_api(self.transfer_fee_usd),
             "fx_difference_usd": _decimal_to_api(self.fx_difference_usd),
             "notes": self.notes,
@@ -89,12 +89,8 @@ class MonthBankReconciliationSummary:
             "month": self.month,
             "currency": self.currency,
             "status": self.status,
-            "adsense_paid_amount_usd": _decimal_to_api(
-                self.adsense_paid_amount_usd
-            ),
-            "bank_received_amount_usd": _decimal_to_api(
-                self.bank_received_amount_usd
-            ),
+            "adsense_paid_amount_usd": _decimal_to_api(self.adsense_paid_amount_usd),
+            "bank_received_amount_usd": _decimal_to_api(self.bank_received_amount_usd),
             "bank_gap_usd": _decimal_to_api(self.bank_gap_usd),
             "transfer_fee_usd": _decimal_to_api(self.transfer_fee_usd),
             "fx_difference_usd": _decimal_to_api(self.fx_difference_usd),
@@ -114,6 +110,7 @@ class MonthBankReconciliationSummary:
 class SqlAlchemyBankReconciliationRepository:
     def __init__(self, session: Session):
         self._session = session
+        self._tenant_id = _DEFAULT_TENANT_UUID
 
     def record_entry(
         self,
@@ -153,6 +150,7 @@ class SqlAlchemyBankReconciliationRepository:
             BankReconciliationEntryORM
         ).values(
             id=uuid4(),
+            tenant_id=self._tenant_id,
             month=month,
             bank_reference=normalized_reference,
             bank_received_date=bank_received_date,
@@ -168,6 +166,7 @@ class SqlAlchemyBankReconciliationRepository:
         )
         statement = insert_statement.on_conflict_do_update(
             index_elements=[
+                BankReconciliationEntryORM.tenant_id,
                 BankReconciliationEntryORM.month,
                 BankReconciliationEntryORM.bank_reference,
             ],
@@ -187,9 +186,7 @@ class SqlAlchemyBankReconciliationRepository:
         row_id = self._session.execute(statement).scalar_one()
         row = self._session.get(BankReconciliationEntryORM, row_id)
         if row is None:
-            raise BankReconciliationValidationError(
-                "Bank reconciliation upsert failed"
-            )
+            raise BankReconciliationValidationError("Bank reconciliation upsert failed")
         self._session.refresh(row)
         return self._to_entry(row)
 
@@ -197,7 +194,10 @@ class SqlAlchemyBankReconciliationRepository:
         _validate_month(month)
         rows = self._session.scalars(
             select(BankReconciliationEntryORM)
-            .where(BankReconciliationEntryORM.month == month)
+            .where(
+                BankReconciliationEntryORM.tenant_id == self._tenant_id,
+                BankReconciliationEntryORM.month == month,
+            )
             .order_by(
                 BankReconciliationEntryORM.bank_received_date.desc(),
                 BankReconciliationEntryORM.bank_reference,

@@ -6,7 +6,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM
-
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 SECRET_REF_PREFIXES = (
     "secret-manager://",
@@ -16,8 +16,11 @@ SECRET_REF_PREFIXES = (
     "vault://",
     "kms://",
 )
-CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT = "uq_api_connector_credentials_connector_account"
+CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT = (
+    "uq_api_connector_credentials_connector_account"
+)
 MAX_CREDENTIAL_PAGE_SIZE = 100
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 @dataclass(frozen=True)
@@ -61,19 +64,28 @@ class ConnectorCredentialValidationError(ConnectorCredentialError):
 class SqlAlchemyConnectorCredentialRepository:
     def __init__(self, session: Session):
         self._session = session
+        self._tenant_id = _DEFAULT_TENANT_UUID
 
-    def list_credentials(self, *, limit: int = 50, offset: int = 0) -> ConnectorCredentialPage:
+    def list_credentials(
+        self, *, limit: int = 50, offset: int = 0
+    ) -> ConnectorCredentialPage:
         if limit < 1 or limit > MAX_CREDENTIAL_PAGE_SIZE:
             raise ConnectorCredentialValidationError(
                 f"limit must be between 1 and {MAX_CREDENTIAL_PAGE_SIZE}"
             )
         if offset < 0:
-            raise ConnectorCredentialValidationError("offset must be greater than or equal to 0")
+            raise ConnectorCredentialValidationError(
+                "offset must be greater than or equal to 0"
+            )
         rows = self._session.scalars(
-            select(ApiConnectorCredentialORM).order_by(
+            select(ApiConnectorCredentialORM)
+            .where(ApiConnectorCredentialORM.tenant_id == self._tenant_id)
+            .order_by(
                 ApiConnectorCredentialORM.connector_key,
                 ApiConnectorCredentialORM.account_id,
-            ).limit(limit + 1).offset(offset)
+            )
+            .limit(limit + 1)
+            .offset(offset)
         ).all()
         visible_rows = rows[:limit]
         return ConnectorCredentialPage(
@@ -94,6 +106,7 @@ class SqlAlchemyConnectorCredentialRepository:
         actor_uuid = _parse_uuid(actor_user_id)
         existing = self._session.scalars(
             select(ApiConnectorCredentialORM).where(
+                ApiConnectorCredentialORM.tenant_id == self._tenant_id,
                 ApiConnectorCredentialORM.connector_key == connector_key,
                 ApiConnectorCredentialORM.account_id == account_id,
             )
@@ -105,6 +118,7 @@ class SqlAlchemyConnectorCredentialRepository:
 
         row = ApiConnectorCredentialORM(
             id=uuid4(),
+            tenant_id=self._tenant_id,
             connector_key=connector_key,
             account_id=account_id,
             encrypted_secret_ref=encrypted_secret_ref,
@@ -149,7 +163,9 @@ def _parse_uuid(value: str) -> UUID:
     try:
         return UUID(value)
     except ValueError as exc:
-        raise ConnectorCredentialValidationError("actor_user_id must be a valid UUID") from exc
+        raise ConnectorCredentialValidationError(
+            "actor_user_id must be a valid UUID"
+        ) from exc
 
 
 def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:
@@ -161,8 +177,17 @@ def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:
     # PostgreSQL exposes the named constraint via diag.constraint_name; SQLite does not,
     # so keep an explicit fallback for its unique-constraint error text.
     error_text = f"{exc.orig!s} {exc!s}"
+    tenant_scoped_sqlite_constraint = (
+        "UNIQUE constraint failed: api_connector_credentials.tenant_id, "
+        "api_connector_credentials.connector_key, "
+        "api_connector_credentials.account_id"
+    )
+    legacy_sqlite_constraint = (
+        "UNIQUE constraint failed: api_connector_credentials.connector_key, "
+        "api_connector_credentials.account_id"
+    )
     return (
         CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT in error_text
-        or "UNIQUE constraint failed: api_connector_credentials.connector_key, api_connector_credentials.account_id"
-        in error_text
+        or tenant_scoped_sqlite_constraint in error_text
+        or legacy_sqlite_constraint in error_text
     )

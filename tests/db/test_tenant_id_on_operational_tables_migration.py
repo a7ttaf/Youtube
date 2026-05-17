@@ -33,6 +33,7 @@ from sqlalchemy import (
     UniqueConstraint,
     create_engine,
     event,
+    func,
     inspect,
     text,
 )
@@ -229,6 +230,78 @@ def test_tenant_scoped_constraints_are_rewritten():
         assert permission_scope_fk["referred_columns"] == ["tenant_id", "id"]
         assert (permission_scope_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
+        user_email_index_sql = connection.execute(
+            text(
+                "SELECT sql FROM sqlite_master "
+                "WHERE type = 'index' AND name = 'uq_users_email_lower'"
+            )
+        ).scalar_one()
+        assert "tenant_id" in user_email_index_sql
+        assert "lower(email)" in user_email_index_sql
+
+        api_connector_indexes = {
+            index["name"]: index["column_names"]
+            for index in inspector.get_indexes("api_connector_credentials")
+        }
+        assert api_connector_indexes[
+            "uq_api_connector_credentials_connector_account"
+        ] == [
+            "tenant_id",
+            "connector_key",
+            "account_id",
+        ]
+
+        monthly_revenue_uniques = {
+            constraint["name"]: constraint["column_names"]
+            for constraint in inspector.get_unique_constraints(
+                "monthly_channel_revenue_facts"
+            )
+        }
+        assert monthly_revenue_uniques["uq_monthly_channel_revenue_source"] == [
+            "tenant_id",
+            "month",
+            "youtube_channel_id",
+            "source_kind",
+        ]
+
+        bank_uniques = {
+            constraint["name"]: constraint["column_names"]
+            for constraint in inspector.get_unique_constraints(
+                "bank_reconciliation_entries"
+            )
+        }
+        assert bank_uniques["uq_bank_reconciliation_month_reference"] == [
+            "tenant_id",
+            "month",
+            "bank_reference",
+        ]
+
+        raw_report_uniques = {
+            constraint["name"]: constraint["column_names"]
+            for constraint in inspector.get_unique_constraints("raw_report_files")
+        }
+        assert raw_report_uniques[
+            "uq_raw_report_files_source_type_month_checksum"
+        ] == [
+            "tenant_id",
+            "source",
+            "report_type",
+            "report_month",
+            "checksum",
+        ]
+
+        explanation_uniques = {
+            constraint["name"]: constraint["column_names"]
+            for constraint in inspector.get_unique_constraints("number_explanations")
+        }
+        assert explanation_uniques["uq_number_explanations_entity_metric_month"] == [
+            "tenant_id",
+            "month",
+            "entity_type",
+            "entity_id",
+            "metric",
+        ]
+
         finance_pk = inspector.get_pk_constraint("finance_month_close")
         assert finance_pk["constrained_columns"] == ["tenant_id", "month"]
 
@@ -312,6 +385,13 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
     """
     metadata = MetaData()
     Table("tenants", metadata, Column("id", Text(), primary_key=True))
+    users = Table(
+        "users",
+        metadata,
+        Column("id", Text(), primary_key=True),
+        Column("email", Text(), nullable=True),
+    )
+    Index("uq_users_email_lower", func.lower(users.c.email), unique=True)
     access_scopes = Table(
         "access_scopes",
         metadata,
@@ -378,6 +458,19 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
         unique=True,
         sqlite_where=text("active = true"),
     )
+    api_connector_credentials = Table(
+        "api_connector_credentials",
+        metadata,
+        Column("id", Text(), primary_key=True),
+        Column("connector_key", Text(), nullable=False),
+        Column("account_id", Text(), nullable=False),
+    )
+    Index(
+        "uq_api_connector_credentials_connector_account",
+        api_connector_credentials.c.connector_key,
+        api_connector_credentials.c.account_id,
+        unique=True,
+    )
     Table("youtube_channels", metadata, Column("id", Text(), primary_key=True))
     Table("channel_groups", metadata, Column("id", Text(), primary_key=True))
     Table(
@@ -410,6 +503,48 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
         PrimaryKeyConstraint("month", name="finance_month_close_pkey"),
     )
     Table(
+        "monthly_channel_revenue_facts",
+        metadata,
+        Column("id", Text(), primary_key=True),
+        Column("month", Text(), nullable=False),
+        Column("youtube_channel_id", Text(), nullable=False),
+        Column("source_kind", Text(), nullable=False),
+        UniqueConstraint(
+            "month",
+            "youtube_channel_id",
+            "source_kind",
+            name="uq_monthly_channel_revenue_source",
+        ),
+    )
+    Table(
+        "bank_reconciliation_entries",
+        metadata,
+        Column("id", Text(), primary_key=True),
+        Column("month", Text(), nullable=False),
+        Column("bank_reference", Text(), nullable=False),
+        UniqueConstraint(
+            "month",
+            "bank_reference",
+            name="uq_bank_reconciliation_month_reference",
+        ),
+    )
+    Table(
+        "raw_report_files",
+        metadata,
+        Column("id", Text(), primary_key=True),
+        Column("source", Text(), nullable=False),
+        Column("report_type", Text(), nullable=False),
+        Column("report_month", Text(), nullable=False),
+        Column("checksum", Text(), nullable=False),
+        UniqueConstraint(
+            "source",
+            "report_type",
+            "report_month",
+            "checksum",
+            name="uq_raw_report_files_source_type_month_checksum",
+        ),
+    )
+    Table(
         "adsense_payments",
         metadata,
         Column("id", Text(), primary_key=True),
@@ -421,15 +556,37 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
             name="uq_adsense_payments_month_name",
         ),
     )
+    Table(
+        "number_explanations",
+        metadata,
+        Column("id", Text(), primary_key=True),
+        Column("month", Text(), nullable=False),
+        Column("entity_type", Text(), nullable=False),
+        Column("entity_id", Text(), nullable=False),
+        Column("metric", Text(), nullable=False),
+        UniqueConstraint(
+            "month",
+            "entity_type",
+            "entity_id",
+            "metric",
+            name="uq_number_explanations_entity_metric_month",
+        ),
+    )
     special_tables = {
         "access_scopes",
+        "api_connector_credentials",
         "adsense_payments",
+        "bank_reconciliation_entries",
         "channel_group_members",
         "channel_groups",
         "finance_month_close",
+        "monthly_channel_revenue_facts",
+        "number_explanations",
+        "raw_report_files",
         "tenants",
         "user_permission_grants",
         "user_role_assignments",
+        "users",
         "youtube_channels",
     }
     for table in EXPECTED_TABLES:

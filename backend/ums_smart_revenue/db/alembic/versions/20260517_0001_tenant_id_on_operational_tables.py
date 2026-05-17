@@ -76,6 +76,7 @@ def upgrade() -> None:
         _add_tenant_id_to(table_name)
     _scope_access_scope_unique_indexes()
     _scope_access_assignment_constraints()
+    _scope_tenant_unique_constraints()
     _scope_finance_month_close_primary_key()
     _scope_channel_group_membership_constraints()
     _scope_adsense_payment_unique_constraint()
@@ -85,6 +86,7 @@ def downgrade() -> None:
     _unscope_adsense_payment_unique_constraint()
     _unscope_channel_group_membership_constraints()
     _unscope_finance_month_close_primary_key()
+    _unscope_tenant_unique_constraints()
     _unscope_access_assignment_constraints()
     _unscope_access_scope_unique_indexes()
     for table_name in reversed(TENANT_SCOPED_TABLES):
@@ -127,6 +129,13 @@ def _drop_tenant_id_from(table_name: str) -> None:
     with op.batch_alter_table(table_name) as batch_op:
         batch_op.drop_constraint(fk_name, type_="foreignkey")
         batch_op.drop_column("tenant_id")
+
+
+def _drop_index(index_name: str, *, table_name: str) -> None:
+    if op.get_bind().dialect.name == "sqlite":
+        op.execute(sa.text(f'DROP INDEX IF EXISTS "{index_name}"'))
+        return
+    op.drop_index(index_name, table_name=table_name)
 
 
 def _scope_access_scope_unique_indexes() -> None:
@@ -274,6 +283,128 @@ def _unscope_access_assignment_constraints() -> None:
         )
     with op.batch_alter_table("access_scopes") as batch_op:
         batch_op.drop_constraint("uq_access_scopes_tenant_id_id", type_="unique")
+
+
+def _scope_tenant_unique_constraints() -> None:
+    _drop_index("uq_users_email_lower", table_name="users")
+    op.create_index(
+        "uq_users_email_lower",
+        "users",
+        ["tenant_id", sa.text("lower(email)")],
+        unique=True,
+    )
+
+    op.drop_index(
+        "uq_api_connector_credentials_connector_account",
+        table_name="api_connector_credentials",
+    )
+    op.create_index(
+        "uq_api_connector_credentials_connector_account",
+        "api_connector_credentials",
+        ["tenant_id", "connector_key", "account_id"],
+        unique=True,
+    )
+
+    with op.batch_alter_table("monthly_channel_revenue_facts") as batch_op:
+        batch_op.drop_constraint(
+            "uq_monthly_channel_revenue_source",
+            type_="unique",
+        )
+        batch_op.create_unique_constraint(
+            "uq_monthly_channel_revenue_source",
+            ["tenant_id", "month", "youtube_channel_id", "source_kind"],
+        )
+
+    with op.batch_alter_table("bank_reconciliation_entries") as batch_op:
+        batch_op.drop_constraint(
+            "uq_bank_reconciliation_month_reference",
+            type_="unique",
+        )
+        batch_op.create_unique_constraint(
+            "uq_bank_reconciliation_month_reference",
+            ["tenant_id", "month", "bank_reference"],
+        )
+
+    with op.batch_alter_table("raw_report_files") as batch_op:
+        batch_op.drop_constraint(
+            "uq_raw_report_files_source_type_month_checksum",
+            type_="unique",
+        )
+        batch_op.create_unique_constraint(
+            "uq_raw_report_files_source_type_month_checksum",
+            ["tenant_id", "source", "report_type", "report_month", "checksum"],
+        )
+
+    with op.batch_alter_table("number_explanations") as batch_op:
+        batch_op.drop_constraint(
+            "uq_number_explanations_entity_metric_month",
+            type_="unique",
+        )
+        batch_op.create_unique_constraint(
+            "uq_number_explanations_entity_metric_month",
+            ["tenant_id", "month", "entity_type", "entity_id", "metric"],
+        )
+
+
+def _unscope_tenant_unique_constraints() -> None:
+    with op.batch_alter_table("number_explanations") as batch_op:
+        batch_op.drop_constraint(
+            "uq_number_explanations_entity_metric_month",
+            type_="unique",
+        )
+        batch_op.create_unique_constraint(
+            "uq_number_explanations_entity_metric_month",
+            ["month", "entity_type", "entity_id", "metric"],
+        )
+
+    with op.batch_alter_table("raw_report_files") as batch_op:
+        batch_op.drop_constraint(
+            "uq_raw_report_files_source_type_month_checksum",
+            type_="unique",
+        )
+        batch_op.create_unique_constraint(
+            "uq_raw_report_files_source_type_month_checksum",
+            ["source", "report_type", "report_month", "checksum"],
+        )
+
+    with op.batch_alter_table("bank_reconciliation_entries") as batch_op:
+        batch_op.drop_constraint(
+            "uq_bank_reconciliation_month_reference",
+            type_="unique",
+        )
+        batch_op.create_unique_constraint(
+            "uq_bank_reconciliation_month_reference",
+            ["month", "bank_reference"],
+        )
+
+    with op.batch_alter_table("monthly_channel_revenue_facts") as batch_op:
+        batch_op.drop_constraint(
+            "uq_monthly_channel_revenue_source",
+            type_="unique",
+        )
+        batch_op.create_unique_constraint(
+            "uq_monthly_channel_revenue_source",
+            ["month", "youtube_channel_id", "source_kind"],
+        )
+
+    op.drop_index(
+        "uq_api_connector_credentials_connector_account",
+        table_name="api_connector_credentials",
+    )
+    op.create_index(
+        "uq_api_connector_credentials_connector_account",
+        "api_connector_credentials",
+        ["connector_key", "account_id"],
+        unique=True,
+    )
+
+    _drop_index("uq_users_email_lower", table_name="users")
+    op.create_index(
+        "uq_users_email_lower",
+        "users",
+        [sa.text("lower(email)")],
+        unique=True,
+    )
 
 
 def _scope_finance_month_close_primary_key() -> None:

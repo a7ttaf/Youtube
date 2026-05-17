@@ -63,6 +63,7 @@ class RawReportFileORM(ReportBase):
 
     __table_args__ = (
         UniqueConstraint(
+            "tenant_id",
             "source",
             "report_type",
             "report_month",
