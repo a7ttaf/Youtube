@@ -206,22 +206,16 @@ class UserRoleAssignmentORM(SecurityBase):
     id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
-    user_id: Mapped[UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
+    user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     role_key: Mapped[str] = mapped_column(
         ForeignKey("roles.key", ondelete="RESTRICT"), nullable=False
     )
     scope_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
-    assigned_by: Mapped[UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
+    assigned_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     assigned_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    revoked_by: Mapped[UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
+    revoked_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -248,6 +242,24 @@ class UserRoleAssignmentORM(SecurityBase):
             name="fk_user_role_assignments_tenant_scope",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["tenant_id", "user_id"],
+            ["users.tenant_id", "users.id"],
+            name="fk_user_role_assignments_tenant_user",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "assigned_by"],
+            ["users.tenant_id", "users.id"],
+            name="fk_user_role_assignments_tenant_assigned_by",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "revoked_by"],
+            ["users.tenant_id", "users.id"],
+            name="fk_user_role_assignments_tenant_revoked_by",
+            ondelete="RESTRICT",
+        ),
         Index(
             "uq_active_user_role_scope",
             "tenant_id",
@@ -271,22 +283,16 @@ class UserPermissionGrantORM(SecurityBase):
     id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
-    user_id: Mapped[UUID] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"), nullable=False
-    )
+    user_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     permission_key: Mapped[str] = mapped_column(
         ForeignKey("permissions.key", ondelete="RESTRICT"), nullable=False
     )
     scope_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
-    granted_by: Mapped[UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
+    granted_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     granted_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
-    revoked_by: Mapped[UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
+    revoked_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
@@ -314,6 +320,24 @@ class UserPermissionGrantORM(SecurityBase):
             name="fk_user_permission_grants_tenant_scope",
             ondelete="RESTRICT",
         ),
+        ForeignKeyConstraint(
+            ["tenant_id", "user_id"],
+            ["users.tenant_id", "users.id"],
+            name="fk_user_permission_grants_tenant_user",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "granted_by"],
+            ["users.tenant_id", "users.id"],
+            name="fk_user_permission_grants_tenant_granted_by",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "revoked_by"],
+            ["users.tenant_id", "users.id"],
+            name="fk_user_permission_grants_tenant_revoked_by",
+            ondelete="RESTRICT",
+        ),
         Index(
             "uq_active_user_permission_scope",
             "tenant_id",
@@ -337,9 +361,7 @@ class AuditLogORM(SecurityBase):
     id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
-    user_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
+    user_id: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     event_type: Mapped[str] = mapped_column(Text, nullable=False)
     entity_type: Mapped[str | None] = mapped_column(Text, nullable=True)
     entity_id: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -364,6 +386,12 @@ class AuditLogORM(SecurityBase):
     )
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "user_id"],
+            ["users.tenant_id", "users.id"],
+            name="fk_audit_logs_tenant_user",
+            ondelete="RESTRICT",
+        ),
         Index("ix_audit_logs_user_created", "user_id", "created_at"),
         Index("ix_audit_logs_event_created", "event_type", "created_at"),
         Index("ix_audit_logs_entity", "entity_type", "entity_id"),
@@ -385,12 +413,8 @@ class ApiConnectorCredentialORM(SecurityBase):
     status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'active'")
     )
-    created_by: Mapped[UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
-    updated_by: Mapped[UUID | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"), nullable=True
-    )
+    created_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    updated_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -411,6 +435,18 @@ class ApiConnectorCredentialORM(SecurityBase):
         CheckConstraint(
             "status IN ('active', 'disabled', 'rotating', 'failed_auth')",
             name="ck_connector_status",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "created_by"],
+            ["users.tenant_id", "users.id"],
+            name="fk_api_connector_credentials_tenant_created_by",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "updated_by"],
+            ["users.tenant_id", "users.id"],
+            name="fk_api_connector_credentials_tenant_updated_by",
+            ondelete="RESTRICT",
         ),
         Index(
             "uq_api_connector_credentials_connector_account",

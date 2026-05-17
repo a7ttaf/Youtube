@@ -81,9 +81,11 @@ def upgrade() -> None:
     _scope_channel_group_membership_constraints()
     _scope_adsense_payment_unique_constraint()
     _scope_org_units_parent_fk()
+    _scope_user_fks()
 
 
 def downgrade() -> None:
+    _unscope_user_fks()
     _unscope_org_units_parent_fk()
     _unscope_adsense_payment_unique_constraint()
     _unscope_channel_group_membership_constraints()
@@ -548,4 +550,214 @@ def _unscope_org_units_parent_fk() -> None:
             ["parent_id"],
             ["id"],
             ondelete="RESTRICT",
+        )
+
+
+def _scope_user_fks() -> None:
+    # ============================================================================
+    # Purpose: Replace all single-column user_id / assigned_by / revoked_by /
+    #          granted_by / created_by / updated_by FKs that reference users.id
+    #          with composite FKs (tenant_id, <col>) → users(tenant_id, id).
+    #          Prevents any user column from pointing at a user in a different
+    #          tenant. SET NULL semantics become RESTRICT because setting only
+    #          the user column to NULL while keeping tenant_id intact is not
+    #          possible with composite FK ON DELETE SET NULL semantics; users
+    #          are soft-deleted (disabled) rather than hard-deleted in practice.
+    # Database/ORM: user_role_assignments, user_permission_grants, audit_logs,
+    #              api_connector_credentials. Requires uq_users_tenant_id_id on
+    #              users(tenant_id, id) — created by _scope_tenant_unique_constraints.
+    # Blast Radius: Cross-tenant user references now blocked at DB level.
+    # ============================================================================
+    with op.batch_alter_table("user_role_assignments") as batch_op:
+        batch_op.drop_constraint(
+            "user_role_assignments_user_id_fkey", type_="foreignkey"
+        )
+        batch_op.drop_constraint(
+            "user_role_assignments_assigned_by_fkey", type_="foreignkey"
+        )
+        batch_op.drop_constraint(
+            "user_role_assignments_revoked_by_fkey", type_="foreignkey"
+        )
+        batch_op.create_foreign_key(
+            "fk_user_role_assignments_tenant_user",
+            "users",
+            ["tenant_id", "user_id"],
+            ["tenant_id", "id"],
+            ondelete="CASCADE",
+        )
+        batch_op.create_foreign_key(
+            "fk_user_role_assignments_tenant_assigned_by",
+            "users",
+            ["tenant_id", "assigned_by"],
+            ["tenant_id", "id"],
+            ondelete="RESTRICT",
+        )
+        batch_op.create_foreign_key(
+            "fk_user_role_assignments_tenant_revoked_by",
+            "users",
+            ["tenant_id", "revoked_by"],
+            ["tenant_id", "id"],
+            ondelete="RESTRICT",
+        )
+
+    with op.batch_alter_table("user_permission_grants") as batch_op:
+        batch_op.drop_constraint(
+            "user_permission_grants_user_id_fkey", type_="foreignkey"
+        )
+        batch_op.drop_constraint(
+            "user_permission_grants_granted_by_fkey", type_="foreignkey"
+        )
+        batch_op.drop_constraint(
+            "user_permission_grants_revoked_by_fkey", type_="foreignkey"
+        )
+        batch_op.create_foreign_key(
+            "fk_user_permission_grants_tenant_user",
+            "users",
+            ["tenant_id", "user_id"],
+            ["tenant_id", "id"],
+            ondelete="CASCADE",
+        )
+        batch_op.create_foreign_key(
+            "fk_user_permission_grants_tenant_granted_by",
+            "users",
+            ["tenant_id", "granted_by"],
+            ["tenant_id", "id"],
+            ondelete="RESTRICT",
+        )
+        batch_op.create_foreign_key(
+            "fk_user_permission_grants_tenant_revoked_by",
+            "users",
+            ["tenant_id", "revoked_by"],
+            ["tenant_id", "id"],
+            ondelete="RESTRICT",
+        )
+
+    with op.batch_alter_table("audit_logs") as batch_op:
+        batch_op.drop_constraint("audit_logs_user_id_fkey", type_="foreignkey")
+        batch_op.create_foreign_key(
+            "fk_audit_logs_tenant_user",
+            "users",
+            ["tenant_id", "user_id"],
+            ["tenant_id", "id"],
+            ondelete="RESTRICT",
+        )
+
+    with op.batch_alter_table("api_connector_credentials") as batch_op:
+        batch_op.drop_constraint(
+            "api_connector_credentials_created_by_fkey", type_="foreignkey"
+        )
+        batch_op.drop_constraint(
+            "api_connector_credentials_updated_by_fkey", type_="foreignkey"
+        )
+        batch_op.create_foreign_key(
+            "fk_api_connector_credentials_tenant_created_by",
+            "users",
+            ["tenant_id", "created_by"],
+            ["tenant_id", "id"],
+            ondelete="RESTRICT",
+        )
+        batch_op.create_foreign_key(
+            "fk_api_connector_credentials_tenant_updated_by",
+            "users",
+            ["tenant_id", "updated_by"],
+            ["tenant_id", "id"],
+            ondelete="RESTRICT",
+        )
+
+
+def _unscope_user_fks() -> None:
+    with op.batch_alter_table("api_connector_credentials") as batch_op:
+        batch_op.drop_constraint(
+            "fk_api_connector_credentials_tenant_updated_by", type_="foreignkey"
+        )
+        batch_op.drop_constraint(
+            "fk_api_connector_credentials_tenant_created_by", type_="foreignkey"
+        )
+        batch_op.create_foreign_key(
+            "api_connector_credentials_created_by_fkey",
+            "users",
+            ["created_by"],
+            ["id"],
+            ondelete="SET NULL",
+        )
+        batch_op.create_foreign_key(
+            "api_connector_credentials_updated_by_fkey",
+            "users",
+            ["updated_by"],
+            ["id"],
+            ondelete="SET NULL",
+        )
+
+    with op.batch_alter_table("audit_logs") as batch_op:
+        batch_op.drop_constraint("fk_audit_logs_tenant_user", type_="foreignkey")
+        batch_op.create_foreign_key(
+            "audit_logs_user_id_fkey",
+            "users",
+            ["user_id"],
+            ["id"],
+            ondelete="SET NULL",
+        )
+
+    with op.batch_alter_table("user_permission_grants") as batch_op:
+        batch_op.drop_constraint(
+            "fk_user_permission_grants_tenant_revoked_by", type_="foreignkey"
+        )
+        batch_op.drop_constraint(
+            "fk_user_permission_grants_tenant_granted_by", type_="foreignkey"
+        )
+        batch_op.drop_constraint(
+            "fk_user_permission_grants_tenant_user", type_="foreignkey"
+        )
+        batch_op.create_foreign_key(
+            "user_permission_grants_user_id_fkey",
+            "users",
+            ["user_id"],
+            ["id"],
+            ondelete="CASCADE",
+        )
+        batch_op.create_foreign_key(
+            "user_permission_grants_granted_by_fkey",
+            "users",
+            ["granted_by"],
+            ["id"],
+            ondelete="SET NULL",
+        )
+        batch_op.create_foreign_key(
+            "user_permission_grants_revoked_by_fkey",
+            "users",
+            ["revoked_by"],
+            ["id"],
+            ondelete="SET NULL",
+        )
+
+    with op.batch_alter_table("user_role_assignments") as batch_op:
+        batch_op.drop_constraint(
+            "fk_user_role_assignments_tenant_revoked_by", type_="foreignkey"
+        )
+        batch_op.drop_constraint(
+            "fk_user_role_assignments_tenant_assigned_by", type_="foreignkey"
+        )
+        batch_op.drop_constraint(
+            "fk_user_role_assignments_tenant_user", type_="foreignkey"
+        )
+        batch_op.create_foreign_key(
+            "user_role_assignments_user_id_fkey",
+            "users",
+            ["user_id"],
+            ["id"],
+            ondelete="CASCADE",
+        )
+        batch_op.create_foreign_key(
+            "user_role_assignments_assigned_by_fkey",
+            "users",
+            ["assigned_by"],
+            ["id"],
+            ondelete="SET NULL",
+        )
+        batch_op.create_foreign_key(
+            "user_role_assignments_revoked_by_fkey",
+            "users",
+            ["revoked_by"],
+            ["id"],
+            ondelete="SET NULL",
         )

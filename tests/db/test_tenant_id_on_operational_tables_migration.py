@@ -371,6 +371,63 @@ def test_tenant_scoped_constraints_are_rewritten():
         assert parent_fk["referred_columns"] == ["tenant_id", "id"]
         assert (parent_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
+        role_assign_fks = {
+            fk["name"]: fk
+            for fk in inspector.get_foreign_keys("user_role_assignments")
+        }
+        ura_user_fk = role_assign_fks["fk_user_role_assignments_tenant_user"]
+        assert ura_user_fk["constrained_columns"] == ["tenant_id", "user_id"]
+        assert ura_user_fk["referred_table"] == "users"
+        assert ura_user_fk["referred_columns"] == ["tenant_id", "id"]
+        assert (ura_user_fk.get("options") or {}).get("ondelete") == "CASCADE"
+        ura_ab_fk = role_assign_fks["fk_user_role_assignments_tenant_assigned_by"]
+        assert ura_ab_fk["constrained_columns"] == ["tenant_id", "assigned_by"]
+        assert ura_ab_fk["referred_table"] == "users"
+        assert ura_ab_fk["referred_columns"] == ["tenant_id", "id"]
+        ura_rb_fk = role_assign_fks["fk_user_role_assignments_tenant_revoked_by"]
+        assert ura_rb_fk["constrained_columns"] == ["tenant_id", "revoked_by"]
+        assert ura_rb_fk["referred_table"] == "users"
+        assert ura_rb_fk["referred_columns"] == ["tenant_id", "id"]
+
+        perm_grant_fks = {
+            fk["name"]: fk
+            for fk in inspector.get_foreign_keys("user_permission_grants")
+        }
+        upg_user_fk = perm_grant_fks["fk_user_permission_grants_tenant_user"]
+        assert upg_user_fk["constrained_columns"] == ["tenant_id", "user_id"]
+        assert upg_user_fk["referred_table"] == "users"
+        assert upg_user_fk["referred_columns"] == ["tenant_id", "id"]
+        assert (upg_user_fk.get("options") or {}).get("ondelete") == "CASCADE"
+        upg_gb_fk = perm_grant_fks["fk_user_permission_grants_tenant_granted_by"]
+        assert upg_gb_fk["constrained_columns"] == ["tenant_id", "granted_by"]
+        assert upg_gb_fk["referred_table"] == "users"
+        assert upg_gb_fk["referred_columns"] == ["tenant_id", "id"]
+        upg_rb_fk = perm_grant_fks["fk_user_permission_grants_tenant_revoked_by"]
+        assert upg_rb_fk["constrained_columns"] == ["tenant_id", "revoked_by"]
+        assert upg_rb_fk["referred_table"] == "users"
+        assert upg_rb_fk["referred_columns"] == ["tenant_id", "id"]
+
+        audit_fks = {
+            fk["name"]: fk for fk in inspector.get_foreign_keys("audit_logs")
+        }
+        al_user_fk = audit_fks["fk_audit_logs_tenant_user"]
+        assert al_user_fk["constrained_columns"] == ["tenant_id", "user_id"]
+        assert al_user_fk["referred_table"] == "users"
+        assert al_user_fk["referred_columns"] == ["tenant_id", "id"]
+
+        connector_fks = {
+            fk["name"]: fk
+            for fk in inspector.get_foreign_keys("api_connector_credentials")
+        }
+        acc_cb_fk = connector_fks["fk_api_connector_credentials_tenant_created_by"]
+        assert acc_cb_fk["constrained_columns"] == ["tenant_id", "created_by"]
+        assert acc_cb_fk["referred_table"] == "users"
+        assert acc_cb_fk["referred_columns"] == ["tenant_id", "id"]
+        acc_ub_fk = connector_fks["fk_api_connector_credentials_tenant_updated_by"]
+        assert acc_ub_fk["constrained_columns"] == ["tenant_id", "updated_by"]
+        assert acc_ub_fk["referred_table"] == "users"
+        assert acc_ub_fk["referred_columns"] == ["tenant_id", "id"]
+
 
 def test_downgrade_removes_tenant_id_from_every_table():
     engine = _build_engine()
@@ -440,12 +497,32 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
         Column("user_id", Text(), nullable=False),
         Column("role_key", Text(), nullable=False),
         Column("scope_id", Text(), nullable=False),
+        Column("assigned_by", Text(), nullable=True),
+        Column("revoked_by", Text(), nullable=True),
         Column("active", Boolean(), nullable=False),
         ForeignKeyConstraint(
             ["scope_id"],
             ["access_scopes.id"],
             name="user_role_assignments_scope_id_fkey",
             ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="user_role_assignments_user_id_fkey",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["assigned_by"],
+            ["users.id"],
+            name="user_role_assignments_assigned_by_fkey",
+            ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            ["revoked_by"],
+            ["users.id"],
+            name="user_role_assignments_revoked_by_fkey",
+            ondelete="SET NULL",
         ),
     )
     Index(
@@ -463,12 +540,32 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
         Column("user_id", Text(), nullable=False),
         Column("permission_key", Text(), nullable=False),
         Column("scope_id", Text(), nullable=False),
+        Column("granted_by", Text(), nullable=True),
+        Column("revoked_by", Text(), nullable=True),
         Column("active", Boolean(), nullable=False),
         ForeignKeyConstraint(
             ["scope_id"],
             ["access_scopes.id"],
             name="user_permission_grants_scope_id_fkey",
             ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="user_permission_grants_user_id_fkey",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["granted_by"],
+            ["users.id"],
+            name="user_permission_grants_granted_by_fkey",
+            ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            ["revoked_by"],
+            ["users.id"],
+            name="user_permission_grants_revoked_by_fkey",
+            ondelete="SET NULL",
         ),
     )
     Index(
@@ -485,6 +582,20 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
         Column("id", Text(), primary_key=True),
         Column("connector_key", Text(), nullable=False),
         Column("account_id", Text(), nullable=False),
+        Column("created_by", Text(), nullable=True),
+        Column("updated_by", Text(), nullable=True),
+        ForeignKeyConstraint(
+            ["created_by"],
+            ["users.id"],
+            name="api_connector_credentials_created_by_fkey",
+            ondelete="SET NULL",
+        ),
+        ForeignKeyConstraint(
+            ["updated_by"],
+            ["users.id"],
+            name="api_connector_credentials_updated_by_fkey",
+            ondelete="SET NULL",
+        ),
     )
     Index(
         "uq_api_connector_credentials_connector_account",
@@ -606,10 +717,23 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
             name="uq_number_explanations_entity_metric_month",
         ),
     )
+    Table(
+        "audit_logs",
+        metadata,
+        Column("id", Text(), primary_key=True),
+        Column("user_id", Text(), nullable=True),
+        ForeignKeyConstraint(
+            ["user_id"],
+            ["users.id"],
+            name="audit_logs_user_id_fkey",
+            ondelete="SET NULL",
+        ),
+    )
     special_tables = {
         "access_scopes",
         "api_connector_credentials",
         "adsense_payments",
+        "audit_logs",
         "bank_reconciliation_entries",
         "channel_group_members",
         "channel_groups",
