@@ -226,6 +226,34 @@ def test_health_endpoint_bypasses_resolver():
     assert response.json() == {"status": "ok"}
 
 
+def test_options_requests_bypass_tenant_resolution_without_header():
+    """OPTIONS probes pass through without tenant headers or registry lookup."""
+    app = FastAPI()
+
+    def unexpected_session_factory() -> object:
+        """Fail the test if OPTIONS incorrectly reaches tenant lookup."""
+        raise AssertionError("OPTIONS must bypass tenant lookup")
+
+    app.add_middleware(
+        TenantResolverMiddleware,
+        session_factory=unexpected_session_factory,
+        authorize_tenant=lambda _scope, _slug: True,
+    )
+
+    @app.options("/whoami")
+    def preflight() -> dict[str, str]:
+        """Return a synthetic preflight response."""
+        return {"status": "preflight"}
+
+    client = TestClient(app)
+
+    response = client.options("/whoami")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "preflight"}
+    assert get_current_tenant() is None
+
+
 def test_tenant_context_is_cleared_after_response():
     """Tenant context resets after the request task finishes."""
     engine = _build_engine()

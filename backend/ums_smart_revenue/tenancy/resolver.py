@@ -93,6 +93,10 @@ class TenantResolverMiddleware:
             await self.app(scope, receive, send)
             return
 
+        if scope.get("method", "").upper() == "OPTIONS":
+            await self.app(scope, receive, send)
+            return
+
         if self._should_bypass(scope["path"]):
             await self.app(scope, receive, send)
             return
