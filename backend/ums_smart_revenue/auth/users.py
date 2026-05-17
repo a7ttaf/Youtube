@@ -24,6 +24,7 @@ from ums_smart_revenue.db.security_models import (
     UserPermissionGrantORM,
     UserRoleAssignmentORM,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -40,6 +41,7 @@ USER_DISPLAY_NAME_MAX_LENGTH = 200
 USER_LIST_MAX_OFFSET = 10_000
 _EMAIL_CONFLICT_SAMPLE_LIMIT = 2
 USER_ACCOUNT_STORAGE_ATTEMPTS = 2
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 @dataclass(frozen=True)
@@ -130,6 +132,7 @@ class SqlAlchemyUserAccountRepository:
     def __init__(self, session: Session):
         """Bind repository operations to the request-scoped SQLAlchemy session."""
         self._session = session
+        self._tenant_id = _DEFAULT_TENANT_UUID
 
     def create_user(
         self,
@@ -156,6 +159,7 @@ class SqlAlchemyUserAccountRepository:
 
             row = UserORM(
                 id=uuid4(),
+                tenant_id=self._tenant_id,
                 email=normalized_email,
                 display_name=normalized_display_name,
                 status=(
@@ -187,7 +191,12 @@ class SqlAlchemyUserAccountRepository:
 
         def operation() -> UserAccountEntry:
             """Attempt one account lookup against the current session."""
-            row = self._session.get(UserORM, user_uuid)
+            row = self._session.scalars(
+                select(UserORM).where(
+                    UserORM.id == user_uuid,
+                    UserORM.tenant_id == self._tenant_id,
+                )
+            ).one_or_none()
             if row is None:
                 raise UserAccountNotFoundError("User not found")
             return self._to_entry(row)
@@ -218,7 +227,11 @@ class SqlAlchemyUserAccountRepository:
         ]:
             """Attempt one user-list read against the current session."""
             email_sort_key = func.lower(UserORM.email)
-            statement = select(UserORM).order_by(email_sort_key, UserORM.id)
+            statement = (
+                select(UserORM)
+                .where(UserORM.tenant_id == self._tenant_id)
+                .order_by(email_sort_key, UserORM.id)
+            )
             if normalized_status is not None:
                 statement = statement.where(UserORM.status == normalized_status)
             if cursor is not None:
@@ -253,7 +266,12 @@ class SqlAlchemyUserAccountRepository:
 
         def operation() -> UserAccessProfileEntry:
             """Attempt one access-profile read against the current session."""
-            account_row = self._session.get(UserORM, user_uuid)
+            account_row = self._session.scalars(
+                select(UserORM).where(
+                    UserORM.id == user_uuid,
+                    UserORM.tenant_id == self._tenant_id,
+                )
+            ).one_or_none()
             if account_row is None:
                 raise UserAccountNotFoundError("User not found")
 
@@ -261,10 +279,12 @@ class SqlAlchemyUserAccountRepository:
                 select(UserRoleAssignmentORM, AccessScopeORM)
                 .join(
                     AccessScopeORM,
-                    UserRoleAssignmentORM.scope_id == AccessScopeORM.id,
+                    (UserRoleAssignmentORM.scope_id == AccessScopeORM.id)
+                    & (AccessScopeORM.tenant_id == self._tenant_id),
                 )
                 .where(
                     UserRoleAssignmentORM.user_id == user_uuid,
+                    UserRoleAssignmentORM.tenant_id == self._tenant_id,
                     UserRoleAssignmentORM.active.is_(True),
                 )
                 .order_by(UserRoleAssignmentORM.assigned_at, UserRoleAssignmentORM.id)
@@ -273,10 +293,12 @@ class SqlAlchemyUserAccountRepository:
                 select(UserPermissionGrantORM, AccessScopeORM)
                 .join(
                     AccessScopeORM,
-                    UserPermissionGrantORM.scope_id == AccessScopeORM.id,
+                    (UserPermissionGrantORM.scope_id == AccessScopeORM.id)
+                    & (AccessScopeORM.tenant_id == self._tenant_id),
                 )
                 .where(
                     UserPermissionGrantORM.user_id == user_uuid,
+                    UserPermissionGrantORM.tenant_id == self._tenant_id,
                     UserPermissionGrantORM.active.is_(True),
                 )
                 .order_by(UserPermissionGrantORM.granted_at, UserPermissionGrantORM.id)
@@ -325,7 +347,12 @@ class SqlAlchemyUserAccountRepository:
 
         def operation() -> UserAccountEntry:
             """Attempt one account-update write against the current session."""
-            row = self._session.get(UserORM, user_uuid)
+            row = self._session.scalars(
+                select(UserORM).where(
+                    UserORM.id == user_uuid,
+                    UserORM.tenant_id == self._tenant_id,
+                )
+            ).one_or_none()
             if row is None:
                 raise UserAccountNotFoundError("User not found")
 
@@ -389,7 +416,10 @@ class SqlAlchemyUserAccountRepository:
         self, email: str, *, excluding_user_id: UUID | None = None
     ) -> bool:
         """Return whether a normalized email already belongs to another user."""
-        criteria = [func.lower(UserORM.email) == email]
+        criteria = [
+            UserORM.tenant_id == self._tenant_id,
+            func.lower(UserORM.email) == email,
+        ]
         if excluding_user_id is not None:
             criteria.append(UserORM.id != excluding_user_id)
         conflicts = self._session.scalars(
