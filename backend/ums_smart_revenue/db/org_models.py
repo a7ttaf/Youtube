@@ -5,7 +5,6 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     DateTime,
-    ForeignKey,
     ForeignKeyConstraint,
     Index,
     Text,
@@ -83,8 +82,7 @@ class YouTubeChannelORM(OrgBase):
     youtube_channel_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
     channel_name: Mapped[str] = mapped_column(Text, nullable=False)
     primary_org_unit_id: Mapped[UUID | None] = mapped_column(
-        ForeignKey("org_units.id", ondelete="RESTRICT"),
-        nullable=True,
+        Uuid(as_uuid=True), nullable=True
     )
     cms_status: Mapped[str] = mapped_column(
         Text, nullable=False, server_default=text("'UNKNOWN'")
@@ -116,6 +114,12 @@ class YouTubeChannelORM(OrgBase):
     )
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "primary_org_unit_id"],
+            ["org_units.tenant_id", "org_units.id"],
+            name="fk_youtube_channels_tenant_org_unit",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             "cms_status IN ('INSIDE_CMS', 'OUTSIDE_CMS', 'UNKNOWN')",
             name="ck_youtube_channels_cms_status",

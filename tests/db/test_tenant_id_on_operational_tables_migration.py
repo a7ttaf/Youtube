@@ -321,6 +321,18 @@ def test_tenant_scoped_constraints_are_rewritten():
             "payment_name",
         ]
 
+        yt_channel_fks = {
+            fk["name"]: fk for fk in inspector.get_foreign_keys("youtube_channels")
+        }
+        yt_org_fk = yt_channel_fks["fk_youtube_channels_tenant_org_unit"]
+        assert yt_org_fk["constrained_columns"] == [
+            "tenant_id",
+            "primary_org_unit_id",
+        ]
+        assert yt_org_fk["referred_table"] == "org_units"
+        assert yt_org_fk["referred_columns"] == ["tenant_id", "id"]
+        assert (yt_org_fk.get("options") or {}).get("ondelete") == "RESTRICT"
+
         youtube_uniques = {
             constraint["name"]: constraint["column_names"]
             for constraint in inspector.get_unique_constraints("youtube_channels")
@@ -616,7 +628,18 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
         ),
     )
     del org_units  # referenced only to register with metadata
-    Table("youtube_channels", metadata, Column("id", Text(), primary_key=True))
+    Table(
+        "youtube_channels",
+        metadata,
+        Column("id", Text(), primary_key=True),
+        Column("primary_org_unit_id", Text(), nullable=True),
+        ForeignKeyConstraint(
+            ["primary_org_unit_id"],
+            ["org_units.id"],
+            name="youtube_channels_primary_org_unit_id_fkey",
+            ondelete="RESTRICT",
+        ),
+    )
     Table("channel_groups", metadata, Column("id", Text(), primary_key=True))
     Table(
         "channel_group_members",

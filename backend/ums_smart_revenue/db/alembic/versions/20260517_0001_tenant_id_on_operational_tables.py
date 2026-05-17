@@ -81,11 +81,13 @@ def upgrade() -> None:
     _scope_channel_group_membership_constraints()
     _scope_adsense_payment_unique_constraint()
     _scope_org_units_parent_fk()
+    _scope_youtube_channel_org_unit_fk()
     _scope_user_fks()
 
 
 def downgrade() -> None:
     _unscope_user_fks()
+    _unscope_youtube_channel_org_unit_fk()
     _unscope_org_units_parent_fk()
     _unscope_adsense_payment_unique_constraint()
     _unscope_channel_group_membership_constraints()
@@ -548,6 +550,38 @@ def _unscope_org_units_parent_fk() -> None:
             "org_units_parent_id_fkey",
             "org_units",
             ["parent_id"],
+            ["id"],
+            ondelete="RESTRICT",
+        )
+
+
+def _scope_youtube_channel_org_unit_fk() -> None:
+    # Replace the single-column FK primary_org_unit_id -> org_units.id with a
+    # composite FK (tenant_id, primary_org_unit_id) -> org_units(tenant_id, id)
+    # so a channel cannot reference an org_unit from a different tenant.
+    # Requires uq_org_units_tenant_id_id created by _scope_org_units_parent_fk.
+    with op.batch_alter_table("youtube_channels") as batch_op:
+        batch_op.drop_constraint(
+            "youtube_channels_primary_org_unit_id_fkey", type_="foreignkey"
+        )
+        batch_op.create_foreign_key(
+            "fk_youtube_channels_tenant_org_unit",
+            "org_units",
+            ["tenant_id", "primary_org_unit_id"],
+            ["tenant_id", "id"],
+            ondelete="RESTRICT",
+        )
+
+
+def _unscope_youtube_channel_org_unit_fk() -> None:
+    with op.batch_alter_table("youtube_channels") as batch_op:
+        batch_op.drop_constraint(
+            "fk_youtube_channels_tenant_org_unit", type_="foreignkey"
+        )
+        batch_op.create_foreign_key(
+            "youtube_channels_primary_org_unit_id_fkey",
+            "org_units",
+            ["primary_org_unit_id"],
             ["id"],
             ondelete="RESTRICT",
         )
