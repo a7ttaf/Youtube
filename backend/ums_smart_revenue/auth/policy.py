@@ -1,3 +1,5 @@
+"""Authorization predicates for tenant users and platform admins."""
+
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.platform_admin import (
@@ -8,7 +10,6 @@ from ums_smart_revenue.auth.platform_admin import (
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 
-
 EMPTY_ORG_INDEX = OrgAccessIndex()
 
 
@@ -18,13 +19,18 @@ def has_permission(
     scope: AccessScope,
     org_index: OrgAccessIndex | None = None,
 ) -> bool:
+    """Return whether a tenant user has a permission on a scope."""
     if user.disabled:
         return False
 
     index = org_index or EMPTY_ORG_INDEX
 
     for grant in user.direct_permissions:
-        if grant.active and grant.permission == permission and index.contains(grant.scope, scope):
+        if (
+            grant.active
+            and grant.permission == permission
+            and index.contains(grant.scope, scope)
+        ):
             return True
 
     for assignment in user.role_assignments:
@@ -42,7 +48,10 @@ def can_view_channel_analytics(
     channel_id: str,
     org_index: OrgAccessIndex,
 ) -> bool:
-    return has_permission(user, Permission.VIEW_ANALYTICS, AccessScope.channel(channel_id), org_index)
+    """Authorize analytics reads for a specific channel."""
+    return has_permission(
+        user, Permission.VIEW_ANALYTICS, AccessScope.channel(channel_id), org_index
+    )
 
 
 def can_view_channel_revenue(
@@ -50,7 +59,10 @@ def can_view_channel_revenue(
     channel_id: str,
     org_index: OrgAccessIndex,
 ) -> bool:
-    return has_permission(user, Permission.VIEW_REVENUE, AccessScope.channel(channel_id), org_index)
+    """Authorize revenue reads for a specific channel."""
+    return has_permission(
+        user, Permission.VIEW_REVENUE, AccessScope.channel(channel_id), org_index
+    )
 
 
 def can_view_company_revenue(
@@ -58,7 +70,10 @@ def can_view_company_revenue(
     company_id: str,
     org_index: OrgAccessIndex,
 ) -> bool:
-    return has_permission(user, Permission.VIEW_REVENUE, AccessScope.company(company_id), org_index)
+    """Authorize revenue reads for a company scope."""
+    return has_permission(
+        user, Permission.VIEW_REVENUE, AccessScope.company(company_id), org_index
+    )
 
 
 def can_export_finance_report(
@@ -66,7 +81,10 @@ def can_export_finance_report(
     scope: AccessScope,
     org_index: OrgAccessIndex,
 ) -> bool:
-    return has_permission(user, Permission.EXPORT_REVENUE_REPORT, scope, org_index) and has_permission(
+    """Authorize exports only when the user can export and view revenue."""
+    return has_permission(
+        user, Permission.EXPORT_REVENUE_REPORT, scope, org_index
+    ) and has_permission(
         user,
         Permission.VIEW_REVENUE,
         scope,
@@ -75,15 +93,24 @@ def can_export_finance_report(
 
 
 def can_lock_month(user: UserPrincipal, month: str) -> bool:
-    return has_permission(user, Permission.LOCK_FINANCE_MONTH, AccessScope.finance_month(month))
+    """Authorize locking a finance month."""
+    return has_permission(
+        user, Permission.LOCK_FINANCE_MONTH, AccessScope.finance_month(month)
+    )
 
 
 def can_unlock_month(user: UserPrincipal, month: str) -> bool:
-    return has_permission(user, Permission.UNLOCK_FINANCE_MONTH, AccessScope.finance_month(month))
+    """Authorize unlocking a finance month."""
+    return has_permission(
+        user, Permission.UNLOCK_FINANCE_MONTH, AccessScope.finance_month(month)
+    )
 
 
 def can_change_allocation_rule(user: UserPrincipal, month: str) -> bool:
-    return has_permission(user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(month))
+    """Authorize changes to allocation rules for a finance month."""
+    return has_permission(
+        user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(month)
+    )
 
 
 def can_view_neo4j_graph(
@@ -93,11 +120,14 @@ def can_view_neo4j_graph(
     *,
     contains_finance: bool = False,
 ) -> bool:
+    """Authorize graph reads, adding finance checks for finance-bearing graphs."""
     if not has_permission(user, Permission.VIEW_GRAPH, scope, org_index):
         return False
     if not contains_finance:
         return True
-    return has_permission(user, Permission.VIEW_GRAPH_FINANCE, scope, org_index) and has_permission(
+    return has_permission(
+        user, Permission.VIEW_GRAPH_FINANCE, scope, org_index
+    ) and has_permission(
         user,
         Permission.VIEW_REVENUE,
         scope,
@@ -106,14 +136,21 @@ def can_view_neo4j_graph(
 
 
 def can_manage_connectors(user: UserPrincipal) -> bool:
-    return has_permission(user, Permission.MANAGE_CONNECTORS, AccessScope.global_scope())
+    """Authorize connector administration."""
+    return has_permission(
+        user, Permission.MANAGE_CONNECTORS, AccessScope.global_scope()
+    )
 
 
 def can_run_connector_job(user: UserPrincipal, connector_id: str) -> bool:
-    return has_permission(user, Permission.RUN_CONNECTOR_JOBS, AccessScope.connector(connector_id))
+    """Authorize running a connector job."""
+    return has_permission(
+        user, Permission.RUN_CONNECTOR_JOBS, AccessScope.connector(connector_id)
+    )
 
 
 def can_assign_roles(user: UserPrincipal) -> bool:
+    """Authorize global role assignment."""
     return has_permission(user, Permission.ASSIGN_ROLES, AccessScope.global_scope())
 
 
@@ -139,4 +176,3 @@ def can_manage_tenants(principal: Principal) -> bool:
     auditors) without churn at every consumer.
     """
     return is_platform_admin(principal)
-

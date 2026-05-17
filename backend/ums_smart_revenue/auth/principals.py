@@ -87,20 +87,19 @@ class SqlAlchemyPrincipalLoader:
     ) -> UserPrincipal:
         """Return a UserPrincipal using a loader-owned isolated transaction.
 
-        ``tenant_id`` is recorded on the principal verbatim; it is the
-        responsibility of the caller (typically the API dependency layer
-        reading from the tenant resolver's contextvar) to ensure the
-        value matches the user's stored tenant once S2.4 enforces that.
-        Until then, callers may pass ``None`` for legacy routes.
+        ``tenant_id`` is normalized to a canonical UUID string before it
+        reaches policy code. Blank values are treated as missing during
+        the pre-S2.4 window; malformed non-empty values fail closed.
         """
         parsed_user_id = _parse_uuid(user_id)
+        parsed_tenant_id = _parse_tenant_uuid(tenant_id)
         if self._session.in_transaction():
             raise PrincipalTransactionError(
                 "Principal loads require a session without an active transaction"
             )
         with self._session.begin():
             self._prepare_read_connection()
-            return self._load_principal(parsed_user_id, tenant_id=tenant_id)
+            return self._load_principal(parsed_user_id, tenant_id=parsed_tenant_id)
 
     def _load_principal(
         self,
@@ -202,6 +201,22 @@ def _parse_uuid(value: str) -> UUID:
         return UUID(value.strip())
     except ValueError as exc:
         raise PrincipalValidationError("user_id must be a valid UUID") from exc
+
+
+def _parse_tenant_uuid(value: str | None) -> str | None:
+    """Normalize optional tenant context into a canonical UUID string."""
+    if value is None:
+        return None
+    try:
+        stripped_value = value.strip()
+    except AttributeError as exc:
+        raise PrincipalValidationError("tenant_id must be a valid UUID") from exc
+    if not stripped_value:
+        return None
+    try:
+        return str(UUID(stripped_value))
+    except ValueError as exc:
+        raise PrincipalValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _parse_user_status(value: str) -> UserStatus:

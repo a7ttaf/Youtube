@@ -1,3 +1,5 @@
+"""Immutable request-principal models used by authorization policy code."""
+
 from dataclasses import dataclass, field
 
 from ums_smart_revenue.auth.permissions import Permission
@@ -7,6 +9,8 @@ from ums_smart_revenue.auth.scopes import AccessScope
 
 @dataclass(frozen=True)
 class RoleAssignment:
+    """Role membership granted to a user over an access scope."""
+
     role: RoleKey
     scope: AccessScope
     active: bool = True
@@ -14,6 +18,8 @@ class RoleAssignment:
 
 @dataclass(frozen=True)
 class PermissionGrant:
+    """Direct permission grant assigned to a user over an access scope."""
+
     permission: Permission
     scope: AccessScope
     active: bool = True
@@ -21,6 +27,8 @@ class PermissionGrant:
 
 @dataclass(frozen=True)
 class UserPrincipal:
+    """Immutable tenant-user identity and authorization material."""
+
     user_id: str
     email: str
     role_assignments: tuple[RoleAssignment, ...] = field(default_factory=tuple)
@@ -35,6 +43,6 @@ class UserPrincipal:
     tenant_id: str | None = None
 
     def __post_init__(self) -> None:
+        """Freeze iterable authorization collections as tuples."""
         object.__setattr__(self, "role_assignments", tuple(self.role_assignments))
         object.__setattr__(self, "direct_permissions", tuple(self.direct_permissions))
-

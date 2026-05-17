@@ -1,10 +1,11 @@
 """Behaviour tests for :mod:`ums_smart_revenue.auth.platform_admin`."""
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, event
+from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -23,13 +24,13 @@ from ums_smart_revenue.auth.policy import (
 )
 from ums_smart_revenue.db.tenant_models import PlatformAdminORM, TenantBase
 
-
 # ---------------------------------------------------------------------------
 # PlatformAdminPrincipal + PlatformAdminStatus
 # ---------------------------------------------------------------------------
 
 
-def test_status_vocabulary_matches_sql_constraint():
+def test_status_vocabulary_matches_sql_constraint() -> None:
+    """Platform-admin statuses stay aligned with the migration CHECK."""
     assert {s.value for s in PlatformAdminStatus} == {
         "ACTIVE",
         "SUSPENDED",
@@ -37,7 +38,8 @@ def test_status_vocabulary_matches_sql_constraint():
     }
 
 
-def test_platform_admin_is_active_only_when_status_is_active():
+def test_platform_admin_is_active_only_when_status_is_active() -> None:
+    """Only ACTIVE platform admins are usable by platform policy checks."""
     active = PlatformAdminPrincipal(
         admin_id="00000000-0000-0000-0000-000000000010",
         email="root@platform.example",
@@ -57,14 +59,16 @@ def test_platform_admin_is_active_only_when_status_is_active():
 # ---------------------------------------------------------------------------
 
 
-def test_is_platform_admin_rejects_user_principal():
+def test_is_platform_admin_rejects_user_principal() -> None:
+    """Tenant user principals never satisfy platform-admin predicates."""
     user: Principal = UserPrincipal(user_id="user-1", email="u@example.com")
 
     assert is_platform_admin(user) is False
     assert can_manage_tenants(user) is False
 
 
-def test_is_platform_admin_accepts_active_platform_admin():
+def test_is_platform_admin_accepts_active_platform_admin() -> None:
+    """Active platform admins may manage tenants."""
     admin: Principal = PlatformAdminPrincipal(
         admin_id="00000000-0000-0000-0000-000000000010",
         email="root@platform.example",
@@ -74,7 +78,8 @@ def test_is_platform_admin_accepts_active_platform_admin():
     assert can_manage_tenants(admin) is True
 
 
-def test_is_platform_admin_rejects_non_active_status():
+def test_is_platform_admin_rejects_non_active_status() -> None:
+    """Suspended and retired platform admins fail tenant-management checks."""
     for status in (PlatformAdminStatus.SUSPENDED, PlatformAdminStatus.RETIRED):
         admin: Principal = PlatformAdminPrincipal(
             admin_id="00000000-0000-0000-0000-000000000010",
@@ -91,15 +96,14 @@ def test_is_platform_admin_rejects_non_active_status():
 # ---------------------------------------------------------------------------
 
 
-def test_loader_returns_active_admin():
+def test_loader_returns_active_admin() -> None:
+    """The SQL loader returns an immutable principal for an ACTIVE row."""
     engine = _build_engine()
     admin_id = uuid4()
     _seed_admin(engine, admin_id=admin_id)
 
     with Session(engine) as session:
-        principal = SqlAlchemyPlatformAdminLoader(session).load(
-            admin_id=str(admin_id)
-        )
+        principal = SqlAlchemyPlatformAdminLoader(session).load(admin_id=str(admin_id))
 
     assert isinstance(principal, PlatformAdminPrincipal)
     assert principal.admin_id == str(admin_id)
@@ -107,35 +111,36 @@ def test_loader_returns_active_admin():
     assert principal.is_active is True
 
 
-def test_loader_rejects_missing_admin():
+def test_loader_rejects_missing_admin() -> None:
+    """Unknown platform-admin ids fail closed."""
     engine = _build_engine()
 
-    with Session(engine) as session:
-        with pytest.raises(PlatformAdminNotFoundError):
-            SqlAlchemyPlatformAdminLoader(session).load(admin_id=str(uuid4()))
+    with Session(engine) as session, pytest.raises(PlatformAdminNotFoundError):
+        SqlAlchemyPlatformAdminLoader(session).load(admin_id=str(uuid4()))
 
 
-def test_loader_rejects_suspended_admin():
+def test_loader_rejects_suspended_admin() -> None:
+    """Suspended platform admins cannot authenticate."""
     engine = _build_engine()
     admin_id = uuid4()
     _seed_admin(engine, admin_id=admin_id, status=PlatformAdminStatus.SUSPENDED)
 
-    with Session(engine) as session:
-        with pytest.raises(PlatformAdminDisabledError):
-            SqlAlchemyPlatformAdminLoader(session).load(admin_id=str(admin_id))
+    with Session(engine) as session, pytest.raises(PlatformAdminDisabledError):
+        SqlAlchemyPlatformAdminLoader(session).load(admin_id=str(admin_id))
 
 
-def test_loader_rejects_retired_admin():
+def test_loader_rejects_retired_admin() -> None:
+    """Retired platform admins cannot authenticate."""
     engine = _build_engine()
     admin_id = uuid4()
     _seed_admin(engine, admin_id=admin_id, status=PlatformAdminStatus.RETIRED)
 
-    with Session(engine) as session:
-        with pytest.raises(PlatformAdminDisabledError):
-            SqlAlchemyPlatformAdminLoader(session).load(admin_id=str(admin_id))
+    with Session(engine) as session, pytest.raises(PlatformAdminDisabledError):
+        SqlAlchemyPlatformAdminLoader(session).load(admin_id=str(admin_id))
 
 
-def test_loader_rejects_invalid_uuid():
+def test_loader_rejects_invalid_uuid() -> None:
+    """Malformed admin ids are rejected before database access."""
     engine = _build_engine()
 
     with Session(engine) as session:
@@ -144,7 +149,8 @@ def test_loader_rejects_invalid_uuid():
             loader.load(admin_id="not-a-uuid")
 
 
-def test_loader_rejects_non_string_admin_id():
+def test_loader_rejects_non_string_admin_id() -> None:
+    """Non-string admin ids are rejected as untrusted principal input."""
     engine = _build_engine()
 
     with Session(engine) as session:
@@ -168,11 +174,13 @@ def test_loader_rejects_non_string_admin_id():
 # ---------------------------------------------------------------------------
 
 
-def _build_engine():
+def _build_engine() -> Engine:
+    """Create an in-memory tenant schema for platform-admin loader tests."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
 
     @event.listens_for(engine, "connect")
     def _enable_uuid(dbapi_connection, _connection_record) -> None:
+        """Install a SQLite replacement for the Postgres UUID default."""
         dbapi_connection.create_function("gen_random_uuid", 0, lambda: str(uuid4()))
 
     TenantBase.metadata.create_all(engine)
@@ -180,12 +188,13 @@ def _build_engine():
 
 
 def _seed_admin(
-    engine,
+    engine: Engine,
     *,
     admin_id: UUID,
     status: PlatformAdminStatus = PlatformAdminStatus.ACTIVE,
 ) -> None:
-    now = datetime.now(timezone.utc)
+    """Insert a platform-admin row for SQL loader scenarios."""
+    now = datetime.now(UTC)
     with Session(engine) as session, session.begin():
         session.add(
             PlatformAdminORM(

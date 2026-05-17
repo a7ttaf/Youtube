@@ -58,6 +58,7 @@ class PlatformAdminPrincipal:
 
     @property
     def is_active(self) -> bool:
+        """Return whether this principal may act as a platform admin."""
         return self.status == PlatformAdminStatus.ACTIVE
 
 
@@ -96,6 +97,7 @@ class SqlAlchemyPlatformAdminLoader:
     """
 
     def __init__(self, session: Session) -> None:
+        """Store the SQLAlchemy session used for one admin lookup."""
         self._session = session
 
     def load(self, *, admin_id: str) -> PlatformAdminPrincipal:
@@ -103,9 +105,7 @@ class SqlAlchemyPlatformAdminLoader:
         parsed_id = _parse_uuid(admin_id)
         row = self._session.get(PlatformAdminORM, parsed_id)
         if row is None:
-            raise PlatformAdminNotFoundError(
-                "Platform admin is not registered"
-            )
+            raise PlatformAdminNotFoundError("Platform admin is not registered")
         try:
             status = PlatformAdminStatus(row.status)
         except ValueError as exc:
@@ -124,11 +124,10 @@ class SqlAlchemyPlatformAdminLoader:
 
 
 def _parse_uuid(value: str) -> UUID:
+    """Parse trusted platform-admin input into a UUID."""
     if not isinstance(value, str):
         raise PlatformAdminValidationError("admin_id must be a string")
     try:
         return UUID(value.strip())
     except ValueError as exc:
-        raise PlatformAdminValidationError(
-            "admin_id must be a valid UUID"
-        ) from exc
+        raise PlatformAdminValidationError("admin_id must be a valid UUID") from exc
