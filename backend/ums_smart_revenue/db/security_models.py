@@ -7,8 +7,10 @@ from sqlalchemy import (
     CheckConstraint,
     DateTime,
     ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Text,
+    UniqueConstraint,
     Uuid,
     func,
     text,
@@ -161,6 +163,11 @@ class AccessScopeORM(SecurityBase):
             sqlite_where=text("scope_type = 'global' AND scope_id IS NULL"),
         ),
         Index("ix_access_scopes_tenant_id", "tenant_id"),
+        UniqueConstraint(
+            "tenant_id",
+            "id",
+            name="uq_access_scopes_tenant_id_id",
+        ),
     )
 
 
@@ -197,9 +204,7 @@ class UserRoleAssignmentORM(SecurityBase):
     role_key: Mapped[str] = mapped_column(
         ForeignKey("roles.key", ondelete="RESTRICT"), nullable=False
     )
-    scope_id: Mapped[UUID] = mapped_column(
-        ForeignKey("access_scopes.id", ondelete="RESTRICT"), nullable=False
-    )
+    scope_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     assigned_by: Mapped[UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -226,13 +231,21 @@ class UserRoleAssignmentORM(SecurityBase):
             "OR (active = false AND revoked_at IS NOT NULL)",
             name="ck_user_role_assignments_revocation",
         ),
+        ForeignKeyConstraint(
+            ["tenant_id", "scope_id"],
+            ["access_scopes.tenant_id", "access_scopes.id"],
+            name="fk_user_role_assignments_tenant_scope",
+            ondelete="RESTRICT",
+        ),
         Index(
             "uq_active_user_role_scope",
+            "tenant_id",
             "user_id",
             "role_key",
             "scope_id",
             unique=True,
             postgresql_where=text("active = true"),
+            sqlite_where=text("active = true"),
         ),
         Index("ix_user_role_assignments_user_id", "user_id"),
         Index("ix_user_role_assignments_tenant_id", "tenant_id"),
@@ -253,9 +266,7 @@ class UserPermissionGrantORM(SecurityBase):
     permission_key: Mapped[str] = mapped_column(
         ForeignKey("permissions.key", ondelete="RESTRICT"), nullable=False
     )
-    scope_id: Mapped[UUID] = mapped_column(
-        ForeignKey("access_scopes.id", ondelete="RESTRICT"), nullable=False
-    )
+    scope_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
     granted_by: Mapped[UUID | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )
@@ -283,13 +294,21 @@ class UserPermissionGrantORM(SecurityBase):
             "OR (active = false AND revoked_at IS NOT NULL)",
             name="ck_user_permission_grants_revocation",
         ),
+        ForeignKeyConstraint(
+            ["tenant_id", "scope_id"],
+            ["access_scopes.tenant_id", "access_scopes.id"],
+            name="fk_user_permission_grants_tenant_scope",
+            ondelete="RESTRICT",
+        ),
         Index(
             "uq_active_user_permission_scope",
+            "tenant_id",
             "user_id",
             "permission_key",
             "scope_id",
             unique=True,
             postgresql_where=text("active = true"),
+            sqlite_where=text("active = true"),
         ),
         Index("ix_user_permission_grants_user_id", "user_id"),
         Index("ix_user_permission_grants_tenant_id", "tenant_id"),

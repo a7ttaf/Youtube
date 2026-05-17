@@ -86,6 +86,7 @@ class AdSensePaymentValidationError(AdSensePaymentError):
 class SqlAlchemyAdSensePaymentRepository:
     def __init__(self, session: Session):
         self._session = session
+        self._tenant_id = _DEFAULT_TENANT_UUID
 
     def sync_payments(
         self,
@@ -110,7 +111,7 @@ class SqlAlchemyAdSensePaymentRepository:
                 AdSensePaymentORM
             ).values(
                 id=uuid4(),
-                tenant_id=_DEFAULT_TENANT_UUID,
+                tenant_id=self._tenant_id,
                 month=normalized_payment.month,
                 payment_name=normalized_payment.payment_name,
                 payment_date=normalized_payment.payment_date,
@@ -166,10 +167,14 @@ class SqlAlchemyAdSensePaymentRepository:
         if month is not None:
             _validate_month(month)
 
-        statement = select(AdSensePaymentORM).order_by(
-            AdSensePaymentORM.month.desc(),
-            AdSensePaymentORM.payment_date.desc(),
-            AdSensePaymentORM.payment_name,
+        statement = (
+            select(AdSensePaymentORM)
+            .where(AdSensePaymentORM.tenant_id == self._tenant_id)
+            .order_by(
+                AdSensePaymentORM.month.desc(),
+                AdSensePaymentORM.payment_date.desc(),
+                AdSensePaymentORM.payment_name,
+            )
         )
         if month is not None:
             statement = statement.where(AdSensePaymentORM.month == month)
@@ -186,6 +191,7 @@ class SqlAlchemyAdSensePaymentRepository:
         _validate_month(month)
         rows = self._session.scalars(
             select(AdSensePaymentORM)
+            .where(AdSensePaymentORM.tenant_id == self._tenant_id)
             .where(AdSensePaymentORM.month == month)
             .order_by(
                 AdSensePaymentORM.payment_date.desc(),

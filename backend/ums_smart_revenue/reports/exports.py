@@ -84,6 +84,7 @@ class ExportJobValidationError(ExportJobError):
 class SqlAlchemyExportJobRepository:
     def __init__(self, session: Session):
         self._session = session
+        self._tenant_id = _DEFAULT_TENANT_UUID
 
     def request_export(
         self,
@@ -119,6 +120,7 @@ class SqlAlchemyExportJobRepository:
             month_lock_status=month_lock_status,
             include_confidence_notes=include_confidence_notes,
             include_manual_override_notes=include_manual_override_notes,
+            tenant_id=self._tenant_id,
         )
         self._session.add(row)
         self._session.flush()
@@ -126,7 +128,12 @@ class SqlAlchemyExportJobRepository:
 
     def get_job(self, export_id: str) -> ExportJobEntry:
         export_uuid = _parse_uuid(export_id, field_name="export_id")
-        row = self._session.get(ExportJobORM, export_uuid)
+        row = self._session.scalars(
+            select(ExportJobORM).where(
+                ExportJobORM.id == export_uuid,
+                ExportJobORM.tenant_id == self._tenant_id,
+            )
+        ).one_or_none()
         if row is None:
             raise ExportJobNotFoundError("Export job not found")
         return self._to_entry(row)
@@ -145,8 +152,10 @@ class SqlAlchemyExportJobRepository:
         if offset < 0:
             raise ExportJobValidationError("offset must be greater than or equal to 0")
 
-        statement = select(ExportJobORM).order_by(
-            ExportJobORM.created_at.desc(), ExportJobORM.id.desc()
+        statement = (
+            select(ExportJobORM)
+            .where(ExportJobORM.tenant_id == self._tenant_id)
+            .order_by(ExportJobORM.created_at.desc(), ExportJobORM.id.desc())
         )
         if requested_by is not None:
             statement = statement.where(
@@ -162,7 +171,7 @@ class SqlAlchemyExportJobRepository:
         )
 
     def _month_lock_status(self, month: str) -> str:
-        row = self._session.get(FinanceMonthCloseORM, (_DEFAULT_TENANT_UUID, month))
+        row = self._session.get(FinanceMonthCloseORM, (self._tenant_id, month))
         return row.status if row is not None else "OPEN"
 
     @staticmethod

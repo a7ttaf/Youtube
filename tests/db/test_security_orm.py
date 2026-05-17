@@ -21,11 +21,33 @@ def test_security_orm_metadata_contains_required_tables():
 def test_user_role_assignments_model_has_scope_and_revocation_controls():
     table = SecurityBase.metadata.tables["user_role_assignments"]
 
-    assert {"user_id", "role_key", "scope_id", "assigned_by", "revoked_by", "revoked_at", "reason", "active"} <= set(
-        table.columns.keys()
+    assert {
+        "tenant_id",
+        "user_id",
+        "role_key",
+        "scope_id",
+        "assigned_by",
+        "revoked_by",
+        "revoked_at",
+        "reason",
+        "active",
+    } <= set(table.columns.keys())
+    role_scope_index = next(
+        index for index in table.indexes if index.name == "uq_active_user_role_scope"
     )
-    assert any(index.name == "uq_active_user_role_scope" for index in table.indexes)
-    assert any(index.name == "ix_user_role_assignments_user_id" for index in table.indexes)
+    assert [column.name for column in role_scope_index.columns] == [
+        "tenant_id",
+        "user_id",
+        "role_key",
+        "scope_id",
+    ]
+    assert any(
+        constraint.name == "fk_user_role_assignments_tenant_scope"
+        for constraint in table.foreign_key_constraints
+    )
+    assert any(
+        index.name == "ix_user_role_assignments_user_id" for index in table.indexes
+    )
 
 
 def test_postgresql_ddl_contains_sensitive_audit_and_connector_tables():

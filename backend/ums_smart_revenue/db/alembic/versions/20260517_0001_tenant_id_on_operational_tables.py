@@ -30,7 +30,6 @@ What does *not* get ``tenant_id`` and why:
 
 import sqlalchemy as sa
 from alembic import op
-from sqlalchemy.dialects import postgresql
 
 revision = "20260517_0001"
 down_revision = "20260516_0001"
@@ -76,6 +75,7 @@ def upgrade() -> None:
     for table_name in TENANT_SCOPED_TABLES:
         _add_tenant_id_to(table_name)
     _scope_access_scope_unique_indexes()
+    _scope_access_assignment_constraints()
     _scope_finance_month_close_primary_key()
     _scope_channel_group_membership_constraints()
     _scope_adsense_payment_unique_constraint()
@@ -85,6 +85,7 @@ def downgrade() -> None:
     _unscope_adsense_payment_unique_constraint()
     _unscope_channel_group_membership_constraints()
     _unscope_finance_month_close_primary_key()
+    _unscope_access_assignment_constraints()
     _unscope_access_scope_unique_indexes()
     for table_name in reversed(TENANT_SCOPED_TABLES):
         _drop_tenant_id_from(table_name)
@@ -104,7 +105,7 @@ def _add_tenant_id_to(table_name: str) -> None:
         batch_op.add_column(
             sa.Column(
                 "tenant_id",
-                postgresql.UUID(as_uuid=True),
+                sa.Uuid(as_uuid=True),
                 nullable=False,
                 server_default=sa.text(f"'{UMS_TENANT_ID}'"),
             )
@@ -168,6 +169,111 @@ def _unscope_access_scope_unique_indexes() -> None:
         postgresql_where=sa.text("scope_type = 'global' AND scope_id IS NULL"),
         sqlite_where=sa.text("scope_type = 'global' AND scope_id IS NULL"),
     )
+
+
+def _scope_access_assignment_constraints() -> None:
+    with op.batch_alter_table("access_scopes") as batch_op:
+        batch_op.create_unique_constraint(
+            "uq_access_scopes_tenant_id_id",
+            ["tenant_id", "id"],
+        )
+    with op.batch_alter_table("user_role_assignments") as batch_op:
+        batch_op.drop_constraint(
+            "user_role_assignments_scope_id_fkey",
+            type_="foreignkey",
+        )
+        batch_op.create_foreign_key(
+            "fk_user_role_assignments_tenant_scope",
+            "access_scopes",
+            ["tenant_id", "scope_id"],
+            ["tenant_id", "id"],
+            ondelete="RESTRICT",
+        )
+    op.drop_index("uq_active_user_role_scope", table_name="user_role_assignments")
+    op.create_index(
+        "uq_active_user_role_scope",
+        "user_role_assignments",
+        ["tenant_id", "user_id", "role_key", "scope_id"],
+        unique=True,
+        postgresql_where=sa.text("active = true"),
+        sqlite_where=sa.text("active = true"),
+    )
+
+    with op.batch_alter_table("user_permission_grants") as batch_op:
+        batch_op.drop_constraint(
+            "user_permission_grants_scope_id_fkey",
+            type_="foreignkey",
+        )
+        batch_op.create_foreign_key(
+            "fk_user_permission_grants_tenant_scope",
+            "access_scopes",
+            ["tenant_id", "scope_id"],
+            ["tenant_id", "id"],
+            ondelete="RESTRICT",
+        )
+    op.drop_index(
+        "uq_active_user_permission_scope",
+        table_name="user_permission_grants",
+    )
+    op.create_index(
+        "uq_active_user_permission_scope",
+        "user_permission_grants",
+        ["tenant_id", "user_id", "permission_key", "scope_id"],
+        unique=True,
+        postgresql_where=sa.text("active = true"),
+        sqlite_where=sa.text("active = true"),
+    )
+
+
+def _unscope_access_assignment_constraints() -> None:
+    op.drop_index(
+        "uq_active_user_permission_scope",
+        table_name="user_permission_grants",
+    )
+    op.create_index(
+        "uq_active_user_permission_scope",
+        "user_permission_grants",
+        ["user_id", "permission_key", "scope_id"],
+        unique=True,
+        postgresql_where=sa.text("active = true"),
+        sqlite_where=sa.text("active = true"),
+    )
+    with op.batch_alter_table("user_permission_grants") as batch_op:
+        batch_op.drop_constraint(
+            "fk_user_permission_grants_tenant_scope",
+            type_="foreignkey",
+        )
+        batch_op.create_foreign_key(
+            "user_permission_grants_scope_id_fkey",
+            "access_scopes",
+            ["scope_id"],
+            ["id"],
+            ondelete="RESTRICT",
+        )
+
+    op.drop_index("uq_active_user_role_scope", table_name="user_role_assignments")
+    op.create_index(
+        "uq_active_user_role_scope",
+        "user_role_assignments",
+        ["user_id", "role_key", "scope_id"],
+        unique=True,
+        postgresql_where=sa.text("active = true"),
+        sqlite_where=sa.text("active = true"),
+    )
+    with op.batch_alter_table("user_role_assignments") as batch_op:
+        batch_op.drop_constraint(
+            "fk_user_role_assignments_tenant_scope",
+            type_="foreignkey",
+        )
+        batch_op.create_foreign_key(
+            "user_role_assignments_scope_id_fkey",
+            "access_scopes",
+            ["scope_id"],
+            ["id"],
+            ondelete="RESTRICT",
+        )
+    with op.batch_alter_table("access_scopes") as batch_op:
+        batch_op.drop_constraint("uq_access_scopes_tenant_id_id", type_="unique")
 
 
 def _scope_finance_month_close_primary_key() -> None:

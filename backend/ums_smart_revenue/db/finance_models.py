@@ -124,7 +124,10 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
         onupdate=func.now(),
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
 
     __table_args__ = (
@@ -214,7 +217,10 @@ class RevenueManualOverrideORM(FinanceBase):
         onupdate=func.now(),
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
 
     __table_args__ = (
@@ -298,7 +304,10 @@ class BankReconciliationEntryORM(FinanceBase):
         onupdate=func.now(),
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
 
     __table_args__ = (
@@ -380,7 +389,10 @@ class AdSensePaymentORM(FinanceBase):
         onupdate=func.now(),
     )
     tenant_id: Mapped[UUID] = mapped_column(
-        Uuid(as_uuid=True), nullable=False, server_default=_TENANT_ID_DEFAULT
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
 
     __table_args__ = (

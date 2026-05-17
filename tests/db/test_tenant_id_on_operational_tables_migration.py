@@ -22,6 +22,7 @@ from uuid import uuid4
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import (
+    Boolean,
     Column,
     ForeignKeyConstraint,
     Index,
@@ -174,6 +175,59 @@ def test_tenant_scoped_constraints_are_rewritten():
             "tenant_id",
             "scope_type",
         ]
+        access_scope_uniques = {
+            constraint["name"]: constraint["column_names"]
+            for constraint in inspector.get_unique_constraints("access_scopes")
+        }
+        assert access_scope_uniques["uq_access_scopes_tenant_id_id"] == [
+            "tenant_id",
+            "id",
+        ]
+
+        role_assignment_indexes = {
+            index["name"]: index["column_names"]
+            for index in inspector.get_indexes("user_role_assignments")
+        }
+        assert role_assignment_indexes["uq_active_user_role_scope"] == [
+            "tenant_id",
+            "user_id",
+            "role_key",
+            "scope_id",
+        ]
+        role_assignment_fks = {
+            fk["name"]: fk
+            for fk in inspector.get_foreign_keys("user_role_assignments")
+        }
+        role_scope_fk = role_assignment_fks["fk_user_role_assignments_tenant_scope"]
+        assert role_scope_fk["constrained_columns"] == ["tenant_id", "scope_id"]
+        assert role_scope_fk["referred_table"] == "access_scopes"
+        assert role_scope_fk["referred_columns"] == ["tenant_id", "id"]
+        assert (role_scope_fk.get("options") or {}).get("ondelete") == "RESTRICT"
+
+        permission_grant_indexes = {
+            index["name"]: index["column_names"]
+            for index in inspector.get_indexes("user_permission_grants")
+        }
+        assert permission_grant_indexes["uq_active_user_permission_scope"] == [
+            "tenant_id",
+            "user_id",
+            "permission_key",
+            "scope_id",
+        ]
+        permission_grant_fks = {
+            fk["name"]: fk
+            for fk in inspector.get_foreign_keys("user_permission_grants")
+        }
+        permission_scope_fk = permission_grant_fks[
+            "fk_user_permission_grants_tenant_scope"
+        ]
+        assert permission_scope_fk["constrained_columns"] == [
+            "tenant_id",
+            "scope_id",
+        ]
+        assert permission_scope_fk["referred_table"] == "access_scopes"
+        assert permission_scope_fk["referred_columns"] == ["tenant_id", "id"]
+        assert (permission_scope_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
         finance_pk = inspector.get_pk_constraint("finance_month_close")
         assert finance_pk["constrained_columns"] == ["tenant_id", "month"]
@@ -278,6 +332,52 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
         unique=True,
         sqlite_where=text("scope_type = 'global' AND scope_id IS NULL"),
     )
+    user_role_assignments = Table(
+        "user_role_assignments",
+        metadata,
+        Column("id", Text(), primary_key=True),
+        Column("user_id", Text(), nullable=False),
+        Column("role_key", Text(), nullable=False),
+        Column("scope_id", Text(), nullable=False),
+        Column("active", Boolean(), nullable=False),
+        ForeignKeyConstraint(
+            ["scope_id"],
+            ["access_scopes.id"],
+            name="user_role_assignments_scope_id_fkey",
+            ondelete="RESTRICT",
+        ),
+    )
+    Index(
+        "uq_active_user_role_scope",
+        user_role_assignments.c.user_id,
+        user_role_assignments.c.role_key,
+        user_role_assignments.c.scope_id,
+        unique=True,
+        sqlite_where=text("active = true"),
+    )
+    user_permission_grants = Table(
+        "user_permission_grants",
+        metadata,
+        Column("id", Text(), primary_key=True),
+        Column("user_id", Text(), nullable=False),
+        Column("permission_key", Text(), nullable=False),
+        Column("scope_id", Text(), nullable=False),
+        Column("active", Boolean(), nullable=False),
+        ForeignKeyConstraint(
+            ["scope_id"],
+            ["access_scopes.id"],
+            name="user_permission_grants_scope_id_fkey",
+            ondelete="RESTRICT",
+        ),
+    )
+    Index(
+        "uq_active_user_permission_scope",
+        user_permission_grants.c.user_id,
+        user_permission_grants.c.permission_key,
+        user_permission_grants.c.scope_id,
+        unique=True,
+        sqlite_where=text("active = true"),
+    )
     Table("youtube_channels", metadata, Column("id", Text(), primary_key=True))
     Table("channel_groups", metadata, Column("id", Text(), primary_key=True))
     Table(
@@ -328,6 +428,8 @@ def _setup_minimal_pre_state(connection: Connection) -> None:
         "channel_groups",
         "finance_month_close",
         "tenants",
+        "user_permission_grants",
+        "user_role_assignments",
         "youtube_channels",
     }
     for table in EXPECTED_TABLES:
