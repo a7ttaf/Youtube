@@ -295,15 +295,23 @@ class TenantResolverMiddleware:
         timeout: float,
     ) -> object:
         """Run blocking work with bounded admission and request timeout."""
-        await asyncio.wait_for(self._blocking_tasks.acquire(), timeout=timeout)
         loop = asyncio.get_running_loop()
+        deadline = loop.time() + timeout
+        await asyncio.wait_for(self._blocking_tasks.acquire(), timeout=timeout)
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            self._blocking_tasks.release()
+            raise TimeoutError
         try:
             future = self._submit_blocking(loop, func, *args)
         except BaseException:
             self._blocking_tasks.release()
             raise
         future.add_done_callback(lambda _future: self._blocking_tasks.release())
-        return await asyncio.wait_for(asyncio.shield(future), timeout=timeout)
+        remaining = deadline - loop.time()
+        if remaining <= 0:
+            raise TimeoutError
+        return await asyncio.wait_for(asyncio.shield(future), timeout=remaining)
 
     def _submit_blocking(
         self,
