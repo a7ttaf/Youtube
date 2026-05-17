@@ -157,6 +157,7 @@ def test_active_tenant_request_succeeds_and_sets_context():
 
     assert response.status_code == 200
     assert response.json() == {"tenant": {"slug": "ums", "status": "ACTIVE"}}
+    assert response.headers["vary"] == TENANT_HEADER
 
 
 def test_missing_tenant_header_returns_400():
@@ -169,6 +170,7 @@ def test_missing_tenant_header_returns_400():
 
     assert response.status_code == 400
     assert response.json()["header"] == TENANT_HEADER
+    assert response.headers["vary"] == TENANT_HEADER
 
 
 def test_blank_tenant_header_returns_400():

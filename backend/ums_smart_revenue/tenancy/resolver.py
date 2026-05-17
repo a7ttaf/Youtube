@@ -47,9 +47,9 @@ from concurrent.futures import CancelledError as FutureCancelledError
 
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
-from starlette.datastructures import Headers
+from starlette.datastructures import Headers, MutableHeaders
 from starlette.responses import JSONResponse
-from starlette.types import ASGIApp, Receive, Scope, Send
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
@@ -108,17 +108,18 @@ class TenantResolverMiddleware:
             await self.app(scope, receive, send)
             return
 
+        send_with_tenant_vary = _tenant_vary_send(send)
         raw_slug = Headers(scope=scope).get(TENANT_HEADER, "")
         try:
             normalised_slug = _normalise_tenant_slug(raw_slug)
         except _ResolverError as error:
-            await error.to_response()(scope, receive, send)
+            await error.to_response()(scope, receive, send_with_tenant_vary)
             return
 
         try:
             tenant = await run_in_threadpool(self._resolve, normalised_slug)
         except _ResolverError as error:
-            await error.to_response()(scope, receive, send)
+            await error.to_response()(scope, receive, send_with_tenant_vary)
             return
         except (asyncio.CancelledError, FutureCancelledError):
             raise
@@ -136,19 +137,19 @@ class TenantResolverMiddleware:
             await _ResolverError(
                 status_code=503,
                 detail="Tenant registry unavailable",
-            ).to_response()(scope, receive, send)
+            ).to_response()(scope, receive, send_with_tenant_vary)
             return
 
         if not self._is_authorized(scope, normalised_slug):
             await _ResolverError(
                 status_code=403,
                 detail="Tenant access denied",
-            ).to_response()(scope, receive, send)
+            ).to_response()(scope, receive, send_with_tenant_vary)
             return
 
         token = TENANT_CTX.set(tenant)
         try:
-            await self.app(scope, receive, send)
+            await self.app(scope, receive, send_with_tenant_vary)
         finally:
             TENANT_CTX.reset(token)
 
@@ -245,6 +246,30 @@ def _normalise_tenant_slug(raw_slug: str) -> str:
             detail=str(exc),
             header=TENANT_HEADER,
         ) from exc
+
+
+def _tenant_vary_send(send: Send) -> Send:
+    """Return a send wrapper that marks tenant-scoped responses as header-varying."""
+
+    async def send_with_tenant_vary(message: Message) -> None:
+        """Append ``X-UMS-Tenant`` to Vary before response headers are sent."""
+        if message["type"] == "http.response.start":
+            _append_vary_header(message, TENANT_HEADER)
+        await send(message)
+
+    return send_with_tenant_vary
+
+
+def _append_vary_header(message: Message, header_name: str) -> None:
+    """Append a header name to Vary unless it is already present."""
+    headers = MutableHeaders(scope=message)
+    vary = headers.get("vary")
+    if vary is None:
+        headers["vary"] = header_name
+        return
+    existing = {item.strip().lower() for item in vary.split(",")}
+    if header_name.lower() not in existing:
+        headers["vary"] = f"{vary}, {header_name}"
 
 
 def _ensure_active_tenant(tenant: Tenant) -> Tenant:
