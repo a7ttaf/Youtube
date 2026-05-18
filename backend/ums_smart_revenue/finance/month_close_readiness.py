@@ -16,6 +16,7 @@ from ums_smart_revenue.finance.reconciliation import (
 )
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
@@ -69,11 +70,11 @@ class FinanceCloseReadiness:
 
 
 class SqlAlchemyFinanceCloseReadinessService:
-    """Evaluate close blockers from the SQL-backed finance and channel tables."""
+    """Month-close readiness checker scoped to a single tenant."""
 
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         self._session = session
-        self._tenant_id = _DEFAULT_TENANT_UUID
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def check_month(
         self, month: str, *, for_update: bool = False
@@ -214,6 +215,15 @@ class SqlAlchemyFinanceCloseReadinessService:
             )
             for row in rows
         ]
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    if tenant_id is not None:
+        return UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
 
 
 def _validate_month(month: str) -> None:

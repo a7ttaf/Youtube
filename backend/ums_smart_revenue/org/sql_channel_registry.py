@@ -11,6 +11,7 @@ from ums_smart_revenue.org.channel_registry import (
     ChannelRegistryValidationError,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 _SQLITE_TENANT_CHANNEL_UNIQUE_ERROR = (
@@ -20,11 +21,14 @@ _SQLITE_TENANT_CHANNEL_UNIQUE_ERROR = (
 
 
 class SqlAlchemyChannelRegistry:
-    def __init__(self, session: Session):
+    """SQL-backed channel registry scoped to a single tenant."""
+
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         self._session = session
-        self._tenant_id = _DEFAULT_TENANT_UUID
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def list_channels(self) -> list[ChannelRegistryEntry]:
+        """Return active channels in the bound tenant."""
         rows = self._session.scalars(
             select(YouTubeChannelORM)
             .where(
@@ -38,6 +42,7 @@ class SqlAlchemyChannelRegistry:
     def list_channels_by_ids(
         self, youtube_channel_ids: set[str]
     ) -> list[ChannelRegistryEntry]:
+        """Return active channels matching a set of external channel ids."""
         if not youtube_channel_ids:
             return []
         rows = self._session.scalars(
@@ -52,6 +57,7 @@ class SqlAlchemyChannelRegistry:
         return [self._to_entry(row) for row in rows]
 
     def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
+        """Return a single channel entry by external id, or None."""
         row = self._get_row(youtube_channel_id)
         if row is None:
             return None
@@ -66,6 +72,7 @@ class SqlAlchemyChannelRegistry:
         cms_status: str,
         revenue_required: bool,
     ) -> ChannelRegistryEntry:
+        """Create a channel row, raising on tenant-scoped duplicate or FK violation."""
         if self._get_row(youtube_channel_id) is not None:
             raise ChannelRegistryConflictError(
                 f"Channel already exists: {youtube_channel_id}"
@@ -116,6 +123,7 @@ class SqlAlchemyChannelRegistry:
         return self._to_entry(row)
 
     def _get_row(self, youtube_channel_id: str) -> YouTubeChannelORM | None:
+        """Look up the ORM row filtered by tenant_id + external channel id."""
         return self._session.scalars(
             select(YouTubeChannelORM).where(
                 YouTubeChannelORM.tenant_id == self._tenant_id,
@@ -135,6 +143,16 @@ class SqlAlchemyChannelRegistry:
             revenue_required=row.revenue_required,
             active=row.active,
         )
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Resolve tenant id from explicit param, request context, or default fallback."""
+    if tenant_id is not None:
+        return UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
 
 
 def _parse_optional_uuid(value: str | None, field_name: str) -> UUID | None:

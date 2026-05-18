@@ -11,6 +11,7 @@ from ums_smart_revenue.db.org_models import (
 )
 from ums_smart_revenue.org.channel_groups import ChannelGroupEntry
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 _SQLITE_DUPLICATE_GROUP_MEMBER_ERROR = (
@@ -20,11 +21,14 @@ _SQLITE_DUPLICATE_GROUP_MEMBER_ERROR = (
 
 
 class SqlAlchemyChannelGroupRegistry:
-    def __init__(self, session: Session):
+    """SQL-backed channel group registry scoped to a single tenant."""
+
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         self._session = session
-        self._tenant_id = _DEFAULT_TENANT_UUID
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def list_groups(self) -> list[ChannelGroupEntry]:
+        """Return active channel groups with their member channel ids."""
         rows = self._session.scalars(
             select(ChannelGroupORM)
             .where(
@@ -259,6 +263,15 @@ class SqlAlchemyChannelGroupRegistry:
             active=row.active,
             channel_ids=resolved_channel_ids,
         )
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    if tenant_id is not None:
+        return UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
 
 
 def _is_duplicate_group_member_integrity_error(exc: IntegrityError) -> bool:

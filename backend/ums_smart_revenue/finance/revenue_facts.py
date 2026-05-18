@@ -12,6 +12,7 @@ from ums_smart_revenue.db.finance_models import MonthlyChannelRevenueFactORM
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
@@ -76,9 +77,11 @@ class RevenueFactNotFoundError(RevenueFactError):
 
 
 class SqlAlchemyRevenueFactRepository:
-    def __init__(self, session: Session):
+    """SQL-backed revenue fact repository scoped to a single tenant."""
+
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         self._session = session
-        self._tenant_id = _DEFAULT_TENANT_UUID
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def record_fact(
         self,
@@ -283,6 +286,15 @@ class SqlAlchemyRevenueFactRepository:
             confidence_score=row.confidence_score,
             imported_by=str(row.imported_by) if row.imported_by else None,
         )
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    if tenant_id is not None:
+        return UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
 
 
 def _validate_month(month: str) -> None:
