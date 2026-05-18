@@ -16,9 +16,11 @@ from ums_smart_revenue.db.security_models import (
     UserORM,
     UserPermissionGrantORM,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 TARGET_ID = UUID("00000000-0000-0000-0000-000000015002")
 ACTOR_ID = UUID("00000000-0000-0000-0000-000000015001")
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 class _ScalarResult:
@@ -50,6 +52,7 @@ class _FkRaceSession:
         self._user_exists_results = list(user_exists_results)
         self.scope = AccessScopeORM(
             id=uuid4(),
+            tenant_id=_DEFAULT_TENANT_UUID,
             scope_type="company",
             scope_id="company-tv-a",
             label="company:company-tv-a",
@@ -60,6 +63,7 @@ class _FkRaceSession:
         if model is UserORM:
             return UserORM(
                 id=key,
+                tenant_id=_DEFAULT_TENANT_UUID,
                 email=f"{key}@example.com",
                 display_name="Cached User",
             )
