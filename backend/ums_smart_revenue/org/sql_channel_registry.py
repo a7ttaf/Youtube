@@ -10,16 +10,23 @@ from ums_smart_revenue.org.channel_registry import (
     ChannelRegistryEntry,
     ChannelRegistryValidationError,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 class SqlAlchemyChannelRegistry:
     def __init__(self, session: Session):
         self._session = session
+        self._tenant_id = _DEFAULT_TENANT_UUID
 
     def list_channels(self) -> list[ChannelRegistryEntry]:
         rows = self._session.scalars(
             select(YouTubeChannelORM)
-            .where(YouTubeChannelORM.active.is_(True))
+            .where(
+                YouTubeChannelORM.tenant_id == self._tenant_id,
+                YouTubeChannelORM.active.is_(True),
+            )
             .order_by(YouTubeChannelORM.youtube_channel_id)
         ).all()
         return [self._to_entry(row) for row in rows]
@@ -30,6 +37,7 @@ class SqlAlchemyChannelRegistry:
         rows = self._session.scalars(
             select(YouTubeChannelORM)
             .where(
+                YouTubeChannelORM.tenant_id == self._tenant_id,
                 YouTubeChannelORM.active.is_(True),
                 YouTubeChannelORM.youtube_channel_id.in_(youtube_channel_ids),
             )
@@ -57,6 +65,7 @@ class SqlAlchemyChannelRegistry:
 
         row = YouTubeChannelORM(
             id=uuid4(),
+            tenant_id=self._tenant_id,
             youtube_channel_id=youtube_channel_id,
             channel_name=channel_name,
             primary_org_unit_id=_parse_optional_uuid(primary_company_id, "primary_company_id"),
@@ -89,7 +98,10 @@ class SqlAlchemyChannelRegistry:
 
     def _get_row(self, youtube_channel_id: str) -> YouTubeChannelORM | None:
         return self._session.scalars(
-            select(YouTubeChannelORM).where(YouTubeChannelORM.youtube_channel_id == youtube_channel_id)
+            select(YouTubeChannelORM).where(
+                YouTubeChannelORM.tenant_id == self._tenant_id,
+                YouTubeChannelORM.youtube_channel_id == youtube_channel_id,
+            )
         ).one_or_none()
 
     @staticmethod

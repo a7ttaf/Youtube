@@ -1,10 +1,14 @@
 from dataclasses import dataclass
+from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.scopes import OrgAccessIndex
 from ums_smart_revenue.db.org_models import OrgUnitORM, YouTubeChannelORM
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 @dataclass(frozen=True)
@@ -61,6 +65,7 @@ def build_org_access_index(
 
 
 def load_org_access_index_from_session(session: Session) -> OrgAccessIndex:
+    tenant_id = _DEFAULT_TENANT_UUID
     org_units = [
         OrgUnitRow(
             id=str(row.id),
@@ -71,7 +76,8 @@ def load_org_access_index_from_session(session: Session) -> OrgAccessIndex:
         )
         for row in session.execute(
             select(OrgUnitORM.id, OrgUnitORM.parent_id, OrgUnitORM.type, OrgUnitORM.name, OrgUnitORM.active).where(
-                OrgUnitORM.active.is_(True)
+                OrgUnitORM.tenant_id == tenant_id,
+                OrgUnitORM.active.is_(True),
             )
         ).all()
     ]
@@ -86,7 +92,11 @@ def load_org_access_index_from_session(session: Session) -> OrgAccessIndex:
                 YouTubeChannelORM.youtube_channel_id,
                 YouTubeChannelORM.primary_org_unit_id,
                 YouTubeChannelORM.active,
-            ).where(YouTubeChannelORM.active.is_(True), YouTubeChannelORM.primary_org_unit_id.is_not(None))
+            ).where(
+                YouTubeChannelORM.tenant_id == tenant_id,
+                YouTubeChannelORM.active.is_(True),
+                YouTubeChannelORM.primary_org_unit_id.is_not(None),
+            )
         ).all()
     ]
     return build_org_access_index(org_units=org_units, channels=channels)
