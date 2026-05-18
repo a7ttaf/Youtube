@@ -75,7 +75,13 @@ def load_org_access_index_from_session(session: Session) -> OrgAccessIndex:
             active=row.active,
         )
         for row in session.execute(
-            select(OrgUnitORM.id, OrgUnitORM.parent_id, OrgUnitORM.type, OrgUnitORM.name, OrgUnitORM.active).where(
+            select(
+                OrgUnitORM.id,
+                OrgUnitORM.parent_id,
+                OrgUnitORM.type,
+                OrgUnitORM.name,
+                OrgUnitORM.active,
+            ).where(
                 OrgUnitORM.tenant_id == tenant_id,
                 OrgUnitORM.active.is_(True),
             )
@@ -84,7 +90,9 @@ def load_org_access_index_from_session(session: Session) -> OrgAccessIndex:
     channels = [
         ChannelRegistryRow(
             youtube_channel_id=row.youtube_channel_id,
-            primary_org_unit_id=str(row.primary_org_unit_id) if row.primary_org_unit_id is not None else None,
+            primary_org_unit_id=str(row.primary_org_unit_id)
+            if row.primary_org_unit_id is not None
+            else None,
             active=row.active,
         )
         for row in session.execute(

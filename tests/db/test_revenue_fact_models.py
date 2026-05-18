@@ -4,9 +4,11 @@ from uuid import UUID, uuid4
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.finance_models import FinanceBase, MonthlyChannelRevenueFactORM
+from ums_smart_revenue.db.finance_models import (
+    FinanceBase,
+    MonthlyChannelRevenueFactORM,
+)
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
-
 
 USER_ID = UUID("00000000-0000-0000-0000-000000007001")
 CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-000000007002")
@@ -66,9 +68,18 @@ def test_monthly_channel_revenue_fact_model_persists_canonical_values():
 
 
 def test_monthly_channel_revenue_fact_model_declares_channel_foreign_key():
-    foreign_keys = {
-        foreign_key.parent.name: (foreign_key.column.table.name, foreign_key.column.name, foreign_key.ondelete)
-        for foreign_key in MonthlyChannelRevenueFactORM.__table__.foreign_keys
-    }
+    foreign_key = next(
+        constraint
+        for constraint in MonthlyChannelRevenueFactORM.__table__.foreign_key_constraints
+        if constraint.name == "fk_monthly_channel_revenue_facts_tenant_channel"
+    )
 
-    assert foreign_keys["youtube_channel_id"] == ("youtube_channels", "youtube_channel_id", "RESTRICT")
+    assert [column.name for column in foreign_key.columns] == [
+        "tenant_id",
+        "youtube_channel_id",
+    ]
+    assert [element.column.name for element in foreign_key.elements] == [
+        "tenant_id",
+        "youtube_channel_id",
+    ]
+    assert foreign_key.ondelete == "RESTRICT"

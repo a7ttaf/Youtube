@@ -1,5 +1,6 @@
 import re
 from dataclasses import dataclass
+from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -14,8 +15,10 @@ from ums_smart_revenue.finance.reconciliation import (
     build_revenue_reconciliation_issue_queue,
 )
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 @dataclass(frozen=True)
@@ -70,6 +73,7 @@ class SqlAlchemyFinanceCloseReadinessService:
 
     def __init__(self, session: Session):
         self._session = session
+        self._tenant_id = _DEFAULT_TENANT_UUID
 
     def check_month(
         self, month: str, *, for_update: bool = False
@@ -124,6 +128,7 @@ class SqlAlchemyFinanceCloseReadinessService:
     def _pending_manual_override_count(self, month: str, *, for_update: bool) -> int:
         """Count pending overrides, locking matching rows during lock-time rechecks."""
         pending_overrides_statement = select(RevenueManualOverrideORM.id).where(
+            RevenueManualOverrideORM.tenant_id == self._tenant_id,
             RevenueManualOverrideORM.month == month,
             RevenueManualOverrideORM.status == "PENDING",
         )
@@ -142,13 +147,16 @@ class SqlAlchemyFinanceCloseReadinessService:
             .select_from(YouTubeChannelORM)
             .outerjoin(
                 MonthlyChannelRevenueFactORM,
-                (
+                (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)
+                & (
                     MonthlyChannelRevenueFactORM.youtube_channel_id
                     == YouTubeChannelORM.youtube_channel_id
                 )
+                & (MonthlyChannelRevenueFactORM.tenant_id == self._tenant_id)
                 & (MonthlyChannelRevenueFactORM.month == month),
             )
             .where(
+                YouTubeChannelORM.tenant_id == self._tenant_id,
                 YouTubeChannelORM.active.is_(True),
                 YouTubeChannelORM.revenue_required.is_(True),
                 MonthlyChannelRevenueFactORM.id.is_(None),
@@ -178,7 +186,10 @@ class SqlAlchemyFinanceCloseReadinessService:
         """Load month facts used for reconciliation, locking them for close attempts."""
         statement = (
             select(MonthlyChannelRevenueFactORM)
-            .where(MonthlyChannelRevenueFactORM.month == month)
+            .where(
+                MonthlyChannelRevenueFactORM.tenant_id == self._tenant_id,
+                MonthlyChannelRevenueFactORM.month == month,
+            )
             .order_by(
                 MonthlyChannelRevenueFactORM.youtube_channel_id,
                 MonthlyChannelRevenueFactORM.source_kind,

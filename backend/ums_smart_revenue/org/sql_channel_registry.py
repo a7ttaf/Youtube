@@ -13,6 +13,10 @@ from ums_smart_revenue.org.channel_registry import (
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
+_SQLITE_TENANT_CHANNEL_UNIQUE_ERROR = (
+    "unique constraint failed: youtube_channels.tenant_id, "
+    "youtube_channels.youtube_channel_id"
+)
 
 
 class SqlAlchemyChannelRegistry:
@@ -31,7 +35,9 @@ class SqlAlchemyChannelRegistry:
         ).all()
         return [self._to_entry(row) for row in rows]
 
-    def list_channels_by_ids(self, youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
+    def list_channels_by_ids(
+        self, youtube_channel_ids: set[str]
+    ) -> list[ChannelRegistryEntry]:
         if not youtube_channel_ids:
             return []
         rows = self._session.scalars(
@@ -61,14 +67,18 @@ class SqlAlchemyChannelRegistry:
         revenue_required: bool,
     ) -> ChannelRegistryEntry:
         if self._get_row(youtube_channel_id) is not None:
-            raise ChannelRegistryConflictError(f"Channel already exists: {youtube_channel_id}")
+            raise ChannelRegistryConflictError(
+                f"Channel already exists: {youtube_channel_id}"
+            )
 
         row = YouTubeChannelORM(
             id=uuid4(),
             tenant_id=self._tenant_id,
             youtube_channel_id=youtube_channel_id,
             channel_name=channel_name,
-            primary_org_unit_id=_parse_optional_uuid(primary_company_id, "primary_company_id"),
+            primary_org_unit_id=_parse_optional_uuid(
+                primary_company_id, "primary_company_id"
+            ),
             cms_status=cms_status,
             revenue_required=revenue_required,
             active=True,
@@ -78,17 +88,26 @@ class SqlAlchemyChannelRegistry:
             self._session.flush()
         except IntegrityError as exc:
             self._session.rollback()
-            if _is_duplicate_channel_integrity_error(exc) or self._get_row(youtube_channel_id) is not None:
-                raise ChannelRegistryConflictError(f"Channel already exists: {youtube_channel_id}") from exc
+            if (
+                _is_duplicate_channel_integrity_error(exc)
+                or self._get_row(youtube_channel_id) is not None
+            ):
+                raise ChannelRegistryConflictError(
+                    f"Channel already exists: {youtube_channel_id}"
+                ) from exc
             raise _channel_registry_validation_error_from_integrity_error(exc) from exc
         return self._to_entry(row)
 
-    def update_mapping(self, *, youtube_channel_id: str, primary_company_id: str | None) -> ChannelRegistryEntry:
+    def update_mapping(
+        self, *, youtube_channel_id: str, primary_company_id: str | None
+    ) -> ChannelRegistryEntry:
         row = self._get_row(youtube_channel_id)
         if row is None:
             raise KeyError(f"Channel not found: {youtube_channel_id}")
 
-        row.primary_org_unit_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
+        row.primary_org_unit_id = _parse_optional_uuid(
+            primary_company_id, "primary_company_id"
+        )
         try:
             self._session.flush()
         except IntegrityError as exc:
@@ -109,7 +128,9 @@ class SqlAlchemyChannelRegistry:
         return ChannelRegistryEntry(
             youtube_channel_id=row.youtube_channel_id,
             channel_name=row.channel_name,
-            primary_company_id=str(row.primary_org_unit_id) if row.primary_org_unit_id is not None else None,
+            primary_company_id=str(row.primary_org_unit_id)
+            if row.primary_org_unit_id is not None
+            else None,
             cms_status=row.cms_status,
             revenue_required=row.revenue_required,
             active=row.active,
@@ -122,7 +143,9 @@ def _parse_optional_uuid(value: str | None, field_name: str) -> UUID | None:
     try:
         return UUID(value)
     except ValueError as exc:
-        raise ChannelRegistryValidationError(f"{field_name} must be a valid UUID") from exc
+        raise ChannelRegistryValidationError(
+            f"{field_name} must be a valid UUID"
+        ) from exc
 
 
 def _is_duplicate_channel_integrity_error(exc: IntegrityError) -> bool:
@@ -130,16 +153,31 @@ def _is_duplicate_channel_integrity_error(exc: IntegrityError) -> bool:
     error_text = _integrity_error_text(exc)
     return (
         "youtube_channel_id" in constraint_name
+        or (
+            "youtube_channels" in constraint_name
+            and "youtube_channel" in constraint_name
+        )
         or "unique constraint failed: youtube_channels.youtube_channel_id" in error_text
+        or _SQLITE_TENANT_CHANNEL_UNIQUE_ERROR in error_text
     )
 
 
-def _channel_registry_validation_error_from_integrity_error(exc: IntegrityError) -> ChannelRegistryValidationError:
+def _channel_registry_validation_error_from_integrity_error(
+    exc: IntegrityError,
+) -> ChannelRegistryValidationError:
     constraint_name = _constraint_name(exc)
     error_text = _integrity_error_text(exc)
-    if "primary_org_unit_id" in constraint_name or "foreign key constraint failed" in error_text:
-        return ChannelRegistryValidationError("primary_company_id must reference an existing org unit")
-    return ChannelRegistryValidationError("Channel registry values violate database constraints")
+    if (
+        "primary_org_unit_id" in constraint_name
+        or "tenant_org_unit" in constraint_name
+        or "foreign key constraint failed" in error_text
+    ):
+        return ChannelRegistryValidationError(
+            "primary_company_id must reference an existing org unit"
+        )
+    return ChannelRegistryValidationError(
+        "Channel registry values violate database constraints"
+    )
 
 
 def _constraint_name(exc: IntegrityError) -> str:

@@ -8,7 +8,7 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
-    ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Numeric,
     PrimaryKeyConstraint,
@@ -95,7 +95,6 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
     month: Mapped[str] = mapped_column(Text, nullable=False)
     youtube_channel_id: Mapped[str] = mapped_column(
         Text,
-        ForeignKey("youtube_channels.youtube_channel_id", ondelete="RESTRICT"),
         nullable=False,
     )
     source_kind: Mapped[str] = mapped_column(Text, nullable=False)
@@ -131,6 +130,12 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
     )
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "youtube_channel_id"],
+            ["youtube_channels.tenant_id", "youtube_channels.youtube_channel_id"],
+            name="fk_monthly_channel_revenue_facts_tenant_channel",
+            ondelete="RESTRICT",
+        ),
         UniqueConstraint(
             "tenant_id",
             "month",
@@ -192,7 +197,6 @@ class RevenueManualOverrideORM(FinanceBase):
     month: Mapped[str] = mapped_column(Text, nullable=False)
     youtube_channel_id: Mapped[str] = mapped_column(
         Text,
-        ForeignKey("youtube_channels.youtube_channel_id", ondelete="RESTRICT"),
         nullable=False,
     )
     adjustment_revenue_usd: Mapped[Decimal] = mapped_column(
@@ -225,6 +229,12 @@ class RevenueManualOverrideORM(FinanceBase):
     )
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "youtube_channel_id"],
+            ["youtube_channels.tenant_id", "youtube_channels.youtube_channel_id"],
+            name="fk_revenue_manual_overrides_tenant_channel",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             "length(month) = 7 AND substr(month, 5, 1) = '-' "
             "AND substr(month, 1, 1) BETWEEN '0' AND '9' "

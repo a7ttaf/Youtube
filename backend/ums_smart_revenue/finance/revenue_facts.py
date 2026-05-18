@@ -171,7 +171,8 @@ class SqlAlchemyRevenueFactRepository:
             select(MonthlyChannelRevenueFactORM)
             .join(
                 YouTubeChannelORM,
-                (
+                (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)
+                & (
                     MonthlyChannelRevenueFactORM.youtube_channel_id
                     == YouTubeChannelORM.youtube_channel_id
                 )
@@ -214,7 +215,8 @@ class SqlAlchemyRevenueFactRepository:
             select(MonthlyChannelRevenueFactORM.youtube_channel_id)
             .join(
                 YouTubeChannelORM,
-                (
+                (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)
+                & (
                     MonthlyChannelRevenueFactORM.youtube_channel_id
                     == YouTubeChannelORM.youtube_channel_id
                 )
