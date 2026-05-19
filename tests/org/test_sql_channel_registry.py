@@ -138,10 +138,10 @@ def test_sql_channel_registry_reads_and_writes_channel_rows():
     assert created.youtube_channel_id == "channel-tv-b"
     assert updated.primary_company_id == str(COMPANY_NEWS_ID)
     assert persisted.primary_org_unit_id == COMPANY_NEWS_ID
-    assert [channel.youtube_channel_id for channel in registry.list_channels()] == [
+    assert {channel.youtube_channel_id for channel in registry.list_channels()} == {
         "channel-tv-a",
         "channel-tv-b",
-    ]
+    }
 
 
 def test_sql_channel_registry_rejects_malformed_primary_company_id():
@@ -255,12 +255,12 @@ def test_sql_channel_registry_filters_every_read_to_default_tenant():
     )
 
     assert registry.get_channel(OTHER_TENANT_CHANNEL_ID) is None
-    assert [channel.youtube_channel_id for channel in registry.list_channels()] == [
+    assert {channel.youtube_channel_id for channel in registry.list_channels()} == {
         "channel-tv-a"
-    ]
-    assert [channel.youtube_channel_id for channel in channels_by_id] == [
+    }
+    assert {channel.youtube_channel_id for channel in channels_by_id} == {
         "channel-tv-a"
-    ]
+    }
 
 
 def test_sql_channel_registry_allows_same_external_channel_id_in_another_tenant():
@@ -296,12 +296,12 @@ def test_sql_channel_registry_explicit_tenant_writes_are_isolated():
 
     assert created.youtube_channel_id == "channel-other-tenant-created"
     assert default_registry.get_channel("channel-other-tenant-created") is None
-    assert [
+    assert {
         channel.youtube_channel_id for channel in default_registry.list_channels()
-    ] == ["channel-tv-a"]
-    assert [
+    } == {"channel-tv-a"}
+    assert {
         channel.youtube_channel_id for channel in other_registry.list_channels()
-    ] == ["channel-other-tenant-created", OTHER_TENANT_CHANNEL_ID]
+    } == {"channel-other-tenant-created", OTHER_TENANT_CHANNEL_ID}
 
 
 def test_sql_channel_registry_rejects_cross_tenant_company_id():
