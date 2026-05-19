@@ -225,7 +225,10 @@ class SqlAlchemyManualOverrideRepository:
 
     def _require_month_open(self, month: str, *, for_update: bool = True) -> None:
         close = get_or_create_month_close_row(
-            self._session, month, for_update=for_update
+            self._session,
+            month,
+            tenant_id=self._tenant_id,
+            for_update=for_update,
         )
         if close.status == "LOCKED":
             raise ManualOverrideLockedMonthError(

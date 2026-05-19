@@ -245,7 +245,12 @@ class SqlAlchemyRevenueFactRepository:
         return list(self._session.scalars(statement).all())
 
     def _require_month_open(self, month: str) -> None:
-        close = get_or_create_month_close_row(self._session, month, for_update=True)
+        close = get_or_create_month_close_row(
+            self._session,
+            month,
+            tenant_id=self._tenant_id,
+            for_update=True,
+        )
         if close.status == "LOCKED":
             raise RevenueFactLockedMonthError(
                 "Finance month is locked for revenue fact imports"

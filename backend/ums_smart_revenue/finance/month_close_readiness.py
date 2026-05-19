@@ -82,7 +82,11 @@ class SqlAlchemyFinanceCloseReadinessService:
         """Return readiness, optionally guarding the close attempt transaction."""
         _validate_month(month)
         if for_update:
-            acquire_finance_month_advisory_lock(self._session, month)
+            acquire_finance_month_advisory_lock(
+                self._session,
+                month,
+                tenant_id=self._tenant_id,
+            )
         blockers: list[FinanceCloseBlocker] = []
         pending_override_count = self._pending_manual_override_count(
             month, for_update=for_update
