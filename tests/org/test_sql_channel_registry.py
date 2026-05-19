@@ -10,7 +10,9 @@ from ums_smart_revenue.org.access_index import load_org_access_index_from_sessio
 from ums_smart_revenue.org.channel_registry import ChannelRegistryValidationError
 from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry
 from ums_smart_revenue.org.sql_channel_registry import SqlAlchemyChannelRegistry
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
+DEFAULT_TENANT_ID = UUID(UMS_TENANT_ID)
 SECTOR_TV_ID = UUID("00000000-0000-0000-0000-000000000101")
 COMPANY_TV_ID = UUID("00000000-0000-0000-0000-000000000201")
 COMPANY_NEWS_ID = UUID("00000000-0000-0000-0000-000000000202")
@@ -132,6 +134,7 @@ def test_sql_channel_registry_reads_and_writes_channel_rows():
 
     persisted = session.scalars(
         select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
             YouTubeChannelORM.youtube_channel_id == "channel-tv-b"
         )
     ).one()
@@ -239,6 +242,7 @@ def test_sql_channel_registry_rejects_missing_company_id_on_update_and_rolls_bac
 
     persisted = session.scalars(
         select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
             YouTubeChannelORM.youtube_channel_id == "channel-tv-a"
         )
     ).one()
