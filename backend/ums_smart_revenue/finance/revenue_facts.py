@@ -295,11 +295,20 @@ class SqlAlchemyRevenueFactRepository:
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
     if tenant_id is not None:
-        return UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
+        return _parse_tenant_uuid(tenant_id)
     current_tenant = get_current_tenant()
     if current_tenant is not None:
         return current_tenant.id
     return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise RevenueFactValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _validate_month(month: str) -> None:

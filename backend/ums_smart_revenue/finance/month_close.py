@@ -161,7 +161,7 @@ def get_or_create_month_close_row(
     for_update: bool = False,
 ) -> FinanceMonthCloseORM:
     """Return or create the close row, guarding month writers when requested."""
-    resolved_tenant_id = _resolve_tenant_id(tenant_id, use_context=False)
+    resolved_tenant_id = _resolve_tenant_id(tenant_id)
     if for_update:
         acquire_finance_month_advisory_lock(
             session, month, tenant_id=resolved_tenant_id
@@ -198,7 +198,7 @@ def acquire_finance_month_advisory_lock(
     """Acquire the transaction-scoped month guard used by close and writer paths."""
     if session.get_bind().dialect.name != "postgresql":
         return
-    resolved_tenant_id = _resolve_tenant_id(tenant_id, use_context=False)
+    resolved_tenant_id = _resolve_tenant_id(tenant_id)
     session.execute(
         text("SELECT pg_advisory_xact_lock(:lock_key)"),
         {"lock_key": _finance_month_advisory_lock_key(month, resolved_tenant_id)},
@@ -208,19 +208,28 @@ def acquire_finance_month_advisory_lock(
 def _month_close_key(
     month: str, *, tenant_id: UUID | str | None = None
 ) -> tuple[UUID, str]:
-    return (_resolve_tenant_id(tenant_id, use_context=False), month)
+    return (_resolve_tenant_id(tenant_id), month)
 
 
 def _resolve_tenant_id(
     tenant_id: UUID | str | None, *, use_context: bool = True
 ) -> UUID:
     if tenant_id is not None:
-        return UUID(tenant_id) if isinstance(tenant_id, str) else tenant_id
+        return _parse_tenant_uuid(tenant_id)
     if use_context:
         current_tenant = get_current_tenant()
         if current_tenant is not None:
             return current_tenant.id
     return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise ValueError("tenant_id must be a valid UUID") from exc
 
 
 def _finance_month_advisory_lock_key(month: str, tenant_id: UUID) -> int:

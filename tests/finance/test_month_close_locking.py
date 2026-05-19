@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -6,10 +7,21 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import FinanceBase, FinanceMonthCloseORM
+from ums_smart_revenue.finance import adsense_payments as adsense_payments_module
+from ums_smart_revenue.finance import bank_reconciliation as bank_reconciliation_module
 from ums_smart_revenue.finance import manual_overrides as manual_overrides_module
 from ums_smart_revenue.finance import month_close as month_close_module
 from ums_smart_revenue.finance import month_close_readiness as readiness_module
 from ums_smart_revenue.finance import revenue_facts as revenue_facts_module
+from ums_smart_revenue.finance.adsense_payments import (
+    AdSensePaymentValidationError,
+    SqlAlchemyAdSensePaymentRepository,
+)
+from ums_smart_revenue.finance.bank_reconciliation import (
+    BankReconciliationValidationError,
+    SqlAlchemyBankReconciliationRepository,
+)
+from ums_smart_revenue.finance.manual_overrides import ManualOverrideValidationError
 from ums_smart_revenue.finance.month_close import (
     SqlAlchemyFinanceMonthCloseRepository,
     acquire_finance_month_advisory_lock,
@@ -18,9 +30,13 @@ from ums_smart_revenue.finance.month_close import (
 from ums_smart_revenue.finance.month_close_readiness import (
     SqlAlchemyFinanceCloseReadinessService,
 )
+from ums_smart_revenue.finance.revenue_facts import RevenueFactValidationError
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import TENANT_CTX
+from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 DEFAULT_TENANT_ID = UUID(UMS_TENANT_ID)
+OTHER_TENANT_ID = UUID("00000000-0000-0000-0000-00000000f301")
 
 
 class _DialectSession:
@@ -33,6 +49,20 @@ class _DialectSession:
 
     def execute(self, statement: object, parameters: dict[str, object]) -> None:
         self.executed.append((statement, parameters))
+
+
+def _tenant(tenant_id: UUID = OTHER_TENANT_ID) -> Tenant:
+    now = datetime.now(UTC)
+    return Tenant(
+        id=tenant_id,
+        slug=f"tenant-{tenant_id.hex[-4:]}",
+        display_name="Tenant",
+        primary_currency="USD",
+        status=TenantStatus.ACTIVE,
+        onboarding_at=now,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def test_finance_month_advisory_lock_uses_postgres_transaction_lock() -> None:
@@ -121,6 +151,44 @@ def test_get_or_create_month_close_row_uses_explicit_tenant() -> None:
 
         assert row.tenant_id == tenant_id
         assert session.get(FinanceMonthCloseORM, (tenant_id, "2026-03")) is row
+
+
+def test_get_or_create_month_close_row_uses_request_tenant_context() -> None:
+    """Public close-row helpers honor request context when tenant_id is omitted."""
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    FinanceBase.metadata.create_all(engine)
+    token = TENANT_CTX.set(_tenant())
+    try:
+        with Session(engine) as session:
+            row = get_or_create_month_close_row(session, "2026-03")
+
+            assert row.tenant_id == OTHER_TENANT_ID
+            assert session.get(
+                FinanceMonthCloseORM,
+                (OTHER_TENANT_ID, "2026-03"),
+            ) is row
+            assert session.get(
+                FinanceMonthCloseORM,
+                (DEFAULT_TENANT_ID, "2026-03"),
+            ) is None
+    finally:
+        TENANT_CTX.reset(token)
+
+
+def test_finance_month_advisory_lock_uses_request_tenant_context() -> None:
+    """Omitted advisory-lock tenant ids resolve to the active request tenant."""
+    default_session = _DialectSession("postgresql")
+    acquire_finance_month_advisory_lock(default_session, "2026-03")
+    request_session = _DialectSession("postgresql")
+    token = TENANT_CTX.set(_tenant())
+    try:
+        acquire_finance_month_advisory_lock(request_session, "2026-03")
+    finally:
+        TENANT_CTX.reset(token)
+
+    assert default_session.executed[0][1]["lock_key"] != (
+        request_session.executed[0][1]["lock_key"]
+    )
 
 
 def test_finance_month_close_repository_uses_explicit_tenant() -> None:
@@ -267,3 +335,89 @@ def test_manual_override_writes_use_guarded_month_open_check(
     )._require_month_open("2026-03")
 
     assert calls == [("2026-03", DEFAULT_TENANT_ID, True)]
+
+
+def test_adsense_payment_writes_use_context_tenant_in_month_open_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AdSense payment sync checks the close row for its resolved tenant."""
+    calls: list[tuple[str, UUID | str | None, bool]] = []
+
+    def record_get_or_create(
+        session: object,
+        month: str,
+        *,
+        tenant_id: UUID | str | None = None,
+        for_update: bool,
+    ) -> SimpleNamespace:
+        del session
+        calls.append((month, tenant_id, for_update))
+        return SimpleNamespace(status="OPEN")
+
+    monkeypatch.setattr(
+        adsense_payments_module,
+        "get_or_create_month_close_row",
+        record_get_or_create,
+    )
+    token = TENANT_CTX.set(_tenant())
+    try:
+        SqlAlchemyAdSensePaymentRepository(object())._require_month_open("2026-03")
+    finally:
+        TENANT_CTX.reset(token)
+
+    assert calls == [("2026-03", OTHER_TENANT_ID, True)]
+
+
+def test_bank_reconciliation_writes_use_context_tenant_in_month_open_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bank reconciliation writes check the close row for their resolved tenant."""
+    calls: list[tuple[str, UUID | str | None, bool]] = []
+
+    def record_get_or_create(
+        session: object,
+        month: str,
+        *,
+        tenant_id: UUID | str | None = None,
+        for_update: bool,
+    ) -> SimpleNamespace:
+        del session
+        calls.append((month, tenant_id, for_update))
+        return SimpleNamespace(status="OPEN")
+
+    monkeypatch.setattr(
+        bank_reconciliation_module,
+        "get_or_create_month_close_row",
+        record_get_or_create,
+    )
+    token = TENANT_CTX.set(_tenant())
+    try:
+        SqlAlchemyBankReconciliationRepository(object())._require_month_open(
+            "2026-03"
+        )
+    finally:
+        TENANT_CTX.reset(token)
+
+    assert calls == [("2026-03", OTHER_TENANT_ID, True)]
+
+
+def test_tenant_id_constructor_inputs_are_validated() -> None:
+    """Tenant-aware finance repositories reject malformed tenant_id strings."""
+    with pytest.raises(ValueError, match="tenant_id must be a valid UUID"):
+        SqlAlchemyFinanceMonthCloseRepository(object(), tenant_id=" ")
+    with pytest.raises(ValueError, match="tenant_id must be a valid UUID"):
+        SqlAlchemyFinanceCloseReadinessService(object(), tenant_id=" ")
+    with pytest.raises(ManualOverrideValidationError, match="valid UUID"):
+        manual_overrides_module.SqlAlchemyManualOverrideRepository(
+            object(),
+            tenant_id="not-a-uuid",
+        )
+    with pytest.raises(RevenueFactValidationError, match="valid UUID"):
+        revenue_facts_module.SqlAlchemyRevenueFactRepository(
+            object(),
+            tenant_id="not-a-uuid",
+        )
+    with pytest.raises(AdSensePaymentValidationError, match="valid UUID"):
+        SqlAlchemyAdSensePaymentRepository(object(), tenant_id="not-a-uuid")
+    with pytest.raises(BankReconciliationValidationError, match="valid UUID"):
+        SqlAlchemyBankReconciliationRepository(object(), tenant_id="not-a-uuid")

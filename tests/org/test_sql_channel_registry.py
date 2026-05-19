@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.org.access_index import load_org_access_index_from_session
 from ums_smart_revenue.org.channel_registry import ChannelRegistryValidationError
+from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry
 from ums_smart_revenue.org.sql_channel_registry import SqlAlchemyChannelRegistry
 
 SECTOR_TV_ID = UUID("00000000-0000-0000-0000-000000000101")
@@ -155,6 +156,13 @@ def test_sql_channel_registry_rejects_malformed_primary_company_id():
             cms_status="UNKNOWN",
             revenue_required=False,
         )
+
+
+def test_org_sql_repositories_validate_tenant_id_constructor_input():
+    with pytest.raises(ChannelRegistryValidationError, match="tenant_id"):
+        SqlAlchemyChannelRegistry(object(), tenant_id="not-a-uuid")
+    with pytest.raises(ValueError, match="tenant_id must be a valid UUID"):
+        SqlAlchemyChannelGroupRegistry(object(), tenant_id=" ")
 
 
 def test_sql_channel_registry_rejects_missing_company_id_on_create():
