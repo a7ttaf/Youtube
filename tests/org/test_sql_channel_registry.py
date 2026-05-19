@@ -280,6 +280,30 @@ def test_sql_channel_registry_allows_same_external_channel_id_in_another_tenant(
     assert created.primary_company_id == str(COMPANY_TV_ID)
 
 
+def test_sql_channel_registry_explicit_tenant_writes_are_isolated():
+    session = build_session()
+    seed_org(session)
+    default_registry = SqlAlchemyChannelRegistry(session)
+    other_registry = SqlAlchemyChannelRegistry(session, tenant_id=OTHER_TENANT_ID)
+
+    created = other_registry.create_channel(
+        youtube_channel_id="channel-other-tenant-created",
+        channel_name="Other Tenant Created",
+        primary_company_id=str(OTHER_TENANT_COMPANY_ID),
+        cms_status="UNKNOWN",
+        revenue_required=False,
+    )
+
+    assert created.youtube_channel_id == "channel-other-tenant-created"
+    assert default_registry.get_channel("channel-other-tenant-created") is None
+    assert [
+        channel.youtube_channel_id for channel in default_registry.list_channels()
+    ] == ["channel-tv-a"]
+    assert [
+        channel.youtube_channel_id for channel in other_registry.list_channels()
+    ] == ["channel-other-tenant-created", OTHER_TENANT_CHANNEL_ID]
+
+
 def test_sql_channel_registry_rejects_cross_tenant_company_id():
     session = build_session()
     seed_org(session)
