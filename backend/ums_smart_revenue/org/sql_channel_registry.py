@@ -95,10 +95,7 @@ class SqlAlchemyChannelRegistry:
             self._session.flush()
         except IntegrityError as exc:
             self._session.rollback()
-            if (
-                _is_duplicate_channel_integrity_error(exc)
-                or self._get_row(youtube_channel_id) is not None
-            ):
+            if _is_duplicate_channel_integrity_error(exc):
                 raise ChannelRegistryConflictError(
                     f"Channel already exists: {youtube_channel_id}"
                 ) from exc

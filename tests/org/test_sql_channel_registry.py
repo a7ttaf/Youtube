@@ -2,6 +2,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import create_engine, event, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
@@ -181,6 +182,45 @@ def test_sql_channel_registry_rejects_missing_company_id_on_create():
             cms_status="UNKNOWN",
             revenue_required=False,
         )
+
+
+def test_sql_channel_registry_does_not_mask_non_duplicate_integrity_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+    lookups = 0
+
+    def _get_row(channel_id: str):
+        nonlocal lookups
+        assert channel_id == "channel-racing-failure"
+        lookups += 1
+        return None if lookups == 1 else object()
+
+    def _raise_foreign_key_failure():
+        raise IntegrityError(
+            "insert youtube channel",
+            {},
+            Exception("foreign key constraint failed"),
+        )
+
+    monkeypatch.setattr(registry, "_get_row", _get_row)
+    monkeypatch.setattr(session, "flush", _raise_foreign_key_failure)
+
+    with pytest.raises(
+        ChannelRegistryValidationError,
+        match="primary_company_id must reference an existing org unit",
+    ):
+        registry.create_channel(
+            youtube_channel_id="channel-racing-failure",
+            channel_name="Racing Failure",
+            primary_company_id=None,
+            cms_status="UNKNOWN",
+            revenue_required=False,
+        )
+
+    assert lookups == 1
 
 
 def test_sql_channel_registry_rejects_missing_company_id_on_update_and_rolls_back():
