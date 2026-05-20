@@ -37,6 +37,10 @@ Second commit (this artifact set):
 
 - **At runtime: none.** Same `org/sql_channel_groups.py`.
 - **In CI / test count: +18 tests.** Pytest moves from 507 → 525.
+- Count reconciliation: the original PR objective and first push covered
+  15 tests / 522 total pytest tests. After CodeRabbit review follow-up,
+  this head intentionally carries 18 tests / 525 total pytest tests; those
+  are the authoritative validated numbers for the current branch head.
 
 ## Tests run
 

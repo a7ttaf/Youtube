@@ -13,7 +13,12 @@ After PR #29 (bank reconciliation tenant tests) was opened, the user picked dire
 
 ## What was actually done
 
-A single new test file, `tests/org/test_sql_channel_groups.py`, with **18 focused tests** for `SqlAlchemyChannelGroupRegistry`:
+A single new test file, `tests/org/test_sql_channel_groups.py`, with **18 focused tests** for `SqlAlchemyChannelGroupRegistry`.
+
+Count reconciliation: the original PR objective and first push covered
+15 tests / 522 total pytest tests. After CodeRabbit review follow-up,
+this head intentionally carries 18 tests / 525 total pytest tests; those
+are the authoritative validated numbers for the current branch head.
 
 | # | Test | What it proves |
 |---|---|---|

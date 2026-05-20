@@ -12,6 +12,11 @@
 - `docs/pulls/2026-05-20-pr30-channel-groups-tenant-tests-changelog.md` (this file).
 - `docs/pulls/2026-05-20-pr30-channel-groups-tenant-tests-handoff.md` (handoff artifact).
 
+Note: the original PR objective and first push covered 15 tests / 522 total
+pytest tests. After CodeRabbit review follow-up, this head intentionally carries
+18 tests / 525 total pytest tests; those are the authoritative validated numbers
+for the current branch head.
+
 ## Changed
 
 ### Source semantics — none

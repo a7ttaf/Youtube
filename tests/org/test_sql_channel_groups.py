@@ -59,10 +59,12 @@ CHANNEL_DEFAULT_A_ID = UUID("00000000-0000-0000-0000-000000050301")
 CHANNEL_DEFAULT_B_ID = UUID("00000000-0000-0000-0000-000000050302")
 CHANNEL_INACTIVE_ID = UUID("00000000-0000-0000-0000-000000050303")
 CHANNEL_OTHER_ID = UUID("00000000-0000-0000-0000-000000050903")
+CHANNEL_OTHER_B_ID = UUID("00000000-0000-0000-0000-000000050904")
 CHANNEL_DEFAULT_A_EXTERNAL = "channel-tv-a"
 CHANNEL_DEFAULT_B_EXTERNAL = "channel-tv-b"
 CHANNEL_INACTIVE_EXTERNAL = "channel-inactive"
 CHANNEL_OTHER_EXTERNAL = "channel-other-tenant"
+CHANNEL_OTHER_B_EXTERNAL = "channel-other-tenant-b"
 CREATED_AT = datetime(2026, 4, 21, 9, 0, tzinfo=UTC)
 
 
@@ -150,26 +152,47 @@ def seed_org(session: Session) -> None:
                 revenue_required=True,
                 active=True,
             ),
+            YouTubeChannelORM(
+                id=CHANNEL_OTHER_B_ID,
+                tenant_id=OTHER_TENANT_ID,
+                youtube_channel_id=CHANNEL_OTHER_B_EXTERNAL,
+                channel_name="Other Tenant Channel B",
+                primary_org_unit_id=COMPANY_OTHER_ID,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                active=True,
+            ),
         ]
     )
     session.commit()
 
 
-def insert_cross_tenant_member_row(session: Session, *, group_id: UUID) -> None:
+def insert_member_row_bypassing_fk(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    group_id: UUID,
+    channel_id: UUID,
+) -> None:
     """Insert inconsistent fixture data that normal FK checks would reject."""
     session.commit()
     bind = session.get_bind()
     with bind.connect() as connection:
         connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
-        connection.execute(
-            ChannelGroupMemberORM.__table__.insert().values(
-                tenant_id=OTHER_TENANT_ID,
-                group_id=group_id,
-                channel_id=CHANNEL_OTHER_ID,
+        try:
+            connection.execute(
+                ChannelGroupMemberORM.__table__.insert().values(
+                    tenant_id=tenant_id,
+                    group_id=group_id,
+                    channel_id=channel_id,
+                )
             )
-        )
-        connection.commit()
-        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
+            connection.commit()
+        except Exception:
+            connection.rollback()
+            raise
+        finally:
+            connection.exec_driver_sql("PRAGMA foreign_keys=ON")
 
 
 def _tenant(tenant_id: UUID, *, slug: str) -> Tenant:
@@ -671,7 +694,18 @@ def test_channel_ids_by_group_dual_filter_excludes_cross_tenant_member_rows() ->
         group_type="CUSTOM_GROUP",
         channel_ids=[CHANNEL_OTHER_EXTERNAL],
     )
-    insert_cross_tenant_member_row(session, group_id=default_group_uuid)
+    insert_member_row_bypassing_fk(
+        session,
+        tenant_id=OTHER_TENANT_ID,
+        group_id=default_group_uuid,
+        channel_id=CHANNEL_OTHER_ID,
+    )
+    insert_member_row_bypassing_fk(
+        session,
+        tenant_id=DEFAULT_TENANT_ID,
+        group_id=default_group_uuid,
+        channel_id=CHANNEL_OTHER_B_ID,
+    )
 
     default_view = default_registry._channel_ids_by_group([default_group_uuid])
     assert default_view == {default_group_uuid: (CHANNEL_DEFAULT_A_EXTERNAL,)}
