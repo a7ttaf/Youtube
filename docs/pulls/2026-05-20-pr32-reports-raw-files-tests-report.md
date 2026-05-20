@@ -38,7 +38,7 @@ A single new test file, `tests/reports/test_raw_files.py`, with **39 focused tes
 | 2 | Read `RawReportFileORM` model | 538 passed | Confirmed composite unique key + check constraints. |
 | 3 | Read `tests/db/test_raw_report_file_models.py` | 538 passed | Adopted the `ReportBase.metadata.create_all(engine)` session-builder pattern. |
 | 4 | Write `test_raw_files.py` (~520 lines, 39 tests) | 577 passed | One E501 long-line fixed; one ordering assertion converted from list-eq to set-eq with separate deterministic-ordering test using controlled `datetime` constants. |
-| 5 | `ruff check` + `ruff format --check` | 577 passed | All clean. |
+| 5 | `ruff check` + `ruff format --check` | 577 passed | 1 file format-unclean (pre-existing: `tests/finance/test_adsense_payments_tenant_scope.py`). |
 | 6 | Final full gate | 577 passed | Baseline preserved. |
 | 7 | Commit `797c037`, push, open PR #32 | — | — |
 

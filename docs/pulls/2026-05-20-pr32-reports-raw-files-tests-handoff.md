@@ -90,15 +90,17 @@ Remaining queued items (lower priority):
 ## Validation a future maintainer can rerun
 
 ```bash
-cd /home/mahmoud/work/youtube-ums-rawfiles
+# From the repository root on branch pr/s2-4b-reports-raw-files-tests.
 git checkout pr/s2-4b-reports-raw-files-tests
-/home/mahmoud/work/youtube-ums/.venv/bin/python -m ruff check tests/reports/test_raw_files.py
-/home/mahmoud/work/youtube-ums/.venv/bin/python -m ruff format --check tests/reports/test_raw_files.py
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -m pytest -q tests/reports/test_raw_files.py
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -m pytest -q
+PYTHONPATH=backend python -m ruff check tests/reports/test_raw_files.py
+PYTHONPATH=backend python -m ruff format --check tests/reports/test_raw_files.py
+PYTHONPATH=backend python -m pytest -q tests/reports/test_raw_files.py
+PYTHONPATH=backend python -m pytest -q
 git diff --check
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -c "from ums_smart_revenue.reports.raw_files import SqlAlchemyRawReportFileRepository, RawReportFileEntry, RawReportFileNotFoundError, RawReportFileConflictError, RawReportFileValidationError, MAX_RAW_REPORT_FILE_PAGE_SIZE; print('ok')"
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -m alembic -c alembic.ini heads
+PYTHONPATH=backend python -c "from ums_smart_revenue.reports.raw_files import SqlAlchemyRawReportFileRepository, RawReportFileEntry, RawReportFileNotFoundError, RawReportFileConflictError, RawReportFileValidationError, MAX_RAW_REPORT_FILE_PAGE_SIZE; print('ok')"
+PYTHONPATH=backend python -m alembic -c alembic.ini heads
 ```
+
+Assumes an activated virtualenv; prepend `path/to/venv/bin/` to `python` if needed.
 
 Expected: 39 tests pass on the new file, 577 total on the full suite, diff clean, ruff/format clean on the new file, import smoke ok, single alembic head.
