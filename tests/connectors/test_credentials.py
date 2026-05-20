@@ -132,7 +132,8 @@ def test_entry_to_api_never_exposes_raw_secret_material():
 
     api = entry.to_api()
     assert "encrypted_secret_ref" not in api
-    assert "secret" not in api or api.get("has_secret_ref") is True
+    assert "secret" not in api
+    assert "secret_ref" not in api
     for value in api.values():
         if isinstance(value, str):
             assert "secret-manager://" not in value
