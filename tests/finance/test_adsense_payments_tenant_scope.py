@@ -195,10 +195,14 @@ def test_sync_payments_allows_same_payment_name_in_two_tenants() -> None:
         source_report_id=None,
     )
 
-    rows = {
-        row.tenant_id: row.payment_amount
-        for row in session.scalars(select(AdSensePaymentORM)).all()
+    all_rows = session.scalars(select(AdSensePaymentORM)).all()
+    assert len(all_rows) == 2
+    assert {row.tenant_id for row in all_rows} == {
+        DEFAULT_TENANT_ID,
+        SECOND_TENANT_ID,
     }
+
+    rows = {row.tenant_id: row.payment_amount for row in all_rows}
     assert set(rows.keys()) == {DEFAULT_TENANT_ID, SECOND_TENANT_ID}
     assert rows[DEFAULT_TENANT_ID] == Decimal("500.00")
     assert rows[SECOND_TENANT_ID] == Decimal("900.00")
@@ -230,10 +234,14 @@ def test_sync_payments_upsert_is_scoped_to_one_tenant() -> None:
         source_report_id=None,
     )
 
-    rows = {
-        row.tenant_id: row.payment_amount
-        for row in session.scalars(select(AdSensePaymentORM)).all()
+    all_rows = session.scalars(select(AdSensePaymentORM)).all()
+    assert len(all_rows) == 2
+    assert {row.tenant_id for row in all_rows} == {
+        DEFAULT_TENANT_ID,
+        SECOND_TENANT_ID,
     }
+
+    rows = {row.tenant_id: row.payment_amount for row in all_rows}
     assert rows[DEFAULT_TENANT_ID] == Decimal("111.00")
     assert rows[SECOND_TENANT_ID] == Decimal("200.00")
 
@@ -375,6 +383,81 @@ def test_list_month_payments_returns_empty_when_target_tenant_has_no_rows() -> N
     ).list_month_payments(month="2026-03")
 
     assert entries == []
+
+
+def test_list_month_payments_uses_default_tenant_without_context() -> None:
+    """Bootstrap callers see only UMS-default rows on month-scoped reads."""
+    session = build_session()
+    _seed_payment(
+        session,
+        tenant_id=DEFAULT_TENANT_ID,
+        payment_name="Default March",
+        month="2026-03",
+    )
+    _seed_payment(
+        session,
+        tenant_id=SECOND_TENANT_ID,
+        payment_name="Second March",
+        month="2026-03",
+    )
+
+    entries = SqlAlchemyAdSensePaymentRepository(session).list_month_payments(
+        month="2026-03"
+    )
+
+    assert [entry.payment_name for entry in entries] == ["Default March"]
+
+
+def test_list_month_payments_uses_request_tenant_context_by_default() -> None:
+    """Ambient TENANT_CTX scopes month reads when no explicit tenant is supplied."""
+    session = build_session()
+    _seed_payment(
+        session,
+        tenant_id=DEFAULT_TENANT_ID,
+        payment_name="Default March",
+        month="2026-03",
+    )
+    _seed_payment(
+        session,
+        tenant_id=SECOND_TENANT_ID,
+        payment_name="Second March",
+        month="2026-03",
+    )
+    token = TENANT_CTX.set(_tenant(SECOND_TENANT_ID, slug="second"))
+    try:
+        entries = SqlAlchemyAdSensePaymentRepository(session).list_month_payments(
+            month="2026-03"
+        )
+    finally:
+        TENANT_CTX.reset(token)
+
+    assert [entry.payment_name for entry in entries] == ["Second March"]
+
+
+def test_list_month_payments_explicit_tenant_overrides_request_context() -> None:
+    """Constructor tenant ids beat any ambient request context on month reads."""
+    session = build_session()
+    _seed_payment(
+        session,
+        tenant_id=DEFAULT_TENANT_ID,
+        payment_name="Default March",
+        month="2026-03",
+    )
+    _seed_payment(
+        session,
+        tenant_id=SECOND_TENANT_ID,
+        payment_name="Second March",
+        month="2026-03",
+    )
+    token = TENANT_CTX.set(_tenant(SECOND_TENANT_ID, slug="second"))
+    try:
+        entries = SqlAlchemyAdSensePaymentRepository(
+            session, tenant_id=DEFAULT_TENANT_ID
+        ).list_month_payments(month="2026-03")
+    finally:
+        TENANT_CTX.reset(token)
+
+    assert [entry.payment_name for entry in entries] == ["Default March"]
 
 
 # ---------------------------------------------------------------------------

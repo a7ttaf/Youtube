@@ -4,8 +4,8 @@
 **PR:** https://github.com/XGenerationy/Youtube/pull/26
 **Branch:** `pr/s2-4b-finance-adsense-tenant-tests`
 **Base:** `pr/s2-4a-tenant-id-on-operational-tables`
-**Head commit:** `a910de1` (first commit; this report and the changelog/handoff land in a second commit).
-**Status:** Open, tests green locally, awaiting review.
+**Branch head:** See PR metadata for the latest head SHA; this file may be updated during review follow-up.
+**Status:** Open, review feedback addressed locally, tests green locally, awaiting final bot re-review after push.
 
 ## What was requested
 
@@ -27,7 +27,7 @@ The user picked `finance/adsense_payments.py` as PR A (single-file scope), with 
 
 ## What was changed
 
-Single file added: `tests/finance/test_adsense_payments_tenant_scope.py` (+392 lines, 0 deletions). No source changes. No migration. No model changes.
+Single file added: `tests/finance/test_adsense_payments_tenant_scope.py` (+475 lines, 0 deletions). No source changes. No migration. No model changes.
 
 Test layout mirrors `tests/auth/test_audit_tenant_scope.py` and `tests/auth/test_user_account_tenant_scope.py`:
 
@@ -36,7 +36,7 @@ Test layout mirrors `tests/auth/test_audit_tenant_scope.py` and `tests/auth/test
 - `_tenant(...)` — active `Tenant` for `TENANT_CTX.set(...)` cases.
 - `_seed_payment(...)` — direct ORM insert bypassing `_require_month_open` for read-test fixtures.
 
-Fourteen test functions:
+Seventeen test functions:
 
 | # | Test | What it proves |
 |---|------|----------------|
@@ -44,8 +44,8 @@ Fourteen test functions:
 | 2 | `test_sync_payments_stamps_explicit_constructor_tenant` | Explicit `tenant_id=` kwarg is stamped on inserted row. |
 | 3 | `test_sync_payments_uses_request_tenant_context_by_default` | `TENANT_CTX` scopes writes when no explicit kwarg is supplied. |
 | 4 | `test_sync_payments_explicit_tenant_overrides_request_context` | Explicit kwarg beats ambient context. |
-| 5 | `test_sync_payments_allows_same_payment_name_in_two_tenants` | Per-tenant unique constraint `(tenant_id, month, payment_name)` lets two tenants share names. |
-| 6 | `test_sync_payments_upsert_is_scoped_to_one_tenant` | Re-syncing in tenant A leaves tenant B's row untouched. |
+| 5 | `test_sync_payments_allows_same_payment_name_in_two_tenants` | Per-tenant unique constraint `(tenant_id, month, payment_name)` lets two tenants share names and creates exactly one row per tenant. |
+| 6 | `test_sync_payments_upsert_is_scoped_to_one_tenant` | Re-syncing in tenant A leaves tenant B's row untouched and preserves exactly one row per tenant. |
 | 7 | `test_list_payments_filters_to_explicit_tenant_id` | `list_payments` filters to the chosen tenant. |
 | 8 | `test_list_payments_uses_default_tenant_without_context` | Default tenant fallback on reads. |
 | 9 | `test_list_payments_returns_empty_page_for_empty_tenant` | Empty page for an unknown tenant (no leak). |
@@ -53,15 +53,24 @@ Fourteen test functions:
 | 11 | `test_list_payments_uses_request_tenant_context_by_default` | Context wins when no explicit kwarg on reads. |
 | 12 | `test_list_month_payments_filters_to_explicit_tenant_id` | Month-scoped read does not surface other-tenant rows. |
 | 13 | `test_list_month_payments_returns_empty_when_target_tenant_has_no_rows` | Empty result when only the other tenant has rows. |
-| 14 | `test_adsense_repository_rejects_invalid_tenant_id_string` | Constructor input validation fails closed. |
+| 14 | `test_list_month_payments_uses_default_tenant_without_context` | Default tenant fallback on month-scoped reads. |
+| 15 | `test_list_month_payments_uses_request_tenant_context_by_default` | Context tenant wins when no explicit kwarg is supplied on month-scoped reads. |
+| 16 | `test_list_month_payments_explicit_tenant_overrides_request_context` | Explicit tenant wins over ambient context on month-scoped reads. |
+| 17 | `test_adsense_repository_rejects_invalid_tenant_id_string` | Constructor input validation fails closed. |
+
+## Bot audit follow-up
+
+- CodeRabbit requested parity tests for `list_month_payments` tenant precedence and a portable handoff rerun snippet.
+- Codex requested row-cardinality assertions before dict projections in the two write isolation tests.
+- All four findings were verified as valid and addressed in this follow-up.
 
 ## Quality checks performed
 
-- `python -m ruff check tests/finance/test_adsense_payments_tenant_scope.py` — `All checks passed!`
-- `python -m pytest -q tests/finance/test_adsense_payments_tenant_scope.py` — `14 passed in 0.34s`.
-- `python -m pytest -q` (full suite) — `504 passed, 7 warnings in 29.68s` (baseline was 490 before this PR; +14 = 504).
+- `.venv/bin/python -m ruff check tests/finance/test_adsense_payments_tenant_scope.py` — `All checks passed!`
+- `.venv/bin/python -m pytest -q tests/finance/test_adsense_payments_tenant_scope.py` — `17 passed in 0.34s`.
+- `.venv/bin/python -m pytest -q` (full suite) — `507 passed, 7 warnings in 29.95s` (baseline was 490 before this PR; +17 = 507).
 - `git diff --check` — clean.
-- Re-read final diff, confirmed only the one intended file is staged.
+- Re-read final diff, confirmed only the intended test and PR artifact files are changed.
 - No `.venv` or `__pycache__` directories leaked into the commit (git considers them untracked and they were never staged).
 
 ## Architecture & quality posture
@@ -72,7 +81,7 @@ Fourteen test functions:
 - **No authorization, audit, or finance-number behavior change.** This PR adds proof of existing scoping; it cannot loosen anything.
 - **Security:** the tests directly exercise IDOR-style attacks (cross-tenant lookups, third-tenant reads with no rows). Closing this coverage gap is the security value of the PR.
 - **Observability:** no new logs/metrics; tests-only.
-- **Testability:** 14 direct unit tests using in-memory sqlite, sub-second runtime; no Docker, no fixtures outside the file.
+- **Testability:** 17 direct unit tests using in-memory sqlite, sub-second runtime; no Docker, no fixtures outside the file.
 
 ## Blast-radius statement
 
@@ -86,8 +95,8 @@ Fourteen test functions:
 
 ## Remaining risks
 
-- **None at the code level.** The diff is +392/0 in a brand-new test file; nothing to regress.
-- **Process risk**: this report and the matching changelog/handoff land in a second commit on the same branch, per OPUS CLAUDE.md §Document tradeoff note ("PR artifact names require a PR number that is not available until after opening the PR"). The second push therefore reruns whatever pre-push hooks are wired locally; in this repo there are none, so cost is negligible.
+- **None at the code level.** The diff is +475/0 in a brand-new test file; nothing to regress at runtime.
+- **Process risk:** follow-up commits on an open PR were limited to review feedback, tests, and PR artifacts.
 
 ## Follow-up recommendations
 
@@ -97,4 +106,4 @@ Fourteen test functions:
 
 ## Rollback notes
 
-- Pure additive PR. Revert is `git revert <merge-commit>` — no data, schema, or runtime state is touched. If the second commit (these three artifacts) is rejected, drop just that commit; the test commit `a910de1` stands on its own.
+- Pure additive PR. Revert is `git revert <merge-commit>` — no data, schema, or runtime state is touched. If a follow-up commit is rejected, revert that commit without touching production code.

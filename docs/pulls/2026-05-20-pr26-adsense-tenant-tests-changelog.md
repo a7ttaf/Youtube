@@ -7,7 +7,7 @@
 
 ## Added
 
-- `tests/finance/test_adsense_payments_tenant_scope.py` — direct repository-layer tenant-isolation tests for `SqlAlchemyAdSensePaymentRepository`. 14 test functions, +392 lines.
+- `tests/finance/test_adsense_payments_tenant_scope.py` — direct repository-layer tenant-isolation tests for `SqlAlchemyAdSensePaymentRepository`. 17 test functions, +475 lines.
 - `docs/pulls/2026-05-20-pr26-adsense-tenant-tests-report.md` — this PR's report artifact.
 - `docs/pulls/2026-05-20-pr26-adsense-tenant-tests-changelog.md` — this file.
 - `docs/pulls/2026-05-20-pr26-adsense-tenant-tests-handoff.md` — handoff artifact.
@@ -15,7 +15,10 @@
 
 ## Changed
 
-- Nothing. No `backend/` source file was modified. No migration, ORM, route, service, or repository signature changed.
+- Tightened two write-isolation tests with row-cardinality assertions before dict projection.
+- Added `list_month_payments` tenant-resolution precedence parity with the existing `list_payments` coverage.
+- Replaced the handoff rerun snippet's machine-specific path with repo-agnostic commands.
+- No `backend/` source file was modified. No migration, ORM, route, service, or repository signature changed.
 
 ## Removed
 
@@ -27,7 +30,7 @@
 
 ## Test surface change
 
-- Total pytest count: 490 → 504 (+14).
+- Total pytest count: 490 → 507 (+17).
 - New tests:
   - `test_sync_payments_stamps_default_tenant_without_context`
   - `test_sync_payments_stamps_explicit_constructor_tenant`
@@ -42,6 +45,9 @@
   - `test_list_payments_uses_request_tenant_context_by_default`
   - `test_list_month_payments_filters_to_explicit_tenant_id`
   - `test_list_month_payments_returns_empty_when_target_tenant_has_no_rows`
+  - `test_list_month_payments_uses_default_tenant_without_context`
+  - `test_list_month_payments_uses_request_tenant_context_by_default`
+  - `test_list_month_payments_explicit_tenant_overrides_request_context`
   - `test_adsense_repository_rejects_invalid_tenant_id_string`
 
 ## Documentation changes

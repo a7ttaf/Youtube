@@ -4,7 +4,7 @@
 **PR:** https://github.com/XGenerationy/Youtube/pull/26
 **Branch:** `pr/s2-4b-finance-adsense-tenant-tests`
 **Base:** `pr/s2-4a-tenant-id-on-operational-tables`
-**Status at handoff:** Open. Test commit `a910de1` pushed. Docs commit lands as a second commit on this branch.
+**Status at handoff:** Open. Initial test and docs commits were pushed; this follow-up addresses CodeRabbit and Codex review findings.
 
 ## Scope
 
@@ -21,11 +21,11 @@ Add direct repository-layer tenant-isolation tests for `SqlAlchemyAdSensePayment
 
 ## Files changed
 
-Commit `a910de1`:
+Current branch:
 
-- `tests/finance/test_adsense_payments_tenant_scope.py` (+392 / -0; new file).
+- `tests/finance/test_adsense_payments_tenant_scope.py` (+475 / -0; new file).
 
-Second commit (this artifact set):
+Documentation artifacts:
 
 - `docs/pulls/2026-05-20-pr26-adsense-tenant-tests-report.md` (new).
 - `docs/pulls/2026-05-20-pr26-adsense-tenant-tests-changelog.md` (new).
@@ -37,28 +37,28 @@ None at runtime. Test surface only.
 
 ## Tests run
 
-- `python -m ruff check tests/finance/test_adsense_payments_tenant_scope.py` — `All checks passed!`
-- `python -m pytest -q tests/finance/test_adsense_payments_tenant_scope.py` — `14 passed in 0.34s`.
-- `python -m pytest -q` (full suite) — `504 passed, 7 warnings in 29.68s`. Baseline before this PR: `490 passed, 7 warnings in 29.17s`. Same 7 warnings (pre-existing SQLAlchemy reflection warnings about `uq_users_email_lower`).
+- `.venv/bin/python -m ruff check tests/finance/test_adsense_payments_tenant_scope.py` — `All checks passed!`
+- `.venv/bin/python -m pytest -q tests/finance/test_adsense_payments_tenant_scope.py` — `17 passed in 0.34s`.
+- `.venv/bin/python -m pytest -q` (full suite) — `507 passed, 7 warnings in 29.95s`. Baseline before this PR: `490 passed, 7 warnings in 29.17s`. Same 7 warnings (pre-existing SQLAlchemy reflection warnings about `uq_users_email_lower`).
 - `git diff --check` — clean.
-- The docs-only second commit will be revalidated locally before push: `ruff check docs/` is a no-op (ruff ignores `.md`), `git diff --check` will run, and full `pytest -q` will be skipped because no Python file is touched. This matches OPUS CLAUDE.md §Validate which warns against running long broad gates for docs-only follow-up commits.
+- CodeRabbit/Codex review follow-up was revalidated with focused ruff, focused pytest, full pytest, and whitespace checks.
 
 ## Failures / skipped gates
 
 - None.
-- Note: this branch was set up on a fresh Linux working copy (`/home/mahmoud/work/youtube-ums`) using `/usr/bin/python3.14 -m venv .venv`. The system Python ships without `ensurepip`, so pip was bootstrapped from the official `get-pip.py` (`pip 26.1.1` installed inside the venv only). Dependencies installed directly (no `-e .`) because the repo's `pyproject.toml` has no build-system table and `setuptools` cannot auto-discover packages in the flat layout. Tests pass with `pythonpath = ["backend"]` from `pyproject.toml`.
+- Note: this branch was set up on a fresh Linux working copy using `/usr/bin/python3.14 -m venv .venv`. The system Python ships without `ensurepip`, so pip was bootstrapped from the official `get-pip.py` (`pip 26.1.1` installed inside the venv only). Dependencies installed directly (no `-e .`) because the repo's `pyproject.toml` has no build-system table and `setuptools` cannot auto-discover packages in the flat layout. Tests pass with `pythonpath = ["backend"]` from `pyproject.toml`.
 - No remote CI run; UMS repo has no `.github/workflows/` and no `ci/` directory at this point in the stack.
 
 ## Risks
 
 - **Code risk: none.** Test-only PR.
-- **Process risk: low.** Second commit on an open PR (docs) is explicitly addressed by OPUS CLAUDE.md §Document: state the tradeoff (PR number unavailable until after PR open) and avoid spending a long pre-push gate just for docs. Stated above.
+- **Process risk: low.** Follow-up commits on an open PR are limited to review feedback, tests, and PR artifacts.
 - **Cross-repo risk: none.** No OPUS or UMS shared contract changed.
 
 ## Rollback / operational notes
 
 - Pure additive PR. `git revert` of the merge commit is safe.
-- If only the docs commit is rejected at review, drop that commit (`git reset --hard a910de1` locally, force-push) — but coordinate with the operator first, since force-push is a destructive operation per CLAUDE.md.
+- If a follow-up commit is rejected at review, revert only that commit and keep the original test coverage unless the reviewer asks for a narrower scope.
 - No reset, reseed, backfill, or migration needed.
 - *No graph projection impact detected.* PostgreSQL remains the source of truth and Neo4j read-only projections are not touched.
 
@@ -84,7 +84,9 @@ None at runtime. Test surface only.
 ## Validation a future maintainer can rerun
 
 ```bash
-cd /home/mahmoud/work/youtube-ums
+# From any directory inside a checkout of XGenerationy/Youtube:
+cd "$(git rev-parse --show-toplevel)"
+git fetch origin
 git checkout pr/s2-4b-finance-adsense-tenant-tests
 .venv/bin/python -m ruff check tests/finance/test_adsense_payments_tenant_scope.py
 .venv/bin/python -m pytest -q tests/finance/test_adsense_payments_tenant_scope.py
@@ -92,4 +94,4 @@ git checkout pr/s2-4b-finance-adsense-tenant-tests
 git diff --check
 ```
 
-Expected: ruff clean, 14 passed, 504 passed, no whitespace errors.
+Expected: ruff clean, 17 passed, 507 passed, no whitespace errors.
