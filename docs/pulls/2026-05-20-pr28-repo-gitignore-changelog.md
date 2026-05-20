@@ -95,4 +95,4 @@ No test was added, modified, removed, or skipped. Pytest total: 507 → 507 unch
 
 - `AGENTS.md` — NOT matched by any line. (User-owned local file in some worktrees.)
 - `docs/AGENT_VALIDATION_PLAYBOOK.md` — NOT matched by any line. (User-owned local file.)
-- All currently-tracked files — `git ls-files | check-ignore` sweep returned empty.
+- All currently-tracked files — `git ls-files | git check-ignore --stdin` sweep returned empty.

@@ -18,7 +18,7 @@ During implementation I discovered an important fact that reshaped the scope: **
 A single commit, `d59e429`, adds **byte-identical** content from `origin/main:.gitignore` to the stack head:
 
 - 227 lines.
-- File hash: identical to `origin/main:.gitignore` (verified by `git show origin/main:.gitignore > .gitignore` followed by a `wc -l` cross-check).
+- File content: identical to `origin/main:.gitignore` (verified with `git show origin/main:.gitignore | cmp -s - .gitignore`).
 - No other repo file touched in commit `d59e429`.
 
 ## Phased execution
@@ -26,8 +26,8 @@ A single commit, `d59e429`, adds **byte-identical** content from `origin/main:.g
 | Phase | Action | Pytest after | Notes |
 |---|---|---|---|
 | Baseline | Inspect base (no `.gitignore` on stack) | 507 passed | 652 ruff errors, 102 unformatted files — all pre-existing |
-| 1 | `git show origin/main:.gitignore > .gitignore` | 507 passed | Verified `wc -l = 227` |
-| 2 | `git ls-files \| git check-ignore` sweep | n/a | **Empty** — no tracked file becomes ignored |
+| 1 | `git show origin/main:.gitignore \| cmp -s - .gitignore` | 507 passed | Verified byte-identical content |
+| 2 | `git ls-files \| git check-ignore --stdin` sweep | n/a | **Empty** — no tracked file becomes ignored |
 | 3 | Pattern audit against `AGENTS.md` and `docs/AGENT_VALIDATION_PLAYBOOK.md` | n/a | Neither matched |
 | 4 | Full pre-push gate (ruff/format/pytest/diff/markers/import/alembic) | 507 passed | Baseline preserved |
 | 5 | Commit `d59e429`, push, open PR #28 | — | — |
@@ -45,7 +45,7 @@ A single commit, `d59e429`, adds **byte-identical** content from `origin/main:.g
 - Alembic linear history — single head `20260518_0001`.
 
 PR-specific:
-- `git ls-files \| while read f; do git check-ignore -q "$f" && echo "$f"; done` — **empty** (no tracked file becomes ignored).
+- `git ls-files \| git check-ignore --stdin` — **empty** (no tracked file becomes ignored).
 - Pattern audit for user-owned files: `AGENTS.md`, `docs/AGENT_VALIDATION_PLAYBOOK.md` — NOT matched.
 - Staged-diff `git diff --cached --check` — clean.
 

@@ -48,14 +48,14 @@ Second commit (this artifact set):
 - Conflict-marker scan (tracked + working tree) — clean.
 - Import smoke (`from ums_smart_revenue.app import app`) — ok.
 - `alembic heads` — single linear head `20260518_0001`.
-- `git ls-files | git check-ignore` — **empty** (no tracked file becomes ignored).
+- `git ls-files | git check-ignore --stdin` — **empty** (no tracked file becomes ignored).
 - Pattern audit for user-owned files (`AGENTS.md`, `docs/AGENT_VALIDATION_PLAYBOOK.md`) — neither matched.
 
 ## Failures / skipped gates
 
 - None.
-- Note on environment: this branch was developed in a git worktree at `/home/mahmoud/work/youtube-ums-gitignore` (created via `git worktree add` off `origin/pr/s2-4a-tenant-id-on-operational-tables`). The PR #26 worktree at `/home/mahmoud/work/youtube-ums` and the PR #27 worktree at `/home/mahmoud/work/youtube-ums-cleanup` were both left **completely untouched**.
-- No remote CI run; the UMS branch this targets has no `.github/workflows/` and no `ci/` lane (those exist on main but not on this stack — see Non-goals).
+- Note on environment: validate from any clean checkout or worktree. If a separate worktree is needed, create one with `git worktree add <WORKTREE_DIR> origin/pr/s2-4b-repo-gitignore`, then run the checks from that worktree root.
+- No remote CI run was available on the target stack branch. Before relying on remote gates, check whether the target branch includes `.github/workflows/` or a `ci/` lane.
 
 ## Risks
 
@@ -86,15 +86,15 @@ This PR is part of a 3-PR sequence picked by the user after PR #27 (ruff cleanup
 ## Validation a future maintainer can rerun
 
 ```bash
-cd /home/mahmoud/work/youtube-ums-gitignore
+# Run from the repository root.
 git checkout pr/s2-4b-repo-gitignore
-/home/mahmoud/work/youtube-ums/.venv/bin/python -m ruff check backend tests --statistics
-/home/mahmoud/work/youtube-ums/.venv/bin/python -m ruff format --check backend tests
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -m pytest -q
+python -m ruff check backend tests --statistics
+python -m ruff format --check backend tests
+PYTHONPATH=backend python -m pytest -q
 git diff --check
-git ls-files | while read f; do git check-ignore -q "$f" && echo "WOULD IGNORE: $f"; done
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -c "from ums_smart_revenue.app import app; print('ok')"
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -m alembic -c alembic.ini heads
+git ls-files | git check-ignore --stdin
+PYTHONPATH=backend python -c "from ums_smart_revenue.app import app; print('ok')"
+PYTHONPATH=backend python -m alembic -c alembic.ini heads
 ```
 
 Expected: same 652-error / 102-unformatted ruff baseline as `pr/s2-4a`, 507 pytest passes, diff clean, no tracked file becomes ignored, app imports, single alembic head.
