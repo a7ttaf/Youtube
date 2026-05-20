@@ -84,7 +84,7 @@ are the authoritative validated numbers for the current branch head.
 
 ## Blast-radius statement
 
-*No graph projection impact detected.* No SQLAlchemy ORM change, no Alembic migration, no route, no service, no repository, no DI provider, no schema change. The PR adds one new test file and nothing else. PostgreSQL/Neo4j contract is unchanged.
+*No graph projection impact detected.* No SQLAlchemy ORM change, no Alembic migration, no route, no service, no repository, no DI provider, no schema change. The PR adds one new test file plus documentation artifacts; no production code changes. PostgreSQL/Neo4j contract is unchanged.
 
 ## Pre-existing baseline (NOT introduced by this PR)
 
@@ -112,6 +112,6 @@ These are independent of any current PR and can be picked off in any order.
 
 ## Rollback notes
 
-- Single-file PR. Revert is `git revert <merge-commit>` — touches one new test file.
+- Test-only PR with documentation artifacts. Revert is `git revert <merge-commit>` — removes one test file and three `docs/pulls/` artifacts.
 - No data, schema, runtime state, or downstream consumer is touched; rollback is safe to apply to a running deployment.
 - If the test file is reverted, `org/sql_channel_groups.py` still functions identically — the production code is unchanged.

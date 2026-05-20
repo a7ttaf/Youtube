@@ -694,18 +694,45 @@ def test_channel_ids_by_group_dual_filter_excludes_cross_tenant_member_rows() ->
         group_type="CUSTOM_GROUP",
         channel_ids=[CHANNEL_OTHER_EXTERNAL],
     )
+    # This row is internally consistent for the other tenant and would leak if
+    # the member-row tenant predicate were removed.
     insert_member_row_bypassing_fk(
         session,
         tenant_id=OTHER_TENANT_ID,
         group_id=default_group_uuid,
         channel_id=CHANNEL_OTHER_ID,
     )
+    # This row has the bound member tenant and a foreign channel tenant; it
+    # would leak if the member/channel tenant join predicate were removed.
     insert_member_row_bypassing_fk(
         session,
         tenant_id=DEFAULT_TENANT_ID,
         group_id=default_group_uuid,
         channel_id=CHANNEL_OTHER_B_ID,
     )
+
+    without_member_tenant_filter = session.execute(
+        select(YouTubeChannelORM.youtube_channel_id)
+        .join(
+            ChannelGroupMemberORM,
+            (ChannelGroupMemberORM.tenant_id == YouTubeChannelORM.tenant_id)
+            & (ChannelGroupMemberORM.channel_id == YouTubeChannelORM.id),
+        )
+        .where(ChannelGroupMemberORM.group_id == default_group_uuid)
+    ).all()
+    without_channel_tenant_join = session.execute(
+        select(YouTubeChannelORM.youtube_channel_id)
+        .join(
+            ChannelGroupMemberORM,
+            ChannelGroupMemberORM.channel_id == YouTubeChannelORM.id,
+        )
+        .where(
+            ChannelGroupMemberORM.tenant_id == DEFAULT_TENANT_ID,
+            ChannelGroupMemberORM.group_id == default_group_uuid,
+        )
+    ).all()
+    assert (CHANNEL_OTHER_EXTERNAL,) in without_member_tenant_filter
+    assert (CHANNEL_OTHER_B_EXTERNAL,) in without_channel_tenant_join
 
     default_view = default_registry._channel_ids_by_group([default_group_uuid])
     assert default_view == {default_group_uuid: (CHANNEL_DEFAULT_A_EXTERNAL,)}
