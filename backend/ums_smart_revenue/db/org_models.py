@@ -79,7 +79,7 @@ class YouTubeChannelORM(OrgBase):
     id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
     )
-    youtube_channel_id: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    youtube_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
     channel_name: Mapped[str] = mapped_column(Text, nullable=False)
     primary_org_unit_id: Mapped[UUID | None] = mapped_column(
         Uuid(as_uuid=True), nullable=True
@@ -138,6 +138,11 @@ class YouTubeChannelORM(OrgBase):
             "tenant_id",
             "id",
             name="uq_youtube_channels_tenant_id_id",
+        ),
+        UniqueConstraint(
+            "tenant_id",
+            "youtube_channel_id",
+            name="uq_youtube_channels_tenant_channel_id",
         ),
         Index("ix_youtube_channels_primary_org_unit_id", "primary_org_unit_id"),
         Index("ix_youtube_channels_tenant_id", "tenant_id"),

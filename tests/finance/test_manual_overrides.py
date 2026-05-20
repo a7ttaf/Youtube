@@ -6,18 +6,26 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.finance_models import FinanceBase, RevenueManualOverrideORM
+from ums_smart_revenue.db.finance_models import (
+    FinanceBase,
+    FinanceMonthCloseORM,
+    RevenueManualOverrideORM,
+)
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.finance.manual_overrides import (
+    ManualOverrideLockedMonthError,
     ManualOverrideValidationError,
     SqlAlchemyManualOverrideRepository,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 USER_ID = "00000000-0000-0000-0000-000000011001"
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000011101")
 COMPANY_ID = UUID("00000000-0000-0000-0000-000000011201")
 ACTIVE_CHANNEL_ID = UUID("00000000-0000-0000-0000-000000011301")
 INACTIVE_CHANNEL_ID = UUID("00000000-0000-0000-0000-000000011302")
+OTHER_TENANT_ID = UUID("00000000-0000-0000-0000-000000011999")
+DEFAULT_TENANT_ID = UUID(UMS_TENANT_ID)
 
 
 def test_manual_override_repository_rejects_non_finite_adjustment_amount():
@@ -25,7 +33,10 @@ def test_manual_override_repository_rejects_non_finite_adjustment_amount():
     with Session(engine) as session:
         repository = SqlAlchemyManualOverrideRepository(session)
 
-        with pytest.raises(ManualOverrideValidationError, match="adjustment_revenue_usd must be a finite decimal"):
+        with pytest.raises(
+            ManualOverrideValidationError,
+            match="adjustment_revenue_usd must be a finite decimal",
+        ):
             repository.create_override(
                 month="2026-03",
                 youtube_channel_id="channel-tv-a",
@@ -107,3 +118,46 @@ def test_list_month_overrides_excludes_inactive_channels():
         overrides = repository.list_month_overrides(month="2026-03")
 
     assert [override.youtube_channel_id for override in overrides] == ["channel-active"]
+
+
+def test_manual_override_rejects_locked_month_in_bound_tenant():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    OrgBase.metadata.create_all(engine)
+    FinanceBase.metadata.create_all(engine)
+
+    with Session(engine) as session:
+        session.add_all(
+            [
+                YouTubeChannelORM(
+                    id=uuid4(),
+                    tenant_id=OTHER_TENANT_ID,
+                    youtube_channel_id="other-tenant-channel",
+                    channel_name="Other Tenant Channel",
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                FinanceMonthCloseORM(
+                    tenant_id=OTHER_TENANT_ID,
+                    month="2026-03",
+                    status="LOCKED",
+                    locked_by=UUID(USER_ID),
+                    allocation_rule_payload={},
+                ),
+            ]
+        )
+        session.commit()
+
+        repository = SqlAlchemyManualOverrideRepository(
+            session, tenant_id=OTHER_TENANT_ID
+        )
+        with pytest.raises(ManualOverrideLockedMonthError):
+            repository.create_override(
+                month="2026-03",
+                youtube_channel_id="other-tenant-channel",
+                adjustment_revenue_usd=Decimal("50.00"),
+                reason="Should honor tenant lock",
+                actor_user_id=USER_ID,
+            )
+
+        assert session.get(FinanceMonthCloseORM, (DEFAULT_TENANT_ID, "2026-03")) is None

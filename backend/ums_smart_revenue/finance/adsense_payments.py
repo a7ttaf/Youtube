@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.db.finance_models import AdSensePaymentORM
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 CURRENCY_PATTERN = re.compile(r"^[A-Z]{3}$")
@@ -84,9 +85,9 @@ class AdSensePaymentValidationError(AdSensePaymentError):
 
 
 class SqlAlchemyAdSensePaymentRepository:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         self._session = session
-        self._tenant_id = _DEFAULT_TENANT_UUID
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def sync_payments(
         self,
@@ -201,7 +202,12 @@ class SqlAlchemyAdSensePaymentRepository:
         return [self._to_entry(row) for row in rows]
 
     def _require_month_open(self, month: str) -> None:
-        close = get_or_create_month_close_row(self._session, month, for_update=True)
+        close = get_or_create_month_close_row(
+            self._session,
+            month,
+            tenant_id=self._tenant_id,
+            for_update=True,
+        )
         if close.status == "LOCKED":
             raise AdSensePaymentLockedMonthError(
                 "Finance month is locked for AdSense payment sync"
@@ -303,6 +309,24 @@ def _parse_uuid(value: str) -> UUID:
         raise AdSensePaymentValidationError(
             "actor_user_id must be a valid UUID"
         ) from exc
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise AdSensePaymentValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _decimal_to_api(value: Decimal) -> str:

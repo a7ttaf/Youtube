@@ -1,17 +1,23 @@
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.finance_models import FinanceBase
+from ums_smart_revenue.db.finance_models import FinanceBase, FinanceMonthCloseORM
 from ums_smart_revenue.db.org_models import OrgBase, YouTubeChannelORM
-from ums_smart_revenue.finance.revenue_facts import RevenueFactValidationError, SqlAlchemyRevenueFactRepository
-
+from ums_smart_revenue.finance.revenue_facts import (
+    RevenueFactLockedMonthError,
+    RevenueFactValidationError,
+    SqlAlchemyRevenueFactRepository,
+)
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 USER_ID = "00000000-0000-0000-0000-000000010001"
 CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-000000010002")
+OTHER_TENANT_ID = UUID("00000000-0000-0000-0000-000000010999")
+DEFAULT_TENANT_ID = UUID(UMS_TENANT_ID)
 
 
 def test_revenue_fact_repository_rejects_invalid_metric_ranges():
@@ -46,7 +52,10 @@ def test_revenue_fact_repository_rejects_invalid_metric_ranges():
                 actor_user_id=USER_ID,
             )
 
-        with pytest.raises(RevenueFactValidationError, match="watch_time_minutes must be >= 0"):
+        with pytest.raises(
+            RevenueFactValidationError,
+            match="watch_time_minutes must be >= 0",
+        ):
             repository.record_fact(
                 month="2026-03",
                 youtube_channel_id="channel-tv-a",
@@ -60,7 +69,10 @@ def test_revenue_fact_repository_rejects_invalid_metric_ranges():
                 actor_user_id=USER_ID,
             )
 
-        with pytest.raises(RevenueFactValidationError, match="confidence_score must be between 0 and 1"):
+        with pytest.raises(
+            RevenueFactValidationError,
+            match="confidence_score must be between 0 and 1",
+        ):
             repository.record_fact(
                 month="2026-03",
                 youtube_channel_id="channel-tv-a",
@@ -74,7 +86,10 @@ def test_revenue_fact_repository_rejects_invalid_metric_ranges():
                 actor_user_id=USER_ID,
             )
 
-        with pytest.raises(RevenueFactValidationError, match="confidence_score must be between 0 and 1"):
+        with pytest.raises(
+            RevenueFactValidationError,
+            match="confidence_score must be between 0 and 1",
+        ):
             repository.record_fact(
                 month="2026-03",
                 youtube_channel_id="channel-tv-a",
@@ -107,7 +122,10 @@ def test_revenue_fact_repository_rejects_invalid_amounts_and_non_finite_metrics(
         session.commit()
 
         repository = SqlAlchemyRevenueFactRepository(session)
-        with pytest.raises(RevenueFactValidationError, match="gross_revenue_usd must be a finite decimal >= 0"):
+        with pytest.raises(
+            RevenueFactValidationError,
+            match="gross_revenue_usd must be a finite decimal >= 0",
+        ):
             repository.record_fact(
                 month="2026-03",
                 youtube_channel_id="channel-tv-a",
@@ -121,7 +139,10 @@ def test_revenue_fact_repository_rejects_invalid_amounts_and_non_finite_metrics(
                 actor_user_id=USER_ID,
             )
 
-        with pytest.raises(RevenueFactValidationError, match="net_revenue_usd must be a finite decimal >= 0"):
+        with pytest.raises(
+            RevenueFactValidationError,
+            match="net_revenue_usd must be a finite decimal >= 0",
+        ):
             repository.record_fact(
                 month="2026-03",
                 youtube_channel_id="channel-tv-a",
@@ -135,7 +156,10 @@ def test_revenue_fact_repository_rejects_invalid_amounts_and_non_finite_metrics(
                 actor_user_id=USER_ID,
             )
 
-        with pytest.raises(RevenueFactValidationError, match="watch_time_minutes must be a finite decimal"):
+        with pytest.raises(
+            RevenueFactValidationError,
+            match="watch_time_minutes must be a finite decimal",
+        ):
             repository.record_fact(
                 month="2026-03",
                 youtube_channel_id="channel-tv-a",
@@ -149,7 +173,10 @@ def test_revenue_fact_repository_rejects_invalid_amounts_and_non_finite_metrics(
                 actor_user_id=USER_ID,
             )
 
-        with pytest.raises(RevenueFactValidationError, match="confidence_score must be a finite decimal"):
+        with pytest.raises(
+            RevenueFactValidationError,
+            match="confidence_score must be a finite decimal",
+        ):
             repository.record_fact(
                 month="2026-03",
                 youtube_channel_id="channel-tv-a",
@@ -162,3 +189,48 @@ def test_revenue_fact_repository_rejects_invalid_amounts_and_non_finite_metrics(
                 confidence_score=Decimal("NaN"),
                 actor_user_id=USER_ID,
             )
+
+
+def test_revenue_fact_rejects_locked_month_in_bound_tenant():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    OrgBase.metadata.create_all(engine)
+    FinanceBase.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                YouTubeChannelORM(
+                    id=uuid4(),
+                    tenant_id=OTHER_TENANT_ID,
+                    youtube_channel_id="other-tenant-channel",
+                    channel_name="Other Tenant Channel",
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                FinanceMonthCloseORM(
+                    tenant_id=OTHER_TENANT_ID,
+                    month="2026-03",
+                    status="LOCKED",
+                    locked_by=UUID(USER_ID),
+                    allocation_rule_payload={},
+                ),
+            ]
+        )
+        session.commit()
+
+        repository = SqlAlchemyRevenueFactRepository(session, tenant_id=OTHER_TENANT_ID)
+        with pytest.raises(RevenueFactLockedMonthError):
+            repository.record_fact(
+                month="2026-03",
+                youtube_channel_id="other-tenant-channel",
+                source_kind="YOUTUBE_CMS",
+                source_report_id=None,
+                gross_revenue_usd=Decimal("1000.00"),
+                net_revenue_usd=None,
+                views=1,
+                watch_time_minutes=Decimal("0"),
+                confidence_score=Decimal("0.9000"),
+                actor_user_id=USER_ID,
+            )
+
+        assert session.get(FinanceMonthCloseORM, (DEFAULT_TENANT_ID, "2026-03")) is None

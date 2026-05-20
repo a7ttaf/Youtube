@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 _FINANCE_MONTH_LOCK_KEY_PREFIX = "finance-month-close:"
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
@@ -52,12 +53,16 @@ class FinanceMonthCloseReadinessError(ValueError):
 class SqlAlchemyFinanceMonthCloseRepository:
     """Persist and mutate finance month close control rows with month locks."""
 
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         self._session = session
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def get(self, month: str) -> FinanceMonthCloseEntry | None:
         """Return the close row for month, or None when no row exists."""
-        row = self._session.get(FinanceMonthCloseORM, _month_close_key(month))
+        row = self._session.get(
+            FinanceMonthCloseORM,
+            _month_close_key(month, tenant_id=self._tenant_id),
+        )
         return self._to_entry(row) if row is not None else None
 
     def get_or_create(self, month: str) -> FinanceMonthCloseEntry:
@@ -73,9 +78,9 @@ class SqlAlchemyFinanceMonthCloseRepository:
         row = self._get_or_create_row(month, for_update=True)
         if row.status == "LOCKED":
             raise ValueError(f"Finance month is already locked: {month}")
-        readiness = SqlAlchemyFinanceCloseReadinessService(self._session).check_month(
-            month, for_update=True
-        )
+        readiness = SqlAlchemyFinanceCloseReadinessService(
+            self._session, tenant_id=self._tenant_id
+        ).check_month(month, for_update=True)
         if not readiness.ready:
             raise FinanceMonthCloseReadinessError(readiness)
         row.status = "LOCKED"
@@ -119,7 +124,10 @@ class SqlAlchemyFinanceMonthCloseRepository:
     ) -> FinanceMonthCloseORM:
         """Return the ORM row, optionally acquiring the month close guard."""
         return get_or_create_month_close_row(
-            self._session, month, for_update=for_update
+            self._session,
+            month,
+            tenant_id=self._tenant_id,
+            for_update=for_update,
         )
 
     @staticmethod
@@ -149,13 +157,17 @@ def get_or_create_month_close_row(
     session: Session,
     month: str,
     *,
+    tenant_id: UUID | str | None = None,
     for_update: bool = False,
 ) -> FinanceMonthCloseORM:
     """Return or create the close row, guarding month writers when requested."""
+    resolved_tenant_id = _resolve_tenant_id(tenant_id)
     if for_update:
-        acquire_finance_month_advisory_lock(session, month)
+        acquire_finance_month_advisory_lock(
+            session, month, tenant_id=resolved_tenant_id
+        )
     statement = select(FinanceMonthCloseORM).where(
-        FinanceMonthCloseORM.tenant_id == _DEFAULT_TENANT_UUID,
+        FinanceMonthCloseORM.tenant_id == resolved_tenant_id,
         FinanceMonthCloseORM.month == month,
     )
     if for_update:
@@ -165,7 +177,7 @@ def get_or_create_month_close_row(
         try:
             with session.begin_nested():
                 row = FinanceMonthCloseORM(
-                    tenant_id=_DEFAULT_TENANT_UUID,
+                    tenant_id=resolved_tenant_id,
                     month=month,
                     status="OPEN",
                     allocation_rule_payload={},
@@ -177,24 +189,53 @@ def get_or_create_month_close_row(
     return row
 
 
-def acquire_finance_month_advisory_lock(session: Session, month: str) -> None:
+def acquire_finance_month_advisory_lock(
+    session: Session,
+    month: str,
+    *,
+    tenant_id: UUID | str | None = None,
+) -> None:
     """Acquire the transaction-scoped month guard used by close and writer paths."""
     if session.get_bind().dialect.name != "postgresql":
         return
+    resolved_tenant_id = _resolve_tenant_id(tenant_id)
     session.execute(
         text("SELECT pg_advisory_xact_lock(:lock_key)"),
-        {"lock_key": _finance_month_advisory_lock_key(month)},
+        {"lock_key": _finance_month_advisory_lock_key(month, resolved_tenant_id)},
     )
 
 
-def _month_close_key(month: str) -> tuple[UUID, str]:
-    return (_DEFAULT_TENANT_UUID, month)
+def _month_close_key(
+    month: str, *, tenant_id: UUID | str | None = None
+) -> tuple[UUID, str]:
+    return (_resolve_tenant_id(tenant_id), month)
 
 
-def _finance_month_advisory_lock_key(month: str) -> int:
+def _resolve_tenant_id(
+    tenant_id: UUID | str | None, *, use_context: bool = True
+) -> UUID:
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    if use_context:
+        current_tenant = get_current_tenant()
+        if current_tenant is not None:
+            return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise ValueError("tenant_id must be a valid UUID") from exc
+
+
+def _finance_month_advisory_lock_key(month: str, tenant_id: UUID) -> int:
     """Return a stable signed 64-bit advisory-lock key for a finance month."""
     digest = blake2b(
-        f"{_FINANCE_MONTH_LOCK_KEY_PREFIX}{month}".encode(),
+        f"{_FINANCE_MONTH_LOCK_KEY_PREFIX}{tenant_id}:{month}".encode(),
         digest_size=8,
     ).digest()
     return int.from_bytes(digest, byteorder="big", signed=True)

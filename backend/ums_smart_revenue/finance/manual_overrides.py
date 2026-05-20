@@ -10,8 +10,11 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.db.finance_models import RevenueManualOverrideORM
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 @dataclass(frozen=True)
@@ -61,8 +64,11 @@ class ManualOverrideValidationError(ManualOverrideError):
 
 
 class SqlAlchemyManualOverrideRepository:
-    def __init__(self, session: Session):
+    """SQL-backed manual override repository scoped to a single tenant."""
+
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         self._session = session
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def create_override(
         self,
@@ -82,6 +88,7 @@ class SqlAlchemyManualOverrideRepository:
 
         row = RevenueManualOverrideORM(
             id=uuid4(),
+            tenant_id=self._tenant_id,
             month=month,
             youtube_channel_id=youtube_channel_id,
             adjustment_revenue_usd=adjustment_revenue_usd,
@@ -101,14 +108,20 @@ class SqlAlchemyManualOverrideRepository:
     def get_override_channel_id(self, override_id: str) -> str | None:
         override_uuid = _parse_uuid(override_id, field_name="manual_override_id")
         return self._session.scalar(
-            select(RevenueManualOverrideORM.youtube_channel_id).where(RevenueManualOverrideORM.id == override_uuid)
+            select(RevenueManualOverrideORM.youtube_channel_id).where(
+                RevenueManualOverrideORM.tenant_id == self._tenant_id,
+                RevenueManualOverrideORM.id == override_uuid,
+            )
         )
 
-    def list_channel_month_overrides(self, *, month: str, youtube_channel_id: str) -> list[RevenueManualOverrideEntry]:
+    def list_channel_month_overrides(
+        self, *, month: str, youtube_channel_id: str
+    ) -> list[RevenueManualOverrideEntry]:
         _validate_month(month)
         rows = self._session.scalars(
             select(RevenueManualOverrideORM)
             .where(
+                RevenueManualOverrideORM.tenant_id == self._tenant_id,
                 RevenueManualOverrideORM.month == month,
                 RevenueManualOverrideORM.youtube_channel_id == youtube_channel_id,
             )
@@ -130,11 +143,17 @@ class SqlAlchemyManualOverrideRepository:
             select(RevenueManualOverrideORM)
             .join(
                 YouTubeChannelORM,
-                RevenueManualOverrideORM.youtube_channel_id
-                == YouTubeChannelORM.youtube_channel_id,
+                (RevenueManualOverrideORM.tenant_id == YouTubeChannelORM.tenant_id)
+                & (
+                    RevenueManualOverrideORM.youtube_channel_id
+                    == YouTubeChannelORM.youtube_channel_id
+                ),
             )
-            .where(RevenueManualOverrideORM.month == month)
-            .where(YouTubeChannelORM.active.is_(True))
+            .where(
+                RevenueManualOverrideORM.tenant_id == self._tenant_id,
+                RevenueManualOverrideORM.month == month,
+                YouTubeChannelORM.active.is_(True),
+            )
             .order_by(
                 RevenueManualOverrideORM.youtube_channel_id,
                 RevenueManualOverrideORM.created_at,
@@ -160,9 +179,13 @@ class SqlAlchemyManualOverrideRepository:
         row = self._get_row(override_id, for_update=True)
         self._require_month_open(row.month, for_update=True)
         if row.status != "PENDING":
-            raise ManualOverrideConflictError("Manual override cannot be approved from its current state")
+            raise ManualOverrideConflictError(
+                "Manual override cannot be approved from its current state"
+            )
         if row.created_by == actor_uuid:
-            raise ManualOverrideValidationError("Manual override creator cannot approve their own override")
+            raise ManualOverrideValidationError(
+                "Manual override creator cannot approve their own override"
+            )
 
         row.status = "APPROVED"
         row.approved_by = actor_uuid
@@ -172,9 +195,14 @@ class SqlAlchemyManualOverrideRepository:
         self._session.flush()
         return self._to_entry(row)
 
-    def _get_row(self, override_id: str, *, for_update: bool = False) -> RevenueManualOverrideORM:
+    def _get_row(
+        self, override_id: str, *, for_update: bool = False
+    ) -> RevenueManualOverrideORM:
         override_uuid = _parse_uuid(override_id, field_name="manual_override_id")
-        statement = select(RevenueManualOverrideORM).where(RevenueManualOverrideORM.id == override_uuid)
+        statement = select(RevenueManualOverrideORM).where(
+            RevenueManualOverrideORM.tenant_id == self._tenant_id,
+            RevenueManualOverrideORM.id == override_uuid,
+        )
         if for_update:
             statement = statement.with_for_update()
         row = self._session.scalars(statement).one_or_none()
@@ -185,17 +213,27 @@ class SqlAlchemyManualOverrideRepository:
     def _require_active_channel(self, youtube_channel_id: str) -> None:
         row = self._session.scalars(
             select(YouTubeChannelORM).where(
+                YouTubeChannelORM.tenant_id == self._tenant_id,
                 YouTubeChannelORM.youtube_channel_id == youtube_channel_id,
                 YouTubeChannelORM.active.is_(True),
             )
         ).one_or_none()
         if row is None:
-            raise ManualOverrideValidationError("youtube_channel_id must reference an active channel")
+            raise ManualOverrideValidationError(
+                "youtube_channel_id must reference an active channel"
+            )
 
     def _require_month_open(self, month: str, *, for_update: bool = True) -> None:
-        close = get_or_create_month_close_row(self._session, month, for_update=for_update)
+        close = get_or_create_month_close_row(
+            self._session,
+            month,
+            tenant_id=self._tenant_id,
+            for_update=for_update,
+        )
         if close.status == "LOCKED":
-            raise ManualOverrideLockedMonthError("Finance month is locked for manual overrides")
+            raise ManualOverrideLockedMonthError(
+                "Finance month is locked for manual overrides"
+            )
 
     @staticmethod
     def _to_entry(row: RevenueManualOverrideORM) -> RevenueManualOverrideEntry:
@@ -212,14 +250,38 @@ class SqlAlchemyManualOverrideRepository:
         )
 
 
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise ManualOverrideValidationError(
+            "tenant_id must be a valid UUID"
+        ) from exc
+
+
 def _validate_month(month: str) -> None:
     if not MONTH_PATTERN.fullmatch(month):
-        raise ManualOverrideValidationError("month must use YYYY-MM with a calendar month from 01 to 12")
+        raise ManualOverrideValidationError(
+            "month must use YYYY-MM with a calendar month from 01 to 12"
+        )
 
 
 def _validate_nonzero_adjustment(value: Decimal) -> None:
     if not value.is_finite():
-        raise ManualOverrideValidationError("adjustment_revenue_usd must be a finite decimal")
+        raise ManualOverrideValidationError(
+            "adjustment_revenue_usd must be a finite decimal"
+        )
     if value == 0:
         raise ManualOverrideValidationError("adjustment_revenue_usd must not be zero")
 
@@ -235,7 +297,9 @@ def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
     try:
         return UUID(value)
     except ValueError as exc:
-        raise ManualOverrideValidationError(f"{field_name} must be a valid UUID") from exc
+        raise ManualOverrideValidationError(
+            f"{field_name} must be a valid UUID"
+        ) from exc
 
 
 def _decimal_to_api(value: Decimal) -> str:
