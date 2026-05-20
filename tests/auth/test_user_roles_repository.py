@@ -24,7 +24,14 @@ def test_get_or_create_scope_concurrent_insert_race_is_recovered(tmp_path):
 
     # A concurrent writer commits this scope before we try to insert it.
     with Session(engine) as setup:
-        setup.add(AccessScopeORM(id=uuid4(), scope_type="company", scope_id="race-co", label="company:race-co"))
+        setup.add(
+            AccessScopeORM(
+                id=uuid4(),
+                scope_type="company",
+                scope_id="race-co",
+                label="company:race-co",
+            )
+        )
         setup.commit()
 
     with Session(engine) as session:
@@ -36,8 +43,9 @@ def test_get_or_create_scope_concurrent_insert_race_is_recovered(tmp_path):
         def intercept(stmt, *args, **kwargs):
             call_count[0] += 1
             if call_count[0] == 1:
-                # Simulate the race window: our existence check ran before the concurrent
-                # commit, so we see no existing scope and proceed to INSERT.
+                # Simulate the race window: our existence check ran before
+                # the concurrent commit, so we see no existing scope and
+                # proceed to INSERT.
                 mock = MagicMock()
                 mock.one_or_none.return_value = None
                 return mock

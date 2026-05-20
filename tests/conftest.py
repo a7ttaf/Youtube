@@ -1,9 +1,8 @@
-from pathlib import Path
 import os
 import sys
+from pathlib import Path
 
 import pytest
-
 
 BACKEND_PATH = Path(__file__).resolve().parents[1] / "backend"
 sys.path.insert(0, str(BACKEND_PATH))
@@ -18,4 +17,3 @@ def reset_app_settings_cache():
     load_app_settings.cache_clear()
     yield
     load_app_settings.cache_clear()
-

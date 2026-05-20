@@ -7,11 +7,17 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
-from ums_smart_revenue.db.explanation_models import ExplanationBase, NumberExplanationORM
-from ums_smart_revenue.db.finance_models import FinanceBase, MonthlyChannelRevenueFactORM, RevenueManualOverrideORM
+from ums_smart_revenue.db.explanation_models import (
+    ExplanationBase,
+    NumberExplanationORM,
+)
+from ums_smart_revenue.db.finance_models import (
+    FinanceBase,
+    MonthlyChannelRevenueFactORM,
+    RevenueManualOverrideORM,
+)
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
-
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000011101")
 COMPANY_ID = UUID("00000000-0000-0000-0000-000000011201")
@@ -21,7 +27,9 @@ CREATOR_ID = UUID("00000000-0000-0000-0000-000000011402")
 APPROVER_ID = UUID("00000000-0000-0000-0000-000000011403")
 
 
-def auth_headers(role: str, user_id: UUID = FINANCE_USER_ID, scope_id: str | None = None) -> dict[str, str]:
+def auth_headers(
+    role: str, user_id: UUID = FINANCE_USER_ID, scope_id: str | None = None
+) -> dict[str, str]:
     headers = {
         "x-user-id": str(user_id),
         "x-user-email": f"{role}@example.com",
@@ -47,8 +55,16 @@ def seed_database(database_url: str) -> None:
     with Session(engine) as session:
         session.add_all(
             [
-                OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True),
-                OrgUnitORM(id=COMPANY_ID, parent_id=SECTOR_ID, type="COMPANY", name="TV Company", active=True),
+                OrgUnitORM(
+                    id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True
+                ),
+                OrgUnitORM(
+                    id=COMPANY_ID,
+                    parent_id=SECTOR_ID,
+                    type="COMPANY",
+                    name="TV Company",
+                    active=True,
+                ),
                 YouTubeChannelORM(
                     id=CHANNEL_ROW_ID,
                     youtube_channel_id="channel-tv-a",
@@ -58,9 +74,21 @@ def seed_database(database_url: str) -> None:
                     revenue_required=True,
                     active=True,
                 ),
-                UserORM(id=FINANCE_USER_ID, email="finance-viewer@example.com", display_name="Finance Viewer"),
-                UserORM(id=CREATOR_ID, email="finance-admin@example.com", display_name="Finance Admin"),
-                UserORM(id=APPROVER_ID, email="finance-approver@example.com", display_name="Finance Approver"),
+                UserORM(
+                    id=FINANCE_USER_ID,
+                    email="finance-viewer@example.com",
+                    display_name="Finance Viewer",
+                ),
+                UserORM(
+                    id=CREATOR_ID,
+                    email="finance-admin@example.com",
+                    display_name="Finance Admin",
+                ),
+                UserORM(
+                    id=APPROVER_ID,
+                    email="finance-approver@example.com",
+                    display_name="Finance Approver",
+                ),
                 MonthlyChannelRevenueFactORM(
                     id=uuid4(),
                     month="2026-03",
@@ -100,7 +128,9 @@ def seed_database(database_url: str) -> None:
         session.commit()
 
 
-def test_finance_viewer_gets_adjusted_revenue_explanation_with_audit_and_snapshot(tmp_path):
+def test_finance_viewer_gets_adjusted_revenue_explanation_with_audit_and_snapshot(
+    tmp_path,
+):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -119,7 +149,10 @@ def test_finance_viewer_gets_adjusted_revenue_explanation_with_audit_and_snapsho
     assert response.json()["metric"] == "adjusted_gross_revenue_usd"
     assert response.json()["value"] == "1125.5"
     assert response.json()["currency"] == "USD"
-    assert response.json()["formula"] == "baseline_gross_revenue_usd + approved_manual_override_total_usd"
+    assert (
+        response.json()["formula"]
+        == "baseline_gross_revenue_usd + approved_manual_override_total_usd"
+    )
     assert response.json()["confidence"]["label"] == "HIGH"
     assert response.json()["components"] == [
         {
@@ -139,7 +172,10 @@ def test_finance_viewer_gets_adjusted_revenue_explanation_with_audit_and_snapsho
     assert response.json()["warnings"] == [
         {
             "code": "PENDING_MANUAL_OVERRIDES",
-            "message": "1 pending manual override is not included in adjusted_gross_revenue_usd.",
+            "message": (
+                "1 pending manual override is not included in "
+                "adjusted_gross_revenue_usd."
+            ),
         }
     ]
     assert response.json()["audit_event"]["event_type"] == "REVENUE_VIEWED"
@@ -174,4 +210,6 @@ def test_revenue_explanation_rejects_unsupported_metric(tmp_path):
     )
 
     assert response.status_code == 422
-    assert response.json()["detail"] == "Unsupported explanation metric: net_revenue_usd"
+    assert (
+        response.json()["detail"] == "Unsupported explanation metric: net_revenue_usd"
+    )

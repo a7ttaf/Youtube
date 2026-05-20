@@ -149,7 +149,7 @@ class TenantResolverMiddleware:
         except _ResolverError as error:
             await error.to_response()(scope, receive, send_with_tenant_vary)
             return
-        except (asyncio.CancelledError, FutureCancelledError):
+        except (asyncio.CancelledError, FutureCancelledError) as _:
             raise
         except TimeoutError:
             _LOGGER.error(
@@ -271,7 +271,7 @@ class TenantResolverMiddleware:
                 normalised_slug,
                 timeout=self._authorization_timeout_seconds,
             )
-        except (asyncio.CancelledError, FutureCancelledError):
+        except (asyncio.CancelledError, FutureCancelledError) as _:
             raise
         except TimeoutError:
             _LOGGER.warning(

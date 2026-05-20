@@ -1,8 +1,8 @@
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 
 
-class RoleKey(str, Enum):
+class RoleKey(StrEnum):
     SUPER_OWNER = "super_owner"
     CORPORATE_ADMIN = "corporate_admin"
     REVENUE_OPERATIONS_ADMIN = "revenue_operations_admin"
@@ -138,4 +138,3 @@ _missing_definitions = set(RoleKey) - set(ROLE_DEFINITIONS)
 if _missing_definitions:
     missing = ", ".join(sorted(role.value for role in _missing_definitions))
     raise RuntimeError(f"Missing role definitions for: {missing}")
-

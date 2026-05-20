@@ -45,9 +45,7 @@ def manual_override(
         status=status,
         created_by="00000000-0000-0000-0000-00000000c001",
         approved_by=(
-            "00000000-0000-0000-0000-00000000c002"
-            if status == "APPROVED"
-            else None
+            "00000000-0000-0000-0000-00000000c002" if status == "APPROVED" else None
         ),
         approval_reason="Approved correction" if status == "APPROVED" else None,
     )

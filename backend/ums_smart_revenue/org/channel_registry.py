@@ -41,7 +41,9 @@ class ChannelRegistryStore(Protocol):
     def list_channels(self) -> list[ChannelRegistryEntry]:
         pass
 
-    def list_channels_by_ids(self, youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
+    def list_channels_by_ids(
+        self, youtube_channel_ids: set[str]
+    ) -> list[ChannelRegistryEntry]:
         pass
 
     def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
@@ -58,7 +60,9 @@ class ChannelRegistryStore(Protocol):
     ) -> ChannelRegistryEntry:
         pass
 
-    def update_mapping(self, *, youtube_channel_id: str, primary_company_id: str | None) -> ChannelRegistryEntry:
+    def update_mapping(
+        self, *, youtube_channel_id: str, primary_company_id: str | None
+    ) -> ChannelRegistryEntry:
         pass
 
 
@@ -67,7 +71,9 @@ class ChannelRegistry:
         self._channels: dict[str, ChannelRegistryEntry] = {}
         for channel in channels or []:
             if channel.youtube_channel_id in self._channels:
-                raise ChannelRegistryConflictError(f"Duplicate channel id: {channel.youtube_channel_id}")
+                raise ChannelRegistryConflictError(
+                    f"Duplicate channel id: {channel.youtube_channel_id}"
+                )
             self._channels[channel.youtube_channel_id] = channel
 
     def list_channels(self) -> list[ChannelRegistryEntry]:
@@ -76,7 +82,9 @@ class ChannelRegistry:
             key=lambda channel: channel.youtube_channel_id,
         )
 
-    def list_channels_by_ids(self, youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
+    def list_channels_by_ids(
+        self, youtube_channel_ids: set[str]
+    ) -> list[ChannelRegistryEntry]:
         return sorted(
             [
                 channel
@@ -98,9 +106,13 @@ class ChannelRegistry:
         cms_status: str,
         revenue_required: bool,
     ) -> ChannelRegistryEntry:
-        normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
+        normalized_company_id = _parse_optional_uuid(
+            primary_company_id, "primary_company_id"
+        )
         if youtube_channel_id in self._channels:
-            raise ChannelRegistryConflictError(f"Channel already exists: {youtube_channel_id}")
+            raise ChannelRegistryConflictError(
+                f"Channel already exists: {youtube_channel_id}"
+            )
         channel = ChannelRegistryEntry(
             youtube_channel_id=youtube_channel_id,
             channel_name=channel_name,
@@ -111,8 +123,12 @@ class ChannelRegistry:
         self._channels[youtube_channel_id] = channel
         return channel
 
-    def update_mapping(self, *, youtube_channel_id: str, primary_company_id: str | None) -> ChannelRegistryEntry:
-        normalized_company_id = _parse_optional_uuid(primary_company_id, "primary_company_id")
+    def update_mapping(
+        self, *, youtube_channel_id: str, primary_company_id: str | None
+    ) -> ChannelRegistryEntry:
+        normalized_company_id = _parse_optional_uuid(
+            primary_company_id, "primary_company_id"
+        )
         existing = self._channels.get(youtube_channel_id)
         if existing is None:
             raise KeyError(youtube_channel_id)
@@ -133,7 +149,9 @@ def bootstrap_channel_registry() -> ChannelRegistry:
         ChannelRegistryEntry(
             youtube_channel_id=channel.youtube_channel_id,
             channel_name=channel.youtube_channel_id,
-            primary_company_id=_parse_optional_uuid(channel.primary_org_unit_id, "primary_company_id"),
+            primary_company_id=_parse_optional_uuid(
+                channel.primary_org_unit_id, "primary_company_id"
+            ),
             cms_status="UNKNOWN",
             revenue_required=True,
             active=channel.active,
@@ -149,4 +167,6 @@ def _parse_optional_uuid(value: str | None, field_name: str) -> str | None:
     try:
         return str(UUID(value))
     except ValueError as exc:
-        raise ChannelRegistryValidationError(f"{field_name} must be a valid UUID") from exc
+        raise ChannelRegistryValidationError(
+            f"{field_name} must be a valid UUID"
+        ) from exc

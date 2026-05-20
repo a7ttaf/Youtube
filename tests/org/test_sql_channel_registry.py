@@ -135,7 +135,7 @@ def test_sql_channel_registry_reads_and_writes_channel_rows():
     persisted = session.scalars(
         select(YouTubeChannelORM).where(
             YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
-            YouTubeChannelORM.youtube_channel_id == "channel-tv-b"
+            YouTubeChannelORM.youtube_channel_id == "channel-tv-b",
         )
     ).one()
     assert created.youtube_channel_id == "channel-tv-b"
@@ -243,7 +243,7 @@ def test_sql_channel_registry_rejects_missing_company_id_on_update_and_rolls_bac
     persisted = session.scalars(
         select(YouTubeChannelORM).where(
             YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
-            YouTubeChannelORM.youtube_channel_id == "channel-tv-a"
+            YouTubeChannelORM.youtube_channel_id == "channel-tv-a",
         )
     ).one()
     assert persisted.primary_org_unit_id == COMPANY_TV_ID

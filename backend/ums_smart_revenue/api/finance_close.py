@@ -6,7 +6,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
-from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
+from ums_smart_revenue.api.dependencies import (
+    current_db_session,
+    current_principal_from_headers,
+)
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -21,7 +24,6 @@ from ums_smart_revenue.finance.month_close import (
 from ums_smart_revenue.finance.month_close_readiness import (
     SqlAlchemyFinanceCloseReadinessService,
 )
-
 
 router = APIRouter(prefix="/finance-close", tags=["finance-close"])
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
@@ -53,13 +55,19 @@ def current_finance_close_readiness_service(
 def get_finance_month_close(
     month: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
+    repository: Annotated[
+        SqlAlchemyFinanceMonthCloseRepository,
+        Depends(current_finance_month_close_repository),
+    ],
 ) -> dict[str, object]:
     _validate_month(month)
     _require_permission(user, Permission.VIEW_REVENUE, AccessScope.finance_month(month))
     close = repository.get(month)
     if close is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Finance month close record not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Finance month close record not found",
+        )
     return close.to_api()
 
 
@@ -73,7 +81,9 @@ def get_finance_close_readiness(
     ],
 ) -> dict[str, object]:
     _validate_month(month)
-    _require_permission(user, Permission.LOCK_FINANCE_MONTH, AccessScope.finance_month(month))
+    _require_permission(
+        user, Permission.LOCK_FINANCE_MONTH, AccessScope.finance_month(month)
+    )
     return readiness_service.check_month(month).to_api()
 
 
@@ -82,7 +92,10 @@ def lock_finance_month(
     month: str,
     payload: FinanceCloseReasonRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
+    repository: Annotated[
+        SqlAlchemyFinanceMonthCloseRepository,
+        Depends(current_finance_month_close_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     _validate_month(month)
@@ -116,7 +129,10 @@ def unlock_finance_month(
     month: str,
     payload: FinanceCloseReasonRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
+    repository: Annotated[
+        SqlAlchemyFinanceMonthCloseRepository,
+        Depends(current_finance_month_close_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     _validate_month(month)
@@ -145,7 +161,10 @@ def record_allocation_rule(
     month: str,
     payload: AllocationRuleRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyFinanceMonthCloseRepository, Depends(current_finance_month_close_repository)],
+    repository: Annotated[
+        SqlAlchemyFinanceMonthCloseRepository,
+        Depends(current_finance_month_close_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     _validate_month(month)
@@ -160,7 +179,9 @@ def record_allocation_rule(
     except ValueError as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="Finance month allocation rule cannot be changed from its current state",
+            detail=(
+                "Finance month allocation rule cannot be changed from its current state"
+            ),
         ) from exc
     record = _audit_finance_close(
         audit_sink=audit_sink,
@@ -168,12 +189,17 @@ def record_allocation_rule(
         event_type=AuditEventType.ALLOCATION_RULE_CHANGED,
         month=month,
         reason=payload.reason,
-        details={"allocation_method": payload.allocation_method, "rule_payload": payload.rule_payload},
+        details={
+            "allocation_method": payload.allocation_method,
+            "rule_payload": payload.rule_payload,
+        },
     )
     return _with_audit_event(close, record)
 
 
-def _require_permission(user: UserPrincipal, permission: Permission, scope: AccessScope) -> None:
+def _require_permission(
+    user: UserPrincipal, permission: Permission, scope: AccessScope
+) -> None:
     if not has_permission(user, permission, scope):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

@@ -60,20 +60,28 @@ def test_super_owner_can_see_everything_and_manage_sensitive_controls(org_index)
     assert can_view_channel_analytics(user, "channel-news-a", org_index)
     assert can_view_channel_revenue(user, "channel-news-a", org_index)
     assert can_view_company_revenue(user, "company-news-a", org_index)
-    assert can_export_finance_report(user, AccessScope.company("company-news-a"), org_index)
+    assert can_export_finance_report(
+        user, AccessScope.company("company-news-a"), org_index
+    )
     assert can_lock_month(user, "2026-03")
     assert can_change_allocation_rule(user, "2026-03")
     assert can_manage_connectors(user)
     assert can_assign_roles(user)
 
 
-def test_assistant_analyst_can_view_assigned_analytics_but_not_finance_by_default(org_index):
-    user = principal(assigned(RoleKey.ASSISTANT_ANALYST, AccessScope.company("company-tv-a")))
+def test_assistant_analyst_can_view_assigned_analytics_but_not_finance_by_default(
+    org_index,
+):
+    user = principal(
+        assigned(RoleKey.ASSISTANT_ANALYST, AccessScope.company("company-tv-a"))
+    )
 
     assert can_view_channel_analytics(user, "channel-tv-a", org_index)
     assert not can_view_channel_analytics(user, "channel-news-a", org_index)
     assert not can_view_channel_revenue(user, "channel-tv-a", org_index)
-    assert not can_export_finance_report(user, AccessScope.company("company-tv-a"), org_index)
+    assert not can_export_finance_report(
+        user, AccessScope.company("company-tv-a"), org_index
+    )
 
 
 def test_explicit_finance_grant_allows_assistant_revenue_for_only_that_scope(org_index):
@@ -87,7 +95,9 @@ def test_explicit_finance_grant_allows_assistant_revenue_for_only_that_scope(org
 
 
 def test_company_manager_cannot_view_another_company(org_index):
-    user = principal(assigned(RoleKey.COMPANY_MANAGER, AccessScope.company("company-tv-a")))
+    user = principal(
+        assigned(RoleKey.COMPANY_MANAGER, AccessScope.company("company-tv-a"))
+    )
 
     assert can_view_channel_analytics(user, "channel-tv-a", org_index)
     assert not can_view_channel_analytics(user, "channel-news-a", org_index)
@@ -99,12 +109,18 @@ def test_export_operator_can_export_revenue_only_with_view_and_export_grants(org
         assigned(RoleKey.EXPORT_OPERATOR, AccessScope.company("company-tv-a")),
         grants=[
             granted(Permission.VIEW_REVENUE, AccessScope.company("company-tv-a")),
-            granted(Permission.EXPORT_REVENUE_REPORT, AccessScope.company("company-tv-a")),
+            granted(
+                Permission.EXPORT_REVENUE_REPORT, AccessScope.company("company-tv-a")
+            ),
         ],
     )
 
-    assert can_export_finance_report(user, AccessScope.company("company-tv-a"), org_index)
-    assert not can_export_finance_report(user, AccessScope.company("company-news-a"), org_index)
+    assert can_export_finance_report(
+        user, AccessScope.company("company-tv-a"), org_index
+    )
+    assert not can_export_finance_report(
+        user, AccessScope.company("company-news-a"), org_index
+    )
     assert not can_change_allocation_rule(user, "2026-03")
 
 
@@ -125,9 +141,15 @@ def test_finance_admin_can_lock_month_and_change_allocation_rules():
 
 
 def test_connector_admin_can_manage_connectors_but_revenue_ops_can_only_run_jobs():
-    connector_admin = principal(assigned(RoleKey.CONNECTOR_ADMIN, AccessScope.global_scope()))
-    revenue_ops = principal(assigned(RoleKey.REVENUE_OPERATIONS_ADMIN, AccessScope.global_scope()))
-    assistant = principal(assigned(RoleKey.ASSISTANT_ANALYST, AccessScope.global_scope()))
+    connector_admin = principal(
+        assigned(RoleKey.CONNECTOR_ADMIN, AccessScope.global_scope())
+    )
+    revenue_ops = principal(
+        assigned(RoleKey.REVENUE_OPERATIONS_ADMIN, AccessScope.global_scope())
+    )
+    assistant = principal(
+        assigned(RoleKey.ASSISTANT_ANALYST, AccessScope.global_scope())
+    )
 
     assert can_manage_connectors(connector_admin)
     assert not can_manage_connectors(revenue_ops)
@@ -136,16 +158,26 @@ def test_connector_admin_can_manage_connectors_but_revenue_ops_can_only_run_jobs
 
 
 def test_narrow_connector_scope_does_not_grant_global_connector_admin():
-    connector_admin = principal(assigned(RoleKey.CONNECTOR_ADMIN, AccessScope.connector("youtube")))
+    connector_admin = principal(
+        assigned(RoleKey.CONNECTOR_ADMIN, AccessScope.connector("youtube"))
+    )
 
     assert not can_manage_connectors(connector_admin)
 
 
-def test_graph_finance_view_requires_graph_permission_and_underlying_finance_scope(org_index):
-    assistant = principal(assigned(RoleKey.ASSISTANT_ANALYST, AccessScope.company("company-tv-a")))
-    finance_viewer = principal(assigned(RoleKey.FINANCE_VIEWER, AccessScope.company("company-tv-a")))
+def test_graph_finance_view_requires_graph_permission_and_underlying_finance_scope(
+    org_index,
+):
+    assistant = principal(
+        assigned(RoleKey.ASSISTANT_ANALYST, AccessScope.company("company-tv-a"))
+    )
+    finance_viewer = principal(
+        assigned(RoleKey.FINANCE_VIEWER, AccessScope.company("company-tv-a"))
+    )
 
-    assert can_view_neo4j_graph(assistant, AccessScope.company("company-tv-a"), org_index)
+    assert can_view_neo4j_graph(
+        assistant, AccessScope.company("company-tv-a"), org_index
+    )
     assert not can_view_neo4j_graph(
         assistant,
         AccessScope.company("company-tv-a"),
@@ -165,4 +197,3 @@ def test_corporate_admin_can_assign_roles_without_finance_visibility(org_index):
 
     assert can_assign_roles(user)
     assert not can_view_company_revenue(user, "company-tv-a", org_index)
-

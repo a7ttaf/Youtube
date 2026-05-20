@@ -163,14 +163,20 @@ def test_get_or_create_month_close_row_uses_request_tenant_context() -> None:
             row = get_or_create_month_close_row(session, "2026-03")
 
             assert row.tenant_id == OTHER_TENANT_ID
-            assert session.get(
-                FinanceMonthCloseORM,
-                (OTHER_TENANT_ID, "2026-03"),
-            ) is row
-            assert session.get(
-                FinanceMonthCloseORM,
-                (DEFAULT_TENANT_ID, "2026-03"),
-            ) is None
+            assert (
+                session.get(
+                    FinanceMonthCloseORM,
+                    (OTHER_TENANT_ID, "2026-03"),
+                )
+                is row
+            )
+            assert (
+                session.get(
+                    FinanceMonthCloseORM,
+                    (DEFAULT_TENANT_ID, "2026-03"),
+                )
+                is None
+            )
     finally:
         TENANT_CTX.reset(token)
 
@@ -186,8 +192,9 @@ def test_finance_month_advisory_lock_uses_request_tenant_context() -> None:
     finally:
         TENANT_CTX.reset(token)
 
-    assert default_session.executed[0][1]["lock_key"] != (
-        request_session.executed[0][1]["lock_key"]
+    assert (
+        default_session.executed[0][1]["lock_key"]
+        != (request_session.executed[0][1]["lock_key"])
     )
 
 
@@ -199,9 +206,7 @@ def test_finance_month_close_repository_uses_explicit_tenant() -> None:
     FinanceBase.metadata.create_all(engine)
 
     with Session(engine) as session:
-        repository = SqlAlchemyFinanceMonthCloseRepository(
-            session, tenant_id=tenant_id
-        )
+        repository = SqlAlchemyFinanceMonthCloseRepository(session, tenant_id=tenant_id)
         entry = repository.lock_month(month="2026-03", actor_user_id=actor_user_id)
 
         tenant_row = session.get(FinanceMonthCloseORM, (tenant_id, "2026-03"))
@@ -392,9 +397,7 @@ def test_bank_reconciliation_writes_use_context_tenant_in_month_open_check(
     )
     token = TENANT_CTX.set(_tenant())
     try:
-        SqlAlchemyBankReconciliationRepository(object())._require_month_open(
-            "2026-03"
-        )
+        SqlAlchemyBankReconciliationRepository(object())._require_month_open("2026-03")
     finally:
         TENANT_CTX.reset(token)
 

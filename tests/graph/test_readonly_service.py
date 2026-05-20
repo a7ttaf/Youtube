@@ -4,7 +4,10 @@ from ums_smart_revenue.auth.models import RoleAssignment, UserPrincipal
 from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.graph.cypher import READ_ONLY_CYPHER, assert_query_is_read_only
-from ums_smart_revenue.graph.readonly_service import GraphAccessDenied, Neo4jReadOnlyService
+from ums_smart_revenue.graph.readonly_service import (
+    GraphAccessDeniedError,
+    Neo4jReadOnlyService,
+)
 
 
 class FakeGraphClient:
@@ -71,7 +74,9 @@ def test_revenue_flow_filters_nodes_to_authorized_company(org_index):
     service = Neo4jReadOnlyService(client=client, org_index=org_index)
     user = principal(RoleKey.FINANCE_VIEWER, AccessScope.company("company-tv-a"))
 
-    result = service.revenue_flow(user, AccessScope.company("company-tv-a"), month="2026-03")
+    result = service.revenue_flow(
+        user, AccessScope.company("company-tv-a"), month="2026-03"
+    )
 
     assert result == [
         {
@@ -88,7 +93,7 @@ def test_revenue_flow_rejects_assistant_without_finance_visibility(org_index):
     service = Neo4jReadOnlyService(client=FakeGraphClient(), org_index=org_index)
     user = principal(RoleKey.ASSISTANT_ANALYST, AccessScope.company("company-tv-a"))
 
-    with pytest.raises(GraphAccessDenied):
+    with pytest.raises(GraphAccessDeniedError):
         service.revenue_flow(user, AccessScope.company("company-tv-a"), month="2026-03")
 
 
@@ -96,7 +101,10 @@ def test_global_scope_allows_unregistered_graph_rows(org_index):
     service = Neo4jReadOnlyService(client=FakeGraphClient(), org_index=org_index)
 
     assert service._row_in_scope(
-        {"company_id": "company-not-yet-indexed", "channel_id": "channel-not-yet-indexed"},
+        {
+            "company_id": "company-not-yet-indexed",
+            "channel_id": "channel-not-yet-indexed",
+        },
         AccessScope.global_scope(),
     )
 
@@ -109,4 +117,3 @@ def test_cypher_read_only_guard_blocks_write_tokens_with_non_space_separators():
 def test_cypher_read_only_guard_blocks_procedure_calls():
     with pytest.raises(ValueError, match="CALL"):
         assert_query_is_read_only("CALL dbms.components() YIELD name RETURN name")
-

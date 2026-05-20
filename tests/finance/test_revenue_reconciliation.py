@@ -31,8 +31,16 @@ def revenue_fact(
 def test_reconciliation_preview_detects_material_source_variance():
     preview = build_revenue_reconciliation_preview(
         [
-            revenue_fact(source_kind="YOUTUBE_CMS", gross_revenue_usd="1000.00", confidence_score="0.9800"),
-            revenue_fact(source_kind="ADSENSE", gross_revenue_usd="930.00", confidence_score="0.9000"),
+            revenue_fact(
+                source_kind="YOUTUBE_CMS",
+                gross_revenue_usd="1000.00",
+                confidence_score="0.9800",
+            ),
+            revenue_fact(
+                source_kind="ADSENSE",
+                gross_revenue_usd="930.00",
+                confidence_score="0.9000",
+            ),
         ]
     )
 
@@ -50,7 +58,9 @@ def test_reconciliation_preview_detects_material_source_variance():
             {
                 "issue_type": "GROSS_REVENUE_VARIANCE",
                 "severity": "HIGH",
-                "message": "Gross revenue sources differ by 7.00% for channel-tv-a in 2026-03.",
+                "message": (
+                    "Gross revenue sources differ by 7.00% for channel-tv-a in 2026-03."
+                ),
             }
         ],
     }
@@ -58,7 +68,13 @@ def test_reconciliation_preview_detects_material_source_variance():
 
 def test_reconciliation_preview_marks_single_source_as_insufficient():
     preview = build_revenue_reconciliation_preview(
-        [revenue_fact(source_kind="YOUTUBE_CMS", gross_revenue_usd="1000.00", confidence_score="0.9800")]
+        [
+            revenue_fact(
+                source_kind="YOUTUBE_CMS",
+                gross_revenue_usd="1000.00",
+                confidence_score="0.9800",
+            )
+        ]
     )
 
     assert preview.status == "INSUFFICIENT_SOURCES"
@@ -69,8 +85,16 @@ def test_reconciliation_preview_marks_single_source_as_insufficient():
 def test_issue_queue_groups_month_facts_and_returns_only_unresolved_channels():
     queue = build_revenue_reconciliation_issue_queue(
         [
-            revenue_fact(source_kind="YOUTUBE_CMS", gross_revenue_usd="1000.00", confidence_score="0.9800"),
-            revenue_fact(source_kind="ADSENSE", gross_revenue_usd="930.00", confidence_score="0.9000"),
+            revenue_fact(
+                source_kind="YOUTUBE_CMS",
+                gross_revenue_usd="1000.00",
+                confidence_score="0.9800",
+            ),
+            revenue_fact(
+                source_kind="ADSENSE",
+                gross_revenue_usd="930.00",
+                confidence_score="0.9000",
+            ),
             RevenueFactEntry(
                 id="fact-news-cms",
                 month="2026-03",
@@ -119,7 +143,10 @@ def test_issue_queue_groups_month_facts_and_returns_only_unresolved_channels():
                     {
                         "issue_type": "GROSS_REVENUE_VARIANCE",
                         "severity": "HIGH",
-                        "message": "Gross revenue sources differ by 7.00% for channel-tv-a in 2026-03.",
+                        "message": (
+                            "Gross revenue sources differ by 7.00% "
+                            "for channel-tv-a in 2026-03."
+                        ),
                     }
                 ],
             }

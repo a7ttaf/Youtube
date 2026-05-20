@@ -16,7 +16,6 @@ from ums_smart_revenue.db.security_models import (
     UserPermissionGrantORM,
 )
 
-
 ADMIN_ID = UUID("00000000-0000-0000-0000-000000015001")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000015002")
 COMPANY_ID = "company-tv-a"
@@ -42,8 +41,12 @@ def seed_database(database_url: str) -> None:
     with Session(engine) as session:
         session.add_all(
             [
-                UserORM(id=ADMIN_ID, email="admin@example.com", display_name="Admin User"),
-                UserORM(id=TARGET_ID, email="target@example.com", display_name="Target User"),
+                UserORM(
+                    id=ADMIN_ID, email="admin@example.com", display_name="Admin User"
+                ),
+                UserORM(
+                    id=TARGET_ID, email="target@example.com", display_name="Target User"
+                ),
             ]
         )
         for definition in ROLE_DEFINITIONS.values():
@@ -138,7 +141,10 @@ def test_corporate_admin_cannot_grant_finance_permission(tmp_path):
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Finance permissions require Finance Admin or Super Owner"
+    assert (
+        response.json()["detail"]
+        == "Finance permissions require Finance Admin or Super Owner"
+    )
 
 
 def test_assistant_cannot_grant_permissions_or_probe_users(tmp_path):
@@ -186,13 +192,18 @@ def test_finance_admin_revokes_finance_permission_with_audit(tmp_path):
     engine = create_engine(database_url)
     with Session(engine) as session:
         grant = session.scalars(select(UserPermissionGrantORM)).one()
-        audit_logs = session.scalars(select(AuditLogORM).order_by(AuditLogORM.created_at)).all()
+        audit_logs = session.scalars(
+            select(AuditLogORM).order_by(AuditLogORM.created_at)
+        ).all()
 
     assert response.status_code == 200
     assert response.json()["active"] is False
     assert grant.active is False
     assert grant.revoked_by == ADMIN_ID
-    assert [log.event_type for log in audit_logs] == ["USER_PERMISSION_CHANGED", "USER_PERMISSION_CHANGED"]
+    assert [log.event_type for log in audit_logs] == [
+        "USER_PERMISSION_CHANGED",
+        "USER_PERMISSION_CHANGED",
+    ]
     assert audit_logs[-1].reason == "Temporary visibility ended"
 
 
@@ -220,7 +231,10 @@ def test_corporate_admin_cannot_revoke_finance_permission(tmp_path):
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Finance permissions require Finance Admin or Super Owner"
+    assert (
+        response.json()["detail"]
+        == "Finance permissions require Finance Admin or Super Owner"
+    )
 
 
 def test_duplicate_active_permission_grant_is_rejected(tmp_path):
@@ -234,7 +248,11 @@ def test_duplicate_active_permission_grant_is_rejected(tmp_path):
         "reason": "First grant",
     }
 
-    first = client.post(f"/users/{TARGET_ID}/permissions", headers=auth_headers("corporate_admin"), json=payload)
+    first = client.post(
+        f"/users/{TARGET_ID}/permissions",
+        headers=auth_headers("corporate_admin"),
+        json=payload,
+    )
     second = client.post(
         f"/users/{TARGET_ID}/permissions",
         headers=auth_headers("corporate_admin"),

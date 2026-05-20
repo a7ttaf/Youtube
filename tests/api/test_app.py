@@ -37,5 +37,6 @@ def test_security_metadata_endpoints_are_available_for_frontend():
     assert roles.status_code == 200
     assert permissions.status_code == 200
     assert any(role["key"] == "finance_admin" for role in roles.json())
-    assert any(permission["key"] == "finance.view_revenue" for permission in permissions.json())
-
+    assert any(
+        permission["key"] == "finance.view_revenue" for permission in permissions.json()
+    )

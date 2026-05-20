@@ -202,9 +202,7 @@ def test_to_domain_normalises_non_utc_datetimes():
         ("display_name", "invalid display_name"),
     ],
 )
-def test_to_domain_rejects_null_identity_fields(
-    field_name: str, expected_error: str
-):
+def test_to_domain_rejects_null_identity_fields(field_name: str, expected_error: str):
     """Tenant rows with missing identity fields fail domain conversion."""
     from ums_smart_revenue.tenancy.repository import _to_domain
 

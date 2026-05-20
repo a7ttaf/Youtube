@@ -5,7 +5,10 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
-from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
+from ums_smart_revenue.api.dependencies import (
+    current_db_session,
+    current_principal_from_headers,
+)
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -13,14 +16,13 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.connectors.credentials import (
-    ConnectorCredentialEntry,
-    ConnectorCredentialConflictError,
-    ConnectorCredentialValidationError,
     MAX_CREDENTIAL_PAGE_SIZE,
+    ConnectorCredentialConflictError,
+    ConnectorCredentialEntry,
+    ConnectorCredentialValidationError,
     SqlAlchemyConnectorCredentialRepository,
     is_external_secret_ref,
 )
-
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
 
@@ -59,11 +61,15 @@ def current_connector_repository(
 @router.get("/credentials")
 def list_connector_credentials(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyConnectorCredentialRepository, Depends(current_connector_repository)],
+    repository: Annotated[
+        SqlAlchemyConnectorCredentialRepository, Depends(current_connector_repository)
+    ],
     limit: Annotated[int, Query(ge=1, le=MAX_CREDENTIAL_PAGE_SIZE)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, object]:
-    _require_connector_permission(user, Permission.MANAGE_CONNECTORS, AccessScope.global_scope())
+    _require_connector_permission(
+        user, Permission.MANAGE_CONNECTORS, AccessScope.global_scope()
+    )
     page = repository.list_credentials(limit=limit, offset=offset)
     return {
         "items": [credential.to_api() for credential in page.items],
@@ -80,7 +86,9 @@ def list_connector_credentials(
 def create_connector_credential(
     payload: ConnectorCredentialCreateRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyConnectorCredentialRepository, Depends(current_connector_repository)],
+    repository: Annotated[
+        SqlAlchemyConnectorCredentialRepository, Depends(current_connector_repository)
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     connector_scope = AccessScope.connector(payload.connector_key)
@@ -88,7 +96,9 @@ def create_connector_credential(
     if not is_external_secret_ref(payload.encrypted_secret_ref):
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="Connector credentials must use an external encrypted secret reference",
+            detail=(
+                "Connector credentials must use an external encrypted secret reference"
+            ),
         )
     try:
         credential = repository.create_credential(
@@ -98,9 +108,14 @@ def create_connector_credential(
             actor_user_id=user.user_id,
         )
     except ConnectorCredentialValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
     except ConnectorCredentialConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Connector credential already exists") from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Connector credential already exists",
+        ) from exc
 
     record = _audit_connector_change(
         audit_sink=audit_sink,
@@ -139,7 +154,9 @@ def request_connector_job(
     }
 
 
-def _require_connector_permission(user: UserPrincipal, permission: Permission, scope: AccessScope) -> None:
+def _require_connector_permission(
+    user: UserPrincipal, permission: Permission, scope: AccessScope
+) -> None:
     if not has_permission(user, permission, scope):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,

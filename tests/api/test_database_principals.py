@@ -464,9 +464,7 @@ def test_database_principal_canonicalizes_user_id_before_session():
 
     identity = current_trusted_gateway_identity(
         x_user_id=mixed_case_user_id,
-        x_ums_trusted_gateway_token=auth_headers()[
-            "x-ums-trusted-gateway-token"
-        ],
+        x_ums_trusted_gateway_token=auth_headers()["x-ums-trusted-gateway-token"],
     )
 
     assert identity.user_id == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -647,8 +645,9 @@ def test_database_principal_rejects_too_many_active_role_assignments(tmp_path):
     add_many_role_assignments(database_url, count=ROLE_ASSIGNMENT_OVERFLOW_COUNT)
     engine = create_engine(database_url)
 
-    with Session(engine) as session, pytest.raises(
-        PrincipalLoadError, match="role assignments"
+    with (
+        Session(engine) as session,
+        pytest.raises(PrincipalLoadError, match="role assignments"),
     ):
         SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
 
@@ -673,8 +672,9 @@ def test_database_principal_rejects_too_many_active_permission_grants(tmp_path):
     add_many_permission_grants(database_url, count=PERMISSION_GRANT_OVERFLOW_COUNT)
     engine = create_engine(database_url)
 
-    with Session(engine) as session, pytest.raises(
-        PrincipalLoadError, match="permission grants"
+    with (
+        Session(engine) as session,
+        pytest.raises(PrincipalLoadError, match="permission grants"),
     ):
         SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
 
