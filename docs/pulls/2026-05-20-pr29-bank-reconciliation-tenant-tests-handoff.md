@@ -55,9 +55,9 @@ Second commit (this artifact set):
 ## Failures / skipped gates
 
 - None.
-- Note on environment: this branch was developed in a git worktree at `/home/mahmoud/work/youtube-ums-bankrecon` (created via `git worktree add` off `origin/pr/s2-4a-tenant-id-on-operational-tables`). The PR #26 worktree at `/home/mahmoud/work/youtube-ums`, the PR #27 worktree at `/home/mahmoud/work/youtube-ums-cleanup`, and the PR #28 worktree at `/home/mahmoud/work/youtube-ums-gitignore` were all left **completely untouched**.
-- The local working tree shows the usual `__pycache__/` clutter (no `.gitignore` on this stack until PR #28 lands), but only the new test file was staged and committed.
-- No remote CI run; the UMS branch this targets has no `.github/workflows/` and no `ci/` lane.
+- Note on environment: validate from any clean checkout or worktree. If a separate worktree is needed, create one with `git worktree add <WORKTREE_DIR> origin/pr/s2-4b-finance-bank-recon-tenant-tests`, then run the checks from that worktree root.
+- Generated caches such as `__pycache__/` are local artifacts only; do not stage them. If needed, remove them with `find backend tests -type d -name __pycache__ -prune -exec rm -rf {} +`.
+- No remote CI run was available on the target stack branch. Before relying on remote gates, check whether the target branch includes `.github/workflows/` or a `ci/` lane.
 
 ## Risks
 
@@ -87,15 +87,18 @@ This PR is part of the 3-PR sequence picked by the user after PR #27 shipped:
 ## Validation a future maintainer can rerun
 
 ```bash
-cd /home/mahmoud/work/youtube-ums-bankrecon
+# Run from the repository root with the project virtualenv activated.
+# Example setup if needed:
+# python -m venv .venv
+# source .venv/bin/activate
 git checkout pr/s2-4b-finance-bank-recon-tenant-tests
-/home/mahmoud/work/youtube-ums/.venv/bin/python -m ruff check tests/finance/test_bank_reconciliation_tenant_scope.py
-/home/mahmoud/work/youtube-ums/.venv/bin/python -m ruff format --check tests/finance/test_bank_reconciliation_tenant_scope.py
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -m pytest -q tests/finance/test_bank_reconciliation_tenant_scope.py
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -m pytest -q
+python -m ruff check tests/finance/test_bank_reconciliation_tenant_scope.py
+python -m ruff format --check tests/finance/test_bank_reconciliation_tenant_scope.py
+PYTHONPATH=backend python -m pytest -q tests/finance/test_bank_reconciliation_tenant_scope.py
+PYTHONPATH=backend python -m pytest -q
 git diff --check
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -c "from ums_smart_revenue.finance.bank_reconciliation import SqlAlchemyBankReconciliationRepository; print('ok')"
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -m alembic -c alembic.ini heads
+PYTHONPATH=backend python -c "from ums_smart_revenue.finance.bank_reconciliation import SqlAlchemyBankReconciliationRepository; print('ok')"
+PYTHONPATH=backend python -m alembic -c alembic.ini heads
 ```
 
 Expected: 13 tests pass on the new file, 520 total on the full suite, diff clean, ruff/format clean on the new file, import smoke ok, single alembic head.
