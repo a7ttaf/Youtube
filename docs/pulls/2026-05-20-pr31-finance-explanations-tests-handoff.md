@@ -96,15 +96,17 @@ Remaining queued items (lower priority):
 ## Validation a future maintainer can rerun
 
 ```bash
-cd /home/mahmoud/work/youtube-ums-explanations
+# From the repository root on branch pr/s2-4b-finance-explanations-tests.
 git checkout pr/s2-4b-finance-explanations-tests
-/home/mahmoud/work/youtube-ums/.venv/bin/python -m ruff check tests/finance/test_explanations.py
-/home/mahmoud/work/youtube-ums/.venv/bin/python -m ruff format --check tests/finance/test_explanations.py
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -m pytest -q tests/finance/test_explanations.py
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -m pytest -q
+python -m ruff check tests/finance/test_explanations.py
+python -m ruff format --check tests/finance/test_explanations.py
+PYTHONPATH=backend python -m pytest -q tests/finance/test_explanations.py
+PYTHONPATH=backend python -m pytest -q
 git diff --check
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -c "from ums_smart_revenue.finance.explanations import SqlAlchemyNumberExplanationRepository, NumberExplanationEntry, NumberExplanationValidationError, build_channel_month_revenue_explanation, ADJUSTED_GROSS_REVENUE_METRIC; print('ok')"
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -m alembic -c alembic.ini heads
+PYTHONPATH=backend python -c "from ums_smart_revenue.finance.explanations import SqlAlchemyNumberExplanationRepository, NumberExplanationEntry, NumberExplanationValidationError, build_channel_month_revenue_explanation, ADJUSTED_GROSS_REVENUE_METRIC; print('ok')"
+PYTHONPATH=backend python -m alembic -c alembic.ini heads
 ```
+
+Assumes an activated virtualenv; prepend `path/to/venv/bin/` to `python` if needed.
 
 Expected: 21 tests pass on the new file, 559 total on the full suite, diff clean, ruff/format clean on the new file, import smoke ok, single alembic head.

@@ -296,8 +296,8 @@ def test_record_explanation_separates_rows_by_composite_key():
             NumberExplanationEntry(
                 month="2026-03",
                 entity_type="channel",
-                entity_id="channel-b",
-                metric=ADJUSTED_GROSS_REVENUE_METRIC,
+                entity_id="channel-a",
+                metric="adjusted_gross_revenue_usd_alternate",
                 **base_kwargs,
             )
         )

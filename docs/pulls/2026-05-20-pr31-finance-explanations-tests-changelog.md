@@ -1,7 +1,7 @@
 # PR #31 — Finance Number Explanation Tests — Changelog
 
 **Date:** 2026-05-20
-**PR:** https://github.com/XGenerationy/youtube/pull/31
+**PR:** https://github.com/XGenerationy/Youtube/pull/31
 **Branch:** `pr/s2-4b-finance-explanations-tests`
 **Base:** `pr/s2-4a-tenant-id-on-operational-tables`
 
