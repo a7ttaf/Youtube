@@ -91,15 +91,15 @@ Second commit (this artifact set):
 ## Validation a future maintainer can rerun
 
 ```bash
-cd /home/mahmoud/work/youtube-ums-cleanup
+# Run from the repository root.
 git checkout pr/s2-4b-repo-ruff-cleanup
-.venv/bin/python -m ruff check backend tests
-.venv/bin/python -m ruff format --check backend tests
-.venv/bin/python -m pytest -q
+python -m ruff check backend tests
+python -m ruff format --check backend tests
+python -m pytest -q
 git diff --check
 git grep -nE '^(<{7}|={7}|>{7})( |$)' -- ':!docs/pulls/' ':!*.md' ; test $? -eq 1
-PYTHONPATH=backend .venv/bin/python -c "from ums_smart_revenue.app import app; print('ok')"
-PYTHONPATH=backend .venv/bin/python -m alembic -c alembic.ini heads
+PYTHONPATH=backend python -c "from ums_smart_revenue.app import app; print('ok')"
+PYTHONPATH=backend python -m alembic -c alembic.ini heads
 ```
 
 Expected: ruff clean, format clean, 490 passed, diff clean, no conflict markers, app imports, single alembic head.

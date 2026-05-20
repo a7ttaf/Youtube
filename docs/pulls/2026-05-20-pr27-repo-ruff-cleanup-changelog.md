@@ -37,7 +37,7 @@ No business logic, finance calculation, tenant scoping, authorization rule, audi
 
 ### Generic syntax — 1 function
 
-- `backend/ums_smart_revenue/auth/api_guards.py`: `guarded_call` converted to PEP 695 `def guarded_call[T](...)`. Removed `from typing import TypeVar` and `T = TypeVar("T")`.
+- `backend/ums_smart_revenue/auth/api_guards.py`: `guarded_call` converted to PEP 695 `def guarded_call[T](...)`. Removed `from typing import TypeVar` and `T = TypeVar("T")`. PEP 695 generic syntax requires Python 3.12+; this project pins Python 3.14.
 
 ### Cypher whitespace — 2 query templates
 
