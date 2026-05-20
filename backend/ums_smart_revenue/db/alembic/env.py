@@ -10,7 +10,6 @@ from ums_smart_revenue.db.report_models import ReportBase
 from ums_smart_revenue.db.security_models import SecurityBase
 from ums_smart_revenue.db.tenant_models import TenantBase
 
-
 config = context.config
 
 if config.config_file_name is not None:

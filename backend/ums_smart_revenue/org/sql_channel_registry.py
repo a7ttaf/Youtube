@@ -159,9 +159,7 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
     try:
         return UUID(tenant_id.strip())
     except (AttributeError, ValueError) as exc:
-        raise ChannelRegistryValidationError(
-            "tenant_id must be a valid UUID"
-        ) from exc
+        raise ChannelRegistryValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _parse_optional_uuid(value: str | None, field_name: str) -> UUID | None:

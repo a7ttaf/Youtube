@@ -76,7 +76,8 @@ class TenantORM(TenantBase):
             name="ck_tenants_status",
         ),
         CheckConstraint(
-            "length(primary_currency) = 3 AND primary_currency = upper(primary_currency)",
+            "length(primary_currency) = 3 "
+            "AND primary_currency = upper(primary_currency)",
             name="ck_tenants_primary_currency_iso4217",
         ),
         Index("uq_tenants_slug", "slug", unique=True),

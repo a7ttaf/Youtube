@@ -265,9 +265,7 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
     try:
         return UUID(tenant_id.strip())
     except (AttributeError, ValueError) as exc:
-        raise ManualOverrideValidationError(
-            "tenant_id must be a valid UUID"
-        ) from exc
+        raise ManualOverrideValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _validate_month(month: str) -> None:

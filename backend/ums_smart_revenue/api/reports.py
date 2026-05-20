@@ -5,7 +5,10 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
-from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
+from ums_smart_revenue.api.dependencies import (
+    current_db_session,
+    current_principal_from_headers,
+)
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -20,7 +23,6 @@ from ums_smart_revenue.reports.raw_files import (
     RawReportFileValidationError,
     SqlAlchemyRawReportFileRepository,
 )
-
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
@@ -64,7 +66,9 @@ def current_raw_report_file_repository(
 def register_raw_report_file(
     payload: RawReportFileRegisterRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyRawReportFileRepository, Depends(current_raw_report_file_repository)],
+    repository: Annotated[
+        SqlAlchemyRawReportFileRepository, Depends(current_raw_report_file_repository)
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     connector_scope = AccessScope.connector(payload.source)
@@ -80,9 +84,13 @@ def register_raw_report_file(
             actor_user_id=user.user_id,
         )
     except RawReportFileConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     except RawReportFileValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
 
     record = record_audit_event(
         sink=audit_sink,
@@ -108,7 +116,9 @@ def register_raw_report_file(
 @router.get("/raw-files")
 def list_raw_report_files(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyRawReportFileRepository, Depends(current_raw_report_file_repository)],
+    repository: Annotated[
+        SqlAlchemyRawReportFileRepository, Depends(current_raw_report_file_repository)
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
     source: str | None = None,
     report_type: str | None = None,
@@ -127,7 +137,9 @@ def list_raw_report_files(
             offset=offset,
         )
     except RawReportFileValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
 
     record_audit_event(
         sink=audit_sink,
@@ -153,7 +165,9 @@ def list_raw_report_files(
 def get_raw_report_file(
     raw_file_id: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyRawReportFileRepository, Depends(current_raw_report_file_repository)],
+    repository: Annotated[
+        SqlAlchemyRawReportFileRepository, Depends(current_raw_report_file_repository)
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     if not _has_any_permission_scope(user, Permission.VIEW_RAW_FILES):
@@ -162,9 +176,13 @@ def get_raw_report_file(
     try:
         raw_file = repository.get_file(raw_file_id)
     except RawReportFileNotFoundError as exc:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)
+        ) from exc
     except RawReportFileValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
 
     scope = AccessScope.connector(raw_file.source)
     _require_permission(user, Permission.VIEW_RAW_FILES, scope)
@@ -186,7 +204,9 @@ def get_raw_report_file(
     return response
 
 
-def _require_permission(user: UserPrincipal, permission: Permission, scope: AccessScope) -> None:
+def _require_permission(
+    user: UserPrincipal, permission: Permission, scope: AccessScope
+) -> None:
     if not has_permission(user, permission, scope):
         _raise_missing_permission(permission)
 
@@ -205,6 +225,8 @@ def _has_any_permission_scope(user: UserPrincipal, permission: Permission) -> bo
         if grant.active and grant.permission == permission:
             return True
     for assignment in user.role_assignments:
-        if assignment.active and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset()):
+        if assignment.active and permission in ROLE_PERMISSIONS.get(
+            assignment.role, frozenset()
+        ):
             return True
     return False

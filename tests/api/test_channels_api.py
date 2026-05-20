@@ -8,7 +8,10 @@ from ums_smart_revenue.org.bootstrap_registry import (
     BOOTSTRAP_COMPANY_TV_ID,
     BOOTSTRAP_ORG_INDEX,
 )
-from ums_smart_revenue.org.channel_registry import ChannelRegistryEntry, bootstrap_channel_registry
+from ums_smart_revenue.org.channel_registry import (
+    ChannelRegistryEntry,
+    bootstrap_channel_registry,
+)
 
 
 class StaleUpdateRegistry:
@@ -35,15 +38,21 @@ class StaleUpdateRegistry:
     ) -> ChannelRegistryEntry:
         raise NotImplementedError
 
-    def update_mapping(self, *, youtube_channel_id: str, primary_company_id: str | None) -> ChannelRegistryEntry:
+    def update_mapping(
+        self, *, youtube_channel_id: str, primary_company_id: str | None
+    ) -> ChannelRegistryEntry:
         raise KeyError(youtube_channel_id)
 
 
 class ScopedListRegistry:
     def list_channels(self) -> list[ChannelRegistryEntry]:
-        raise AssertionError("unscoped channel listing should not be used for scoped callers")
+        raise AssertionError(
+            "unscoped channel listing should not be used for scoped callers"
+        )
 
-    def list_channels_by_ids(self, youtube_channel_ids: set[str]) -> list[ChannelRegistryEntry]:
+    def list_channels_by_ids(
+        self, youtube_channel_ids: set[str]
+    ) -> list[ChannelRegistryEntry]:
         assert youtube_channel_ids == {"channel-tv-a"}
         return [
             ChannelRegistryEntry(
@@ -64,7 +73,9 @@ def create_bootstrap_app():
     return app
 
 
-def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
+def auth_headers(
+    role: str, scope_type: str, scope_id: str | None = None
+) -> dict[str, str]:
     headers = {
         "x-user-id": "user-1",
         "x-user-email": "user@example.com",
@@ -81,10 +92,15 @@ def test_company_manager_lists_only_company_channels():
     app = create_bootstrap_app()
     client = TestClient(app)
 
-    response = client.get("/channels", headers=auth_headers("company_manager", "company", BOOTSTRAP_COMPANY_TV_ID))
+    response = client.get(
+        "/channels",
+        headers=auth_headers("company_manager", "company", BOOTSTRAP_COMPANY_TV_ID),
+    )
 
     assert response.status_code == 200
-    assert [channel["youtube_channel_id"] for channel in response.json()] == ["channel-tv-a"]
+    assert [channel["youtube_channel_id"] for channel in response.json()] == [
+        "channel-tv-a"
+    ]
 
 
 def test_company_channel_listing_uses_scoped_registry_query():
@@ -92,10 +108,15 @@ def test_company_channel_listing_uses_scoped_registry_query():
     app.dependency_overrides[current_channel_registry] = lambda: ScopedListRegistry()
     client = TestClient(app)
 
-    response = client.get("/channels", headers=auth_headers("company_manager", "company", BOOTSTRAP_COMPANY_TV_ID))
+    response = client.get(
+        "/channels",
+        headers=auth_headers("company_manager", "company", BOOTSTRAP_COMPANY_TV_ID),
+    )
 
     assert response.status_code == 200
-    assert [channel["youtube_channel_id"] for channel in response.json()] == ["channel-tv-a"]
+    assert [channel["youtube_channel_id"] for channel in response.json()] == [
+        "channel-tv-a"
+    ]
 
 
 def test_assistant_cannot_create_channel():
@@ -191,7 +212,10 @@ def test_mapping_change_requires_reason_and_permission():
     denied = client.patch(
         "/channels/channel-news-a/mapping",
         headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
-        json={"primary_company_id": BOOTSTRAP_COMPANY_TV_ID, "reason": "Fix wrong owner"},
+        json={
+            "primary_company_id": BOOTSTRAP_COMPANY_TV_ID,
+            "reason": "Fix wrong owner",
+        },
     )
 
     assert missing_reason.status_code == 422
@@ -205,11 +229,16 @@ def test_mapping_change_authorizes_before_not_found():
     response = client.patch(
         "/channels/missing-channel/mapping",
         headers=auth_headers("data_steward", "company", BOOTSTRAP_COMPANY_TV_ID),
-        json={"primary_company_id": BOOTSTRAP_COMPANY_TV_ID, "reason": "Attempt unauthorized lookup"},
+        json={
+            "primary_company_id": BOOTSTRAP_COMPANY_TV_ID,
+            "reason": "Attempt unauthorized lookup",
+        },
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Missing permission: registry.manage_org_mapping"
+    assert (
+        response.json()["detail"] == "Missing permission: registry.manage_org_mapping"
+    )
 
 
 def test_mapping_change_is_audited_for_corporate_admin():
@@ -218,13 +247,19 @@ def test_mapping_change_is_audited_for_corporate_admin():
     response = client.patch(
         "/channels/channel-tv-a/mapping",
         headers=auth_headers("corporate_admin", "global"),
-        json={"primary_company_id": BOOTSTRAP_COMPANY_NEWS_ID, "reason": "Corporate remap after ownership transfer"},
+        json={
+            "primary_company_id": BOOTSTRAP_COMPANY_NEWS_ID,
+            "reason": "Corporate remap after ownership transfer",
+        },
     )
 
     assert response.status_code == 200
     assert response.json()["primary_company_id"] == BOOTSTRAP_COMPANY_NEWS_ID
     assert response.json()["audit_event"]["event_type"] == "CHANNEL_UPDATED"
-    assert response.json()["audit_event"]["reason"] == "Corporate remap after ownership transfer"
+    assert (
+        response.json()["audit_event"]["reason"]
+        == "Corporate remap after ownership transfer"
+    )
 
 
 def test_registry_factory_returns_fresh_state_per_app():
@@ -250,9 +285,11 @@ def test_mapping_change_preserves_404_if_channel_disappears_before_update():
     response = client.patch(
         "/channels/channel-tv-a/mapping",
         headers=auth_headers("corporate_admin", "global"),
-        json={"primary_company_id": BOOTSTRAP_COMPANY_NEWS_ID, "reason": "Concurrent registry cleanup"},
+        json={
+            "primary_company_id": BOOTSTRAP_COMPANY_NEWS_ID,
+            "reason": "Concurrent registry cleanup",
+        },
     )
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Channel not found"
-

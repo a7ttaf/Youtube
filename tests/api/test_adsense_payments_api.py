@@ -228,7 +228,6 @@ def test_sync_rejects_locked_finance_month(tmp_path):
 
     assert response.status_code == 409
     assert (
-        response.json()["detail"]
-        == "Finance month is locked for AdSense payment sync"
+        response.json()["detail"] == "Finance month is locked for AdSense payment sync"
     )
     assert payment_count == 0

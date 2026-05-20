@@ -26,8 +26,7 @@ class AuditRecord:
 
 
 class AuditSink(Protocol):
-    def append(self, record: AuditRecord) -> None:
-        ...
+    def append(self, record: AuditRecord) -> None: ...
 
 
 @dataclass
@@ -74,4 +73,3 @@ def record_audit_event(
     )
     sink.append(record)
     return record
-

@@ -280,8 +280,7 @@ def test_group_scoped_finance_workbook_records_channel_revenue_audit(tmp_path):
 
     assert response.status_code == 200
     assert ("REVENUE_VIEWED", "channel", "channel-tv-a") in {
-        (event.event_type, event.scope_type, event.scope_id)
-        for event in audit_scopes
+        (event.event_type, event.scope_type, event.scope_id) for event in audit_scopes
     }
 
 
@@ -434,9 +433,7 @@ def test_finance_admin_downloads_generated_executive_pdf_with_audit(tmp_path):
 
     assert response.status_code == 200
     assert response.headers["content-type"] == "application/pdf"
-    assert "ums-executive-2026-03-global.pdf" in response.headers[
-        "content-disposition"
-    ]
+    assert "ums-executive-2026-03-global.pdf" in response.headers["content-disposition"]
     assert response.content.startswith(b"%PDF-")
     text = _extract_pdf_text(response.content)
     assert "UMS Executive Finance Report" in text
@@ -493,9 +490,7 @@ def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(tmp_pat
     assert response.headers["content-type"] == (
         "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     )
-    assert "ums-branded-2026-03-global.pptx" in response.headers[
-        "content-disposition"
-    ]
+    assert "ums-branded-2026-03-global.pptx" in response.headers["content-disposition"]
     presentation = Presentation(BytesIO(response.content))
     slide_text = "\n".join(_slide_texts(presentation))
     assert len(presentation.slides) == 10

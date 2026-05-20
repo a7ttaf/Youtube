@@ -5,7 +5,6 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.report_models import RawReportFileORM, ReportBase
 
-
 USER_ID = UUID("00000000-0000-0000-0000-000000010101")
 
 

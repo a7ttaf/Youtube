@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
-
 USER_ID = UUID("00000000-0000-0000-0000-000000013001")
 
 
@@ -31,7 +30,9 @@ def seed_database(database_url: str) -> None:
     SecurityBase.metadata.create_all(engine)
     created_at = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=10)
     with Session(engine) as session:
-        session.add(UserORM(id=USER_ID, email="audit@example.com", display_name="Audit User"))
+        session.add(
+            UserORM(id=USER_ID, email="audit@example.com", display_name="Audit User")
+        )
         session.add_all(
             [
                 AuditLogORM(
@@ -69,11 +70,15 @@ def test_audit_viewer_lists_audit_events_with_sensitive_details_masked(tmp_path)
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     with TestClient(create_app(database_url=database_url)) as client:
-        response = client.get("/audit/events?limit=10", headers=auth_headers("audit_viewer"))
+        response = client.get(
+            "/audit/events?limit=10", headers=auth_headers("audit_viewer")
+        )
 
         engine = create_engine(database_url)
         with Session(engine) as session:
-            audit_events = session.scalars(select(AuditLogORM).order_by(AuditLogORM.created_at, AuditLogORM.id)).all()
+            audit_events = session.scalars(
+                select(AuditLogORM).order_by(AuditLogORM.created_at, AuditLogORM.id)
+            ).all()
 
         assert response.status_code == 200
         assert response.json()["items"][0]["event_type"] == "REVENUE_VIEWED"
@@ -90,17 +95,24 @@ def test_audit_viewer_lists_audit_events_with_sensitive_details_masked(tmp_path)
         assert response.json()["audit_event"]["event_type"] == "AUDIT_LOG_VIEWED"
         assert any(event.event_type == "AUDIT_LOG_VIEWED" for event in audit_events)
 
-        next_response = client.get("/audit/events?limit=10", headers=auth_headers("audit_viewer"))
+        next_response = client.get(
+            "/audit/events?limit=10", headers=auth_headers("audit_viewer")
+        )
 
         assert next_response.status_code == 200
-        assert [item["event_type"] for item in next_response.json()["items"]] == ["REVENUE_VIEWED", "LOGIN"]
+        assert [item["event_type"] for item in next_response.json()["items"]] == [
+            "REVENUE_VIEWED",
+            "LOGIN",
+        ]
 
 
 def test_audit_event_cursor_pagination_is_stable_when_new_events_arrive(tmp_path):
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     with TestClient(create_app(database_url=database_url)) as client:
-        first_page = client.get("/audit/events?limit=1", headers=auth_headers("audit_viewer"))
+        first_page = client.get(
+            "/audit/events?limit=1", headers=auth_headers("audit_viewer")
+        )
         assert first_page.status_code == 200
         assert "pagination" in first_page.json()
         assert "next_cursor" in first_page.json()["pagination"]
@@ -139,7 +151,9 @@ def test_audit_event_cursor_pagination_is_stable_when_new_events_arrive(tmp_path
         assert "pagination" in second_page.json()
         assert "next_cursor" in second_page.json()["pagination"]
 
-        assert [item["event_type"] for item in first_page.json()["items"]] == ["REVENUE_VIEWED"]
+        assert [item["event_type"] for item in first_page.json()["items"]] == [
+            "REVENUE_VIEWED"
+        ]
         assert [item["event_type"] for item in second_page.json()["items"]] == ["LOGIN"]
 
 
@@ -148,11 +162,17 @@ def test_super_owner_can_view_sensitive_audit_details(tmp_path):
     seed_database(database_url)
 
     with TestClient(create_app(database_url=database_url)) as client:
-        response = client.get("/audit/events?event_type=REVENUE_VIEWED", headers=auth_headers("super_owner"))
+        response = client.get(
+            "/audit/events?event_type=REVENUE_VIEWED",
+            headers=auth_headers("super_owner"),
+        )
 
     assert response.status_code == 200
     assert len(response.json()["items"]) == 1
-    assert response.json()["items"][0]["details"] == {"gross_revenue_usd": "1000", "source": "YOUTUBE_CMS"}
+    assert response.json()["items"][0]["details"] == {
+        "gross_revenue_usd": "1000",
+        "source": "YOUTUBE_CMS",
+    }
     assert response.json()["items"][0]["details_redacted"] is False
 
 
@@ -161,7 +181,9 @@ def test_assistant_cannot_view_audit_events(tmp_path):
     seed_database(database_url)
 
     with TestClient(create_app(database_url=database_url)) as client:
-        response = client.get("/audit/events", headers=auth_headers("assistant_analyst"))
+        response = client.get(
+            "/audit/events", headers=auth_headers("assistant_analyst")
+        )
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: audit.view"

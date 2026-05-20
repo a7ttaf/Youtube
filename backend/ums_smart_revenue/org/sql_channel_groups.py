@@ -169,7 +169,7 @@ class SqlAlchemyChannelGroupRegistry:
     def _get_group_row(self, group_id: str) -> ChannelGroupORM | None:
         try:
             group_uuid = UUID(group_id)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
         return self._session.scalars(
             select(ChannelGroupORM).where(

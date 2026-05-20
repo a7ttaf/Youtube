@@ -104,9 +104,9 @@ def test_user_repository_uses_default_tenant_without_context() -> None:
     session = build_session()
     seed_users(session)
 
-    items, has_more, next_cursor = SqlAlchemyUserAccountRepository(
-        session
-    ).list_users(limit=10)
+    items, has_more, next_cursor = SqlAlchemyUserAccountRepository(session).list_users(
+        limit=10
+    )
 
     assert [item.id for item in items] == [str(DEFAULT_USER_ID)]
     assert has_more is False

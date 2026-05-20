@@ -1,8 +1,8 @@
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 
 
-class Permission(str, Enum):
+class Permission(StrEnum):
     VIEW_ANALYTICS = "analytics.view"
     VIEW_CONFIDENCE = "analytics.view_confidence"
     VIEW_REVENUE = "finance.view_revenue"
@@ -217,9 +217,15 @@ SENSITIVE_PERMISSIONS = frozenset(
 
 
 if set(PERMISSION_DEFINITIONS) != set(Permission):
-    missing = sorted(permission.value for permission in set(Permission) - set(PERMISSION_DEFINITIONS))
-    extra = sorted(permission.value for permission in set(PERMISSION_DEFINITIONS) - set(Permission))
-    raise RuntimeError(f"Permission definition coverage mismatch. missing={missing} extra={extra}")
+    missing = sorted(
+        permission.value for permission in set(Permission) - set(PERMISSION_DEFINITIONS)
+    )
+    extra = sorted(
+        permission.value for permission in set(PERMISSION_DEFINITIONS) - set(Permission)
+    )
+    raise RuntimeError(
+        f"Permission definition coverage mismatch. missing={missing} extra={extra}"
+    )
 
 _mismatched_permission_definitions = sorted(
     permission.value
@@ -227,5 +233,6 @@ _mismatched_permission_definitions = sorted(
     if definition.permission != permission
 )
 if _mismatched_permission_definitions:
-    raise RuntimeError(f"Permission metadata key mismatch: {_mismatched_permission_definitions}")
-
+    raise RuntimeError(
+        f"Permission metadata key mismatch: {_mismatched_permission_definitions}"
+    )

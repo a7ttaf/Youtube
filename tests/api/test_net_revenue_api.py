@@ -138,8 +138,7 @@ def test_finance_viewer_reads_month_net_revenue_summary_with_audit(tmp_path):
     client = TestClient(create_app(database_url=database_url))
 
     response = client.get(
-        "/revenue/months/2026-03/net-revenue?scope_type=company"
-        f"&scope_id={COMPANY_ID}",
+        f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
         headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
     )
 

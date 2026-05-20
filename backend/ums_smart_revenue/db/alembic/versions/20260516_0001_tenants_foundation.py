@@ -10,10 +10,9 @@ identity table. Does NOT add tenant_id columns to any existing operational
 tables — that comes in S2.4 along with Row-Level Security policies.
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy.dialects import postgresql
-
 
 revision = "20260516_0001"
 down_revision = "20260513_0001"

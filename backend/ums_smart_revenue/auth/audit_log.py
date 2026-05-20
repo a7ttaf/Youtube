@@ -116,9 +116,7 @@ class SqlAlchemyAuditLogRepository:
         if exclude_event_type is not None:
             statement = statement.where(
                 AuditLogORM.event_type
-                != _normalize_required_string(
-                    exclude_event_type, "exclude_event_type"
-                )
+                != _normalize_required_string(exclude_event_type, "exclude_event_type")
             )
         if entity_type is not None:
             statement = statement.where(

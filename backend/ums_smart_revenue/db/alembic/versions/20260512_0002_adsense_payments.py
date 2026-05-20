@@ -18,24 +18,48 @@ depends_on = None
 def upgrade() -> None:
     op.create_table(
         "adsense_payments",
-        sa.Column("id", postgresql.UUID(as_uuid=True), primary_key=True, server_default=sa.text("gen_random_uuid()")),
+        sa.Column(
+            "id",
+            postgresql.UUID(as_uuid=True),
+            primary_key=True,
+            server_default=sa.text("gen_random_uuid()"),
+        ),
         sa.Column("month", sa.Text(), nullable=False),
         sa.Column("payment_name", sa.Text(), nullable=False),
         sa.Column("payment_date", sa.Date(), nullable=False),
         sa.Column("payment_amount", sa.Numeric(18, 6), nullable=False),
         sa.Column("payment_currency", sa.Text(), nullable=False),
-        sa.Column("payment_status", sa.Text(), nullable=False, server_default=sa.text("'PAID'")),
+        sa.Column(
+            "payment_status",
+            sa.Text(),
+            nullable=False,
+            server_default=sa.text("'PAID'"),
+        ),
         sa.Column("raw_payload", sa.JSON(), nullable=False),
         sa.Column("source_report_id", sa.Text(), nullable=True),
         sa.Column("imported_by", postgresql.UUID(as_uuid=True), nullable=True),
-        sa.Column("imported_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.UniqueConstraint("month", "payment_name", name="uq_adsense_payments_month_name"),
+        sa.Column(
+            "imported_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.Column(
+            "updated_at",
+            sa.DateTime(timezone=True),
+            nullable=False,
+            server_default=sa.func.now(),
+        ),
+        sa.UniqueConstraint(
+            "month", "payment_name", name="uq_adsense_payments_month_name"
+        ),
         sa.CheckConstraint(
             _month_format_check_sql(),
             name="ck_adsense_payments_month_format",
         ),
-        sa.CheckConstraint("payment_amount >= 0", name="ck_adsense_payments_amount_nonnegative"),
+        sa.CheckConstraint(
+            "payment_amount >= 0", name="ck_adsense_payments_amount_nonnegative"
+        ),
         sa.CheckConstraint(
             "length(payment_currency) = 3 "
             "AND payment_currency = upper(payment_currency) "
@@ -49,8 +73,12 @@ def upgrade() -> None:
             name="ck_adsense_payments_payment_status",
         ),
     )
-    op.create_index("ix_adsense_payments_month_date", "adsense_payments", ["month", "payment_date"])
-    op.create_index("ix_adsense_payments_source_report", "adsense_payments", ["source_report_id"])
+    op.create_index(
+        "ix_adsense_payments_month_date", "adsense_payments", ["month", "payment_date"]
+    )
+    op.create_index(
+        "ix_adsense_payments_source_report", "adsense_payments", ["source_report_id"]
+    )
 
 
 def downgrade() -> None:

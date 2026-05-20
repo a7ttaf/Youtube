@@ -5,7 +5,10 @@ from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
-from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
+from ums_smart_revenue.api.dependencies import (
+    current_db_session,
+    current_principal_from_headers,
+)
 from ums_smart_revenue.api.revenue import current_org_access_index
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
@@ -13,9 +16,12 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
-from ums_smart_revenue.org.channel_groups import ChannelGroupEntry, ChannelGroupRegistry, ChannelGroupRegistryStore
+from ums_smart_revenue.org.channel_groups import (
+    ChannelGroupEntry,
+    ChannelGroupRegistry,
+    ChannelGroupRegistryStore,
+)
 from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry
-
 
 router = APIRouter(prefix="/groups", tags=["groups"])
 
@@ -85,7 +91,9 @@ def create_group(
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     _validate_group_type(payload.group_type)
-    _require_manage_group_channels(user=user, channel_ids=payload.channel_ids, org_index=org_index)
+    _require_manage_group_channels(
+        user=user, channel_ids=payload.channel_ids, org_index=org_index
+    )
     group = registry.create_group(
         name=payload.name,
         group_type=payload.group_type,
@@ -113,8 +121,12 @@ def update_group(
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     group = _require_group(registry, group_id)
-    _require_manage_group_channels(user=user, channel_ids=list(group.channel_ids), org_index=org_index)
-    updated = registry.update_group(group_id=group_id, name=payload.name, active=payload.active)
+    _require_manage_group_channels(
+        user=user, channel_ids=list(group.channel_ids), org_index=org_index
+    )
+    updated = registry.update_group(
+        group_id=group_id, name=payload.name, active=payload.active
+    )
     record = _audit_group_change(
         audit_sink=audit_sink,
         user=user,
@@ -138,7 +150,9 @@ def add_group_members(
 ) -> dict[str, object]:
     group = _require_group(registry, group_id)
     channel_ids = list(dict.fromkeys([*group.channel_ids, *payload.channel_ids]))
-    _require_manage_group_channels(user=user, channel_ids=channel_ids, org_index=org_index)
+    _require_manage_group_channels(
+        user=user, channel_ids=channel_ids, org_index=org_index
+    )
     updated = registry.add_members(group_id=group_id, channel_ids=payload.channel_ids)
     record = _audit_group_change(
         audit_sink=audit_sink,
@@ -163,7 +177,9 @@ def remove_group_member(
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     group = _require_group(registry, group_id)
-    _require_manage_group_channels(user=user, channel_ids=list(group.channel_ids), org_index=org_index)
+    _require_manage_group_channels(
+        user=user, channel_ids=list(group.channel_ids), org_index=org_index
+    )
     updated = registry.remove_member(group_id=group_id, channel_id=channel_id)
     record = _audit_group_change(
         audit_sink=audit_sink,
@@ -179,25 +195,43 @@ def remove_group_member(
 
 def _validate_group_type(group_type: str) -> None:
     if group_type not in GROUP_TYPES:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=f"Unknown group type: {group_type}")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=f"Unknown group type: {group_type}",
+        )
 
 
-def _can_view_group(*, user: UserPrincipal, group: ChannelGroupEntry, org_index: OrgAccessIndex) -> bool:
+def _can_view_group(
+    *, user: UserPrincipal, group: ChannelGroupEntry, org_index: OrgAccessIndex
+) -> bool:
     if not group.channel_ids:
-        return has_permission(user, Permission.VIEW_ANALYTICS, AccessScope.global_scope(), org_index)
+        return has_permission(
+            user, Permission.VIEW_ANALYTICS, AccessScope.global_scope(), org_index
+        )
     return all(
-        has_permission(user, Permission.VIEW_ANALYTICS, AccessScope.channel(channel_id), org_index)
+        has_permission(
+            user, Permission.VIEW_ANALYTICS, AccessScope.channel(channel_id), org_index
+        )
         for channel_id in group.channel_ids
     )
 
 
-def _require_manage_group_channels(*, user: UserPrincipal, channel_ids: list[str], org_index: OrgAccessIndex) -> None:
+def _require_manage_group_channels(
+    *, user: UserPrincipal, channel_ids: list[str], org_index: OrgAccessIndex
+) -> None:
     unique_channel_ids = list(dict.fromkeys(channel_ids))
     allowed = (
-        has_permission(user, Permission.MANAGE_GROUPS, AccessScope.global_scope(), org_index)
+        has_permission(
+            user, Permission.MANAGE_GROUPS, AccessScope.global_scope(), org_index
+        )
         if not unique_channel_ids
         else all(
-            has_permission(user, Permission.MANAGE_GROUPS, AccessScope.channel(channel_id), org_index)
+            has_permission(
+                user,
+                Permission.MANAGE_GROUPS,
+                AccessScope.channel(channel_id),
+                org_index,
+            )
             for channel_id in unique_channel_ids
         )
     )
@@ -208,10 +242,14 @@ def _require_manage_group_channels(*, user: UserPrincipal, channel_ids: list[str
         )
 
 
-def _require_group(registry: ChannelGroupRegistryStore, group_id: str) -> ChannelGroupEntry:
+def _require_group(
+    registry: ChannelGroupRegistryStore, group_id: str
+) -> ChannelGroupEntry:
     group = registry.get_group(group_id)
     if group is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Group not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="Group not found"
+        )
     return group
 
 
@@ -231,5 +269,9 @@ def _audit_group_change(
         entity_id=group.id,
         scope=AccessScope.global_scope(),
         reason=reason,
-        details={"action": action, "group_type": group.group_type, "channel_ids": list(group.channel_ids)},
+        details={
+            "action": action,
+            "group_type": group.group_type,
+            "channel_ids": list(group.channel_ids),
+        },
     )

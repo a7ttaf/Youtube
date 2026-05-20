@@ -4,16 +4,17 @@ import importlib.util
 from pathlib import Path
 from uuid import uuid4
 
+import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.exc import IntegrityError
-import pytest
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MIGRATION_PATH = (
     PROJECT_ROOT
-    / "backend/ums_smart_revenue/db/alembic/versions/20260516_0001_tenants_foundation.py"
+    / "backend/ums_smart_revenue/db/alembic/versions"
+    / "20260516_0001_tenants_foundation.py"
 )
 UMS_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 
@@ -31,8 +32,7 @@ def test_tenants_migration_creates_tables_and_seeds_ums():
         assert {"tenants", "platform_admins"} <= table_names
 
         tenant_columns = {
-            column["name"]: column
-            for column in inspector.get_columns("tenants")
+            column["name"]: column for column in inspector.get_columns("tenants")
         }
         assert tenant_columns["slug"]["nullable"] is False
         assert tenant_columns["display_name"]["nullable"] is False
@@ -82,7 +82,8 @@ def test_tenants_migration_seed_is_idempotent_when_re_applied():
         # Re-run the seed step alone — must not duplicate or fail.
         connection.execute(
             text(
-                "INSERT INTO tenants (id, slug, display_name, primary_currency, status) "
+                "INSERT INTO tenants "
+                "(id, slug, display_name, primary_currency, status) "
                 f"VALUES ('{UMS_TENANT_ID}', 'ums', 'UMS', 'USD', 'ACTIVE') "
                 "ON CONFLICT (slug) DO NOTHING"
             )

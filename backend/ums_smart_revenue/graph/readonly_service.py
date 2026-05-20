@@ -5,13 +5,14 @@ from ums_smart_revenue.auth.policy import can_view_neo4j_graph
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 
 
-class GraphAccessDenied(PermissionError):
+class GraphAccessDeniedError(PermissionError):
     pass
 
 
 class ReadOnlyGraphClient(Protocol):
-    def execute_read(self, query_name: str, parameters: dict[str, object]) -> list[dict[str, object]]:
-        ...
+    def execute_read(
+        self, query_name: str, parameters: dict[str, object]
+    ) -> list[dict[str, object]]: ...
 
 
 class Neo4jReadOnlyService:
@@ -26,8 +27,12 @@ class Neo4jReadOnlyService:
         *,
         month: str,
     ) -> list[dict[str, object]]:
-        if not can_view_neo4j_graph(user, scope, self._org_index, contains_finance=True):
-            raise GraphAccessDenied("User cannot view finance graph for requested scope")
+        if not can_view_neo4j_graph(
+            user, scope, self._org_index, contains_finance=True
+        ):
+            raise GraphAccessDeniedError(
+                "User cannot view finance graph for requested scope"
+            )
 
         rows = self._client.execute_read(
             "revenue_flow",
@@ -45,7 +50,7 @@ class Neo4jReadOnlyService:
         scope: AccessScope,
     ) -> list[dict[str, object]]:
         if not can_view_neo4j_graph(user, scope, self._org_index):
-            raise GraphAccessDenied("User cannot view graph for requested scope")
+            raise GraphAccessDeniedError("User cannot view graph for requested scope")
 
         rows = self._client.execute_read(
             "hierarchy",
@@ -85,4 +90,3 @@ class Neo4jReadOnlyService:
             return self._org_index.contains(scope, AccessScope.sector(sector_id))
 
         return scope.type.value == "global"
-

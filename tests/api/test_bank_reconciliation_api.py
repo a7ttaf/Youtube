@@ -103,17 +103,18 @@ def test_finance_admin_records_bank_reconciliation_with_audit(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        bank_row = session.execute(
-            text("SELECT * FROM bank_reconciliation_entries")
-        ).mappings().one()
+        bank_row = (
+            session.execute(text("SELECT * FROM bank_reconciliation_entries"))
+            .mappings()
+            .one()
+        )
         audit_log = session.scalars(select(AuditLogORM)).one()
 
     assert response.status_code == 201
     assert response.json()["bank_reference"] == "bank-transfer-2026-04-22"
     assert response.json()["bank_received_amount_usd"] == "928.5"
     assert (
-        response.json()["audit_event"]["event_type"]
-        == "BANK_RECONCILIATION_RECORDED"
+        response.json()["audit_event"]["event_type"] == "BANK_RECONCILIATION_RECORDED"
     )
     assert bank_row["bank_received_amount_usd"] == Decimal("928.500000")
     assert audit_log.event_type == "BANK_RECONCILIATION_RECORDED"

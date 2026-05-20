@@ -33,11 +33,7 @@ def test_user_role_assignments_model_has_scope_and_revocation_controls():
         "active",
     } <= set(table.columns.keys())
     role_scope_index = next(
-        (
-            index
-            for index in table.indexes
-            if index.name == "uq_active_user_role_scope"
-        ),
+        (index for index in table.indexes if index.name == "uq_active_user_role_scope"),
         None,
     )
     assert role_scope_index is not None

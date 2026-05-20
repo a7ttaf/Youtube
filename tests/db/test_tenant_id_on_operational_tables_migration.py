@@ -171,8 +171,7 @@ def test_tenant_scoped_constraints_are_rewritten():
         # Seed a row that must survive batch_alter_table with tenant_id backfilled.
         connection.execute(
             text(
-                "INSERT INTO access_scopes (id, scope_type)"
-                " VALUES ('as-pre', 'global')"
+                "INSERT INTO access_scopes (id, scope_type) VALUES ('as-pre', 'global')"
             )
         )
         _execute_migration(connection, _load_migration(TARGET_MIGRATION), "upgrade")
@@ -220,10 +219,7 @@ def test_tenant_scoped_constraints_are_rewritten():
             ),
         ):
             idx_sql = connection.execute(
-                text(
-                    "SELECT sql FROM sqlite_master"
-                    " WHERE type='index' AND name=:n"
-                ),
+                text("SELECT sql FROM sqlite_master WHERE type='index' AND name=:n"),
                 {"n": idx_name},
             ).scalar_one()
             assert expected_where in idx_sql, (
@@ -241,8 +237,7 @@ def test_tenant_scoped_constraints_are_rewritten():
             "scope_id",
         ]
         role_assignment_fks = {
-            fk["name"]: fk
-            for fk in inspector.get_foreign_keys("user_role_assignments")
+            fk["name"]: fk for fk in inspector.get_foreign_keys("user_role_assignments")
         }
         role_scope_fk = role_assignment_fks["fk_user_role_assignments_tenant_scope"]
         assert role_scope_fk["constrained_columns"] == ["tenant_id", "scope_id"]
@@ -331,9 +326,7 @@ def test_tenant_scoped_constraints_are_rewritten():
             constraint["name"]: constraint["column_names"]
             for constraint in inspector.get_unique_constraints("raw_report_files")
         }
-        assert raw_report_uniques[
-            "uq_raw_report_files_source_type_month_checksum"
-        ] == [
+        assert raw_report_uniques["uq_raw_report_files_source_type_month_checksum"] == [
             "tenant_id",
             "source",
             "report_type",
@@ -429,8 +422,7 @@ def test_tenant_scoped_constraints_are_rewritten():
         assert (parent_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
         role_assign_fks = {
-            fk["name"]: fk
-            for fk in inspector.get_foreign_keys("user_role_assignments")
+            fk["name"]: fk for fk in inspector.get_foreign_keys("user_role_assignments")
         }
         ura_user_fk = role_assign_fks["fk_user_role_assignments_tenant_user"]
         assert ura_user_fk["constrained_columns"] == ["tenant_id", "user_id"]
@@ -468,9 +460,7 @@ def test_tenant_scoped_constraints_are_rewritten():
         assert upg_rb_fk["referred_columns"] == ["tenant_id", "id"]
         assert (upg_rb_fk.get("options") or {}).get("ondelete") == "RESTRICT"
 
-        audit_fks = {
-            fk["name"]: fk for fk in inspector.get_foreign_keys("audit_logs")
-        }
+        audit_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("audit_logs")}
         al_user_fk = audit_fks["fk_audit_logs_tenant_user"]
         assert al_user_fk["constrained_columns"] == ["tenant_id", "user_id"]
         assert al_user_fk["referred_table"] == "users"
@@ -532,8 +522,7 @@ def test_downgrade_removes_tenant_id_from_every_table():
             return (fk_dict.get("options") or {}).get("ondelete")
 
         ura_fks = {
-            fk["name"]: fk
-            for fk in inspector.get_foreign_keys("user_role_assignments")
+            fk["name"]: fk for fk in inspector.get_foreign_keys("user_role_assignments")
         }
         assert _ondelete(ura_fks["user_role_assignments_assigned_by_fkey"]) == (
             "SET NULL"
@@ -553,9 +542,7 @@ def test_downgrade_removes_tenant_id_from_every_table():
             "SET NULL"
         )
 
-        audit_fks = {
-            fk["name"]: fk for fk in inspector.get_foreign_keys("audit_logs")
-        }
+        audit_fks = {fk["name"]: fk for fk in inspector.get_foreign_keys("audit_logs")}
         assert _ondelete(audit_fks["audit_logs_user_id_fkey"]) == "SET NULL"
 
         acc_fks = {

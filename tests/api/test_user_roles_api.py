@@ -14,7 +14,6 @@ from ums_smart_revenue.db.security_models import (
     UserRoleAssignmentORM,
 )
 
-
 ADMIN_ID = UUID("00000000-0000-0000-0000-000000014001")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000014002")
 COMPANY_ID = "company-tv-a"
@@ -34,13 +33,17 @@ def build_database_url(tmp_path) -> str:
     return f"sqlite+pysqlite:///{(tmp_path / 'user-roles.db').as_posix()}"
 
 
-def seed_database(database_url: str, *, target_is_service_account: bool = False) -> None:
+def seed_database(
+    database_url: str, *, target_is_service_account: bool = False
+) -> None:
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
     with Session(engine) as session:
         session.add_all(
             [
-                UserORM(id=ADMIN_ID, email="admin@example.com", display_name="Admin User"),
+                UserORM(
+                    id=ADMIN_ID, email="admin@example.com", display_name="Admin User"
+                ),
                 UserORM(
                     id=TARGET_ID,
                     email="target@example.com",
@@ -130,7 +133,10 @@ def test_corporate_admin_cannot_assign_finance_role(tmp_path):
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Finance roles require Finance Admin or Super Owner"
+    assert (
+        response.json()["detail"]
+        == "Finance roles require Finance Admin or Super Owner"
+    )
 
 
 def test_finance_admin_can_assign_finance_viewer_role(tmp_path):
@@ -178,8 +184,9 @@ def test_incompatible_scope_type_rejected_before_persisting(tmp_path):
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
 
-    # tv_sector_manager allows only global/sector scopes; company must be rejected at the
-    # repository layer (no special policy gate for this role, so scope check is reachable)
+    # tv_sector_manager allows only global/sector scopes; company must be
+    # rejected at the repository layer (no special policy gate for this
+    # role, so scope check is reachable)
     response = client.post(
         f"/users/{TARGET_ID}/roles",
         headers=auth_headers("corporate_admin"),
@@ -240,13 +247,18 @@ def test_corporate_admin_revokes_role_assignment_with_audit(tmp_path):
     engine = create_engine(database_url)
     with Session(engine) as session:
         assignment = session.scalars(select(UserRoleAssignmentORM)).one()
-        audit_logs = session.scalars(select(AuditLogORM).order_by(AuditLogORM.created_at)).all()
+        audit_logs = session.scalars(
+            select(AuditLogORM).order_by(AuditLogORM.created_at)
+        ).all()
 
     assert response.status_code == 200
     assert response.json()["active"] is False
     assert assignment.active is False
     assert assignment.revoked_by == ADMIN_ID
-    assert [log.event_type for log in audit_logs] == ["USER_ROLE_CHANGED", "USER_ROLE_CHANGED"]
+    assert [log.event_type for log in audit_logs] == [
+        "USER_ROLE_CHANGED",
+        "USER_ROLE_CHANGED",
+    ]
     assert audit_logs[-1].reason == "Temporary access ended"
 
 
@@ -274,7 +286,10 @@ def test_corporate_admin_cannot_revoke_finance_role(tmp_path):
     )
 
     assert response.status_code == 403
-    assert response.json()["detail"] == "Finance roles require Finance Admin or Super Owner"
+    assert (
+        response.json()["detail"]
+        == "Finance roles require Finance Admin or Super Owner"
+    )
 
 
 def test_finance_admin_can_revoke_finance_viewer_role(tmp_path):

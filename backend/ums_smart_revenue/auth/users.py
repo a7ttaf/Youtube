@@ -85,9 +85,7 @@ class UserAccessProfileEntry:
             "role_assignments": [
                 assignment.to_api() for assignment in self.role_assignments
             ],
-            "direct_permissions": [
-                grant.to_api() for grant in self.direct_permissions
-            ],
+            "direct_permissions": [grant.to_api() for grant in self.direct_permissions],
         }
 
 
@@ -248,9 +246,7 @@ class SqlAlchemyUserAccountRepository:
                 )
             elif normalized_offset:
                 statement = statement.offset(normalized_offset)
-            rows = self._session.scalars(
-                statement.limit(normalized_limit + 1)
-            ).all()
+            rows = self._session.scalars(statement.limit(normalized_limit + 1)).all()
             items = tuple(self._to_entry(row) for row in rows[:normalized_limit])
             has_more = len(rows) > normalized_limit
             return (
@@ -392,9 +388,7 @@ class SqlAlchemyUserAccountRepository:
 
         return self._run_with_storage_retries(operation)
 
-    def _run_with_storage_retries(
-        self, operation: Callable[[], T]
-    ) -> T:
+    def _run_with_storage_retries(self, operation: Callable[[], T]) -> T:
         """Retry transient storage failures once and fail closed otherwise."""
         for attempt_index in range(USER_ACCOUNT_STORAGE_ATTEMPTS):
             try:

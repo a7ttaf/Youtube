@@ -37,9 +37,7 @@ def test_branded_slide_pack_report_builds_planned_slide_manifest():
 
     assert payload["artifact_type"] == "BRANDED_FINANCE_SLIDE_PACK"
     assert payload["status"] == "READY_FOR_GENERATION"
-    assert [slide["name"] for slide in payload["slides"]] == list(
-        BRANDED_SLIDE_NAMES
-    )
+    assert [slide["name"] for slide in payload["slides"]] == list(BRANDED_SLIDE_NAMES)
     assert payload["executive_summary"]["total_net_revenue_usd"] == "930"
     assert payload["executive_summary"]["payment_match_status"] == "PAYMENT_MATCHED"
     assert payload["executive_summary"]["bank_reconciliation_status"] == (
