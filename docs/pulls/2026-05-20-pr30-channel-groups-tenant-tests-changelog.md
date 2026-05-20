@@ -7,7 +7,7 @@
 
 ## Added
 
-- `tests/org/test_sql_channel_groups.py` (~550 lines, 15 tests).
+- `tests/org/test_sql_channel_groups.py` (~680 lines, 18 tests).
 - `docs/pulls/2026-05-20-pr30-channel-groups-tenant-tests-report.md` (this PR's report artifact).
 - `docs/pulls/2026-05-20-pr30-channel-groups-tenant-tests-changelog.md` (this file).
 - `docs/pulls/2026-05-20-pr30-channel-groups-tenant-tests-handoff.md` (handoff artifact).
@@ -34,23 +34,23 @@ No Python source file is modified outside of the new test file. The new test fil
 
 ### SQL — none
 
-### Tests — added 15
+### Tests — added 18
 
 Direct registry-layer tenant-isolation tests for `SqlAlchemyChannelGroupRegistry`:
 
 | Category | Tests added | Coverage |
 |---|---|---|
-| `create_group` writes | 4 | Default (no context), explicit constructor, `TENANT_CTX`-by-default, explicit overrides `TENANT_CTX` |
+| `create_group` writes | 5 | Default (no context), explicit constructor, `TENANT_CTX`-by-default, explicit overrides `TENANT_CTX`, empty channel list |
 | `_channel_rows_by_external_ids` rejection | 1 | Cross-tenant channel external id → `KeyError` |
 | `list_groups` reads | 3 | Filters to bound tenant, excludes inactive, `TENANT_CTX`-by-default |
 | `get_group` reads (IDOR) | 2 | Cross-tenant `group_id` returns `None`; malformed UUID returns `None` |
-| `add_members` | 2 | Cross-tenant group_id raises `KeyError`; stamps bound tenant on inserts |
+| `add_members` | 4 | Cross-tenant group_id raises `KeyError`; stamps bound tenant on inserts; empty list no-op; duplicate-member `IntegrityError` recovery path |
 | `remove_member` | 1 | Cross-tenant group_id raises `KeyError` and does not delete the foreign row |
 | `update_group` | 1 | Cross-tenant group_id raises `KeyError` and does not mutate the foreign row |
-| `_channel_ids_by_group` (read-layer dual filter) | 1 | Empty result for another tenant's group_id |
-| **Total** | **15** | |
+| `_channel_ids_by_group` (read-layer dual filter) | 1 | Empty result for another tenant's group_id and exclusion of a mismatched-tenant member row on the same group id |
+| **Total** | **18** | |
 
-The tests use in-memory SQLite with `PRAGMA foreign_keys=ON` enabled in a `@event.listens_for(engine, "connect")` hook, mirroring `tests/org/test_sql_channel_registry.py` (the registry test PR #25 established).
+The tests use in-memory SQLite with `PRAGMA foreign_keys=ON` enabled in a `@event.listens_for(engine, "connect")` hook, mirroring `tests/org/test_sql_channel_registry.py` (the registry test PR #25 established). One read-filter test temporarily disables SQLite FK checks only to insert deliberately inconsistent fixture data that proves the member-row tenant predicate.
 
 ## Removed
 
@@ -58,14 +58,14 @@ The tests use in-memory SQLite with `PRAGMA foreign_keys=ON` enabled in a `@even
 
 ## Behavior changes
 
-- **Source semantics: none.** Pytest count: 507 → 522 (+15).
+- **Source semantics: none.** Pytest count: 507 → 525 (+18).
 - **Regression guard added:** if a future PR accidentally removes a `tenant_id` filter or stamp from `SqlAlchemyChannelGroupRegistry`, or accidentally restores `session.get(ChannelGroupORM, group_id)` in `_get_group_row` (the IDOR vector closed by PR #25), the corresponding test in this file will fail.
 
 ## Test surface change
 
-- Pytest total: 507 → 522 (+15).
+- Pytest total: 507 → 525 (+18).
 - 1 new test file: `tests/org/test_sql_channel_groups.py`.
-- 15 new test functions, all `test_*` discoverable by pytest's default collection.
+- 18 new test functions, all `test_*` discoverable by pytest's default collection.
 - No existing test file, fixture, or conftest is modified.
 - The shared `test_org_sql_repositories_validate_tenant_id_constructor_input` in `tests/org/test_sql_channel_registry.py` already exercises `SqlAlchemyChannelGroupRegistry`'s constructor `tenant_id` validation, so this file does **not** re-add that test (avoids duplicate-test redundancy).
 

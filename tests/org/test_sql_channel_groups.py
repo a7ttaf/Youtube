@@ -34,6 +34,7 @@ from uuid import UUID
 
 import pytest
 from sqlalchemy import create_engine, event, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.org_models import (
@@ -70,7 +71,7 @@ def build_session() -> Session:
     engine = create_engine("sqlite+pysqlite:///:memory:")
 
     @event.listens_for(engine, "connect")
-    def _enable_foreign_keys(dbapi_connection, connection_record):
+    def _enable_foreign_keys(dbapi_connection, connection_record) -> None:
         del connection_record
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
@@ -152,6 +153,23 @@ def seed_org(session: Session) -> None:
         ]
     )
     session.commit()
+
+
+def insert_cross_tenant_member_row(session: Session, *, group_id: UUID) -> None:
+    """Insert inconsistent fixture data that normal FK checks would reject."""
+    session.commit()
+    bind = session.get_bind()
+    with bind.connect() as connection:
+        connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        connection.execute(
+            ChannelGroupMemberORM.__table__.insert().values(
+                tenant_id=OTHER_TENANT_ID,
+                group_id=group_id,
+                channel_id=CHANNEL_OTHER_ID,
+            )
+        )
+        connection.commit()
+        connection.exec_driver_sql("PRAGMA foreign_keys=ON")
 
 
 def _tenant(tenant_id: UUID, *, slug: str) -> Tenant:
@@ -284,6 +302,31 @@ def test_create_group_rejects_cross_tenant_channel_external_id() -> None:
             group_type="CUSTOM_GROUP",
             channel_ids=[CHANNEL_OTHER_EXTERNAL],
         )
+
+
+def test_create_group_allows_empty_channel_id_list_without_member_rows() -> None:
+    """Empty create_group input creates a tenant-stamped group and no members."""
+    session = build_session()
+    seed_org(session)
+
+    group = SqlAlchemyChannelGroupRegistry(session).create_group(
+        name="Empty Group",
+        group_type="CUSTOM_GROUP",
+        channel_ids=[],
+    )
+
+    group_row = session.scalars(
+        select(ChannelGroupORM).where(ChannelGroupORM.name == "Empty Group")
+    ).one()
+    member_rows = session.scalars(
+        select(ChannelGroupMemberORM).where(
+            ChannelGroupMemberORM.group_id == group_row.id
+        )
+    ).all()
+
+    assert group.channel_ids == ()
+    assert group_row.tenant_id == DEFAULT_TENANT_ID
+    assert member_rows == []
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +504,91 @@ def test_add_members_stamps_bound_tenant_on_new_member_rows() -> None:
     }
 
 
+def test_add_members_with_empty_channel_id_list_keeps_existing_members() -> None:
+    """Empty add_members input is a no-op on the existing member set."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    group = registry.create_group(
+        name="Default Group",
+        group_type="CUSTOM_GROUP",
+        channel_ids=[CHANNEL_DEFAULT_A_EXTERNAL],
+    )
+
+    updated = registry.add_members(group_id=group.id, channel_ids=[])
+
+    assert updated.channel_ids == (CHANNEL_DEFAULT_A_EXTERNAL,)
+    member_rows = session.scalars(
+        select(ChannelGroupMemberORM).where(
+            ChannelGroupMemberORM.group_id == UUID(group.id)
+        )
+    ).all()
+    assert len(member_rows) == 1
+    assert member_rows[0].tenant_id == DEFAULT_TENANT_ID
+    assert member_rows[0].channel_id == CHANNEL_DEFAULT_A_ID
+
+
+def test_add_members_recovers_from_duplicate_member_integrity_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The duplicate-member retry path preserves tenant stamping."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelGroupRegistry(session)
+    group = registry.create_group(
+        name="Default Group",
+        group_type="CUSTOM_GROUP",
+        channel_ids=[CHANNEL_DEFAULT_A_EXTERNAL],
+    )
+
+    original_flush = session.flush
+    duplicate_error_seen = False
+
+    def flaky_flush(*args, **kwargs):
+        nonlocal duplicate_error_seen
+        has_pending_new_member = any(
+            isinstance(obj, ChannelGroupMemberORM)
+            and obj.channel_id == CHANNEL_DEFAULT_B_ID
+            for obj in session.new
+        )
+        if has_pending_new_member and not duplicate_error_seen:
+            duplicate_error_seen = True
+            raise IntegrityError(
+                "INSERT INTO channel_group_members",
+                {},
+                Exception(
+                    "UNIQUE constraint failed: "
+                    "channel_group_members.group_id, "
+                    "channel_group_members.channel_id"
+                ),
+            )
+        return original_flush(*args, **kwargs)
+
+    monkeypatch.setattr(session, "flush", flaky_flush)
+
+    updated = registry.add_members(
+        group_id=group.id,
+        channel_ids=[CHANNEL_DEFAULT_B_EXTERNAL],
+    )
+
+    member_rows = session.scalars(
+        select(ChannelGroupMemberORM).where(
+            ChannelGroupMemberORM.group_id == UUID(group.id)
+        )
+    ).all()
+
+    assert duplicate_error_seen is True
+    assert updated.channel_ids == (
+        CHANNEL_DEFAULT_A_EXTERNAL,
+        CHANNEL_DEFAULT_B_EXTERNAL,
+    )
+    assert {row.tenant_id for row in member_rows} == {DEFAULT_TENANT_ID}
+    assert {row.channel_id for row in member_rows} == {
+        CHANNEL_DEFAULT_A_ID,
+        CHANNEL_DEFAULT_B_ID,
+    }
+
+
 def test_remove_member_for_cross_tenant_group_raises_keyerror() -> None:
     """`_require_group_row` rejects remove_member on another tenant's group."""
     session = build_session()
@@ -543,6 +671,7 @@ def test_channel_ids_by_group_dual_filter_excludes_cross_tenant_member_rows() ->
         group_type="CUSTOM_GROUP",
         channel_ids=[CHANNEL_OTHER_EXTERNAL],
     )
+    insert_cross_tenant_member_row(session, group_id=default_group_uuid)
 
     default_view = default_registry._channel_ids_by_group([default_group_uuid])
     assert default_view == {default_group_uuid: (CHANNEL_DEFAULT_A_EXTERNAL,)}

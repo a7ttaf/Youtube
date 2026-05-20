@@ -10,7 +10,7 @@
 
 Add direct registry-layer tenant-isolation tests for `SqlAlchemyChannelGroupRegistry`. The repository's tenant wiring was added in PR #25 (S2.4b-org-1) — every read filters by `tenant_id`, every write stamps it, and `_get_group_row` replaced the IDOR-prone `session.get(...)` with an explicit tenant-scoped select — but unlike the parallel channel registry, the channel group registry lacked dedicated tests for those filters.
 
-The trigger: the plan file at `/home/mahmoud/.claude/plans/declarative-churning-falcon.md` explicitly called out "PR B — S2.4b-org-2" to create `tests/org/test_sql_channel_groups.py` from scratch. After the user picked the 3-PR sequence (PR #28 `.gitignore` backport, PR #29 bank reconciliation tests, PR #30 channel groups tests), this PR closed item #3 of the sequence.
+The trigger: the local planning note explicitly called out "PR B — S2.4b-org-2" to create `tests/org/test_sql_channel_groups.py` from scratch. After the user picked the 3-PR sequence (PR #28 `.gitignore` backport, PR #29 bank reconciliation tests, PR #30 channel groups tests), this PR closed item #3 of the sequence.
 
 ## Non-goals
 
@@ -25,7 +25,7 @@ The trigger: the plan file at `/home/mahmoud/.claude/plans/declarative-churning-
 
 Commit `64d70a6` (the change):
 
-- `tests/org/test_sql_channel_groups.py` — added, ~550 lines, 15 tests.
+- `tests/org/test_sql_channel_groups.py` — added, ~680 lines, 18 tests.
 
 Second commit (this artifact set):
 
@@ -36,7 +36,7 @@ Second commit (this artifact set):
 ## Behavior changes
 
 - **At runtime: none.** Same `org/sql_channel_groups.py`.
-- **In CI / test count: +15 tests.** Pytest moves from 507 → 522.
+- **In CI / test count: +18 tests.** Pytest moves from 507 → 525.
 
 ## Tests run
 
@@ -45,9 +45,9 @@ Second commit (this artifact set):
 - `python -m ruff check tests/org/test_sql_channel_groups.py` — All checks passed.
 - `python -m ruff format --check backend tests` — 102 unformatted files (pre-existing on base; PR adds 0; addressed by PR #27).
 - `python -m ruff format --check tests/org/test_sql_channel_groups.py` — Already formatted.
-- `python -m pytest -q` — **522 passed, 7 warnings in 30s**. Baseline before this PR: 507 passed. Delta +15.
-- `python -m pytest -q tests/org/test_sql_channel_groups.py` — 15 passed in 0.27s.
-- `python -m pytest -q tests/org/` — 30 passed (no regression on `test_sql_channel_registry.py`).
+- `python -m pytest -q` — **525 passed, 7 warnings in 30s**. Baseline before this PR: 507 passed. Delta +18.
+- `python -m pytest -q tests/org/test_sql_channel_groups.py` — 18 passed in 0.34s.
+- `python -m pytest -q tests/org/` — 33 passed (no regression on `test_sql_channel_registry.py`).
 - `git diff --check` — clean (exit 0). `git diff --cached --check` — clean.
 - Conflict-marker scan (tracked + working tree) — clean.
 - Import smoke (`from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry`) — ok.
@@ -56,15 +56,15 @@ Second commit (this artifact set):
 ## Failures / skipped gates
 
 - None.
-- Note on environment: this branch was developed in a git worktree at `/home/mahmoud/work/youtube-ums-chgroups` (created via `git worktree add` off `origin/pr/s2-4a-tenant-id-on-operational-tables`). The PR #26 / #27 / #28 / #29 worktrees were all left **completely untouched**.
-- The local working tree shows the usual `__pycache__/` clutter (no `.gitignore` on this stack until PR #28 lands), but only the new test file was staged and committed.
-- No remote CI run; the UMS branch this targets has no `.github/workflows/` and no `ci/` lane.
+- Note on environment: validate from any clean checkout or worktree. If a separate worktree is needed, create one with `git worktree add <WORKTREE_DIR> origin/pr/s2-4b-org-2-channel-groups-tests`, then run the checks from that worktree root.
+- Generated caches such as `__pycache__/` are local artifacts only; do not stage them. If needed, remove them with `find backend tests -type d -name __pycache__ -prune -exec rm -rf {} +`.
+- No remote CI run was available on the target stack branch. Before relying on remote gates, check whether the target branch includes `.github/workflows/` or a `ci/` lane.
 
 ## Risks
 
 - **Code risk: zero.** No code is touched.
-- **Test-flake risk: very low.** All 15 tests use isolated in-memory SQLite with `PRAGMA foreign_keys=ON`, no shared state, no time-dependent assertions beyond a fixed `CREATED_AT` constant.
-- **Reviewer-flow risk: low.** One file, ~550 lines, 15 tests, each short and focused. The naming and ordering directly mirror `tests/org/test_sql_channel_registry.py` so reviewers familiar with PR #25 see the same shape.
+- **Test-flake risk: very low.** All 18 tests use isolated in-memory SQLite with `PRAGMA foreign_keys=ON` by default, no shared state, no time-dependent assertions beyond a fixed `CREATED_AT` constant. One read-filter test temporarily disables FK checks only to insert deliberately inconsistent fixture data.
+- **Reviewer-flow risk: low.** One file, ~680 lines, 18 tests, each short and focused. The naming and ordering directly mirror `tests/org/test_sql_channel_registry.py` so reviewers familiar with PR #25 see the same shape.
 
 ## Rollback / operational notes
 
@@ -94,15 +94,18 @@ Remaining queued items from PR #26's handoff (lower priority):
 ## Validation a future maintainer can rerun
 
 ```bash
-cd /home/mahmoud/work/youtube-ums-chgroups
+# Run from the repository root with the project virtualenv activated.
+# Example setup if needed:
+# python -m venv .venv
+# source .venv/bin/activate
 git checkout pr/s2-4b-org-2-channel-groups-tests
-/home/mahmoud/work/youtube-ums/.venv/bin/python -m ruff check tests/org/test_sql_channel_groups.py
-/home/mahmoud/work/youtube-ums/.venv/bin/python -m ruff format --check tests/org/test_sql_channel_groups.py
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -m pytest -q tests/org/test_sql_channel_groups.py
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -m pytest -q
+python -m ruff check tests/org/test_sql_channel_groups.py
+python -m ruff format --check tests/org/test_sql_channel_groups.py
+PYTHONPATH=backend python -m pytest -q tests/org/test_sql_channel_groups.py
+PYTHONPATH=backend python -m pytest -q
 git diff --check
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -c "from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry; print('ok')"
-PYTHONPATH=backend /home/mahmoud/work/youtube-ums/.venv/bin/python -m alembic -c alembic.ini heads
+PYTHONPATH=backend python -c "from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry; print('ok')"
+PYTHONPATH=backend python -m alembic -c alembic.ini heads
 ```
 
-Expected: 15 tests pass on the new file, 522 total on the full suite, diff clean, ruff/format clean on the new file, import smoke ok, single alembic head.
+Expected: 18 tests pass on the new file, 525 total on the full suite, diff clean, ruff/format clean on the new file, import smoke ok, single alembic head.
