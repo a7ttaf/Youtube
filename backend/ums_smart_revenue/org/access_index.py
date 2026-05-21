@@ -1,15 +1,11 @@
 from dataclasses import dataclass
-from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.scopes import OrgAccessIndex
 from ums_smart_revenue.db.org_models import OrgUnitORM, YouTubeChannelORM
-from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
-from ums_smart_revenue.tenancy.context import get_current_tenant
-
-_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
+from ums_smart_revenue.tenancy.context import require_current_tenant
 
 
 @dataclass(frozen=True)
@@ -66,11 +62,8 @@ def build_org_access_index(
 
 
 def load_org_access_index_from_session(session: Session) -> OrgAccessIndex:
-    """Build the org-access index for the current or default tenant."""
-    current_tenant = get_current_tenant()
-    tenant_id = (
-        current_tenant.id if current_tenant is not None else _DEFAULT_TENANT_UUID
-    )
+    """Build the org-access index for the current request tenant."""
+    tenant_id = require_current_tenant().id
     org_units = [
         OrgUnitRow(
             id=str(row.id),

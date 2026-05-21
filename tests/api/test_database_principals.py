@@ -1,6 +1,7 @@
 """Regression tests for SQL-backed principal authorization."""
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -38,7 +39,10 @@ from ums_smart_revenue.db.security_models import (
     UserPermissionGrantORM,
     UserRoleAssignmentORM,
 )
+from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import TENANT_CTX
+from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 ACTOR_ID = UUID("00000000-0000-0000-0000-000000016001")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000016002")
@@ -154,6 +158,7 @@ def auth_headers(
     """Build trusted gateway headers for database-mode request tests."""
     headers = {
         "x-user-id": str(user_id),
+        "x-ums-tenant": "ums",
         "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
     }
     if include_bootstrap_claims:
@@ -170,6 +175,28 @@ def auth_headers(
 def build_database_url(tmp_path) -> str:
     """Return an isolated SQLite URL for a pytest temp directory."""
     return f"sqlite+pysqlite:///{(tmp_path / 'database-principals.db').as_posix()}"
+
+
+@contextmanager
+def ums_tenant_context():
+    """Bind the request tenant context expected by database principal loading."""
+    now = datetime.now(UTC)
+    token = TENANT_CTX.set(
+        Tenant(
+            id=UUID(UMS_TENANT_ID),
+            slug="ums",
+            display_name="UMS",
+            primary_currency="USD",
+            status=TenantStatus.ACTIVE,
+            onboarding_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    try:
+        yield
+    finally:
+        TENANT_CTX.reset(token)
 
 
 def seed_security_catalog(session: Session) -> AccessScopeORM:
@@ -200,8 +227,18 @@ def seed_security_catalog(session: Session) -> AccessScopeORM:
 def seed_database(database_url: str) -> None:
     """Create the security schema and seed the two users used by auth tests."""
     engine = create_engine(database_url)
+    TenantBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
     with Session(engine) as session:
+        session.add(
+            TenantORM(
+                id=UUID(UMS_TENANT_ID),
+                slug="ums",
+                display_name="UMS",
+                primary_currency="USD",
+                status="ACTIVE",
+            )
+        )
         seed_security_catalog(session)
         session.add_all(
             [
@@ -541,7 +578,7 @@ def test_database_principal_retryable_storage_errors_return_service_unavailable(
     """Retryable SQLAlchemy storage failures are retried once before 503."""
     session = FailingSession()
 
-    with pytest.raises(HTTPException) as exc_info:
+    with ums_tenant_context(), pytest.raises(HTTPException) as exc_info:
         current_principal_from_database(
             identity=TrustedGatewayIdentity(user_id=str(ACTOR_ID)),
             session=session,
@@ -553,11 +590,26 @@ def test_database_principal_retryable_storage_errors_return_service_unavailable(
     assert session.rollback_count == 1
 
 
+def test_database_principal_requires_tenant_context():
+    """Principal loading fails closed before storage reads when tenant context is absent."""
+    session = FailingSession()
+
+    with pytest.raises(HTTPException) as exc_info:
+        current_principal_from_database(
+            identity=TrustedGatewayIdentity(user_id=str(ACTOR_ID)),
+            session=session,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Principal authorization unavailable"
+    assert session.get_count == 0
+
+
 def test_database_principal_non_retryable_storage_errors_do_not_retry():
     """Non-transient SQLAlchemy failures fail closed without retry storms."""
     session = FailingSession(lookup_error=SQLAlchemyError("statement is invalid"))
 
-    with pytest.raises(HTTPException) as exc_info:
+    with ums_tenant_context(), pytest.raises(HTTPException) as exc_info:
         current_principal_from_database(
             identity=TrustedGatewayIdentity(user_id=str(ACTOR_ID)),
             session=session,
@@ -573,7 +625,7 @@ def test_database_principal_unexpected_errors_return_service_unavailable():
     """Unexpected loader failures are fail-closed instead of leaking as 500s."""
     session = FailingSession(lookup_error=RuntimeError("driver bridge failed"))
 
-    with pytest.raises(HTTPException) as exc_info:
+    with ums_tenant_context(), pytest.raises(HTTPException) as exc_info:
         current_principal_from_database(
             identity=TrustedGatewayIdentity(user_id=str(ACTOR_ID)),
             session=session,
@@ -603,7 +655,7 @@ def test_database_principal_rejects_active_transaction_to_avoid_race_reads():
     """Caller-owned transactions are rejected to avoid mixed-isolation races."""
     session = FailingSession(active_transaction=True)
 
-    with pytest.raises(HTTPException) as exc_info:
+    with ums_tenant_context(), pytest.raises(HTTPException) as exc_info:
         current_principal_from_database(
             identity=TrustedGatewayIdentity(user_id=str(ACTOR_ID)),
             session=session,

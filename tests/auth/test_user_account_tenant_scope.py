@@ -99,18 +99,16 @@ def test_user_repository_filters_list_users_by_current_tenant() -> None:
     assert next_cursor is None
 
 
-def test_user_repository_uses_default_tenant_without_context() -> None:
-    """Verify bootstrap callers fall back to the default tenant id."""
+def test_user_repository_requires_tenant_context_without_explicit_tenant() -> None:
+    """Verify tenant-scoped repositories fail closed without context."""
     session = build_session()
     seed_users(session)
 
-    items, has_more, next_cursor = SqlAlchemyUserAccountRepository(session).list_users(
-        limit=10
-    )
-
-    assert [item.id for item in items] == [str(DEFAULT_USER_ID)]
-    assert has_more is False
-    assert next_cursor is None
+    with pytest.raises(
+        UserAccountValidationError,
+        match="tenant context is required",
+    ):
+        SqlAlchemyUserAccountRepository(session).list_users(limit=10)
 
 
 def test_user_repository_returns_empty_page_for_empty_tenant() -> None:
@@ -196,7 +194,9 @@ def test_user_repository_rejects_invalid_cursor_uuid() -> None:
         UserAccountValidationError,
         match="cursor_id must be a valid UUID",
     ):
-        SqlAlchemyUserAccountRepository(session).list_users(
+        SqlAlchemyUserAccountRepository(
+            session, tenant_id=DEFAULT_TENANT_ID
+        ).list_users(
             cursor_email="shared@example.com",
             cursor_id="not-a-uuid",
         )
@@ -208,7 +208,9 @@ def test_user_repository_accepts_pagination_boundaries(limit: int) -> None:
     session = build_session()
     seed_users(session)
 
-    items, _, _ = SqlAlchemyUserAccountRepository(session).list_users(limit=limit)
+    items, _, _ = SqlAlchemyUserAccountRepository(
+        session, tenant_id=DEFAULT_TENANT_ID
+    ).list_users(limit=limit)
 
     assert [item.id for item in items] == [str(DEFAULT_USER_ID)]
 
@@ -218,7 +220,9 @@ def test_user_repository_rejects_page_size_above_boundary() -> None:
     session = build_session()
 
     with pytest.raises(UserAccountValidationError, match="limit must be between"):
-        SqlAlchemyUserAccountRepository(session).list_users(limit=101)
+        SqlAlchemyUserAccountRepository(
+            session, tenant_id=DEFAULT_TENANT_ID
+        ).list_users(limit=101)
 
 
 def test_user_repository_rejects_offset_above_boundary() -> None:
@@ -229,7 +233,9 @@ def test_user_repository_rejects_offset_above_boundary() -> None:
         UserAccountValidationError,
         match=f"offset must be less than or equal to {USER_LIST_MAX_OFFSET}",
     ):
-        SqlAlchemyUserAccountRepository(session).list_users(
+        SqlAlchemyUserAccountRepository(
+            session, tenant_id=DEFAULT_TENANT_ID
+        ).list_users(
             offset=USER_LIST_MAX_OFFSET + 1
         )
 

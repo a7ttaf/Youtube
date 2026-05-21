@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from uuid import UUID
 
 import pytest
@@ -14,6 +15,8 @@ from ums_smart_revenue.org.channel_registry import (
 from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry
 from ums_smart_revenue.org.sql_channel_registry import SqlAlchemyChannelRegistry
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import TENANT_CTX, TenantContextMissing
+from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 DEFAULT_TENANT_ID = UUID(UMS_TENANT_ID)
 SECTOR_TV_ID = UUID("00000000-0000-0000-0000-000000000101")
@@ -28,6 +31,20 @@ OTHER_TENANT_SECTOR_ID = UUID("00000000-0000-0000-0000-000000000901")
 OTHER_TENANT_COMPANY_ID = UUID("00000000-0000-0000-0000-000000000902")
 OTHER_TENANT_CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-000000000903")
 OTHER_TENANT_CHANNEL_ID = "channel-shared-across-tenants"
+
+
+def _tenant(tenant_id: UUID, *, slug: str) -> Tenant:
+    now = datetime.now(UTC)
+    return Tenant(
+        id=tenant_id,
+        slug=slug,
+        display_name=slug.upper(),
+        primary_currency="USD",
+        status=TenantStatus.ACTIVE,
+        onboarding_at=now,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def build_session() -> Session:
@@ -392,8 +409,11 @@ def test_sql_channel_registry_rejects_cross_tenant_company_id():
 def test_load_org_access_index_from_session_uses_active_sql_rows():
     session = build_session()
     seed_org(session)
-
-    index = load_org_access_index_from_session(session)
+    token = TENANT_CTX.set(_tenant(DEFAULT_TENANT_ID, slug="ums"))
+    try:
+        index = load_org_access_index_from_session(session)
+    finally:
+        TENANT_CTX.reset(token)
 
     assert index.company_sector == {
         str(COMPANY_TV_ID): str(SECTOR_TV_ID),
@@ -405,3 +425,11 @@ def test_load_org_access_index_from_session_uses_active_sql_rows():
     assert "channel-inactive" not in index.channel_company
     assert str(OTHER_TENANT_COMPANY_ID) not in index.company_sector
     assert OTHER_TENANT_CHANNEL_ID not in index.channel_company
+
+
+def test_load_org_access_index_from_session_requires_tenant_context():
+    session = build_session()
+    seed_org(session)
+
+    with pytest.raises(TenantContextMissing):
+        load_org_access_index_from_session(session)

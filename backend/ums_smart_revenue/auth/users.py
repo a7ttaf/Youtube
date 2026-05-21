@@ -24,8 +24,7 @@ from ums_smart_revenue.db.security_models import (
     UserPermissionGrantORM,
     UserRoleAssignmentORM,
 )
-from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
-from ums_smart_revenue.tenancy.context import get_current_tenant
+from ums_smart_revenue.tenancy.context import TenantContextMissing, require_current_tenant
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -42,7 +41,6 @@ USER_DISPLAY_NAME_MAX_LENGTH = 200
 USER_LIST_MAX_OFFSET = 10_000
 _EMAIL_CONFLICT_SAMPLE_LIMIT = 2
 USER_ACCOUNT_STORAGE_ATTEMPTS = 2
-_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 @dataclass(frozen=True)
@@ -587,13 +585,13 @@ def _is_retryable_user_storage_error(exc: SQLAlchemyError) -> bool:
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
-    """Resolve an explicit, request-scoped, or bootstrap account tenant id."""
+    """Resolve an explicit or request-scoped account tenant id."""
     if tenant_id is not None:
         return _parse_tenant_uuid(tenant_id)
-    current_tenant = get_current_tenant()
-    if current_tenant is not None:
-        return current_tenant.id
-    return _DEFAULT_TENANT_UUID
+    try:
+        return require_current_tenant().id
+    except TenantContextMissing as exc:
+        raise UserAccountValidationError("tenant context is required") from exc
 
 
 def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
