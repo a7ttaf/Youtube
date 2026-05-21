@@ -173,7 +173,7 @@ Net effect: main returns to pre-integration state in one PR. No data loss (integ
 ## Post-merge
 
 - `git fetch origin --prune && git rev-parse origin/main` → record the new main SHA as `INTEGRATION_MERGE_SHA` (rollback anchor).
-- Confirm single Alembic head: `PYTHONPATH=backend python -m alembic heads` returns exactly one head, and the returned revision equals the merge migration revision generated in Phase 4 (e.g., `<timestamp>_merge_s2_stack_and_main_*`) — **not** one of the original pre-merge heads (`20260513_0006`, `20260516_0001`, `20260518_0001`).
+- Confirm single Alembic head: `PYTHONPATH=backend python -m alembic heads` returns exactly one head, and the returned revision **equals the `revision = '...'` value inside the generated merge migration file** (look in `backend/ums_smart_revenue/db/alembic/versions/` for the file produced by `alembic merge` — its filename will include `_merge_` and its `revision` is what `alembic heads` must report). This must **not** match any of the original pre-merge heads (`20260513_0006`, `20260516_0001`, `20260518_0001`). For determinism, the Phase 4 merge command may be run as `PYTHONPATH=backend python -m alembic merge --rev-id <chosen_id> -m "..." <head_a> <head_b>` and `<chosen_id>` recorded in the run log alongside `INTEGRATION_MERGE_SHA`.
 - Verify pytest count on main matches integration-branch result.
 - Phase 5 (frontend tenant header) starts from `INTEGRATION_MERGE_SHA`.
 - Phase 6 (planning docs reconcile) starts from `INTEGRATION_MERGE_SHA`.
