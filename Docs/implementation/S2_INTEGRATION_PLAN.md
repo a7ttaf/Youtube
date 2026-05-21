@@ -124,7 +124,7 @@ Must run on the integration branch **before push**, in order:
 1. `python -m ruff check backend tests` — must pass. (Origin/main has 55 pre-existing ruff errors per Phase 2.5 baseline; PR #27 cleanup is on the stack and will reach main via this integration. Post-merge expected: 0 errors.)
 2. `python -m pytest -q` — must pass full suite. Origin/main baseline = 452 tests. Post-integration target = ~570 (452 + ~120 new from S2.4b coverage PRs).
 3. **Alembic validation — prefer disposable PostgreSQL**:
-   - If docker is available: `docker compose up -d postgres`, set `DATABASE_URL`, run `PYTHONPATH=backend python -m alembic upgrade head` (must reach single head), then exercise a round-trip using **one of** the two options below, then tear down the container. Record which option was used in the run log (`Docs/superpowers/runlog/2026-05-21-phase-0.md`).
+   - If docker is available: `docker compose up -d postgres`, set `DATABASE_URL`, run `PYTHONPATH=backend python -m alembic upgrade head` (must reach single head), then exercise a round-trip using **one of** the two options below, then tear down the container. Record which option was used in the Phase 4 run log entry (`Docs/superpowers/runlog/2026-05-21-phase-4.md`).
      - **Option A — targeted (faster)**: downgrade to the recorded pre-merge head (`LAST_PRE_MERGE_HEAD`, captured from `alembic heads` against `origin/main` and `origin/pr/s2-4a-...` before the integration merge), then re-`upgrade head`. Exercises only the migrations introduced by the integration; failures point cleanly at the new chain.
        ```bash
        export LAST_PRE_MERGE_HEAD=<sha>   # e.g. 20260513_0006 or 20260518_0001 — the head of the side you want to bounce against
@@ -137,8 +137,9 @@ Must run on the integration branch **before push**, in order:
        PYTHONPATH=backend python -m alembic upgrade head
        ```
    - SQLite fallback only if PG unavailable: same commands against `sqlite:///./.pytest-tmp/integration.sqlite`. If fallback used, document the contract gap in the run log (SQLite does not enforce all PG constraints used by this repo, especially partial indexes and `RESTRICT` FKs).
-4. `cd frontend && npm install && npm run build` — must succeed. (`cd` required because `package.json` lives in `frontend/`.)
-5. `git diff --check` — must show no whitespace issues.
+4. **Inspect the generated merge migration file** (the file produced by `alembic merge` in the "Alembic migrations" section above; lives at `backend/ums_smart_revenue/db/alembic/versions/<timestamp>_merge_*.py`). Confirm both `upgrade()` and `downgrade()` contain only `pass` (or are empty). If either function contains any schema operation (`op.create_table`, `op.add_column`, `op.alter_column`, `op.drop_*`, etc.), **STOP and CHECKPOINT** — incompatible schema changes between branches detected; the merge is unsafe without hand-resolution.
+5. `cd frontend && npm install && npm run build` — must succeed. (`cd` required because `package.json` lives in `frontend/`.)
+6. `git diff --check` — must show no whitespace issues.
 
 If any gate fails, STOP. Surface the failure to user. Do not push until resolved or explicitly accepted with documented mitigation.
 
@@ -163,7 +164,7 @@ The integration merge commit on `main` (recorded as `INTEGRATION_MERGE_SHA` in t
 3. Push: `git push -u origin revert/s2-integration`
 4. Open revert PR: `gh pr create --base main --head revert/s2-integration --title "Revert S2 integration" --body "Reverts merge commit <SHA>. See run log Docs/superpowers/runlog/2026-05-21-phase-0.md."`
 5. Merge revert PR with `gh pr merge --merge`
-6. Alembic rollback if needed: against disposable PG, `PYTHONPATH=backend python -m alembic downgrade <pre_merge_head>`. The merge migration is no-op and reversible.
+6. Alembic rollback if needed: against disposable PG, `PYTHONPATH=backend python -m alembic downgrade "$LAST_PRE_MERGE_HEAD"`. `LAST_PRE_MERGE_HEAD` is the pre-integration head captured during the validation gate (e.g., `20260513_0006` or `20260518_0001`) — see the Phase 4 run log entry. The merge migration is no-op and reversible.
 
 Net effect: main returns to pre-integration state in one PR. No data loss (integration is code-only; no production data migration runs).
 
@@ -172,7 +173,7 @@ Net effect: main returns to pre-integration state in one PR. No data loss (integ
 ## Post-merge
 
 - `git fetch origin --prune && git rev-parse origin/main` → record the new main SHA as `INTEGRATION_MERGE_SHA` (rollback anchor).
-- Confirm single Alembic head: `PYTHONPATH=backend python -m alembic heads` returns one head.
+- Confirm single Alembic head: `PYTHONPATH=backend python -m alembic heads` returns exactly one head, and the returned revision equals the merge migration revision generated in Phase 4 (e.g., `<timestamp>_merge_s2_stack_and_main_*`) — **not** one of the original pre-merge heads (`20260513_0006`, `20260516_0001`, `20260518_0001`).
 - Verify pytest count on main matches integration-branch result.
 - Phase 5 (frontend tenant header) starts from `INTEGRATION_MERGE_SHA`.
 - Phase 6 (planning docs reconcile) starts from `INTEGRATION_MERGE_SHA`.

@@ -155,13 +155,13 @@ Highest-risk phase. Every transition surfaces evidence before continuing.
 
 **Discovered topology (recorded 2026-05-21 — confirm live before acting):**
 
-Pre-integration audit (see `Docs/implementation/S2_INTEGRATION_PLAN.md`) discovered a **3-head divergence** on the main side that was previously missed: migration `20260516_0001` (`tenants_foundation`) branched from `20260513_0001` (`bank_reconciliation`) and **skipped** the parallel `20260513_0002..0006` chain (`retire_graph_permissions` → `export_artifact_metadata` → `currency_exchange_rates` → `revenue_format_breakdown` → `export_job_scope_channel_snapshot`). The stack's head `20260518_0001` is descended from `20260516_0001` via `20260517_0001`, so it transitively absorbs `20260516_0001`.
+Pre-integration audit (see `Docs/implementation/S2_INTEGRATION_PLAN.md`) discovered a **3-lineage branching topology** on the main side that was previously missed. Migration `20260516_0001` (`tenants_foundation`) **branched off from** `20260513_0001` (`bank_reconciliation`), creating a parallel lineage to the existing `20260513_0002..0006` chain (`retire_graph_permissions` → `export_artifact_metadata` → `currency_exchange_rates` → `revenue_format_breakdown` → `export_job_scope_channel_snapshot`). The stack's head `20260518_0001` is descended from `20260516_0001` via `20260517_0001`, so it transitively absorbs `20260516_0001` — meaning the three parallel lineages on disk normally collapse to two active heads.
 
-Effective heads to merge depend on what `alembic heads` reports against the integration tree:
+Distinguish the **topology** (always three parallel lineages: `20260513_0002..0006`, `20260516_0001..20260518_0001`, and any older heads) from the **`alembic heads` result** (the live count of unmerged tip revisions). The expected and defensive outcomes:
 
-- **2-head outcome (expected):** `20260513_0006` (main's other branch) and `20260518_0001` (stack tail, transitively including `20260516_0001`). Proceed with a 2-head `alembic merge` in Step 4.5.
-- **3-head outcome (defensive):** `20260513_0006`, `20260516_0001`, and `20260518_0001` listed independently — meaning the descent from `20260516_0001` to `20260518_0001` was not resolved during merge. Proceed with a 3-head `alembic merge` in Step 4.5 (pass all three head IDs to one `alembic merge` invocation; do not chain two 2-way merges, since that produces an asymmetric history that is harder to revert).
-- **1-head outcome (unexpected):** a single head means somehow the topology was already flattened. **🛑 CHECKPOINT** — investigate before proceeding; the integration plan assumes ≥2 heads.
+- **2-head result (expected):** `20260513_0006` (main's `0513` finance/export chain tail) and `20260518_0001` (stack tail, transitively including `20260516_0001`). Proceed with a 2-head `alembic merge` in Step 4.5.
+- **3-head result (defensive):** `20260513_0006`, `20260516_0001`, and `20260518_0001` listed independently — meaning the descent from `20260516_0001` to `20260518_0001` was not resolved during merge. Proceed with a 3-head `alembic merge` in Step 4.5 (pass all three head IDs to one `alembic merge` invocation; do not chain two 2-way merges, since that produces an asymmetric history that is harder to revert).
+- **1-head result (unexpected):** a single head means somehow the topology was already flattened. **🛑 CHECKPOINT** — investigate before proceeding; the integration plan assumes ≥2 heads.
 
 **Step 4.3 — Create integration branch**
 - `git checkout -b pr/s2-integration-merge origin/main`
@@ -176,7 +176,7 @@ Effective heads to merge depend on what `alembic heads` reports against the inte
 
 **Step 4.5 — Generate Alembic merge migration**
 - All alembic commands run from repo root with `PYTHONPATH=backend`. Never `cd backend`.
-- With both branches now in the working tree: `PYTHONPATH=backend python -m alembic heads` — confirm head count and match against the Step 4.2 topology
+- With the branch histories now integrated into the merged working tree: `PYTHONPATH=backend python -m alembic heads` — confirm head count and match against the Step 4.2 topology
 - Pass **all live heads in a single `alembic merge` invocation** (do not chain 2-way merges, which produce asymmetric history that is harder to revert):
   - 2-head case:
     ```bash
@@ -194,7 +194,7 @@ Effective heads to merge depend on what `alembic heads` reports against the inte
 - `python -m ruff check backend tests`
 - `python -m pytest -q` (full suite)
 - **Prefer disposable PostgreSQL** for Alembic validation. All alembic invocations from repo root with `PYTHONPATH=backend`:
-  - If docker is available: `docker compose up -d postgres` (or equivalent), set `DATABASE_URL` env var to the disposable PG, run `PYTHONPATH=backend python -m alembic upgrade head`, then `PYTHONPATH=backend python -m alembic downgrade -2`, then `PYTHONPATH=backend python -m alembic upgrade head`, tear down container
+  - If docker is available: `docker compose up -d postgres` (or equivalent), set `DATABASE_URL` env var to the disposable PG, run `PYTHONPATH=backend python -m alembic upgrade head`, then exercise a round-trip using Option A (targeted: `downgrade "$LAST_PRE_MERGE_HEAD"` then `upgrade head` — faster, exercises only the migrations the integration introduces) **or** Option B (full: `downgrade base` then `upgrade head` — slower, exercises every `downgrade()` in the chain). See `Docs/implementation/S2_INTEGRATION_PLAN.md` validation gate for full commands and the run-log recording requirement. Tear down container after.
   - Fall back to SQLite scratch DB only if PG unavailable. If fallback used, document it in the validation report and call out the contract gap explicitly (SQLite does not enforce all PG constraints used by this repo)
 - `cd frontend && npm install && npm run build` — confirm frontend still builds against merged code (the `cd` is required here because `package.json` is in `frontend/`)
 - `git diff --check` (final)
