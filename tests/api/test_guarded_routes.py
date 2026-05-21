@@ -2,7 +2,10 @@ from fastapi.testclient import TestClient
 
 from ums_smart_revenue.api.revenue import current_org_access_index
 from ums_smart_revenue.app import create_app
-from ums_smart_revenue.org.bootstrap_registry import BOOTSTRAP_COMPANY_TV_ID, BOOTSTRAP_ORG_INDEX
+from ums_smart_revenue.org.bootstrap_registry import (
+    BOOTSTRAP_COMPANY_TV_ID,
+    BOOTSTRAP_ORG_INDEX,
+)
 
 
 def create_bootstrap_app():
@@ -11,7 +14,9 @@ def create_bootstrap_app():
     return app
 
 
-def auth_headers(role: str, scope_type: str, scope_id: str | None = None) -> dict[str, str]:
+def auth_headers(
+    role: str, scope_type: str, scope_id: str | None = None
+) -> dict[str, str]:
     headers = {
         "x-user-id": "user-1",
         "x-user-email": "user@example.com",
@@ -78,7 +83,9 @@ def test_guarded_route_rejects_untrusted_identity_headers():
 
     headers = auth_headers("super_owner", "global")
     headers.pop("x-ums-trusted-gateway-token")
-    response = client.get("/revenue/channels/channel-tv-a/authorization-check", headers=headers)
+    response = client.get(
+        "/revenue/channels/channel-tv-a/authorization-check", headers=headers
+    )
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid trusted gateway token"
@@ -94,4 +101,3 @@ def test_guarded_route_rejects_non_global_scope_without_id():
 
     assert response.status_code == 400
     assert response.json()["detail"] == "scope_id is required for scope type: company"
-

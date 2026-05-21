@@ -1,7 +1,7 @@
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -11,9 +11,11 @@ from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntr
 from ums_smart_revenue.finance.reconciliation import SOURCE_PRIORITY
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_summary
-
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 ADJUSTED_GROSS_REVENUE_METRIC = "adjusted_gross_revenue_usd"
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 @dataclass(frozen=True)
@@ -53,12 +55,17 @@ class NumberExplanationValidationError(NumberExplanationError):
 
 
 class SqlAlchemyNumberExplanationRepository:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        """Bind number explanation upserts to an explicit or request tenant."""
         self._session = session
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
-    def record_explanation(self, explanation: NumberExplanationEntry) -> NumberExplanationEntry:
+    def record_explanation(
+        self, explanation: NumberExplanationEntry
+    ) -> NumberExplanationEntry:
         row = self._session.scalars(
             select(NumberExplanationORM).where(
+                NumberExplanationORM.tenant_id == self._tenant_id,
                 NumberExplanationORM.month == explanation.month,
                 NumberExplanationORM.entity_type == explanation.entity_type,
                 NumberExplanationORM.entity_id == explanation.entity_id,
@@ -69,6 +76,7 @@ class SqlAlchemyNumberExplanationRepository:
         if row is None:
             row = NumberExplanationORM(
                 id=uuid4(),
+                tenant_id=self._tenant_id,
                 month=explanation.month,
                 entity_type=explanation.entity_type,
                 entity_id=explanation.entity_id,
@@ -97,7 +105,9 @@ def build_channel_month_revenue_explanation(
     metric: str,
 ) -> NumberExplanationEntry:
     if metric != ADJUSTED_GROSS_REVENUE_METRIC:
-        raise NumberExplanationValidationError(f"Unsupported explanation metric: {metric}")
+        raise NumberExplanationValidationError(
+            f"Unsupported explanation metric: {metric}"
+        )
 
     summary = build_adjusted_revenue_summary(
         facts=facts,
@@ -106,7 +116,9 @@ def build_channel_month_revenue_explanation(
         youtube_channel_id=youtube_channel_id,
     )
     primary_fact = _primary_fact(facts)
-    approved_count = sum(1 for override in manual_overrides if override.status == "APPROVED")
+    approved_count = sum(
+        1 for override in manual_overrides if override.status == "APPROVED"
+    )
     pending_count = summary.pending_manual_override_count
 
     components: list[dict[str, object]] = [
@@ -130,14 +142,20 @@ def build_channel_month_revenue_explanation(
         warnings.append(
             {
                 "code": "PENDING_MANUAL_OVERRIDES",
-                "message": f"{pending_count} pending manual {subject} not included in {metric}.",
+                "message": (
+                    f"{pending_count} pending manual {subject} "
+                    f"not included in {metric}."
+                ),
             }
         )
     if primary_fact is None:
         warnings.append(
             {
                 "code": "NO_REVENUE_FACTS",
-                "message": f"No revenue facts are available for {youtube_channel_id} in {month}.",
+                "message": (
+                    f"No revenue facts are available for {youtube_channel_id} "
+                    f"in {month}."
+                ),
             }
         )
 
@@ -158,18 +176,51 @@ def build_channel_month_revenue_explanation(
 def _primary_fact(facts: list[RevenueFactEntry]) -> RevenueFactEntry | None:
     if not facts:
         return None
-    return sorted(facts, key=lambda fact: (SOURCE_PRIORITY.get(fact.source_kind, 99), fact.source_kind))[0]
+    return sorted(
+        facts,
+        key=lambda fact: (SOURCE_PRIORITY.get(fact.source_kind, 99), fact.source_kind),
+    )[0]
 
 
-def _confidence(primary_fact: RevenueFactEntry | None, warnings: list[dict[str, object]]) -> dict[str, object]:
+def _confidence(
+    primary_fact: RevenueFactEntry | None, warnings: list[dict[str, object]]
+) -> dict[str, object]:
     score = primary_fact.confidence_score if primary_fact else Decimal("0")
     if warnings and score > Decimal("0.9000"):
         score = Decimal("0.9000")
-    label = "HIGH" if score >= Decimal("0.9000") else "MEDIUM" if score >= Decimal("0.7000") else "LOW"
+    label = (
+        "HIGH"
+        if score >= Decimal("0.9000")
+        else "MEDIUM"
+        if score >= Decimal("0.7000")
+        else "LOW"
+    )
     return {
         "label": label,
         "score": _decimal_to_api(score),
     }
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Resolve tenant id from explicit param, request context, or bootstrap."""
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    """Normalize tenant constructor input into a UUID object."""
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise NumberExplanationValidationError(
+            "tenant_id must be a valid UUID"
+        ) from exc
 
 
 def _decimal_to_api(value: Decimal) -> str:

@@ -6,6 +6,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM, UserORM
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 SECRET_REF_PREFIXES = (
     "secret-manager://",
@@ -15,8 +17,11 @@ SECRET_REF_PREFIXES = (
     "vault://",
     "kms://",
 )
-CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT = "uq_api_connector_credentials_connector_account"
+CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT = (
+    "uq_api_connector_credentials_connector_account"
+)
 MAX_CREDENTIAL_PAGE_SIZE = 100
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 @dataclass(frozen=True)
@@ -58,8 +63,10 @@ class ConnectorCredentialValidationError(ConnectorCredentialError):
 
 
 class SqlAlchemyConnectorCredentialRepository:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        """Bind connector credential reads and writes to one tenant."""
         self._session = session
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def list_credentials(
         self,
@@ -76,9 +83,13 @@ class SqlAlchemyConnectorCredentialRepository:
             raise ConnectorCredentialValidationError("offset must be greater than or equal to 0")
         if connector_keys is not None and not connector_keys:
             return ConnectorCredentialPage(items=[], limit=limit, offset=offset, has_more=False)
-        statement = select(ApiConnectorCredentialORM).order_by(
-            ApiConnectorCredentialORM.connector_key,
-            ApiConnectorCredentialORM.account_id,
+        statement = (
+            select(ApiConnectorCredentialORM)
+            .where(ApiConnectorCredentialORM.tenant_id == self._tenant_id)
+            .order_by(
+                ApiConnectorCredentialORM.connector_key,
+                ApiConnectorCredentialORM.account_id,
+            )
         )
         if connector_keys is not None:
             statement = statement.where(
@@ -104,12 +115,19 @@ class SqlAlchemyConnectorCredentialRepository:
         actor_user_id: str,
     ) -> ConnectorCredentialEntry:
         actor_uuid = _parse_uuid(actor_user_id)
-        if self._session.get(UserORM, actor_uuid) is None:
+        actor_exists = self._session.scalar(
+            select(UserORM.id).where(
+                UserORM.id == actor_uuid,
+                UserORM.tenant_id == self._tenant_id,
+            )
+        )
+        if actor_exists is None:
             raise ConnectorCredentialValidationError(
                 "actor_user_id does not reference an existing user"
             )
         existing = self._session.scalars(
             select(ApiConnectorCredentialORM).where(
+                ApiConnectorCredentialORM.tenant_id == self._tenant_id,
                 ApiConnectorCredentialORM.connector_key == connector_key,
                 ApiConnectorCredentialORM.account_id == account_id,
             )
@@ -121,6 +139,7 @@ class SqlAlchemyConnectorCredentialRepository:
 
         row = ApiConnectorCredentialORM(
             id=uuid4(),
+            tenant_id=self._tenant_id,
             connector_key=connector_key,
             account_id=account_id,
             encrypted_secret_ref=encrypted_secret_ref,
@@ -169,7 +188,31 @@ def _parse_uuid(value: str) -> UUID:
     try:
         return UUID(value)
     except ValueError as exc:
-        raise ConnectorCredentialValidationError("actor_user_id must be a valid UUID") from exc
+        raise ConnectorCredentialValidationError(
+            "actor_user_id must be a valid UUID"
+        ) from exc
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Resolve tenant id from explicit param, request context, or bootstrap."""
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    """Normalize tenant constructor input into a UUID object."""
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise ConnectorCredentialValidationError(
+            "tenant_id must be a valid UUID"
+        ) from exc
 
 
 def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:
@@ -181,16 +224,27 @@ def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:
     # PostgreSQL exposes the named constraint via diag.constraint_name; SQLite does not,
     # so keep an explicit fallback for its unique-constraint error text.
     error_text = f"{exc.orig!s} {exc!s}"
+    tenant_scoped_sqlite_constraint = (
+        "UNIQUE constraint failed: api_connector_credentials.tenant_id, "
+        "api_connector_credentials.connector_key, "
+        "api_connector_credentials.account_id"
+    )
+    legacy_sqlite_constraint = (
+        "UNIQUE constraint failed: api_connector_credentials.connector_key, "
+        "api_connector_credentials.account_id"
+    )
     return (
         CONNECTOR_CREDENTIAL_UNIQUE_CONSTRAINT in error_text
-        or "UNIQUE constraint failed: api_connector_credentials.connector_key, api_connector_credentials.account_id"
-        in error_text
+        or tenant_scoped_sqlite_constraint in error_text
+        or legacy_sqlite_constraint in error_text
     )
 
 
 _ACTOR_FK_CONSTRAINTS = frozenset({
     "fk_api_connector_credentials_created_by",
     "fk_api_connector_credentials_updated_by",
+    "fk_api_connector_credentials_tenant_created_by",
+    "fk_api_connector_credentials_tenant_updated_by",
 })
 
 

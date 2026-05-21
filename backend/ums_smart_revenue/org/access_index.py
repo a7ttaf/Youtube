@@ -5,6 +5,7 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.scopes import OrgAccessIndex
 from ums_smart_revenue.db.org_models import OrgUnitORM, YouTubeChannelORM
+from ums_smart_revenue.tenancy.context import require_current_tenant
 
 
 @dataclass(frozen=True)
@@ -61,6 +62,8 @@ def build_org_access_index(
 
 
 def load_org_access_index_from_session(session: Session) -> OrgAccessIndex:
+    """Build the org-access index for the current request tenant."""
+    tenant_id = require_current_tenant().id
     org_units = [
         OrgUnitRow(
             id=str(row.id),
@@ -70,15 +73,24 @@ def load_org_access_index_from_session(session: Session) -> OrgAccessIndex:
             active=row.active,
         )
         for row in session.execute(
-            select(OrgUnitORM.id, OrgUnitORM.parent_id, OrgUnitORM.type, OrgUnitORM.name, OrgUnitORM.active).where(
-                OrgUnitORM.active.is_(True)
+            select(
+                OrgUnitORM.id,
+                OrgUnitORM.parent_id,
+                OrgUnitORM.type,
+                OrgUnitORM.name,
+                OrgUnitORM.active,
+            ).where(
+                OrgUnitORM.tenant_id == tenant_id,
+                OrgUnitORM.active.is_(True),
             )
         ).all()
     ]
     channels = [
         ChannelRegistryRow(
             youtube_channel_id=row.youtube_channel_id,
-            primary_org_unit_id=str(row.primary_org_unit_id) if row.primary_org_unit_id is not None else None,
+            primary_org_unit_id=str(row.primary_org_unit_id)
+            if row.primary_org_unit_id is not None
+            else None,
             active=row.active,
         )
         for row in session.execute(
@@ -86,7 +98,11 @@ def load_org_access_index_from_session(session: Session) -> OrgAccessIndex:
                 YouTubeChannelORM.youtube_channel_id,
                 YouTubeChannelORM.primary_org_unit_id,
                 YouTubeChannelORM.active,
-            ).where(YouTubeChannelORM.active.is_(True), YouTubeChannelORM.primary_org_unit_id.is_not(None))
+            ).where(
+                YouTubeChannelORM.tenant_id == tenant_id,
+                YouTubeChannelORM.active.is_(True),
+                YouTubeChannelORM.primary_org_unit_id.is_not(None),
+            )
         ).all()
     ]
     return build_org_access_index(org_units=org_units, channels=channels)

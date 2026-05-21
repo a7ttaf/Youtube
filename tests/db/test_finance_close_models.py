@@ -18,4 +18,7 @@ def test_finance_month_close_has_control_columns():
         "unlocked_by",
         "unlocked_at",
     } <= set(table.columns.keys())
-    assert any(constraint.name == "ck_finance_month_close_month_format" for constraint in table.constraints)
+    assert any(
+        constraint.name == "ck_finance_month_close_month_format"
+        for constraint in table.constraints
+    )

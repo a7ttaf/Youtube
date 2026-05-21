@@ -166,7 +166,9 @@ def test_payment_match_maps_adsense_payment_validation_to_422():
         user_id=str(USER_ID),
         email="payment-match@example.com",
         role_assignments=(
-            RoleAssignment(role=RoleKey.FINANCE_VIEWER, scope=AccessScope.global_scope()),
+            RoleAssignment(
+                role=RoleKey.FINANCE_VIEWER, scope=AccessScope.global_scope()
+            ),
         ),
     )
 

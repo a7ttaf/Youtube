@@ -33,6 +33,10 @@ from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope, ScopeType
 from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.db.session import SessionFactory
+from ums_smart_revenue.tenancy.context import (
+    TenantContextMissing,
+    require_current_tenant,
+)
 
 logger = logging.getLogger(__name__)
 DATABASE_PRINCIPAL_LOAD_ATTEMPTS = 2
@@ -166,7 +170,16 @@ def current_principal_from_database(
 ) -> UserPrincipal:
     """Load a request principal from SQL after trusted gateway validation."""
     try:
-        return _load_database_principal_with_retries(session, identity.user_id)
+        tenant = require_current_tenant()
+        return _load_database_principal_with_retries(
+            session, identity.user_id, tenant_id=str(tenant.id)
+        )
+    except TenantContextMissing as exc:
+        logger.error("Database principal lookup missing tenant context")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Principal authorization unavailable",
+        ) from exc
     except PrincipalDisabledError as exc:
         logger.warning("Database principal lookup rejected disabled principal")
         raise HTTPException(
@@ -222,11 +235,16 @@ def current_principal_from_database(
 def _load_database_principal_with_retries(
     session: Session,
     normalized_user_id: str,
+    *,
+    tenant_id: str,
 ) -> UserPrincipal:
     """Retry transient storage failures once before failing closed."""
     for attempt_index in range(DATABASE_PRINCIPAL_LOAD_ATTEMPTS):
         try:
-            return SqlAlchemyPrincipalLoader(session).load(user_id=normalized_user_id)
+            return SqlAlchemyPrincipalLoader(session).load(
+                user_id=normalized_user_id,
+                tenant_id=tenant_id,
+            )
         except SQLAlchemyError as exc:
             if (
                 attempt_index + 1 >= DATABASE_PRINCIPAL_LOAD_ATTEMPTS

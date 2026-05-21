@@ -1,11 +1,12 @@
 """Regression tests for SQL-backed principal authorization."""
 
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from datetime import UTC, datetime
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -17,13 +18,14 @@ from ums_smart_revenue.api.dependencies import (
     current_principal_from_database,
     current_trusted_gateway_identity,
 )
-from ums_smart_revenue.app import create_app
+from ums_smart_revenue.app import TrustedGatewayTenantResolverMiddleware, create_app
 from ums_smart_revenue.auth.permissions import PERMISSION_DEFINITIONS
 from ums_smart_revenue.auth.principals import (
     MAX_ACTIVE_PERMISSION_GRANTS,
     MAX_ACTIVE_ROLE_ASSIGNMENTS,
     PRINCIPAL_QUERY_TIMEOUT_MS,
     PrincipalLoadError,
+    PrincipalNotFoundError,
     SqlAlchemyPrincipalLoader,
 )
 from ums_smart_revenue.auth.roles import ROLE_DEFINITIONS
@@ -37,10 +39,15 @@ from ums_smart_revenue.db.security_models import (
     UserPermissionGrantORM,
     UserRoleAssignmentORM,
 )
+from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import TENANT_CTX
+from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 ACTOR_ID = UUID("00000000-0000-0000-0000-000000016001")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000016002")
 GLOBAL_SCOPE_ID = UUID("00000000-0000-0000-0000-000000016101")
+OTHER_TENANT_ID = UUID("00000000-0000-0000-0000-000000016201")
 ROLE_ASSIGNMENT_OVERFLOW_COUNT = MAX_ACTIVE_ROLE_ASSIGNMENTS + 1
 PERMISSION_GRANT_OVERFLOW_COUNT = MAX_ACTIVE_PERMISSION_GRANTS + 1
 
@@ -151,6 +158,7 @@ def auth_headers(
     """Build trusted gateway headers for database-mode request tests."""
     headers = {
         "x-user-id": str(user_id),
+        "x-ums-tenant": "ums",
         "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
     }
     if include_bootstrap_claims:
@@ -167,6 +175,28 @@ def auth_headers(
 def build_database_url(tmp_path) -> str:
     """Return an isolated SQLite URL for a pytest temp directory."""
     return f"sqlite+pysqlite:///{(tmp_path / 'database-principals.db').as_posix()}"
+
+
+@contextmanager
+def ums_tenant_context():
+    """Bind the request tenant context expected by database principal loading."""
+    now = datetime.now(UTC)
+    token = TENANT_CTX.set(
+        Tenant(
+            id=UUID(UMS_TENANT_ID),
+            slug="ums",
+            display_name="UMS",
+            primary_currency="USD",
+            status=TenantStatus.ACTIVE,
+            onboarding_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+    try:
+        yield
+    finally:
+        TENANT_CTX.reset(token)
 
 
 def seed_security_catalog(session: Session) -> AccessScopeORM:
@@ -197,8 +227,18 @@ def seed_security_catalog(session: Session) -> AccessScopeORM:
 def seed_database(database_url: str) -> None:
     """Create the security schema and seed the two users used by auth tests."""
     engine = create_engine(database_url)
+    TenantBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
     with Session(engine) as session:
+        session.add(
+            TenantORM(
+                id=UUID(UMS_TENANT_ID),
+                slug="ums",
+                display_name="UMS",
+                primary_currency="USD",
+                status="ACTIVE",
+            )
+        )
         seed_security_catalog(session)
         session.add_all(
             [
@@ -382,6 +422,33 @@ def test_database_principal_loads_direct_permission_grants(tmp_path):
     ]
 
 
+def test_database_principal_uses_stored_user_tenant(tmp_path):
+    """Principal tenant identity comes from the persisted user row."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        principal = SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
+
+    assert principal.tenant_id == UMS_TENANT_ID
+
+
+def test_database_principal_rejects_mismatched_explicit_tenant(tmp_path):
+    """Explicit tenant input cannot make a user appear in another tenant."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session, pytest.raises(
+        PrincipalNotFoundError, match="User is not registered"
+    ):
+        SqlAlchemyPrincipalLoader(session).load(
+            user_id=str(ACTOR_ID),
+            tenant_id=str(OTHER_TENANT_ID),
+        )
+
+
 def test_database_principal_rejects_disabled_user_with_super_owner_header(tmp_path):
     """Disabled SQL users fail closed even if headers claim super-owner."""
     database_url = build_database_url(tmp_path)
@@ -464,9 +531,7 @@ def test_database_principal_canonicalizes_user_id_before_session():
 
     identity = current_trusted_gateway_identity(
         x_user_id=mixed_case_user_id,
-        x_ums_trusted_gateway_token=auth_headers()[
-            "x-ums-trusted-gateway-token"
-        ],
+        x_ums_trusted_gateway_token=auth_headers()["x-ums-trusted-gateway-token"],
     )
 
     assert identity.user_id == "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
@@ -509,11 +574,31 @@ def test_database_principal_rejects_bad_token_before_opening_session(monkeypatch
     assert counter.opened_sessions == 0
 
 
+def test_database_tenant_resolver_normalizes_bypass_paths_before_auth():
+    """Database-auth wrapper bypasses normalized paths before gateway checks."""
+    app = FastAPI()
+    app.add_middleware(
+        TrustedGatewayTenantResolverMiddleware,
+        session_factory=lambda: None,
+        bypass_paths=("/health/",),
+        authorize_tenant=lambda _scope, _slug: True,
+    )
+
+    @app.get("/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
 def test_database_principal_retryable_storage_errors_return_service_unavailable():
     """Retryable SQLAlchemy storage failures are retried once before 503."""
     session = FailingSession()
 
-    with pytest.raises(HTTPException) as exc_info:
+    with ums_tenant_context(), pytest.raises(HTTPException) as exc_info:
         current_principal_from_database(
             identity=TrustedGatewayIdentity(user_id=str(ACTOR_ID)),
             session=session,
@@ -525,11 +610,26 @@ def test_database_principal_retryable_storage_errors_return_service_unavailable(
     assert session.rollback_count == 1
 
 
+def test_database_principal_requires_tenant_context():
+    """Principal loading fails closed before storage reads when tenant context is absent."""
+    session = FailingSession()
+
+    with pytest.raises(HTTPException) as exc_info:
+        current_principal_from_database(
+            identity=TrustedGatewayIdentity(user_id=str(ACTOR_ID)),
+            session=session,
+        )
+
+    assert exc_info.value.status_code == 503
+    assert exc_info.value.detail == "Principal authorization unavailable"
+    assert session.get_count == 0
+
+
 def test_database_principal_non_retryable_storage_errors_do_not_retry():
     """Non-transient SQLAlchemy failures fail closed without retry storms."""
     session = FailingSession(lookup_error=SQLAlchemyError("statement is invalid"))
 
-    with pytest.raises(HTTPException) as exc_info:
+    with ums_tenant_context(), pytest.raises(HTTPException) as exc_info:
         current_principal_from_database(
             identity=TrustedGatewayIdentity(user_id=str(ACTOR_ID)),
             session=session,
@@ -545,7 +645,7 @@ def test_database_principal_unexpected_errors_return_service_unavailable():
     """Unexpected loader failures are fail-closed instead of leaking as 500s."""
     session = FailingSession(lookup_error=RuntimeError("driver bridge failed"))
 
-    with pytest.raises(HTTPException) as exc_info:
+    with ums_tenant_context(), pytest.raises(HTTPException) as exc_info:
         current_principal_from_database(
             identity=TrustedGatewayIdentity(user_id=str(ACTOR_ID)),
             session=session,
@@ -575,7 +675,7 @@ def test_database_principal_rejects_active_transaction_to_avoid_race_reads():
     """Caller-owned transactions are rejected to avoid mixed-isolation races."""
     session = FailingSession(active_transaction=True)
 
-    with pytest.raises(HTTPException) as exc_info:
+    with ums_tenant_context(), pytest.raises(HTTPException) as exc_info:
         current_principal_from_database(
             identity=TrustedGatewayIdentity(user_id=str(ACTOR_ID)),
             session=session,
@@ -647,8 +747,9 @@ def test_database_principal_rejects_too_many_active_role_assignments(tmp_path):
     add_many_role_assignments(database_url, count=ROLE_ASSIGNMENT_OVERFLOW_COUNT)
     engine = create_engine(database_url)
 
-    with Session(engine) as session, pytest.raises(
-        PrincipalLoadError, match="role assignments"
+    with (
+        Session(engine) as session,
+        pytest.raises(PrincipalLoadError, match="role assignments"),
     ):
         SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
 
@@ -673,8 +774,9 @@ def test_database_principal_rejects_too_many_active_permission_grants(tmp_path):
     add_many_permission_grants(database_url, count=PERMISSION_GRANT_OVERFLOW_COUNT)
     engine = create_engine(database_url)
 
-    with Session(engine) as session, pytest.raises(
-        PrincipalLoadError, match="permission grants"
+    with (
+        Session(engine) as session,
+        pytest.raises(PrincipalLoadError, match="permission grants"),
     ):
         SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
 

@@ -28,13 +28,19 @@ class ChannelGroupRegistryStore(Protocol):
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
         pass
 
-    def create_group(self, *, name: str, group_type: str, channel_ids: list[str]) -> ChannelGroupEntry:
+    def create_group(
+        self, *, name: str, group_type: str, channel_ids: list[str]
+    ) -> ChannelGroupEntry:
         pass
 
-    def update_group(self, *, group_id: str, name: str | None, active: bool | None) -> ChannelGroupEntry:
+    def update_group(
+        self, *, group_id: str, name: str | None, active: bool | None
+    ) -> ChannelGroupEntry:
         pass
 
-    def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
+    def add_members(
+        self, *, group_id: str, channel_ids: list[str]
+    ) -> ChannelGroupEntry:
         pass
 
     def remove_member(self, *, group_id: str, channel_id: str) -> ChannelGroupEntry:
@@ -51,7 +57,9 @@ class ChannelGroupRegistry:
     def get_group(self, group_id: str) -> ChannelGroupEntry | None:
         return self._groups.get(group_id)
 
-    def create_group(self, *, name: str, group_type: str, channel_ids: list[str]) -> ChannelGroupEntry:
+    def create_group(
+        self, *, name: str, group_type: str, channel_ids: list[str]
+    ) -> ChannelGroupEntry:
         group = ChannelGroupEntry(
             id=str(uuid4()),
             name=name,
@@ -62,7 +70,9 @@ class ChannelGroupRegistry:
         self._groups[group.id] = group
         return group
 
-    def update_group(self, *, group_id: str, name: str | None, active: bool | None) -> ChannelGroupEntry:
+    def update_group(
+        self, *, group_id: str, name: str | None, active: bool | None
+    ) -> ChannelGroupEntry:
         group = self._require_group(group_id)
         updated = replace(
             group,
@@ -72,15 +82,24 @@ class ChannelGroupRegistry:
         self._groups[group_id] = updated
         return updated
 
-    def add_members(self, *, group_id: str, channel_ids: list[str]) -> ChannelGroupEntry:
+    def add_members(
+        self, *, group_id: str, channel_ids: list[str]
+    ) -> ChannelGroupEntry:
         group = self._require_group(group_id)
-        updated = replace(group, channel_ids=tuple(dict.fromkeys([*group.channel_ids, *channel_ids])))
+        updated = replace(
+            group, channel_ids=tuple(dict.fromkeys([*group.channel_ids, *channel_ids]))
+        )
         self._groups[group_id] = updated
         return updated
 
     def remove_member(self, *, group_id: str, channel_id: str) -> ChannelGroupEntry:
         group = self._require_group(group_id)
-        updated = replace(group, channel_ids=tuple(channel for channel in group.channel_ids if channel != channel_id))
+        updated = replace(
+            group,
+            channel_ids=tuple(
+                channel for channel in group.channel_ids if channel != channel_id
+            ),
+        )
         self._groups[group_id] = updated
         return updated
 

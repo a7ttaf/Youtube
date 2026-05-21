@@ -1,13 +1,37 @@
-from ums_smart_revenue.org.access_index import ChannelRegistryRow, OrgUnitRow, build_org_access_index
+from ums_smart_revenue.org.access_index import (
+    ChannelRegistryRow,
+    OrgUnitRow,
+    build_org_access_index,
+)
 
 
 def test_build_org_access_index_maps_channels_to_companies_and_sectors():
     index = build_org_access_index(
         org_units=[
-            OrgUnitRow(id="sector-tv", parent_id=None, type="SECTOR", name="TV", active=True),
-            OrgUnitRow(id="company-tv-a", parent_id="sector-tv", type="COMPANY", name="TV A", active=True),
-            OrgUnitRow(id="sector-news", parent_id=None, type="SECTOR", name="News", active=True),
-            OrgUnitRow(id="company-news-a", parent_id="sector-news", type="COMPANY", name="News A", active=True),
+            OrgUnitRow(
+                id="sector-tv", parent_id=None, type="SECTOR", name="TV", active=True
+            ),
+            OrgUnitRow(
+                id="company-tv-a",
+                parent_id="sector-tv",
+                type="COMPANY",
+                name="TV A",
+                active=True,
+            ),
+            OrgUnitRow(
+                id="sector-news",
+                parent_id=None,
+                type="SECTOR",
+                name="News",
+                active=True,
+            ),
+            OrgUnitRow(
+                id="company-news-a",
+                parent_id="sector-news",
+                type="COMPANY",
+                name="News A",
+                active=True,
+            ),
         ],
         channels=[
             ChannelRegistryRow(
@@ -40,9 +64,23 @@ def test_build_org_access_index_maps_channels_to_companies_and_sectors():
 def test_build_org_access_index_ignores_inactive_and_unmapped_channels():
     index = build_org_access_index(
         org_units=[
-            OrgUnitRow(id="sector-tv", parent_id=None, type="SECTOR", name="TV", active=True),
-            OrgUnitRow(id="company-tv-a", parent_id="sector-tv", type="COMPANY", name="TV A", active=True),
-            OrgUnitRow(id="company-inactive", parent_id="sector-tv", type="COMPANY", name="Old TV", active=False),
+            OrgUnitRow(
+                id="sector-tv", parent_id=None, type="SECTOR", name="TV", active=True
+            ),
+            OrgUnitRow(
+                id="company-tv-a",
+                parent_id="sector-tv",
+                type="COMPANY",
+                name="TV A",
+                active=True,
+            ),
+            OrgUnitRow(
+                id="company-inactive",
+                parent_id="sector-tv",
+                type="COMPANY",
+                name="Old TV",
+                active=False,
+            ),
         ],
         channels=[
             ChannelRegistryRow(
@@ -70,4 +108,3 @@ def test_build_org_access_index_ignores_inactive_and_unmapped_channels():
 
     assert index.channel_company == {"channel-tv-a": "company-tv-a"}
     assert index.channel_sector == {"channel-tv-a": "sector-tv"}
-

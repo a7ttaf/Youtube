@@ -10,8 +10,11 @@ from ums_smart_revenue.auth.roles import RoleKey
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 USER_ID = UUID("00000000-0000-0000-0000-000000002001")
+DEFAULT_TENANT_ID = UUID(UMS_TENANT_ID)
+OTHER_TENANT_ID = UUID("00000000-0000-0000-0000-000000002999")
 
 
 def build_session() -> Session:
@@ -99,4 +102,35 @@ def test_sql_audit_sink_tolerates_unknown_valid_actor_id():
     audit_log = session.scalars(select(AuditLogORM)).one()
     assert audit_log.user_id is None
     assert audit_log.reason == "Persist audit without local actor row"
+    assert audit_log.details["actor_user_id"] == str(USER_ID)
+
+
+def test_sql_audit_sink_treats_other_tenant_actor_as_metadata():
+    session = build_session()
+    session.add(
+        UserORM(
+            id=USER_ID,
+            tenant_id=OTHER_TENANT_ID,
+            email="admin@example.com",
+            display_name="Admin",
+            status="active",
+        )
+    )
+    session.commit()
+    sink = SqlAlchemyAuditSink(session, tenant_id=DEFAULT_TENANT_ID)
+
+    record_audit_event(
+        sink=sink,
+        actor=principal(),
+        event_type=AuditEventType.CHANNEL_UPDATED,
+        entity_type="youtube_channel",
+        entity_id="channel-tv-a",
+        scope=AccessScope.company("company-tv-a"),
+        reason="Persist audit for cross-tenant actor",
+        details={},
+    )
+    session.commit()
+
+    audit_log = session.scalars(select(AuditLogORM)).one()
+    assert audit_log.user_id is None
     assert audit_log.details["actor_user_id"] == str(USER_ID)

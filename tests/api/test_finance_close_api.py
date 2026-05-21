@@ -20,8 +20,10 @@ from ums_smart_revenue.finance.month_close_readiness import (
     FinanceCloseReadiness,
     SqlAlchemyFinanceCloseReadinessService,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 USER_ID = UUID("00000000-0000-0000-0000-000000005001")
+DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 def auth_headers(
@@ -62,6 +64,11 @@ def seed_database(database_url: str) -> None:
         session.commit()
 
 
+def close_key(month: str) -> tuple[UUID, str]:
+    """Return the current default tenant finance-close identity key."""
+    return (DEFAULT_TENANT_UUID, month)
+
+
 def test_finance_close_entry_to_api_copies_allocation_rule_payload():
     """Serializer copies allocation-rule payloads instead of sharing dicts."""
     payload = {"basis": "gross_revenue_usd"}
@@ -97,7 +104,7 @@ def test_finance_admin_can_lock_month_with_audit(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        close = session.get(FinanceMonthCloseORM, "2026-03")
+        close = session.get(FinanceMonthCloseORM, close_key("2026-03"))
         audit_log = session.scalars(select(AuditLogORM)).one()
 
     assert response.status_code == 200
@@ -122,7 +129,7 @@ def test_finance_close_rejects_blank_lock_reason_before_state_change(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        close = session.get(FinanceMonthCloseORM, "2026-03")
+        close = session.get(FinanceMonthCloseORM, close_key("2026-03"))
         audit_logs = session.scalars(select(AuditLogORM)).all()
 
     assert response.status_code == 422
@@ -147,7 +154,7 @@ def test_finance_close_rejects_malformed_actor_id_before_state_change(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        close = session.get(FinanceMonthCloseORM, "2026-03")
+        close = session.get(FinanceMonthCloseORM, close_key("2026-03"))
         audit_logs = session.scalars(select(AuditLogORM)).all()
 
     assert response.status_code == 400
@@ -187,7 +194,7 @@ def test_get_finance_close_does_not_create_missing_month(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        close = session.get(FinanceMonthCloseORM, "2026-03")
+        close = session.get(FinanceMonthCloseORM, close_key("2026-03"))
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Finance month close record not found"
@@ -601,7 +608,7 @@ def test_finance_approver_can_unlock_month_with_audit(tmp_path):
     )
 
     with Session(engine) as session:
-        close = session.get(FinanceMonthCloseORM, "2026-03")
+        close = session.get(FinanceMonthCloseORM, close_key("2026-03"))
         audit_log = session.scalars(select(AuditLogORM)).one()
 
     assert response.status_code == 200
@@ -670,7 +677,7 @@ def test_finance_close_rejects_blank_allocation_method_before_state_change(tmp_p
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        close = session.get(FinanceMonthCloseORM, "2026-03")
+        close = session.get(FinanceMonthCloseORM, close_key("2026-03"))
         audit_logs = session.scalars(select(AuditLogORM)).all()
 
     assert response.status_code == 422
@@ -697,7 +704,7 @@ def test_finance_admin_can_record_allocation_rule_metadata_with_audit(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        close = session.get(FinanceMonthCloseORM, "2026-03")
+        close = session.get(FinanceMonthCloseORM, close_key("2026-03"))
         audit_log = session.scalars(select(AuditLogORM)).one()
 
     assert response.status_code == 200
@@ -730,7 +737,7 @@ def test_allocation_rule_allows_non_uuid_gateway_actor_with_audit(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        close = session.get(FinanceMonthCloseORM, "2026-03")
+        close = session.get(FinanceMonthCloseORM, close_key("2026-03"))
         audit_log = session.scalars(select(AuditLogORM)).one()
 
     assert response.status_code == 200

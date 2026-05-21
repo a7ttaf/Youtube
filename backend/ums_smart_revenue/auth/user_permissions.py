@@ -13,6 +13,10 @@ from ums_smart_revenue.db.security_models import (
     UserORM,
     UserPermissionGrantORM,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
+
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 _ORG_SCOPE_TYPES = frozenset(
     {
@@ -124,8 +128,10 @@ class UserPermissionGrantValidationError(UserPermissionGrantError):
 
 
 class SqlAlchemyUserPermissionGrantRepository:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        """Bind direct permission grants to an explicit or request tenant."""
         self._session = session
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def grant_permission(
         self,
@@ -154,6 +160,7 @@ class SqlAlchemyUserPermissionGrantRepository:
 
         existing = self._session.scalars(
             select(UserPermissionGrantORM).where(
+                UserPermissionGrantORM.tenant_id == self._tenant_id,
                 UserPermissionGrantORM.user_id == target_user_id,
                 UserPermissionGrantORM.permission_key == permission.value,
                 UserPermissionGrantORM.scope_id == scope.id,
@@ -167,6 +174,7 @@ class SqlAlchemyUserPermissionGrantRepository:
 
         row = UserPermissionGrantORM(
             id=uuid4(),
+            tenant_id=self._tenant_id,
             user_id=target_user_id,
             permission_key=permission.value,
             scope_id=scope.id,
@@ -181,6 +189,7 @@ class SqlAlchemyUserPermissionGrantRepository:
         except IntegrityError as exc:
             duplicate = self._session.scalars(
                 select(UserPermissionGrantORM).where(
+                    UserPermissionGrantORM.tenant_id == self._tenant_id,
                     UserPermissionGrantORM.user_id == target_user_id,
                     UserPermissionGrantORM.permission_key == permission.value,
                     UserPermissionGrantORM.scope_id == scope.id,
@@ -206,10 +215,20 @@ class SqlAlchemyUserPermissionGrantRepository:
         """
         target_user_id = _parse_uuid(user_id, field_name="user_id")
         grant_uuid = _parse_uuid(grant_id, field_name="grant_id")
-        row = self._session.get(UserPermissionGrantORM, grant_uuid)
+        row = self._session.scalars(
+            select(UserPermissionGrantORM).where(
+                UserPermissionGrantORM.id == grant_uuid,
+                UserPermissionGrantORM.tenant_id == self._tenant_id,
+            )
+        ).one_or_none()
         if row is None or row.user_id != target_user_id:
             raise UserPermissionGrantNotFoundError("Permission grant not found")
-        scope = self._session.get(AccessScopeORM, row.scope_id)
+        scope = self._session.scalars(
+            select(AccessScopeORM).where(
+                AccessScopeORM.id == row.scope_id,
+                AccessScopeORM.tenant_id == self._tenant_id,
+            )
+        ).one_or_none()
         if scope is None:
             raise UserPermissionGrantNotFoundError("Permission grant scope not found")
         return self._to_entry(row, scope)
@@ -237,6 +256,7 @@ class SqlAlchemyUserPermissionGrantRepository:
             select(UserPermissionGrantORM)
             .where(
                 UserPermissionGrantORM.id == grant_uuid,
+                UserPermissionGrantORM.tenant_id == self._tenant_id,
                 UserPermissionGrantORM.user_id == target_user_id,
             )
             .with_for_update()
@@ -259,22 +279,36 @@ class SqlAlchemyUserPermissionGrantRepository:
             if not self._user_exists_in_db(actor_user_id):
                 raise UserPermissionGrantNotFoundError("revoked_by not found") from exc
             raise
-        scope = self._session.get(AccessScopeORM, row.scope_id)
+        scope = self._session.scalars(
+            select(AccessScopeORM).where(
+                AccessScopeORM.id == row.scope_id,
+                AccessScopeORM.tenant_id == self._tenant_id,
+            )
+        ).one_or_none()
         if scope is None:
             raise UserPermissionGrantNotFoundError("Permission grant scope not found")
         return self._to_entry(row, scope)
 
     def _require_user(self, user_id: UUID, *, field_name: str = "user_id") -> UserORM:
         """Look up a user by UUID; raise UserPermissionGrantNotFoundError if absent."""
+        # Keep session.get so the identity-map cache fast-paths repeat lookups
+        # in the same transaction; defend cross-tenant access in Python rather
+        # than emitting a wider SELECT. Composite FKs introduced in fbf58e1
+        # already enforce tenant isolation at the schema level.
         row = self._session.get(UserORM, user_id)
-        if row is None:
+        if row is None or row.tenant_id != self._tenant_id:
             raise UserPermissionGrantNotFoundError(f"{field_name} not found")
         return row
 
     def _user_exists_in_db(self, user_id: UUID) -> bool:
         """Return whether a user row exists, bypassing identity-map-only hits."""
         return (
-            self._session.scalar(select(UserORM.id).where(UserORM.id == user_id))
+            self._session.scalar(
+                select(UserORM.id).where(
+                    UserORM.id == user_id,
+                    UserORM.tenant_id == self._tenant_id,
+                )
+            )
             is not None
         )
 
@@ -289,6 +323,7 @@ class SqlAlchemyUserPermissionGrantRepository:
             scope_type, scope_id
         )
         scope_filter = (
+            AccessScopeORM.tenant_id == self._tenant_id,
             AccessScopeORM.scope_type == normalized_scope_type,
             AccessScopeORM.scope_id.is_(None)
             if normalized_scope_id is None
@@ -302,6 +337,7 @@ class SqlAlchemyUserPermissionGrantRepository:
 
         new_row = AccessScopeORM(
             id=uuid4(),
+            tenant_id=self._tenant_id,
             scope_type=normalized_scope_type,
             scope_id=normalized_scope_id,
             label=_scope_label(normalized_scope_type, normalized_scope_id),
@@ -367,6 +403,28 @@ def _require_compatible_scope_type(permission: Permission, scope_type: str) -> N
             f"Permission {permission.value!r} cannot be granted to scope type "
             f"{normalized!r}; allowed: {allowed}"
         )
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Resolve tenant id from explicit param, request context, or bootstrap."""
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    """Normalize tenant constructor input into a UUID object."""
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise UserPermissionGrantValidationError(
+            "tenant_id must be a valid UUID"
+        ) from exc
 
 
 def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | None]:

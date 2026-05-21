@@ -133,8 +133,8 @@ def build_monthly_payment_match_summary(
                         "YouTube revenue and paid AdSense payments differ by "
                         f"{_decimal_to_api(abs(payment_gap))} for {month}."
                     ),
+                )
             )
-        )
 
     if unsupported_payment_currency_count:
         issues.append(

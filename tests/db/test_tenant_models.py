@@ -29,9 +29,7 @@ def test_tenants_table_columns_and_constraints():
     }
     assert expected_columns <= set(table.columns.keys())
 
-    not_null_columns = {
-        column.name for column in table.columns if not column.nullable
-    }
+    not_null_columns = {column.name for column in table.columns if not column.nullable}
     assert expected_columns <= not_null_columns
 
     constraint_names = {constraint.name for constraint in table.constraints}
@@ -58,9 +56,7 @@ def test_platform_admins_table_columns_and_constraints():
     }
     assert expected_columns <= set(table.columns.keys())
 
-    not_null_columns = {
-        column.name for column in table.columns if not column.nullable
-    }
+    not_null_columns = {column.name for column in table.columns if not column.nullable}
     assert expected_columns <= not_null_columns
 
     constraint_names = {constraint.name for constraint in table.constraints}
