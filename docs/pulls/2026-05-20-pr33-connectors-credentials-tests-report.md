@@ -36,7 +36,7 @@ A single new test file, `tests/connectors/test_credentials.py`, with **38 focuse
 | 1 | Read `connectors/credentials.py` (193 lines) | 538 passed | Confirmed tenant wiring on pre-check, INSERT, and list query. |
 | 2 | Read `ApiConnectorCredentialORM` definition | 538 passed | Confirmed `(tenant_id, connector_key, account_id)` unique constraint. |
 | 3 | Read `tests/api/test_connectors_api.py` | 538 passed | Adopted UUID and seed-shape conventions. |
-| 4 | Create `tests/connectors/` directory; write `test_credentials.py` (~450 lines after format, 38 tests) | 576 passed | One E501 long-line fixed; one format reflow. |
+| 4 | Create `tests/connectors/` directory; write `test_credentials.py` (448 lines after format, 38 tests) | 576 passed | One E501 long-line fixed; one format reflow. |
 | 5 | `ruff check` + `ruff format --check` | 576 passed | All clean. |
 | 6 | Final full gate | 576 passed | Baseline preserved. |
 | 7 | Commit `b13222d`, push, open PR #33 | — | — |
