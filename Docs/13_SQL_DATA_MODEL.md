@@ -67,9 +67,10 @@ channel_group_members (
 
 `channel_group_members` keeps the implemented primary key
 `(group_id, channel_id)` because both referenced `id` columns remain globally
-unique primary keys. Tenant isolation is enforced by `tenant_id`, the composite
-foreign keys, and `ix_channel_group_members_tenant_id`; the primary key is not
-the tenant-isolation boundary.
+unique primary keys. Tenant isolation is enforced by the `tenant_id` column,
+composite foreign keys, and tenant-scoped query predicates. The
+`ix_channel_group_members_tenant_id` index only supports tenant-bound read
+performance; it is not an enforcement boundary.
 
 User table constraints:
 

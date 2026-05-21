@@ -403,12 +403,13 @@ def test_database_principal_rejects_mismatched_explicit_tenant(tmp_path):
     seed_database(database_url)
     engine = create_engine(database_url)
 
-    with Session(engine) as session:
-        with pytest.raises(PrincipalNotFoundError, match="User is not registered"):
-            SqlAlchemyPrincipalLoader(session).load(
-                user_id=str(ACTOR_ID),
-                tenant_id=str(OTHER_TENANT_ID),
-            )
+    with Session(engine) as session, pytest.raises(
+        PrincipalNotFoundError, match="User is not registered"
+    ):
+        SqlAlchemyPrincipalLoader(session).load(
+            user_id=str(ACTOR_ID),
+            tenant_id=str(OTHER_TENANT_ID),
+        )
 
 
 def test_database_principal_rejects_disabled_user_with_super_owner_header(tmp_path):
