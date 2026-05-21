@@ -43,9 +43,11 @@ from __future__ import annotations
 import asyncio
 import logging
 import math
+import weakref
 from collections.abc import Callable, Iterable
 from concurrent.futures import CancelledError as FutureCancelledError
-from functools import partial
+from concurrent.futures import Future as ConcurrentFuture
+from concurrent.futures import ThreadPoolExecutor
 
 from sqlalchemy.orm import Session
 from starlette.datastructures import Headers, MutableHeaders
@@ -105,9 +107,24 @@ class TenantResolverMiddleware:
         self._authorization_timeout_seconds = _validate_timeout(
             "authorization_timeout_seconds", authorization_timeout_seconds
         )
-        self._blocking_tasks = asyncio.BoundedSemaphore(
-            _validate_positive_int("max_blocking_tasks", max_blocking_tasks)
+        blocking_task_limit = _validate_positive_int(
+            "max_blocking_tasks", max_blocking_tasks
         )
+        self._blocking_tasks = asyncio.BoundedSemaphore(blocking_task_limit)
+        self._blocking_executor = ThreadPoolExecutor(
+            max_workers=blocking_task_limit,
+            thread_name_prefix="ums-tenant-resolver",
+        )
+        self._blocking_executor_finalizer = weakref.finalize(
+            self,
+            self._blocking_executor.shutdown,
+            wait=False,
+            cancel_futures=True,
+        )
+
+    def close(self) -> None:
+        """Shut down the private resolver executor when the app is torn down."""
+        self._blocking_executor_finalizer()
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Resolve the tenant, set request context, and fail closed on lookup errors."""
@@ -312,29 +329,34 @@ class TenantResolverMiddleware:
             self._blocking_tasks.release()
             raise TimeoutError
         try:
-            future = self._submit_blocking(loop, func, *args)
+            worker_future = self._submit_blocking(func, *args)
         except BaseException:
             self._blocking_tasks.release()
             raise
-        future.add_done_callback(lambda _future: self._blocking_tasks.release())
+        worker_future.add_done_callback(lambda _future: self._release_admission(loop))
         remaining = deadline - loop.time()
         if remaining <= 0:
-            future.cancel()
             raise TimeoutError
+        future = asyncio.wrap_future(worker_future, loop=loop)
         try:
             return await asyncio.wait_for(future, timeout=remaining)
         except TimeoutError:
-            future.cancel()
             raise
 
     def _submit_blocking(
         self,
-        loop: asyncio.AbstractEventLoop,
         func: Callable[..., object],
         *args: object,
-    ) -> asyncio.Future:
-        """Submit blocking work to the loop executor."""
-        return loop.run_in_executor(None, partial(func, *args))
+    ) -> ConcurrentFuture[object]:
+        """Submit blocking work to the resolver's bounded executor."""
+        return self._blocking_executor.submit(func, *args)
+
+    def _release_admission(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Release one blocking-work admission slot from the event-loop thread."""
+        try:
+            loop.call_soon_threadsafe(self._blocking_tasks.release)
+        except RuntimeError:
+            pass
 
 
 def _normalise_bypass_paths(bypass_paths: Iterable[str]) -> tuple[str, ...]:

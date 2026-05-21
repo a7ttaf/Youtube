@@ -5,6 +5,7 @@ import logging
 import threading
 import time
 from collections.abc import Callable, Iterator
+from concurrent.futures import Future as ConcurrentFuture
 from datetime import UTC, datetime
 from typing import cast
 from uuid import uuid4
@@ -796,45 +797,55 @@ def test_tenant_lookup_timeout_returns_503(caplog: pytest.LogCaptureFixture):
     assert "Tenant registry lookup timed out" in caplog.text
 
 
-def test_blocking_timeout_cancels_future_and_releases_admission_slot():
-    """Timed-out blocking futures are cancelled so later work can enter."""
-    submitted: list[asyncio.Future] = []
+def test_blocking_timeout_keeps_slot_until_worker_finishes():
+    """Timed-out executor workers keep admission until the thread is done."""
+    started = threading.Event()
+    release_worker = threading.Event()
+    finished = threading.Event()
 
-    class PendingSubmissionMiddleware(TenantResolverMiddleware):
-        """Resolver variant that returns never-completing futures."""
+    def slow_lookup() -> str:
+        """Hold the only worker slot until the test releases it."""
+        started.set()
+        release_worker.wait(timeout=1.0)
+        finished.set()
+        return "slow"
 
-        def _submit_blocking(
-            self,
-            loop: asyncio.AbstractEventLoop,
-            func: Callable[..., object],
-            *args: object,
-        ) -> asyncio.Future:
-            """Return a pending future instead of submitting executor work."""
-            del func, args
-            future = loop.create_future()
-            submitted.append(future)
-            return future
-
-    middleware = PendingSubmissionMiddleware(
+    middleware = TenantResolverMiddleware(
         FastAPI(),
         session_factory=lambda: None,
         authorize_tenant=lambda _scope, _slug: True,
         max_blocking_tasks=1,
     )
 
-    async def run_twice() -> None:
-        """Verify one timed-out future does not consume the only slot forever."""
-        for _ in range(2):
+    async def run_sequence() -> None:
+        """Verify timed-out work still owns the only worker slot."""
+        try:
             with pytest.raises(TimeoutError):
                 await middleware._run_blocking_with_timeout(
-                    lambda: None,
+                    slow_lookup,
                     timeout=0.01,
                 )
+            assert await asyncio.to_thread(started.wait, 1.0)
+            assert not finished.is_set()
 
-    asyncio.run(run_twice())
+            with pytest.raises(TimeoutError):
+                await middleware._run_blocking_with_timeout(
+                    lambda: "second",
+                    timeout=0.02,
+                )
+        finally:
+            release_worker.set()
 
-    assert len(submitted) == 2
-    assert all(future.cancelled() for future in submitted)
+        assert await asyncio.to_thread(finished.wait, 1.0)
+        assert (
+            await middleware._run_blocking_with_timeout(
+                lambda: "third",
+                timeout=0.2,
+            )
+            == "third"
+        )
+
+    asyncio.run(run_sequence())
 
 
 def test_session_close_errors_do_not_mask_lookup_errors(
@@ -945,14 +956,13 @@ def test_authorizer_executor_failures_fail_closed_and_log(
 
         def _submit_blocking(
             self,
-            loop: asyncio.AbstractEventLoop,
             func: Callable[..., object],
             *args: object,
-        ) -> asyncio.Future:
+        ) -> ConcurrentFuture[object]:
             """Raise once the authorization callback is submitted."""
             if getattr(func, "__name__", "") == "_is_authorized":
                 raise ExecutorSubmissionError
-            return super()._submit_blocking(loop, func, *args)
+            return super()._submit_blocking(func, *args)
 
     app.add_middleware(
         BrokenAuthorizationExecutorMiddleware,
@@ -985,10 +995,9 @@ def test_blocking_submission_failures_release_admission_slot():
 
         def _submit_blocking(
             self,
-            loop: asyncio.AbstractEventLoop,
             func: Callable[..., object],
             *args: object,
-        ) -> asyncio.Future:
+        ) -> ConcurrentFuture[object]:
             """Raise before a future can receive the done callback."""
             calls.append(func.__name__)
             raise ExecutorSubmissionError
