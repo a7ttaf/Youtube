@@ -248,6 +248,7 @@ payment, bank, or allocation assumptions.
 ```sql
 number_explanations (
   id uuid primary key,
+  tenant_id uuid not null references tenants(id),
   month text,
   entity_type text,
   entity_id text,
@@ -258,8 +259,14 @@ number_explanations (
   confidence text,
   components jsonb,
   warnings jsonb,
-  created_at timestamp
+  created_at timestamp,
+  updated_at timestamp,
+  unique (tenant_id, month, entity_type, entity_id, metric)
 );
+
+-- Tenant scope: fk_number_explanations_tenant_id keeps rows attached to
+-- tenants(id), uq_number_explanations_entity_metric_month includes tenant_id,
+-- and ix_number_explanations_tenant_id supports tenant-bound reads.
 
 revenue_manual_overrides (
   id uuid primary key,
