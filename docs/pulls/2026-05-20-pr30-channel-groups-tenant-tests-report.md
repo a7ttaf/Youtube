@@ -69,7 +69,7 @@ are the authoritative validated numbers for the current branch head.
 - Conflict-marker scan (`git grep -nE '^(<{7}|={7}|>{7})( |$)' -- ':!docs/pulls/' ':!*.md'`) — clean.
 - Working-tree conflict-marker scan over new file — clean.
 - Import smoke: `from ums_smart_revenue.org.sql_channel_groups import SqlAlchemyChannelGroupRegistry` — ok.
-- Alembic linear history — single head `20260518_0001`.
+- Alembic linear history — single head `20260518_0001` on the historical PR #30 branch. Integrated branches after PR #36 use merge head `20260521_0001`.
 
 ## Architecture & quality posture
 

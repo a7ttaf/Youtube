@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.report_models import RawReportFileORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 ALLOWED_PARSE_STATUSES = frozenset({"DOWNLOADED", "PARSED", "FAILED", "QUARANTINED"})
@@ -69,9 +70,10 @@ class RawReportFileValidationError(RawReportFileError):
 
 
 class SqlAlchemyRawReportFileRepository:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        """Bind raw report file metadata operations to one tenant."""
         self._session = session
-        self._tenant_id = _DEFAULT_TENANT_UUID
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def register_file(
         self,
@@ -244,6 +246,28 @@ def _parse_uuid(value: str, *, field_name: str = "raw_report_file_id") -> UUID:
     except ValueError as exc:
         raise RawReportFileValidationError(
             f"{field_name} must be a valid UUID"
+        ) from exc
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Resolve tenant id from explicit param, request context, or bootstrap."""
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    """Normalize tenant constructor input into a UUID object."""
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise RawReportFileValidationError(
+            "tenant_id must be a valid UUID"
         ) from exc
 
 

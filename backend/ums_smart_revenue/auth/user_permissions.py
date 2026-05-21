@@ -14,6 +14,7 @@ from ums_smart_revenue.db.security_models import (
     UserPermissionGrantORM,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
@@ -127,9 +128,10 @@ class UserPermissionGrantValidationError(UserPermissionGrantError):
 
 
 class SqlAlchemyUserPermissionGrantRepository:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        """Bind direct permission grants to an explicit or request tenant."""
         self._session = session
-        self._tenant_id = _DEFAULT_TENANT_UUID
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def grant_permission(
         self,
@@ -401,6 +403,28 @@ def _require_compatible_scope_type(permission: Permission, scope_type: str) -> N
             f"Permission {permission.value!r} cannot be granted to scope type "
             f"{normalized!r}; allowed: {allowed}"
         )
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Resolve tenant id from explicit param, request context, or bootstrap."""
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    """Normalize tenant constructor input into a UUID object."""
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise UserPermissionGrantValidationError(
+            "tenant_id must be a valid UUID"
+        ) from exc
 
 
 def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | None]:

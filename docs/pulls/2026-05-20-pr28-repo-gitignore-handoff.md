@@ -47,7 +47,7 @@ Second commit (this artifact set):
 - `git diff --check` — clean (exit 0). Staged-diff `git diff --cached --check` — clean.
 - Conflict-marker scan (tracked + working tree) — clean.
 - Import smoke (`from ums_smart_revenue.app import app`) — ok.
-- `alembic heads` — single linear head `20260518_0001`.
+- `alembic heads` — single linear head `20260518_0001` on the historical PR #28 branch. Integrated branches after PR #36 use merge head `20260521_0001`.
 - `git ls-files | git check-ignore --stdin` — **empty** (no tracked file becomes ignored).
 - Pattern audit for user-owned files (`AGENTS.md`, `docs/AGENT_VALIDATION_PLAYBOOK.md`) — neither matched.
 

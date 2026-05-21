@@ -16,6 +16,8 @@ from ums_smart_revenue.reports.raw_files import (
     SqlAlchemyRawReportFileRepository,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import TENANT_CTX
+from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 OTHER_TENANT_UUID = UUID("00000000-0000-0000-0000-000000071999")
@@ -26,6 +28,20 @@ def build_session() -> Session:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     ReportBase.metadata.create_all(engine)
     return Session(engine)
+
+
+def tenant(tenant_id: UUID = OTHER_TENANT_UUID) -> Tenant:
+    now = datetime.now(UTC)
+    return Tenant(
+        id=tenant_id,
+        slug="other",
+        display_name="Other Tenant",
+        primary_currency="USD",
+        status=TenantStatus.ACTIVE,
+        onboarding_at=now,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def register_defaults(
@@ -124,6 +140,20 @@ def test_register_file_stamps_tenant_and_persists_all_fields():
         assert entry.storage_uri == row.file_url
 
 
+def test_register_file_uses_ambient_tenant_context():
+    with build_session() as session:
+        token = TENANT_CTX.set(tenant())
+        try:
+            repo = SqlAlchemyRawReportFileRepository(session)
+            register_defaults(repo)
+            session.commit()
+        finally:
+            TENANT_CTX.reset(token)
+
+        row = session.scalars(select(RawReportFileORM)).one()
+        assert row.tenant_id == OTHER_TENANT_UUID
+
+
 def test_register_file_strips_whitespace_from_normalized_fields():
     with build_session() as session:
         repo = SqlAlchemyRawReportFileRepository(session)
@@ -195,8 +225,9 @@ def test_register_file_with_same_key_under_different_tenants_does_not_conflict()
         register_defaults(primary_repo)
         session.commit()
 
-        other_repo = SqlAlchemyRawReportFileRepository(session)
-        other_repo._tenant_id = OTHER_TENANT_UUID  # noqa: SLF001
+        other_repo = SqlAlchemyRawReportFileRepository(
+            session, tenant_id=OTHER_TENANT_UUID
+        )
         register_defaults(other_repo)
         session.commit()
 
@@ -322,8 +353,9 @@ def test_get_file_raises_validation_for_malformed_uuid():
 
 def test_get_file_does_not_surface_other_tenants_row_via_id_lookup():
     with build_session() as session:
-        other_repo = SqlAlchemyRawReportFileRepository(session)
-        other_repo._tenant_id = OTHER_TENANT_UUID  # noqa: SLF001
+        other_repo = SqlAlchemyRawReportFileRepository(
+            session, tenant_id=OTHER_TENANT_UUID
+        )
         foreign = register_defaults(other_repo, checksum="sha256:foreign")
         session.commit()
 
@@ -508,8 +540,9 @@ def test_list_files_does_not_surface_cross_tenant_rows():
         register_defaults(primary_repo, checksum="sha256:primary-2")
         session.commit()
 
-        other_repo = SqlAlchemyRawReportFileRepository(session)
-        other_repo._tenant_id = OTHER_TENANT_UUID  # noqa: SLF001
+        other_repo = SqlAlchemyRawReportFileRepository(
+            session, tenant_id=OTHER_TENANT_UUID
+        )
         register_defaults(other_repo, checksum="sha256:foreign-1")
         register_defaults(other_repo, checksum="sha256:foreign-2")
         register_defaults(other_repo, checksum="sha256:foreign-3")
@@ -548,3 +581,11 @@ def test_repository_default_tenant_id_matches_constant():
     with build_session() as session:
         repo = SqlAlchemyRawReportFileRepository(session)
         assert repo._tenant_id == DEFAULT_TENANT_UUID  # noqa: SLF001
+
+
+def test_repository_rejects_malformed_tenant_id():
+    with build_session() as session:
+        with pytest.raises(
+            RawReportFileValidationError, match="tenant_id must be a valid UUID"
+        ):
+            SqlAlchemyRawReportFileRepository(session, tenant_id="not-a-uuid")

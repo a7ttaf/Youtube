@@ -12,6 +12,7 @@ from ums_smart_revenue.finance.reconciliation import SOURCE_PRIORITY
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_summary
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 ADJUSTED_GROSS_REVENUE_METRIC = "adjusted_gross_revenue_usd"
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
@@ -54,9 +55,10 @@ class NumberExplanationValidationError(NumberExplanationError):
 
 
 class SqlAlchemyNumberExplanationRepository:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        """Bind number explanation upserts to an explicit or request tenant."""
         self._session = session
-        self._tenant_id = _DEFAULT_TENANT_UUID
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def record_explanation(
         self, explanation: NumberExplanationEntry
@@ -197,6 +199,28 @@ def _confidence(
         "label": label,
         "score": _decimal_to_api(score),
     }
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Resolve tenant id from explicit param, request context, or bootstrap."""
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    """Normalize tenant constructor input into a UUID object."""
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise NumberExplanationValidationError(
+            "tenant_id must be a valid UUID"
+        ) from exc
 
 
 def _decimal_to_api(value: Decimal) -> str:

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
@@ -19,14 +20,31 @@ from ums_smart_revenue.finance.explanations import (
 from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntry
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import TENANT_CTX
+from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
+OTHER_TENANT_UUID = UUID("00000000-0000-0000-0000-000000094999")
 
 
 def build_session() -> Session:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     ExplanationBase.metadata.create_all(engine)
     return Session(engine)
+
+
+def tenant(tenant_id: UUID = OTHER_TENANT_UUID) -> Tenant:
+    now = datetime.now(UTC)
+    return Tenant(
+        id=tenant_id,
+        slug="other",
+        display_name="Other Tenant",
+        primary_currency="USD",
+        status=TenantStatus.ACTIVE,
+        onboarding_at=now,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def revenue_fact(
@@ -200,6 +218,33 @@ def test_record_explanation_inserts_new_row_with_tenant_stamp_and_all_fields():
         assert row.updated_at == row.created_at
 
 
+def test_record_explanation_uses_ambient_tenant_context():
+    with build_session() as session:
+        token = TENANT_CTX.set(tenant())
+        try:
+            repo = SqlAlchemyNumberExplanationRepository(session)
+            repo.record_explanation(
+                NumberExplanationEntry(
+                    month="2026-03",
+                    entity_type="channel",
+                    entity_id="channel-tv-a",
+                    metric=ADJUSTED_GROSS_REVENUE_METRIC,
+                    value=Decimal("1125.50"),
+                    currency="USD",
+                    formula="baseline + override",
+                    confidence={"label": "HIGH", "score": "0.98"},
+                    components=[],
+                    warnings=[],
+                )
+            )
+            session.commit()
+        finally:
+            TENANT_CTX.reset(token)
+
+        row = session.scalars(select(NumberExplanationORM)).one()
+        assert row.tenant_id == OTHER_TENANT_UUID
+
+
 def test_record_explanation_updates_existing_row_in_place():
     with build_session() as session:
         repo = SqlAlchemyNumberExplanationRepository(session)
@@ -325,8 +370,9 @@ def test_record_explanation_isolates_writes_between_tenants():
         )
 
         other_tenant = UUID("00000000-0000-0000-0000-000000061999")
-        other_repo = SqlAlchemyNumberExplanationRepository(session)
-        other_repo._tenant_id = other_tenant  # noqa: SLF001
+        other_repo = SqlAlchemyNumberExplanationRepository(
+            session, tenant_id=other_tenant
+        )
         other_repo.record_explanation(
             NumberExplanationEntry(
                 month="2026-03",
@@ -355,8 +401,9 @@ def test_record_explanation_isolates_writes_between_tenants():
 def test_record_explanation_does_not_update_other_tenants_row():
     with build_session() as session:
         other_tenant = UUID("00000000-0000-0000-0000-000000061998")
-        other_repo = SqlAlchemyNumberExplanationRepository(session)
-        other_repo._tenant_id = other_tenant  # noqa: SLF001
+        other_repo = SqlAlchemyNumberExplanationRepository(
+            session, tenant_id=other_tenant
+        )
         other_repo.record_explanation(
             NumberExplanationEntry(
                 month="2026-03",
@@ -668,3 +715,11 @@ def test_repository_default_tenant_id_matches_constant():
     with build_session() as session:
         repo = SqlAlchemyNumberExplanationRepository(session)
         assert repo._tenant_id == UUID(UMS_TENANT_ID)  # noqa: SLF001
+
+
+def test_repository_rejects_malformed_tenant_id():
+    with build_session() as session:
+        with pytest.raises(
+            NumberExplanationValidationError, match="tenant_id must be a valid UUID"
+        ):
+            SqlAlchemyNumberExplanationRepository(session, tenant_id="not-a-uuid")

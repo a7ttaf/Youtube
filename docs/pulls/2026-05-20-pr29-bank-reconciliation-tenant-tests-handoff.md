@@ -50,7 +50,7 @@ Second commit (this artifact set):
 - `git diff --check` — clean (exit 0). `git diff --cached --check` — clean.
 - Conflict-marker scan (tracked + working tree) — clean.
 - Import smoke (`from ums_smart_revenue.finance.bank_reconciliation import SqlAlchemyBankReconciliationRepository, BankReconciliationLockedMonthError, BankReconciliationValidationError`) — ok.
-- `alembic heads` — single linear head `20260518_0001`.
+- `alembic heads` — single linear head `20260518_0001` on the historical PR #29 branch. Integrated branches after PR #36 use merge head `20260521_0001`.
 
 ## Failures / skipped gates
 
@@ -101,4 +101,4 @@ PYTHONPATH=backend python -c "from ums_smart_revenue.finance.bank_reconciliation
 PYTHONPATH=backend python -m alembic -c alembic.ini heads
 ```
 
-Expected: 13 tests pass on the new file, 520 total on the full suite, diff clean, ruff/format clean on the new file, import smoke ok, single alembic head.
+Expected on the historical PR #29 branch: 13 tests pass on the new file, 520 total on the full suite, diff clean, ruff/format clean on the new file, import smoke ok, single alembic head `20260518_0001`. Integrated branches after PR #36 use merge head `20260521_0001`.

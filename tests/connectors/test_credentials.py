@@ -1,7 +1,9 @@
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.credentials import (
@@ -12,6 +14,7 @@ from ums_smart_revenue.connectors.credentials import (
     ConnectorCredentialEntry,
     ConnectorCredentialValidationError,
     SqlAlchemyConnectorCredentialRepository,
+    _is_foreign_key_integrity_error,
     is_external_secret_ref,
 )
 from ums_smart_revenue.db.security_models import (
@@ -20,6 +23,8 @@ from ums_smart_revenue.db.security_models import (
     UserORM,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import TENANT_CTX
+from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 OTHER_TENANT_UUID = UUID("00000000-0000-0000-0000-000000081999")
@@ -33,6 +38,20 @@ def build_session() -> Session:
     session = Session(engine)
     seed_actor_user(session)
     return session
+
+
+def tenant(tenant_id: UUID = OTHER_TENANT_UUID) -> Tenant:
+    now = datetime.now(UTC)
+    return Tenant(
+        id=tenant_id,
+        slug="other",
+        display_name="Other Tenant",
+        primary_currency="USD",
+        status=TenantStatus.ACTIVE,
+        onboarding_at=now,
+        created_at=now,
+        updated_at=now,
+    )
 
 
 def seed_actor_user(
@@ -192,6 +211,23 @@ def test_create_credential_stamps_tenant_and_persists_all_fields():
         assert entry.status == "active"
 
 
+def test_create_credential_uses_ambient_tenant_context():
+    with build_session() as session:
+        seed_actor_user(
+            session, actor_user_id=OTHER_ACTOR_USER_ID, tenant_id=OTHER_TENANT_UUID
+        )
+        token = TENANT_CTX.set(tenant())
+        try:
+            repo = SqlAlchemyConnectorCredentialRepository(session)
+            create_default(repo, actor_user_id=OTHER_ACTOR_USER_ID)
+            session.commit()
+        finally:
+            TENANT_CTX.reset(token)
+
+        row = session.scalars(select(ApiConnectorCredentialORM)).one()
+        assert row.tenant_id == OTHER_TENANT_UUID
+
+
 def test_create_credential_returns_entry_without_exposing_secret_ref_value():
     with build_session() as session:
         repo = SqlAlchemyConnectorCredentialRepository(session)
@@ -253,8 +289,9 @@ def test_create_credential_same_key_under_different_tenants_does_not_conflict():
         create_default(primary_repo)
         session.commit()
 
-        other_repo = SqlAlchemyConnectorCredentialRepository(session)
-        other_repo._tenant_id = OTHER_TENANT_UUID  # noqa: SLF001
+        other_repo = SqlAlchemyConnectorCredentialRepository(
+            session, tenant_id=OTHER_TENANT_UUID
+        )
         seed_actor_user(
             session, actor_user_id=OTHER_ACTOR_USER_ID, tenant_id=OTHER_TENANT_UUID
         )
@@ -293,6 +330,20 @@ def test_create_credential_rejects_empty_actor_user_id():
         repo = SqlAlchemyConnectorCredentialRepository(session)
         with pytest.raises(ConnectorCredentialValidationError):
             create_default(repo, actor_user_id="")
+
+
+def test_create_credential_rejects_actor_user_from_another_tenant():
+    with build_session() as session:
+        seed_actor_user(
+            session, actor_user_id=OTHER_ACTOR_USER_ID, tenant_id=OTHER_TENANT_UUID
+        )
+        repo = SqlAlchemyConnectorCredentialRepository(session)
+
+        with pytest.raises(
+            ConnectorCredentialValidationError,
+            match="actor_user_id does not reference an existing user",
+        ):
+            create_default(repo, actor_user_id=OTHER_ACTOR_USER_ID)
 
 
 # -----------------------------------------------------------------------------
@@ -369,8 +420,9 @@ def test_list_credentials_does_not_surface_cross_tenant_rows():
         create_default(primary_repo, connector_key="adsense", account_id="primary-2")
         session.commit()
 
-        other_repo = SqlAlchemyConnectorCredentialRepository(session)
-        other_repo._tenant_id = OTHER_TENANT_UUID  # noqa: SLF001
+        other_repo = SqlAlchemyConnectorCredentialRepository(
+            session, tenant_id=OTHER_TENANT_UUID
+        )
         seed_actor_user(
             session, actor_user_id=OTHER_ACTOR_USER_ID, tenant_id=OTHER_TENANT_UUID
         )
@@ -481,6 +533,37 @@ def test_repository_default_tenant_id_matches_constant():
     with build_session() as session:
         repo = SqlAlchemyConnectorCredentialRepository(session)
         assert repo._tenant_id == DEFAULT_TENANT_UUID  # noqa: SLF001
+
+
+def test_repository_rejects_malformed_tenant_id():
+    with build_session() as session:
+        with pytest.raises(
+            ConnectorCredentialValidationError, match="tenant_id must be a valid UUID"
+        ):
+            SqlAlchemyConnectorCredentialRepository(session, tenant_id="not-a-uuid")
+
+
+@pytest.mark.parametrize(
+    "constraint_name",
+    [
+        "fk_api_connector_credentials_tenant_created_by",
+        "fk_api_connector_credentials_tenant_updated_by",
+    ],
+)
+def test_foreign_key_integrity_detection_includes_tenant_scoped_actor_constraints(
+    constraint_name,
+):
+    class _Diag:
+        def __init__(self, name: str) -> None:
+            self.constraint_name = name
+
+    class _Orig:
+        def __init__(self, name: str) -> None:
+            self.diag = _Diag(name)
+
+    assert _is_foreign_key_integrity_error(
+        IntegrityError("stmt", {}, _Orig(constraint_name))
+    )
 
 
 def test_max_credential_page_size_is_positive_integer():

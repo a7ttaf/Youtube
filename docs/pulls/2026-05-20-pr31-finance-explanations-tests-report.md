@@ -70,7 +70,7 @@ A single new test file, `tests/finance/test_explanations.py`, with **21 focused 
 - `git diff --check` and `git diff --cached --check` — clean.
 - Conflict-marker scan (tracked, working tree) — clean.
 - Import smoke: `from ums_smart_revenue.finance.explanations import SqlAlchemyNumberExplanationRepository, NumberExplanationEntry, NumberExplanationValidationError, build_channel_month_revenue_explanation, ADJUSTED_GROSS_REVENUE_METRIC` — ok.
-- Alembic linear history — single head `20260518_0001`.
+- Alembic linear history — single head `20260518_0001` on the historical PR #31 branch. Integrated branches after PR #36 use merge head `20260521_0001`.
 
 ## Architecture & quality posture
 

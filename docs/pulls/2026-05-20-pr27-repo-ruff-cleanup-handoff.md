@@ -12,7 +12,7 @@ Drive the whole-tree ruff gate from 652 errors → 0 across the UMS Smart Revenu
 
 ## Non-goals
 
-- No source behavior change. Pytest count is identical (490 baseline → 490 head).
+- No business-logic behavior change; one representational string change is documented below. Pytest count is identical (490 baseline → 490 head).
 - No tenant-scoping, finance, auth, audit, route, service, repository, DI provider, schema, or migration semantics changed.
 - No new dependencies. No `pyproject.toml`, `alembic.ini`, Docker, CI, or env config change.
 - No `Docs/*` architecture or API-spec updates (no behavioral contract change to document).
@@ -53,7 +53,7 @@ Second commit (this artifact set):
 - Import smoke (`PYTHONPATH=backend python -c "from ums_smart_revenue.app import app"`) — ok.
 - Renamed-symbol import smoke (`from ums_smart_revenue.auth.api_guards import AccessDeniedError, guarded_call, require_permission`) — ok.
 - StrEnum smoke (`str(Permission.VIEW_ANALYTICS)` returns `analytics.view` as expected) — ok.
-- `alembic heads` — single linear head `20260518_0001`.
+- `alembic heads` — single linear head `20260518_0001` on the historical PR #27 branch. Integrated branches after PR #36 use merge head `20260521_0001`.
 
 ## Failures / skipped gates
 

@@ -62,7 +62,7 @@ And the docstring `"""Fully reverse upgrade(): drop the revoke_reason column add
 
 These are docstring whitespace changes only — the function bodies are unchanged.
 
-### SQL CHECK constraint string concatenations — 6 alembic files
+### SQL CHECK constraint string concatenations — 7 constraints across 4 alembic files
 
 Long SQL CHECK constraint strings (>88 chars) were split into multiple concatenated Python string literals. Compile-time concatenation produces the identical literal SQL the database sees. Files:
 
@@ -71,7 +71,7 @@ Long SQL CHECK constraint strings (>88 chars) were split into multiple concatena
 - `manual_overrides.py` (approval-fields conjunction)
 - `export_jobs.py` (`export_type IN (...)`, scope_id required logic)
 
-### Long error-message strings — 4 backend files
+### Long error-message strings — 6 backend files
 
 Concatenated string breaks applied for >88 char user-visible error messages in:
 
@@ -84,7 +84,7 @@ Concatenated string breaks applied for >88 char user-visible error messages in:
 
 The user-facing error message TEXT is unchanged byte-for-byte. Only the source-code layout changed.
 
-### Test fixtures — 8 files
+### Test fixtures — 13 files
 
 Concatenated string breaks applied for >88 char strings in:
 

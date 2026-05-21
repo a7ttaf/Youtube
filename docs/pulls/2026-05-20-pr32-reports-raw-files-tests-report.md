@@ -27,7 +27,7 @@ A single new test file, `tests/reports/test_raw_files.py`, with **39 focused tes
 | Repository default | 1 | `_tenant_id` matches `UUID(UMS_TENANT_ID)` |
 | **Total** | **39** | |
 
-(Parametrized tests count: 39 logical tests, but `test_register_file_rejects_bad_string_inputs` adds 6 cases, `test_register_file_rejects_bad_report_month` adds 5, `test_register_file_rejects_storage_uri_outside_allowlist` adds 6 — so the actual pytest count is **39** total.)
+(Parametrized tests count: 39 logical test functions expand to **56 pytest cases**: `test_register_file_rejects_bad_string_inputs` adds 6 cases, `test_register_file_rejects_bad_report_month` adds 5, and `test_register_file_rejects_storage_uri_outside_allowlist` adds 6.)
 
 ## Phased execution
 
@@ -54,7 +54,7 @@ A single new test file, `tests/reports/test_raw_files.py`, with **39 focused tes
 - `git diff --check` and `git diff --cached --check` — clean.
 - Conflict-marker scan (tracked + working tree) — clean.
 - Import smoke: `SqlAlchemyRawReportFileRepository, RawReportFileEntry, RawReportFileNotFoundError, RawReportFileConflictError, RawReportFileValidationError, MAX_RAW_REPORT_FILE_PAGE_SIZE` — ok.
-- Alembic linear history — single head `20260518_0001`.
+- Alembic linear history — single head `20260518_0001` on the historical PR #32 branch. Integrated branches after PR #36 use merge head `20260521_0001`.
 
 ## Architecture & quality posture
 

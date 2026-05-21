@@ -53,7 +53,11 @@ def upgrade() -> None:
     op.create_check_constraint(
         "ck_export_jobs_artifact_all_or_none",
         "export_jobs",
-        "(artifact_filename IS NULL AND artifact_content_type IS NULL AND artifact_byte_size IS NULL AND artifact_checksum_sha256 IS NULL) OR (artifact_filename IS NOT NULL AND artifact_content_type IS NOT NULL AND artifact_byte_size IS NOT NULL AND artifact_checksum_sha256 IS NOT NULL)",
+        "(artifact_filename IS NULL AND artifact_content_type IS NULL "
+        "AND artifact_byte_size IS NULL AND artifact_checksum_sha256 IS NULL) "
+        "OR (artifact_filename IS NOT NULL AND artifact_content_type IS NOT NULL "
+        "AND artifact_byte_size IS NOT NULL "
+        "AND artifact_checksum_sha256 IS NOT NULL)",
     )
 
 

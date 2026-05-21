@@ -49,7 +49,7 @@ Second commit (this artifact set):
 - `git diff --check` and `git diff --cached --check` — clean.
 - Conflict-marker scan (tracked + working tree) — clean.
 - Import smoke (`from ums_smart_revenue.reports.raw_files import SqlAlchemyRawReportFileRepository, RawReportFileEntry, RawReportFileNotFoundError, RawReportFileConflictError, RawReportFileValidationError, MAX_RAW_REPORT_FILE_PAGE_SIZE`) — ok.
-- `alembic heads` — single linear head `20260518_0001`.
+- `alembic heads` — single linear head `20260518_0001` on the historical PR #32 branch. Integrated branches after PR #36 use merge head `20260521_0001`.
 
 ## Failures / skipped gates
 

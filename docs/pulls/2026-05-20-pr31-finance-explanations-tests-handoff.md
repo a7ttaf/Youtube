@@ -39,7 +39,7 @@ Second commit (this artifact set):
 ## Behavior changes
 
 - **At runtime: none.** Same `finance/explanations.py`.
-- **In CI / test count: +21 tests.** Pytest moves from 538 → 559.
+- **In CI / test count: +21 tests.** On the historical PR #31 branch, pytest moves from 538 → 559; integrated branches include later test suites and will have a higher current count.
 
 ## Tests run
 
@@ -48,13 +48,13 @@ Second commit (this artifact set):
 - `python -m ruff check tests/finance/test_explanations.py` — All checks passed.
 - `python -m ruff format --check backend tests` — 1 file unclean (`tests/finance/test_adsense_payments_tenant_scope.py`, pre-existing on base from PR #26 merge; not modified here).
 - `python -m ruff format --check tests/finance/test_explanations.py` — Already formatted.
-- `python -m pytest -q` — **559 passed, 7 warnings in 30s**. Baseline before this PR: 538 passed. Delta +21.
+- `python -m pytest -q` — **559 passed, 7 warnings in 30s** on the historical PR #31 branch. Baseline before this PR: 538 passed. Delta +21.
 - `python -m pytest -q tests/finance/test_explanations.py` — 21 passed in 0.25s.
 - `python -m pytest -q tests/finance/` — 92 passed (no regression on existing finance tests).
 - `git diff --check` — clean (exit 0). `git diff --cached --check` — clean.
 - Conflict-marker scan (tracked + working tree) — clean.
 - Import smoke (`from ums_smart_revenue.finance.explanations import SqlAlchemyNumberExplanationRepository, NumberExplanationEntry, NumberExplanationValidationError, build_channel_month_revenue_explanation, ADJUSTED_GROSS_REVENUE_METRIC`) — ok.
-- `alembic heads` — single linear head `20260518_0001`.
+- `alembic heads` — single linear head `20260518_0001` on the historical PR #31 branch. Integrated branches after PR #36 use merge head `20260521_0001`.
 
 ## Failures / skipped gates
 
@@ -109,4 +109,4 @@ PYTHONPATH=backend python -m alembic -c alembic.ini heads
 
 Assumes an activated virtualenv; prepend `path/to/venv/bin/` to `python` if needed.
 
-Expected: 21 tests pass on the new file, 559 total on the full suite, diff clean, ruff/format clean on the new file, import smoke ok, single alembic head.
+Expected on the historical PR #31 branch: 21 tests pass on the new file, 559 total on the full suite, diff clean, ruff/format clean on the new file, import smoke ok, single alembic head `20260518_0001`. Integrated branches after PR #36 use merge head `20260521_0001` and a higher full-suite count.

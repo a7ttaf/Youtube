@@ -7,6 +7,7 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM, UserORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 SECRET_REF_PREFIXES = (
     "secret-manager://",
@@ -62,9 +63,10 @@ class ConnectorCredentialValidationError(ConnectorCredentialError):
 
 
 class SqlAlchemyConnectorCredentialRepository:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        """Bind connector credential reads and writes to one tenant."""
         self._session = session
-        self._tenant_id = _DEFAULT_TENANT_UUID
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def list_credentials(
         self,
@@ -113,7 +115,13 @@ class SqlAlchemyConnectorCredentialRepository:
         actor_user_id: str,
     ) -> ConnectorCredentialEntry:
         actor_uuid = _parse_uuid(actor_user_id)
-        if self._session.get(UserORM, actor_uuid) is None:
+        actor_exists = self._session.scalar(
+            select(UserORM.id).where(
+                UserORM.id == actor_uuid,
+                UserORM.tenant_id == self._tenant_id,
+            )
+        )
+        if actor_exists is None:
             raise ConnectorCredentialValidationError(
                 "actor_user_id does not reference an existing user"
             )
@@ -185,6 +193,28 @@ def _parse_uuid(value: str) -> UUID:
         ) from exc
 
 
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Resolve tenant id from explicit param, request context, or bootstrap."""
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    """Normalize tenant constructor input into a UUID object."""
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise ConnectorCredentialValidationError(
+            "tenant_id must be a valid UUID"
+        ) from exc
+
+
 def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:
     diag = getattr(getattr(exc, "orig", None), "diag", None)
     constraint_name = getattr(diag, "constraint_name", None)
@@ -213,6 +243,8 @@ def _is_duplicate_credential_integrity_error(exc: IntegrityError) -> bool:
 _ACTOR_FK_CONSTRAINTS = frozenset({
     "fk_api_connector_credentials_created_by",
     "fk_api_connector_credentials_updated_by",
+    "fk_api_connector_credentials_tenant_created_by",
+    "fk_api_connector_credentials_tenant_updated_by",
 })
 
 

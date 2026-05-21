@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from types import TracebackType
 from typing import Never
 from uuid import UUID, uuid4
 
 import pytest
+from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.user_permissions import (
     SqlAlchemyUserPermissionGrantRepository,
@@ -13,14 +16,18 @@ from ums_smart_revenue.auth.user_permissions import (
 )
 from ums_smart_revenue.db.security_models import (
     AccessScopeORM,
+    SecurityBase,
     UserORM,
     UserPermissionGrantORM,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import TENANT_CTX
+from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 TARGET_ID = UUID("00000000-0000-0000-0000-000000015002")
 ACTOR_ID = UUID("00000000-0000-0000-0000-000000015001")
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
+OTHER_TENANT_ID = UUID("00000000-0000-0000-0000-000000015999")
 
 
 class _ScalarResult:
@@ -85,6 +92,62 @@ class _FkRaceSession:
 
     def flush(self) -> Never:
         raise IntegrityError("flush", {}, Exception("FOREIGN KEY constraint failed"))
+
+
+def _tenant(tenant_id: UUID = OTHER_TENANT_ID) -> Tenant:
+    now = datetime.now(UTC)
+    return Tenant(
+        id=tenant_id,
+        slug="other",
+        display_name="Other Tenant",
+        primary_currency="USD",
+        status=TenantStatus.ACTIVE,
+        onboarding_at=now,
+        created_at=now,
+        updated_at=now,
+    )
+
+
+def _seed_user(session: Session, user_id: UUID, tenant_id: UUID) -> None:
+    session.add(
+        UserORM(
+            id=user_id,
+            tenant_id=tenant_id,
+            email=f"{user_id}@example.com",
+            display_name="Tenant User",
+        )
+    )
+
+
+def test_grant_permission_uses_ambient_tenant_context(tmp_path):
+    engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / 'permissions.db').as_posix()}")
+    SecurityBase.metadata.create_all(engine)
+    with Session(engine) as setup:
+        _seed_user(setup, TARGET_ID, OTHER_TENANT_ID)
+        _seed_user(setup, ACTOR_ID, OTHER_TENANT_ID)
+        setup.commit()
+
+    with Session(engine) as session:
+        token = TENANT_CTX.set(_tenant())
+        try:
+            entry = SqlAlchemyUserPermissionGrantRepository(session).grant_permission(
+                user_id=str(TARGET_ID),
+                permission_key="analytics.view_confidence",
+                scope_type="company",
+                scope_id="company-tv-a",
+                granted_by=str(ACTOR_ID),
+                reason="Tenant-scoped permission grant",
+            )
+            session.commit()
+        finally:
+            TENANT_CTX.reset(token)
+
+        row = session.scalars(
+            select(UserPermissionGrantORM).where(
+                UserPermissionGrantORM.id == UUID(entry.id)
+            )
+        ).one()
+        assert row.tenant_id == OTHER_TENANT_ID
 
 
 def test_grant_permission_translates_target_user_fk_race_with_db_backed_lookup():

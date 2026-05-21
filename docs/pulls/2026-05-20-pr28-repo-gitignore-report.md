@@ -42,7 +42,7 @@ A single commit, `d59e429`, adds **byte-identical** content from `origin/main:.g
 - Conflict-marker scan (`git grep -nE '^(<{7}|={7}|>{7})( |$)' -- ':!docs/pulls/' ':!*.md'`) — clean.
 - Conflict-marker scan over working tree — clean.
 - Import smoke (`from ums_smart_revenue.app import app`) — ok.
-- Alembic linear history — single head `20260518_0001`.
+- Alembic linear history — single head `20260518_0001` on the historical PR #28 branch. Integrated branches after PR #36 use merge head `20260521_0001`.
 
 PR-specific:
 - `git ls-files \| git check-ignore --stdin` — **empty** (no tracked file becomes ignored).

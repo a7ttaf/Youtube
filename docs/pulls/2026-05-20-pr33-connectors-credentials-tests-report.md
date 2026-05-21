@@ -52,7 +52,7 @@ A single new test file, `tests/connectors/test_credentials.py`, with **38 focuse
 - `git diff --check` and `git diff --cached --check` — clean.
 - Conflict-marker scan (tracked + working tree) — clean.
 - Import smoke: 8 names from `ums_smart_revenue.connectors.credentials` — ok.
-- Alembic linear history — single head `20260518_0001`.
+- Alembic linear history — single head `20260518_0001` on the historical PR #33 branch. Integrated branches after PR #36 use merge head `20260521_0001`.
 
 ## Architecture & quality posture
 

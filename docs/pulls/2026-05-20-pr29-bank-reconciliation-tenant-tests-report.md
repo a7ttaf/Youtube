@@ -59,7 +59,7 @@ A single new test file, `tests/finance/test_bank_reconciliation_tenant_scope.py`
 - Conflict-marker scan (`git grep -nE '^(<{7}|={7}|>{7})( |$)' -- ':!docs/pulls/' ':!*.md'`) — clean.
 - Working-tree conflict-marker scan over new file — clean.
 - Import smoke: `from ums_smart_revenue.finance.bank_reconciliation import SqlAlchemyBankReconciliationRepository, BankReconciliationLockedMonthError, BankReconciliationValidationError` — ok.
-- Alembic linear history — single head `20260518_0001`.
+- Alembic linear history — single head `20260518_0001` as of the 2026-05-20 PR #29 branch. Integrated branches after PR #36 use merge head `20260521_0001`.
 
 ## Architecture & quality posture
 

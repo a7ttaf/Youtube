@@ -47,7 +47,7 @@ The mandate: drive the whole-tree gate green, not just the PR-touched files. No 
 - `git diff --check` — clean (exit 0). Pre-fix this gate was flagging 35 files' worth of CRLF as trailing whitespace.
 - Conflict-marker scan (both `git grep` over tracked and `grep -r` over working tree) — clean.
 - Import smoke: `from ums_smart_revenue.app import app` ok; renamed `AccessDeniedError` + PEP 695 `guarded_call` ok; `StrEnum`-based `Permission`, `RoleKey`, `ScopeType` ok.
-- Alembic linear history: single head `20260518_0001`, no branches.
+- Alembic linear history: single head `20260518_0001`, no branches, on the historical PR #27 branch. Integrated branches after PR #36 use merge head `20260521_0001`.
 
 ## Architecture & quality posture
 

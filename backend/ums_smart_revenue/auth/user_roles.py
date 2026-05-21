@@ -14,6 +14,7 @@ from ums_smart_revenue.db.security_models import (
     UserRoleAssignmentORM,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
@@ -65,9 +66,10 @@ class UserRoleAssignmentValidationError(UserRoleAssignmentError):
 
 
 class SqlAlchemyUserRoleAssignmentRepository:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        """Bind role assignment operations to an explicit or request tenant."""
         self._session = session
-        self._tenant_id = _DEFAULT_TENANT_UUID
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def assign_role(
         self,
@@ -210,7 +212,13 @@ class SqlAlchemyUserRoleAssignmentRepository:
         return row
 
     def _require_actor_user(self, user_id: UUID) -> None:
-        if self._session.get(UserORM, user_id) is None:
+        exists = self._session.scalar(
+            select(UserORM.id).where(
+                UserORM.id == user_id,
+                UserORM.tenant_id == self._tenant_id,
+            )
+        )
+        if exists is None:
             raise UserRoleAssignmentNotFoundError("Actor user not found")
 
     def _require_assignable_role(self, target_user: UserORM, role: RoleKey) -> None:
@@ -283,6 +291,28 @@ def _parse_uuid(value: str, *, field_name: str) -> UUID:
     except ValueError as exc:
         raise UserRoleAssignmentValidationError(
             f"{field_name} must be a valid UUID"
+        ) from exc
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Resolve tenant id from explicit param, request context, or bootstrap."""
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    """Normalize tenant constructor input into a UUID object."""
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise UserRoleAssignmentValidationError(
+            "tenant_id must be a valid UUID"
         ) from exc
 
 

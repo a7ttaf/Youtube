@@ -10,6 +10,7 @@ from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM
 from ums_smart_revenue.db.report_models import ExportJobORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 FINANCE_EXPORT_TYPES = frozenset(
@@ -119,9 +120,10 @@ class ExportJobTerminalStateError(ExportJobValidationError):
 
 
 class SqlAlchemyExportJobRepository:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        """Bind export job reads and writes to an explicit or request tenant."""
         self._session = session
-        self._tenant_id = _DEFAULT_TENANT_UUID
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     # ========================================================================
     # Purpose: Create an export job and freeze its resolved channel set so
@@ -320,7 +322,12 @@ class SqlAlchemyExportJobRepository:
 
     def _get_row(self, export_id: str) -> ExportJobORM:
         export_uuid = _parse_uuid(export_id, field_name="export_id")
-        row = self._session.get(ExportJobORM, export_uuid)
+        row = self._session.scalars(
+            select(ExportJobORM).where(
+                ExportJobORM.id == export_uuid,
+                ExportJobORM.tenant_id == self._tenant_id,
+            )
+        ).one_or_none()
         if row is None:
             raise ExportJobNotFoundError("Export job not found")
         return row
@@ -329,7 +336,10 @@ class SqlAlchemyExportJobRepository:
         export_uuid = _parse_uuid(export_id, field_name="export_id")
         statement = (
             select(ExportJobORM)
-            .where(ExportJobORM.id == export_uuid)
+            .where(
+                ExportJobORM.id == export_uuid,
+                ExportJobORM.tenant_id == self._tenant_id,
+            )
             .with_for_update()
         )
         row = self._session.execute(statement).scalar_one_or_none()
@@ -481,6 +491,26 @@ def _actor_identity_uuid(value: str, *, field_name: str = "actor_user_id") -> UU
         return actor_identity_uuid(value, field_name=field_name)
     except ValueError as exc:
         raise ExportJobValidationError(str(exc)) from exc
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Resolve tenant id from explicit param, request context, or bootstrap."""
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    """Normalize tenant constructor input into a UUID object."""
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise ExportJobValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _normalize_scope_channel_ids(

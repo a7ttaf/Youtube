@@ -1,5 +1,6 @@
 from uuid import UUID, uuid4
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.audit_service import AuditRecord
@@ -23,7 +24,17 @@ class SqlAlchemyAuditSink:
         raw_actor_user_id = record.user_id
         user_id = _parse_uuid_or_none(raw_actor_user_id)
         details = dict(record.details or {})
-        if user_id is None or self._session.get(UserORM, user_id) is None:
+        actor_exists = (
+            user_id is not None
+            and self._session.scalar(
+                select(UserORM.id).where(
+                    UserORM.id == user_id,
+                    UserORM.tenant_id == self._tenant_id,
+                )
+            )
+            is not None
+        )
+        if not actor_exists:
             details["actor_user_id"] = raw_actor_user_id
             user_id = None
         self._session.add(
