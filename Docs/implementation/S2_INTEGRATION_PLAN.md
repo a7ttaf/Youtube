@@ -127,7 +127,7 @@ Must run on the integration branch **before push**, in order:
    - If docker is available: `docker compose up -d postgres`, set `DATABASE_URL`, run `PYTHONPATH=backend python -m alembic upgrade head` (must reach single head), then exercise a round-trip using **one of** the two options below, then tear down the container. Record which option was used in the Phase 4 run log entry (`Docs/superpowers/runlog/2026-05-21-phase-4.md`).
      - **Option A — targeted (faster)**: downgrade to the recorded pre-merge head (`LAST_PRE_MERGE_HEAD`, captured from `alembic heads` against `origin/main` and `origin/pr/s2-4a-...` before the integration merge), then re-`upgrade head`. Exercises only the migrations introduced by the integration; failures point cleanly at the new chain.
        ```bash
-       export LAST_PRE_MERGE_HEAD=<sha>   # e.g. 20260513_0006 or 20260518_0001 — the head of the side you want to bounce against
+       export LAST_PRE_MERGE_HEAD=<alembic_revision>   # e.g. 20260513_0006 or 20260518_0001 — the alembic revision identifier of the side you want to bounce against (NOT a git commit SHA)
        PYTHONPATH=backend python -m alembic downgrade "$LAST_PRE_MERGE_HEAD"
        PYTHONPATH=backend python -m alembic upgrade head
        ```
@@ -162,7 +162,7 @@ The integration merge commit on `main` (recorded as `INTEGRATION_MERGE_SHA` in t
 1. Branch off origin/main: `git checkout -b revert/s2-integration origin/main`
 2. `git revert -m 1 <INTEGRATION_MERGE_SHA>` — `-m 1` because main is the first parent of the merge commit
 3. Push: `git push -u origin revert/s2-integration`
-4. Open revert PR: `gh pr create --base main --head revert/s2-integration --title "Revert S2 integration" --body "Reverts merge commit <SHA>. See run log Docs/superpowers/runlog/2026-05-21-phase-0.md."`
+4. Open revert PR: `gh pr create --base main --head revert/s2-integration --title "Revert S2 integration" --body "Reverts merge commit <SHA>. See run log Docs/superpowers/runlog/2026-05-21-phase-4.md."`
 5. Merge revert PR with `gh pr merge --merge`
 6. Alembic rollback if needed: against disposable PG, `PYTHONPATH=backend python -m alembic downgrade "$LAST_PRE_MERGE_HEAD"`. `LAST_PRE_MERGE_HEAD` is the pre-integration head captured during the validation gate (e.g., `20260513_0006` or `20260518_0001`) — see the Phase 4 run log entry. The merge migration is no-op and reversible.
 
