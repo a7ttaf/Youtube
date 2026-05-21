@@ -5,7 +5,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 def test_manual_override_migration_creates_revenue_override_table():
     migration = (
-        PROJECT_ROOT / "backend/ums_smart_revenue/db/alembic/versions/20260510_0005_manual_overrides.py"
+        PROJECT_ROOT
+        / "backend/ums_smart_revenue/db/alembic/versions"
+        / "20260510_0005_manual_overrides.py"
     ).read_text(encoding="utf-8")
 
     assert 'revision = "20260510_0005"' in migration

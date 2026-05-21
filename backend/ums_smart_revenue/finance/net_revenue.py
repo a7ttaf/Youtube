@@ -35,9 +35,7 @@ class ChannelNetRevenueSummary:
             "baseline_gross_revenue_usd": _decimal_to_api(
                 self.baseline_gross_revenue_usd
             ),
-            "baseline_net_revenue_usd": _decimal_to_api(
-                self.baseline_net_revenue_usd
-            ),
+            "baseline_net_revenue_usd": _decimal_to_api(self.baseline_net_revenue_usd),
             "approved_manual_override_total_usd": _decimal_to_api(
                 self.approved_manual_override_total_usd
             ),
@@ -209,8 +207,8 @@ def build_month_net_revenue_summary(
     manual_overrides: Iterable[RevenueManualOverrideEntry],
 ) -> MonthNetRevenueSummary:
     facts_by_channel: dict[str, list[RevenueFactEntry]] = defaultdict(list)
-    overrides_by_channel: dict[str, list[RevenueManualOverrideEntry]] = (
-        defaultdict(list)
+    overrides_by_channel: dict[str, list[RevenueManualOverrideEntry]] = defaultdict(
+        list
     )
     for fact in facts:
         if fact.month == month:

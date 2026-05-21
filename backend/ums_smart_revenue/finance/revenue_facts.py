@@ -12,8 +12,11 @@ from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.finance_models import MonthlyChannelRevenueFactORM
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 class RevenueFactSourceKind(StrEnum):
@@ -83,8 +86,11 @@ class RevenueFactNotFoundError(RevenueFactError):
 
 
 class SqlAlchemyRevenueFactRepository:
-    def __init__(self, session: Session):
+    """SQL-backed revenue fact repository scoped to a single tenant."""
+
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         self._session = session
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def record_fact(
         self,
@@ -123,6 +129,7 @@ class SqlAlchemyRevenueFactRepository:
 
         row = self._session.scalars(
             select(MonthlyChannelRevenueFactORM).where(
+                MonthlyChannelRevenueFactORM.tenant_id == self._tenant_id,
                 MonthlyChannelRevenueFactORM.month == month,
                 MonthlyChannelRevenueFactORM.youtube_channel_id == youtube_channel_id,
                 MonthlyChannelRevenueFactORM.source_kind == normalized_source_kind,
@@ -131,6 +138,7 @@ class SqlAlchemyRevenueFactRepository:
         if row is None:
             row = MonthlyChannelRevenueFactORM(
                 id=uuid4(),
+                tenant_id=self._tenant_id,
                 month=month,
                 youtube_channel_id=youtube_channel_id,
                 source_kind=normalized_source_kind,
@@ -152,12 +160,15 @@ class SqlAlchemyRevenueFactRepository:
         self._session.flush()
         return self._to_entry(row)
 
-    def list_channel_month_facts(self, *, month: str, youtube_channel_id: str) -> list[RevenueFactEntry]:
+    def list_channel_month_facts(
+        self, *, month: str, youtube_channel_id: str
+    ) -> list[RevenueFactEntry]:
         _validate_month(month)
         self._require_active_channel_for_read(youtube_channel_id)
         rows = self._session.scalars(
             select(MonthlyChannelRevenueFactORM)
             .where(
+                MonthlyChannelRevenueFactORM.tenant_id == self._tenant_id,
                 MonthlyChannelRevenueFactORM.month == month,
                 MonthlyChannelRevenueFactORM.youtube_channel_id == youtube_channel_id,
             )
@@ -181,9 +192,15 @@ class SqlAlchemyRevenueFactRepository:
             select(MonthlyChannelRevenueFactORM)
             .join(
                 YouTubeChannelORM,
-                MonthlyChannelRevenueFactORM.youtube_channel_id == YouTubeChannelORM.youtube_channel_id,
+                (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)
+                & (
+                    MonthlyChannelRevenueFactORM.youtube_channel_id
+                    == YouTubeChannelORM.youtube_channel_id
+                )
+                & (YouTubeChannelORM.tenant_id == self._tenant_id),
             )
             .where(
+                MonthlyChannelRevenueFactORM.tenant_id == self._tenant_id,
                 MonthlyChannelRevenueFactORM.month == month,
                 YouTubeChannelORM.active.is_(True),
             )
@@ -193,7 +210,9 @@ class SqlAlchemyRevenueFactRepository:
             )
         )
         if youtube_channel_ids is not None:
-            statement = statement.where(MonthlyChannelRevenueFactORM.youtube_channel_id.in_(youtube_channel_ids))
+            statement = statement.where(
+                MonthlyChannelRevenueFactORM.youtube_channel_id.in_(youtube_channel_ids)
+            )
         if offset:
             statement = statement.offset(offset)
         if limit is not None:
@@ -217,9 +236,15 @@ class SqlAlchemyRevenueFactRepository:
             select(MonthlyChannelRevenueFactORM.youtube_channel_id)
             .join(
                 YouTubeChannelORM,
-                MonthlyChannelRevenueFactORM.youtube_channel_id == YouTubeChannelORM.youtube_channel_id,
+                (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)
+                & (
+                    MonthlyChannelRevenueFactORM.youtube_channel_id
+                    == YouTubeChannelORM.youtube_channel_id
+                )
+                & (YouTubeChannelORM.tenant_id == self._tenant_id),
             )
             .where(
+                MonthlyChannelRevenueFactORM.tenant_id == self._tenant_id,
                 MonthlyChannelRevenueFactORM.month == month,
                 YouTubeChannelORM.active.is_(True),
             )
@@ -227,7 +252,9 @@ class SqlAlchemyRevenueFactRepository:
             .order_by(MonthlyChannelRevenueFactORM.youtube_channel_id)
         )
         if youtube_channel_ids is not None:
-            statement = statement.where(MonthlyChannelRevenueFactORM.youtube_channel_id.in_(youtube_channel_ids))
+            statement = statement.where(
+                MonthlyChannelRevenueFactORM.youtube_channel_id.in_(youtube_channel_ids)
+            )
         if offset:
             statement = statement.offset(offset)
         if limit is not None:
@@ -236,13 +263,22 @@ class SqlAlchemyRevenueFactRepository:
         return list(self._session.scalars(statement).all())
 
     def _require_month_open(self, month: str) -> None:
-        close = get_or_create_month_close_row(self._session, month, for_update=True)
+        close = get_or_create_month_close_row(
+            self._session,
+            month,
+            tenant_id=self._tenant_id,
+            for_update=True,
+        )
         if close.status == "LOCKED":
-            raise RevenueFactLockedMonthError("Finance month is locked for revenue fact imports")
+            raise RevenueFactLockedMonthError(
+                "Finance month is locked for revenue fact imports"
+            )
 
     def _require_active_channel_for_import(self, youtube_channel_id: str) -> None:
         if not self._active_channel_exists(youtube_channel_id):
-            raise RevenueFactValidationError("youtube_channel_id must reference an active channel")
+            raise RevenueFactValidationError(
+                "youtube_channel_id must reference an active channel"
+            )
 
     def _require_active_channel_for_read(self, youtube_channel_id: str) -> None:
         if not self._active_channel_exists(youtube_channel_id):
@@ -251,6 +287,7 @@ class SqlAlchemyRevenueFactRepository:
     def _active_channel_exists(self, youtube_channel_id: str) -> bool:
         row = self._session.scalars(
             select(YouTubeChannelORM).where(
+                YouTubeChannelORM.tenant_id == self._tenant_id,
                 YouTubeChannelORM.youtube_channel_id == youtube_channel_id,
                 YouTubeChannelORM.active.is_(True),
             )
@@ -277,16 +314,38 @@ class SqlAlchemyRevenueFactRepository:
         )
 
 
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise RevenueFactValidationError("tenant_id must be a valid UUID") from exc
+
+
 def _validate_month(month: str) -> None:
     if not MONTH_PATTERN.fullmatch(month):
-        raise RevenueFactValidationError("month must use YYYY-MM with a calendar month from 01 to 12")
+        raise RevenueFactValidationError(
+            "month must use YYYY-MM with a calendar month from 01 to 12"
+        )
 
 
 def _normalize_source_kind(source_kind: str) -> str:
     try:
         return RevenueFactSourceKind(source_kind).value
     except ValueError as exc:
-        raise RevenueFactValidationError(f"Unknown revenue fact source_kind: {source_kind}") from exc
+        raise RevenueFactValidationError(
+            f"Unknown revenue fact source_kind: {source_kind}"
+        ) from exc
 
 
 def _actor_identity_uuid(value: str) -> UUID:
@@ -300,7 +359,9 @@ def _actor_identity_uuid(value: str) -> UUID:
         raise RevenueFactValidationError(str(exc)) from exc
 
 
-def _validate_metrics(*, views: int, watch_time_minutes: Decimal, confidence_score: Decimal) -> None:
+def _validate_metrics(
+    *, views: int, watch_time_minutes: Decimal, confidence_score: Decimal
+) -> None:
     if not watch_time_minutes.is_finite():
         raise RevenueFactValidationError("watch_time_minutes must be a finite decimal")
     if not confidence_score.is_finite():

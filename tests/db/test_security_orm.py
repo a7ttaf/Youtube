@@ -22,6 +22,7 @@ def test_user_role_assignments_model_has_scope_and_revocation_controls():
     table = SecurityBase.metadata.tables["user_role_assignments"]
 
     assert {
+        "tenant_id",
         "user_id",
         "role_key",
         "scope_id",
@@ -31,7 +32,21 @@ def test_user_role_assignments_model_has_scope_and_revocation_controls():
         "reason",
         "active",
     } <= set(table.columns.keys())
-    assert any(index.name == "uq_active_user_role_scope" for index in table.indexes)
+    role_scope_index = next(
+        (index for index in table.indexes if index.name == "uq_active_user_role_scope"),
+        None,
+    )
+    assert role_scope_index is not None
+    assert [column.name for column in role_scope_index.columns] == [
+        "tenant_id",
+        "user_id",
+        "role_key",
+        "scope_id",
+    ]
+    assert any(
+        constraint.name == "fk_user_role_assignments_tenant_scope"
+        for constraint in table.foreign_key_constraints
+    )
     assert any(
         index.name == "ix_user_role_assignments_user_id" for index in table.indexes
     )

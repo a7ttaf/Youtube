@@ -79,18 +79,34 @@ class SqlAlchemyPrincipalLoader:
         """Store the SQLAlchemy session used for one principal lookup."""
         self._session = session
 
-    def load(self, *, user_id: str) -> UserPrincipal:
-        """Return a UserPrincipal using a loader-owned isolated transaction."""
+    def load(
+        self,
+        *,
+        user_id: str,
+        tenant_id: str | None = None,
+    ) -> UserPrincipal:
+        """Return a UserPrincipal using a loader-owned isolated transaction.
+
+        ``tenant_id`` is normalized to a canonical UUID string before it
+        reaches policy code. Blank values are treated as missing during
+        the pre-S2.4 window; malformed non-empty values fail closed.
+        """
         parsed_user_id = _parse_uuid(user_id)
+        parsed_tenant_id = _parse_tenant_uuid(tenant_id)
         if self._session.in_transaction():
             raise PrincipalTransactionError(
                 "Principal loads require a session without an active transaction"
             )
         with self._session.begin():
             self._prepare_read_connection()
-            return self._load_principal(parsed_user_id)
+            return self._load_principal(parsed_user_id, tenant_id=parsed_tenant_id)
 
-    def _load_principal(self, parsed_user_id: UUID) -> UserPrincipal:
+    def _load_principal(
+        self,
+        parsed_user_id: UUID,
+        *,
+        tenant_id: str | None,
+    ) -> UserPrincipal:
         """Load the principal rows within the current transaction scope."""
         user = self._session.get(UserORM, parsed_user_id)
         if user is None:
@@ -108,6 +124,7 @@ class SqlAlchemyPrincipalLoader:
                 user.is_service_account or user_status == UserStatus.SERVICE
             ),
             disabled=False,
+            tenant_id=tenant_id,
         )
 
     def _prepare_read_connection(self) -> None:
@@ -184,6 +201,22 @@ def _parse_uuid(value: str) -> UUID:
         return UUID(value.strip())
     except ValueError as exc:
         raise PrincipalValidationError("user_id must be a valid UUID") from exc
+
+
+def _parse_tenant_uuid(value: str | None) -> str | None:
+    """Normalize optional tenant context into a canonical UUID string."""
+    if value is None:
+        return None
+    try:
+        stripped_value = value.strip()
+    except AttributeError as exc:
+        raise PrincipalValidationError("tenant_id must be a valid UUID") from exc
+    if not stripped_value:
+        return None
+    try:
+        return str(UUID(stripped_value))
+    except ValueError as exc:
+        raise PrincipalValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _parse_user_status(value: str) -> UserStatus:

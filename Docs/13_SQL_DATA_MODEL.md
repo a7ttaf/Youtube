@@ -16,16 +16,20 @@ users (
 org_units (
   id uuid primary key,
   parent_id uuid null,
+  tenant_id uuid not null references tenants(id),
   type text,
   name text,
   active boolean,
   created_at timestamp,
-  updated_at timestamp
+  updated_at timestamp,
+  unique (tenant_id, id),
+  foreign key (tenant_id, parent_id) references org_units (tenant_id, id)
 );
 
 youtube_channels (
   id uuid primary key,
-  youtube_channel_id text unique,
+  tenant_id uuid not null references tenants(id),
+  youtube_channel_id text not null,
   channel_name text,
   primary_org_unit_id uuid,
   cms_status text,
@@ -34,21 +38,30 @@ youtube_channels (
   revenue_source_status text,
   active boolean,
   created_at timestamp,
-  updated_at timestamp
+  updated_at timestamp,
+  unique (tenant_id, id),
+  unique (tenant_id, youtube_channel_id),
+  foreign key (tenant_id, primary_org_unit_id)
+    references org_units (tenant_id, id)
 );
 
 channel_groups (
   id uuid primary key,
+  tenant_id uuid not null references tenants(id),
   name text,
   group_type text,
   active boolean,
-  created_at timestamp
+  created_at timestamp,
+  unique (tenant_id, id)
 );
 
 channel_group_members (
+  tenant_id uuid not null references tenants(id),
   group_id uuid,
   channel_id uuid,
-  primary key (group_id, channel_id)
+  primary key (group_id, channel_id),
+  foreign key (tenant_id, group_id) references channel_groups (tenant_id, id),
+  foreign key (tenant_id, channel_id) references youtube_channels (tenant_id, id)
 );
 ```
 
@@ -60,6 +73,14 @@ User table constraints:
   service accounts may use `service` or `disabled`, and human accounts may use
   `active` or `disabled`.
 - `updated_at` is DB-defaulted and refreshed by the ORM when account rows change.
+
+Tenant-scoped channel identity:
+
+- `youtube_channels.youtube_channel_id` is unique per tenant, not globally.
+- `channel_group_members`, revenue facts, and revenue manual overrides use
+  tenant-aware composite foreign keys back to `youtube_channels`.
+- A single YouTube external channel ID can exist in multiple tenants, but not
+  more than once inside the same tenant.
 
 ## Revenue tables
 
@@ -140,7 +161,8 @@ currency_exchange_rates (
 );
 
 finance_month_close (
-  month text primary key,
+  tenant_id uuid not null references tenants(id),
+  month text,
   status text,
   allocation_method text,
   allocation_rule_payload jsonb,
@@ -148,7 +170,8 @@ finance_month_close (
   locked_at timestamp null,
   unlocked_by uuid null,
   unlocked_at timestamp null,
-  updated_at timestamp
+  updated_at timestamp,
+  primary key (tenant_id, month)
 );
 
 -- Phase 1 control-plane implementation note:
@@ -173,6 +196,26 @@ finance_month_close (
 -- subscription revenue component columns when source reports provide those
 -- values. Component columns are nullable, non-negative, and their known sum
 -- cannot exceed gross_revenue_usd. Null means not provided, not zero.
+
+monthly_channel_revenue_facts (
+  id uuid primary key,
+  tenant_id uuid not null references tenants(id),
+  month text not null,
+  youtube_channel_id text not null,
+  source_kind text not null,
+  source_report_id text null,
+  gross_revenue_usd numeric(18, 6) not null,
+  net_revenue_usd numeric(18, 6) null,
+  views bigint not null default 0,
+  watch_time_minutes numeric(18, 2) not null default 0,
+  confidence_score numeric(5, 4) not null default 1,
+  imported_by uuid null,
+  imported_at timestamp not null default now(),
+  updated_at timestamp not null default now(),
+  unique (tenant_id, month, youtube_channel_id, source_kind),
+  foreign key (tenant_id, youtube_channel_id)
+    references youtube_channels (tenant_id, youtube_channel_id)
+);
 
 channel_net_revenue (
   month text,
@@ -217,6 +260,7 @@ number_explanations (
 
 revenue_manual_overrides (
   id uuid primary key,
+  tenant_id uuid not null references tenants(id),
   month text,
   youtube_channel_id text,
   adjustment_revenue_usd numeric,
@@ -227,7 +271,9 @@ revenue_manual_overrides (
   approved_at timestamp null,
   approval_reason text null,
   created_at timestamp,
-  updated_at timestamp
+  updated_at timestamp,
+  foreign key (tenant_id, youtube_channel_id)
+    references youtube_channels (tenant_id, youtube_channel_id)
 );
 
 audit_logs (
@@ -243,6 +289,24 @@ audit_logs (
 
 Implementation note:
 The backend foundation stores explanation months as `YYYY-MM` text, records deterministic explanation snapshots keyed by month/entity/metric, and derives values from stored revenue facts plus approved manual overrides. Explanation snapshots are not a substitute for source revenue facts.
+
+## Tenant migration deployment notes
+
+Tenant-aware schemas are introduced by two stacked migrations:
+
+- `20260517_0001_tenant_id_on_operational_tables` adds `tenant_id` to
+  operational tables, backfills the configured default tenant, scopes
+  `finance_month_close` to `(tenant_id, month)`, and converts org/channel group
+  relationships to tenant-aware composite foreign keys.
+- `20260518_0001_tenant_scoped_youtube_channel_identity` removes the global
+  `youtube_channels.youtube_channel_id` uniqueness constraint, replaces it with
+  `unique (tenant_id, youtube_channel_id)`, and rewrites revenue fact and manual
+  override channel references to composite tenant/channel foreign keys.
+
+Deploy these migrations before deploying code that constructs tenant-bound
+repositories. Downgrading after multiple tenants have inserted the same
+`youtube_channel_id` requires cleaning those cross-tenant duplicates first,
+because the downgrade restores the former global uniqueness constraint.
 
 ## Raw report storage
 

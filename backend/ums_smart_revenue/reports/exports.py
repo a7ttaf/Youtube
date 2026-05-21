@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM
 from ums_smart_revenue.db.report_models import ExportJobORM
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 FINANCE_EXPORT_TYPES = frozenset(
@@ -28,6 +29,7 @@ ALLOWED_EXPORT_ARTIFACT_URI_PREFIXES = (
 )
 MAX_EXPORT_JOB_PAGE_SIZE = 100
 _TERMINAL_EXPORT_JOB_STATUSES = frozenset({"COMPLETED", "FAILED", "CANCELLED"})
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 @dataclass(frozen=True)
 class ExportJobEntry:
     id: str
@@ -119,6 +121,7 @@ class ExportJobTerminalStateError(ExportJobValidationError):
 class SqlAlchemyExportJobRepository:
     def __init__(self, session: Session):
         self._session = session
+        self._tenant_id = _DEFAULT_TENANT_UUID
 
     # ========================================================================
     # Purpose: Create an export job and freeze its resolved channel set so
@@ -172,6 +175,7 @@ class SqlAlchemyExportJobRepository:
             month_lock_status=month_lock_status,
             include_confidence_notes=include_confidence_notes,
             include_manual_override_notes=include_manual_override_notes,
+            tenant_id=self._tenant_id,
         )
         self._session.add(row)
         self._session.flush()
@@ -183,7 +187,15 @@ class SqlAlchemyExportJobRepository:
         *,
         requested_by: str | None = None,
     ) -> ExportJobEntry:
-        row = self._get_row(export_id)
+        export_uuid = _parse_uuid(export_id, field_name="export_id")
+        row = self._session.scalars(
+            select(ExportJobORM).where(
+                ExportJobORM.id == export_uuid,
+                ExportJobORM.tenant_id == self._tenant_id,
+            )
+        ).one_or_none()
+        if row is None:
+            raise ExportJobNotFoundError("Export job not found")
         if requested_by is not None and row.requested_by != _actor_identity_uuid(
             requested_by, field_name="requested_by"
         ):
@@ -274,8 +286,10 @@ class SqlAlchemyExportJobRepository:
         if offset < 0:
             raise ExportJobValidationError("offset must be greater than or equal to 0")
 
-        statement = select(ExportJobORM).order_by(
-            ExportJobORM.created_at.desc(), ExportJobORM.id.desc()
+        statement = (
+            select(ExportJobORM)
+            .where(ExportJobORM.tenant_id == self._tenant_id)
+            .order_by(ExportJobORM.created_at.desc(), ExportJobORM.id.desc())
         )
         if requested_by is not None:
             statement = statement.where(
@@ -301,7 +315,7 @@ class SqlAlchemyExportJobRepository:
         )
 
     def _month_lock_status(self, month: str) -> str:
-        row = self._session.get(FinanceMonthCloseORM, month)
+        row = self._session.get(FinanceMonthCloseORM, (self._tenant_id, month))
         return row.status if row is not None else "OPEN"
 
     def _get_row(self, export_id: str) -> ExportJobORM:

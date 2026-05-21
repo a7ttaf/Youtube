@@ -47,10 +47,16 @@ class RevenueReconciliationPreview:
             "youtube_channel_id": self.youtube_channel_id,
             "status": self.status,
             "primary_source_kind": self.primary_source_kind,
-            "primary_gross_revenue_usd": _decimal_to_api(self.primary_gross_revenue_usd),
+            "primary_gross_revenue_usd": _decimal_to_api(
+                self.primary_gross_revenue_usd
+            ),
             "compared_source_count": self.compared_source_count,
-            "gross_revenue_variance_usd": _decimal_to_api(self.gross_revenue_variance_usd),
-            "gross_revenue_variance_percent": _decimal_to_api(self.gross_revenue_variance_percent),
+            "gross_revenue_variance_usd": _decimal_to_api(
+                self.gross_revenue_variance_usd
+            ),
+            "gross_revenue_variance_percent": _decimal_to_api(
+                self.gross_revenue_variance_percent
+            ),
             "confidence_score": _decimal_to_api(self.confidence_score),
             "issues": [issue.to_api() for issue in self.issues],
         }
@@ -76,10 +82,16 @@ def build_revenue_reconciliation_preview(
     youtube_channel_id: str | None = None,
     variance_tolerance_percent: Decimal = DEFAULT_VARIANCE_TOLERANCE_PERCENT,
 ) -> RevenueReconciliationPreview:
-    sorted_facts = sorted(facts, key=lambda fact: (SOURCE_PRIORITY.get(fact.source_kind, 99), fact.source_kind))
+    sorted_facts = sorted(
+        facts,
+        key=lambda fact: (SOURCE_PRIORITY.get(fact.source_kind, 99), fact.source_kind),
+    )
     if not sorted_facts:
         if month is None or youtube_channel_id is None:
-            raise ValueError("month and youtube_channel_id are required when no revenue facts are provided")
+            raise ValueError(
+                "month and youtube_channel_id are required when "
+                "no revenue facts are provided"
+            )
         return RevenueReconciliationPreview(
             month=month,
             youtube_channel_id=youtube_channel_id,
@@ -94,14 +106,19 @@ def build_revenue_reconciliation_preview(
                 ReconciliationIssue(
                     issue_type="NO_REVENUE_FACTS",
                     severity="HIGH",
-                    message=f"No revenue facts are available for {youtube_channel_id} in {month}.",
+                    message=(
+                        f"No revenue facts are available for "
+                        f"{youtube_channel_id} in {month}."
+                    ),
                 )
             ],
         )
 
     primary = sorted_facts[0]
     revenue_values = [fact.gross_revenue_usd for fact in sorted_facts]
-    variance_usd = (max(revenue_values) - min(revenue_values)).quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
+    variance_usd = (max(revenue_values) - min(revenue_values)).quantize(
+        Decimal("0.0001"), rounding=ROUND_HALF_UP
+    )
     variance_percent = _safe_percent(variance_usd, primary.gross_revenue_usd)
 
     issues: list[ReconciliationIssue] = []
@@ -114,13 +131,18 @@ def build_revenue_reconciliation_preview(
             ReconciliationIssue(
                 issue_type="INSUFFICIENT_SOURCES",
                 severity="MEDIUM",
-                message=f"Only one revenue source is available for {primary.youtube_channel_id} in {primary.month}.",
+                message=(
+                    f"Only one revenue source is available for "
+                    f"{primary.youtube_channel_id} in {primary.month}."
+                ),
             )
         )
     elif variance_percent > variance_tolerance_percent:
         status = "VARIANCE_DETECTED"
         severity = "HIGH" if variance_percent >= Decimal("0.05") else "MEDIUM"
-        confidence_score = (_average_confidence(sorted_facts) - variance_percent).quantize(
+        confidence_score = (
+            _average_confidence(sorted_facts) - variance_percent
+        ).quantize(
             Decimal("0.0001"),
             rounding=ROUND_HALF_UP,
         )
@@ -129,14 +151,17 @@ def build_revenue_reconciliation_preview(
                 issue_type="GROSS_REVENUE_VARIANCE",
                 severity=severity,
                 message=(
-                    f"Gross revenue sources differ by {_percent_message(variance_percent)} "
+                    f"Gross revenue sources differ by "
+                    f"{_percent_message(variance_percent)} "
                     f"for {primary.youtube_channel_id} in {primary.month}."
                 ),
             )
         )
     else:
         status = "RECONCILED"
-        confidence_score = (_average_confidence(sorted_facts) - variance_percent).quantize(
+        confidence_score = (
+            _average_confidence(sorted_facts) - variance_percent
+        ).quantize(
             Decimal("0.0001"),
             rounding=ROUND_HALF_UP,
         )
@@ -178,7 +203,10 @@ def build_revenue_reconciliation_issue_queue(
 
 
 def _average_confidence(facts: list[RevenueFactEntry]) -> Decimal:
-    return (sum((fact.confidence_score for fact in facts), Decimal("0")) / Decimal(len(facts))).quantize(
+    return (
+        sum((fact.confidence_score for fact in facts), Decimal("0"))
+        / Decimal(len(facts))
+    ).quantize(
         Decimal("0.0001"),
         rounding=ROUND_HALF_UP,
     )
@@ -197,7 +225,9 @@ def _safe_percent(numerator: Decimal, denominator: Decimal) -> Decimal:
 
 
 def _percent_message(value: Decimal) -> str:
-    return f"{(value * Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}%"
+    return (
+        f"{(value * Decimal('100')).quantize(Decimal('0.01'), rounding=ROUND_HALF_UP)}%"
+    )
 
 
 def _decimal_to_api(value: Decimal | None) -> str | None:

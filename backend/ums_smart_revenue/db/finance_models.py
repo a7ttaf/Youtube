@@ -8,9 +8,10 @@ from sqlalchemy import (
     CheckConstraint,
     Date,
     DateTime,
-    ForeignKey,
+    ForeignKeyConstraint,
     Index,
     Numeric,
+    PrimaryKeyConstraint,
     Text,
     UniqueConstraint,
     Uuid,
@@ -21,16 +22,24 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from ums_smart_revenue.db.org_models import OrgBase
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 
 class FinanceBase(DeclarativeBase):
     metadata = OrgBase.metadata
 
 
+# Shared server_default for the tenant_id column added in migration
+# 20260517_0001. See backend/ums_smart_revenue/db/security_models.py for
+# the rationale (single source of truth for the UMS tenant id).
+_TENANT_ID_DEFAULT = text(f"'{UMS_TENANT_ID}'")
+_TENANT_ID_DEFAULT_VALUE = UUID(UMS_TENANT_ID)
+
+
 class FinanceMonthCloseORM(FinanceBase):
     __tablename__ = "finance_month_close"
 
-    month: Mapped[str] = mapped_column(Text, primary_key=True)
+    month: Mapped[str] = mapped_column(Text, nullable=False)
     status: Mapped[str] = mapped_column(Text, nullable=False, server_default=text("'OPEN'"))
     allocation_method: Mapped[str | None] = mapped_column(Text, nullable=True)
     allocation_rule_payload: Mapped[dict[str, object]] = mapped_column(
@@ -43,8 +52,19 @@ class FinanceMonthCloseORM(FinanceBase):
     unlocked_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     unlocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
+    )
 
     __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id",
+            "month",
+            name="pk_finance_month_close",
+        ),
         CheckConstraint(
             "length(month) = 7 AND substr(month, 5, 1) = '-' "
             "AND substr(month, 1, 1) BETWEEN '0' AND '9' "
@@ -54,18 +74,22 @@ class FinanceMonthCloseORM(FinanceBase):
             "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
             name="ck_finance_month_close_month_format",
         ),
-        CheckConstraint("status IN ('OPEN', 'LOCKED')", name="ck_finance_month_close_status"),
+        CheckConstraint(
+            "status IN ('OPEN', 'LOCKED')", name="ck_finance_month_close_status"
+        ),
+        Index("ix_finance_month_close_tenant_id", "tenant_id"),
     )
 
 
 class MonthlyChannelRevenueFactORM(FinanceBase):
     __tablename__ = "monthly_channel_revenue_facts"
 
-    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
     month: Mapped[str] = mapped_column(Text, nullable=False)
     youtube_channel_id: Mapped[str] = mapped_column(
         Text,
-        ForeignKey("youtube_channels.youtube_channel_id", ondelete="RESTRICT"),
         nullable=False,
     )
     source_kind: Mapped[str] = mapped_column(Text, nullable=False)
@@ -79,11 +103,31 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
     watch_time_minutes: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, server_default=text("0"))
     confidence_score: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False, server_default=text("1"))
     imported_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
-    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    imported_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
+    )
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "youtube_channel_id"],
+            ["youtube_channels.tenant_id", "youtube_channels.youtube_channel_id"],
+            name="fk_monthly_channel_revenue_facts_tenant_channel",
+            ondelete="RESTRICT",
+        ),
         UniqueConstraint(
+            "tenant_id",
             "month",
             "youtube_channel_id",
             "source_kind",
@@ -99,10 +143,16 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
             name="ck_monthly_channel_revenue_facts_month_format",
         ),
         CheckConstraint(
-            "source_kind IN ('YOUTUBE_CMS', 'YOUTUBE_ANALYTICS', 'ADSENSE', 'MANUAL_UPLOAD', 'ALLOCATION')",
+            "source_kind IN ("
+            "'YOUTUBE_CMS', 'YOUTUBE_ANALYTICS', 'ADSENSE', "
+            "'MANUAL_UPLOAD', 'ALLOCATION'"
+            ")",
             name="ck_monthly_channel_revenue_facts_source_kind",
         ),
-        CheckConstraint("gross_revenue_usd >= 0", name="ck_monthly_channel_revenue_facts_gross_nonnegative"),
+        CheckConstraint(
+            "gross_revenue_usd >= 0",
+            name="ck_monthly_channel_revenue_facts_gross_nonnegative",
+        ),
         CheckConstraint(
             "net_revenue_usd IS NULL OR net_revenue_usd >= 0",
             name="ck_monthly_channel_revenue_facts_net_nonnegative",
@@ -135,31 +185,62 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
             name="ck_monthly_channel_revenue_facts_confidence_range",
         ),
         Index("ix_monthly_channel_revenue_facts_month", "month"),
-        Index("ix_monthly_channel_revenue_facts_channel_month", "youtube_channel_id", "month"),
+        Index(
+            "ix_monthly_channel_revenue_facts_channel_month",
+            "youtube_channel_id",
+            "month",
+        ),
+        Index("ix_monthly_channel_revenue_facts_tenant_id", "tenant_id"),
     )
 
 
 class RevenueManualOverrideORM(FinanceBase):
     __tablename__ = "revenue_manual_overrides"
 
-    id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()"))
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, server_default=text("gen_random_uuid()")
+    )
     month: Mapped[str] = mapped_column(Text, nullable=False)
     youtube_channel_id: Mapped[str] = mapped_column(
         Text,
-        ForeignKey("youtube_channels.youtube_channel_id", ondelete="RESTRICT"),
         nullable=False,
     )
-    adjustment_revenue_usd: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    adjustment_revenue_usd: Mapped[Decimal] = mapped_column(
+        Numeric(18, 6), nullable=False
+    )
     reason: Mapped[str] = mapped_column(Text, nullable=False)
-    status: Mapped[str] = mapped_column(Text, nullable=False, default="PENDING", server_default=text("'PENDING'"))
+    status: Mapped[str] = mapped_column(
+        Text, nullable=False, default="PENDING", server_default=text("'PENDING'")
+    )
     created_by: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
     approved_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
-    approved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    approved_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     approval_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
+    )
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id", "youtube_channel_id"],
+            ["youtube_channels.tenant_id", "youtube_channels.youtube_channel_id"],
+            name="fk_revenue_manual_overrides_tenant_channel",
+            ondelete="RESTRICT",
+        ),
         CheckConstraint(
             "length(month) = 7 AND substr(month, 5, 1) = '-' "
             "AND substr(month, 1, 1) BETWEEN '0' AND '9' "
@@ -171,17 +252,27 @@ class RevenueManualOverrideORM(FinanceBase):
             "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
             name="ck_revenue_manual_overrides_month_format",
         ),
-        CheckConstraint("adjustment_revenue_usd <> 0", name="ck_revenue_manual_overrides_adjustment_nonzero"),
-        CheckConstraint("status IN ('PENDING', 'APPROVED', 'REJECTED')", name="ck_revenue_manual_overrides_status"),
         CheckConstraint(
-            "(status = 'APPROVED' AND approved_by IS NOT NULL AND approved_at IS NOT NULL "
+            "adjustment_revenue_usd <> 0",
+            name="ck_revenue_manual_overrides_adjustment_nonzero",
+        ),
+        CheckConstraint(
+            "status IN ('PENDING', 'APPROVED', 'REJECTED')",
+            name="ck_revenue_manual_overrides_status",
+        ),
+        CheckConstraint(
+            "(status = 'APPROVED' AND approved_by IS NOT NULL "
+            "AND approved_at IS NOT NULL "
             "AND approval_reason IS NOT NULL) "
             "OR (status <> 'APPROVED' AND approved_by IS NULL AND approved_at IS NULL "
             "AND approval_reason IS NULL)",
             name="ck_revenue_manual_overrides_approval_fields",
         ),
         Index("ix_revenue_manual_overrides_month_status", "month", "status"),
-        Index("ix_revenue_manual_overrides_channel_month", "youtube_channel_id", "month"),
+        Index(
+            "ix_revenue_manual_overrides_channel_month", "youtube_channel_id", "month"
+        ),
+        Index("ix_revenue_manual_overrides_tenant_id", "tenant_id"),
     )
 
 
@@ -229,9 +320,16 @@ class BankReconciliationEntryORM(FinanceBase):
         server_default=func.now(),
         onupdate=func.now(),
     )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
+    )
 
     __table_args__ = (
         UniqueConstraint(
+            "tenant_id",
             "month",
             "bank_reference",
             name="uq_bank_reconciliation_month_reference",
@@ -267,6 +365,7 @@ class BankReconciliationEntryORM(FinanceBase):
         ),
         Index("ix_bank_reconciliation_entries_month", "month"),
         Index("ix_bank_reconciliation_entries_source_report", "source_report_id"),
+        Index("ix_bank_reconciliation_entries_tenant_id", "tenant_id"),
     )
 
 
@@ -307,9 +406,16 @@ class AdSensePaymentORM(FinanceBase):
         server_default=func.now(),
         onupdate=func.now(),
     )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
+    )
 
     __table_args__ = (
         UniqueConstraint(
+            "tenant_id",
             "month",
             "payment_name",
             name="uq_adsense_payments_month_name",
@@ -341,6 +447,7 @@ class AdSensePaymentORM(FinanceBase):
         ),
         Index("ix_adsense_payments_month_date", "month", "payment_date"),
         Index("ix_adsense_payments_source_report", "source_report_id"),
+        Index("ix_adsense_payments_tenant_id", "tenant_id"),
     )
 
 

@@ -4,7 +4,10 @@ from uuid import uuid4
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.explanation_models import ExplanationBase, NumberExplanationORM
+from ums_smart_revenue.db.explanation_models import (
+    ExplanationBase,
+    NumberExplanationORM,
+)
 
 
 def test_number_explanation_model_persists_components_and_warnings():
@@ -21,7 +24,9 @@ def test_number_explanation_model_persists_components_and_warnings():
                 metric="adjusted_gross_revenue_usd",
                 value=Decimal("1125.50"),
                 currency="USD",
-                formula="baseline_gross_revenue_usd + approved_manual_override_total_usd",
+                formula=(
+                    "baseline_gross_revenue_usd + approved_manual_override_total_usd"
+                ),
                 confidence="HIGH",
                 components=[{"key": "baseline_gross_revenue_usd", "value": "1000"}],
                 warnings=[{"code": "PENDING_MANUAL_OVERRIDES"}],
@@ -32,5 +37,7 @@ def test_number_explanation_model_persists_components_and_warnings():
 
     assert explanation.metric == "adjusted_gross_revenue_usd"
     assert explanation.value == Decimal("1125.50")
-    assert explanation.components == [{"key": "baseline_gross_revenue_usd", "value": "1000"}]
+    assert explanation.components == [
+        {"key": "baseline_gross_revenue_usd", "value": "1000"}
+    ]
     assert explanation.warnings == [{"code": "PENDING_MANUAL_OVERRIDES"}]

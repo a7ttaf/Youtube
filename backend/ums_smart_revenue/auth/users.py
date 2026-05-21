@@ -24,6 +24,8 @@ from ums_smart_revenue.db.security_models import (
     UserPermissionGrantORM,
     UserRoleAssignmentORM,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 logger = logging.getLogger(__name__)
 T = TypeVar("T")
@@ -40,6 +42,7 @@ USER_DISPLAY_NAME_MAX_LENGTH = 200
 USER_LIST_MAX_OFFSET = 10_000
 _EMAIL_CONFLICT_SAMPLE_LIMIT = 2
 USER_ACCOUNT_STORAGE_ATTEMPTS = 2
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 @dataclass(frozen=True)
@@ -82,9 +85,7 @@ class UserAccessProfileEntry:
             "role_assignments": [
                 assignment.to_api() for assignment in self.role_assignments
             ],
-            "direct_permissions": [
-                grant.to_api() for grant in self.direct_permissions
-            ],
+            "direct_permissions": [grant.to_api() for grant in self.direct_permissions],
         }
 
 
@@ -127,9 +128,10 @@ class UserAccountServiceAccountPolicyError(UserAccountError):
 class SqlAlchemyUserAccountRepository:
     """SQLAlchemy-backed repository for guarded user account lifecycle changes."""
 
-    def __init__(self, session: Session):
-        """Bind repository operations to the request-scoped SQLAlchemy session."""
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        """Bind repository operations to an explicit or current request tenant."""
         self._session = session
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def create_user(
         self,
@@ -156,6 +158,7 @@ class SqlAlchemyUserAccountRepository:
 
             row = UserORM(
                 id=uuid4(),
+                tenant_id=self._tenant_id,
                 email=normalized_email,
                 display_name=normalized_display_name,
                 status=(
@@ -187,7 +190,12 @@ class SqlAlchemyUserAccountRepository:
 
         def operation() -> UserAccountEntry:
             """Attempt one account lookup against the current session."""
-            row = self._session.get(UserORM, user_uuid)
+            row = self._session.scalars(
+                select(UserORM).where(
+                    UserORM.id == user_uuid,
+                    UserORM.tenant_id == self._tenant_id,
+                )
+            ).one_or_none()
             if row is None:
                 raise UserAccountNotFoundError("User not found")
             return self._to_entry(row)
@@ -218,7 +226,11 @@ class SqlAlchemyUserAccountRepository:
         ]:
             """Attempt one user-list read against the current session."""
             email_sort_key = func.lower(UserORM.email)
-            statement = select(UserORM).order_by(email_sort_key, UserORM.id)
+            statement = (
+                select(UserORM)
+                .where(UserORM.tenant_id == self._tenant_id)
+                .order_by(email_sort_key, UserORM.id)
+            )
             if normalized_status is not None:
                 statement = statement.where(UserORM.status == normalized_status)
             if cursor is not None:
@@ -234,9 +246,7 @@ class SqlAlchemyUserAccountRepository:
                 )
             elif normalized_offset:
                 statement = statement.offset(normalized_offset)
-            rows = self._session.scalars(
-                statement.limit(normalized_limit + 1)
-            ).all()
+            rows = self._session.scalars(statement.limit(normalized_limit + 1)).all()
             items = tuple(self._to_entry(row) for row in rows[:normalized_limit])
             has_more = len(rows) > normalized_limit
             return (
@@ -253,7 +263,12 @@ class SqlAlchemyUserAccountRepository:
 
         def operation() -> UserAccessProfileEntry:
             """Attempt one access-profile read against the current session."""
-            account_row = self._session.get(UserORM, user_uuid)
+            account_row = self._session.scalars(
+                select(UserORM).where(
+                    UserORM.id == user_uuid,
+                    UserORM.tenant_id == self._tenant_id,
+                )
+            ).one_or_none()
             if account_row is None:
                 raise UserAccountNotFoundError("User not found")
 
@@ -261,10 +276,12 @@ class SqlAlchemyUserAccountRepository:
                 select(UserRoleAssignmentORM, AccessScopeORM)
                 .join(
                     AccessScopeORM,
-                    UserRoleAssignmentORM.scope_id == AccessScopeORM.id,
+                    (UserRoleAssignmentORM.scope_id == AccessScopeORM.id)
+                    & (AccessScopeORM.tenant_id == self._tenant_id),
                 )
                 .where(
                     UserRoleAssignmentORM.user_id == user_uuid,
+                    UserRoleAssignmentORM.tenant_id == self._tenant_id,
                     UserRoleAssignmentORM.active.is_(True),
                 )
                 .order_by(UserRoleAssignmentORM.assigned_at, UserRoleAssignmentORM.id)
@@ -273,10 +290,12 @@ class SqlAlchemyUserAccountRepository:
                 select(UserPermissionGrantORM, AccessScopeORM)
                 .join(
                     AccessScopeORM,
-                    UserPermissionGrantORM.scope_id == AccessScopeORM.id,
+                    (UserPermissionGrantORM.scope_id == AccessScopeORM.id)
+                    & (AccessScopeORM.tenant_id == self._tenant_id),
                 )
                 .where(
                     UserPermissionGrantORM.user_id == user_uuid,
+                    UserPermissionGrantORM.tenant_id == self._tenant_id,
                     UserPermissionGrantORM.active.is_(True),
                 )
                 .order_by(UserPermissionGrantORM.granted_at, UserPermissionGrantORM.id)
@@ -325,7 +344,12 @@ class SqlAlchemyUserAccountRepository:
 
         def operation() -> UserAccountEntry:
             """Attempt one account-update write against the current session."""
-            row = self._session.get(UserORM, user_uuid)
+            row = self._session.scalars(
+                select(UserORM).where(
+                    UserORM.id == user_uuid,
+                    UserORM.tenant_id == self._tenant_id,
+                )
+            ).one_or_none()
             if row is None:
                 raise UserAccountNotFoundError("User not found")
 
@@ -364,9 +388,7 @@ class SqlAlchemyUserAccountRepository:
 
         return self._run_with_storage_retries(operation)
 
-    def _run_with_storage_retries(
-        self, operation: Callable[[], T]
-    ) -> T:
+    def _run_with_storage_retries(self, operation: Callable[[], T]) -> T:
         """Retry transient storage failures once and fail closed otherwise."""
         for attempt_index in range(USER_ACCOUNT_STORAGE_ATTEMPTS):
             try:
@@ -389,7 +411,10 @@ class SqlAlchemyUserAccountRepository:
         self, email: str, *, excluding_user_id: UUID | None = None
     ) -> bool:
         """Return whether a normalized email already belongs to another user."""
-        criteria = [func.lower(UserORM.email) == email]
+        criteria = [
+            UserORM.tenant_id == self._tenant_id,
+            func.lower(UserORM.email) == email,
+        ]
         if excluding_user_id is not None:
             criteria.append(UserORM.id != excluding_user_id)
         conflicts = self._session.scalars(
@@ -559,6 +584,26 @@ def _is_retryable_user_storage_error(exc: SQLAlchemyError) -> bool:
     if isinstance(exc, (DisconnectionError, OperationalError, SQLAlchemyTimeoutError)):
         return True
     return isinstance(exc, DBAPIError) and exc.connection_invalidated
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Resolve an explicit, request-scoped, or bootstrap account tenant id."""
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    """Normalize tenant constructor input into a UUID object."""
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise UserAccountValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _role_access_to_entry(

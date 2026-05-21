@@ -8,7 +8,14 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.roles import ROLE_DEFINITIONS, RoleKey
 from ums_smart_revenue.auth.scopes import ScopeType
-from ums_smart_revenue.db.security_models import AccessScopeORM, UserORM, UserRoleAssignmentORM
+from ums_smart_revenue.db.security_models import (
+    AccessScopeORM,
+    UserORM,
+    UserRoleAssignmentORM,
+)
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 @dataclass(frozen=True)
@@ -60,6 +67,7 @@ class UserRoleAssignmentValidationError(UserRoleAssignmentError):
 class SqlAlchemyUserRoleAssignmentRepository:
     def __init__(self, session: Session):
         self._session = session
+        self._tenant_id = _DEFAULT_TENANT_UUID
 
     def assign_role(
         self,
@@ -83,6 +91,7 @@ class SqlAlchemyUserRoleAssignmentRepository:
 
         existing = self._session.scalars(
             select(UserRoleAssignmentORM).where(
+                UserRoleAssignmentORM.tenant_id == self._tenant_id,
                 UserRoleAssignmentORM.user_id == target_user_id,
                 UserRoleAssignmentORM.role_key == role.value,
                 UserRoleAssignmentORM.scope_id == scope.id,
@@ -90,10 +99,13 @@ class SqlAlchemyUserRoleAssignmentRepository:
             )
         ).one_or_none()
         if existing is not None:
-            raise UserRoleAssignmentConflictError("Active role assignment already exists")
+            raise UserRoleAssignmentConflictError(
+                "Active role assignment already exists"
+            )
 
         row = UserRoleAssignmentORM(
             id=uuid4(),
+            tenant_id=self._tenant_id,
             user_id=target_user_id,
             role_key=role.value,
             scope_id=scope.id,
@@ -108,6 +120,7 @@ class SqlAlchemyUserRoleAssignmentRepository:
         except IntegrityError as exc:
             duplicate = self._session.scalars(
                 select(UserRoleAssignmentORM).where(
+                    UserRoleAssignmentORM.tenant_id == self._tenant_id,
                     UserRoleAssignmentORM.user_id == target_user_id,
                     UserRoleAssignmentORM.role_key == role.value,
                     UserRoleAssignmentORM.scope_id == scope.id,
@@ -115,17 +128,31 @@ class SqlAlchemyUserRoleAssignmentRepository:
                 )
             ).one_or_none()
             if duplicate is not None:
-                raise UserRoleAssignmentConflictError("Active role assignment already exists") from exc
+                raise UserRoleAssignmentConflictError(
+                    "Active role assignment already exists"
+                ) from exc
             raise
         return self._to_entry(row, scope)
 
-    def get_assignment(self, *, user_id: str, assignment_id: str) -> UserRoleAssignmentEntry:
+    def get_assignment(
+        self, *, user_id: str, assignment_id: str
+    ) -> UserRoleAssignmentEntry:
         target_user_id = _parse_uuid(user_id, field_name="user_id")
         assignment_uuid = _parse_uuid(assignment_id, field_name="assignment_id")
-        row = self._session.get(UserRoleAssignmentORM, assignment_uuid)
+        row = self._session.scalars(
+            select(UserRoleAssignmentORM).where(
+                UserRoleAssignmentORM.id == assignment_uuid,
+                UserRoleAssignmentORM.tenant_id == self._tenant_id,
+            )
+        ).one_or_none()
         if row is None or row.user_id != target_user_id:
             raise UserRoleAssignmentNotFoundError("Role assignment not found")
-        scope = self._session.get(AccessScopeORM, row.scope_id)
+        scope = self._session.scalars(
+            select(AccessScopeORM).where(
+                AccessScopeORM.id == row.scope_id,
+                AccessScopeORM.tenant_id == self._tenant_id,
+            )
+        ).one_or_none()
         if scope is None:
             raise UserRoleAssignmentNotFoundError("Role assignment scope not found")
         return self._to_entry(row, scope)
@@ -145,7 +172,10 @@ class SqlAlchemyUserRoleAssignmentRepository:
         self._require_actor_user(actor_user_id)
         row = self._session.scalars(
             select(UserRoleAssignmentORM)
-            .where(UserRoleAssignmentORM.id == assignment_uuid)
+            .where(
+                UserRoleAssignmentORM.id == assignment_uuid,
+                UserRoleAssignmentORM.tenant_id == self._tenant_id,
+            )
             .with_for_update()
         ).one_or_none()
         if row is None or row.user_id != target_user_id:
@@ -159,14 +189,23 @@ class SqlAlchemyUserRoleAssignmentRepository:
         row.revoked_at = now
         row.reason = normalized_reason
         self._session.flush()
-        scope = self._session.get(AccessScopeORM, row.scope_id)
+        scope = self._session.scalars(
+            select(AccessScopeORM).where(
+                AccessScopeORM.id == row.scope_id,
+                AccessScopeORM.tenant_id == self._tenant_id,
+            )
+        ).one_or_none()
         if scope is None:
             raise UserRoleAssignmentNotFoundError("Role assignment scope not found")
         return self._to_entry(row, scope)
 
     def _require_user(self, user_id: UUID) -> UserORM:
+        # Keep session.get so the identity-map cache fast-paths repeat lookups
+        # in the same transaction; defend cross-tenant access in Python rather
+        # than emitting a wider SELECT. Composite FKs introduced in fbf58e1
+        # already enforce tenant isolation at the schema level.
         row = self._session.get(UserORM, user_id)
-        if row is None:
+        if row is None or row.tenant_id != self._tenant_id:
             raise UserRoleAssignmentNotFoundError("User not found")
         return row
 
@@ -177,22 +216,32 @@ class SqlAlchemyUserRoleAssignmentRepository:
     def _require_assignable_role(self, target_user: UserORM, role: RoleKey) -> None:
         definition = ROLE_DEFINITIONS[role]
         if definition.service_only and not target_user.is_service_account:
-            raise UserRoleAssignmentValidationError("Service-only roles require a service account user")
+            raise UserRoleAssignmentValidationError(
+                "Service-only roles require a service account user"
+            )
 
-    def _get_or_create_scope(self, *, scope_type: str, scope_id: str | None) -> AccessScopeORM:
-        normalized_scope_type, normalized_scope_id = _normalize_scope(scope_type, scope_id)
+    def _get_or_create_scope(
+        self, *, scope_type: str, scope_id: str | None
+    ) -> AccessScopeORM:
+        normalized_scope_type, normalized_scope_id = _normalize_scope(
+            scope_type, scope_id
+        )
         scope_filter = (
+            AccessScopeORM.tenant_id == self._tenant_id,
             AccessScopeORM.scope_type == normalized_scope_type,
             AccessScopeORM.scope_id.is_(None)
             if normalized_scope_id is None
             else AccessScopeORM.scope_id == normalized_scope_id,
         )
-        row = self._session.scalars(select(AccessScopeORM).where(*scope_filter)).one_or_none()
+        row = self._session.scalars(
+            select(AccessScopeORM).where(*scope_filter)
+        ).one_or_none()
         if row is not None:
             return row
 
         new_row = AccessScopeORM(
             id=uuid4(),
+            tenant_id=self._tenant_id,
             scope_type=normalized_scope_type,
             scope_id=normalized_scope_id,
             label=_scope_label(normalized_scope_type, normalized_scope_id),
@@ -202,13 +251,17 @@ class SqlAlchemyUserRoleAssignmentRepository:
                 self._session.add(new_row)
                 self._session.flush()
         except IntegrityError:
-            # Another concurrent writer created the same scope between our SELECT and INSERT.
+            # Another concurrent writer created this scope after our SELECT.
             # The savepoint was rolled back; re-query to return the winning row.
-            return self._session.scalars(select(AccessScopeORM).where(*scope_filter)).one()
+            return self._session.scalars(
+                select(AccessScopeORM).where(*scope_filter)
+            ).one()
         return new_row
 
     @staticmethod
-    def _to_entry(row: UserRoleAssignmentORM, scope: AccessScopeORM) -> UserRoleAssignmentEntry:
+    def _to_entry(
+        row: UserRoleAssignmentORM, scope: AccessScopeORM
+    ) -> UserRoleAssignmentEntry:
         return UserRoleAssignmentEntry(
             id=str(row.id),
             user_id=str(row.user_id),
@@ -228,7 +281,9 @@ def _parse_uuid(value: str, *, field_name: str) -> UUID:
     try:
         return UUID(value)
     except ValueError as exc:
-        raise UserRoleAssignmentValidationError(f"{field_name} must be a valid UUID") from exc
+        raise UserRoleAssignmentValidationError(
+            f"{field_name} must be a valid UUID"
+        ) from exc
 
 
 def _parse_role(value: str) -> RoleKey:
@@ -244,22 +299,31 @@ def _require_compatible_scope_type(role: RoleKey, scope_type: str) -> None:
     if normalized not in definition.allowed_scope_types:
         allowed = ", ".join(sorted(definition.allowed_scope_types))
         raise UserRoleAssignmentValidationError(
-            f"Role {role.value!r} cannot be assigned to scope type {normalized!r}; allowed: {allowed}"
+            f"Role {role.value!r} cannot be assigned to scope type "
+            f"{normalized!r}; allowed: {allowed}"
         )
 
 
 def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | None]:
     try:
-        parsed_scope_type = ScopeType(_normalize_required_string(scope_type, "scope_type"))
+        parsed_scope_type = ScopeType(
+            _normalize_required_string(scope_type, "scope_type")
+        )
     except ValueError as exc:
-        raise UserRoleAssignmentValidationError(f"Unknown scope_type: {scope_type}") from exc
+        raise UserRoleAssignmentValidationError(
+            f"Unknown scope_type: {scope_type}"
+        ) from exc
     normalized_scope_id = scope_id.strip() if isinstance(scope_id, str) else scope_id
     if parsed_scope_type == ScopeType.GLOBAL:
         if normalized_scope_id is not None:
-            raise UserRoleAssignmentValidationError("scope_id must be omitted for global scope")
+            raise UserRoleAssignmentValidationError(
+                "scope_id must be omitted for global scope"
+            )
         return parsed_scope_type.value, None
     if not normalized_scope_id:
-        raise UserRoleAssignmentValidationError(f"scope_id is required for scope type: {parsed_scope_type.value}")
+        raise UserRoleAssignmentValidationError(
+            f"scope_id is required for scope type: {parsed_scope_type.value}"
+        )
     return parsed_scope_type.value, normalized_scope_id
 
 

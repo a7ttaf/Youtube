@@ -98,9 +98,7 @@ def build_monthly_smart_alert_summary(
                 confidence="E_MISSING",
                 details={
                     "payment_match_status": payment_match.status,
-                    "payment_gap_usd": _decimal_to_api(
-                        payment_match.payment_gap_usd
-                    ),
+                    "payment_gap_usd": _decimal_to_api(payment_match.payment_gap_usd),
                     "issue_count": len(payment_match.issues),
                 },
             )
@@ -130,9 +128,7 @@ def build_monthly_smart_alert_summary(
                 confidence="E_MISSING",
                 details={
                     "bank_reconciliation_status": bank_reconciliation.status,
-                    "bank_gap_usd": _decimal_to_api(
-                        bank_reconciliation.bank_gap_usd
-                    ),
+                    "bank_gap_usd": _decimal_to_api(bank_reconciliation.bank_gap_usd),
                 },
             )
         )

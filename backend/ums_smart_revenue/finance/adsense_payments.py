@@ -11,11 +11,14 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import AdSensePaymentORM
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 CURRENCY_PATTERN = re.compile(r"^[A-Z]{3}$")
 ALLOWED_PAYMENT_STATUSES = frozenset({"PAID", "PENDING", "UNPAID", "CANCELLED"})
 MAX_ADSENSE_PAYMENT_PAGE_SIZE = 100
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 @dataclass(frozen=True)
@@ -82,8 +85,9 @@ class AdSensePaymentValidationError(AdSensePaymentError):
 
 
 class SqlAlchemyAdSensePaymentRepository:
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         self._session = session
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def sync_payments(
         self,
@@ -119,10 +123,11 @@ class SqlAlchemyAdSensePaymentRepository:
         for normalized_payment in normalized_payments:
             self._require_month_open(normalized_payment.month)
             now = datetime.now(UTC)
-            insert_statement = _dialect_insert(
-                self._session.get_bind().dialect.name
-            )(AdSensePaymentORM).values(
+            insert_statement = _dialect_insert(self._session.get_bind().dialect.name)(
+                AdSensePaymentORM
+            ).values(
                 id=uuid4(),
+                tenant_id=self._tenant_id,
                 month=normalized_payment.month,
                 payment_name=normalized_payment.payment_name,
                 payment_date=normalized_payment.payment_date,
@@ -150,6 +155,7 @@ class SqlAlchemyAdSensePaymentRepository:
                 update_values["imported_by"] = actor_uuid
             statement = insert_statement.on_conflict_do_update(
                 index_elements=[
+                    AdSensePaymentORM.tenant_id,
                     AdSensePaymentORM.month,
                     AdSensePaymentORM.payment_name,
                 ],
@@ -182,10 +188,14 @@ class SqlAlchemyAdSensePaymentRepository:
         if month is not None:
             _validate_month(month)
 
-        statement = select(AdSensePaymentORM).order_by(
-            AdSensePaymentORM.month.desc(),
-            AdSensePaymentORM.payment_date.desc(),
-            AdSensePaymentORM.payment_name,
+        statement = (
+            select(AdSensePaymentORM)
+            .where(AdSensePaymentORM.tenant_id == self._tenant_id)
+            .order_by(
+                AdSensePaymentORM.month.desc(),
+                AdSensePaymentORM.payment_date.desc(),
+                AdSensePaymentORM.payment_name,
+            )
         )
         if month is not None:
             statement = statement.where(AdSensePaymentORM.month == month)
@@ -202,6 +212,7 @@ class SqlAlchemyAdSensePaymentRepository:
         _validate_month(month)
         rows = self._session.scalars(
             select(AdSensePaymentORM)
+            .where(AdSensePaymentORM.tenant_id == self._tenant_id)
             .where(AdSensePaymentORM.month == month)
             .order_by(
                 AdSensePaymentORM.payment_date.desc(),
@@ -211,7 +222,12 @@ class SqlAlchemyAdSensePaymentRepository:
         return [self._to_entry(row) for row in rows]
 
     def _require_month_open(self, month: str) -> None:
-        close = get_or_create_month_close_row(self._session, month, for_update=True)
+        close = get_or_create_month_close_row(
+            self._session,
+            month,
+            tenant_id=self._tenant_id,
+            for_update=True,
+        )
         if close.status == "LOCKED":
             raise AdSensePaymentLockedMonthError(
                 "Finance month is locked for AdSense payment sync"
@@ -312,6 +328,24 @@ def _parse_uuid_or_none(value: str) -> UUID | None:
         return UUID(normalized)
     except ValueError:
         return None
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise AdSensePaymentValidationError("tenant_id must be a valid UUID") from exc
 
 
 def _decimal_to_api(value: Decimal) -> str:

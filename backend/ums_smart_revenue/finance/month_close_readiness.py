@@ -1,5 +1,6 @@
 import re
 from dataclasses import dataclass
+from uuid import UUID
 
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -14,8 +15,11 @@ from ums_smart_revenue.finance.reconciliation import (
     build_revenue_reconciliation_issue_queue,
 )
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 @dataclass(frozen=True)
@@ -66,10 +70,11 @@ class FinanceCloseReadiness:
 
 
 class SqlAlchemyFinanceCloseReadinessService:
-    """Evaluate close blockers from the SQL-backed finance and channel tables."""
+    """Month-close readiness checker scoped to a single tenant."""
 
-    def __init__(self, session: Session):
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         self._session = session
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def check_month(
         self, month: str, *, for_update: bool = False
@@ -77,7 +82,11 @@ class SqlAlchemyFinanceCloseReadinessService:
         """Return readiness, optionally guarding the close attempt transaction."""
         _validate_month(month)
         if for_update:
-            acquire_finance_month_advisory_lock(self._session, month)
+            acquire_finance_month_advisory_lock(
+                self._session,
+                month,
+                tenant_id=self._tenant_id,
+            )
         blockers: list[FinanceCloseBlocker] = []
         pending_override_count = self._pending_manual_override_count(
             month, for_update=for_update
@@ -124,6 +133,7 @@ class SqlAlchemyFinanceCloseReadinessService:
     def _pending_manual_override_count(self, month: str, *, for_update: bool) -> int:
         """Count pending overrides, locking matching rows during lock-time rechecks."""
         pending_overrides_statement = select(RevenueManualOverrideORM.id).where(
+            RevenueManualOverrideORM.tenant_id == self._tenant_id,
             RevenueManualOverrideORM.month == month,
             RevenueManualOverrideORM.status == "PENDING",
         )
@@ -142,13 +152,16 @@ class SqlAlchemyFinanceCloseReadinessService:
             .select_from(YouTubeChannelORM)
             .outerjoin(
                 MonthlyChannelRevenueFactORM,
-                (
+                (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)
+                & (
                     MonthlyChannelRevenueFactORM.youtube_channel_id
                     == YouTubeChannelORM.youtube_channel_id
                 )
+                & (MonthlyChannelRevenueFactORM.tenant_id == self._tenant_id)
                 & (MonthlyChannelRevenueFactORM.month == month),
             )
             .where(
+                YouTubeChannelORM.tenant_id == self._tenant_id,
                 YouTubeChannelORM.active.is_(True),
                 YouTubeChannelORM.revenue_required.is_(True),
                 MonthlyChannelRevenueFactORM.id.is_(None),
@@ -178,7 +191,10 @@ class SqlAlchemyFinanceCloseReadinessService:
         """Load month facts used for reconciliation, locking them for close attempts."""
         statement = (
             select(MonthlyChannelRevenueFactORM)
-            .where(MonthlyChannelRevenueFactORM.month == month)
+            .where(
+                MonthlyChannelRevenueFactORM.tenant_id == self._tenant_id,
+                MonthlyChannelRevenueFactORM.month == month,
+            )
             .order_by(
                 MonthlyChannelRevenueFactORM.youtube_channel_id,
                 MonthlyChannelRevenueFactORM.source_kind,
@@ -203,6 +219,24 @@ class SqlAlchemyFinanceCloseReadinessService:
             )
             for row in rows
         ]
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    if tenant_id is not None:
+        return _parse_tenant_uuid(tenant_id)
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return _DEFAULT_TENANT_UUID
+
+
+def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    try:
+        return UUID(tenant_id.strip())
+    except (AttributeError, ValueError) as exc:
+        raise ValueError("tenant_id must be a valid UUID") from exc
 
 
 def _validate_month(month: str) -> None:

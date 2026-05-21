@@ -7,7 +7,6 @@ from ums_smart_revenue.org.channel_registry import (
     ChannelRegistryValidationError,
 )
 
-
 COMPANY_TV_ID = "00000000-0000-0000-0000-000000000201"
 COMPANY_NEWS_ID = "00000000-0000-0000-0000-000000000202"
 
@@ -24,7 +23,9 @@ def test_in_memory_channel_registry_validates_primary_company_id_on_create():
     )
 
     assert channel.primary_company_id is None
-    with pytest.raises(ChannelRegistryValidationError, match="primary_company_id must be a valid UUID"):
+    with pytest.raises(
+        ChannelRegistryValidationError, match="primary_company_id must be a valid UUID"
+    ):
         registry.create_channel(
             youtube_channel_id="channel-bad-company",
             channel_name="Bad Company",
@@ -59,12 +60,18 @@ def test_in_memory_channel_registry_validates_primary_company_id_on_update():
     )
 
     assert updated_without_company.primary_company_id is None
-    with pytest.raises(ChannelRegistryValidationError, match="primary_company_id must be a valid UUID"):
-        registry.update_mapping(youtube_channel_id="channel-tv-a", primary_company_id="not-a-uuid")
+    with pytest.raises(
+        ChannelRegistryValidationError, match="primary_company_id must be a valid UUID"
+    ):
+        registry.update_mapping(
+            youtube_channel_id="channel-tv-a", primary_company_id="not-a-uuid"
+        )
 
 
 def test_in_memory_channel_registry_rejects_duplicate_initial_channels():
-    with pytest.raises(ChannelRegistryConflictError, match="Duplicate channel id: channel-tv-a"):
+    with pytest.raises(
+        ChannelRegistryConflictError, match="Duplicate channel id: channel-tv-a"
+    ):
         ChannelRegistry(
             [
                 ChannelRegistryEntry(
@@ -107,4 +114,6 @@ def test_in_memory_channel_registry_list_channels_excludes_inactive_entries():
         ]
     )
 
-    assert [channel.youtube_channel_id for channel in registry.list_channels()] == ["channel-active"]
+    assert [channel.youtube_channel_id for channel in registry.list_channels()] == [
+        "channel-active"
+    ]

@@ -19,9 +19,18 @@ from sqlalchemy import (
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
 
 class ReportBase(DeclarativeBase):
     pass
+
+
+# Shared server_default for the tenant_id column added in migration
+# 20260517_0001. See backend/ums_smart_revenue/db/security_models.py for
+# the rationale (single source of truth for the UMS tenant id).
+_TENANT_ID_DEFAULT = text(f"'{UMS_TENANT_ID}'")
+_TENANT_ID_DEFAULT_VALUE = UUID(UMS_TENANT_ID)
 
 
 class RawReportFileORM(ReportBase):
@@ -50,9 +59,16 @@ class RawReportFileORM(ReportBase):
         server_default=func.now(),
         onupdate=func.now(),
     )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
+    )
 
     __table_args__ = (
         UniqueConstraint(
+            "tenant_id",
             "source",
             "report_type",
             "report_month",
@@ -74,6 +90,7 @@ class RawReportFileORM(ReportBase):
         ),
         Index("ix_raw_report_files_source_month", "source", "report_month"),
         Index("ix_raw_report_files_report_type_month", "report_type", "report_month"),
+        Index("ix_raw_report_files_tenant_id", "tenant_id"),
     )
 
 
@@ -133,6 +150,12 @@ class ExportJobORM(ReportBase):
         nullable=False,
         server_default=func.now(),
         onupdate=func.now(),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
     )
 
     __table_args__ = (
@@ -198,6 +221,7 @@ class ExportJobORM(ReportBase):
             "scope_channel_ids",
             postgresql_using="gin",
         ),
+        Index("ix_export_jobs_tenant_id", "tenant_id"),
     )
 
 
