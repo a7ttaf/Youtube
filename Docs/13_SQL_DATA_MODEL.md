@@ -65,6 +65,12 @@ channel_group_members (
 );
 ```
 
+`channel_group_members` keeps the implemented primary key
+`(group_id, channel_id)` because both referenced `id` columns remain globally
+unique primary keys. Tenant isolation is enforced by `tenant_id`, the composite
+foreign keys, and `ix_channel_group_members_tenant_id`; the primary key is not
+the tenant-isolation boundary.
+
 User table constraints:
 
 - `status` is constrained to `active`, `disabled`, or `service`.
@@ -85,6 +91,12 @@ Tenant-scoped channel identity:
 ## Revenue tables
 
 Canonical persisted month values use `text` in `YYYY-MM` format across operational, revenue, explanation, raw-report, and export tables. API payloads use the same representation.
+
+The `revenue_monthly_channel` and `tax_monthly_channel` sketches below are
+legacy planning models retained for contract history. The current backend does
+not create or write those tables; persisted channel revenue now flows through
+tenant-scoped `monthly_channel_revenue_facts`. There is no S2 backfill path for
+the legacy sketches because they are not active operational tables.
 
 ```sql
 revenue_monthly_channel (
@@ -236,8 +248,8 @@ channel_net_revenue (
 ```
 
 Implementation note:
-The first net-revenue API is read-only and does not persist this
-`channel_net_revenue` table yet. It derives month/channel summaries from
+The first net-revenue API is read-only and does not persist the legacy
+`channel_net_revenue` sketch. It derives month/channel summaries from
 `monthly_channel_revenue_facts.net_revenue_usd` and approved
 `revenue_manual_overrides` only. Channels whose primary source has no official
 net value are reported as missing source data rather than backfilled from tax,

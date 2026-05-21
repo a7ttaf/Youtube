@@ -1,8 +1,7 @@
-"""Behaviour tests for the ``tenant_id`` field added to :class:`UserPrincipal`.
+"""Behaviour tests for the ``tenant_id`` field on :class:`UserPrincipal`.
 
-The field is brand-new in S2.3 and intentionally defaults to ``None`` so
-every pre-existing call site keeps working unchanged. S2.4 will tighten
-the contract (resolver middleware sets it; routes will assume it).
+Direct construction remains backward-compatible for legacy callers, while the
+SQL principal loader binds tenant identity from the persisted ``users`` row.
 """
 
 from dataclasses import FrozenInstanceError
@@ -20,6 +19,7 @@ from ums_smart_revenue.auth.principals import (
     SqlAlchemyPrincipalLoader,
 )
 from ums_smart_revenue.db.security_models import SecurityBase, UserORM
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 
 def test_user_principal_defaults_tenant_id_to_none() -> None:
@@ -55,7 +55,7 @@ def test_principal_loader_normalizes_tenant_id_when_provided() -> None:
     engine = _build_engine_with_users()
     user_id = uuid4()
     tenant_id = UUID("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")
-    _seed_active_user(engine, user_id=user_id)
+    _seed_active_user(engine, user_id=user_id, tenant_id=tenant_id)
 
     with Session(engine) as session:
         principal = SqlAlchemyPrincipalLoader(session).load(
@@ -66,8 +66,8 @@ def test_principal_loader_normalizes_tenant_id_when_provided() -> None:
     assert principal.tenant_id == str(tenant_id)
 
 
-def test_principal_loader_omits_tenant_id_when_unspecified() -> None:
-    """Legacy load paths remain tenantless when no tenant context is supplied."""
+def test_principal_loader_uses_stored_tenant_id_when_unspecified() -> None:
+    """Missing request tenant context falls back to the persisted user tenant."""
     engine = _build_engine_with_users()
     user_id = uuid4()
     _seed_active_user(engine, user_id=user_id)
@@ -75,14 +75,14 @@ def test_principal_loader_omits_tenant_id_when_unspecified() -> None:
     with Session(engine) as session:
         principal = SqlAlchemyPrincipalLoader(session).load(user_id=str(user_id))
 
-    assert principal.tenant_id is None
+    assert principal.tenant_id == UMS_TENANT_ID
 
 
 @pytest.mark.parametrize("tenant_id", ["", "   "])
 def test_principal_loader_treats_empty_tenant_id_as_unspecified(
     tenant_id: str,
 ) -> None:
-    """Blank tenant values cannot become authorization context."""
+    """Blank tenant values cannot override the persisted user tenant."""
     engine = _build_engine_with_users()
     user_id = uuid4()
     _seed_active_user(engine, user_id=user_id)
@@ -92,7 +92,7 @@ def test_principal_loader_treats_empty_tenant_id_as_unspecified(
             user_id=str(user_id), tenant_id=tenant_id
         )
 
-    assert principal.tenant_id is None
+    assert principal.tenant_id == UMS_TENANT_ID
 
 
 def test_principal_loader_rejects_malformed_tenant_id() -> None:
@@ -120,7 +120,12 @@ def _build_engine_with_users() -> Engine:
     return engine
 
 
-def _seed_active_user(engine: Engine, *, user_id: UUID) -> None:
+def _seed_active_user(
+    engine: Engine,
+    *,
+    user_id: UUID,
+    tenant_id: UUID | None = None,
+) -> None:
     """Insert an active user row that can be loaded as a principal."""
     now = datetime.now(UTC)
     with Session(engine) as session, session.begin():
@@ -131,6 +136,7 @@ def _seed_active_user(engine: Engine, *, user_id: UUID) -> None:
                 display_name="Test",
                 status="active",
                 is_service_account=False,
+                tenant_id=tenant_id or UUID(UMS_TENANT_ID),
                 created_at=now,
                 updated_at=now,
             )

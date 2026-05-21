@@ -24,6 +24,7 @@ from ums_smart_revenue.auth.principals import (
     MAX_ACTIVE_ROLE_ASSIGNMENTS,
     PRINCIPAL_QUERY_TIMEOUT_MS,
     PrincipalLoadError,
+    PrincipalNotFoundError,
     SqlAlchemyPrincipalLoader,
 )
 from ums_smart_revenue.auth.roles import ROLE_DEFINITIONS
@@ -37,10 +38,12 @@ from ums_smart_revenue.db.security_models import (
     UserPermissionGrantORM,
     UserRoleAssignmentORM,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 ACTOR_ID = UUID("00000000-0000-0000-0000-000000016001")
 TARGET_ID = UUID("00000000-0000-0000-0000-000000016002")
 GLOBAL_SCOPE_ID = UUID("00000000-0000-0000-0000-000000016101")
+OTHER_TENANT_ID = UUID("00000000-0000-0000-0000-000000016201")
 ROLE_ASSIGNMENT_OVERFLOW_COUNT = MAX_ACTIVE_ROLE_ASSIGNMENTS + 1
 PERMISSION_GRANT_OVERFLOW_COUNT = MAX_ACTIVE_PERMISSION_GRANTS + 1
 
@@ -380,6 +383,32 @@ def test_database_principal_loads_direct_permission_grants(tmp_path):
     assert [item["event_type"] for item in response.json()["items"]] == [
         "CHANNEL_UPDATED"
     ]
+
+
+def test_database_principal_uses_stored_user_tenant(tmp_path):
+    """Principal tenant identity comes from the persisted user row."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        principal = SqlAlchemyPrincipalLoader(session).load(user_id=str(ACTOR_ID))
+
+    assert principal.tenant_id == UMS_TENANT_ID
+
+
+def test_database_principal_rejects_mismatched_explicit_tenant(tmp_path):
+    """Explicit tenant input cannot make a user appear in another tenant."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+
+    with Session(engine) as session:
+        with pytest.raises(PrincipalNotFoundError, match="User is not registered"):
+            SqlAlchemyPrincipalLoader(session).load(
+                user_id=str(ACTOR_ID),
+                tenant_id=str(OTHER_TENANT_ID),
+            )
 
 
 def test_database_principal_rejects_disabled_user_with_super_owner_header(tmp_path):

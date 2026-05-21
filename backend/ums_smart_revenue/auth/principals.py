@@ -114,17 +114,22 @@ class SqlAlchemyPrincipalLoader:
         user_status = _parse_user_status(user.status)
         if user_status == UserStatus.DISABLED:
             raise PrincipalDisabledError("User is disabled")
+        # FIX: Bind the principal to the stored user's tenant, not a caller-
+        # supplied tenant value that could make a cross-tenant user look valid.
+        principal_tenant_id = str(user.tenant_id)
+        if tenant_id is not None and tenant_id != principal_tenant_id:
+            raise PrincipalNotFoundError("User is not registered")
 
         return UserPrincipal(
             user_id=str(user.id),
             email=user.email,
-            role_assignments=self._load_role_assignments(user.id),
-            direct_permissions=self._load_permission_grants(user.id),
+            role_assignments=self._load_role_assignments(user.id, user.tenant_id),
+            direct_permissions=self._load_permission_grants(user.id, user.tenant_id),
             is_service_account=(
                 user.is_service_account or user_status == UserStatus.SERVICE
             ),
             disabled=False,
-            tenant_id=tenant_id,
+            tenant_id=principal_tenant_id,
         )
 
     def _prepare_read_connection(self) -> None:
@@ -138,13 +143,17 @@ class SqlAlchemyPrincipalLoader:
                 f"SET LOCAL statement_timeout = {PRINCIPAL_QUERY_TIMEOUT_MS}"
             )
 
-    def _load_role_assignments(self, user_id: UUID) -> tuple[RoleAssignment, ...]:
+    def _load_role_assignments(
+        self, user_id: UUID, tenant_id: UUID
+    ) -> tuple[RoleAssignment, ...]:
         """Load active role assignments while enforcing a bounded row count."""
         rows = self._session.execute(
             select(UserRoleAssignmentORM, AccessScopeORM)
             .join(AccessScopeORM, UserRoleAssignmentORM.scope_id == AccessScopeORM.id)
             .where(
                 UserRoleAssignmentORM.user_id == user_id,
+                UserRoleAssignmentORM.tenant_id == tenant_id,
+                AccessScopeORM.tenant_id == tenant_id,
                 UserRoleAssignmentORM.active.is_(True),
             )
             .order_by(UserRoleAssignmentORM.assigned_at, UserRoleAssignmentORM.id)
@@ -166,13 +175,17 @@ class SqlAlchemyPrincipalLoader:
             )
         return tuple(assignments)
 
-    def _load_permission_grants(self, user_id: UUID) -> tuple[PermissionGrant, ...]:
+    def _load_permission_grants(
+        self, user_id: UUID, tenant_id: UUID
+    ) -> tuple[PermissionGrant, ...]:
         """Load active direct permission grants while enforcing a bounded row count."""
         rows = self._session.execute(
             select(UserPermissionGrantORM, AccessScopeORM)
             .join(AccessScopeORM, UserPermissionGrantORM.scope_id == AccessScopeORM.id)
             .where(
                 UserPermissionGrantORM.user_id == user_id,
+                UserPermissionGrantORM.tenant_id == tenant_id,
+                AccessScopeORM.tenant_id == tenant_id,
                 UserPermissionGrantORM.active.is_(True),
             )
             .order_by(UserPermissionGrantORM.granted_at, UserPermissionGrantORM.id)
