@@ -319,8 +319,13 @@ class TenantResolverMiddleware:
         future.add_done_callback(lambda _future: self._blocking_tasks.release())
         remaining = deadline - loop.time()
         if remaining <= 0:
+            future.cancel()
             raise TimeoutError
-        return await asyncio.wait_for(asyncio.shield(future), timeout=remaining)
+        try:
+            return await asyncio.wait_for(future, timeout=remaining)
+        except TimeoutError:
+            future.cancel()
+            raise
 
     def _submit_blocking(
         self,

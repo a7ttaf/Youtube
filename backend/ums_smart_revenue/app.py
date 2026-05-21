@@ -60,6 +60,7 @@ from ums_smart_revenue.tenancy.resolver import (
     DEFAULT_BYPASS_PATHS,
     TenantAuthorizer,
     TenantResolverMiddleware,
+    _normalise_bypass_paths,
 )
 from ums_smart_revenue.tenancy.resolver import (
     SessionFactory as TenantSessionFactory,
@@ -158,7 +159,7 @@ class TrustedGatewayTenantResolverMiddleware:
         bypass_paths: Iterable[str] = DEFAULT_BYPASS_PATHS,
         authorize_tenant: TenantAuthorizer | None = None,
     ) -> None:
-        self._bypass_paths = tuple(bypass_paths)
+        self._bypass_paths = _normalise_bypass_paths(bypass_paths)
         self._resolver = TenantResolverMiddleware(
             app,
             session_factory=session_factory,
@@ -192,7 +193,7 @@ class DefaultTenantMiddleware:
         bypass_paths: Iterable[str] = DEFAULT_BYPASS_PATHS,
     ) -> None:
         self.app = app
-        self._bypass_paths = tuple(bypass_paths)
+        self._bypass_paths = _normalise_bypass_paths(bypass_paths)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope.get("method", "").upper() == "OPTIONS":

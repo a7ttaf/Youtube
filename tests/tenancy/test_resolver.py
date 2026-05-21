@@ -731,7 +731,7 @@ def test_sqlalchemy_lookup_errors_fail_closed_and_close_session(
 
 
 def test_tenant_lookup_timeout_returns_503(caplog: pytest.LogCaptureFixture):
-    """Slow tenant lookups time out and keep blocking admission bounded."""
+    """Slow tenant lookups time out and return bounded 503 responses."""
     now = datetime.now(UTC)
     calls: list[str] = []
     tenant = Tenant(
@@ -794,6 +794,47 @@ def test_tenant_lookup_timeout_returns_503(caplog: pytest.LogCaptureFixture):
     ]
     assert calls == ["ums"]
     assert "Tenant registry lookup timed out" in caplog.text
+
+
+def test_blocking_timeout_cancels_future_and_releases_admission_slot():
+    """Timed-out blocking futures are cancelled so later work can enter."""
+    submitted: list[asyncio.Future] = []
+
+    class PendingSubmissionMiddleware(TenantResolverMiddleware):
+        """Resolver variant that returns never-completing futures."""
+
+        def _submit_blocking(
+            self,
+            loop: asyncio.AbstractEventLoop,
+            func: Callable[..., object],
+            *args: object,
+        ) -> asyncio.Future:
+            """Return a pending future instead of submitting executor work."""
+            del func, args
+            future = loop.create_future()
+            submitted.append(future)
+            return future
+
+    middleware = PendingSubmissionMiddleware(
+        FastAPI(),
+        session_factory=lambda: None,
+        authorize_tenant=lambda _scope, _slug: True,
+        max_blocking_tasks=1,
+    )
+
+    async def run_twice() -> None:
+        """Verify one timed-out future does not consume the only slot forever."""
+        for _ in range(2):
+            with pytest.raises(TimeoutError):
+                await middleware._run_blocking_with_timeout(
+                    lambda: None,
+                    timeout=0.01,
+                )
+
+    asyncio.run(run_twice())
+
+    assert len(submitted) == 2
+    assert all(future.cancelled() for future in submitted)
 
 
 def test_session_close_errors_do_not_mask_lookup_errors(

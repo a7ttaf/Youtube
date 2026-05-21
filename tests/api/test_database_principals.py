@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from uuid import UUID, uuid4
 
 import pytest
-from fastapi import HTTPException
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import SQLAlchemyError
@@ -18,7 +18,7 @@ from ums_smart_revenue.api.dependencies import (
     current_principal_from_database,
     current_trusted_gateway_identity,
 )
-from ums_smart_revenue.app import create_app
+from ums_smart_revenue.app import TrustedGatewayTenantResolverMiddleware, create_app
 from ums_smart_revenue.auth.permissions import PERMISSION_DEFINITIONS
 from ums_smart_revenue.auth.principals import (
     MAX_ACTIVE_PERMISSION_GRANTS,
@@ -572,6 +572,26 @@ def test_database_principal_rejects_bad_token_before_opening_session(monkeypatch
     assert response.status_code == 401
     assert response.json()["detail"] == "Invalid trusted gateway token"
     assert counter.opened_sessions == 0
+
+
+def test_database_tenant_resolver_normalizes_bypass_paths_before_auth():
+    """Database-auth wrapper bypasses normalized paths before gateway checks."""
+    app = FastAPI()
+    app.add_middleware(
+        TrustedGatewayTenantResolverMiddleware,
+        session_factory=lambda: None,
+        bypass_paths=("/health/",),
+        authorize_tenant=lambda _scope, _slug: True,
+    )
+
+    @app.get("/health")
+    def health() -> dict[str, str]:
+        return {"status": "ok"}
+
+    response = TestClient(app).get("/health")
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
 
 
 def test_database_principal_retryable_storage_errors_return_service_unavailable():
