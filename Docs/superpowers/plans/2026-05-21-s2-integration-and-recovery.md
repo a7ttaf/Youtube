@@ -78,10 +78,19 @@ gh pr checks N
 
 - [ ] **Step 4: Live re-read unresolved review threads**
 
-For each PR number `N` in {31, 32, 34}:
+Iterate over the three PR numbers. The shell loop below substitutes `$N` into the GraphQL query at each iteration — do **not** paste the inner query directly into `gh api graphql` with a literal `N`, since `number: N` is not valid GraphQL syntax and the call will fail.
 
 ```bash
-gh api graphql -f query='query { repository(owner:"XGenerationy", name:"Youtube") { pullRequest(number:N) { reviewThreads(first:50) { nodes { isResolved isOutdated path line } } } } }'
+for N in 31 32 34; do
+  echo "--- PR #$N ---"
+  gh api graphql -f query="query { repository(owner: \"XGenerationy\", name: \"Youtube\") { pullRequest(number: $N) { reviewThreads(first: 50) { nodes { isResolved isOutdated path line } } } } }"
+done
+```
+
+Alternative (proper GraphQL variable, single-PR form):
+
+```bash
+gh api graphql -F prNumber=31 -f query='query($prNumber: Int!) { repository(owner: "XGenerationy", name: "Youtube") { pullRequest(number: $prNumber) { reviewThreads(first: 50) { nodes { isResolved isOutdated path line } } } } }'
 ```
 
 Count nodes where `isResolved == false`. Record per-PR unresolved count.
@@ -286,7 +295,7 @@ If everything passes: record baseline test count in run log and proceed.
 ```bash
 gh pr view 31 --json state,reviewDecision,mergeStateStatus,headRefOid,statusCheckRollup,latestReviews,baseRefName
 gh pr checks 31
-gh api graphql -f query='query { repository(owner:"XGenerationy", name:"Youtube") { pullRequest(number:31) { reviewThreads(first:50) { nodes { isResolved isOutdated path line comments(first:1) { nodes { author{login} bodyText } } } } } } }'
+gh api graphql -f query='query { repository(owner: "XGenerationy", name: "Youtube") { pullRequest(number: 31) { reviewThreads(first: 50) { nodes { isResolved isOutdated path line comments(first: 1) { nodes { author { login } bodyText } } } } } } }'
 ```
 
 - [ ] **Step 2: Branch on state**
@@ -411,7 +420,7 @@ For each occurrence in the handoff file, replace developer-specific absolute pat
 |---|---|
 | `/home/mahmoud/venv/bin/python -m pytest ...` | `PYTHONPATH=backend python -m pytest ...` |
 | `/home/mahmoud/venv/bin/python -m ruff ...` | `python -m ruff ...` |
-| `/home/mahmoud/.../alembic ...` | `PYTHONPATH=backend python -m alembic -c alembic.ini ...` |
+| `/home/mahmoud/.../alembic ...` | `PYTHONPATH=backend python -m alembic ...` |
 
 Add a one-line note in the handoff file: "All commands assume the repo root as working directory and an activated Python virtualenv (or prepend the venv path)."
 
@@ -476,7 +485,7 @@ git push origin pr/s2-4b-finance-explanations-tests
 ```bash
 gh pr view 31 --json state,reviewDecision,mergeStateStatus,statusCheckRollup
 gh pr checks 31
-gh api graphql -f query='query { repository(owner:"XGenerationy", name:"Youtube") { pullRequest(number:31) { reviewThreads(first:50) { nodes { isResolved } } } } }'
+gh api graphql -f query='query { repository(owner: "XGenerationy", name: "Youtube") { pullRequest(number: 31) { reviewThreads(first: 50) { nodes { isResolved } } } } }'
 ```
 
 Wait for CI to complete. Confirm: state=OPEN, reviewDecision=APPROVED (or RESOLVED), mergeStateStatus=CLEAN, all checks=SUCCESS, zero unresolved threads.
@@ -509,7 +518,7 @@ Append to run log.
 ```bash
 gh pr view 32 --json state,reviewDecision,mergeStateStatus,headRefOid,statusCheckRollup
 gh pr checks 32
-gh api graphql -f query='query { repository(owner:"XGenerationy", name:"Youtube") { pullRequest(number:32) { reviewThreads(first:50) { nodes { isResolved } } } } }'
+gh api graphql -f query='query { repository(owner: "XGenerationy", name: "Youtube") { pullRequest(number: 32) { reviewThreads(first: 50) { nodes { isResolved } } } } }'
 ```
 
 - [ ] **Step 2: Verify preconditions**

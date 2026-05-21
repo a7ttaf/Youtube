@@ -124,7 +124,18 @@ Must run on the integration branch **before push**, in order:
 1. `python -m ruff check backend tests` — must pass. (Origin/main has 55 pre-existing ruff errors per Phase 2.5 baseline; PR #27 cleanup is on the stack and will reach main via this integration. Post-merge expected: 0 errors.)
 2. `python -m pytest -q` — must pass full suite. Origin/main baseline = 452 tests. Post-integration target = ~570 (452 + ~120 new from S2.4b coverage PRs).
 3. **Alembic validation — prefer disposable PostgreSQL**:
-   - If docker is available: `docker compose up -d postgres`, set `DATABASE_URL`, run `PYTHONPATH=backend python -m alembic upgrade head` (must reach single head), then `PYTHONPATH=backend python -m alembic downgrade -2 && PYTHONPATH=backend python -m alembic upgrade head`, tear down container
+   - If docker is available: `docker compose up -d postgres`, set `DATABASE_URL`, run `PYTHONPATH=backend python -m alembic upgrade head` (must reach single head), then exercise a round-trip using **one of** the two options below, then tear down the container. Record which option was used in the run log (`Docs/superpowers/runlog/2026-05-21-phase-0.md`).
+     - **Option A — targeted (faster)**: downgrade to the recorded pre-merge head (`LAST_PRE_MERGE_HEAD`, captured from `alembic heads` against `origin/main` and `origin/pr/s2-4a-...` before the integration merge), then re-`upgrade head`. Exercises only the migrations introduced by the integration; failures point cleanly at the new chain.
+       ```bash
+       export LAST_PRE_MERGE_HEAD=<sha>   # e.g. 20260513_0006 or 20260518_0001 — the head of the side you want to bounce against
+       PYTHONPATH=backend python -m alembic downgrade "$LAST_PRE_MERGE_HEAD"
+       PYTHONPATH=backend python -m alembic upgrade head
+       ```
+     - **Option B — full round-trip (more thorough, slower)**: downgrade to `base` then re-`upgrade head`. Exercises every `downgrade()` in the chain (including the older `20260510_*` / `20260513_*` migrations) at the cost of additional time. Use this when integrating a stack that touches multiple migration branches and you want maximum confidence.
+       ```bash
+       PYTHONPATH=backend python -m alembic downgrade base
+       PYTHONPATH=backend python -m alembic upgrade head
+       ```
    - SQLite fallback only if PG unavailable: same commands against `sqlite:///./.pytest-tmp/integration.sqlite`. If fallback used, document the contract gap in the run log (SQLite does not enforce all PG constraints used by this repo, especially partial indexes and `RESTRICT` FKs).
 4. `cd frontend && npm install && npm run build` — must succeed. (`cd` required because `package.json` lives in `frontend/`.)
 5. `git diff --check` — must show no whitespace issues.

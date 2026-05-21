@@ -153,6 +153,16 @@ Highest-risk phase. Every transition surfaces evidence before continuing.
 - Check out a temp branch from `origin/pr/s2-4a-...`, run same command, note output
 - Document the actual head IDs (DO NOT hardcode in advance)
 
+**Discovered topology (recorded 2026-05-21 — confirm live before acting):**
+
+Pre-integration audit (see `Docs/implementation/S2_INTEGRATION_PLAN.md`) discovered a **3-head divergence** on the main side that was previously missed: migration `20260516_0001` (`tenants_foundation`) branched from `20260513_0001` (`bank_reconciliation`) and **skipped** the parallel `20260513_0002..0006` chain (`retire_graph_permissions` → `export_artifact_metadata` → `currency_exchange_rates` → `revenue_format_breakdown` → `export_job_scope_channel_snapshot`). The stack's head `20260518_0001` is descended from `20260516_0001` via `20260517_0001`, so it transitively absorbs `20260516_0001`.
+
+Effective heads to merge depend on what `alembic heads` reports against the integration tree:
+
+- **2-head outcome (expected):** `20260513_0006` (main's other branch) and `20260518_0001` (stack tail, transitively including `20260516_0001`). Proceed with a 2-head `alembic merge` in Step 4.5.
+- **3-head outcome (defensive):** `20260513_0006`, `20260516_0001`, and `20260518_0001` listed independently — meaning the descent from `20260516_0001` to `20260518_0001` was not resolved during merge. Proceed with a 3-head `alembic merge` in Step 4.5 (pass all three head IDs to one `alembic merge` invocation; do not chain two 2-way merges, since that produces an asymmetric history that is harder to revert).
+- **1-head outcome (unexpected):** a single head means somehow the topology was already flattened. **🛑 CHECKPOINT** — investigate before proceeding; the integration plan assumes ≥2 heads.
+
 **Step 4.3 — Create integration branch**
 - `git checkout -b pr/s2-integration-merge origin/main`
 - `git merge origin/pr/s2-4a-tenant-id-on-operational-tables --no-ff --no-commit`
@@ -166,9 +176,18 @@ Highest-risk phase. Every transition surfaces evidence before continuing.
 
 **Step 4.5 — Generate Alembic merge migration**
 - All alembic commands run from repo root with `PYTHONPATH=backend`. Never `cd backend`.
-- With both heads now reachable: `PYTHONPATH=backend python -m alembic heads` — confirm two heads
-- `PYTHONPATH=backend python -m alembic merge -m "merge tenants and finance heads" <head_a> <head_b>`
-- Inspect generated migration, confirm it is a no-op merge (no schema operations)
+- With both branches now in the working tree: `PYTHONPATH=backend python -m alembic heads` — confirm head count and match against the Step 4.2 topology
+- Pass **all live heads in a single `alembic merge` invocation** (do not chain 2-way merges, which produce asymmetric history that is harder to revert):
+  - 2-head case:
+    ```bash
+    PYTHONPATH=backend python -m alembic merge -m "merge S2 stack and main 0513 finance/export chain" <head_a> <head_b>
+    ```
+  - 3-head case (defensive — see Step 4.2):
+    ```bash
+    PYTHONPATH=backend python -m alembic merge -m "merge S2 stack and main heads" <head_a> <head_b> <head_c>
+    ```
+- Inspect the generated merge migration file. **Confirm it is a no-op merge**: `upgrade()` and `downgrade()` bodies must contain only `pass` (no `op.create_table`, `op.add_column`, `op.alter_column`, etc.). If the generator produced any schema operations, **🛑 STOP and CHECKPOINT** — that means the branches touched the same tables in incompatible ways and the merge is unsafe without hand-resolution
+- After the merge migration is committed: `PYTHONPATH=backend python -m alembic heads` must now return exactly **one** head
 - Commit the merge migration (this is a separate commit from the merge-resolution commit in Step 4.4 — keeps the diff readable)
 
 **Step 4.6 — Validation gate**
