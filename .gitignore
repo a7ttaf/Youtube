@@ -225,3 +225,9 @@ logs/
 scratch/
 tmp/
 .scratch/
+
+# Local Obsidian vault (operator's project-notes workspace, not portable)
+Docs/Youtube Project/
+
+# Vite dev cache
+.vite/

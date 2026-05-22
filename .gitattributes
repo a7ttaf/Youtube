@@ -1,0 +1,9 @@
+# Default: respect core.whitespace and Git's standard line-ending normalization.
+
+# Vendored agent content (Claude Code / Codex agents skills + GitHub theme
+# JSON5 files + GitHub font licenses). Sources tracked in skills-lock.json
+# and mockups/FontsGH/README.md. Trailing whitespace and indentation may
+# not match the repository's whitespace rules; disable the whitespace
+# check on these paths so `git diff --check` does not flag upstream
+# artifacts.
+.agents/** -whitespace

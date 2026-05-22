@@ -86,6 +86,29 @@ of this is required for any phase below to work end-to-end.
   export jobs. Remaining: frontend `X-UMS-Tenant` header wiring +
   tenant-aware API client (tracked as S2 spec Phase 5; not started).
 
+### S0/S1 catch-up (2026-05-22)
+
+Operational artifacts that were used through S0/S1/S2 but never previously
+committed to git. PR #38 brings the repository in sync with what was actually
+running on the operator's workstation.
+
+- ✅ PR #38: Local validation gate (`scripts/run_validation_gate.py` invokes
+  `backend/ums_smart_revenue/devtools/quality_gate.py` which runs ruff
+  on `backend` + `tests` + `scripts`, the AST-based no-skip/xfail policy
+  gate, the full pytest suite with `--strict-config --strict-markers
+  --basetemp .pytest-tmp`, and `git diff --check` on both working tree
+  and staged).
+- ✅ PR #38: Developer agent rules — `AGENTS.md` (Codex-facing, committed)
+  and `.agents/skills/` (postgresql-table-design + vitest) with
+  `skills-lock.json` pinning. The Claude-Code-local `CLAUDE.md` stays
+  gitignored as the per-machine copy.
+- ✅ PR #38: Pre-integration state log
+  (`Docs/superpowers/runlog/2026-05-21-phase-0.md`) and completion of
+  the S2 integration runlog `§3.7/§3.8/§3.9`
+  (`Docs/superpowers/runlog/2026-05-21-phase-4.md`).
+- ✅ PR #38: `.gitignore` adds `Docs/Youtube Project/` (local Obsidian
+  vault) and `.vite/` (Vite dev cache).
+
 ### Sx — Specced but not yet started
 
 - **S3 — Tenant hardening at storage layer.**

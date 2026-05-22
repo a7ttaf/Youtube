@@ -1,0 +1,116 @@
+"""Executable local validation gate for backend changes."""
+
+from __future__ import annotations
+
+import os
+import subprocess
+import sys
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass
+from pathlib import Path
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+@dataclass(frozen=True)
+class GateCommand:
+    """A single command in the repository validation gate."""
+
+    label: str
+    command: tuple[str, ...]
+
+
+# ============================================================================
+# Purpose: Build the local validation gate required before upload, push, or
+# review-readiness claims, including the gate wrapper script itself.
+# Database/ORM: None.
+# Standards: Backend-owned tooling, explicit command tuples, fail-fast execution.
+# Blast Radius: Tests, lint gate, and diff hygiene.
+# Connections:
+#   - File: AGENTS.md -> Mirrors the required baseline validation commands.
+#   - File: Docs/implementation/CODEX_STABILIZATION_PLAN.md -> Keeps Windows
+#     pytest temp handling explicit for this workstation.
+# ============================================================================
+def build_gate_commands(*, python: str = sys.executable) -> tuple[GateCommand, ...]:
+    """Return the ordered validation commands for local quality gates."""
+    return (
+        GateCommand(
+            label="Ruff backend, tests, and scripts",
+            command=(python, "-m", "ruff", "check", "backend", "tests", "scripts"),
+        ),
+        *build_test_gate_commands(python=python),
+        GateCommand(
+            label="Git diff whitespace check",
+            command=("git", "diff", "--check"),
+        ),
+        GateCommand(
+            label="Git staged diff whitespace check",
+            command=("git", "diff", "--cached", "--check"),
+        ),
+    )
+
+
+def build_test_gate_commands(
+    *, python: str = sys.executable
+) -> tuple[GateCommand, ...]:
+    """Return the test-only validation commands for local quality gates."""
+    return (
+        GateCommand(
+            label="Pytest no skip or xfail policy",
+            command=(python, "-m", "ums_smart_revenue.devtools.pytest_policy_gate"),
+        ),
+        GateCommand(
+            label="Pytest full suite",
+            command=(
+                python,
+                "-B",
+                "-m",
+                "pytest",
+                "-q",
+                "--strict-config",
+                "--strict-markers",
+                "-p",
+                "no:cacheprovider",
+                "--basetemp",
+                ".pytest-tmp",
+            ),
+        ),
+    )
+
+
+def run_gate(
+    *,
+    commands: Sequence[GateCommand] | None = None,
+    repo_root: Path = PROJECT_ROOT,
+    runner: Callable[..., subprocess.CompletedProcess[object]] = subprocess.run,
+) -> int:
+    """Run validation commands from the repo root and stop at the first failure."""
+    env = os.environ.copy()
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    existing_pythonpath = env.get("PYTHONPATH")
+    backend_pythonpath = str(repo_root / "backend")
+    env["PYTHONPATH"] = (
+        backend_pythonpath
+        if not existing_pythonpath
+        else f"{backend_pythonpath}{os.pathsep}{existing_pythonpath}"
+    )
+    gate_commands = build_gate_commands() if commands is None else commands
+
+    for gate_command in gate_commands:
+        completed = runner(gate_command.command, cwd=repo_root, env=env)
+        if completed.returncode != 0:
+            print(
+                f"Validation gate failed: {gate_command.label}",
+                file=sys.stderr,
+            )
+            return completed.returncode
+    return 0
+
+
+def main() -> int:
+    """CLI entry point for the local validation gate."""
+    return run_gate()
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
