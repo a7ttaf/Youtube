@@ -1,11 +1,32 @@
 # Open Decisions
 
+## Status (2026-05-22)
+
+Reconciled through PR #36 (S2 multi-tenant integration). Decisions that
+are now made are listed under "Closed (with PR ref)". Items in the topic
+sections below remain genuinely open.
+
+## Closed (with PR ref)
+
+- ✅ **Backend stack: FastAPI** — chosen in PR #1; reaffirmed across S0,
+  S1, S2 PRs.
+- ✅ **Database (operational): PostgreSQL-only first** — operational
+  schema is PostgreSQL with Alembic migrations from PR #1 onward;
+  BigQuery warehouse remains future scope but no longer blocks any
+  shipped work.
+- ✅ **Graph database: none** — Neo4j retired entirely in PR #12.
+- ✅ **Multi-tenant model: row-level `tenant_id` on operational tables,
+  header-based resolver with contextvar** — implemented via the S2 stack
+  (PRs #18 – #21, #36). Storage-layer hardening (RLS + GUC + composite
+  FKs + tenant-scoped unique keys per `Docs/17`) is a separate S3 spec,
+  not yet written.
+- ✅ **Export engine: Python libraries** — `openpyxl` / `reportlab`-class
+  approach via the export artifacts in PR #9 + tenant-scoped export jobs
+  in PR #36.
+
 ## Stack decisions
 
-- Backend: FastAPI or NestJS?
-- Warehouse: BigQuery or PostgreSQL-only first?
 - Job runner: Airflow, Temporal, Celery/RQ, or cloud scheduler?
-- Export engine: Python libraries or dedicated reporting service?
 
 ## Data decisions
 
@@ -37,10 +58,11 @@
 ## Suggested default decisions
 
 ```text
-Backend: FastAPI
-Database: PostgreSQL + optional BigQuery for warehouse
-Graph database: none in active roadmap
-Allocation method: post-tax revenue proportional allocation
-Outside-CMS labels: show confidence clearly
-Bank input: manual first, automation later
+Backend: FastAPI                              [decided — PR #1]
+Database: PostgreSQL + optional BigQuery       [PostgreSQL chosen; BigQuery deferred]
+Graph database: none in active roadmap         [decided — PR #12]
+Export engine: Python libraries                [decided — PR #9 + PR #36]
+Allocation method: post-tax revenue proportional allocation   [target; not yet implemented]
+Outside-CMS labels: show confidence clearly                   [open]
+Bank input: manual first, automation later                    [foundation shipped — PR #29; automation open]
 ```
