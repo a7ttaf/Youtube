@@ -94,10 +94,10 @@ Adds two patterns:
 
 ## Quality checks performed
 
-- `python -m pytest tests/devtools/test_pytest_policy_gate.py -q` — 19 passed.
-- `python -m pytest tests/devtools -q` — 23 passed.
+- `python -m pytest tests/devtools/test_pytest_policy_gate.py -q` — 22 passed.
+- `python -m pytest tests/devtools -q` — 26 passed.
 - `python -m ruff check backend/ums_smart_revenue/devtools tests/devtools` — All checks passed.
-- `python scripts/run_validation_gate.py` — passed; 771 passed, 0 warnings.
+- `python scripts/run_validation_gate.py` — passed; 774 passed, 0 warnings.
 - `git diff --check` and `git -c core.whitespace=cr-at-eol diff --check` — exit 0; Git emitted CRLF conversion notices only.
 
 ## Architecture & quality posture
@@ -118,7 +118,7 @@ authorization or finance-number behavior change. The PR adds:
 
 - New `backend/ums_smart_revenue/devtools/` Python package (3 files; not imported by any route, service, or repo — only by `scripts/`).
 - New `scripts/` directory (Python wrappers, not invoked by runtime code).
-- New `tests/devtools/` test subdirectory plus review-loop pytest-policy coverage (764 tests pass in the latest local validation gate).
+- New `tests/devtools/` test subdirectory plus review-loop pytest-policy coverage (774 passed in the latest local validation gate).
 - `AGENTS.md` (rules text, no runtime impact).
 - `.agents/` (vendored skill content + theme files, no runtime impact).
 - `skills-lock.json` (metadata, no runtime impact).
@@ -129,10 +129,10 @@ authorization or finance-number behavior change. The PR adds:
 
 ## Pre-existing baseline
 
-- Pytest result: 771 passed in the latest local validation gate.
+- Pytest result: 774 passed in the latest local validation gate.
 - Alembic single head: `20260521_0001`.
 - Ruff: 0 errors on `backend/devtools/`, `tests/devtools/`, and `scripts/` (verified).
-- The original devtools test files were already discovered and run by pytest before this PR; the review loop added 15 policy regression cases.
+- The original devtools test files were already discovered and run by pytest before this PR; the review loop added 18 policy regression cases.
 
 ## Validation that could NOT be run
 
@@ -141,7 +141,7 @@ None. All gates passed with 0 warnings.
 ## Remaining risks
 
 - **Code risk: low.** The devtools/ Python code is already running on the operator's workstation (pytest discovers tests/devtools/ today). Committing it is a no-op for behavior.
-- **Test-flake risk: very low.** The 16 devtools tests use `tmp_path`, no shared state, no time-dependent assertions.
+- **Test-flake risk: very low.** The 26 devtools tests use `tmp_path`, no shared state, no time-dependent assertions.
 - **Reviewer-flow risk: medium.** The PR is large, but ~5,300 lines are vendored GitHub theme JSON5 files (`.agents/dark*.json5`, `bgColor.json5`, etc.) and ~3,000 are vendored Vitest skill markdown. The actual non-vendored content under review is the gate + policy + tests + AGENTS.md + runlogs + planning docs + pulls/ triple.
 
 ## Follow-up recommendations

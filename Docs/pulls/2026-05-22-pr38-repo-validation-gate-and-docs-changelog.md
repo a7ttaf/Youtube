@@ -66,13 +66,13 @@ entry points.
 
 ### SQL — none
 
-### Tests — added 16
+### Tests — tracked 26
 
-- 19 in `tests/devtools/test_pytest_policy_gate.py` (allow normal, reject `pytest.mark.skip`, reject runtime `pytest.xfail`, reporter shape, default pytest `*_test.py` pattern, test `conftest.py`, root `conftest.py`, `pytest.importorskip`, imported skip aliases, marker objects passed as values, local aliases assigned from forbidden symbols, `unittest.expectedFailure`, `unittest.SkipTest`, `self.skipTest`, wildcard `from pytest import *`, wildcard `from unittest import *`, unittest submodule import `from unittest.case import skipIf`, wildcard submodule `from unittest.case import *`, and `__init__.py` scanning).
+- 22 in `tests/devtools/test_pytest_policy_gate.py` (allow normal, reject `pytest.mark.skip`, reject runtime `pytest.xfail`, reporter shape, default pytest `*_test.py` pattern, test `conftest.py`, root `conftest.py`, `pytest.importorskip`, imported skip aliases, marker objects passed as values, local aliases assigned from forbidden symbols, `unittest.expectedFailure`, `unittest.SkipTest`, `self.skipTest`, wildcard `from pytest import *`, wildcard `from unittest import *`, unittest submodule import `from unittest.case import skipIf`, wildcard submodule `from unittest.case import *`, `__init__.py` scanning, `getattr` indirection, aliased `getattr` indirection, and wildcard `pytest.mark` decorator coverage).
 - 4 in `tests/devtools/test_quality_gate.py` (test-only gate command tuple, full gate command tuple, env handling, fail-fast behavior).
 
 The original 8 devtools tests were already being discovered and run locally
-before this PR; the review loop added 8 pytest-policy regression tests for
+before this PR; the review loop added 18 pytest-policy regression tests for
 reviewed enforcement gaps.
 
 ## Removed
@@ -85,12 +85,12 @@ reviewed enforcement gaps.
 - **Validation: documented and enforced.** The local validation gate that
   AGENTS.md and CLAUDE.md require is now defined in code rather than as
   an unwritten contract.
-- **Pytest count:** 771 after the review-loop pytest-policy regression tests.
+- **Pytest count:** 774 after the review-loop pytest-policy regression tests.
 
 ## Test surface change
 
-- Pytest total: 771 after the review-loop pytest-policy regression tests.
-- +15 test count delta from the reviewed policy-gate coverage additions;
+- Pytest total: 774 after the review-loop pytest-policy regression tests.
+- +18 test count delta from the reviewed policy-gate coverage additions;
   +2 test files now tracked in git; +1 test subdirectory now tracked.
 
 ## Documentation changes
