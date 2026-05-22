@@ -38,7 +38,12 @@ fn.mockRestore()  // Restore original (for spies)
 ## Spying
 
 ```ts
-const obj = { method: () => 'original' }
+const obj = {
+  method: () => 'original',
+  get prop() {
+    return 'original-prop'
+  },
+}
 
 const spy = vi.spyOn(obj, 'method')
 obj.method()
@@ -229,9 +234,11 @@ vi.mock('./module')
 vi.mocked(myFn).mockReturnValue('typed')
 
 // Deep mocking
+const myModule = await import('./module')
 vi.mocked(myModule, { deep: true })
 
 // Partial mock typing
+const fn = vi.fn<() => Promise<{ ok: boolean }>>()
 vi.mocked(fn, { partial: true }).mockResolvedValue({ ok: true })
 ```
 

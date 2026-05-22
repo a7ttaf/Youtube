@@ -1,10 +1,12 @@
 # PR #38 — Commit Validation Gate, Devtools, Agent Rules, and Missing Runlogs — Handoff
 
 **Date:** 2026-05-22
-**PR:** https://github.com/XGenerationy/Youtube/pull/38 _(opens after push)_
+**PR:** https://github.com/XGenerationy/Youtube/pull/38
 **Branch:** `pr/repo-validation-gate-and-docs`
 **Base:** `main` at `2e775b0` (PR #37 merge commit)
-**Status at handoff:** _(filled in after push)_
+**Status at handoff:** Open PR under review. Local validation passed after the
+pytest-policy review fix; merge remains blocked until GitHub checks and review
+decision are green.
 
 ## Scope
 
@@ -38,7 +40,9 @@ Concrete catch-up:
 
 ## Files changed
 
-40 files staged, +10,517 / −4. See the changelog for the per-file list.
+Current review-loop scope is 46 changed files in the PR diff. See the
+changelog and GitHub diff for the exact final per-file list after review-loop
+commits.
 Key categories:
 
 | Category | Files | Approx lines |
@@ -51,7 +55,7 @@ Key categories:
 | Pulls/ triple | 3 (report + changelog + handoff) | ~600 |
 | `.gitignore` | 1 | +6 |
 
-Of the ~10,500 staged lines, ~5,300 are vendored GitHub theme JSON5
+Of the ~11,000 changed lines, ~5,300 are vendored GitHub theme JSON5
 files (color palettes, dark theme) and ~3,000 are vendored Vitest
 skill markdown references. Non-vendored author-written content is
 ~2,200 lines.
@@ -69,23 +73,22 @@ skill markdown references. Non-vendored author-written content is
 
 - **At runtime: none.** No production code path is changed.
 - **Validation contract: documented in code.** The "ruff + skip-policy + pytest + diff-hygiene" gate that AGENTS.md / CLAUDE.md describe is now executable via `python scripts/run_validation_gate.py`.
-- **Pytest count: unchanged at 756.** The 8 devtools tests were already discovered and running before this PR.
+- **Pytest count: 760.** The original 8 devtools tests were already discovered and running before this PR; the review loop added 4 pytest-policy regression tests.
 
 ## Tests run
 
-_(Filled in after the validation gate run; see `python scripts/run_validation_gate.py` invocation.)_
+Latest local validation after the pytest-policy review fix:
 
-Expected:
-
-- `python -m ruff check backend tests scripts` — All checks passed.
-- `python -m ums_smart_revenue.devtools.pytest_policy_gate` — exit 0 (no skip/xfail violations).
-- `python -B -m pytest -q --strict-config --strict-markers -p no:cacheprovider --basetemp .pytest-tmp` — **756 passed** (matches pre-PR collection count).
-- `git diff --check` — clean.
-- `git diff --cached --check` — clean.
+- `python -m pytest tests/devtools/test_pytest_policy_gate.py -q` — 8 passed.
+- `python -m pytest tests/devtools -q` — 12 passed.
+- `python -m ruff check backend/ums_smart_revenue/devtools tests/devtools` — All checks passed.
+- `python scripts/run_validation_gate.py` — passed; 760 passed, 7 known SQLite expression-index reflection warnings.
+- `git diff --check` and `git -c core.whitespace=cr-at-eol diff --check` — exit 0; Git emitted CRLF conversion notices only.
 
 ## Failures / skipped gates
 
-_(Filled in if any gate is blocked.)_
+None in the latest local validation pass. The remote merge gate remains blocked
+until GitHub review threads and checks clear.
 
 ## Risks
 
@@ -133,4 +136,4 @@ git diff --cached --check
 python scripts/run_tests_gate.py
 ```
 
-Expected: all gates green, 756 tests pass.
+Rerun target: all gates green, 760 tests pass.

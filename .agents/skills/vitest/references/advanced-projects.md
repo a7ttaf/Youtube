@@ -193,7 +193,7 @@ vitest --project integration
 vitest --project unit --project e2e
 
 # Exclude project
-vitest --project.ignore browser
+vitest --project=!browser
 ```
 
 ## Providing Values to Projects

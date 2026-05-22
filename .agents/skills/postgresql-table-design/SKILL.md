@@ -90,7 +90,7 @@ Enable with `ALTER TABLE tbl ENABLE ROW LEVEL SECURITY`. Create policies: `CREAT
 - **HASH**: for even distribution when no natural key (`PARTITION BY HASH (user_id)`). Creates N partitions with modulus.
 - **Constraint exclusion**: requires `CHECK` constraints on partitions for query planner to prune. Auto-created for declarative partitioning (PG10+).
 - Prefer declarative partitioning or hypertables. Do NOT use table inheritance.
-- **Limitations**: no global UNIQUE constraints—include partition key in PK/UNIQUE. FKs from partitioned tables not supported; use triggers.
+- **Limitations**: no global UNIQUE constraints—include partition key in PK/UNIQUE. PostgreSQL 12+ supports foreign keys involving partitioned tables; for PostgreSQL 11 and older, verify version-specific partitioned-table FK limitations before designing cross-partition referential integrity.
 
 ## Special Considerations
 

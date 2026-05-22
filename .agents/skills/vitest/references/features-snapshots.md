@@ -7,6 +7,10 @@ description: Snapshot testing with file, inline, and file snapshots
 
 Snapshot tests capture output and compare against stored references.
 
+Examples that use placeholder helpers or values such as `generateOutput`,
+`renderComponent`, `header`, `body`, `footer`, `getData`, or `getOther` are
+pseudocode. Replace them with real application code before copying.
+
 ## Basic Snapshot
 
 ```ts
@@ -141,6 +145,8 @@ Or via config:
 
 ```ts
 // vitest.config.ts
+import { defineConfig } from 'vitest/config'
+
 defineConfig({
   test: {
     snapshotSerializers: ['./my-serializer.ts'],
@@ -151,6 +157,8 @@ defineConfig({
 ## Snapshot Format Options
 
 ```ts
+import { defineConfig } from 'vitest/config'
+
 defineConfig({
   test: {
     snapshotFormat: {
@@ -182,6 +190,8 @@ Default: `__snapshots__/<test-file>.snap`
 Customize:
 
 ```ts
+import { defineConfig } from 'vitest/config'
+
 defineConfig({
   test: {
     resolveSnapshotPath: (testPath, snapExtension) => {

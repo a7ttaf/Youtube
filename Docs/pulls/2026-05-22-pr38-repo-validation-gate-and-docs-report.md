@@ -1,10 +1,11 @@
 # PR #38 — Commit Validation Gate, Devtools, Agent Rules, and Missing Runlogs — Report
 
 **Date:** 2026-05-22
-**PR:** https://github.com/XGenerationy/Youtube/pull/38 _(opens after push)_
+**PR:** https://github.com/XGenerationy/Youtube/pull/38
 **Branch:** `pr/repo-validation-gate-and-docs`
 **Base:** `main` at `2e775b052a163ffe8acedd4d9778812f27a3c98d` (PR #37 merge commit)
-**Head commit:** _(filled in after commit)_
+**Head tracking:** Branch head moves during review-loop commits; GitHub PR #38
+is the source of truth for the current head SHA.
 **Status:** Catch-up PR — committing infrastructure that has been in active
 local use across S0/S1/S2 but was never previously checked in to git.
 
@@ -20,8 +21,9 @@ real ingestion, multi-currency engine).
 
 ## What was actually done
 
-40 files staged, 10,517 insertions, 4 deletions. The commit is purely
-additive at the layer of "git history catches up with disk".
+Current review-loop scope is 46 changed files in the PR diff. The branch is
+purely additive at the layer of "git history catches up with disk", plus the
+review-loop pytest-policy corrections requested on PR #38.
 
 ### Validation gate (operationally critical)
 
@@ -83,21 +85,20 @@ Adds two patterns:
 | Setup | Branch `pr/repo-validation-gate-and-docs` off `origin/main` at `2e775b0` | Working-tree carries `frontend/package-lock.json` mod (intentional, stays out) and `phase-4.md` mods (intentional, goes in) |
 | Gitignore | Add `Docs/Youtube Project/` + `.vite/` | Removes them from `git status` |
 | Memory | Update `feedback-per-pr-plan-status` memory to clarify Docs/pulls/ coexists with inline marks (user-confirmed 2026-05-22) | Cross-conversation guidance |
-| Stage | `git add` 40 files; verify package-lock.json and mockup files stay out | Confirmed via `git status --short` |
+| Stage | Stage intentional PR files; verify package-lock.json and mockup files stay out | Confirmed via `git status --short` |
 | Plan docs | Add per-PR `✅ PR #38` marks to `01` (new S0/S1 catch-up subsection) and `15` (3 new Cross-cutting shipped bullets) | Per `feedback-per-pr-plan-status` rule |
 | Pulls docs | Write `Docs/pulls/2026-05-22-pr38-repo-validation-gate-and-docs-{report,changelog,handoff}.md` | Coexists with inline marks |
-| Validation | Run `python scripts/run_validation_gate.py` (ruff + policy + pytest + diff hygiene) | _(filled in below)_ |
+| Validation | Run `python scripts/run_validation_gate.py` (ruff + policy + pytest + diff hygiene) | Passed locally after pytest-policy review fix |
 | Push | `git push -u origin pr/repo-validation-gate-and-docs` | Pause before merge per standing constraint |
-| PR | `gh pr create --base main` with summary + test plan | _(filled in below)_ |
+| PR | `gh pr create --base main` with summary + test plan | Opened as https://github.com/XGenerationy/Youtube/pull/38 |
 
 ## Quality checks performed
 
-_(Filled in after the validation gate run.)_
-
-- `python -m ruff check backend tests scripts` — _pending_
-- AST policy gate — _pending_
-- `python -m pytest -q --strict-config --strict-markers` (full suite) — _pending_
-- `git diff --check` + `git diff --cached --check` — _pending_
+- `python -m pytest tests/devtools/test_pytest_policy_gate.py -q` — 8 passed.
+- `python -m pytest tests/devtools -q` — 12 passed.
+- `python -m ruff check backend/ums_smart_revenue/devtools tests/devtools` — All checks passed.
+- `python scripts/run_validation_gate.py` — passed; 760 passed, 7 known SQLite expression-index reflection warnings.
+- `git diff --check` and `git -c core.whitespace=cr-at-eol diff --check` — exit 0; Git emitted CRLF conversion notices only.
 
 ## Architecture & quality posture
 
@@ -117,7 +118,7 @@ authorization or finance-number behavior change. The PR adds:
 
 - New `backend/ums_smart_revenue/devtools/` Python package (3 files; not imported by any route, service, or repo — only by `scripts/`).
 - New `scripts/` directory (Python wrappers, not invoked by runtime code).
-- New `tests/devtools/` test subdirectory (collected by pytest; passes today per `pytest --collect-only` count of 756 already including these).
+- New `tests/devtools/` test subdirectory plus review-loop pytest-policy coverage (760 tests pass in the latest local validation gate).
 - `AGENTS.md` (rules text, no runtime impact).
 - `.agents/` (vendored skill content + theme files, no runtime impact).
 - `skills-lock.json` (metadata, no runtime impact).
@@ -128,20 +129,21 @@ authorization or finance-number behavior change. The PR adds:
 
 ## Pre-existing baseline
 
-- Pytest collected: 756 tests (verified via `python -m pytest --collect-only -q` on origin/main).
+- Pytest result: 760 passed in the latest local validation gate.
 - Alembic single head: `20260521_0001`.
 - Ruff: 0 errors on `backend/devtools/`, `tests/devtools/`, and `scripts/` (verified).
-- All 3 `tests/devtools/` files were already discovered and run by pytest before this PR; they were just not in git.
+- The original devtools test files were already discovered and run by pytest before this PR; the review loop added 4 policy regression cases.
 
 ## Validation that could NOT be run
 
-_(Filled in after validation gate run if any gate is blocked.)_
+None in the latest local validation pass. Remote merge remains blocked until
+GitHub review threads and checks clear.
 
 ## Remaining risks
 
 - **Code risk: low.** The devtools/ Python code is already running on the operator's workstation (pytest discovers tests/devtools/ today). Committing it is a no-op for behavior.
-- **Test-flake risk: very low.** The 8 new devtools tests use `tmp_path`, no shared state, no time-dependent assertions.
-- **Reviewer-flow risk: medium.** 10,517 lines staged is a lot, but ~5,300 of those are vendored GitHub theme JSON5 files (`.agents/dark*.json5`, `bgColor.json5`, etc.) and ~3,000 are vendored Vitest skill markdown. The actual non-vendored content under review is ~2,200 lines (gate + policy + tests + AGENTS.md + runlogs + planning docs + pulls/ triple).
+- **Test-flake risk: very low.** The 12 devtools tests use `tmp_path`, no shared state, no time-dependent assertions.
+- **Reviewer-flow risk: medium.** The PR is large, but ~5,300 lines are vendored GitHub theme JSON5 files (`.agents/dark*.json5`, `bgColor.json5`, etc.) and ~3,000 are vendored Vitest skill markdown. The actual non-vendored content under review is the gate + policy + tests + AGENTS.md + runlogs + planning docs + pulls/ triple.
 
 ## Follow-up recommendations
 

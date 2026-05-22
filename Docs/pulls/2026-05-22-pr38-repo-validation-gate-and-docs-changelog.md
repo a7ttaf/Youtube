@@ -1,7 +1,7 @@
 # PR #38 — Commit Validation Gate, Devtools, Agent Rules, and Missing Runlogs — Changelog
 
 **Date:** 2026-05-22
-**PR:** https://github.com/XGenerationy/Youtube/pull/38 _(opens after push)_
+**PR:** https://github.com/XGenerationy/Youtube/pull/38
 **Branch:** `pr/repo-validation-gate-and-docs`
 **Base:** `main` at `2e775b0`
 
@@ -65,14 +65,14 @@ No existing Python source file is modified.
 
 ### SQL — none
 
-### Tests — added 8
+### Tests — added 12
 
-- 4 in `tests/devtools/test_pytest_policy_gate.py` (allow normal, reject `pytest.mark.skip`, reject runtime `pytest.xfail`, reporter shape).
+- 8 in `tests/devtools/test_pytest_policy_gate.py` (allow normal, reject `pytest.mark.skip`, reject runtime `pytest.xfail`, reporter shape, default pytest `*_test.py` pattern, `conftest.py`, `pytest.importorskip`, and imported skip aliases).
 - 4 in `tests/devtools/test_quality_gate.py` (test-only gate command tuple, full gate command tuple, env handling, fail-fast behavior).
 
-These tests were already being discovered and run by pytest before this PR
-(verified via `pytest --collect-only -q` showing 756 tests including
-`tests/devtools/test_*`); they were just not in git.
+The original 8 devtools tests were already being discovered and run locally
+before this PR; the review loop added 4 pytest-policy regression tests for
+reviewed enforcement gaps.
 
 ## Removed
 
@@ -84,15 +84,13 @@ These tests were already being discovered and run by pytest before this PR
 - **Validation: documented and enforced.** The local validation gate that
   AGENTS.md and CLAUDE.md require is now defined in code rather than as
   an unwritten contract.
-- **Pytest count: unchanged** at 756 (the `tests/devtools/` tests were
-  already in the count).
+- **Pytest count:** 760 after the review-loop pytest-policy regression tests.
 
 ## Test surface change
 
-- Pytest total: 756 (unchanged — the 8 devtools tests were already
-  discovered).
-- 0 new pytest count delta; +2 test files now tracked in git;
-  +1 test subdirectory now tracked.
+- Pytest total: 760 after the review-loop pytest-policy regression tests.
+- +4 pytest count delta from the reviewed policy-gate coverage additions;
+  +2 test files now tracked in git; +1 test subdirectory now tracked.
 
 ## Documentation changes
 

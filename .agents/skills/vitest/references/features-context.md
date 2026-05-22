@@ -227,7 +227,7 @@ export const test = dbTest.extend<{ admin: User }>({
 
 - Use `{ }` destructuring to access fixtures
 - Fixtures are lazy - only initialize when accessed
-- Return cleanup function from fixtures
+- Put fixture cleanup after `await use(...)` in object-style fixtures
 - Use `{ auto: true }` for setup fixtures
 - Use `{ scope: 'file' }` for expensive shared resources
 - Fixtures compose - extend from extended tests

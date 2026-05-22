@@ -54,6 +54,10 @@ test('with options', { timeout: 10_000, retry: 2 }, async () => {
 
 ## Test Modifiers
 
+Repository policy: these APIs are shown for Vitest completeness only. Do not
+commit `test.skip`, dynamic `skip(...)`, `test.only`, `test.fails`, or
+skip/xfail-style bypasses in project tests.
+
 ### Skip Tests
 
 ```ts

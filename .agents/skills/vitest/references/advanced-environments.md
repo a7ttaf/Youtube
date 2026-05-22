@@ -16,6 +16,8 @@ description: Configure environments like jsdom, happy-dom for browser APIs
 
 ```ts
 // vitest.config.ts
+import { defineConfig } from 'vitest/config'
+
 defineConfig({
   test: {
     environment: 'jsdom',
@@ -80,6 +82,8 @@ test('window APIs', () => {
 ### jsdom Options
 
 ```ts
+import { defineConfig } from 'vitest/config'
+
 defineConfig({
   test: {
     environmentOptions: {
@@ -113,6 +117,8 @@ test('basic DOM', () => {
 Use projects for different environments:
 
 ```ts
+import { defineConfig } from 'vitest/config'
+
 defineConfig({
   test: {
     projects: [
@@ -163,6 +169,8 @@ export default <Environment>{
 Use with:
 
 ```ts
+import { defineConfig } from 'vitest/config'
+
 defineConfig({
   test: {
     environment: 'custom',
@@ -202,6 +210,8 @@ export default <Environment>{
 For real browser testing, use Vitest Browser Mode:
 
 ```ts
+import { defineConfig } from 'vitest/config'
+
 defineConfig({
   test: {
     browser: {
@@ -218,6 +228,8 @@ defineConfig({
 In jsdom/happy-dom, configure CSS handling:
 
 ```ts
+import { defineConfig } from 'vitest/config'
+
 defineConfig({
   test: {
     css: true, // Process CSS
@@ -238,6 +250,8 @@ defineConfig({
 If external deps fail with CSS/asset errors:
 
 ```ts
+import { defineConfig } from 'vitest/config'
+
 defineConfig({
   test: {
     server: {

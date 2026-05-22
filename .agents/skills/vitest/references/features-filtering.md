@@ -199,7 +199,7 @@ vitest list --json          # JSON output
 
 - Use `-t` for test name pattern filtering
 - `--changed` runs only tests affected by changes
-- `--related` runs tests importing specific files
+- `vitest related <files>` runs tests importing specific files
 - Tags provide semantic test grouping
 - Use `.only` for debugging, but configure CI to reject it
 - Watch mode has interactive filtering

@@ -115,7 +115,7 @@ opening PRs, or claiming the branch is ready.
 
 Required baseline for code changes:
 
-- `python -m ruff check backend tests`
+- `python -m ruff check backend tests scripts`
 - `pytest -q`
 - `git diff --check`
 

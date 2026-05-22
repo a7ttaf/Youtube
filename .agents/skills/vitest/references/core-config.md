@@ -89,7 +89,7 @@ defineConfig({
       include: ['src/**/*.ts'],
     },
     
-    // Run tests in isolation (each file in separate process)
+    // Run each test file in an isolated context for the selected pool
     isolate: true,
     
     // Pool for running tests: 'threads', 'forks', 'vmThreads'

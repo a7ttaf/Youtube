@@ -221,6 +221,8 @@ Default order (stack):
 Configure with `sequence.hooks`:
 
 ```ts
+import { defineConfig } from 'vitest/config'
+
 defineConfig({
   test: {
     sequence: {

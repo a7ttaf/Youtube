@@ -13,7 +13,7 @@ Type tests use `.test-d.ts` extension:
 
 ```ts
 // math.test-d.ts
-import { expectTypeOf } from 'vitest'
+import { expectTypeOf, test } from 'vitest'
 import { add } from './math'
 
 test('add returns number', () => {

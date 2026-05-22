@@ -54,6 +54,10 @@ describe('slow tests', { timeout: 30_000 }, () => {
 
 ## Suite Modifiers
 
+Repository policy: these APIs are shown for Vitest completeness only. Do not
+commit `describe.skip`, `describe.only`, `describe.skipIf`, or focused modifier
+chains in project tests.
+
 ### Skip Suites
 
 ```ts
@@ -171,7 +175,8 @@ describe('Database', () => {
 
 ## Modifier Combinations
 
-All modifiers can be chained:
+All modifiers can be chained for local exploration, but skip/focus chains must
+not be committed in project tests:
 
 ```ts
 describe.skip.concurrent('skipped concurrent', () => {})
