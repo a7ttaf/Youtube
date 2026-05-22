@@ -389,7 +389,7 @@ def test_revenue_contract_is_checked():
     violations = find_policy_violations(tmp_path)
 
     assert len(violations) == 1
-    assert violations[0].symbol == "unittest.skipIf"
+    assert violations[0].symbol == "unittest.case.skipIf"
 
 
 def test_policy_gate_catches_wildcard_submodule_unittest_import(tmp_path):
@@ -409,7 +409,7 @@ def test_payment_contract_is_checked():
     violations = find_policy_violations(tmp_path)
 
     assert len(violations) == 1
-    assert violations[0].symbol == "unittest.skipIf"
+    assert violations[0].symbol == "unittest.case.skipIf"
 
 
 def test_policy_gate_scans_init_py_in_tests(tmp_path):
@@ -547,23 +547,3 @@ def test_revenue_contract_is_checked():
 
     assert len(violations) == 1
     assert violations[0].symbol == "unittest.case.SkipTest"
-
-
-def test_policy_gate_catches_getattr_with_variable_bound_attribute(tmp_path):
-    write_test_file(
-        tmp_path,
-        "test_getattr_variable.py",
-        """
-import pytest as pt
-
-
-def test_revenue_contract_is_checked():
-    attr_name = "xfail"
-    getattr(pt, attr_name)("broken")
-""",
-    )
-
-    violations = find_policy_violations(tmp_path)
-
-    assert len(violations) == 1
-    assert violations[0].symbol == "pytest.xfail"

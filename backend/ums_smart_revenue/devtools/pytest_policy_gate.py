@@ -23,7 +23,11 @@ FORBIDDEN_SYMBOLS = frozenset(
         "super.skipTest",
         "unittest.skip",
         "unittest.SkipTest",
+        "unittest.case.skip",
         "unittest.case.SkipTest",
+        "unittest.case.skipIf",
+        "unittest.case.skipUnless",
+        "unittest.case.expectedFailure",
         "unittest.TestCase.skipTest",
         "unittest.expectedFailure",
         "unittest.skipIf",
@@ -236,7 +240,11 @@ def _expand_wildcard(aliases: dict[str, str], module: str, root: str) -> None:
     """Expand a starred import from a tracked root into known forbidden symbols."""
     for symbol in FORBIDDEN_SYMBOLS:
         if symbol.startswith(f"{module}."):
-            _add_wildcard_alias(aliases, module, symbol)
+            leaf = symbol[len(module) + 1 :]
+            aliases[leaf] = symbol
+            if "." in leaf:
+                first = leaf.split(".", 1)[0]
+                aliases[first] = f"{module}.{first}"
         elif symbol.startswith(f"{root}."):
             _add_wildcard_alias(aliases, root, symbol)
 
@@ -246,6 +254,9 @@ def _add_wildcard_alias(
 ) -> None:
     leaf = symbol[len(imported_module) + 1 :]
     aliases.setdefault(leaf, symbol)
+    if "." in leaf:
+        first = leaf.split(".", 1)[0]
+        aliases.setdefault(first, f"{imported_module}.{first}")
     if "." in leaf:
         first = leaf.split(".", 1)[0]
         aliases.setdefault(first, f"{imported_module}.{first}")
@@ -307,13 +318,25 @@ def _assignment_value(node: ast.AST) -> ast.AST | None:
 
 
 def _assignment_targets(node: ast.AST) -> tuple[ast.Name, ...]:
+    def _collect(target: ast.AST) -> tuple[ast.Name, ...]:
+        if isinstance(target, ast.Name):
+            return (target,)
+        if isinstance(target, ast.Tuple | ast.List):
+            names: list[ast.Name] = []
+            for elt in target.elts:
+                names.extend(_collect(elt))
+            return tuple(names)
+        return ()
     if isinstance(node, ast.Assign):
         targets = node.targets
     elif isinstance(node, ast.AnnAssign | ast.NamedExpr):
         targets = [node.target]
     else:
         return ()
-    return tuple(target for target in targets if isinstance(target, ast.Name))
+    result: list[ast.Name] = []
+    for target in targets:
+        result.extend(_collect(target))
+    return tuple(result)
 
 
 def _is_policy_symbol_or_prefix(symbol: str) -> bool:
