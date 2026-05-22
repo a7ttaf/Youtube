@@ -256,12 +256,38 @@ def _include_declared_pytest_plugins(
 def _pytest_plugins_from_file(path: Path) -> tuple[str, ...]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     modules: list[str] = []
-    for node in tree.body:
+    for node in _iter_module_scope_statements(tree.body):
         value = _assignment_value(node)
         if value is None or not _assigns_to_name(node, PYTEST_PLUGINS_NAME):
             continue
         modules.extend(_string_literals(value))
     return tuple(modules)
+
+
+def _iter_module_scope_statements(body: list[ast.stmt]) -> tuple[ast.stmt, ...]:
+    # FIX: Include import-time pytest_plugins assignments nested in module-level
+    # control flow without scanning function or class bodies.
+    statements: list[ast.stmt] = []
+    for statement in body:
+        if isinstance(statement, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef):
+            continue
+
+        statements.append(statement)
+        if isinstance(statement, ast.If | ast.For | ast.AsyncFor | ast.While):
+            statements.extend(_iter_module_scope_statements(statement.body))
+            statements.extend(_iter_module_scope_statements(statement.orelse))
+        elif isinstance(statement, ast.With | ast.AsyncWith):
+            statements.extend(_iter_module_scope_statements(statement.body))
+        elif isinstance(statement, ast.Try):
+            statements.extend(_iter_module_scope_statements(statement.body))
+            statements.extend(_iter_module_scope_statements(statement.orelse))
+            statements.extend(_iter_module_scope_statements(statement.finalbody))
+            for handler in statement.handlers:
+                statements.extend(_iter_module_scope_statements(handler.body))
+        elif isinstance(statement, ast.Match):
+            for case in statement.cases:
+                statements.extend(_iter_module_scope_statements(case.body))
+    return tuple(statements)
 
 
 def _resolve_pytest_plugin_path(project_root: Path, module: str) -> Path | None:
