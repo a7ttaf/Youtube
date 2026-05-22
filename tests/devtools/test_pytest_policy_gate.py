@@ -154,6 +154,111 @@ def test_payment_contract_is_checked():
     ]
 
 
+def test_policy_gate_rejects_marker_objects_passed_as_values(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_param_marks.py",
+        """
+import pytest
+
+
+@pytest.mark.parametrize(
+    "amount",
+    [
+        pytest.param(1, marks=pytest.mark.xfail),
+        pytest.param(2, marks=[pytest.mark.skip]),
+    ],
+)
+def test_revenue_contract_is_checked(amount):
+    assert amount > 0
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert {violation.symbol for violation in violations} == {
+        "pytest.mark.skip",
+        "pytest.mark.xfail",
+    }
+
+
+def test_policy_gate_resolves_local_aliases_assigned_from_forbidden_symbols(
+    tmp_path,
+):
+    write_test_file(
+        tmp_path,
+        "test_local_aliases.py",
+        """
+import pytest
+
+skip_now = pytest.skip
+xfail_marker = pytest.mark.xfail
+
+
+def test_revenue_contract_is_checked():
+    skip_now("not ready")
+
+
+@xfail_marker(reason="broken")
+def test_payment_contract_is_checked():
+    assert False
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+    symbols_by_line = {
+        (violation.line, violation.symbol) for violation in violations
+    }
+
+    assert (9, "pytest.skip") in symbols_by_line
+    assert (12, "pytest.mark.xfail") in symbols_by_line
+
+
+def test_policy_gate_rejects_unittest_expected_failure(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_expected_failure.py",
+        """
+import unittest
+
+
+@unittest.expectedFailure
+def test_revenue_contract_is_checked():
+    assert False
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "unittest.expectedFailure"
+
+
+def test_policy_gate_scans_project_root_conftest(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_allowed.py",
+        """
+def test_revenue_contract_is_checked():
+    assert True
+""",
+    )
+    (tmp_path / "conftest.py").write_text(
+        """
+import pytest
+
+pytest.xfail("disabled from root conftest")
+""",
+        encoding="utf-8",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].relative_path == Path("conftest.py")
+    assert violations[0].symbol == "pytest.xfail"
+
+
 def test_policy_gate_reports_failure_summary(tmp_path, capsys):
     write_test_file(
         tmp_path,

@@ -55,7 +55,8 @@ service, repository, ORM, migration, or schema is changed.
 
 ### Lint / format — none
 
-No existing Python source file is modified.
+No runtime Python source file is modified outside the new devtools validation
+entry points.
 
 ### Symbol renames — none
 
@@ -65,13 +66,13 @@ No existing Python source file is modified.
 
 ### SQL — none
 
-### Tests — added 12
+### Tests — added 16
 
-- 8 in `tests/devtools/test_pytest_policy_gate.py` (allow normal, reject `pytest.mark.skip`, reject runtime `pytest.xfail`, reporter shape, default pytest `*_test.py` pattern, `conftest.py`, `pytest.importorskip`, and imported skip aliases).
+- 12 in `tests/devtools/test_pytest_policy_gate.py` (allow normal, reject `pytest.mark.skip`, reject runtime `pytest.xfail`, reporter shape, default pytest `*_test.py` pattern, test `conftest.py`, root `conftest.py`, `pytest.importorskip`, imported skip aliases, marker objects passed as values, local aliases assigned from forbidden symbols, and `unittest.expectedFailure`).
 - 4 in `tests/devtools/test_quality_gate.py` (test-only gate command tuple, full gate command tuple, env handling, fail-fast behavior).
 
 The original 8 devtools tests were already being discovered and run locally
-before this PR; the review loop added 4 pytest-policy regression tests for
+before this PR; the review loop added 8 pytest-policy regression tests for
 reviewed enforcement gaps.
 
 ## Removed
@@ -84,12 +85,12 @@ reviewed enforcement gaps.
 - **Validation: documented and enforced.** The local validation gate that
   AGENTS.md and CLAUDE.md require is now defined in code rather than as
   an unwritten contract.
-- **Pytest count:** 760 after the review-loop pytest-policy regression tests.
+- **Pytest count:** 764 after the review-loop pytest-policy regression tests.
 
 ## Test surface change
 
-- Pytest total: 760 after the review-loop pytest-policy regression tests.
-- +4 pytest count delta from the reviewed policy-gate coverage additions;
+- Pytest total: 764 after the review-loop pytest-policy regression tests.
+- +8 pytest count delta from the reviewed policy-gate coverage additions;
   +2 test files now tracked in git; +1 test subdirectory now tracked.
 
 ## Documentation changes

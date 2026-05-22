@@ -20,6 +20,7 @@ FORBIDDEN_SYMBOLS = frozenset(
         "pytest.skip",
         "pytest.xfail",
         "unittest.skip",
+        "unittest.expectedFailure",
         "unittest.skipIf",
         "unittest.skipUnless",
     }
@@ -39,7 +40,7 @@ class TestPolicyViolation:
 # Purpose: Enforce the repository rule that tests are never skipped or xfailed
 # to make validation pass across pytest-collected test modules and conftests.
 # Database/ORM: None.
-# Standards: AST scanning, import-alias resolution, deterministic reporting.
+# Standards: AST scanning, import/local-alias resolution, deterministic reporting.
 # Blast Radius: Test validation gate only.
 # Connections:
 #   - File: AGENTS.md -> Enforces "Never skip, xfail, delete, or loosen tests".
@@ -49,17 +50,13 @@ class TestPolicyViolation:
 def find_policy_violations(
     project_root: Path = PROJECT_ROOT,
 ) -> tuple[TestPolicyViolation, ...]:
-    """Return all forbidden skip/xfail policy violations under tests/."""
-    tests_root = project_root / TESTS_DIR
-    if not tests_root.exists():
-        return ()
-
+    """Return all forbidden skip/xfail policy violations in pytest inputs."""
     violations: list[TestPolicyViolation] = []
-    for path in _iter_policy_files(tests_root):
+    for path in _iter_policy_files(project_root):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         relative_path = path.relative_to(project_root)
         violations.extend(
-            _violations_in_tree(tree, relative_path, _import_aliases(tree))
+            _violations_in_tree(tree, relative_path, _symbol_aliases(tree))
         )
     return tuple(violations)
 
@@ -95,16 +92,14 @@ def _violations_in_tree(
                     node.decorator_list, relative_path, import_aliases
                 )
             )
-        elif isinstance(node, ast.Call):
-            symbol = _qualified_name(node.func, import_aliases)
-            if symbol in FORBIDDEN_SYMBOLS:
-                violations.append(
-                    TestPolicyViolation(
-                        relative_path=relative_path,
-                        line=node.lineno,
-                        symbol=symbol,
-                    )
-                )
+        if isinstance(node, ast.Call):
+            _append_violation_if_forbidden(
+                violations, node.func, relative_path, import_aliases
+            )
+        elif isinstance(node, ast.Attribute | ast.Name):
+            _append_violation_if_forbidden(
+                violations, node, relative_path, import_aliases
+            )
 
     return _dedupe_violations(violations)
 
@@ -117,22 +112,39 @@ def _decorator_violations(
     violations: list[TestPolicyViolation] = []
     for decorator in decorators:
         target = decorator.func if isinstance(decorator, ast.Call) else decorator
-        symbol = _qualified_name(target, import_aliases)
-        if symbol in FORBIDDEN_SYMBOLS:
-            violations.append(
-                TestPolicyViolation(
-                    relative_path=relative_path,
-                    line=decorator.lineno,
-                    symbol=symbol,
-                )
-            )
+        _append_violation_if_forbidden(
+            violations, target, relative_path, import_aliases
+        )
     return tuple(violations)
 
 
-def _iter_policy_files(tests_root: Path) -> tuple[Path, ...]:
+def _append_violation_if_forbidden(
+    violations: list[TestPolicyViolation],
+    target: ast.AST,
+    relative_path: Path,
+    import_aliases: dict[str, str],
+) -> None:
+    symbol = _qualified_name(target, import_aliases)
+    line = getattr(target, "lineno", None)
+    if symbol in FORBIDDEN_SYMBOLS and isinstance(line, int):
+        violations.append(
+            TestPolicyViolation(
+                relative_path=relative_path,
+                line=line,
+                symbol=symbol,
+            )
+        )
+
+
+def _iter_policy_files(project_root: Path) -> tuple[Path, ...]:
     paths: set[Path] = set()
-    for pattern in PYTEST_COLLECTED_FILE_PATTERNS:
-        paths.update(tests_root.rglob(pattern))
+    tests_root = project_root / TESTS_DIR
+    if tests_root.exists():
+        for pattern in PYTEST_COLLECTED_FILE_PATTERNS:
+            paths.update(tests_root.rglob(pattern))
+    root_conftest = project_root / "conftest.py"
+    if root_conftest.exists():
+        paths.add(root_conftest)
     return tuple(sorted(paths))
 
 
@@ -158,6 +170,55 @@ def _import_aliases(tree: ast.AST) -> dict[str, str]:
                 aliases[local_name] = f"{node.module}.{alias.name}"
 
     return aliases
+
+
+def _symbol_aliases(tree: ast.AST) -> dict[str, str]:
+    aliases = _import_aliases(tree)
+    changed = True
+
+    while changed:
+        changed = False
+        for node in ast.walk(tree):
+            value = _assignment_value(node)
+            if value is None:
+                continue
+
+            symbol = _qualified_name(value, aliases)
+            if not _is_policy_symbol_or_prefix(symbol):
+                continue
+
+            for target in _assignment_targets(node):
+                if aliases.get(target.id) == symbol:
+                    continue
+                aliases[target.id] = symbol
+                changed = True
+
+    return aliases
+
+
+def _assignment_value(node: ast.AST) -> ast.AST | None:
+    if isinstance(node, ast.Assign | ast.NamedExpr):
+        return node.value
+    if isinstance(node, ast.AnnAssign):
+        return node.value
+    return None
+
+
+def _assignment_targets(node: ast.AST) -> tuple[ast.Name, ...]:
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, ast.AnnAssign | ast.NamedExpr):
+        targets = [node.target]
+    else:
+        return ()
+    return tuple(target for target in targets if isinstance(target, ast.Name))
+
+
+def _is_policy_symbol_or_prefix(symbol: str) -> bool:
+    return any(
+        forbidden == symbol or forbidden.startswith(f"{symbol}.")
+        for forbidden in FORBIDDEN_SYMBOLS
+    )
 
 
 def _qualified_name(node: ast.AST, import_aliases: dict[str, str]) -> str:
