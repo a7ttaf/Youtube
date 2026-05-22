@@ -15,9 +15,11 @@ carries a `tenant_id`, the `TenantResolverMiddleware` validates an
 `X-UMS-Tenant` slug on every non-bypass request, and bootstrap tenant `ums`
 (id `00000000-0000-0000-0000-000000000001`) is the deterministic seed. The
 frontend, however, ships zero `X-UMS-Tenant` awareness — it has no HTTP
-client, no test framework, and no tenant context. Any future call from
-`frontend/src/components/srcc/AppShell.tsx` to a real backend route would
-be rejected with `400 "Tenant slug must not be blank"` by the resolver.
+client, no test framework, and no tenant context. In
+`authz_source="database"` or any resolver-enabled runtime, any future call
+from `frontend/src/components/srcc/AppShell.tsx` to a real non-bypass backend
+route would be rejected with `400 "Tenant slug must not be blank"` by the
+resolver; headers-mode bootstrap behavior is called out separately below.
 
 Spec A defines the smallest end-to-end proof that the frontend can talk to a
 multi-tenant backend: a tenant React context seeded with the bootstrap slug,
@@ -130,12 +132,13 @@ and overrides `current_principal_from_headers` with
 keeps the full error tree from `tenancy/resolver.py`. **This is the mode
 Spec A's end-to-end correctness claims are scoped to.**
 
-`create_app(authz_source="headers")` wires `DefaultTenantMiddleware`
-(`app.py:187-211`) — binds the bootstrap tenant via `_bootstrap_tenant()`
-**without** validating the tenant header. The `/tenants/me` route still
-depends on `current_principal_from_headers`, so unauthenticated requests
-must fail closed before the bootstrap tenant can be returned. Spec A
-documents this with one explicit endpoint test
+`create_app(database_url=..., authz_source="headers")` wires
+`DefaultTenantMiddleware` when a session factory is configured — binds the
+bootstrap tenant via `_bootstrap_tenant()` **without** validating the tenant
+header. The `/tenants/me` route still depends on
+`current_principal_from_headers`, so unauthenticated requests must fail closed
+before the bootstrap tenant can be returned. Spec A documents this with one
+explicit endpoint test
 (`test_tenants_me_headers_mode_requires_gateway_auth`) so future readers
 do not read `/tenants/me` as an unauthenticated tenant-discovery route.
 
@@ -397,7 +400,10 @@ Node process environment. The browser never receives or sends the trusted
 token directly. Production must use the deployed gateway for the same
 same-origin/injected-header contract; direct cross-origin
 `VITE_API_BASE_URL` is for URL-normalisation tests only unless a future CORS
-contract is added explicitly.
+contract is added explicitly. The injected `X-User-ID` must be a canonical
+UUID string that maps to an enabled SQL principal with a tenant-scoped role in
+the resolved tenant; malformed values return 400 and unknown or disabled
+principals return 403 before `/tenants/me` executes.
 
 **`frontend/package.json`** — add devDeps `vitest`, `@testing-library/react`,
 `@testing-library/jest-dom`, `@testing-library/user-event`, `jsdom`. Add
@@ -618,7 +624,9 @@ App-construction fixture pattern (mirrors `test_database_principals.py`):
 2. `TenantBase.metadata.create_all(engine)`.
 3. Insert one `TenantORM(id=UUID(UMS_TENANT_ID), slug="ums", display_name="UMS", status=ACTIVE)`.
 4. Insert one enabled SQL principal row plus tenant-scoped role assignment
-   matching `_gateway_headers(TEST_USER_ID)`.
+   matching `_gateway_headers(TEST_USER_ID)`. `TEST_USER_ID` must be a
+   canonical UUID string because `current_trusted_gateway_identity` normalises
+   it with `UUID(...)` before the SQL principal lookup.
 5. `create_app(database_url=engine.url, authz_source="database")` →
    `TestClient(app)`.
 6. `/tenants/me` depends on `current_principal_from_headers`; in database
@@ -640,12 +648,16 @@ def _gateway_headers(user_id: str = TEST_USER_ID) -> dict[str, str]:
 | 1 | `GET /tenants/me` with `X-UMS-Tenant: ums` + gateway headers for seeded user | 200; body `{"id":"00000000-...0001","slug":"ums","display_name":"UMS"}`; `Vary: X-UMS-Tenant` |
 | 2 | gateway headers only, no `X-UMS-Tenant` | 400 `Tenant slug must not be blank`; Vary present |
 | 3 | `X-UMS-Tenant: "   "` and variant `X-UMS-Tenant: "a"*256` | 400 `Tenant slug must not be blank` / `Tenant slug must be at most 255 characters` |
-| 4 | Duplicate `X-UMS-Tenant` headers — `client.build_request(method, url, headers=[("X-UMS-Tenant","ums"),("X-UMS-Tenant","ums")] + gateway_headers); client.send(request)` (fallback if `TestClient(...).get(headers={...})` rejects list-style duplicates) | 400 `X-UMS-Tenant must be provided exactly once` |
+| 4 | Duplicate `X-UMS-Tenant` headers — `client.build_request(method, url, headers=[("X-UMS-Tenant", "ums"), ("X-UMS-Tenant", "ums"), *_gateway_headers().items()]); client.send(request)` (fallback if `TestClient(...).get(headers={...})` rejects list-style duplicates) | 400 `X-UMS-Tenant must be provided exactly once` |
 | 5 | `X-UMS-Tenant: not-a-tenant` | 404 `Tenant 'not-a-tenant' not found` |
 | 6 | **Separately constructed** app instance with `TrustedGatewayTenantResolverMiddleware(..., authorize_tenant=lambda *_: False)` wired manually (stock `create_app(authz_source="database")` uses `_allow_database_auth_tenant` which always returns True) | 403 `Tenant access denied` |
 | 7 | Missing `X-User-ID` or missing/invalid `X-UMS-Trusted-Gateway-Token` | 401 before tenant payload is returned |
-| 8 | `test_tenants_me_headers_mode_requires_gateway_auth` — `create_app(authz_source="headers")`, request has no trusted principal/gateway headers | 401; proves default headers mode cannot leak bootstrap tenant identity unauthenticated. |
-| 9 | `create_app(authz_source="headers")` with full trusted principal headers and no `X-UMS-Tenant` | 200 bootstrap tenant; documents `DefaultTenantMiddleware` fallback only after gateway auth succeeds. |
+| 8 | `test_tenants_me_headers_mode_requires_gateway_auth` — `create_app(database_url=database_url, authz_source="headers")`, request has no trusted principal/gateway headers | 401; proves default headers mode cannot leak bootstrap tenant identity unauthenticated. |
+| 9 | `create_app(database_url=database_url, authz_source="headers")` with full trusted principal headers and no `X-UMS-Tenant` | 200 bootstrap tenant; documents `DefaultTenantMiddleware` fallback only after gateway auth succeeds. |
+
+Cases 8-9 require `database_url` so `create_app()` installs
+`DefaultTenantMiddleware`; without that fixture the bootstrap-tenant fallback
+is not wired and the test no longer exercises the documented headers-mode path.
 
 ### 9.2 Frontend test framework
 
@@ -819,7 +831,7 @@ impact, no migration impact, no auth impact.
 
 - [ ] `backend/ums_smart_revenue/api/tenants.py` exists with `GET /tenants/me`.
 - [ ] `backend/ums_smart_revenue/app.py` registers `tenants_router`.
-- [ ] `tests/api/test_tenants_api.py` covers cases 1–7 from Section 9.1
+- [ ] `tests/api/test_tenants_api.py` covers cases 1–9 from Section 9.1
       and all pass.
 - [ ] `frontend/src/contexts/TenantContext.tsx`, `frontend/src/lib/api/client.ts`,
       `frontend/src/lib/api/types.ts` exist with the contracts in Section 6.4.
@@ -830,6 +842,9 @@ impact, no migration impact, no auth impact.
 - [ ] `frontend/src/components/srcc/AppShell.tsx` calls `/tenants/me` on
       mount with the StrictMode-safe re-entry guard and renders the
       dev-only proof tag.
+- [ ] `frontend/vite.config.ts` proxies `/tenants/me` to the backend in dev
+      and injects the trusted gateway token plus a canonical UUID `X-User-ID`
+      for a seeded enabled SQL principal.
 - [ ] `frontend/package.json` carries the new devDeps and the
       `test` / `test:watch` scripts (no `test:ui`).
 - [ ] `frontend/package-lock.json` regenerated and committed.
