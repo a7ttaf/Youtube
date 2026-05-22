@@ -41,7 +41,8 @@ from sqlalchemy import (
 from sqlalchemy.engine import Connection, Engine
 
 pytestmark = pytest.mark.filterwarnings(
-    "ignore:Skipped unsupported reflection:sqlalchemy.exc.SAWarning"
+    "ignore:Skipped unsupported reflection of expression-based index "
+    "uq_users_email_lower:sqlalchemy.exc.SAWarning"
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
