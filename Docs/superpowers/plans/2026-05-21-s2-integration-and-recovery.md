@@ -1472,6 +1472,29 @@ Append to run log.
 
 ## Phase 6 — Reconcile planning docs
 
+✅ **Complete 2026-05-22.** Executed on branch `pr/docs-reconcile-planning`
+off `origin/main` @ `96dbe73`. Run log:
+`Docs/superpowers/runlog/2026-05-21-phase-6.md`.
+
+Three deliberate deviations from the checklist below, recorded in the run
+log in the same order:
+
+1. **Marker set** switched from `✅ shipped / ⚠️ partial` to the more
+   specific `✅ PR #N / ⏳ PR #N — remaining: <note> / 🗑️ removed in
+   PR #N — <reason>` per the `feedback-per-pr-plan-status` memory rule
+   (saved after this Phase 6 plan was written).
+2. **Phase numbering** in `01_IMPLEMENTATION_PLAN.md` left intact: Step 8
+   below assumed the doc still had a Neo4j Phase 6 to overwrite, but the
+   Neo4j section had already been removed in an earlier pass. Phase 6 is
+   "Export center" in the current doc; multi-tenant work was placed in a
+   new `## Cross-cutting infrastructure (Sx)` section before Phase 0
+   rather than overwriting Export center.
+3. **Honesty over plan optimism.** The Phase 6 checklist's example marker
+   mapping called scaffolding items "shipped" when only ORM models,
+   repositories, and unit tests exist. This PR marks those as
+   `⏳ — remaining: <concrete missing piece>` to accurately reflect
+   partial implementation.
+
 ### Task 6.1: Branch off updated main
 
 **Files:** None.
