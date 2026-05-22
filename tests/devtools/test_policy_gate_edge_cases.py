@@ -49,6 +49,71 @@ def test_revenue_contract_is_checked():
     assert violations[0].symbol == "unittest.case.skipIf"
 
 
+def test_forbids_importorskip_and_unittest_skip_equivalents(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_unittest_skip_equivalents.py",
+        """
+import pytest
+import unittest
+import unittest.case
+
+
+pytest.importorskip("missing_package")
+
+
+@unittest.expectedFailure
+def test_unittest_expected_failure():
+    assert False
+
+
+@unittest.case.expectedFailure
+def test_unittest_case_expected_failure():
+    assert False
+
+
+@unittest.case.skipUnless(False, "not ready")
+def test_unittest_case_skip_unless():
+    assert False
+
+
+class RevenueContractTests(unittest.TestCase):
+    @unittest.skip("not ready")
+    def test_decorator_skip(self):
+        assert False
+
+    def test_self_skip(self):
+        self.skipTest("not ready")
+
+    def test_direct_class_skip(self):
+        unittest.TestCase.skipTest(self, "not ready")
+
+    def test_super_skip(self):
+        super().skipTest("not ready")
+
+    def test_raise_skip(self):
+        raise unittest.SkipTest("not ready")
+
+    def test_raise_case_skip(self):
+        raise unittest.case.SkipTest("not ready")
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    symbols = {violation.symbol for violation in violations}
+    assert {
+        "pytest.importorskip",
+        "self.skipTest",
+        "super.skipTest",
+        "unittest.SkipTest",
+        "unittest.case.SkipTest",
+        "unittest.case.expectedFailure",
+        "unittest.case.skipUnless",
+        "unittest.TestCase.skipTest",
+        "unittest.expectedFailure",
+        "unittest.skip",
+    } <= symbols
+
+
 def test_resolves_destructured_assignment(tmp_path):
     write_test_file(
         tmp_path,

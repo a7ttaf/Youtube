@@ -12,9 +12,9 @@ from pathlib import Path
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 PYTEST_ENV_OVERRIDES = (
     "PYTEST_ADDOPTS",
-    "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
     "PYTEST_PLUGINS",
 )
+PYTEST_DISABLE_PLUGIN_AUTOLOAD = "PYTEST_DISABLE_PLUGIN_AUTOLOAD"
 RUFF_ENTRYPOINT = "import runpy; runpy.run_module('ruff', run_name='__main__')"
 PYTEST_POLICY_ENTRYPOINT = (
     "import sys; from pathlib import Path; "
@@ -130,6 +130,7 @@ def run_gate(
     # FIX: Remove caller-supplied pytest startup overrides before validation.
     for key in PYTEST_ENV_OVERRIDES:
         env.pop(key, None)
+    env[PYTEST_DISABLE_PLUGIN_AUTOLOAD] = "1"
     existing_pythonpath = env.get("PYTHONPATH")
     backend_pythonpath = str(repo_root / "backend")
     env["PYTHONPATH"] = (
