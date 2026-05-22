@@ -16,7 +16,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from ums_smart_revenue.app import create_app
+from ums_smart_revenue.app import (
+    TrustedGatewayTenantResolverMiddleware,
+    create_app,
+)
+from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.db.security_models import (
     AccessScopeORM,
     RoleORM,
@@ -229,3 +233,61 @@ def test_tenants_me_returns_404_for_unknown_slug(client_db_mode):
     )
     assert response.status_code == 404
     assert response.json()["detail"] == "Tenant 'not-a-tenant' not found"
+
+
+# ---------------------------------------------------------------------------
+# Case 6 — custom-wired app whose authorizer always denies → 403
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def client_deny_authz(seeded_engine):
+    """Isolated app whose tenant authorizer denies every resolution."""
+    from fastapi import FastAPI
+    from sqlalchemy.orm import sessionmaker
+
+    from ums_smart_revenue.api.dependencies import (
+        current_db_session,
+        current_principal_from_headers,
+    )
+    from ums_smart_revenue.api.tenants import router as tenants_router
+    from ums_smart_revenue.db.session import session_dependency
+
+    app = FastAPI()
+    session_factory = sessionmaker(bind=seeded_engine, future=True)
+    app.include_router(tenants_router)
+    app.dependency_overrides[current_db_session] = session_dependency(session_factory)
+
+    # ============================================================================
+    # Purpose: Stub out the principal dependency so the route dependency graph
+    #          succeeds and the request reaches the resolver's authorize_tenant
+    #          check, isolating the 403 path to the authorizer outcome rather
+    #          than a principal-lookup failure (401/503).
+    # Database/ORM: None — returns an in-memory UserPrincipal with no SQL read.
+    # Standards: Minimal valid construction; only required fields set explicitly.
+    # Blast Radius: Test fixture only; no production path affected.
+    # ============================================================================
+    def _stub_principal() -> UserPrincipal:
+        return UserPrincipal(
+            user_id=str(TEST_USER_ID),
+            email="spec-a-deny@example.invalid",
+            tenant_id=str(BOOTSTRAP_TENANT_ID),
+        )
+
+    app.dependency_overrides[current_principal_from_headers] = _stub_principal
+    app.add_middleware(
+        TrustedGatewayTenantResolverMiddleware,
+        session_factory=lambda: session_factory(),
+        authorize_tenant=lambda *_: False,
+    )
+    with TestClient(app) as client:
+        yield client
+
+
+def test_tenants_me_returns_403_when_authorizer_denies(client_deny_authz):
+    response = client_deny_authz.get(
+        "/tenants/me",
+        headers={"X-UMS-Tenant": "ums", **_gateway_headers()},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Tenant access denied"
