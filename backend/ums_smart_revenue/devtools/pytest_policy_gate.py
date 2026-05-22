@@ -60,8 +60,10 @@ def find_policy_violations(
     for path in _iter_policy_files(project_root):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         relative_path = path.relative_to(project_root)
+        symbol_aliases = _symbol_aliases(tree)
+        str_aliases = _string_constant_aliases(tree)
         violations.extend(
-            _violations_in_tree(tree, relative_path, _symbol_aliases(tree))
+            _violations_in_tree(tree, relative_path, symbol_aliases, str_aliases)
         )
     return tuple(violations)
 
@@ -86,7 +88,10 @@ def run_policy_gate(project_root: Path = PROJECT_ROOT) -> int:
 
 
 def _violations_in_tree(
-    tree: ast.AST, relative_path: Path, import_aliases: dict[str, str]
+    tree: ast.AST,
+    relative_path: Path,
+    import_aliases: dict[str, str],
+    string_aliases: dict[str, str],
 ) -> tuple[TestPolicyViolation, ...]:
     violations: list[TestPolicyViolation] = []
 
@@ -102,7 +107,7 @@ def _violations_in_tree(
                 violations, node.func, relative_path, import_aliases
             )
             _check_getattr_indirection(
-                violations, node, relative_path, import_aliases
+                violations, node, relative_path, import_aliases, string_aliases
             )
         elif isinstance(node, ast.Attribute | ast.Name):
             _append_violation_if_forbidden(
@@ -117,6 +122,7 @@ def _check_getattr_indirection(
     call: ast.Call,
     relative_path: Path,
     import_aliases: dict[str, str],
+    string_aliases: dict[str, str],
 ) -> None:
     if not (
         isinstance(call.func, ast.Name)
@@ -125,15 +131,9 @@ def _check_getattr_indirection(
     ):
         return
     module_name = _qualified_name(call.args[0], import_aliases)
-    attr_value = (
-        call.args[1].value
-        if isinstance(call.args[1], ast.Constant) and isinstance(
-            call.args[1].value, str
-        )
-        else None
-    )
-    if module_name and attr_value:
-        full_symbol = f"{module_name}.{attr_value}"
+    attr_arg = call.args[1]
+    if isinstance(attr_arg, ast.Constant) and isinstance(attr_arg.value, str):
+        full_symbol = f"{module_name}.{attr_arg.value}"
         if full_symbol in FORBIDDEN_SYMBOLS:
             violations.append(
                 TestPolicyViolation(
@@ -142,6 +142,18 @@ def _check_getattr_indirection(
                     symbol=full_symbol,
                 )
             )
+    elif isinstance(attr_arg, ast.Name):
+        leaf_value = string_aliases.get(attr_arg.id)
+        if leaf_value:
+            full_symbol = f"{module_name}.{leaf_value}"
+            if full_symbol in FORBIDDEN_SYMBOLS:
+                violations.append(
+                    TestPolicyViolation(
+                        relative_path=relative_path,
+                        line=call.lineno,
+                        symbol=full_symbol,
+                    )
+                )
 
 
 def _decorator_violations(
@@ -239,6 +251,15 @@ def _add_wildcard_alias(
         aliases.setdefault(first, f"{imported_module}.{first}")
 
 
+def _resolve_string_constant(value: ast.AST) -> str | None:
+    if not isinstance(value, ast.Constant) or not isinstance(value.value, str):
+        return None
+    for symbol in FORBIDDEN_SYMBOLS:
+        if symbol.rsplit(".", 1)[-1] == value.value:
+            return value.value
+    return None
+
+
 def _symbol_aliases(tree: ast.AST) -> dict[str, str]:
     aliases = _import_aliases(tree)
     changed = True
@@ -261,6 +282,20 @@ def _symbol_aliases(tree: ast.AST) -> dict[str, str]:
                 changed = True
 
     return aliases
+
+
+def _string_constant_aliases(tree: ast.AST) -> dict[str, str]:
+    result: dict[str, str] = {}
+    for node in ast.walk(tree):
+        value = _assignment_value(node)
+        if value is None:
+            continue
+        resolved = _resolve_string_constant(value)
+        if not resolved:
+            continue
+        for target in _assignment_targets(node):
+            result.setdefault(target.id, resolved)
+    return result
 
 
 def _assignment_value(node: ast.AST) -> ast.AST | None:
