@@ -397,7 +397,7 @@ def test_revenue_contract_is_checked():
 """,
     )
     violations = find_policy_violations(tmp_path)
-    assert all(violation.line < 10 for violation in violations)
+    assert violations == ()
 
 
 def test_module_control_flow_string_constant_for_getattr(tmp_path):
@@ -553,6 +553,96 @@ pytest.skip("not ready")
     assert len(violations) == 1
     assert violations[0].relative_path.as_posix() == "tests/policy_plugin.py"
     assert violations[0].symbol == "pytest.skip"
+
+
+def test_resolves_sequence_aliases_in_pytest_plugins_declarations(tmp_path):
+    write_test_file(
+        tmp_path,
+        "conftest.py",
+        """
+plugin_modules = [
+    "ums_smart_revenue.testing.policy_plugin",
+    "ums_smart_revenue.testing.second_policy_plugin",
+]
+pytest_plugins = plugin_modules
+""",
+    )
+    plugin_root = tmp_path / "backend" / "ums_smart_revenue" / "testing"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "policy_plugin.py").write_text(
+        """
+import pytest
+
+
+pytest.skip("not ready")
+""",
+        encoding="utf-8",
+    )
+    (plugin_root / "second_policy_plugin.py").write_text(
+        """
+import pytest
+
+
+pytest.xfail("not ready")
+""",
+        encoding="utf-8",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert {
+        (violation.relative_path.as_posix(), violation.symbol)
+        for violation in violations
+    } == {
+        ("backend/ums_smart_revenue/testing/policy_plugin.py", "pytest.skip"),
+        (
+            "backend/ums_smart_revenue/testing/second_policy_plugin.py",
+            "pytest.xfail",
+        ),
+    }
+
+
+def test_resolves_mutating_pytest_plugins_declarations(tmp_path):
+    write_test_file(
+        tmp_path,
+        "conftest.py",
+        """
+plugin_name = "ums_smart_revenue.testing.policy_plugin"
+plugin_group = ["ums_smart_revenue.testing.second_policy_plugin"]
+pytest_plugins = []
+pytest_plugins.append(plugin_name)
+pytest_plugins.extend(plugin_group)
+""",
+    )
+    plugin_root = tmp_path / "backend" / "ums_smart_revenue" / "testing"
+    plugin_root.mkdir(parents=True)
+    (plugin_root / "policy_plugin.py").write_text(
+        """
+import pytest
+
+
+pytest.skip("not ready")
+""",
+        encoding="utf-8",
+    )
+    (plugin_root / "second_policy_plugin.py").write_text(
+        """
+import pytest
+
+
+pytest.xfail("not ready")
+""",
+        encoding="utf-8",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert {
+        (violation.relative_path.as_posix(), violation.symbol)
+        for violation in violations
+    } == {
+        ("backend/ums_smart_revenue/testing/policy_plugin.py", "pytest.skip"),
+        (
+            "backend/ums_smart_revenue/testing/second_policy_plugin.py",
+            "pytest.xfail",
+        ),
+    }
 
 
 def test_resolves_backend_pytest_plugin_modules(tmp_path):

@@ -539,16 +539,49 @@ def _include_declared_pytest_plugins(
 def _pytest_plugins_from_file(path: Path) -> tuple[str, ...]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     modules: list[str] = []
-    string_aliases: dict[str, str] = {}
+    plugin_aliases: dict[str, tuple[str, ...]] = {}
     for node in _iter_module_scope_statements(tree.body):
-        for key, value in _raw_string_alias_bindings(node):
-            if "." not in key:
-                string_aliases[key] = value
+        _update_pytest_plugin_aliases(plugin_aliases, node)
         value = _assignment_value(node)
-        if value is None or not _assigns_to_name(node, PYTEST_PLUGINS_NAME):
-            continue
-        modules.extend(_string_literals(value, string_aliases))
+        if value is not None and _assigns_to_name(node, PYTEST_PLUGINS_NAME):
+            modules.extend(_string_literals(value, plugin_aliases))
+        modules.extend(_pytest_plugin_mutation_literals(node, plugin_aliases))
     return tuple(modules)
+
+
+def _update_pytest_plugin_aliases(
+    plugin_aliases: dict[str, tuple[str, ...]], node: ast.AST
+) -> None:
+    # FIX: Preserve aliases for full pytest_plugins sequences, not only one
+    # string literal, so backend plugin modules cannot evade static scanning.
+    for key, value in _string_alias_bindings(node):
+        if "." in key:
+            continue
+        modules = _string_literals(value, plugin_aliases)
+        if modules:
+            plugin_aliases[key] = modules
+        else:
+            plugin_aliases.pop(key, None)
+
+
+def _pytest_plugin_mutation_literals(
+    node: ast.AST, plugin_aliases: dict[str, tuple[str, ...]]
+) -> tuple[str, ...]:
+    if not isinstance(node, ast.Expr) or not isinstance(node.value, ast.Call):
+        return ()
+    call = node.value
+    if not isinstance(call.func, ast.Attribute):
+        return ()
+    if call.func.attr not in {"append", "extend"}:
+        return ()
+    if not (
+        isinstance(call.func.value, ast.Name)
+        and call.func.value.id == PYTEST_PLUGINS_NAME
+    ):
+        return ()
+    if len(call.args) != 1:
+        return ()
+    return _string_literals(call.args[0], plugin_aliases)
 
 
 def _iter_module_scope_statements(body: list[ast.stmt]) -> tuple[ast.stmt, ...]:
@@ -603,7 +636,7 @@ def _assigns_to_name(node: ast.AST, name: str) -> bool:
 
 def _string_literals(
     node: ast.AST,
-    string_aliases: dict[str, str] | None = None,
+    string_aliases: dict[str, tuple[str, ...]] | None = None,
 ) -> tuple[str, ...]:
     if isinstance(node, ast.Constant) and isinstance(node.value, str):
         return (node.value,)
@@ -612,7 +645,14 @@ def _string_literals(
         and string_aliases is not None
         and node.id in string_aliases
     ):
-        return (string_aliases[node.id],)
+        return string_aliases[node.id]
+    if isinstance(node, ast.Starred):
+        return _string_literals(node.value, string_aliases)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        return (
+            *_string_literals(node.left, string_aliases),
+            *_string_literals(node.right, string_aliases),
+        )
     if isinstance(node, ast.List | ast.Set | ast.Tuple):
         values: list[str] = []
         for item in node.elts:
@@ -670,14 +710,6 @@ def _string_alias_bindings(node: ast.AST) -> tuple[tuple[str, ast.AST], ...]:
     bindings: list[tuple[str, ast.AST]] = []
     for target in targets:
         bindings.extend(_target_string_value_bindings(target, value))
-    return tuple(bindings)
-
-
-def _raw_string_alias_bindings(node: ast.AST) -> tuple[tuple[str, str], ...]:
-    bindings: list[tuple[str, str]] = []
-    for key, value in _string_alias_bindings(node):
-        if isinstance(value, ast.Constant) and isinstance(value.value, str):
-            bindings.append((key, value.value))
     return tuple(bindings)
 
 
