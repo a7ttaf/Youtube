@@ -302,6 +302,8 @@ def _assigns_to_name(node: ast.AST, name: str) -> bool:
     targets: list[ast.AST]
     if isinstance(node, ast.Assign):
         targets = list(node.targets)
+    elif isinstance(node, ast.AugAssign):
+        targets = [node.target]
     elif isinstance(node, ast.AnnAssign | ast.NamedExpr):
         targets = [node.target]
     else:
@@ -522,6 +524,10 @@ def _target_value_bindings(
 
 def _assignment_value(node: ast.AST) -> ast.AST | None:
     if isinstance(node, ast.Assign | ast.NamedExpr):
+        return node.value
+    if isinstance(node, ast.AugAssign):
+        # FIX: pytest_plugins += (...) appends plugin declarations that must be
+        # scanned without treating augmented assignment as a general alias bind.
         return node.value
     if isinstance(node, ast.AnnAssign):
         return node.value

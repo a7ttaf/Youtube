@@ -13,9 +13,9 @@
 - `scripts/run_tests_gate.py` — test-only gate entry point (15 lines).
 - `backend/ums_smart_revenue/devtools/__init__.py` — package marker (1 line).
 - `backend/ums_smart_revenue/devtools/quality_gate.py` — gate command builder + runner (136 lines).
-- `backend/ums_smart_revenue/devtools/pytest_policy_gate.py` — AST skip/xfail/unittest-SkipTest/expectedFailure/self.skipTest policy enforcer with import-alias, local-alias, wildcard-import, submodule-canonicalization, marker-object, `builtins.getattr`, tuple/list-destructuring, scoped string-constant, attribute-backed `getattr`, and module-scope `pytest_plugins` module resolution, including control-flow declarations; scans __init__.py, test files, conftest, and declared pytest plugin modules (568 lines).
-- `tests/devtools/test_pytest_policy_gate.py` — 25 policy gate tests (549 lines).
-- `tests/devtools/test_policy_gate_edge_cases.py` — 12 policy edge-case tests (268 lines).
+- `backend/ums_smart_revenue/devtools/pytest_policy_gate.py` — AST skip/xfail/unittest-SkipTest/expectedFailure/self.skipTest policy enforcer with import-alias, local-alias, wildcard-import, submodule-canonicalization, marker-object, `builtins.getattr`, tuple/list-destructuring, scoped string-constant, attribute-backed `getattr`, and module-scope `pytest_plugins` module resolution, including augmented assignments and control-flow declarations; scans __init__.py, test files, conftest, and declared pytest plugin modules (574 lines).
+- `tests/devtools/test_pytest_policy_gate.py` — 29 policy gate tests (628 lines).
+- `tests/devtools/test_policy_gate_edge_cases.py` — 13 policy edge-case tests (293 lines).
 - `tests/devtools/test_quality_gate.py` — 5 quality gate tests (175 lines).
 
 ### Developer agent rules
@@ -67,13 +67,13 @@ entry points.
 
 ### SQL — none
 
-### Tests — tracked 42
+### Tests — tracked 47
 
-- 25 in `tests/devtools/test_pytest_policy_gate.py` (allow normal, reject `pytest.mark.skip`, reject runtime `pytest.xfail`, reporter shape, default pytest `*_test.py` pattern, test `conftest.py`, root `conftest.py`, `pytest.importorskip`, imported skip aliases, marker objects passed as values, local aliases assigned from forbidden symbols, `unittest.expectedFailure`, `unittest.SkipTest`, `self.skipTest`, wildcard `from pytest import *`, wildcard `from unittest import *`, unittest submodule import `from unittest.case import skipIf`, wildcard submodule `from unittest.case import *`, `__init__.py` scanning, `getattr` indirection, aliased `getattr` indirection, wildcard `pytest.mark` decorator coverage, `super().skipTest`, `unittest.TestCase.skipTest`, and `unittest.case.SkipTest` coverage).
-- 12 in `tests/devtools/test_policy_gate_edge_cases.py` (unittest.case skip decorators, `import unittest.case as ...`, module-scoped string constants, function-local string constant non-leakage, attribute-backed `getattr`, tuple/list destructuring by position, aliased `builtins.getattr`, destructured `getattr` attribute names, direct and control-flow module-level `pytest_plugins` conftest declarations, and ignoring function-local `pytest_plugins` assignments).
+- 29 in `tests/devtools/test_pytest_policy_gate.py` (allow normal, reject `pytest.mark.skip`, reject runtime `pytest.xfail`, reporter shape, default pytest `*_test.py` pattern, test `conftest.py`, root `conftest.py`, `pytest.importorskip`, imported skip aliases, marker objects passed as values, local aliases assigned from forbidden symbols, `unittest.expectedFailure`, `unittest.SkipTest`, `self.skipTest`, wildcard `from pytest import *`, wildcard `from unittest import *`, unittest submodule import `from unittest.case import skipIf`, wildcard submodule `from unittest.case import *`, `__init__.py` scanning, `getattr` indirection, aliased `getattr` indirection, wildcard `pytest.mark` decorator coverage, `super().skipTest`, `unittest.TestCase.skipTest`, and `unittest.case.SkipTest` coverage).
+- 13 in `tests/devtools/test_policy_gate_edge_cases.py` (unittest.case skip decorators, `import unittest.case as ...`, module-scoped string constants, function-local string constant non-leakage, attribute-backed `getattr`, tuple/list destructuring by position, aliased `builtins.getattr`, destructured `getattr` attribute names, direct, augmented-assignment, and control-flow module-level `pytest_plugins` conftest declarations, and ignoring function-local `pytest_plugins` assignments).
 - 5 in `tests/devtools/test_quality_gate.py` (test-only gate command tuple, full gate command tuple, env handling, pytest override clearing, fail-fast behavior).
 
-Current review-loop validation tracks 37 pytest-policy tests and 5 quality-gate
+Current review-loop validation tracks 42 pytest-policy tests and 5 quality-gate
 tests for reviewed enforcement gaps.
 
 ## Removed
@@ -87,12 +87,12 @@ tests for reviewed enforcement gaps.
   AGENTS.md and CLAUDE.md require is now defined in code rather than as
   an unwritten contract, and it clears pytest startup override environment
   variables before subprocess validation.
-- **Pytest count:** 789 after the review-loop validation regression tests.
+- **Pytest count:** 795 after the review-loop validation regression tests.
 
 ## Test surface change
 
-- Pytest total: 789 after the review-loop validation regression tests.
-- 41 devtools tests now tracked in git; +1 test subdirectory now tracked.
+- Pytest total: 795 after the review-loop validation regression tests.
+- 47 devtools tests now tracked in git (42 policy + 5 quality gate); +1 test subdirectory now tracked.
 
 ## Documentation changes
 

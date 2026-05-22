@@ -219,6 +219,31 @@ pytest.skip("not ready")
     assert violations[0].symbol == "pytest.skip"
 
 
+def test_scans_augmented_assignment_pytest_plugins(tmp_path):
+    write_test_file(
+        tmp_path,
+        "conftest.py",
+        """
+pytest_plugins = ()
+pytest_plugins += ("tests.policy_plugin",)
+""",
+    )
+    write_test_file(
+        tmp_path,
+        "policy_plugin.py",
+        """
+import pytest
+
+
+pytest.skip("not ready")
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert len(violations) == 1
+    assert violations[0].relative_path.as_posix() == "tests/policy_plugin.py"
+    assert violations[0].symbol == "pytest.skip"
+
+
 def test_scans_module_scope_control_flow_pytest_plugins(tmp_path):
     write_test_file(
         tmp_path,
