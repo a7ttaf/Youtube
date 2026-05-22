@@ -217,3 +217,27 @@ pytest.skip("not ready")
     assert len(violations) == 1
     assert violations[0].relative_path.as_posix() == "tests/policy_plugin.py"
     assert violations[0].symbol == "pytest.skip"
+
+
+def test_ignores_function_local_pytest_plugins_declarations(tmp_path):
+    write_test_file(
+        tmp_path,
+        "conftest.py",
+        """
+def helper():
+    pytest_plugins = ("tests.policy_plugin",)
+    return pytest_plugins
+""",
+    )
+    write_test_file(
+        tmp_path,
+        "policy_plugin.py",
+        """
+import pytest
+
+
+pytest.skip("not ready")
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert len(violations) == 0

@@ -256,7 +256,7 @@ def _include_declared_pytest_plugins(
 def _pytest_plugins_from_file(path: Path) -> tuple[str, ...]:
     tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
     modules: list[str] = []
-    for node in ast.walk(tree):
+    for node in tree.body:
         value = _assignment_value(node)
         if value is None or not _assigns_to_name(node, PYTEST_PLUGINS_NAME):
             continue

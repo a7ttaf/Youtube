@@ -73,16 +73,16 @@ skill markdown references. Non-vendored author-written content is
 
 - **At runtime: none.** No production code path is changed.
 - **Validation contract: documented in code.** The "ruff + skip-policy + pytest + diff-hygiene" gate that AGENTS.md / CLAUDE.md describe is now executable via `python scripts/run_validation_gate.py`, with pytest startup override environment variables cleared before subprocess validation.
-- **Pytest count: 788.** Current review-loop validation tracks 35 pytest-policy tests and 5 quality-gate tests.
+- **Pytest count: 789.** Current review-loop validation tracks 36 pytest-policy tests and 5 quality-gate tests.
 
 ## Tests run
 
 Latest local validation after the pytest-policy and validation-gate hardening review fixes:
 
-- `python -m pytest tests/devtools/test_policy_gate_edge_cases.py tests/devtools/test_pytest_policy_gate.py -q` — 35 passed.
-- `python -m pytest tests/devtools -q` — 40 passed.
+- `python -m pytest tests/devtools/test_policy_gate_edge_cases.py tests/devtools/test_pytest_policy_gate.py -q` — 36 passed.
+- `python -m pytest tests/devtools -q` — 41 passed.
 - `python -m ruff check backend/ums_smart_revenue/devtools tests/devtools` — All checks passed.
-- `python scripts/run_validation_gate.py` — passed; 788 passed, 0 warnings.
+- `python scripts/run_validation_gate.py` — passed; 789 passed, 0 warnings.
 - `git diff --check` and `git -c core.whitespace=cr-at-eol diff --check` — exit 0; Git emitted CRLF conversion notices only.
 
 ## Failures / skipped gates
@@ -93,7 +93,7 @@ until GitHub review threads and checks clear.
 ## Risks
 
 - **Code risk: very low.** The devtools/ Python code is already running on the operator's workstation; pytest already discovers `tests/devtools/`. Committing is a git/disk reconciliation, not a behavior change.
-- **Test-flake risk: very low.** The 40 devtools tests use `tmp_path`, no shared state, no time-dependent assertions.
+- **Test-flake risk: very low.** The 41 devtools tests use `tmp_path`, no shared state, no time-dependent assertions.
 - **Reviewer-flow risk: medium.** Big diff (~12,100 lines) but most of it is vendored content (theme JSON5, Vitest skill markdown). The actual review surface is ~3,700 lines.
 - **Backward compat risk: zero.** Purely additive; no existing file's behavior changes.
 
@@ -136,4 +136,4 @@ git diff --cached --check
 python scripts/run_tests_gate.py
 ```
 
-Rerun target: all gates green, 788 tests pass, 0 warnings.
+Rerun target: all gates green, 789 tests pass, 0 warnings.
