@@ -160,3 +160,72 @@ def test_tenants_me_returns_bootstrap_tenant_for_resolved_slug(
         "display_name": BOOTSTRAP_DISPLAY,
     }
     assert response.headers.get("Vary") and "X-UMS-Tenant" in response.headers["Vary"]
+
+
+# ---------------------------------------------------------------------------
+# Case 2 — missing X-UMS-Tenant header → 400
+# ---------------------------------------------------------------------------
+
+
+def test_tenants_me_rejects_missing_tenant_header(client_db_mode):
+    response = client_db_mode.get("/tenants/me", headers=_gateway_headers())
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Tenant slug must not be blank"
+    assert "X-UMS-Tenant" in (response.headers.get("Vary") or "")
+
+
+# ---------------------------------------------------------------------------
+# Case 3 — whitespace slug → 400 / over-255-char slug → 400
+# ---------------------------------------------------------------------------
+
+
+def test_tenants_me_rejects_whitespace_tenant_header(client_db_mode):
+    response = client_db_mode.get(
+        "/tenants/me",
+        headers={"X-UMS-Tenant": "   ", **_gateway_headers()},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Tenant slug must not be blank"
+
+
+def test_tenants_me_rejects_overlong_tenant_header(client_db_mode):
+    response = client_db_mode.get(
+        "/tenants/me",
+        headers={"X-UMS-Tenant": "a" * 256, **_gateway_headers()},
+    )
+    assert response.status_code == 400
+    assert "at most 255 characters" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Case 4 — duplicate X-UMS-Tenant header → 400
+# ---------------------------------------------------------------------------
+
+
+def test_tenants_me_rejects_duplicate_tenant_headers(client_db_mode):
+    request = client_db_mode.build_request(
+        "GET",
+        "/tenants/me",
+        headers=[
+            ("X-UMS-Tenant", "ums"),
+            ("X-UMS-Tenant", "ums"),
+            *_gateway_headers().items(),
+        ],
+    )
+    response = client_db_mode.send(request)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "X-UMS-Tenant must be provided exactly once"
+
+
+# ---------------------------------------------------------------------------
+# Case 5 — unknown slug → 404
+# ---------------------------------------------------------------------------
+
+
+def test_tenants_me_returns_404_for_unknown_slug(client_db_mode):
+    response = client_db_mode.get(
+        "/tenants/me",
+        headers={"X-UMS-Tenant": "not-a-tenant", **_gateway_headers()},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Tenant 'not-a-tenant' not found"
