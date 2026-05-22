@@ -129,3 +129,91 @@ def test_revenue_contract_is_checked():
     violations = find_policy_violations(tmp_path)
     assert len(violations) == 1
     assert violations[0].symbol == "pytest.xfail"
+
+
+def test_resolves_destructured_assignment_by_position(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_destructured_by_position.py",
+        """
+import pytest
+
+
+skip_now, harmless = pytest.skip, object()
+
+
+def test_revenue_contract_is_checked():
+    skip_now("not ready")
+
+
+def test_payment_contract_is_checked():
+    harmless()
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert any(
+        violation.symbol == "pytest.skip" and violation.line > 5
+        for violation in violations
+    )
+
+
+def test_catches_aliased_builtin_getattr(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_aliased_builtin_getattr.py",
+        """
+from builtins import getattr as grab
+import pytest as pt
+
+
+def test_revenue_contract_is_checked():
+    grab(pt, "xfail")("broken")
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert len(violations) == 1
+    assert violations[0].symbol == "pytest.xfail"
+
+
+def test_resolves_destructured_getattr_attribute_names(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_destructured_getattr_name.py",
+        """
+import pytest
+
+
+blocked_attr, allowed_attr = "skip", "not_forbidden"
+
+
+def test_revenue_contract_is_checked():
+    getattr(pytest, blocked_attr)("not ready")
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert len(violations) == 1
+    assert violations[0].symbol == "pytest.skip"
+
+
+def test_scans_pytest_plugins_declared_in_conftest(tmp_path):
+    write_test_file(
+        tmp_path,
+        "conftest.py",
+        """
+pytest_plugins = ("tests.policy_plugin",)
+""",
+    )
+    write_test_file(
+        tmp_path,
+        "policy_plugin.py",
+        """
+import pytest
+
+
+pytest.skip("not ready")
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert len(violations) == 1
+    assert violations[0].relative_path.as_posix() == "tests/policy_plugin.py"
+    assert violations[0].symbol == "pytest.skip"
