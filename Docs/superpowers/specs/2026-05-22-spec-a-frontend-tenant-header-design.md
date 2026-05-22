@@ -19,12 +19,13 @@ client, no test framework, and no tenant context. Any future call from
 `frontend/src/components/srcc/AppShell.tsx` to a real backend route would
 be rejected with `400 "Tenant slug must not be blank"` by the resolver.
 
-Spec A wires the smallest end-to-end proof that the frontend can talk to a
+Spec A defines the smallest end-to-end proof that the frontend can talk to a
 multi-tenant backend: a tenant React context seeded with the bootstrap slug,
 a thin `fetch` wrapper that injects the header on every request, a new
-backend `GET /tenants/me` endpoint that returns the resolved tenant, an
-`AppShell` mount-time call that proves the wire works, and a Vitest test
-framework wired into the local validation gate.
+backend `GET /tenants/me` endpoint that returns the resolved tenant only
+after gateway/principal validation succeeds, an `AppShell` mount-time call
+that proves the wire works through the same-origin gateway/dev shim, and a
+Vitest test framework wired into the local validation gate.
 
 ## 2. Goals
 
@@ -36,14 +37,17 @@ framework wired into the local validation gate.
   by caller-supplied headers.
 - `backend/ums_smart_revenue/api/tenants.py` exposes `GET /tenants/me`
   returning `TenantRead { id, slug, display_name }` from the existing
-  resolver-populated `TENANT_CTX`.
-- `AppShell` calls `/tenants/me` on mount and renders a dev-only proof
-  element showing the resolved tenant or the typed `ApiError`.
-- Vitest, Testing Library, and jsdom land as new devDeps; the local
-  validation gate runs `npm --prefix frontend run test` between pytest and
-  `git diff --check`.
-- The validation gate's own self-test (`tests/devtools/test_quality_gate.py`)
-  reflects the new step order.
+  resolver-populated `TENANT_CTX` after `current_principal_from_headers`
+  succeeds. In database mode, the app factory override loads the principal
+  from SQL.
+- `AppShell` calls `/tenants/me` on mount through the same-origin
+  gateway/dev-shim path and renders a dev-only proof element showing the
+  resolved tenant or the typed `ApiError`.
+- Vitest, Testing Library, and jsdom land as new devDeps in the
+  implementation PR; that PR updates the local validation gate to run
+  `npm --prefix frontend run test` between pytest and `git diff --check`.
+- The implementation PR updates the validation gate's own self-test
+  (`tests/devtools/test_quality_gate.py`) to reflect the new step order.
 
 ## 3. Non-goals
 
@@ -68,9 +72,10 @@ framework wired into the local validation gate.
 
 ## 4. Approach
 
-**One PR.** Backend endpoint + frontend provider/client/tests + live
-AppShell call + validation gate update all land together. Splitting loses
-the end-to-end-wired property that closes S2 Phase 5.
+**One implementation PR after this docs PR.** Backend endpoint + frontend
+provider/client/tests + live AppShell call + validation gate update all land
+together in that implementation PR. Splitting loses the end-to-end-wired
+property that closes S2 Phase 5.
 
 Branch: `pr/spec-a-frontend-tenant-header`. Base: `main` at the merge commit
 of PR #39.
@@ -94,12 +99,13 @@ Browser
         no Content-Type header for GET / FormData; "application/json" only when serialising JSON body
         non-2xx → typed ApiError; fetch rejection → propagated raw TypeError
 
-[Gateway / dev shim — out of frontend scope]            ── injects trusted-gateway identity headers
+[Deployed gateway / Vite dev proxy]                    ── same-origin hop; injects trusted-gateway identity headers
 
 Backend (existing tenancy stack from PR #36)
   ├── TrustedGatewayTenantResolverMiddleware            ── validates gateway headers, delegates
   ├── TenantResolverMiddleware                          ── validates X-UMS-Tenant slug, sets TENANT_CTX
-  └── GET /tenants/me                                   ── NEW — depends on existing resolver
+  └── GET /tenants/me                                   ── NEW — depends on principal + existing resolver
+        _principal = current_principal_from_headers()
         tenant = require_current_tenant()
         return TenantRead(
           id=tenant.id,
@@ -118,17 +124,20 @@ login-derived value but the architecture does not change.
 ### Multi-mode reality
 
 `create_app(authz_source="database")` wires `TrustedGatewayTenantResolverMiddleware`
-— resolver-backed, validates `X-UMS-Tenant`, full error tree from
-`tenancy/resolver.py` applies. **This is the mode Spec A's correctness
-claims are scoped to.**
+and overrides `current_principal_from_headers` with
+`current_principal_from_database` — resolver-backed, validates
+`X-UMS-Tenant`, loads an enabled SQL principal for the resolved tenant, and
+keeps the full error tree from `tenancy/resolver.py`. **This is the mode
+Spec A's end-to-end correctness claims are scoped to.**
 
 `create_app(authz_source="headers")` wires `DefaultTenantMiddleware`
 (`app.py:187-211`) — binds the bootstrap tenant via `_bootstrap_tenant()`
-**without** validating the header. `/tenants/me` still returns 200 with
-the bootstrap payload in this mode. Spec A documents this with one
-explicit endpoint test (`test_tenants_me_headers_mode_documents_bootstrap_shortcut`)
-so future readers don't read `/tenants/me` as universal tenant-header
-proof.
+**without** validating the tenant header. The `/tenants/me` route still
+depends on `current_principal_from_headers`, so unauthenticated requests
+must fail closed before the bootstrap tenant can be returned. Spec A
+documents this with one explicit endpoint test
+(`test_tenants_me_headers_mode_requires_gateway_auth`) so future readers
+do not read `/tenants/me` as an unauthenticated tenant-discovery route.
 
 ## 6. Components
 
@@ -137,10 +146,13 @@ proof.
 **`backend/ums_smart_revenue/api/tenants.py`**
 
 ```python
-from fastapi import APIRouter
+from typing import Annotated
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 from uuid import UUID
 
+from ums_smart_revenue.api.dependencies import current_principal_from_headers
+from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.tenancy.context import require_current_tenant
 
 router = APIRouter(prefix="/tenants", tags=["tenants"])
@@ -153,21 +165,24 @@ class TenantRead(BaseModel):
 
 
 # ============================================================================
-# Purpose: Return the tenant resolved by TenantResolverMiddleware.
-# Database/ORM: None — reads request-scoped TENANT_CTX populated by the
-#               resolver; no SQL from this handler.
-# Standards: Thin route; explicit field construction (Tenant is a domain
-#            dataclass, not a Pydantic model — model_validate without
-#            from_attributes would fail).
-# Blast Radius: None detected. No write path, no auth scope change,
+# Purpose: Return the tenant resolved by TenantResolverMiddleware after the
+#          gateway/principal dependency has authenticated the caller.
+# Database/ORM: No SQL from this handler; current_principal_from_headers is
+#               overridden to SQL principal loading in database auth mode.
+# Standards: Thin route; dependency-owned auth; explicit field construction
+#            because Tenant is a domain dataclass, not a Pydantic model.
+# Blast Radius: Authorization dependency required; no write path,
 #               no finance impact. No graph projection impact detected.
 # Connections:
+#   - File: backend/ums_smart_revenue/api/dependencies.py -> auth dependency
 #   - File: backend/ums_smart_revenue/tenancy/resolver.py -> sets TENANT_CTX
 #   - File: backend/ums_smart_revenue/tenancy/context.py -> require_current_tenant
 #   - File: backend/ums_smart_revenue/app.py -> include_router wiring
 # ============================================================================
 @router.get("/me", response_model=TenantRead)
-def get_current_tenant_endpoint() -> TenantRead:
+def get_current_tenant_endpoint(
+    _principal: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+) -> TenantRead:
     tenant = require_current_tenant()
     return TenantRead(
         id=tenant.id,
@@ -283,26 +298,40 @@ export function useApiClient() {
   const { tenantSlug } = useTenant();
 
   return useMemo(() => {
-    async function request<T>(method: string, path: string, init: RequestInit = {}): Promise<T> {
+    async function request<T>(
+      method: string,
+      path: string,
+      init: RequestInit & { bodyIsJson?: boolean } = {},
+    ): Promise<T> {
       const url = resolveUrl(path);
-      const hasJsonBody =
-        init.body !== undefined &&
-        !(init.body instanceof FormData) &&
-        !(init.body instanceof URLSearchParams) &&
-        !(init.body instanceof Blob);
-      const headers = buildHeaders(init.headers, tenantSlug, hasJsonBody);
-      const res = await fetch(url, { ...init, method, headers });
+      const { bodyIsJson = false, ...requestInit } = init;
+      const headers = buildHeaders(requestInit.headers, tenantSlug, bodyIsJson);
+      const res = await fetch(url, { ...requestInit, method, headers });
       if (!res.ok) {
         const body = await parseBody(res);
         throw new ApiError(`${res.status} ${res.statusText}`, res.status, body, url);
       }
       return (await parseBody(res)) as T;
     }
+    function withBody(body: unknown, init: RequestInit = {}): RequestInit & { bodyIsJson?: boolean } {
+      if (body === undefined) return init;
+      if (
+        typeof body === "string" ||
+        body instanceof FormData ||
+        body instanceof URLSearchParams ||
+        body instanceof Blob ||
+        body instanceof ArrayBuffer ||
+        ArrayBuffer.isView(body)
+      ) {
+        return { ...init, body: body as BodyInit, bodyIsJson: false };
+      }
+      return { ...init, body: JSON.stringify(body), bodyIsJson: true };
+    }
     return {
       get:    <T>(path: string, init?: RequestInit)                       => request<T>("GET",    path, init),
-      post:   <T>(path: string, body?: unknown, init?: RequestInit)       => request<T>("POST",   path, { ...init, body: body === undefined ? undefined : JSON.stringify(body) }),
-      put:    <T>(path: string, body?: unknown, init?: RequestInit)       => request<T>("PUT",    path, { ...init, body: body === undefined ? undefined : JSON.stringify(body) }),
-      patch:  <T>(path: string, body?: unknown, init?: RequestInit)       => request<T>("PATCH",  path, { ...init, body: body === undefined ? undefined : JSON.stringify(body) }),
+      post:   <T>(path: string, body?: unknown, init?: RequestInit)       => request<T>("POST",   path, withBody(body, init)),
+      put:    <T>(path: string, body?: unknown, init?: RequestInit)       => request<T>("PUT",    path, withBody(body, init)),
+      patch:  <T>(path: string, body?: unknown, init?: RequestInit)       => request<T>("PATCH",  path, withBody(body, init)),
       delete: <T>(path: string, init?: RequestInit)                       => request<T>("DELETE", path, init),
     };
   }, [tenantSlug]);                              // stable identity per slug
@@ -360,16 +389,27 @@ useEffect(() => {
 )}
 ```
 
+**`frontend/vite.config.ts`** — add a dev proxy for the proof route so the
+browser calls the Vite origin (`/tenants/me`) instead of calling FastAPI
+cross-origin. The proxy is the local dev shim: it forwards to the backend
+target and injects `X-User-ID` plus `X-UMS-Trusted-Gateway-Token` from the
+Node process environment. The browser never receives or sends the trusted
+token directly. Production must use the deployed gateway for the same
+same-origin/injected-header contract; direct cross-origin
+`VITE_API_BASE_URL` is for URL-normalisation tests only unless a future CORS
+contract is added explicitly.
+
 **`frontend/package.json`** — add devDeps `vitest`, `@testing-library/react`,
 `@testing-library/jest-dom`, `@testing-library/user-event`, `jsdom`. Add
 scripts `"test": "vitest run"` and `"test:watch": "vitest"`. No `test:ui`
 script (would require `@vitest/ui` devDep).
 
 **`frontend/package-lock.json`** — regenerated by `npm install` after the
-`package.json` changes. **This file is in scope for this PR** and must be
-committed alongside `package.json` (added explicitly by path, not via
-`git add -A`). Standing "keep `package-lock.json` out" rule was tied to
-PR #38/#39 catch-up only.
+`package.json` changes in the implementation PR. **This docs-only PR must
+not include the lockfile.** When the implementation PR modifies
+`package.json`, commit the regenerated `package-lock.json` alongside it
+(added explicitly by path, not via `git add -A`). Standing "keep
+`package-lock.json` out" rule was tied to PR #38/#39 catch-up only.
 
 **`frontend/tsconfig.json`** — extend `compilerOptions.types` to include
 `vitest/globals` and `@testing-library/jest-dom` so test files type-check
@@ -446,8 +486,8 @@ pytest → vitest → git diff --check (working tree) → git diff --check
    headers.set("X-UMS-Tenant", "ums")           // set LAST
    fetch(url, { method: "GET", headers })
 
-4. Browser → gateway/dev-shim → FastAPI
-   Browser ships only: X-UMS-Tenant: ums
+4. Browser → same-origin gateway/dev-shim → FastAPI
+   Browser ships only to same-origin /tenants/me: X-UMS-Tenant: ums
    Gateway/dev shim injects: X-User-ID, X-UMS-Trusted-Gateway-Token
    FastAPI sees all three.
 
@@ -465,17 +505,22 @@ pytest → vitest → git diff --check (working tree) → git diff --check
      TENANT_CTX.set(tenant)
      await self.app(scope, receive, send_with_tenant_vary)
 
-6. Route handler GET /tenants/me
+6. Route dependency
+   current_principal_from_headers()
+     database mode override → current_principal_from_database()
+     validates the enabled SQL principal for the resolved tenant
+
+7. Route handler GET /tenants/me
    tenant = require_current_tenant()
    return TenantRead(id=tenant.id, slug=tenant.slug, display_name=tenant.display_name)
 
-7. Response
+8. Response
    200 OK
    Vary: X-UMS-Tenant                          (set by _tenant_vary_send)
    Content-Type: application/json
    {"id":"00000000-0000-0000-0000-000000000001","slug":"ums","display_name":"UMS"}
 
-8. Client resolves
+9. Client resolves
    res.ok → parseBody → typed TenantRead
    AppShell .then(tenant.hydrate)              // provider state merges id, displayName
    Re-render: dev-only proof tag shows "Tenant: UMS (ums) — id 00000000…0001"
@@ -492,11 +537,12 @@ of whether the first fetch has resolved. The ref is **not** reset in the
 ```
 AUTHZ_SOURCE_HEADERS mode
    DefaultTenantMiddleware:
-     bypass? '/tenants/me' ∉ bypass paths → proceed
-     TENANT_CTX.set(_bootstrap_tenant())    // synthesises Tenant, no DB read
-     await self.app(...)
-   Route handler still reads TENANT_CTX → returns bootstrap tenant
-   Endpoint returns 200 even with NO X-UMS-Tenant header.
+      bypass? '/tenants/me' ∉ bypass paths → proceed
+      TENANT_CTX.set(_bootstrap_tenant())    // synthesises Tenant, no DB read
+      await self.app(...)
+   Route dependency current_principal_from_headers():
+      missing gateway/principal headers → 401
+   Endpoint never returns bootstrap tenant to an unauthenticated caller.
 ```
 
 ## 8. Error handling
@@ -526,10 +572,11 @@ and `/tenants/me` success, carries `Vary: X-UMS-Tenant` via
 `TrustedGatewayTenantResolverMiddleware` *before* delegation use
 `_send_http_exception(...)` directly and do **not** carry the tenant Vary.
 
-**Route handler raises nothing.** It calls `require_current_tenant()` and
+**Route handler raises nothing after auth.** The dependency owns
+gateway/principal failures. The handler calls `require_current_tenant()` and
 serialises. If `TENANT_CTX` is somehow unset, `TenantContextMissing`
-propagates as a 500 — a middleware-contract violation, not a request
-error, deliberately not hidden behind a defensive try/except.
+propagates as a 500 — a middleware-contract violation, not a request error,
+deliberately not hidden behind a defensive try/except.
 
 ### 8.2 Frontend error tree
 
@@ -570,11 +617,13 @@ App-construction fixture pattern (mirrors `test_database_principals.py`):
 1. SQLite engine.
 2. `TenantBase.metadata.create_all(engine)`.
 3. Insert one `TenantORM(id=UUID(UMS_TENANT_ID), slug="ums", display_name="UMS", status=ACTIVE)`.
-4. `create_app(database_url=engine.url, authz_source="database")` →
+4. Insert one enabled SQL principal row plus tenant-scoped role assignment
+   matching `_gateway_headers(TEST_USER_ID)`.
+5. `create_app(database_url=engine.url, authz_source="database")` →
    `TestClient(app)`.
-5. **No principal row required** — `/tenants/me` has no principal
-   dependency. The trusted-gateway middleware validates only the gateway
-   headers, not the principal identity.
+6. `/tenants/me` depends on `current_principal_from_headers`; in database
+   mode the app override loads the SQL principal after trusted-gateway
+   validation.
 
 Trusted-gateway header helper:
 
@@ -588,13 +637,15 @@ def _gateway_headers(user_id: str = TEST_USER_ID) -> dict[str, str]:
 
 | # | Request | Expected |
 |---|---|---|
-| 1 | `GET /tenants/me` with `X-UMS-Tenant: ums` + gateway headers | 200; body `{"id":"00000000-...0001","slug":"ums","display_name":"UMS"}`; `Vary: X-UMS-Tenant` |
+| 1 | `GET /tenants/me` with `X-UMS-Tenant: ums` + gateway headers for seeded user | 200; body `{"id":"00000000-...0001","slug":"ums","display_name":"UMS"}`; `Vary: X-UMS-Tenant` |
 | 2 | gateway headers only, no `X-UMS-Tenant` | 400 `Tenant slug must not be blank`; Vary present |
 | 3 | `X-UMS-Tenant: "   "` and variant `X-UMS-Tenant: "a"*256` | 400 `Tenant slug must not be blank` / `Tenant slug must be at most 255 characters` |
 | 4 | Duplicate `X-UMS-Tenant` headers — `client.build_request(method, url, headers=[("X-UMS-Tenant","ums"),("X-UMS-Tenant","ums")] + gateway_headers); client.send(request)` (fallback if `TestClient(...).get(headers={...})` rejects list-style duplicates) | 400 `X-UMS-Tenant must be provided exactly once` |
 | 5 | `X-UMS-Tenant: not-a-tenant` | 404 `Tenant 'not-a-tenant' not found` |
 | 6 | **Separately constructed** app instance with `TrustedGatewayTenantResolverMiddleware(..., authorize_tenant=lambda *_: False)` wired manually (stock `create_app(authz_source="database")` uses `_allow_database_auth_tenant` which always returns True) | 403 `Tenant access denied` |
-| 7 | `test_tenants_me_headers_mode_documents_bootstrap_shortcut` — `create_app(authz_source="headers")`, request has NO `X-UMS-Tenant` | 200; body is bootstrap tenant. Test docstring explicitly states this documents `DefaultTenantMiddleware` behavior and is **not** security coverage for `/tenants/me`. |
+| 7 | Missing `X-User-ID` or missing/invalid `X-UMS-Trusted-Gateway-Token` | 401 before tenant payload is returned |
+| 8 | `test_tenants_me_headers_mode_requires_gateway_auth` — `create_app(authz_source="headers")`, request has no trusted principal/gateway headers | 401; proves default headers mode cannot leak bootstrap tenant identity unauthenticated. |
+| 9 | `create_app(authz_source="headers")` with full trusted principal headers and no `X-UMS-Tenant` | 200 bootstrap tenant; documents `DefaultTenantMiddleware` fallback only after gateway auth succeeds. |
 
 ### 9.2 Frontend test framework
 
@@ -720,7 +771,7 @@ PR does not touch projection code.
 # Backend gate (run from repo root):
 python scripts/run_validation_gate.py
 
-# Should now invoke (in order):
+# Implementation PR target sequence (expected after code lands):
 #   1. ruff check backend tests scripts
 #   2. AST policy gate (no skip/xfail)
 #   3. pytest --strict-config --strict-markers --basetemp .pytest-tmp
