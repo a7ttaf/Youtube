@@ -67,6 +67,93 @@ def test_revenue_contract_is_checked():
     assert violations[0].symbol == "pytest.xfail"
 
 
+def test_policy_gate_scans_default_pytest_file_patterns(tmp_path):
+    write_test_file(
+        tmp_path,
+        "runtime_skip_test.py",
+        """
+import pytest
+
+
+def test_revenue_contract_is_checked():
+    pytest.skip("not ready")
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].relative_path == Path("tests/runtime_skip_test.py")
+    assert violations[0].symbol == "pytest.skip"
+
+
+def test_policy_gate_scans_conftest_files(tmp_path):
+    write_test_file(
+        tmp_path,
+        "tenant/conftest.py",
+        """
+import pytest
+
+
+def pytest_collection_modifyitems(items):
+    pytest.xfail("disabled from hook")
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].relative_path == Path("tests/tenant/conftest.py")
+    assert violations[0].symbol == "pytest.xfail"
+
+
+def test_policy_gate_rejects_pytest_importorskip(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_importorskip.py",
+        """
+import pytest
+
+
+def test_revenue_contract_is_checked():
+    pytest.importorskip("missing_dependency")
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "pytest.importorskip"
+
+
+def test_policy_gate_resolves_imported_skip_aliases(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_aliases.py",
+        """
+from pytest import mark
+from unittest import skipIf
+
+
+@mark.skip(reason="not ready")
+def test_revenue_contract_is_checked():
+    assert False
+
+
+@skipIf(True, "not ready")
+def test_payment_contract_is_checked():
+    assert False
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert [violation.symbol for violation in violations] == [
+        "pytest.mark.skip",
+        "unittest.skipIf",
+    ]
+
+
 def test_policy_gate_reports_failure_summary(tmp_path, capsys):
     write_test_file(
         tmp_path,
