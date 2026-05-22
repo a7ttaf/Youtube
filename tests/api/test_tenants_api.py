@@ -44,6 +44,25 @@ def _gateway_headers(user_id: UUID = TEST_USER_ID) -> dict[str, str]:
     }
 
 
+def _full_principal_headers(user_id: UUID = TEST_USER_ID) -> dict[str, str]:
+    """Return the full set of trusted-gateway headers required by
+    current_principal_from_headers in authz_source="headers" mode.
+
+    In database mode current_principal_from_headers is overridden to
+    current_principal_from_database, which only needs X-User-ID + token.
+    In headers mode the raw dependency is active and requires all five fields:
+    X-User-ID, X-User-Email, X-Role, X-Scope-Type, and the gateway token.
+    X-Scope-Id is omitted because X-Scope-Type="global" must not have a scope_id.
+    """
+    return {
+        "X-User-ID": str(user_id),
+        "X-User-Email": "spec-a@example.invalid",
+        "X-Role": ROLE_KEY,
+        "X-Scope-Type": "global",
+        "X-UMS-Trusted-Gateway-Token": os.environ["UMS_TRUSTED_GATEWAY_TOKEN"],
+    }
+
+
 @pytest.fixture
 def db_engine_url(tmp_path):
     db_path = tmp_path / "spec_a.sqlite"
@@ -291,3 +310,84 @@ def test_tenants_me_returns_403_when_authorizer_denies(client_deny_authz):
     )
     assert response.status_code == 403
     assert response.json()["detail"] == "Tenant access denied"
+
+
+# ---------------------------------------------------------------------------
+# Case 7 — missing / invalid gateway auth → 401
+# ---------------------------------------------------------------------------
+# current_trusted_gateway_identity raises HTTP_401_UNAUTHORIZED for both:
+#   (a) missing/empty X-User-ID (dependencies.py:127-131)
+#   (b) missing or wrong X-UMS-Trusted-Gateway-Token (_require_trusted_gateway_token:273)
+# TrustedGatewayTenantResolverMiddleware intercepts these before the resolver,
+# so the response is emitted from _send_http_exception, not the route handler.
+# ---------------------------------------------------------------------------
+
+
+def test_tenants_me_returns_401_when_gateway_user_id_missing(client_db_mode):
+    headers = _gateway_headers()
+    headers.pop("X-User-ID")
+    headers["X-UMS-Tenant"] = "ums"
+    response = client_db_mode.get("/tenants/me", headers=headers)
+    assert response.status_code == 401
+
+
+def test_tenants_me_returns_401_when_gateway_token_invalid(client_db_mode):
+    response = client_db_mode.get(
+        "/tenants/me",
+        headers={
+            "X-UMS-Tenant": "ums",
+            "X-User-ID": str(TEST_USER_ID),
+            "X-UMS-Trusted-Gateway-Token": "definitely-not-the-token",
+        },
+    )
+    assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Cases 8-9 — headers-mode (DefaultTenantMiddleware) behaviour
+# ---------------------------------------------------------------------------
+# create_app(authz_source="headers") wires DefaultTenantMiddleware (binds the
+# bootstrap tenant unconditionally) without overriding current_principal_from_headers.
+# The raw current_principal_from_headers dependency therefore remains active and
+# requires: X-User-ID, X-User-Email, X-Role, X-Scope-Type, and the gateway token.
+# Without ALL of these, the principal dependency raises 401 before the route runs.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def client_headers_mode(seeded_engine):
+    app = create_app(database_url=str(seeded_engine.url), authz_source="headers")
+    with TestClient(app) as client:
+        yield client
+
+
+def test_tenants_me_headers_mode_requires_gateway_auth(client_headers_mode):
+    """Default headers mode must NOT leak the bootstrap tenant identity to
+    unauthenticated callers. The principal dependency fails closed even when
+    DefaultTenantMiddleware would have bound the bootstrap tenant.
+    """
+    response = client_headers_mode.get("/tenants/me")
+    assert response.status_code == 401
+
+
+def test_tenants_me_headers_mode_returns_bootstrap_after_gateway_auth(
+    client_headers_mode,
+):
+    """Headers mode is documented as a developer-shortcut for bootstrap-only
+    deployments. With the full set of trusted-gateway principal headers in
+    place, DefaultTenantMiddleware binds the bootstrap tenant even when
+    X-UMS-Tenant is absent. This test documents the behavior — it is NOT
+    security coverage for /tenants/me.
+
+    NOTE: current_principal_from_headers (the active dependency in headers
+    mode, not overridden) requires X-User-ID, X-User-Email, X-Role,
+    X-Scope-Type, and X-UMS-Trusted-Gateway-Token. The spec row 9 describes
+    "full trusted principal headers" — _gateway_headers() alone (only
+    X-User-ID + token) would return 401 because email/role/scope are absent.
+    This test therefore supplies all required fields via _full_principal_headers().
+    """
+    response = client_headers_mode.get("/tenants/me", headers=_full_principal_headers())
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["slug"] == "ums"
+    assert payload["id"] == str(BOOTSTRAP_TENANT_ID)
