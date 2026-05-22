@@ -1476,7 +1476,7 @@ Append to run log.
 off `origin/main` @ `96dbe73`. Run log:
 `Docs/superpowers/runlog/2026-05-21-phase-6.md`.
 
-Two deliberate deviations from the checklist below, recorded in the run
+Three deliberate deviations from the checklist below, recorded in the run
 log:
 
 1. **Marker set** switched from `✅ shipped / ⚠️ partial` to the more
@@ -1489,6 +1489,11 @@ log:
    "Export center" in the current doc; multi-tenant work was placed in a
    new `## Cross-cutting infrastructure (Sx)` section before Phase 0
    rather than overwriting Export center.
+3. **Honesty over plan optimism.** The Phase 6 checklist's example marker
+   mapping called scaffolding items "shipped" when only ORM models,
+   repositories, and unit tests exist. This PR marks those as
+   `⏳ — remaining: <concrete missing piece>` to accurately reflect
+   partial implementation.
 
 ### Task 6.1: Branch off updated main
 
