@@ -305,7 +305,7 @@ def _string_constant_aliases(tree: ast.AST) -> dict[str, str]:
         if not resolved:
             continue
         for target in _assignment_targets(node):
-            result.setdefault(target.id, resolved)
+            result[target.id] = resolved
     return result
 
 
