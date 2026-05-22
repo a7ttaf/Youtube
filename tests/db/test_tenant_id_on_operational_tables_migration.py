@@ -19,6 +19,7 @@ from pathlib import Path
 from types import ModuleType
 from uuid import uuid4
 
+import pytest
 from alembic.migration import MigrationContext
 from alembic.operations import Operations
 from sqlalchemy import (
@@ -38,6 +39,11 @@ from sqlalchemy import (
     text,
 )
 from sqlalchemy.engine import Connection, Engine
+
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:Skipped unsupported reflection of expression-based index "
+    "uq_users_email_lower:sqlalchemy.exc.SAWarning"
+)
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 VERSIONS_DIR = PROJECT_ROOT / "backend/ums_smart_revenue/db/alembic/versions"

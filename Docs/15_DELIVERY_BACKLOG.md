@@ -101,6 +101,18 @@ single P-tier above.
 - ✅ Architecture docs: multi-tenant (`Docs/17`), multi-currency
   (`Docs/18`) — PR #16.
 - 🗑️ Neo4j graph component retired entirely (PR #12).
+- ✅ Local validation gate: `scripts/run_validation_gate.py` invokes
+  `backend/ums_smart_revenue/devtools/quality_gate.py` which runs ruff
+  (backend + tests + scripts), the AST-based no-skip/xfail policy gate,
+  pytest full suite (strict-config + strict-markers + isolated
+  `.pytest-tmp`), and `git diff --check` (working tree + staged) — PR #38.
+- ✅ Developer agent rules: `AGENTS.md` (Codex), `.agents/skills/`
+  (vitest + postgresql-table-design), `skills-lock.json` — PR #38.
+  The Claude-Code-local `CLAUDE.md` is gitignored as a per-machine copy.
+- ✅ Per-PR documentation system at `Docs/pulls/` (one
+  `report.md` + `changelog.md` + `handoff.md` per PR) — coexists with
+  inline `✅ / ⏳ / 🗑️ PR #N` marks on this doc and
+  `01_IMPLEMENTATION_PLAN.md`.
 
 ## Hard problems to solve early
 
