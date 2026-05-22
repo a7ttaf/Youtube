@@ -10,6 +10,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
+PYTEST_ENV_OVERRIDES = (
+    "PYTEST_ADDOPTS",
+    "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
+    "PYTEST_PLUGINS",
+)
 
 
 @dataclass(frozen=True)
@@ -78,6 +83,18 @@ def build_test_gate_commands(
     )
 
 
+# ============================================================================
+# Purpose: Execute the repository validation gate with a controlled subprocess
+# environment so caller-local pytest overrides cannot weaken validation.
+# Database/ORM: None.
+# Standards: Fail-fast subprocess execution, explicit environment normalization,
+# and safe stderr reporting without swallowing command failures.
+# Blast Radius: Local validation tooling only.
+# Connections:
+#   - File: scripts/run_validation_gate.py -> CLI wrapper for this entry point.
+#   - File: scripts/run_tests_gate.py -> Reuses this runner for pytest-only gates.
+#   - File: tests/devtools/test_quality_gate.py -> Covers environment handling.
+# ============================================================================
 def run_gate(
     *,
     commands: Sequence[GateCommand] | None = None,
@@ -87,6 +104,9 @@ def run_gate(
     """Run validation commands from the repo root and stop at the first failure."""
     env = os.environ.copy()
     env["PYTHONDONTWRITEBYTECODE"] = "1"
+    # FIX: Remove caller-supplied pytest startup overrides before validation.
+    for key in PYTEST_ENV_OVERRIDES:
+        env.pop(key, None)
     existing_pythonpath = env.get("PYTHONPATH")
     backend_pythonpath = str(repo_root / "backend")
     env["PYTHONPATH"] = (

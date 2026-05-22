@@ -123,6 +123,31 @@ def test_run_gate_uses_repo_root_and_disables_bytecode(monkeypatch):
     assert os.environ["PYTHONDONTWRITEBYTECODE"] == "0"
 
 
+def test_run_gate_clears_pytest_environment_overrides(monkeypatch):
+    monkeypatch.setenv("PYTEST_ADDOPTS", "-k nothing")
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    monkeypatch.setenv("PYTEST_PLUGINS", "tests.malicious_plugin")
+    observed_env = {}
+
+    def runner(command, *, cwd, env):
+        observed_env.update(env)
+        return subprocess.CompletedProcess(command, 0)
+
+    exit_code = run_gate(
+        commands=(GateCommand("pytest", ("python", "-m", "pytest")),),
+        repo_root=PROJECT_ROOT,
+        runner=runner,
+    )
+
+    assert exit_code == 0
+    assert "PYTEST_ADDOPTS" not in observed_env
+    assert "PYTEST_DISABLE_PLUGIN_AUTOLOAD" not in observed_env
+    assert "PYTEST_PLUGINS" not in observed_env
+    assert os.environ["PYTEST_ADDOPTS"] == "-k nothing"
+    assert os.environ["PYTEST_DISABLE_PLUGIN_AUTOLOAD"] == "1"
+    assert os.environ["PYTEST_PLUGINS"] == "tests.malicious_plugin"
+
+
 def test_run_gate_stops_at_first_failed_gate(capsys):
     calls = []
 

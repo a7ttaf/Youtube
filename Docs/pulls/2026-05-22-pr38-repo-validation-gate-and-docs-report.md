@@ -23,7 +23,8 @@ real ingestion, multi-currency engine).
 
 Current review-loop scope is 48 changed files in the PR diff. The branch is
 purely additive at the layer of "git history catches up with disk", plus the
-review-loop pytest-policy corrections requested on PR #38.
+review-loop pytest-policy and validation-gate hardening corrections requested
+on PR #38.
 
 ### Validation gate (operationally critical)
 
@@ -32,11 +33,11 @@ review-loop pytest-policy corrections requested on PR #38.
 | `scripts/run_validation_gate.py` | 12 | Thin entry point; sets `PYTHONPATH=backend` and calls `quality_gate.main`. |
 | `scripts/run_tests_gate.py` | 15 | Same shape; runs only the test gate (no ruff or diff hygiene). |
 | `backend/ums_smart_revenue/devtools/__init__.py` | 1 | Package marker. |
-| `backend/ums_smart_revenue/devtools/quality_gate.py` | 116 | Builds the ordered `GateCommand` tuple and runs them under a controlled env (`PYTHONDONTWRITEBYTECODE=1`, `PYTHONPATH=<repo>/backend`); stops at first failure. |
+| `backend/ums_smart_revenue/devtools/quality_gate.py` | 136 | Builds the ordered `GateCommand` tuple and runs it under a controlled env (`PYTHONDONTWRITEBYTECODE=1`, `PYTHONPATH=<repo>/backend`), clearing caller-supplied pytest startup overrides before validation; stops at first failure. |
 | `backend/ums_smart_revenue/devtools/pytest_policy_gate.py` | 150→542 | AST walks `tests/`, root conftest, and declared `pytest_plugins` modules for pytest-collected patterns; resolves import aliases, local name aliases, wildcard imports, unittest submodule canonicalization, tuple/list destructuring by position, marker objects, scoped string constants, attribute-backed `getattr`, and aliased `builtins.getattr`; rejects `pytest.mark.skip`, `pytest.mark.skipif`, `pytest.mark.xfail`, `pytest.importorskip`, `pytest.skip`, `pytest.xfail`, `self.skipTest`, `super.skipTest`, `unittest.skip`, `unittest.SkipTest`, `unittest.case.*`, `unittest.TestCase.skipTest`, `unittest.expectedFailure`, `unittest.skipIf`, `unittest.skipUnless`, and marker objects passed as values — enforces AGENTS.md / CLAUDE.md rule #8 ("Never skip, xfail, delete, or loosen tests"). |
 | `tests/devtools/test_pytest_policy_gate.py` | 89→549 | 25 tests covering allow normal tests, reject skip/xfail/unittest decorators and calls, resolve import and local aliases, resolve wildcard imports, resolve submodule canonicalization, detect marker objects as values, detect self/super/TestCase skipTest, scan conftest and __init__.py files, detect `getattr` indirection, and reporter shape. |
 | `tests/devtools/test_policy_gate_edge_cases.py` | 219 | 10 tests covering unittest.case decorators and import aliases, module-scoped string constants, function-local string constant non-leakage, attribute-backed `getattr`, tuple/list destructuring by position, aliased `builtins.getattr`, destructured `getattr` attribute names, and `pytest_plugins` conftest declarations. |
-| `tests/devtools/test_quality_gate.py` | 150 | 4 tests asserting the exact command tuple, env handling, and fail-fast behavior. |
+| `tests/devtools/test_quality_gate.py` | 175 | 5 tests asserting the exact command tuple, env handling, pytest override clearing, and fail-fast behavior. |
 
 The gate command order (single source of truth in `build_gate_commands`):
 
@@ -89,21 +90,21 @@ Adds two patterns:
 | Stage | Stage intentional PR files; verify package-lock.json and mockup files stay out | Confirmed via `git status --short` |
 | Plan docs | Add per-PR `✅ PR #38` marks to `01` (new S0/S1 catch-up subsection) and `15` (3 new Cross-cutting shipped bullets) | Per `feedback-per-pr-plan-status` rule |
 | Pulls docs | Write `Docs/pulls/2026-05-22-pr38-repo-validation-gate-and-docs-{report,changelog,handoff}.md` | Coexists with inline marks |
-| Validation | Run `python scripts/run_validation_gate.py` (ruff + policy + pytest + diff hygiene) | Passed locally after pytest-policy review fix |
+| Validation | Run `python scripts/run_validation_gate.py` (ruff + policy + pytest + diff hygiene) | Passed locally after pytest-policy and validation-gate hardening review fixes |
 | Push | `git push -u origin pr/repo-validation-gate-and-docs` | Pause before merge per standing constraint |
 | PR | `gh pr create --base main` with summary + test plan | Opened as https://github.com/XGenerationy/Youtube/pull/38 |
 
 ## Quality checks performed
 
 - `python -m pytest tests/devtools/test_policy_gate_edge_cases.py tests/devtools/test_pytest_policy_gate.py -q` — 35 passed.
-- `python -m pytest tests/devtools -q` — 39 passed.
+- `python -m pytest tests/devtools -q` — 40 passed.
 - `python -m ruff check backend/ums_smart_revenue/devtools tests/devtools` — All checks passed.
-- `python scripts/run_validation_gate.py` — passed; 787 passed, 0 warnings.
+- `python scripts/run_validation_gate.py` — passed; 788 passed, 0 warnings.
 - `git diff --check` and `git -c core.whitespace=cr-at-eol diff --check` — exit 0; Git emitted CRLF conversion notices only.
 
 ## Architecture & quality posture
 
-- **No source semantics change** to any `backend/ums_smart_revenue/**` non-`devtools` path.
+- **No production source semantics change** to any `backend/ums_smart_revenue/**` non-`devtools` path.
 - **No tenant scoping change.**
 - **No graph projection impact detected.** Neo4j was retired in PR #12; this PR adds no graph-touching code.
 - **No authorization or audit behavior change.**
@@ -119,7 +120,7 @@ authorization or finance-number behavior change. The PR adds:
 
 - New `backend/ums_smart_revenue/devtools/` Python package (3 files; not imported by any route, service, or repo — only by `scripts/`).
 - New `scripts/` directory (Python wrappers, not invoked by runtime code).
-- New `tests/devtools/` test subdirectory plus review-loop pytest-policy coverage (787 passed in the latest local validation gate).
+- New `tests/devtools/` test subdirectory plus review-loop pytest-policy coverage (788 passed in the latest local validation gate).
 - `AGENTS.md` (rules text, no runtime impact).
 - `.agents/` (vendored skill content + theme files, no runtime impact).
 - `skills-lock.json` (metadata, no runtime impact).
@@ -130,10 +131,10 @@ authorization or finance-number behavior change. The PR adds:
 
 ## Pre-existing baseline
 
-- Pytest result: 787 passed in the latest local validation gate.
+- Pytest result: 788 passed in the latest local validation gate.
 - Alembic single head: `20260521_0001`.
 - Ruff: 0 errors on `backend/devtools/`, `tests/devtools/`, and `scripts/` (verified).
-- Current review-loop validation tracks 35 pytest-policy tests and 4 quality-gate tests.
+- Current review-loop validation tracks 35 pytest-policy tests and 5 quality-gate tests.
 
 ## Validation that could NOT be run
 
@@ -142,7 +143,7 @@ None. All gates passed with 0 warnings.
 ## Remaining risks
 
 - **Code risk: low.** The devtools/ Python code is already running on the operator's workstation (pytest discovers tests/devtools/ today). Committing it is a no-op for behavior.
-- **Test-flake risk: very low.** The 39 devtools tests use `tmp_path`, no shared state, no time-dependent assertions.
+- **Test-flake risk: very low.** The 40 devtools tests use `tmp_path`, no shared state, no time-dependent assertions.
 - **Reviewer-flow risk: medium.** The PR is large, but ~5,300 lines are vendored GitHub theme JSON5 files (`.agents/dark*.json5`, `bgColor.json5`, etc.) and ~3,000 are vendored Vitest skill markdown. The actual non-vendored content under review is the gate + policy + tests + AGENTS.md + runlogs + planning docs + pulls/ triple.
 
 ## Follow-up recommendations
