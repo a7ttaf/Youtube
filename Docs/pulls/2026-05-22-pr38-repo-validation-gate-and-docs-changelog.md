@@ -13,8 +13,8 @@
 - `scripts/run_tests_gate.py` — test-only gate entry point (15 lines).
 - `backend/ums_smart_revenue/devtools/__init__.py` — package marker (1 line).
 - `backend/ums_smart_revenue/devtools/quality_gate.py` — gate command builder + runner (116 lines).
-- `backend/ums_smart_revenue/devtools/pytest_policy_gate.py` — AST skip/xfail/unittest-SkipTest/expectedFailure policy enforcer with import-alias, local-alias, wildcard-import, and marker-object resolution (270 lines).
-- `tests/devtools/test_pytest_policy_gate.py` — 15 policy gate tests (380 lines).
+- `backend/ums_smart_revenue/devtools/pytest_policy_gate.py` — AST skip/xfail/unittest-SkipTest/expectedFailure policy enforcer with import-alias, local-alias, wildcard-import, and marker-object resolution (280 lines).
+- `tests/devtools/test_pytest_policy_gate.py` — 18 policy gate tests (412 lines).
 - `tests/devtools/test_quality_gate.py` — 4 quality gate tests (150 lines).
 
 ### Developer agent rules
@@ -66,13 +66,13 @@ entry points.
 
 ### SQL — none
 
-### Tests — added 16
+### Tests — 22 devtools tests tracked
 
 - 18 in `tests/devtools/test_pytest_policy_gate.py` (allow normal, reject `pytest.mark.skip`, reject runtime `pytest.xfail`, reporter shape, default pytest `*_test.py` pattern, test `conftest.py`, root `conftest.py`, `pytest.importorskip`, imported skip aliases, marker objects passed as values, local aliases assigned from forbidden symbols, `unittest.expectedFailure`, `unittest.SkipTest`, `self.skipTest`, wildcard `from pytest import *`, wildcard `from unittest import *`, unittest submodule import `from unittest.case import skipIf`, and wildcard submodule `from unittest.case import *`).
 - 4 in `tests/devtools/test_quality_gate.py` (test-only gate command tuple, full gate command tuple, env handling, fail-fast behavior).
 
 The original 8 devtools tests were already being discovered and run locally
-before this PR; the review loop added 8 pytest-policy regression tests for
+before this PR; the review loop added 14 pytest-policy regression tests for
 reviewed enforcement gaps.
 
 ## Removed

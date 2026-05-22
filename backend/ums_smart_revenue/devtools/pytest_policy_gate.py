@@ -186,13 +186,19 @@ def _expand_wildcard(aliases: dict[str, str], module: str, root: str) -> None:
     """Expand a starred import from a tracked root into known forbidden symbols."""
     for symbol in FORBIDDEN_SYMBOLS:
         if symbol.startswith(f"{module}."):
-            leaf = symbol[len(module) + 1 :]
-            if leaf not in aliases:
-                aliases[leaf] = symbol
+            _add_wildcard_alias(aliases, module, symbol)
         elif symbol.startswith(f"{root}."):
-            leaf = symbol[len(root) + 1 :]
-            if "." not in leaf and leaf not in aliases:
-                aliases[leaf] = symbol
+            _add_wildcard_alias(aliases, root, symbol)
+
+
+def _add_wildcard_alias(
+    aliases: dict[str, str], imported_module: str, symbol: str
+) -> None:
+    leaf = symbol[len(imported_module) + 1 :]
+    aliases.setdefault(leaf, symbol)
+    if "." in leaf:
+        first = leaf.split(".", 1)[0]
+        aliases.setdefault(first, f"{imported_module}.{first}")
 
 
 def _symbol_aliases(tree: ast.AST) -> dict[str, str]:

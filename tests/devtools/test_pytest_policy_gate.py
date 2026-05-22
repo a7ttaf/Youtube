@@ -288,6 +288,16 @@ from pytest import *
 
 skip("not ready")
 xfail("broken")
+
+
+@mark.skip(reason="not ready")
+def test_mark_skip_is_blocked():
+    assert False
+
+
+@mark.xfail(reason="broken")
+def test_mark_xfail_is_blocked():
+    assert False
 """,
     )
 
@@ -296,6 +306,8 @@ xfail("broken")
     symbols = {violation.symbol for violation in violations}
     assert "pytest.skip" in symbols
     assert "pytest.xfail" in symbols
+    assert "pytest.mark.skip" in symbols
+    assert "pytest.mark.xfail" in symbols
 
 
 def test_policy_gate_catches_wildcard_unittest_import(tmp_path):
