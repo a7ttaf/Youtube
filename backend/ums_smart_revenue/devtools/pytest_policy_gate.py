@@ -65,9 +65,11 @@ def find_policy_violations(
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
         relative_path = path.relative_to(project_root)
         symbol_aliases = _symbol_aliases(tree)
-        str_aliases = _string_constant_aliases(tree)
+        str_aliases, attr_str_aliases = _string_constant_aliases(tree)
         violations.extend(
-            _violations_in_tree(tree, relative_path, symbol_aliases, str_aliases)
+            _violations_in_tree(
+                tree, relative_path, symbol_aliases, str_aliases, attr_str_aliases
+            )
         )
     return tuple(violations)
 
@@ -96,6 +98,7 @@ def _violations_in_tree(
     relative_path: Path,
     import_aliases: dict[str, str],
     string_aliases: dict[str, str],
+    attr_str_aliases: dict[str, str],
 ) -> tuple[TestPolicyViolation, ...]:
     violations: list[TestPolicyViolation] = []
 
@@ -111,7 +114,8 @@ def _violations_in_tree(
                 violations, node.func, relative_path, import_aliases
             )
             _check_getattr_indirection(
-                violations, node, relative_path, import_aliases, string_aliases
+                violations, node, relative_path, import_aliases,
+                string_aliases, attr_str_aliases,
             )
         elif isinstance(node, ast.Attribute | ast.Name):
             _append_violation_if_forbidden(
@@ -127,6 +131,7 @@ def _check_getattr_indirection(
     relative_path: Path,
     import_aliases: dict[str, str],
     string_aliases: dict[str, str],
+    attr_str_aliases: dict[str, str],
 ) -> None:
     if not (
         isinstance(call.func, ast.Name)
@@ -148,6 +153,19 @@ def _check_getattr_indirection(
             )
     elif isinstance(attr_arg, ast.Name):
         leaf_value = string_aliases.get(attr_arg.id)
+        if leaf_value:
+            full_symbol = f"{module_name}.{leaf_value}"
+            if full_symbol in FORBIDDEN_SYMBOLS:
+                violations.append(
+                    TestPolicyViolation(
+                        relative_path=relative_path,
+                        line=call.lineno,
+                        symbol=full_symbol,
+                    )
+                )
+    elif isinstance(attr_arg, ast.Attribute):
+        qual = _qualified_name(attr_arg, import_aliases)
+        leaf_value = attr_str_aliases.get(qual)
         if leaf_value:
             full_symbol = f"{module_name}.{leaf_value}"
             if full_symbol in FORBIDDEN_SYMBOLS:
@@ -257,9 +275,6 @@ def _add_wildcard_alias(
     if "." in leaf:
         first = leaf.split(".", 1)[0]
         aliases.setdefault(first, f"{imported_module}.{first}")
-    if "." in leaf:
-        first = leaf.split(".", 1)[0]
-        aliases.setdefault(first, f"{imported_module}.{first}")
 
 
 def _resolve_string_constant(value: ast.AST) -> str | None:
@@ -295,18 +310,45 @@ def _symbol_aliases(tree: ast.AST) -> dict[str, str]:
     return aliases
 
 
-def _string_constant_aliases(tree: ast.AST) -> dict[str, str]:
+def _string_constant_aliases(
+    tree: ast.AST,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return (name->leaf, qualified_attr->leaf) for module/class-level constants."""
     result: dict[str, str] = {}
-    for node in ast.walk(tree):
-        value = _assignment_value(node)
-        if value is None:
-            continue
-        resolved = _resolve_string_constant(value)
-        if not resolved:
-            continue
-        for target in _assignment_targets(node):
-            result[target.id] = resolved
-    return result
+    attr_result: dict[str, str] = {}
+
+    def _collect(target: ast.AST) -> tuple[str, ...]:
+        if isinstance(target, ast.Name):
+            return (target.id,)
+        if isinstance(target, ast.Attribute):
+            qual = _qualified_name(target, {})
+            return (qual,) if qual else ()
+        if isinstance(target, ast.Tuple | ast.List):
+            names: list[str] = []
+            for elt in target.elts:
+                names.extend(_collect(elt))
+            return tuple(names)
+        return ()
+
+    def _scan(body: list[ast.stmt], class_prefix: str = "") -> None:
+        for node in body:
+            if isinstance(node, ast.Assign):
+                resolved = _resolve_string_constant(node.value)
+                if resolved is None:
+                    continue
+                for target in node.targets:
+                    for key in _collect(target):
+                        if class_prefix:
+                            attr_result[f"{class_prefix}.{key}"] = resolved
+                        elif "." in key:
+                            attr_result[key] = resolved
+                        else:
+                            result[key] = resolved
+            elif isinstance(node, ast.ClassDef):
+                _scan(node.body, class_prefix=node.name)
+
+    _scan(tree.body)
+    return result, attr_result
 
 
 def _assignment_value(node: ast.AST) -> ast.AST | None:

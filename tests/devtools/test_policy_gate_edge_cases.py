@@ -72,3 +72,60 @@ def test_payment_contract_is_checked():
     symbols = {v.symbol for v in violations}
     assert "pytest.skip" in symbols
     assert "pytest.xfail" in symbols
+
+
+def test_module_level_string_constant_for_getattr(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_module_attr.py",
+        """
+import pytest as pt
+
+attr_name = "xfail"
+
+def test_revenue_contract_is_checked():
+    getattr(pt, attr_name)("broken")
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert len(violations) == 1
+    assert violations[0].symbol == "pytest.xfail"
+
+
+def test_function_local_variable_does_not_leak_to_module(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_no_leak.py",
+        """
+import pytest as pt
+
+def helper():
+    attr_name = "xfail"
+
+def test_revenue_contract_is_checked():
+    getattr(pt, attr_name)("broken")
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert len(violations) == 0
+
+
+def test_getattr_with_object_attribute(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_obj_attr.py",
+        """
+import pytest
+
+class Box:
+    attr = "xfail"
+
+box = Box()
+
+def test_revenue_contract_is_checked():
+    getattr(pytest, Box.attr)("broken")
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert len(violations) == 1
+    assert violations[0].symbol == "pytest.xfail"
