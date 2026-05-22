@@ -15,6 +15,18 @@ PYTEST_ENV_OVERRIDES = (
     "PYTEST_DISABLE_PLUGIN_AUTOLOAD",
     "PYTEST_PLUGINS",
 )
+RUFF_ENTRYPOINT = "import runpy; runpy.run_module('ruff', run_name='__main__')"
+PYTEST_POLICY_ENTRYPOINT = (
+    "import sys; from pathlib import Path; "
+    "sys.path.insert(0, str(Path.cwd() / 'backend')); "
+    "from ums_smart_revenue.devtools.pytest_policy_gate import main; "
+    "raise SystemExit(main())"
+)
+PYTEST_ENTRYPOINT = (
+    "import sys; from pathlib import Path; "
+    "sys.path.insert(0, str(Path.cwd() / 'backend')); "
+    "from pytest import console_main; raise SystemExit(console_main())"
+)
 
 
 @dataclass(frozen=True)
@@ -41,7 +53,17 @@ def build_gate_commands(*, python: str = sys.executable) -> tuple[GateCommand, .
     return (
         GateCommand(
             label="Ruff backend, tests, and scripts",
-            command=(python, "-m", "ruff", "check", "backend", "tests", "scripts"),
+            command=(
+                python,
+                "-B",
+                "-P",
+                "-c",
+                RUFF_ENTRYPOINT,
+                "check",
+                "backend",
+                "tests",
+                "scripts",
+            ),
         ),
         *build_test_gate_commands(python=python),
         GateCommand(
@@ -62,15 +84,16 @@ def build_test_gate_commands(
     return (
         GateCommand(
             label="Pytest no skip or xfail policy",
-            command=(python, "-m", "ums_smart_revenue.devtools.pytest_policy_gate"),
+            command=(python, "-B", "-P", "-c", PYTEST_POLICY_ENTRYPOINT),
         ),
         GateCommand(
             label="Pytest full suite",
             command=(
                 python,
                 "-B",
-                "-m",
-                "pytest",
+                "-P",
+                "-c",
+                PYTEST_ENTRYPOINT,
                 "-q",
                 "--strict-config",
                 "--strict-markers",

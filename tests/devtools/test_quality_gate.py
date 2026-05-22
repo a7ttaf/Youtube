@@ -12,6 +12,19 @@ from ums_smart_revenue.devtools.quality_gate import (
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
+RUFF_ENTRYPOINT = "import runpy; runpy.run_module('ruff', run_name='__main__')"
+PYTEST_POLICY_ENTRYPOINT = (
+    "import sys; from pathlib import Path; "
+    "sys.path.insert(0, str(Path.cwd() / 'backend')); "
+    "from ums_smart_revenue.devtools.pytest_policy_gate import main; "
+    "raise SystemExit(main())"
+)
+PYTEST_ENTRYPOINT = (
+    "import sys; from pathlib import Path; "
+    "sys.path.insert(0, str(Path.cwd() / 'backend')); "
+    "from pytest import console_main; raise SystemExit(console_main())"
+)
+
 
 def test_test_gate_commands_are_strict_and_test_only():
     commands = build_test_gate_commands(python=sys.executable)
@@ -21,8 +34,10 @@ def test_test_gate_commands_are_strict_and_test_only():
             label="Pytest no skip or xfail policy",
             command=(
                 sys.executable,
-                "-m",
-                "ums_smart_revenue.devtools.pytest_policy_gate",
+                "-B",
+                "-P",
+                "-c",
+                PYTEST_POLICY_ENTRYPOINT,
             ),
         ),
         GateCommand(
@@ -30,8 +45,9 @@ def test_test_gate_commands_are_strict_and_test_only():
             command=(
                 sys.executable,
                 "-B",
-                "-m",
-                "pytest",
+                "-P",
+                "-c",
+                PYTEST_ENTRYPOINT,
                 "-q",
                 "--strict-config",
                 "--strict-markers",
@@ -52,8 +68,10 @@ def test_gate_commands_cover_required_local_validation_contract():
             label="Ruff backend, tests, and scripts",
             command=(
                 sys.executable,
-                "-m",
-                "ruff",
+                "-B",
+                "-P",
+                "-c",
+                RUFF_ENTRYPOINT,
                 "check",
                 "backend",
                 "tests",
@@ -64,8 +82,10 @@ def test_gate_commands_cover_required_local_validation_contract():
             label="Pytest no skip or xfail policy",
             command=(
                 sys.executable,
-                "-m",
-                "ums_smart_revenue.devtools.pytest_policy_gate",
+                "-B",
+                "-P",
+                "-c",
+                PYTEST_POLICY_ENTRYPOINT,
             ),
         ),
         GateCommand(
@@ -73,8 +93,9 @@ def test_gate_commands_cover_required_local_validation_contract():
             command=(
                 sys.executable,
                 "-B",
-                "-m",
-                "pytest",
+                "-P",
+                "-c",
+                PYTEST_ENTRYPOINT,
                 "-q",
                 "--strict-config",
                 "--strict-markers",

@@ -275,8 +275,203 @@ def test_ignores_function_local_pytest_plugins_declarations(tmp_path):
         "conftest.py",
         """
 def helper():
-    pytest_plugins = ("tests.policy_plugin",)
+    pytest_plugins = ("external.policy_plugin",)
     return pytest_plugins
+""",
+    )
+    plugin_path = tmp_path / "external" / "policy_plugin.py"
+    plugin_path.parent.mkdir(parents=True, exist_ok=True)
+    plugin_path.write_text(
+        """
+import pytest
+
+
+pytest.skip("not ready")
+""",
+        encoding="utf-8",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert len(violations) == 0
+
+
+def test_catches_getattr_assigned_from_builtins_attribute(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_builtins_getattr_alias.py",
+        """
+import builtins
+import pytest
+
+
+grab = builtins.getattr
+
+
+def test_revenue_contract_is_checked():
+    grab(pytest, "skip")("not ready")
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert len(violations) == 1
+    assert violations[0].symbol == "pytest.skip"
+
+
+def test_local_getattr_shadow_does_not_trigger_policy_gate(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_local_getattr_shadow.py",
+        """
+import pytest
+
+
+def getattr(module, name):
+    return lambda *_args, **_kwargs: None
+
+
+def test_revenue_contract_is_checked():
+    getattr(pytest, "skip")("local helper")
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert all(violation.line < 10 for violation in violations)
+
+
+def test_module_control_flow_string_constant_for_getattr(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_control_flow_attr.py",
+        """
+import pytest
+
+
+if True:
+    attr_name = "skip"
+
+
+def test_revenue_contract_is_checked():
+    getattr(pytest, attr_name)("not ready")
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert len(violations) == 1
+    assert violations[0].symbol == "pytest.skip"
+
+
+def test_function_local_string_constant_for_getattr(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_function_attr.py",
+        """
+import pytest
+
+
+def test_revenue_contract_is_checked():
+    attr_name = "xfail"
+    getattr(pytest, attr_name)("broken")
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert len(violations) == 1
+    assert violations[0].symbol == "pytest.xfail"
+
+
+def test_function_local_string_constants_do_not_leak_between_functions(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_function_attr_leak.py",
+        """
+import pytest
+
+
+def helper():
+    attr_name = "xfail"
+    return attr_name
+
+
+def test_revenue_contract_is_checked():
+    attr_name = "plain"
+    getattr(pytest, attr_name)("local helper")
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert violations == ()
+
+
+def test_symbol_aliases_do_not_leak_between_functions(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_symbol_alias_leak.py",
+        """
+import pytest
+
+
+def helper():
+    skip_now = pytest.skip
+    return skip_now
+
+
+def test_revenue_contract_is_checked():
+    def skip_now(message):
+        return message
+
+    assert skip_now("local helper") == "local helper"
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert all(violation.line < 10 for violation in violations)
+
+
+def test_getattr_starred_arguments_are_checked(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_starred_getattr.py",
+        """
+import pytest
+
+
+args = (pytest, "skip")
+
+
+def test_revenue_contract_is_checked():
+    getattr(*args)("not ready")
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert len(violations) == 1
+    assert violations[0].symbol == "pytest.skip"
+
+
+def test_scans_helper_modules_under_tests(tmp_path):
+    write_test_file(
+        tmp_path,
+        "helpers.py",
+        """
+import pytest
+
+
+pytest.skip("not ready")
+""",
+    )
+    write_test_file(
+        tmp_path,
+        "test_revenue_contract.py",
+        """
+def test_revenue_contract_is_checked():
+    assert True
+""",
+    )
+    violations = find_policy_violations(tmp_path)
+    assert len(violations) == 1
+    assert violations[0].relative_path.as_posix() == "tests/helpers.py"
+    assert violations[0].symbol == "pytest.skip"
+
+
+def test_resolves_string_aliases_in_pytest_plugins_declarations(tmp_path):
+    write_test_file(
+        tmp_path,
+        "conftest.py",
+        """
+plugin_name = "tests.policy_plugin"
+pytest_plugins = (plugin_name,)
 """,
     )
     write_test_file(
@@ -290,4 +485,41 @@ pytest.skip("not ready")
 """,
     )
     violations = find_policy_violations(tmp_path)
-    assert len(violations) == 0
+    assert len(violations) == 1
+    assert violations[0].relative_path.as_posix() == "tests/policy_plugin.py"
+    assert violations[0].symbol == "pytest.skip"
+
+
+def test_resolves_backend_pytest_plugin_modules(tmp_path):
+    write_test_file(
+        tmp_path,
+        "conftest.py",
+        """
+pytest_plugins = ("ums_smart_revenue.testing.policy_plugin",)
+""",
+    )
+    plugin_path = (
+        tmp_path
+        / "backend"
+        / "ums_smart_revenue"
+        / "testing"
+        / "policy_plugin.py"
+    )
+    plugin_path.parent.mkdir(parents=True, exist_ok=True)
+    plugin_path.write_text(
+        """
+import pytest
+
+
+pytest.skip("not ready")
+""",
+        encoding="utf-8",
+    )
+
+    violations = find_policy_violations(tmp_path)
+    assert len(violations) == 1
+    assert (
+        violations[0].relative_path.as_posix()
+        == "backend/ums_smart_revenue/testing/policy_plugin.py"
+    )
+    assert violations[0].symbol == "pytest.skip"
