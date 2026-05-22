@@ -424,3 +424,67 @@ def test_policy_gate_scans_init_py_in_tests(tmp_path):
     assert len(violations) == 1
     assert violations[0].relative_path == Path("tests/tenancy/__init__.py")
     assert violations[0].symbol == "pytest.skip"
+
+
+def test_policy_gate_catches_getattr_indirection(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_getattr_bypass.py",
+        """
+import unittest
+
+
+def test_revenue_contract_is_checked():
+    getattr(unittest, "skip")(True, "not ready")
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "unittest.skip"
+
+
+def test_policy_gate_catches_getattr_indirection_with_alias(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_getattr_alias.py",
+        """
+import pytest as pt
+
+
+def test_revenue_contract_is_checked():
+    getattr(pt, "xfail")("broken")
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "pytest.xfail"
+
+
+def test_policy_gate_catches_wildcard_mark_decorator(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_wildcard_mark.py",
+        """
+from pytest import mark
+
+
+@mark.skip(reason="not ready")
+def test_mark_skip_is_blocked():
+    assert False
+
+
+@mark.xfail(reason="broken")
+def test_mark_xfail_is_blocked():
+    assert False
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    symbols = {violation.symbol for violation in violations}
+    assert "pytest.mark.skip" in symbols
+    assert "pytest.mark.xfail" in symbols

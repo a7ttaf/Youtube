@@ -98,12 +98,47 @@ def _violations_in_tree(
             _append_violation_if_forbidden(
                 violations, node.func, relative_path, import_aliases
             )
+            _check_getattr_indirection(
+                violations, node, relative_path, import_aliases
+            )
         elif isinstance(node, ast.Attribute | ast.Name):
             _append_violation_if_forbidden(
                 violations, node, relative_path, import_aliases
             )
 
     return _dedupe_violations(violations)
+
+
+def _check_getattr_indirection(
+    violations: list[TestPolicyViolation],
+    call: ast.Call,
+    relative_path: Path,
+    import_aliases: dict[str, str],
+) -> None:
+    if not (
+        isinstance(call.func, ast.Name)
+        and call.func.id == "getattr"
+        and len(call.args) >= 2
+    ):
+        return
+    module_name = _qualified_name(call.args[0], import_aliases)
+    attr_value = (
+        call.args[1].value
+        if isinstance(call.args[1], ast.Constant) and isinstance(
+            call.args[1].value, str
+        )
+        else None
+    )
+    if module_name and attr_value:
+        full_symbol = f"{module_name}.{attr_value}"
+        if full_symbol in FORBIDDEN_SYMBOLS:
+            violations.append(
+                TestPolicyViolation(
+                    relative_path=relative_path,
+                    line=call.lineno,
+                    symbol=full_symbol,
+                )
+            )
 
 
 def _decorator_violations(
