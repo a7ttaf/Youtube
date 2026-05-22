@@ -73,16 +73,16 @@ skill markdown references. Non-vendored author-written content is
 
 - **At runtime: none.** No production code path is changed.
 - **Validation contract: documented in code.** The "ruff + skip-policy + pytest + diff-hygiene" gate that AGENTS.md / CLAUDE.md describe is now executable via `python scripts/run_validation_gate.py`.
-- **Pytest count: 770.** The original 8 devtools tests were already discovered and running before this PR; the review loop added 14 pytest-policy regression tests.
+- **Pytest count: 771.** The original 8 devtools tests were already discovered and running before this PR; the review loop added 15 pytest-policy regression tests.
 
 ## Tests run
 
 Latest local validation after the pytest-policy review fix:
 
-- `python -m pytest tests/devtools/test_pytest_policy_gate.py -q` — 18 passed.
-- `python -m pytest tests/devtools -q` — 22 passed.
+- `python -m pytest tests/devtools/test_pytest_policy_gate.py -q` — 19 passed.
+- `python -m pytest tests/devtools -q` — 23 passed.
 - `python -m ruff check backend/ums_smart_revenue/devtools tests/devtools` — All checks passed.
-- `python scripts/run_validation_gate.py` — passed; 770 passed, 7 known SQLite expression-index reflection warnings.
+- `python scripts/run_validation_gate.py` — passed; 771 passed, 0 warnings.
 - `git diff --check` and `git -c core.whitespace=cr-at-eol diff --check` — exit 0; Git emitted CRLF conversion notices only.
 
 ## Failures / skipped gates
@@ -136,4 +136,4 @@ git diff --cached --check
 python scripts/run_tests_gate.py
 ```
 
-Rerun target: all gates green, 770 tests pass.
+Rerun target: all gates green, 771 tests pass, 0 warnings.

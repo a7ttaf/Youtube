@@ -9,7 +9,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[3]
 TESTS_DIR = "tests"
-PYTEST_COLLECTED_FILE_PATTERNS = ("test_*.py", "*_test.py", "conftest.py")
+PYTEST_COLLECTED_FILE_PATTERNS = ("test_*.py", "*_test.py", "conftest.py", "__init__.py")
 TRACKED_IMPORT_ROOTS = frozenset({"pytest", "unittest"})
 FORBIDDEN_SYMBOLS = frozenset(
     {

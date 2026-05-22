@@ -33,8 +33,8 @@ review-loop pytest-policy corrections requested on PR #38.
 | `scripts/run_tests_gate.py` | 15 | Same shape; runs only the test gate (no ruff or diff hygiene). |
 | `backend/ums_smart_revenue/devtools/__init__.py` | 1 | Package marker. |
 | `backend/ums_smart_revenue/devtools/quality_gate.py` | 116 | Builds the ordered `GateCommand` tuple and runs them under a controlled env (`PYTHONDONTWRITEBYTECODE=1`, `PYTHONPATH=<repo>/backend`); stops at first failure. |
-| `backend/ums_smart_revenue/devtools/pytest_policy_gate.py` | 150→280 | AST walks `tests/` and root conftest for all pytest-collected patterns; resolves import aliases, local name aliases, wildcard imports, and unittest submodule canonicalization; rejects `pytest.mark.skip`, `pytest.mark.skipif`, `pytest.mark.xfail`, `pytest.importorskip`, `pytest.skip`, `pytest.xfail`, `self.skipTest`, `unittest.skip`, `unittest.SkipTest`, `unittest.expectedFailure`, `unittest.skipIf`, `unittest.skipUnless`, and marker objects passed as values — enforces AGENTS.md / CLAUDE.md rule #8 ("Never skip, xfail, delete, or loosen tests"). |
-| `tests/devtools/test_pytest_policy_gate.py` | 89→412 | 18 tests covering allow normal tests, reject skip/xfail/unittest decorators and calls, resolve import and local aliases, resolve wildcard imports including `mark` decorators, resolve submodule canonicalization, detect marker objects as values, detect self.skipTest, scan conftest files, and reporter shape. |
+| `backend/ums_smart_revenue/devtools/pytest_policy_gate.py` | 150→227 | AST walks `tests/` and root conftest for all pytest-collected patterns; resolves import aliases, local name aliases, wildcard imports, and unittest submodule canonicalization; rejects `pytest.mark.skip`, `pytest.mark.skipif`, `pytest.mark.xfail`, `pytest.importorskip`, `pytest.skip`, `pytest.xfail`, `self.skipTest`, `unittest.skip`, `unittest.SkipTest`, `unittest.expectedFailure`, `unittest.skipIf`, `unittest.skipUnless`, and marker objects passed as values — enforces AGENTS.md / CLAUDE.md rule #8 ("Never skip, xfail, delete, or loosen tests"). |
+| `tests/devtools/test_pytest_policy_gate.py` | 89→460 | 19 tests covering allow normal tests, reject skip/xfail/unittest decorators and calls, resolve import and local aliases, resolve wildcard imports, resolve submodule canonicalization, detect marker objects as values, detect self.skipTest, scan conftest and __init__.py files, and reporter shape. |
 | `tests/devtools/test_quality_gate.py` | 150 | 4 tests asserting the exact command tuple, env handling, and fail-fast behavior. |
 
 The gate command order (single source of truth in `build_gate_commands`):
@@ -94,10 +94,10 @@ Adds two patterns:
 
 ## Quality checks performed
 
-- `python -m pytest tests/devtools/test_pytest_policy_gate.py -q` — 18 passed.
-- `python -m pytest tests/devtools -q` — 22 passed.
+- `python -m pytest tests/devtools/test_pytest_policy_gate.py -q` — 19 passed.
+- `python -m pytest tests/devtools -q` — 23 passed.
 - `python -m ruff check backend/ums_smart_revenue/devtools tests/devtools` — All checks passed.
-- `python scripts/run_validation_gate.py` — passed; 770 passed, 7 known SQLite expression-index reflection warnings.
+- `python scripts/run_validation_gate.py` — passed; 771 passed, 0 warnings.
 - `git diff --check` and `git -c core.whitespace=cr-at-eol diff --check` — exit 0; Git emitted CRLF conversion notices only.
 
 ## Architecture & quality posture
@@ -108,7 +108,7 @@ Adds two patterns:
 - **No authorization or audit behavior change.**
 - **Security:** AST policy gate now enforces "no skip/xfail" at the validation layer, not just by reviewer discipline.
 - **Observability:** no logging change.
-- **Testability:** 22 dedicated tests for devtools (18 policy, 4 gate).
+- **Testability:** 23 dedicated tests for devtools (19 policy, 4 gate).
 
 ## Blast-radius statement
 
@@ -118,7 +118,7 @@ authorization or finance-number behavior change. The PR adds:
 
 - New `backend/ums_smart_revenue/devtools/` Python package (3 files; not imported by any route, service, or repo — only by `scripts/`).
 - New `scripts/` directory (Python wrappers, not invoked by runtime code).
-- New `tests/devtools/` test subdirectory plus review-loop pytest-policy coverage (770 tests pass in the latest local validation gate).
+- New `tests/devtools/` test subdirectory plus review-loop pytest-policy coverage (764 tests pass in the latest local validation gate).
 - `AGENTS.md` (rules text, no runtime impact).
 - `.agents/` (vendored skill content + theme files, no runtime impact).
 - `skills-lock.json` (metadata, no runtime impact).
@@ -129,15 +129,14 @@ authorization or finance-number behavior change. The PR adds:
 
 ## Pre-existing baseline
 
-- Pytest result: 770 passed in the latest local validation gate.
+- Pytest result: 771 passed in the latest local validation gate.
 - Alembic single head: `20260521_0001`.
 - Ruff: 0 errors on `backend/devtools/`, `tests/devtools/`, and `scripts/` (verified).
-- The original devtools test files were already discovered and run by pytest before this PR; the review loop added 14 policy regression cases.
+- The original devtools test files were already discovered and run by pytest before this PR; the review loop added 15 policy regression cases.
 
 ## Validation that could NOT be run
 
-None in the latest local validation pass. Remote merge remains blocked until
-GitHub review threads and checks clear.
+None. All gates passed with 0 warnings.
 
 ## Remaining risks
 

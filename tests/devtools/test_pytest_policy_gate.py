@@ -410,3 +410,17 @@ def test_payment_contract_is_checked():
 
     assert len(violations) == 1
     assert violations[0].symbol == "unittest.skipIf"
+
+
+def test_policy_gate_scans_init_py_in_tests(tmp_path):
+    (tmp_path / "tests" / "tenancy").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests" / "tenancy" / "__init__.py").write_text(
+        "import pytest\npytest.skip('not ready')\n",
+        encoding="utf-8",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].relative_path == Path("tests/tenancy/__init__.py")
+    assert violations[0].symbol == "pytest.skip"
