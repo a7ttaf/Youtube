@@ -16,10 +16,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
-from ums_smart_revenue.app import (
-    TrustedGatewayTenantResolverMiddleware,  # noqa: F401  (used in Task 1.4 fixture)
-    create_app,
-)
+from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.security_models import (
     AccessScopeORM,
     RoleORM,
