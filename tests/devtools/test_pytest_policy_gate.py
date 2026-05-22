@@ -530,6 +530,85 @@ class TestRevenue(unittest.TestCase):
     assert violations[0].symbol == "unittest.TestCase.skipTest"
 
 
+def test_policy_gate_catches_aliased_getattr_builtins_qual(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_builtins_getattr.py",
+        """
+import builtins
+
+def test_revenue_contract_is_checked():
+    builtins.getattr(pytest, "skip")(True, "not ready")
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "pytest.skip"
+
+
+def test_policy_gate_catches_aliased_getattr_from_import(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_getattr_alias_import.py",
+        """
+from builtins import getattr as g
+
+def test_revenue_contract_is_checked():
+    g(unittest, "skip")(True, "not ready")
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "unittest.skip"
+
+
+def test_policy_gate_scans_root_level_conftest_with_plugins(tmp_path):
+    (tmp_path / "tests").mkdir(parents=True, exist_ok=True)
+    (tmp_path / "tests" / "conftest.py").write_text(
+        """
+pytest_plugins = ("tests.policy_plugin",)
+""",
+        encoding="utf-8",
+    )
+    (tmp_path / "tests" / "policy_plugin.py").write_text(
+        """
+import pytest
+
+pytest.skip("not ready")
+""",
+        encoding="utf-8",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "pytest.skip"
+
+
+def test_policy_gate_catches_string_constant_via_getattr(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_string_via_getattr.py",
+        """
+import pytest as pt
+
+attr_name = "skip"
+
+def test_revenue_contract_is_checked():
+    getattr(pt, attr_name)(True, "not ready")
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "pytest.skip"
+
+
 def test_policy_gate_catches_unittest_case_skip_test_via_getattr(tmp_path):
     write_test_file(
         tmp_path,
