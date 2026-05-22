@@ -19,7 +19,9 @@ FORBIDDEN_SYMBOLS = frozenset(
         "pytest.importorskip",
         "pytest.skip",
         "pytest.xfail",
+        "self.skipTest",
         "unittest.skip",
+        "unittest.SkipTest",
         "unittest.expectedFailure",
         "unittest.skipIf",
         "unittest.skipUnless",
@@ -165,11 +167,32 @@ def _import_aliases(tree: ast.AST) -> dict[str, str]:
                 continue
             for alias in node.names:
                 if alias.name == "*":
+                    _expand_wildcard(aliases, node.module, root)
                     continue
                 local_name = alias.asname or alias.name
-                aliases[local_name] = f"{node.module}.{alias.name}"
+                full_form = f"{node.module}.{alias.name}"
+                canonical_form = f"{root}.{alias.name}"
+                if full_form in FORBIDDEN_SYMBOLS:
+                    aliases[local_name] = full_form
+                elif canonical_form in FORBIDDEN_SYMBOLS:
+                    aliases[local_name] = canonical_form
+                else:
+                    aliases[local_name] = full_form
 
     return aliases
+
+
+def _expand_wildcard(aliases: dict[str, str], module: str, root: str) -> None:
+    """Expand a starred import from a tracked root into known forbidden symbols."""
+    for symbol in FORBIDDEN_SYMBOLS:
+        if symbol.startswith(f"{module}."):
+            leaf = symbol[len(module) + 1 :]
+            if leaf not in aliases:
+                aliases[leaf] = symbol
+        elif symbol.startswith(f"{root}."):
+            leaf = symbol[len(root) + 1 :]
+            if "." not in leaf and leaf not in aliases:
+                aliases[leaf] = symbol
 
 
 def _symbol_aliases(tree: ast.AST) -> dict[str, str]:

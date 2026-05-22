@@ -259,6 +259,65 @@ pytest.xfail("disabled from root conftest")
     assert violations[0].symbol == "pytest.xfail"
 
 
+def test_policy_gate_rejects_unittest_skip_test_exception(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_unittest_skip_test.py",
+        """
+import unittest
+
+
+def test_revenue_contract_is_checked():
+    raise unittest.SkipTest("not ready")
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "unittest.SkipTest"
+
+
+def test_policy_gate_catches_wildcard_pytest_import(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_wildcard.py",
+        """
+from pytest import *
+
+
+skip("not ready")
+xfail("broken")
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    symbols = {violation.symbol for violation in violations}
+    assert "pytest.skip" in symbols
+    assert "pytest.xfail" in symbols
+
+
+def test_policy_gate_catches_wildcard_unittest_import(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_wildcard_unittest.py",
+        """
+from unittest import *
+
+
+@skipIf(True, "not ready")
+def test_payment_contract_is_checked():
+    assert False
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "unittest.skipIf"
+
+
 def test_policy_gate_reports_failure_summary(tmp_path, capsys):
     write_test_file(
         tmp_path,
@@ -279,3 +338,63 @@ def test_revenue_contract_is_checked():
     assert exit_code == 1
     assert "Forbidden pytest skip/xfail policy violations: 1" in captured.err
     assert "tests/test_skip.py" in captured.err
+
+
+def test_policy_gate_rejects_self_skip_test(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_self_skip.py",
+        """
+import unittest
+
+
+class TestRevenue(unittest.TestCase):
+    def test_revenue_contract_is_checked(self):
+        self.skipTest("not ready")
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "self.skipTest"
+
+
+def test_policy_gate_catches_unittest_submodule_import(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_submodule_import.py",
+        """
+from unittest.case import skipIf
+
+
+@skipIf(True, "not ready")
+def test_revenue_contract_is_checked():
+    assert False
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "unittest.skipIf"
+
+
+def test_policy_gate_catches_wildcard_submodule_unittest_import(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_wildcard_submodule.py",
+        """
+from unittest.case import *
+
+
+@skipIf(True, "not ready")
+def test_payment_contract_is_checked():
+    assert False
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "unittest.skipIf"
