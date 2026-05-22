@@ -113,6 +113,13 @@ single P-tier above.
   `report.md` + `changelog.md` + `handoff.md` per PR) — coexists with
   inline `✅ / ⏳ / 🗑️ PR #N` marks on this doc and
   `01_IMPLEMENTATION_PLAN.md`.
+- ✅ Mockup catch-up: OFL-licensed soft-dark variant
+  (`mockups/ums-smart-revenue-command-center-soft-dark.html` + 9 QA
+  screenshots + `generate-screenshots-soft-dark.py` + `mockups/FontsGH/`
+  with Mona Sans / Monaspace Neon / Newsreader) committed as a
+  redistributable sibling to the canonical
+  `mockups/ums-smart-revenue-command-center.html`, referenced from
+  `Docs/09_SMART_DASHBOARD_UI.md` — PR #39.
 
 ## Hard problems to solve early
 

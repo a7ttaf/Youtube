@@ -1,0 +1,2973 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>UMS Smart Revenue Control Center — Soft Dark</title>
+  <style>
+    /* ==========================================================================
+       Soft Dark theme. Surfaces and status colors transcribed verbatim from
+       github.com's served dark_dimmed CSS (Primer Primitives v1.x). Anthropic
+       orange retained as UMS brand accent for nav-active, brand mark, KPI
+       deltas, and focus ring. Typography swapped to OFL fonts so this file
+       redistributes cleanly. See FontsGH/README.md for license attribution.
+       ========================================================================== */
+
+    @font-face {
+      font-family: "Mona Sans";
+      src: url("./FontsGH/MonaSans-VF.woff2") format("woff2");
+      font-weight: 200 900;
+      font-stretch: 75% 125%;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: "Newsreader";
+      src: url("./FontsGH/Newsreader-VF.woff2") format("woff2");
+      font-weight: 200 800;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    @font-face {
+      font-family: "Monaspace Neon";
+      src: url("./FontsGH/MonaspaceNeon-VF.woff2") format("woff2");
+      font-weight: 200 800;
+      font-style: normal;
+      font-display: swap;
+    }
+
+    :root {
+      color-scheme: dark;
+      --font-display: "Newsreader", Georgia, "Times New Roman", serif;
+      --font-body: "Mona Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+      --font-mono: "Monaspace Neon", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
+      /* Surfaces — github.com dark_dimmed verbatim */
+      --bg: #212830;            /* bgColor-default */
+      --bg-rail: #1b212a;       /* between inset and default, used in body gradient */
+      --panel: #262c36;         /* bgColor-muted */
+      --panel-soft: #2a313c;    /* bgColor-disabled / subtle */
+      --panel-raised: #2f3742;  /* neutral.6, raised cards */
+      --panel-active: oklch(0.66 0.15 45 / 0.16); /* orange wash for selected nav */
+      --nav: #151b23;           /* bgColor-inset, side rail well */
+      --nav-2: #1c232b;         /* between rail and bg */
+      /* Text — github.com dark_dimmed verbatim, with tiered strong for money */
+      --ink: #d1d7e0;           /* fgColor-default (body chrome, ~10:1) */
+      --ink-strong: #f0f6fc;    /* fgColor-onEmphasis (KPI/money values, ~16:1) */
+      --muted: #9198a1;         /* fgColor-muted */
+      --faint: #656c76;         /* fgColor-disabled */
+      /* Borders — github.com dark_dimmed verbatim */
+      --line: #3d444d;          /* borderColor-default */
+      --line-strong: #656c76;   /* borderColor-emphasis */
+      /* Brand accent — Anthropic orange unchanged from canonical mockup */
+      --primary: oklch(0.66 0.15 45);
+      --primary-hover: oklch(0.72 0.15 45);
+      --primary-soft: oklch(0.66 0.15 45 / 0.16);
+      /* Finance status — github.com dark_dimmed fgColor.success/attention/danger */
+      --green: #57ab5a;
+      --green-soft: rgba(87, 171, 90, 0.18);
+      --amber: #c69026;
+      --amber-soft: rgba(198, 144, 38, 0.18);
+      --red: #e5534b;
+      --red-soft: rgba(229, 83, 75, 0.16);
+      --violet: oklch(0.66 0.15 45);
+      --violet-soft: oklch(0.66 0.15 45 / 0.16);
+      --shadow: 0 24px 70px color-mix(in oklch, oklch(0 0 0) 48%, transparent);
+      --shadow-sm: 0 1px 2px color-mix(in oklch, oklch(0 0 0) 36%, transparent);
+      --shadow-md: 0 10px 28px color-mix(in oklch, oklch(0 0 0) 30%, transparent);
+      --radius: 8px;
+      --radius-sm: 5px;
+      --focus: 0 0 0 3px color-mix(in oklch, var(--primary) 28%, transparent);
+      --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
+      --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
+      font-family: var(--font-body);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        linear-gradient(180deg, color-mix(in oklch, var(--bg-rail) 62%, var(--panel)) 0, var(--bg) 360px);
+      color: var(--ink);
+      font-size: 14px;
+      line-height: 1.42;
+      font-family: var(--font-body);
+    }
+
+    /* Screen-reader only text */
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    button,
+    input,
+    select {
+      font: inherit;
+    }
+
+    button,
+    select {
+      border: 1px solid var(--line);
+      background: var(--panel);
+      color: var(--ink);
+      border-radius: var(--radius-sm);
+      transition: border-color 150ms var(--ease-out-quart),
+                  background-color 150ms var(--ease-out-quart),
+                  box-shadow 150ms var(--ease-out-quart),
+                  transform 150ms var(--ease-out-quart);
+    }
+
+    button {
+      cursor: pointer;
+    }
+
+    button:hover {
+      border-color: var(--line-strong);
+    }
+
+    button:active {
+      transform: translateY(1px);
+    }
+
+    button:focus-visible,
+    select:focus-visible,
+    input:focus-visible {
+      outline: none;
+      box-shadow: var(--focus);
+    }
+
+    .app {
+      display: grid;
+      grid-template-columns: 248px minmax(0, 1fr);
+      min-height: 100vh;
+    }
+
+    /* Mobile hamburger (hidden on desktop) */
+    .mobile-toggle {
+      display: none;
+    }
+
+    .sidebar {
+      background: var(--nav);
+      color: var(--ink);
+      padding: 18px 14px;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+      position: sticky;
+      top: 0;
+      height: 100vh;
+      overflow-y: auto;
+      scrollbar-width: thin;
+      border-right: 1px solid var(--line);
+      scrollbar-color: color-mix(in oklch, var(--ink) 20%, transparent) transparent;
+      transition: transform 260ms var(--ease-out-expo);
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 4px 6px 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .brand-mark {
+      width: 34px;
+      height: 34px;
+      border-radius: 8px;
+      display: grid;
+      place-items: center;
+      background: var(--ink);
+      color: var(--bg);
+      box-shadow: inset 0 0 0 1px color-mix(in oklch, var(--bg) 16%, transparent);
+      flex: 0 0 auto;
+    }
+
+    .brand-mark svg,
+    .icon svg {
+      width: 18px;
+      height: 18px;
+      stroke: currentColor;
+      stroke-width: 2;
+      fill: none;
+      stroke-linecap: round;
+      stroke-linejoin: round;
+    }
+
+    .brand strong {
+      display: block;
+      font-family: var(--font-display);
+      font-size: 18px;
+      line-height: 1.1;
+      font-weight: 400;
+    }
+
+    .brand span {
+      display: block;
+      font-size: 11px;
+      color: var(--faint);
+      margin-top: 2px;
+    }
+
+    .nav-section {
+      display: grid;
+      gap: 4px;
+    }
+
+    .nav-title {
+      padding: 0 10px;
+      margin: 5px 0;
+      font-size: 11px;
+      color: var(--primary);
+      text-transform: uppercase;
+      letter-spacing: 0;
+      font-weight: 700;
+    }
+
+    .nav-item {
+      display: grid;
+      grid-template-columns: 24px 1fr auto;
+      gap: 8px;
+      align-items: center;
+      padding: 8px 9px;
+      border-radius: 7px;
+      color: var(--muted);
+      text-decoration: none;
+      font-size: 13px;
+      border: 1px solid transparent;
+      transition: background-color 160ms var(--ease-out-quart),
+                  border-color 160ms var(--ease-out-quart),
+                  color 160ms var(--ease-out-quart),
+                  box-shadow 160ms var(--ease-out-quart);
+    }
+
+    .nav-item:hover {
+      background: var(--panel-soft);
+      color: var(--ink);
+    }
+
+    .nav-item.is-active {
+      background: color-mix(in oklch, var(--primary) 8%, var(--panel));
+      border-color: color-mix(in oklch, var(--primary) 38%, var(--line));
+      color: var(--ink);
+    }
+
+    .nav-count {
+      font-size: 11px;
+      color: var(--faint);
+      transition: color 160ms var(--ease-out-quart);
+    }
+
+    .nav-item:hover .nav-count {
+      color: var(--muted);
+    }
+
+    .role-card {
+      margin-top: auto;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--panel-soft);
+    }
+
+    .role-card label {
+      display: block;
+      font-size: 11px;
+      color: var(--muted);
+      font-weight: 700;
+      margin-bottom: 7px;
+    }
+
+    .role-card select {
+      width: 100%;
+      background: var(--panel);
+      color: var(--ink);
+      border-color: var(--line);
+      padding: 8px 9px;
+      font-size: 12px;
+    }
+
+    .role-card select:focus-visible {
+      box-shadow: var(--focus);
+    }
+
+    .role-meta {
+      display: grid;
+      gap: 7px;
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 650;
+    }
+
+    .role-state {
+      display: inline-flex;
+      align-items: center;
+      gap: 7px;
+      min-width: 0;
+    }
+
+    .role-state .dot {
+      width: 7px;
+      height: 7px;
+      box-shadow: 0 0 0 3px color-mix(in oklch, var(--green) 13%, transparent);
+    }
+
+    .role-state.is-restricted .dot {
+      background: var(--red);
+      box-shadow: 0 0 0 3px color-mix(in oklch, var(--red) 15%, transparent);
+    }
+
+    .main {
+      min-width: 0;
+      display: grid;
+      grid-template-rows: auto auto minmax(0, 1fr) auto;
+    }
+
+    .topbar {
+      position: sticky;
+      top: 0;
+      z-index: 6;
+      /* FIX: oklch->transparent mixing shifts hue toward red (Chromium quirk
+         when source color has cool hue). Use srgb for the predictable
+         alpha-blend behavior we want. */
+      background: color-mix(in srgb, var(--bg) 94%, transparent);
+      backdrop-filter: blur(14px);
+      border-bottom: 1px solid var(--line);
+      box-shadow: 0 1px 0 color-mix(in srgb, var(--panel) 65%, transparent),
+                  0 10px 28px color-mix(in srgb, var(--ink) 4%, transparent);
+      padding: 14px 22px 12px;
+      display: grid;
+      grid-template-columns: minmax(230px, 1fr) auto;
+      gap: 18px;
+      align-items: center;
+    }
+
+    .page-title {
+      min-width: 0;
+      display: grid;
+      gap: 4px;
+    }
+
+    .title-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      min-width: 0;
+    }
+
+    .page-title h1 {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: 30px;
+      line-height: 1;
+      font-weight: 400;
+      letter-spacing: 0;
+    }
+
+    .page-title p {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .operational-cues {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 6px;
+      margin-top: 5px;
+    }
+
+    .cue {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      min-height: 24px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      border: 1px solid var(--line);
+      background: color-mix(in oklch, var(--panel) 86%, var(--panel-soft));
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 650;
+      white-space: nowrap;
+    }
+
+    .cue strong {
+      color: var(--ink);
+      font-weight: 760;
+    }
+
+    .cue.green {
+      background: color-mix(in oklch, var(--green-soft) 72%, var(--panel));
+      border-color: color-mix(in oklch, var(--green) 22%, var(--line));
+    }
+
+    .cue.amber {
+      background: color-mix(in oklch, var(--amber-soft) 74%, var(--panel));
+      border-color: color-mix(in oklch, var(--amber) 24%, var(--line));
+    }
+
+    .cue.red {
+      background: color-mix(in oklch, var(--red-soft) 72%, var(--panel));
+      border-color: color-mix(in oklch, var(--red) 23%, var(--line));
+    }
+
+    .cue.violet {
+      background: color-mix(in oklch, var(--violet-soft) 74%, var(--panel));
+      border-color: color-mix(in oklch, var(--violet) 22%, var(--line));
+    }
+
+    .control-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .control {
+      height: 34px;
+      padding: 0 10px;
+      font-size: 12px;
+      min-width: 112px;
+      background: color-mix(in oklch, var(--panel) 90%, var(--panel-soft));
+      border-color: var(--line-strong);
+    }
+
+    .icon-button {
+      width: 34px;
+      height: 34px;
+      display: grid;
+      place-items: center;
+      min-width: 34px;
+    }
+
+    .primary-button {
+      height: 34px;
+      padding: 0 12px;
+      border-color: color-mix(in oklch, var(--ink) 86%, var(--line));
+      background: var(--ink);
+      color: var(--bg);
+      font-weight: 600;
+      font-size: 12px;
+      letter-spacing: 0.02em;
+      box-shadow: 0 8px 22px color-mix(in oklch, oklch(0 0 0) 28%, transparent);
+      transition: background-color 150ms var(--ease-out-quart),
+                  border-color 150ms var(--ease-out-quart),
+                  box-shadow 150ms var(--ease-out-quart),
+                  transform 150ms var(--ease-out-quart);
+    }
+
+    .primary-button:hover {
+      background: color-mix(in oklch, var(--ink) 88%, var(--primary));
+      border-color: color-mix(in oklch, var(--ink) 88%, var(--primary));
+    }
+
+    .primary-button:active {
+      transform: translateY(1px);
+    }
+
+    .status-strip {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(150px, 1fr));
+      gap: 10px;
+      padding: 14px 22px 12px;
+      border-bottom: 1px solid var(--line);
+      background:
+        linear-gradient(180deg, color-mix(in oklch, var(--bg-rail) 92%, var(--panel)), var(--bg-rail));
+    }
+
+    .metric {
+      --metric-tone: var(--line-strong);
+      position: relative;
+      overflow: hidden;
+      background: linear-gradient(180deg, var(--panel), var(--panel-raised));
+      border: 1px solid color-mix(in oklch, var(--metric-tone) 28%, var(--line));
+      border-radius: var(--radius);
+      padding: 12px;
+      min-height: 92px;
+      display: grid;
+      align-content: space-between;
+      gap: 8px;
+      box-shadow: var(--shadow-sm);
+      transition: border-color 180ms var(--ease-out-quart),
+                  box-shadow 180ms var(--ease-out-quart),
+                  transform 180ms var(--ease-out-quart);
+    }
+
+    .metric::before {
+      content: "";
+      position: absolute;
+      inset: 0 0 auto;
+      height: 3px;
+      background: color-mix(in oklch, var(--metric-tone) 76%, transparent);
+      opacity: 0.9;
+      pointer-events: none;
+    }
+
+    .metric.is-revenue,
+    .metric.is-close {
+      --metric-tone: var(--green);
+    }
+
+    .metric.is-payment,
+    .metric.is-net {
+      --metric-tone: var(--primary);
+    }
+
+    .metric.is-review {
+      --metric-tone: var(--amber);
+      background: linear-gradient(180deg, color-mix(in oklch, var(--amber-soft) 36%, var(--panel)), var(--panel));
+    }
+
+    .metric.is-risk {
+      --metric-tone: var(--red);
+      background: linear-gradient(180deg, color-mix(in oklch, var(--red-soft) 34%, var(--panel)), var(--panel));
+    }
+
+    .metric:hover {
+      border-color: var(--line-strong);
+      box-shadow: 0 4px 12px color-mix(in oklch, var(--ink) 6%, transparent);
+      transform: translateY(-1px);
+    }
+
+    .metric header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .metric-value {
+      font-family: var(--font-display);
+      font-size: 27px;
+      line-height: 1.05;
+      font-weight: 600;
+      color: var(--ink-strong); /* Soft dark tiered: KPI numbers stay near-white */
+      white-space: nowrap;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .metric-note {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 8px;
+      color: var(--muted);
+      font-size: 11px;
+      flex-wrap: wrap;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      min-height: 22px;
+      padding: 2px 7px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      border: 1px solid transparent;
+      white-space: nowrap;
+      transition: background-color 150ms var(--ease-out-quart),
+                  border-color 150ms var(--ease-out-quart);
+    }
+
+    .badge.green {
+      background: var(--green-soft);
+      color: color-mix(in oklch, var(--ink) 90%, var(--green));
+      border-color: color-mix(in oklch, var(--green) 28%, transparent);
+    }
+
+    .badge.amber {
+      background: var(--amber-soft);
+      color: color-mix(in oklch, var(--ink) 88%, var(--amber));
+      border-color: color-mix(in oklch, var(--amber) 28%, transparent);
+    }
+
+    .badge.red {
+      background: var(--red-soft);
+      color: color-mix(in oklch, var(--ink) 88%, var(--red));
+      border-color: color-mix(in oklch, var(--red) 28%, transparent);
+    }
+
+    .badge.blue {
+      background: var(--primary-soft);
+      color: color-mix(in oklch, var(--ink) 90%, var(--primary));
+      border-color: color-mix(in oklch, var(--primary) 26%, transparent);
+    }
+
+    .badge.violet {
+      background: var(--violet-soft);
+      color: color-mix(in oklch, var(--ink) 90%, var(--violet));
+      border-color: color-mix(in oklch, var(--violet) 24%, transparent);
+    }
+
+    .workspace {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 320px;
+      gap: 14px;
+      padding: 14px 22px 16px;
+      min-width: 0;
+    }
+
+    .work-left {
+      min-width: 0;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    .panel {
+      background: linear-gradient(180deg, var(--panel), color-mix(in oklch, var(--panel-raised) 72%, var(--panel)));
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow-sm);
+      min-width: 0;
+      transition: border-color 180ms var(--ease-out-quart),
+                  box-shadow 180ms var(--ease-out-quart);
+    }
+
+    .panel:hover {
+      border-color: var(--line-strong);
+      box-shadow: 0 3px 10px color-mix(in oklch, var(--ink) 5%, transparent);
+    }
+
+    .panel-header {
+      padding: 13px 14px;
+      border-bottom: 1px solid var(--line);
+      background: color-mix(in oklch, var(--panel) 76%, var(--panel-soft));
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    .panel-title {
+      display: grid;
+      gap: 2px;
+    }
+
+    .panel-title strong {
+      font-family: var(--font-display);
+      font-size: 20px;
+      line-height: 1.2;
+      font-weight: 700;
+    }
+
+    .panel-title span {
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .segmented {
+      display: inline-flex;
+      align-items: center;
+      gap: 2px;
+      padding: 3px;
+      border-radius: 7px;
+      background: var(--panel-soft);
+      border: 1px solid var(--line);
+      box-shadow: inset 0 1px 0 color-mix(in oklch, var(--panel) 70%, transparent);
+    }
+
+    .segmented button {
+      border: 0;
+      height: 26px;
+      padding: 0 9px;
+      background: transparent;
+      color: var(--muted);
+      font-size: 12px;
+      border-radius: 5px;
+      transition: background-color 150ms var(--ease-out-quart),
+                  color 150ms var(--ease-out-quart),
+                  box-shadow 150ms var(--ease-out-quart);
+    }
+
+    .segmented button:hover {
+      color: var(--ink);
+    }
+
+    .segmented button.is-active {
+      background: var(--panel);
+      color: var(--ink);
+      box-shadow: 0 1px 2px color-mix(in oklch, var(--ink) 9%, transparent),
+                  0 0 0 1px color-mix(in oklch, var(--line-strong) 44%, transparent);
+    }
+
+    .table-wrap {
+      overflow: auto;
+      position: relative;
+      scrollbar-gutter: stable;
+    }
+
+    /* Scroll shadows for table */
+    .table-wrap::before,
+    .table-wrap::after {
+      content: "";
+      position: sticky;
+      left: 0;
+      right: 0;
+      height: 6px;
+      z-index: 2;
+      pointer-events: none;
+      opacity: 0;
+      transition: opacity 200ms var(--ease-out-quart);
+    }
+
+    .table-wrap::before {
+      top: 0;
+      background: linear-gradient(180deg, color-mix(in oklch, var(--ink) 8%, transparent), transparent);
+    }
+
+    .table-wrap::after {
+      bottom: 0;
+      background: linear-gradient(0deg, color-mix(in oklch, var(--ink) 8%, transparent), transparent);
+    }
+
+    .table-wrap.is-scrolled-top::before {
+      opacity: 1;
+    }
+
+    .table-wrap.is-scrolled-bottom::after {
+      opacity: 1;
+    }
+
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 960px;
+      font-size: 12px;
+    }
+
+    #tableWrap table {
+      min-width: 810px;
+    }
+
+    th,
+    td {
+      text-align: left;
+      padding: 9px 10px;
+      border-bottom: 1px solid var(--line);
+      vertical-align: middle;
+      transition: background-color 150ms var(--ease-out-quart);
+    }
+
+    th:nth-child(4),
+    th:nth-child(5),
+    th:nth-child(6),
+    th:nth-child(7),
+    td:nth-child(4),
+    td:nth-child(5),
+    td:nth-child(6),
+    td:nth-child(7) {
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    th:nth-child(8),
+    th:nth-child(9),
+    th:nth-child(10),
+    td:nth-child(8),
+    td:nth-child(9),
+    td:nth-child(10) {
+      text-align: right;
+    }
+
+    th {
+      color: var(--muted);
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0;
+      font-weight: 760;
+      background: var(--panel-soft);
+      position: sticky;
+      top: 0;
+      z-index: 1;
+    }
+
+    th:first-child,
+    td:first-child {
+      position: sticky;
+      left: 0;
+    }
+
+    th:first-child {
+      z-index: 3;
+      box-shadow: 1px 0 0 var(--line);
+    }
+
+    td:first-child {
+      z-index: 2;
+      background: var(--panel);
+      box-shadow: 1px 0 0 var(--line);
+    }
+
+    tbody tr {
+      transition: background-color 150ms var(--ease-out-quart);
+    }
+
+    tbody tr:hover td {
+      background: color-mix(in oklch, var(--primary-soft) 22%, transparent);
+    }
+
+    tbody tr:hover td:first-child {
+      background: color-mix(in oklch, var(--primary-soft) 28%, var(--panel));
+    }
+
+    tr.is-selected td {
+      background: color-mix(in oklch, var(--primary-soft) 42%, transparent);
+    }
+
+    tr.is-selected td:first-child {
+      background: color-mix(in oklch, var(--primary-soft) 46%, var(--panel));
+    }
+
+    tr.is-selected:hover td {
+      background: color-mix(in oklch, var(--primary-soft) 50%, transparent);
+    }
+
+    tbody tr:focus-visible {
+      outline: none;
+    }
+
+    tbody tr:focus-visible td {
+      box-shadow: inset 0 0 0 2px color-mix(in oklch, var(--primary) 35%, transparent);
+    }
+
+    .channel-cell {
+      display: flex;
+      align-items: center;
+      gap: 9px;
+      min-width: 154px;
+    }
+
+    .channel-copy {
+      display: grid;
+      gap: 3px;
+      min-width: 0;
+    }
+
+    .avatar {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+      display: grid;
+      place-items: center;
+      background: var(--panel-soft);
+      border: 1px solid var(--line);
+      color: var(--primary);
+      font-weight: 800;
+      font-size: 11px;
+      flex: 0 0 auto;
+      transition: border-color 150ms var(--ease-out-quart),
+                  box-shadow 150ms var(--ease-out-quart);
+    }
+
+    tbody tr:hover .avatar {
+      border-color: color-mix(in oklch, var(--primary) 30%, var(--line));
+    }
+
+    .channel-name {
+      display: block;
+      font-weight: 720;
+      color: var(--ink);
+    }
+
+    .channel-id {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      margin-top: 1px;
+    }
+
+    .money {
+      font-variant-numeric: tabular-nums;
+      white-space: nowrap;
+      font-weight: 680;
+      color: var(--ink-strong); /* Soft dark tiered: money cells stay near-white */
+    }
+
+    .explain-trigger {
+      color: color-mix(in oklch, var(--ink) 86%, var(--primary));
+      background: color-mix(in oklch, var(--primary-soft) 72%, var(--panel));
+      border-color: color-mix(in oklch, var(--primary) 22%, var(--line));
+      font-weight: 760;
+    }
+
+    .inline-explain {
+      width: max-content;
+      height: 22px;
+      padding: 0 7px;
+      font-size: 10px;
+    }
+
+    .muted {
+      color: var(--muted);
+    }
+
+    .row-actions {
+      display: flex;
+      gap: 6px;
+      justify-content: flex-end;
+      min-width: 96px;
+    }
+
+    .mini-button {
+      height: 26px;
+      padding: 0 8px;
+      font-size: 11px;
+      border-radius: 5px;
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      transition: background-color 150ms var(--ease-out-quart),
+                  border-color 150ms var(--ease-out-quart),
+                  color 150ms var(--ease-out-quart),
+                  transform 120ms var(--ease-out-quart);
+    }
+
+    .mini-button:hover {
+      border-color: var(--line-strong);
+      background: var(--panel-soft);
+    }
+
+    .mini-button:active {
+      transform: scale(0.97);
+    }
+
+    .layout-split {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 14px;
+    }
+
+    .issue-list,
+    .close-list,
+    .explain-list {
+      display: grid;
+      gap: 0;
+    }
+
+    .issue-item,
+    .close-item,
+    .explain-row {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      padding: 11px 13px;
+      border-bottom: 1px solid var(--line);
+      align-items: center;
+      transition: background-color 150ms var(--ease-out-quart);
+    }
+
+    .issue-item:hover,
+    .close-item:hover,
+    .explain-row:hover {
+      background: color-mix(in oklch, var(--primary-soft) 14%, transparent);
+    }
+
+    .issue-item:has(.dot.red),
+    .close-item:has(.dot.red),
+    .explain-row:has(.dot.red) {
+      background: color-mix(in oklch, var(--red-soft) 32%, var(--panel));
+    }
+
+    .issue-item:has(.dot.amber),
+    .close-item:has(.dot.amber),
+    .explain-row:has(.dot.amber) {
+      background: color-mix(in oklch, var(--amber-soft) 22%, var(--panel));
+    }
+
+    .issue-item:last-child,
+    .close-item:last-child,
+    .explain-row:last-child {
+      border-bottom: 0;
+    }
+
+    .dot {
+      width: 9px;
+      height: 9px;
+      border-radius: 50%;
+      background: var(--primary);
+      box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 16%, transparent);
+      flex-shrink: 0;
+    }
+
+    .dot.red {
+      background: var(--red);
+      box-shadow: 0 0 0 3px color-mix(in oklch, var(--red) 16%, transparent);
+    }
+
+    .dot.amber {
+      background: var(--amber);
+      box-shadow: 0 0 0 3px color-mix(in oklch, var(--amber) 18%, transparent);
+    }
+
+    .dot.green {
+      background: var(--green);
+      box-shadow: 0 0 0 3px color-mix(in oklch, var(--green) 16%, transparent);
+    }
+
+    .item-title {
+      display: block;
+      font-size: 12px;
+      font-weight: 730;
+      line-height: 1.25;
+    }
+
+    .item-sub {
+      display: block;
+      margin-top: 2px;
+      font-size: 11px;
+      color: var(--muted);
+    }
+
+    .side-stack {
+      display: grid;
+      gap: 14px;
+      align-content: start;
+      min-width: 0;
+    }
+
+    .explain-card {
+      padding: 14px;
+      display: grid;
+      gap: 13px;
+      border-color: color-mix(in oklch, var(--primary) 22%, var(--line));
+      background: linear-gradient(180deg, color-mix(in oklch, var(--primary-soft) 28%, var(--panel)), var(--panel));
+    }
+
+    .explain-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 10px;
+    }
+
+    .explain-head h2 {
+      margin: 0;
+      font-family: var(--font-display);
+      font-size: 24px;
+      line-height: 1.05;
+      font-weight: 600;
+    }
+
+    .explain-head p {
+      margin: 3px 0 0;
+      color: var(--muted);
+      font-size: 12px;
+    }
+
+    .formula {
+      padding: 10px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      background: var(--panel-soft);
+      font-family: var(--font-mono);
+      color: var(--muted);
+      font-size: 11px;
+      line-height: 1.55;
+      overflow-wrap: anywhere;
+      transition: border-color 150ms var(--ease-out-quart);
+    }
+
+    .formula:hover {
+      border-color: var(--line-strong);
+    }
+
+    .graph-canvas {
+      height: 176px;
+      margin: 0 13px 13px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background:
+        linear-gradient(90deg, color-mix(in oklch, var(--line) 50%, transparent) 1px, transparent 1px),
+        linear-gradient(180deg, color-mix(in oklch, var(--line) 50%, transparent) 1px, transparent 1px),
+        var(--panel-soft);
+      background-size: 28px 28px;
+      position: relative;
+      overflow: hidden;
+      box-shadow: inset 0 1px 0 color-mix(in oklch, var(--panel) 70%, transparent);
+    }
+
+    .graph-node {
+      position: absolute;
+      display: grid;
+      place-items: center;
+      min-width: 70px;
+      height: 28px;
+      border-radius: 999px;
+      border: 1px solid var(--line-strong);
+      background: var(--panel);
+      color: var(--ink);
+      font-size: 11px;
+      font-weight: 730;
+      box-shadow: 0 6px 18px color-mix(in oklch, var(--ink) 10%, transparent);
+      transition: border-color 180ms var(--ease-out-quart),
+                  box-shadow 180ms var(--ease-out-quart),
+                  transform 200ms var(--ease-out-expo);
+    }
+
+    .graph-node:hover {
+      border-color: color-mix(in oklch, var(--violet) 50%, var(--line));
+      box-shadow: 0 8px 24px color-mix(in oklch, var(--ink) 14%, transparent);
+      transform: translateY(-2px);
+      z-index: 1;
+    }
+
+    .graph-node.finance {
+      border-color: color-mix(in oklch, var(--violet) 40%, var(--line));
+      color: color-mix(in oklch, var(--ink) 86%, var(--violet));
+    }
+
+    .graph-line {
+      position: absolute;
+      height: 2px;
+      background: color-mix(in oklch, var(--violet) 45%, var(--line));
+      transform-origin: left center;
+      transition: background-color 200ms var(--ease-out-quart);
+    }
+
+    .workflow {
+      border-top: 1px solid var(--line);
+      background: color-mix(in oklch, var(--panel) 86%, var(--panel-soft));
+      padding: 11px 22px;
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .workflow-label {
+      font-size: 12px;
+      font-weight: 760;
+      display: grid;
+      gap: 2px;
+    }
+
+    .workflow-label span {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 560;
+    }
+
+    .steps {
+      display: grid;
+      grid-template-columns: repeat(6, minmax(100px, 1fr));
+      gap: 8px;
+      position: relative;
+    }
+
+    /* Workflow connector line */
+    .steps::before {
+      content: "";
+      position: absolute;
+      top: 50%;
+      left: 8px;
+      right: 8px;
+      height: 2px;
+      background: var(--line);
+      transform: translateY(-50%);
+      z-index: 0;
+      border-radius: 1px;
+    }
+
+    .step {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      min-height: 34px;
+      padding: 6px 8px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: var(--panel-soft);
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 700;
+      position: relative;
+      z-index: 1;
+      transition: background-color 180ms var(--ease-out-quart),
+                  border-color 180ms var(--ease-out-quart),
+                  color 180ms var(--ease-out-quart),
+                  box-shadow 180ms var(--ease-out-quart),
+                  transform 180ms var(--ease-out-quart);
+    }
+
+    [data-view-panel]:not(.is-active) {
+      display: none !important;
+    }
+
+    .view-page {
+      padding: 14px 22px 18px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+      min-width: 0;
+    }
+
+    .view-summary {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(160px, 1fr));
+      gap: 10px;
+    }
+
+    .summary-tile {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      padding: 12px;
+      min-height: 84px;
+      display: grid;
+      gap: 6px;
+      align-content: space-between;
+      box-shadow: 0 1px 0 color-mix(in oklch, var(--ink) 4%, transparent);
+    }
+
+    .summary-tile span:first-child {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 760;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .summary-tile strong {
+      font-family: var(--font-display);
+      font-size: 27px;
+      line-height: 1.05;
+      font-weight: 600;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .summary-tile small {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .view-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 340px;
+      gap: 14px;
+      min-width: 0;
+      align-items: start;
+    }
+
+    .view-grid.wide-side {
+      grid-template-columns: minmax(0, 1fr) 390px;
+    }
+
+    .view-page table {
+      min-width: 780px;
+    }
+
+    .view-stack {
+      display: grid;
+      gap: 14px;
+      min-width: 0;
+      align-content: start;
+    }
+
+    .view-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: flex-end;
+      align-items: center;
+    }
+
+    .permission-band {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 10px;
+      align-items: center;
+      padding: 10px 12px;
+      border-bottom: 1px solid var(--line);
+      background: color-mix(in oklch, var(--primary-soft) 45%, transparent);
+    }
+
+    .permission-band strong {
+      display: block;
+      font-size: 12px;
+      line-height: 1.25;
+      font-weight: 760;
+    }
+
+    .permission-band span {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .detail-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      padding: 13px;
+    }
+
+    .detail-cell {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      padding: 10px;
+      background: var(--panel-soft);
+      min-height: 70px;
+    }
+
+    .detail-cell span {
+      display: block;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 720;
+      margin-bottom: 6px;
+    }
+
+    .detail-cell strong {
+      display: block;
+      font-size: 13px;
+      line-height: 1.35;
+      font-weight: 760;
+    }
+
+    .form-grid {
+      display: grid;
+      gap: 10px;
+      padding: 13px;
+    }
+
+    .field-row {
+      display: grid;
+      grid-template-columns: minmax(112px, 0.45fr) minmax(0, 1fr);
+      gap: 10px;
+      align-items: center;
+    }
+
+    .field-row label {
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 760;
+      text-transform: uppercase;
+      letter-spacing: 0;
+    }
+
+    .field-row input,
+    .field-row select {
+      width: 100%;
+      height: 34px;
+      padding: 0 10px;
+      font-size: 12px;
+      border: 1px solid var(--line);
+      background: var(--panel);
+      border-radius: var(--radius-sm);
+      color: var(--ink);
+    }
+
+    .action-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      padding: 0 13px 13px;
+      justify-content: flex-end;
+    }
+
+    .timeline {
+      display: grid;
+      gap: 0;
+    }
+
+    .timeline-item {
+      display: grid;
+      grid-template-columns: 82px auto 1fr auto;
+      gap: 10px;
+      align-items: start;
+      padding: 12px 13px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .timeline-item:last-child {
+      border-bottom: 0;
+    }
+
+    .timeline-time {
+      color: var(--muted);
+      font-size: 11px;
+      font-variant-numeric: tabular-nums;
+      padding-top: 2px;
+    }
+
+    .graph-canvas.large {
+      height: 460px;
+      margin: 0;
+      border-radius: var(--radius);
+      min-width: 700px;
+    }
+
+    .graph-canvas.large .graph-node {
+      min-width: 86px;
+      height: 32px;
+    }
+
+    .graph-note {
+      position: absolute;
+      right: 14px;
+      bottom: 14px;
+      max-width: 260px;
+      padding: 10px;
+      border-radius: var(--radius-sm);
+      border: 1px solid color-mix(in oklch, var(--violet) 28%, var(--line));
+      background: color-mix(in oklch, var(--violet-soft) 82%, var(--panel));
+      font-size: 11px;
+      color: color-mix(in oklch, var(--ink) 84%, var(--violet));
+      line-height: 1.45;
+    }
+
+    .connector-health {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      padding: 13px;
+    }
+
+    .health-block {
+      border: 1px solid var(--line);
+      border-radius: var(--radius-sm);
+      padding: 10px;
+      background: var(--panel-soft);
+      display: grid;
+      gap: 5px;
+    }
+
+    .health-block strong {
+      font-size: 13px;
+      font-weight: 760;
+    }
+
+    .health-block span {
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .code-chip {
+      display: inline-flex;
+      min-height: 22px;
+      align-items: center;
+      padding: 2px 7px;
+      border: 1px solid var(--line);
+      border-radius: 999px;
+      background: var(--panel-soft);
+      color: var(--muted);
+      font-family: var(--font-mono);
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .danger-button {
+      height: 34px;
+      padding: 0 12px;
+      border-color: color-mix(in oklch, var(--red) 36%, var(--line));
+      background: var(--red-soft);
+      color: color-mix(in oklch, var(--ink) 88%, var(--red));
+      font-weight: 760;
+      font-size: 12px;
+    }
+
+    .ghost-button {
+      height: 34px;
+      padding: 0 12px;
+      background: var(--panel);
+      color: var(--ink);
+      font-weight: 700;
+      font-size: 12px;
+    }
+
+    .step:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 3px 8px color-mix(in oklch, var(--ink) 6%, transparent);
+    }
+
+    .step.is-done {
+      color: color-mix(in oklch, var(--ink) 88%, var(--green));
+      background: var(--green-soft);
+      border-color: color-mix(in oklch, var(--green) 24%, transparent);
+    }
+
+    .step.is-current {
+      color: color-mix(in oklch, var(--ink) 88%, var(--primary));
+      background: var(--primary-soft);
+      border-color: color-mix(in oklch, var(--primary) 28%, transparent);
+      box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 14%, transparent);
+    }
+
+    .step.is-current:hover {
+      box-shadow: 0 0 0 3px color-mix(in oklch, var(--primary) 20%, transparent),
+                  0 3px 8px color-mix(in oklch, var(--ink) 6%, transparent);
+    }
+
+    .locked {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 11px;
+      color: color-mix(in oklch, var(--ink) 88%, var(--green));
+      font-weight: 750;
+    }
+
+    /* Restricted finance data with smooth transition */
+    .finance-data {
+      transition: filter 260ms var(--ease-out-expo),
+                  color 260ms var(--ease-out-expo),
+                  text-shadow 260ms var(--ease-out-expo);
+    }
+
+    .hidden-finance .finance-data {
+      color: transparent;
+      text-shadow: 0 0 8px color-mix(in oklch, var(--muted) 60%, transparent);
+      user-select: none;
+      position: relative;
+    }
+
+    .hidden-finance .finance-data::after {
+      content: "Restricted";
+      color: var(--muted);
+      text-shadow: none;
+      font-size: 11px;
+      font-weight: 700;
+      position: absolute;
+      left: 0;
+      top: 50%;
+      transform: translateY(-50%);
+    }
+
+    body,
+    body * {
+      font-weight: 400 !important;
+    }
+
+    /* Mobile sidebar overlay backdrop */
+    .sidebar-backdrop {
+      display: none;
+    }
+
+    /* Announcement region for screen readers */
+    #ariaAnnounce {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    @media (max-width: 1180px) {
+      .app {
+        grid-template-columns: 78px minmax(0, 1fr);
+      }
+
+      .brand div:not(.brand-mark),
+      .nav-title,
+      .nav-item span:not(.icon),
+      .nav-count,
+      .role-card label,
+      .role-meta {
+        display: none;
+      }
+
+      .brand {
+        justify-content: center;
+      }
+
+      .nav-item {
+        grid-template-columns: 1fr;
+        place-items: center;
+      }
+
+      .role-card {
+        padding: 8px;
+      }
+
+      .role-card select {
+        min-width: 0;
+        font-size: 11px;
+        padding: 6px 5px;
+      }
+
+      .status-strip {
+        grid-template-columns: repeat(3, minmax(150px, 1fr));
+      }
+
+      .view-summary {
+        grid-template-columns: repeat(2, minmax(150px, 1fr));
+      }
+
+      .workspace {
+        grid-template-columns: 1fr;
+      }
+
+      .view-grid,
+      .view-grid.wide-side {
+        grid-template-columns: 1fr;
+      }
+
+      .side-stack {
+        grid-template-columns: 1fr 1fr;
+      }
+    }
+
+    @media (max-width: 780px) {
+      .app {
+        display: block;
+        position: relative;
+      }
+
+      .mobile-toggle {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        width: 34px;
+        height: 34px;
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: var(--radius-sm);
+        color: var(--ink);
+        cursor: pointer;
+      }
+
+      .mobile-toggle svg {
+        width: 18px;
+        height: 18px;
+        stroke: currentColor;
+        stroke-width: 2;
+        fill: none;
+        stroke-linecap: round;
+        stroke-linejoin: round;
+      }
+
+      .sidebar {
+        position: fixed;
+        top: 0;
+        left: 0;
+        height: 100vh;
+        width: 260px;
+        z-index: 10;
+        transform: translateX(-110%);
+        box-shadow: var(--shadow);
+      }
+
+      .sidebar.is-open {
+        transform: translateX(0);
+      }
+
+      .sidebar-backdrop {
+        display: block;
+        position: fixed;
+        inset: 0;
+        background: color-mix(in oklch, var(--ink) 35%, transparent);
+        z-index: 9;
+        opacity: 0;
+        pointer-events: none;
+        transition: opacity 260ms var(--ease-out-expo);
+      }
+
+      .sidebar-backdrop.is-visible {
+        opacity: 1;
+        pointer-events: auto;
+      }
+
+      .nav-section {
+        grid-template-columns: 1fr;
+      }
+
+      .brand div:not(.brand-mark),
+      .nav-title,
+      .nav-item span:not(.icon),
+      .nav-count,
+      .role-card label {
+        display: block;
+      }
+
+      .role-meta {
+        display: grid;
+      }
+
+      .brand {
+        justify-content: flex-start;
+      }
+
+      .nav-item {
+        grid-template-columns: 24px 1fr auto;
+        place-items: initial;
+      }
+
+      .role-card {
+        display: block;
+        padding: 12px;
+      }
+
+      .role-card select {
+        min-width: 0;
+        font-size: 12px;
+        padding: 8px 9px;
+      }
+
+      .topbar {
+        grid-template-columns: 1fr;
+        padding: 12px;
+        gap: 12px;
+      }
+
+      .control-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        justify-content: stretch;
+      }
+
+      .control {
+        width: 100%;
+        min-width: 0;
+      }
+
+      .control-row .icon-button,
+      .control-row .primary-button {
+        width: 100%;
+        height: 38px;
+      }
+
+      .control-row .primary-button {
+        grid-column: 1 / -1;
+      }
+
+      .operational-cues {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 6px;
+      }
+
+      .cue {
+        justify-content: space-between;
+        min-width: 0;
+      }
+
+      .status-strip {
+        grid-template-columns: 1fr;
+        padding: 12px;
+        gap: 10px;
+      }
+
+      .view-page {
+        padding: 12px;
+      }
+
+      .view-summary,
+      .detail-grid,
+      .connector-health {
+        grid-template-columns: 1fr;
+      }
+
+      .permission-band,
+      .timeline-item,
+      .field-row {
+        grid-template-columns: 1fr;
+      }
+
+      .view-actions,
+      .action-row {
+        justify-content: flex-start;
+      }
+
+      .graph-canvas.large {
+        height: 360px;
+      }
+
+      .panel:has(.graph-canvas.large) {
+        overflow-x: auto;
+      }
+
+      .workspace {
+        padding: 12px;
+      }
+
+      .panel-header {
+        align-items: flex-start;
+        flex-wrap: wrap;
+      }
+
+      table {
+        min-width: 880px;
+      }
+
+      .layout-split,
+      .side-stack {
+        grid-template-columns: 1fr;
+      }
+
+      .workflow {
+        grid-template-columns: 1fr;
+        padding: 12px;
+      }
+
+      .steps {
+        grid-template-columns: 1fr 1fr;
+      }
+
+      .steps::before {
+        display: none;
+      }
+    }
+
+    /* Reduced motion */
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        animation-duration: 0.01ms !important;
+        animation-iteration-count: 1 !important;
+        transition-duration: 0.01ms !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div id="ariaAnnounce" role="status" aria-live="polite" aria-atomic="true"></div>
+
+  <div class="app" id="app">
+    <div class="sidebar-backdrop" id="sidebarBackdrop" aria-hidden="true"></div>
+
+    <aside class="sidebar" id="sidebar" aria-label="Primary navigation">
+      <div class="brand">
+        <div class="brand-mark" aria-hidden="true">
+          <svg viewBox="0 0 24 24"><path d="M5 17V7l7-4 7 4v10l-7 4-7-4Z"></path><path d="M9 15V9l3-2 3 2v6l-3 2-3-2Z"></path></svg>
+        </div>
+        <div>
+          <strong>UMS Revenue</strong>
+          <span>Control Center · Soft Dark</span>
+        </div>
+      </div>
+
+      <nav class="nav-section" aria-label="Workspace">
+        <div class="nav-title">Workspace</div>
+        <a class="nav-item is-active" href="#command" data-view="command" aria-current="page"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 13h6V4H4v9Z"></path><path d="M14 20h6V4h-6v16Z"></path><path d="M4 20h6v-3H4v3Z"></path></svg></span><span>Command Center</span><span class="nav-count">Live</span></a>
+        <a class="nav-item" href="#registry" data-view="registry"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16"></path><path d="M4 12h16"></path><path d="M4 17h10"></path></svg></span><span>Channel Registry</span><span class="nav-count">318</span></a>
+        <a class="nav-item" href="#close" data-view="close"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 18V6"></path><path d="M8 18v-5"></path><path d="M12 18V9"></path><path d="M16 18v-7"></path><path d="M20 18V4"></path></svg></span><span>Month Close</span><span class="nav-count">5</span></a>
+        <a class="nav-item" href="#graph" data-view="graph"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 4v16"></path><path d="M4 12h16"></path><circle cx="12" cy="12" r="3"></circle></svg></span><span>Graph Explorer</span><span class="nav-count">RO</span></a>
+      </nav>
+
+      <nav class="nav-section" aria-label="Operations">
+        <div class="nav-title">Operations</div>
+        <a class="nav-item" href="#exports" data-view="exports"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 7h16v10H4V7Z"></path><path d="M8 11h8"></path><path d="M8 15h5"></path></svg></span><span>Exports</span><span class="nav-count">12</span></a>
+        <a class="nav-item" href="#connectors" data-view="connectors"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M6 6h12v12H6V6Z"></path><path d="M9 3v3"></path><path d="M15 3v3"></path><path d="M9 18v3"></path><path d="M15 18v3"></path></svg></span><span>Connectors</span><span class="nav-count">2</span></a>
+        <a class="nav-item" href="#audit" data-view="audit"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M5 12h14"></path><path d="M12 5v14"></path><path d="M7 7l10 10"></path><path d="M17 7 7 17"></path></svg></span><span>Audit Log</span><span class="nav-count">AA</span></a>
+      </nav>
+
+      <div class="role-card">
+        <label for="roleSelect">Current role</label>
+        <select id="roleSelect" aria-describedby="roleHelp">
+          <option value="finance">Finance Admin</option>
+          <option value="assistant">Assistant Analyst</option>
+          <option value="company">Company Manager</option>
+        </select>
+        <div class="role-meta" aria-label="Role permission state">
+          <span class="role-state" id="roleMoneyState"><span class="dot green" aria-hidden="true"></span><span id="roleMoneyStateText">Money visible</span></span>
+          <span class="role-state"><span class="dot amber" aria-hidden="true"></span><span>Raw files gated</span></span>
+        </div>
+        <span id="roleHelp" class="sr-only">Changing role updates visible finance data and permissions</span>
+      </div>
+    </aside>
+
+    <main class="main">
+      <header class="topbar">
+        <div class="page-title">
+          <div class="title-row">
+            <button class="mobile-toggle" id="mobileToggle" aria-label="Open navigation menu" aria-controls="sidebar" aria-expanded="false">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18"></path><path d="M3 12h18"></path><path d="M3 18h18"></path></svg>
+            </button>
+            <h1 id="pageHeading">Revenue Command Center</h1>
+          </div>
+          <p id="pageSubtitle">March 2026 close, UMS holding scope, USD reporting currency</p>
+          <div class="operational-cues" aria-label="Operational status">
+            <span class="cue green">Source <strong>A Official</strong></span>
+            <span class="cue amber">Bank gap <strong>$31.4K</strong></span>
+            <span class="cue red">Export blockers <strong>2</strong></span>
+            <span class="cue violet">Graph <strong>Read only</strong></span>
+          </div>
+        </div>
+        <div class="control-row" aria-label="Report filters">
+          <select class="control" aria-label="Month"><option>Mar 2026</option><option>Feb 2026</option><option>Jan 2026</option></select>
+          <select class="control" aria-label="Scope"><option>UMS Holding</option><option>TV Sector</option><option>News Sector</option><option>Company A</option></select>
+          <select class="control" aria-label="Currency"><option>USD</option><option>EGP</option><option>AED</option></select>
+          <button class="icon-button" aria-label="Refresh reports" title="Refresh reports"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2.3-5.6"></path><path d="M20 4v6h-6"></path></svg></span></button>
+          <button class="primary-button">Create Export</button>
+        </div>
+      </header>
+
+      <section class="status-strip is-active" data-view-panel="command" aria-label="Revenue summary">
+        <article class="metric is-revenue">
+          <header><span class="metric-label">Gross revenue</span><span class="badge green">A Official</span></header>
+          <div class="metric-value finance-data">$4.82M</div>
+          <div class="metric-note"><span>YouTube reports</span><span>318 channels</span></div>
+        </article>
+        <article class="metric is-payment">
+          <header><span class="metric-label">AdSense payment</span><span class="badge blue">B Matched</span></header>
+          <div class="metric-value finance-data">$4.39M</div>
+          <div class="metric-note"><span>Payment object</span><span>Mar batch</span></div>
+        </article>
+        <article class="metric is-review">
+          <header><span class="metric-label">Bank received</span><span class="badge amber">Review</span></header>
+          <div class="metric-value finance-data">$4.36M</div>
+          <div class="metric-note"><span>FX pending</span><span>$31.4K gap</span></div>
+        </article>
+        <article class="metric is-net">
+          <header><span class="metric-label">Net revenue</span><span class="badge blue">B Recon</span></header>
+          <div class="metric-value finance-data">$4.11M</div>
+          <div class="metric-note"><span>Post-tax allocation</span><span>Locked rows</span></div>
+        </article>
+        <article class="metric is-risk">
+          <header><span class="metric-label">Open issues</span><span class="badge red">9 High</span></header>
+          <div class="metric-value">26</div>
+          <div class="metric-note"><span>Missing sources</span><span>Outside CMS</span></div>
+        </article>
+        <article class="metric is-close">
+          <header><span class="metric-label">Month state</span><span class="badge green">Locked</span></header>
+          <div class="metric-value">Close 6/7</div>
+          <div class="metric-note"><span>Final review</span><span class="locked"><span class="icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 11V8a5 5 0 0 1 10 0v3"></path><path d="M6 11h12v9H6v-9Z"></path></svg></span>Locked rows</span></div>
+        </article>
+      </section>
+
+      <section class="workspace is-active" data-view-panel="command">
+        <div class="work-left">
+          <section class="panel" aria-labelledby="channelTableTitle">
+            <div class="panel-header">
+              <div class="panel-title">
+                <strong id="channelTableTitle">Channel Revenue Table</strong>
+                <span>Money values are source-linked and permission-gated</span>
+              </div>
+              <div class="segmented" role="tablist" aria-label="Revenue type">
+                <button class="is-active" type="button" role="tab" aria-selected="true">Net</button>
+                <button type="button" role="tab" aria-selected="false">Gross</button>
+                <button type="button" role="tab" aria-selected="false">Allocated</button>
+              </div>
+            </div>
+            <div class="table-wrap" id="tableWrap">
+              <table role="grid" aria-label="Channel revenue">
+                <thead>
+                  <tr>
+                    <th scope="col">Channel</th>
+                    <th scope="col">Company</th>
+                    <th scope="col">CMS</th>
+                    <th scope="col">Gross</th>
+                    <th scope="col">Tax</th>
+                    <th scope="col">Deductions</th>
+                    <th scope="col">Net</th>
+                    <th scope="col">Confidence</th>
+                    <th scope="col">Issues</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr class="is-selected" data-channel="UMS Drama" tabindex="0" role="row" aria-selected="true">
+                    <td><span class="channel-cell"><span class="avatar">DR</span><span class="channel-copy"><span class="channel-name">UMS Drama</span><span class="channel-id">UC-DRAMA-01</span><button class="mini-button inline-explain explain-trigger" type="button">Explain</button></span></span></td>
+                    <td>United Studios</td>
+                    <td><span class="badge green">Inside CMS</span></td>
+                    <td class="money finance-data">$684,200</td>
+                    <td class="money finance-data">$41,900</td>
+                    <td class="money finance-data">$32,400</td>
+                    <td class="money finance-data">$609,900</td>
+                    <td><span class="badge blue">B Recon</span></td>
+                    <td><span class="badge amber">FX note</span></td>
+                  </tr>
+                  <tr data-channel="UMS News Live" tabindex="0" role="row" aria-selected="false">
+                    <td><span class="channel-cell"><span class="avatar">NL</span><span class="channel-copy"><span class="channel-name">UMS News Live</span><span class="channel-id">UC-NEWS-22</span><button class="mini-button inline-explain explain-trigger" type="button">Explain</button></span></span></td>
+                    <td>News Network</td>
+                    <td><span class="badge green">Inside CMS</span></td>
+                    <td class="money finance-data">$512,880</td>
+                    <td class="money finance-data">$29,600</td>
+                    <td class="money finance-data">$21,140</td>
+                    <td class="money finance-data">$462,140</td>
+                    <td><span class="badge green">A Official</span></td>
+                    <td><span class="muted">None</span></td>
+                  </tr>
+                  <tr data-channel="Sports Extra" tabindex="0" role="row" aria-selected="false">
+                    <td><span class="channel-cell"><span class="avatar">SX</span><span class="channel-copy"><span class="channel-name">Sports Extra</span><span class="channel-id">UC-SPORT-7</span><button class="mini-button inline-explain explain-trigger" type="button">Explain</button></span></span></td>
+                    <td>TV Sector</td>
+                    <td><span class="badge amber">Outside CMS</span></td>
+                    <td class="money finance-data">$244,700</td>
+                    <td class="money finance-data">$18,300</td>
+                    <td class="money finance-data">$19,820</td>
+                    <td class="money finance-data">$206,580</td>
+                    <td><span class="badge amber">C Alloc</span></td>
+                    <td><span class="badge red">Source</span></td>
+                  </tr>
+                  <tr data-channel="Kids Arabic" tabindex="0" role="row" aria-selected="false">
+                    <td><span class="channel-cell"><span class="avatar">KA</span><span class="channel-copy"><span class="channel-name">Kids Arabic</span><span class="channel-id">UC-KIDS-18</span><button class="mini-button inline-explain explain-trigger" type="button">Explain</button></span></span></td>
+                    <td>Family Media</td>
+                    <td><span class="badge green">Inside CMS</span></td>
+                    <td class="money finance-data">$199,420</td>
+                    <td class="money finance-data">$12,010</td>
+                    <td class="money finance-data">$8,980</td>
+                    <td class="money finance-data">$178,430</td>
+                    <td><span class="badge blue">B Recon</span></td>
+                    <td><span class="muted">None</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <div class="layout-split">
+            <section class="panel" aria-labelledby="issuesTitle">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <strong id="issuesTitle">Issue Queue</strong>
+                  <span>Alerts block export until resolved or accepted</span>
+                </div>
+                <span class="badge red">26 open</span>
+              </div>
+              <div class="issue-list" role="list">
+                <div class="issue-item" role="listitem"><span class="dot red" aria-hidden="true"></span><span><span class="item-title">Outside-CMS source missing</span><span class="item-sub">Sports Extra, 6 channels in TV sector</span></span><span class="badge red">High</span></div>
+                <div class="issue-item" role="listitem"><span class="dot amber" aria-hidden="true"></span><span><span class="item-title">Bank amount needs FX confirmation</span><span class="item-sub">Transfer fee and bank gap not finalized</span></span><span class="badge amber">Review</span></div>
+                <div class="issue-item" role="listitem"><span class="dot amber" aria-hidden="true"></span><span><span class="item-title">Manual override used</span><span class="item-sub">Kids Arabic adjustment approved by Finance</span></span><span class="badge amber">Audit</span></div>
+              </div>
+            </section>
+
+            <section class="panel" aria-labelledby="closeTitle">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <strong id="closeTitle">Month Close Controls</strong>
+                  <span>Restricted actions are audited</span>
+                </div>
+                <span class="badge blue">Step 6</span>
+              </div>
+              <div class="close-list" role="list">
+                <div class="close-item" role="listitem"><span class="dot green" aria-hidden="true"></span><span><span class="item-title">YouTube reports normalized</span><span class="item-sub">Raw files retained, checksum verified</span></span><span class="badge green">Done</span></div>
+                <div class="close-item" role="listitem"><span class="dot green" aria-hidden="true"></span><span><span class="item-title">AdSense payment matched</span><span class="item-sub">Payment object linked to March close</span></span><span class="badge green">Done</span></div>
+                <div class="close-item" role="listitem"><span class="dot amber" aria-hidden="true"></span><span><span class="item-title">Unresolved gap allocation</span><span class="item-sub">Post-tax proportional method selected</span></span><button class="mini-button">Review</button></div>
+              </div>
+            </section>
+          </div>
+        </div>
+
+        <aside class="side-stack" aria-label="Explanation and graph">
+          <section class="panel explain-card">
+            <div class="explain-head">
+              <div>
+                <h2 id="explainTitle">UMS Drama</h2>
+                <p>Net revenue explanation, March 2026</p>
+              </div>
+              <span class="badge blue">B Reconciled</span>
+            </div>
+            <div class="formula" role="text" aria-label="Revenue formula">net = gross + adjustments - tax - allocated_deductions + manual_adjustments</div>
+            <div class="explain-list" role="list">
+              <div class="explain-row" role="listitem"><span class="dot green" aria-hidden="true"></span><span><span class="item-title">Gross revenue</span><span class="item-sub">YouTube Reporting API</span></span><span class="money finance-data">$684,200</span></div>
+              <div class="explain-row" role="listitem"><span class="dot green" aria-hidden="true"></span><span><span class="item-title">Tax withholding</span><span class="item-sub">Official tax report</span></span><span class="money finance-data">-$41,900</span></div>
+              <div class="explain-row" role="listitem"><span class="dot amber" aria-hidden="true"></span><span><span class="item-title">Allocated deductions</span><span class="item-sub">Payment gap allocation</span></span><span class="money finance-data">-$32,400</span></div>
+              <div class="explain-row" role="listitem"><span class="dot green" aria-hidden="true"></span><span><span class="item-title">Net value</span><span class="item-sub">Locked result row</span></span><span class="money finance-data">$609,900</span></div>
+            </div>
+          </section>
+
+          <section class="panel" aria-labelledby="graphTitle">
+            <div class="panel-header">
+              <div class="panel-title">
+                <strong id="graphTitle">Read-Only Graph</strong>
+                <span>Neo4j projection, filtered by app permissions</span>
+              </div>
+              <span class="badge violet">Graph read</span>
+            </div>
+            <div class="graph-canvas" aria-hidden="true">
+              <span class="graph-line" style="left:64px;top:76px;width:84px;transform:rotate(-18deg)"></span>
+              <span class="graph-line" style="left:151px;top:68px;width:94px;transform:rotate(23deg)"></span>
+              <span class="graph-line" style="left:244px;top:105px;width:58px;transform:rotate(-8deg)"></span>
+              <span class="graph-node" style="left:18px;top:64px">UMS</span>
+              <span class="graph-node" style="left:132px;top:42px">TV</span>
+              <span class="graph-node" style="left:236px;top:86px">Drama</span>
+              <span class="graph-node finance" style="left:214px;top:132px">Payment</span>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-header">
+              <div class="panel-title">
+                <strong>Export Readiness</strong>
+                <span>Finance workbook, PDF, slide pack</span>
+              </div>
+              <span class="badge amber">2 blockers</span>
+            </div>
+            <div class="issue-list" role="list">
+              <div class="issue-item" role="listitem"><span class="dot amber" aria-hidden="true"></span><span><span class="item-title">Confidence notes required</span><span class="item-sub">Allocated values must be included</span></span><span class="badge amber">Open</span></div>
+              <div class="issue-item" role="listitem"><span class="dot red" aria-hidden="true"></span><span><span class="item-title">Raw appendix restricted</span><span class="item-sub">Requires raw file permission</span></span><span class="badge red">Blocked</span></div>
+            </div>
+          </section>
+        </aside>
+      </section>
+
+      <footer class="workflow is-active" data-view-panel="command" aria-label="Month close workflow">
+        <div class="workflow-label">Monthly close<span>2 blockers before export</span></div>
+        <div class="steps" role="list">
+          <span class="step is-done" role="listitem"><span class="dot green" aria-hidden="true"></span>Reports</span>
+          <span class="step is-done" role="listitem"><span class="dot green" aria-hidden="true"></span>Normalize</span>
+          <span class="step is-done" role="listitem"><span class="dot green" aria-hidden="true"></span>Payments</span>
+          <span class="step is-current" role="listitem" aria-current="step"><span class="dot" aria-hidden="true"></span>Allocate</span>
+          <span class="step" role="listitem"><span class="dot amber" aria-hidden="true"></span>Lock</span>
+          <span class="step" role="listitem"><span class="dot amber" aria-hidden="true"></span>Export</span>
+        </div>
+        <button class="primary-button">Open Close</button>
+      </footer>
+
+      <section class="view-page" data-view-panel="registry" aria-labelledby="registryTitle">
+        <div class="view-summary" aria-label="Registry summary">
+          <article class="summary-tile"><span>Active channels</span><strong>318</strong><small>300+ target registry, 12 pending review</small></article>
+          <article class="summary-tile"><span>Outside CMS</span><strong>70</strong><small>Allocation requires explicit source mapping</small></article>
+          <article class="summary-tile"><span>Unmapped revenue</span><strong class="finance-data">$42.8K</strong><small>Held from export until mapped</small></article>
+          <article class="summary-tile"><span>Scoped changes</span><strong>9</strong><small>Company and sector approvals required</small></article>
+        </div>
+
+        <div class="view-grid wide-side">
+          <section class="panel" aria-labelledby="registryTitle">
+            <div class="panel-header">
+              <div class="panel-title">
+                <strong id="registryTitle">Channel Registry</strong>
+                <span>Ownership, CMS status, revenue scope, and graph projection identity</span>
+              </div>
+              <div class="view-actions">
+                <button class="ghost-button" type="button">Bulk Import</button>
+                <button class="primary-button" type="button">Request Mapping Change</button>
+              </div>
+            </div>
+            <div class="permission-band">
+              <span class="dot green" aria-hidden="true"></span>
+              <span><strong>Finance-visible mapping layer</strong><span>Company managers see only assigned companies; sector managers see assigned sectors; every mapping change writes an audit event.</span></span>
+              <span class="badge blue">Scoped</span>
+            </div>
+            <div class="table-wrap">
+              <table aria-label="Channel registry">
+                <thead>
+                  <tr>
+                    <th scope="col">Channel</th>
+                    <th scope="col">Company</th>
+                    <th scope="col">Sector</th>
+                    <th scope="col">CMS</th>
+                    <th scope="col">Revenue Source</th>
+                    <th scope="col">Graph Node</th>
+                    <th scope="col">State</th>
+                    <th scope="col">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td><span class="channel-cell"><span class="avatar">DR</span><span><span class="channel-name">UMS Drama</span><span class="channel-id">UC-DRAMA-01</span></span></span></td>
+                    <td>United Studios</td>
+                    <td>TV</td>
+                    <td><span class="badge green">Inside CMS</span></td>
+                    <td>YouTube Reporting API</td>
+                    <td><span class="code-chip">channel:ums-drama</span></td>
+                    <td><span class="badge green">Approved</span></td>
+                    <td><button class="mini-button" type="button">Review</button></td>
+                  </tr>
+                  <tr>
+                    <td><span class="channel-cell"><span class="avatar">SX</span><span><span class="channel-name">Sports Extra</span><span class="channel-id">UC-SPORT-7</span></span></span></td>
+                    <td>TV Sector</td>
+                    <td>TV</td>
+                    <td><span class="badge amber">Outside CMS</span></td>
+                    <td>Uploaded owner statement</td>
+                    <td><span class="code-chip">channel:sports-extra</span></td>
+                    <td><span class="badge amber">Evidence due</span></td>
+                    <td><button class="mini-button" type="button">Assign</button></td>
+                  </tr>
+                  <tr>
+                    <td><span class="channel-cell"><span class="avatar">NL</span><span><span class="channel-name">UMS News Live</span><span class="channel-id">UC-NEWS-22</span></span></span></td>
+                    <td>News Network</td>
+                    <td>News</td>
+                    <td><span class="badge green">Inside CMS</span></td>
+                    <td>YouTube Analytics API</td>
+                    <td><span class="code-chip">channel:news-live</span></td>
+                    <td><span class="badge green">Approved</span></td>
+                    <td><button class="mini-button" type="button">Review</button></td>
+                  </tr>
+                  <tr>
+                    <td><span class="channel-cell"><span class="avatar">MS</span><span><span class="channel-name">Music Stage</span><span class="channel-id">UC-MUSIC-31</span></span></span></td>
+                    <td>Catalog Media</td>
+                    <td>Entertainment</td>
+                    <td><span class="badge red">Unmapped</span></td>
+                    <td>Not linked</td>
+                    <td><span class="code-chip">pending</span></td>
+                    <td><span class="badge red">Export block</span></td>
+                    <td><button class="mini-button" type="button">Map</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <aside class="view-stack" aria-label="Registry side panels">
+            <section class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <strong>Mapping Change Request</strong>
+                  <span>Restricted to registry admins and corporate finance approvers</span>
+                </div>
+                <span class="badge amber">Audit required</span>
+              </div>
+              <div class="form-grid">
+                <div class="field-row"><label for="registryChannel">Channel</label><select id="registryChannel"><option>Sports Extra</option><option>Music Stage</option></select></div>
+                <div class="field-row"><label for="registryCompany">Company</label><select id="registryCompany"><option>TV Sector</option><option>Catalog Media</option></select></div>
+                <div class="field-row"><label for="registryReason">Reason</label><input id="registryReason" value="March source evidence received"></div>
+                <div class="field-row"><label for="registryEffective">Effective month</label><select id="registryEffective"><option>Mar 2026</option><option>Apr 2026</option></select></div>
+              </div>
+              <div class="action-row">
+                <button class="ghost-button" type="button">Save Draft</button>
+                <button class="primary-button" type="button">Submit Approval</button>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <strong>Registry Controls</strong>
+                  <span>Production behavior expected from the backend foundation</span>
+                </div>
+              </div>
+              <div class="issue-list" role="list">
+                <div class="issue-item" role="listitem"><span class="dot green" aria-hidden="true"></span><span><span class="item-title">Company scope enforced</span><span class="item-sub">Managers cannot open unrelated company mappings</span></span><span class="badge green">Pass</span></div>
+                <div class="issue-item" role="listitem"><span class="dot amber" aria-hidden="true"></span><span><span class="item-title">Finance month impact</span><span class="item-sub">Changes after lock require Finance Admin approval</span></span><span class="badge amber">Guarded</span></div>
+                <div class="issue-item" role="listitem"><span class="dot green" aria-hidden="true"></span><span><span class="item-title">Graph projection update</span><span class="item-sub">Neo4j receives read-model refresh after SQL approval</span></span><span class="badge violet">RO</span></div>
+              </div>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <section class="view-page" data-view-panel="close" aria-labelledby="closeViewTitle">
+        <div class="view-summary" aria-label="Month close summary">
+          <article class="summary-tile"><span>Close state</span><strong>Step 6/7</strong><small>Allocation review before lock</small></article>
+          <article class="summary-tile"><span>Payment gap</span><strong class="finance-data">$31.4K</strong><small>Bank fee and FX confirmation pending</small></article>
+          <article class="summary-tile"><span>Manual overrides</span><strong>3</strong><small>All require reviewer and reason</small></article>
+          <article class="summary-tile"><span>Export blockers</span><strong>2</strong><small>Cannot finalize until accepted</small></article>
+        </div>
+
+        <div class="view-grid">
+          <section class="panel" aria-labelledby="closeViewTitle">
+            <div class="panel-header">
+              <div class="panel-title">
+                <strong id="closeViewTitle">Month Close Workbench</strong>
+                <span>Deterministic workflow from report ingestion to locked exports</span>
+              </div>
+              <span class="badge amber">Finance Admin</span>
+            </div>
+            <div class="detail-grid">
+              <div class="detail-cell"><span>Gross revenue source</span><strong>YouTube official reports, checksummed raw files</strong></div>
+              <div class="detail-cell"><span>Payment source</span><strong>AdSense payment object matched to March close</strong></div>
+              <div class="detail-cell"><span>Allocation method</span><strong>Post-tax proportional gap allocation</strong></div>
+              <div class="detail-cell"><span>Lock policy</span><strong>Unlock requires reason, dual approval, and audit log</strong></div>
+            </div>
+            <div class="table-wrap">
+              <table aria-label="Month close checkpoints">
+                <thead>
+                  <tr>
+                    <th scope="col">Checkpoint</th>
+                    <th scope="col">Owner</th>
+                    <th scope="col">Evidence</th>
+                    <th scope="col">Sensitive Action</th>
+                    <th scope="col">State</th>
+                    <th scope="col">Next</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Raw report intake</td>
+                    <td>System Integration User</td>
+                    <td><span class="code-chip">raw_report_file_id</span></td>
+                    <td>View raw files</td>
+                    <td><span class="badge green">Done</span></td>
+                    <td><button class="mini-button" type="button">Open Log</button></td>
+                  </tr>
+                  <tr>
+                    <td>Payment reconciliation</td>
+                    <td>Finance Admin</td>
+                    <td><span class="code-chip">payment_reconciliation_id</span></td>
+                    <td>View bank reconciliation</td>
+                    <td><span class="badge amber">Review</span></td>
+                    <td><button class="mini-button" type="button">Explain Gap</button></td>
+                  </tr>
+                  <tr>
+                    <td>Manual override approval</td>
+                    <td>Corporate Admin</td>
+                    <td><span class="code-chip">override_id</span></td>
+                    <td>Create manual override</td>
+                    <td><span class="badge amber">3 pending</span></td>
+                    <td><button class="mini-button" type="button">Review</button></td>
+                  </tr>
+                  <tr>
+                    <td>Month lock</td>
+                    <td>Finance Admin</td>
+                    <td><span class="code-chip">finance_month_id</span></td>
+                    <td>Lock or unlock month</td>
+                    <td><span class="badge red">Blocked</span></td>
+                    <td><button class="mini-button" type="button">Resolve</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <aside class="view-stack">
+            <section class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <strong>Lock Controls</strong>
+                  <span>Actions stay disabled until blockers are cleared</span>
+                </div>
+                <span class="badge red">Restricted</span>
+              </div>
+              <div class="form-grid">
+                <div class="field-row"><label for="closeMonth">Month</label><select id="closeMonth"><option>Mar 2026</option><option>Feb 2026</option></select></div>
+                <div class="field-row"><label for="closeReason">Reason</label><input id="closeReason" value="Export blockers remain open"></div>
+                <div class="field-row"><label for="closeApprover">Approver</label><select id="closeApprover"><option>Finance Admin required</option><option>Corporate Admin co-approval</option></select></div>
+              </div>
+              <div class="action-row">
+                <button class="danger-button" type="button">Request Unlock</button>
+                <button class="primary-button" type="button">Lock Month</button>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <strong>Reconciliation Equation</strong>
+                  <span>Displayed as explanation, not editable revenue logic</span>
+                </div>
+              </div>
+              <div class="formula">gross_reported - official_tax - payment_fees - allocation_gap + approved_overrides = locked_net</div>
+              <div class="issue-list" role="list">
+                <div class="issue-item" role="listitem"><span class="dot amber" aria-hidden="true"></span><span><span class="item-title">Gap allocation needs final note</span><span class="item-sub">Finance memo is required before export</span></span><span class="badge amber">Open</span></div>
+                <div class="issue-item" role="listitem"><span class="dot green" aria-hidden="true"></span><span><span class="item-title">Override audit trail present</span><span class="item-sub">Reason, approver, timestamp, and before value captured</span></span><span class="badge green">Ready</span></div>
+              </div>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <section class="view-page" data-view-panel="graph" aria-labelledby="graphViewTitle">
+        <div class="view-summary" aria-label="Graph summary">
+          <article class="summary-tile"><span>Projection mode</span><strong>Read-only</strong><small>SQL remains the financial source of truth</small></article>
+          <article class="summary-tile"><span>Visible nodes</span><strong>146</strong><small>Filtered by current role and scope</small></article>
+          <article class="summary-tile"><span>Hidden finance nodes</span><strong>38</strong><small>Assistant and company scopes cannot open them</small></article>
+          <article class="summary-tile"><span>Trace paths</span><strong>9</strong><small>Revenue issue paths for March close</small></article>
+        </div>
+
+        <div class="view-grid wide-side">
+          <section class="panel" aria-labelledby="graphViewTitle">
+            <div class="panel-header">
+              <div class="panel-title">
+                <strong id="graphViewTitle">Graph Explorer</strong>
+                <span>Ownership, source, issue, and payment relationships filtered by application permissions</span>
+              </div>
+              <div class="segmented" role="tablist" aria-label="Graph mode">
+                <button class="is-active" type="button" role="tab" aria-selected="true">Revenue Flow</button>
+                <button type="button" role="tab" aria-selected="false">Issues</button>
+                <button type="button" role="tab" aria-selected="false">Ownership</button>
+              </div>
+            </div>
+            <div class="graph-canvas large" aria-label="Read-only graph mockup">
+              <span class="graph-line" style="left:110px;top:100px;width:140px;transform:rotate(8deg)"></span>
+              <span class="graph-line" style="left:260px;top:116px;width:138px;transform:rotate(29deg)"></span>
+              <span class="graph-line" style="left:393px;top:194px;width:132px;transform:rotate(-18deg)"></span>
+              <span class="graph-line" style="left:232px;top:198px;width:122px;transform:rotate(58deg)"></span>
+              <span class="graph-line" style="left:378px;top:326px;width:146px;transform:rotate(-24deg)"></span>
+              <span class="graph-line" style="left:520px;top:258px;width:116px;transform:rotate(19deg)"></span>
+              <span class="graph-node" style="left:48px;top:82px">UMS Holding</span>
+              <span class="graph-node" style="left:248px;top:94px">TV Sector</span>
+              <span class="graph-node" style="left:388px;top:170px">United Studios</span>
+              <span class="graph-node" style="left:548px;top:126px">UMS Drama</span>
+              <span class="graph-node finance" style="left:526px;top:264px">Payment</span>
+              <span class="graph-node finance" style="left:300px;top:330px">Gap Allocation</span>
+              <span class="graph-node" style="left:156px;top:246px">Sports Extra</span>
+              <span class="graph-node finance" style="left:646px;top:294px">Export Row</span>
+              <span class="graph-note">Dashboard users never write to Neo4j. The app resolves SQL scopes first, then passes allowed company, channel, month, and graph-read filters into projection queries.</span>
+            </div>
+          </section>
+
+          <aside class="view-stack">
+            <section class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <strong>Permission Filter</strong>
+                  <span>Applied before Neo4j query construction</span>
+                </div>
+                <span class="badge violet">Graph-read</span>
+              </div>
+              <div class="detail-grid">
+                <div class="detail-cell"><span>Role</span><strong>Finance Admin</strong></div>
+                <div class="detail-cell"><span>Scope</span><strong>Global finance month</strong></div>
+                <div class="detail-cell"><span>Companies</span><strong>All allowed</strong></div>
+                <div class="detail-cell"><span>Raw files</span><strong>Hidden unless explicitly granted</strong></div>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <strong>Trace Selection</strong>
+                  <span>Issue path selected from SQL-backed reconciliation state</span>
+                </div>
+              </div>
+              <div class="issue-list" role="list">
+                <div class="issue-item" role="listitem"><span class="dot amber" aria-hidden="true"></span><span><span class="item-title">Sports Extra source issue</span><span class="item-sub">Channel to company mapping lacks March evidence</span></span><span class="badge amber">Trace</span></div>
+                <div class="issue-item" role="listitem"><span class="dot green" aria-hidden="true"></span><span><span class="item-title">UMS Drama payment path</span><span class="item-sub">Channel, payment, allocation, and export row linked</span></span><span class="badge green">Clean</span></div>
+                <div class="issue-item" role="listitem"><span class="dot red" aria-hidden="true"></span><span><span class="item-title">Hidden company branch</span><span class="item-sub">Suppressed by company scope filter</span></span><span class="badge red">Masked</span></div>
+              </div>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <section class="view-page" data-view-panel="exports" aria-labelledby="exportsTitle">
+        <div class="view-summary" aria-label="Export summary">
+          <article class="summary-tile"><span>Export packages</span><strong>12</strong><small>Finance, executive, brand, and channel formats</small></article>
+          <article class="summary-tile"><span>Ready now</span><strong>7</strong><small>Non-finance reports and approved finance workbooks</small></article>
+          <article class="summary-tile"><span>Blocked</span><strong>2</strong><small>Raw appendix and unresolved source evidence</small></article>
+          <article class="summary-tile"><span>Last export</span><strong>01:42</strong><small>Audit event stored with checksum</small></article>
+        </div>
+
+        <div class="view-grid">
+          <section class="panel" aria-labelledby="exportsTitle">
+            <div class="panel-header">
+              <div class="panel-title">
+                <strong id="exportsTitle">Export Center</strong>
+                <span>Permission-controlled packages with locked month and audit requirements</span>
+              </div>
+              <button class="primary-button" type="button">Create Export Job</button>
+            </div>
+            <div class="table-wrap">
+              <table aria-label="Exports">
+                <thead>
+                  <tr>
+                    <th scope="col">Package</th>
+                    <th scope="col">Audience</th>
+                    <th scope="col">Contains Money</th>
+                    <th scope="col">Requires</th>
+                    <th scope="col">Status</th>
+                    <th scope="col">Action</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Finance Workbook</td>
+                    <td>Finance Admins</td>
+                    <td><span class="badge red">Sensitive</span></td>
+                    <td>Locked month, revenue export permission</td>
+                    <td><span class="badge amber">Notes due</span></td>
+                    <td><button class="mini-button" type="button">Prepare</button></td>
+                  </tr>
+                  <tr>
+                    <td>Executive PDF</td>
+                    <td>Corporate leadership</td>
+                    <td><span class="badge blue">Summary</span></td>
+                    <td>Finance viewer or higher</td>
+                    <td><span class="badge green">Ready</span></td>
+                    <td><button class="mini-button" type="button">Export</button></td>
+                  </tr>
+                  <tr>
+                    <td>Brand Slide Deck</td>
+                    <td>Brand partners</td>
+                    <td><span class="badge amber">Scoped</span></td>
+                    <td>Company or channel export scope</td>
+                    <td><span class="badge green">Ready</span></td>
+                    <td><button class="mini-button" type="button">Export</button></td>
+                  </tr>
+                  <tr>
+                    <td>Raw Appendix</td>
+                    <td>Audit</td>
+                    <td><span class="badge red">Raw files</span></td>
+                    <td>Raw report file permission</td>
+                    <td><span class="badge red">Blocked</span></td>
+                    <td><button class="mini-button" type="button">Request</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <aside class="view-stack">
+            <section class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <strong>Export Guardrails</strong>
+                  <span>Every package records scope, filters, checksum, and actor</span>
+                </div>
+              </div>
+              <div class="issue-list" role="list">
+                <div class="issue-item" role="listitem"><span class="dot green" aria-hidden="true"></span><span><span class="item-title">Revenue cells permission checked</span><span class="item-sub">Assistant Analyst receives masked finance exports</span></span><span class="badge green">On</span></div>
+                <div class="issue-item" role="listitem"><span class="dot amber" aria-hidden="true"></span><span><span class="item-title">Confidence notes required</span><span class="item-sub">Allocated and overridden values require explanations</span></span><span class="badge amber">Open</span></div>
+                <div class="issue-item" role="listitem"><span class="dot red" aria-hidden="true"></span><span><span class="item-title">Raw appendix restricted</span><span class="item-sub">Only Audit Viewer plus raw file grant can open source files</span></span><span class="badge red">Blocked</span></div>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <strong>Export Metadata</strong>
+                  <span>UI-facing fields that must come from backend jobs</span>
+                </div>
+              </div>
+              <div class="detail-grid">
+                <div class="detail-cell"><span>Scope hash</span><strong><span class="code-chip">exp_8b3c41</span></strong></div>
+                <div class="detail-cell"><span>Month</span><strong>Mar 2026 locked</strong></div>
+                <div class="detail-cell"><span>Actor</span><strong>finance.admin@ums</strong></div>
+                <div class="detail-cell"><span>Retention</span><strong>Audit log plus generated file checksum</strong></div>
+              </div>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <section class="view-page" data-view-panel="connectors" aria-labelledby="connectorsTitle">
+        <div class="view-summary" aria-label="Connector summary">
+          <article class="summary-tile"><span>Connector jobs</span><strong>4</strong><small>YouTube, Analytics, Data API, AdSense</small></article>
+          <article class="summary-tile"><span>Latest run</span><strong>00:18</strong><small>Reporting API completed with checksum</small></article>
+          <article class="summary-tile"><span>Warnings</span><strong>2</strong><small>Quota and delayed AdSense settlement</small></article>
+          <article class="summary-tile"><span>Admin access</span><strong>Restricted</strong><small>OAuth and job runs require connector permission</small></article>
+        </div>
+
+        <div class="view-grid">
+          <section class="panel" aria-labelledby="connectorsTitle">
+            <div class="panel-header">
+              <div class="panel-title">
+                <strong id="connectorsTitle">Connector Operations</strong>
+                <span>OAuth credentials, API jobs, raw files, and ingestion windows</span>
+              </div>
+              <button class="primary-button" type="button">Run Approved Job</button>
+            </div>
+            <div class="connector-health" aria-label="Connector health">
+              <div class="health-block"><strong>YouTube Reporting API</strong><span>Latest file set normalized for March</span><span class="badge green">Healthy</span></div>
+              <div class="health-block"><strong>YouTube Analytics API</strong><span>Performance metrics available without revenue for analysts</span><span class="badge blue">Scoped</span></div>
+              <div class="health-block"><strong>AdSense Payments</strong><span>Settlement object linked, bank gap pending</span><span class="badge amber">Review</span></div>
+            </div>
+            <div class="table-wrap">
+              <table aria-label="Connector jobs">
+                <thead>
+                  <tr>
+                    <th scope="col">Job</th>
+                    <th scope="col">Credential</th>
+                    <th scope="col">Last Run</th>
+                    <th scope="col">Raw File</th>
+                    <th scope="col">Sensitive Action</th>
+                    <th scope="col">State</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr>
+                    <td>Monthly revenue report fetch</td>
+                    <td><span class="code-chip">youtube-reporting-prod</span></td>
+                    <td>2026-04-02 00:18</td>
+                    <td><span class="code-chip">raw_yt_mar_2026</span></td>
+                    <td>Run connector job</td>
+                    <td><span class="badge green">Complete</span></td>
+                  </tr>
+                  <tr>
+                    <td>Analytics performance sync</td>
+                    <td><span class="code-chip">youtube-analytics-prod</span></td>
+                    <td>2026-04-02 01:10</td>
+                    <td><span class="code-chip">raw_perf_mar_2026</span></td>
+                    <td>View raw report file</td>
+                    <td><span class="badge green">Complete</span></td>
+                  </tr>
+                  <tr>
+                    <td>AdSense payment sync</td>
+                    <td><span class="code-chip">adsense-payment-prod</span></td>
+                    <td>2026-04-01 23:40</td>
+                    <td><span class="code-chip">raw_adsense_mar_2026</span></td>
+                    <td>Manage connector OAuth</td>
+                    <td><span class="badge amber">Delayed</span></td>
+                  </tr>
+                  <tr>
+                    <td>Channel metadata refresh</td>
+                    <td><span class="code-chip">youtube-data-prod</span></td>
+                    <td>2026-04-02 02:00</td>
+                    <td><span class="code-chip">raw_meta_mar_2026</span></td>
+                    <td>Change channel mapping</td>
+                    <td><span class="badge blue">Queued</span></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+
+          <aside class="view-stack">
+            <section class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <strong>Credential Controls</strong>
+                  <span>No Google passwords stored; OAuth grants only</span>
+                </div>
+                <span class="badge red">Admin only</span>
+              </div>
+              <div class="issue-list" role="list">
+                <div class="issue-item" role="listitem"><span class="dot green" aria-hidden="true"></span><span><span class="item-title">OAuth token vault</span><span class="item-sub">Rotations logged and scoped to connector service accounts</span></span><span class="badge green">On</span></div>
+                <div class="issue-item" role="listitem"><span class="dot amber" aria-hidden="true"></span><span><span class="item-title">Quota pressure</span><span class="item-sub">Analytics sync should back off outside close window</span></span><span class="badge amber">Watch</span></div>
+                <div class="issue-item" role="listitem"><span class="dot red" aria-hidden="true"></span><span><span class="item-title">Raw file access</span><span class="item-sub">Raw source reports are not visible to default analysts</span></span><span class="badge red">Restricted</span></div>
+              </div>
+            </section>
+          </aside>
+        </div>
+      </section>
+
+      <section class="view-page" data-view-panel="audit" aria-labelledby="auditTitle">
+        <div class="view-summary" aria-label="Audit summary">
+          <article class="summary-tile"><span>Events today</span><strong>184</strong><small>Sensitive actions, reads, exports, and mapping changes</small></article>
+          <article class="summary-tile"><span>High sensitivity</span><strong>23</strong><small>Revenue, payment, raw file, and override events</small></article>
+          <article class="summary-tile"><span>Denied attempts</span><strong>7</strong><small>Permission failures retained for review</small></article>
+          <article class="summary-tile"><span>Retention</span><strong>7 years</strong><small>Finance audit policy baseline</small></article>
+        </div>
+
+        <div class="view-grid">
+          <section class="panel" aria-labelledby="auditTitle">
+            <div class="panel-header">
+              <div class="panel-title">
+                <strong id="auditTitle">Audit Log</strong>
+                <span>Every sensitive action records actor, permission, scope, target, and result</span>
+              </div>
+              <div class="view-actions">
+                <select class="control" aria-label="Audit severity"><option>All sensitive</option><option>Denied</option><option>Exports</option></select>
+                <button class="ghost-button" type="button">Download Audit View</button>
+              </div>
+            </div>
+            <div class="timeline" role="list">
+              <div class="timeline-item" role="listitem">
+                <span class="timeline-time">02:18:44</span>
+                <span class="dot red" aria-hidden="true"></span>
+                <span><span class="item-title">Revenue export file prepared</span><span class="item-sub">actor=finance.admin@ums, permission=export:revenue, scope=global:mar-2026, checksum=exp_8b3c41</span></span>
+                <span class="badge red">Sensitive</span>
+              </div>
+              <div class="timeline-item" role="listitem">
+                <span class="timeline-time">02:03:11</span>
+                <span class="dot amber" aria-hidden="true"></span>
+                <span><span class="item-title">Manual override submitted</span><span class="item-sub">target=Kids Arabic, before and after values stored, reason required, approver pending</span></span>
+                <span class="badge amber">Pending</span>
+              </div>
+              <div class="timeline-item" role="listitem">
+                <span class="timeline-time">01:55:08</span>
+                <span class="dot green" aria-hidden="true"></span>
+                <span><span class="item-title">Graph query filtered</span><span class="item-sub">allowed_companies=United Studios, hidden_nodes=38, neo4j_mode=read_only</span></span>
+                <span class="badge violet">Graph</span>
+              </div>
+              <div class="timeline-item" role="listitem">
+                <span class="timeline-time">01:40:29</span>
+                <span class="dot red" aria-hidden="true"></span>
+                <span><span class="item-title">Denied bank reconciliation view</span><span class="item-sub">actor=assistant.analyst@ums, permission=view:bank_reconciliation, result=denied</span></span>
+                <span class="badge red">Denied</span>
+              </div>
+              <div class="timeline-item" role="listitem">
+                <span class="timeline-time">01:22:05</span>
+                <span class="dot amber" aria-hidden="true"></span>
+                <span><span class="item-title">Channel mapping change requested</span><span class="item-sub">target=Sports Extra, company=TV Sector, approval required because month is in close window</span></span>
+                <span class="badge amber">Review</span>
+              </div>
+            </div>
+          </section>
+
+          <aside class="view-stack">
+            <section class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <strong>Audit Payload Contract</strong>
+                  <span>Security metadata the UI must preserve</span>
+                </div>
+              </div>
+              <div class="detail-grid">
+                <div class="detail-cell"><span>Actor</span><strong>User, role, and assignment scope</strong></div>
+                <div class="detail-cell"><span>Target</span><strong>Company, channel, month, export, connector, or graph path</strong></div>
+                <div class="detail-cell"><span>Decision</span><strong>Allowed, denied, masked, or requires approval</strong></div>
+                <div class="detail-cell"><span>Evidence</span><strong>Before value, after value, reason, checksum, and request id</strong></div>
+              </div>
+            </section>
+
+            <section class="panel">
+              <div class="panel-header">
+                <div class="panel-title">
+                  <strong>Investigation Queue</strong>
+                  <span>Audit viewers can inspect events without changing finance data</span>
+                </div>
+              </div>
+              <div class="issue-list" role="list">
+                <div class="issue-item" role="listitem"><span class="dot red" aria-hidden="true"></span><span><span class="item-title">Denied finance reads</span><span class="item-sub">3 attempts from assistant role today</span></span><span class="badge red">Review</span></div>
+                <div class="issue-item" role="listitem"><span class="dot amber" aria-hidden="true"></span><span><span class="item-title">Override waiting approval</span><span class="item-sub">Requires Finance Admin and reason acceptance</span></span><span class="badge amber">Open</span></div>
+                <div class="issue-item" role="listitem"><span class="dot green" aria-hidden="true"></span><span><span class="item-title">Connector run retained</span><span class="item-sub">Raw file checksum linked to ingestion event</span></span><span class="badge green">Stored</span></div>
+              </div>
+            </section>
+          </aside>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    (function() {
+      const app = document.getElementById("app");
+      const roleSelect = document.getElementById("roleSelect");
+      const pageHeading = document.getElementById("pageHeading");
+      const pageSubtitle = document.getElementById("pageSubtitle");
+      const explainTitle = document.getElementById("explainTitle");
+      const rows = document.querySelectorAll("tr[data-channel]");
+      const triggers = document.querySelectorAll(".explain-trigger");
+      const segmentButtons = document.querySelectorAll(".segmented button");
+      const tableWrap = document.getElementById("tableWrap");
+      const announce = document.getElementById("ariaAnnounce");
+      const sidebar = document.getElementById("sidebar");
+      const sidebarBackdrop = document.getElementById("sidebarBackdrop");
+      const mobileToggle = document.getElementById("mobileToggle");
+      const roleMoneyState = document.getElementById("roleMoneyState");
+      const roleMoneyStateText = document.getElementById("roleMoneyStateText");
+      const navItems = document.querySelectorAll("[data-view]");
+      const viewPanels = document.querySelectorAll("[data-view-panel]");
+      const viewCopy = {
+        command: {
+          title: "Revenue Command Center",
+          subtitle: "March 2026 close, UMS holding scope, USD reporting currency"
+        },
+        registry: {
+          title: "Channel Registry",
+          subtitle: "Ownership, CMS status, company scope, and graph identity controls"
+        },
+        close: {
+          title: "Month Close Workbench",
+          subtitle: "Payment reconciliation, allocation review, overrides, and lock controls"
+        },
+        graph: {
+          title: "Read-Only Graph Explorer",
+          subtitle: "Neo4j projection filtered by SQL-backed application permissions"
+        },
+        exports: {
+          title: "Export Center",
+          subtitle: "Permission-controlled finance, executive, brand, and audit packages"
+        },
+        connectors: {
+          title: "Connector Operations",
+          subtitle: "YouTube, Analytics, AdSense, raw files, and restricted job controls"
+        },
+        audit: {
+          title: "Audit Log",
+          subtitle: "Sensitive action trace for revenue, exports, overrides, connectors, and graph reads"
+        }
+      };
+
+      function switchView(viewName, options = {}) {
+        if (!viewCopy[viewName]) return;
+
+        viewPanels.forEach((panel) => {
+          panel.classList.toggle("is-active", panel.dataset.viewPanel === viewName);
+        });
+
+        navItems.forEach((item) => {
+          const isActive = item.dataset.view === viewName;
+          item.classList.toggle("is-active", isActive);
+          if (isActive) {
+            item.setAttribute("aria-current", "page");
+          } else {
+            item.removeAttribute("aria-current");
+          }
+        });
+
+        pageHeading.textContent = viewCopy[viewName].title;
+        pageSubtitle.textContent = viewCopy[viewName].subtitle;
+        announce.textContent = `Showing ${viewCopy[viewName].title}`;
+
+        if (!options.skipHash) {
+          history.replaceState(null, "", `#${viewName}`);
+        }
+
+        if (sidebar && sidebar.classList.contains("is-open")) {
+          closeSidebar();
+        }
+      }
+
+      // Role change with announcement
+      function applyRole(value) {
+        const isHidden = value !== "finance";
+        app.classList.toggle("hidden-finance", isHidden);
+        if (roleMoneyState && roleMoneyStateText) {
+          roleMoneyState.classList.toggle("is-restricted", isHidden);
+          roleMoneyStateText.textContent = isHidden ? "Money masked" : "Money visible";
+        }
+        const roleName = roleSelect.options[roleSelect.selectedIndex].text;
+        announce.textContent = isHidden
+          ? `Role changed to ${roleName}. Finance values are now restricted.`
+          : `Role changed to ${roleName}. Finance values are now visible.`;
+      }
+
+      roleSelect.addEventListener("change", (event) => {
+        applyRole(event.target.value);
+      });
+
+      // Explain triggers: update selection and side panel
+      triggers.forEach((button) => {
+        button.addEventListener("click", () => {
+          const row = button.closest("tr");
+          const channel = row.dataset.channel;
+
+          rows.forEach((r) => {
+            r.classList.remove("is-selected");
+            r.setAttribute("aria-selected", "false");
+          });
+          row.classList.add("is-selected");
+          row.setAttribute("aria-selected", "true");
+          explainTitle.textContent = channel;
+          announce.textContent = `Showing explanation for ${channel}`;
+        });
+      });
+
+      // Keyboard navigation for table rows
+      rows.forEach((row) => {
+        row.addEventListener("keydown", (e) => {
+          const allRows = Array.from(rows);
+          const index = allRows.indexOf(row);
+          let nextIndex = index;
+
+          if (e.key === "ArrowDown") {
+            nextIndex = Math.min(index + 1, allRows.length - 1);
+          } else if (e.key === "ArrowUp") {
+            nextIndex = Math.max(index - 1, 0);
+          } else if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            const btn = row.querySelector(".explain-trigger");
+            if (btn) btn.click();
+            return;
+          } else {
+            return;
+          }
+
+          e.preventDefault();
+          allRows[nextIndex].focus();
+        });
+      });
+
+      // Segmented control
+      segmentButtons.forEach((button) => {
+        button.addEventListener("click", () => {
+          const group = button.closest(".segmented");
+          const items = group ? group.querySelectorAll("button") : segmentButtons;
+          items.forEach((item) => {
+            item.classList.remove("is-active");
+            item.setAttribute("aria-selected", "false");
+          });
+          button.classList.add("is-active");
+          button.setAttribute("aria-selected", "true");
+        });
+      });
+
+      // Table scroll shadow detection
+      function updateScrollShadows() {
+        if (!tableWrap) return;
+        const el = tableWrap;
+        const tolerance = 2;
+        el.classList.toggle("is-scrolled-top", el.scrollTop > tolerance);
+        el.classList.toggle("is-scrolled-bottom",
+          el.scrollTop + el.clientHeight < el.scrollHeight - tolerance);
+      }
+
+      if (tableWrap) {
+        tableWrap.addEventListener("scroll", updateScrollShadows, { passive: true });
+        // Initial check after paint
+        requestAnimationFrame(updateScrollShadows);
+        window.addEventListener("resize", updateScrollShadows, { passive: true });
+      }
+
+      // Mobile sidebar toggle
+      function openSidebar() {
+        sidebar.classList.add("is-open");
+        sidebarBackdrop.classList.add("is-visible");
+        mobileToggle.setAttribute("aria-expanded", "true");
+        // Focus first nav item for accessibility
+        const firstNav = sidebar.querySelector(".nav-item");
+        if (firstNav) firstNav.focus();
+      }
+
+      function closeSidebar() {
+        sidebar.classList.remove("is-open");
+        sidebarBackdrop.classList.remove("is-visible");
+        mobileToggle.setAttribute("aria-expanded", "false");
+        mobileToggle.focus();
+      }
+
+      if (mobileToggle && sidebar && sidebarBackdrop) {
+        mobileToggle.addEventListener("click", () => {
+          if (sidebar.classList.contains("is-open")) {
+            closeSidebar();
+          } else {
+            openSidebar();
+          }
+        });
+
+        sidebarBackdrop.addEventListener("click", closeSidebar);
+
+        // Close on Escape
+        document.addEventListener("keydown", (e) => {
+          if (e.key === "Escape" && sidebar.classList.contains("is-open")) {
+            closeSidebar();
+          }
+        });
+
+        // Trap focus in sidebar when open
+        sidebar.addEventListener("keydown", (e) => {
+          if (e.key !== "Tab") return;
+          const focusable = sidebar.querySelectorAll(
+            'a[href], button, select, input, textarea, [tabindex]:not([tabindex="-1"])'
+          );
+          const first = focusable[0];
+          const last = focusable[focusable.length - 1];
+
+          if (e.shiftKey && document.activeElement === first) {
+            e.preventDefault();
+            last.focus();
+          } else if (!e.shiftKey && document.activeElement === last) {
+            e.preventDefault();
+            first.focus();
+          }
+        });
+      }
+
+      navItems.forEach((item) => {
+        item.addEventListener("click", (event) => {
+          event.preventDefault();
+          switchView(item.dataset.view);
+        });
+      });
+
+      window.addEventListener("hashchange", () => {
+        const nextView = window.location.hash.replace("#", "");
+        if (nextView && viewCopy[nextView]) {
+          switchView(nextView, { skipHash: true });
+        }
+      });
+
+      const initialView = window.location.hash.replace("#", "");
+      if (initialView && viewCopy[initialView]) {
+        switchView(initialView, { skipHash: true });
+      }
+    })();
+  </script>
+</body>
+</html>

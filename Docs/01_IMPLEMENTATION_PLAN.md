@@ -108,6 +108,14 @@ running on the operator's workstation.
   (`Docs/superpowers/runlog/2026-05-21-phase-4.md`).
 - ✅ PR #38: `.gitignore` adds `Docs/Youtube Project/` (local Obsidian
   vault) and `.vite/` (Vite dev cache).
+- ✅ PR #39: Soft-dark mockup variant + OFL fonts —
+  `mockups/ums-smart-revenue-command-center-soft-dark.html`,
+  `mockups/qa/ums-command-center-soft-dark-*.png` (9 QA screenshots),
+  `mockups/qa/generate-screenshots-soft-dark.py`, and `mockups/FontsGH/`
+  (Mona Sans + Monaspace Neon + Newsreader OFL-1.1 fonts with license
+  notices and README). Redistributable sibling to the canonical
+  Anthropic-licensed mockup; referenced from
+  `Docs/09_SMART_DASHBOARD_UI.md` as a visual target for Phase 5.
 
 ### Sx — Specced but not yet started
 
