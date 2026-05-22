@@ -536,6 +536,7 @@ def test_policy_gate_catches_aliased_getattr_builtins_qual(tmp_path):
         "test_builtins_getattr.py",
         """
 import builtins
+import pytest
 
 def test_revenue_contract_is_checked():
     builtins.getattr(pytest, "skip")(True, "not ready")
@@ -554,6 +555,7 @@ def test_policy_gate_catches_aliased_getattr_from_import(tmp_path):
         "test_getattr_alias_import.py",
         """
 from builtins import getattr as g
+import unittest
 
 def test_revenue_contract_is_checked():
     g(unittest, "skip")(True, "not ready")

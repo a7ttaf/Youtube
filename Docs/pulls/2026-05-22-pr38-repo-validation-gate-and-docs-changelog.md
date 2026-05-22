@@ -14,7 +14,7 @@
 - `backend/ums_smart_revenue/devtools/__init__.py` — package marker (1 line).
 - `backend/ums_smart_revenue/devtools/quality_gate.py` — gate command builder + runner (136 lines).
 - `backend/ums_smart_revenue/devtools/pytest_policy_gate.py` — AST skip/xfail/unittest-SkipTest/expectedFailure/self.skipTest policy enforcer with import-alias, local-alias, wildcard-import, submodule-canonicalization, marker-object, `builtins.getattr`, tuple/list-destructuring, scoped string-constant, attribute-backed `getattr`, and module-scope `pytest_plugins` module resolution, including augmented assignments and control-flow declarations; scans __init__.py, test files, conftest, and declared pytest plugin modules (574 lines).
-- `tests/devtools/test_pytest_policy_gate.py` — 29 policy gate tests (628 lines).
+- `tests/devtools/test_pytest_policy_gate.py` — 29 policy gate tests (630 lines).
 - `tests/devtools/test_policy_gate_edge_cases.py` — 13 policy edge-case tests (293 lines).
 - `tests/devtools/test_quality_gate.py` — 5 quality gate tests (175 lines).
 
