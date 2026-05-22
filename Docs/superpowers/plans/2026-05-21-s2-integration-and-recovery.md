@@ -1477,7 +1477,7 @@ off `origin/main` @ `96dbe73`. Run log:
 `Docs/superpowers/runlog/2026-05-21-phase-6.md`.
 
 Three deliberate deviations from the checklist below, recorded in the run
-log:
+log in the same order:
 
 1. **Marker set** switched from `✅ shipped / ⚠️ partial` to the more
    specific `✅ PR #N / ⏳ PR #N — remaining: <note> / 🗑️ removed in
