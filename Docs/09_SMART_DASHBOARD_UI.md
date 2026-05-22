@@ -136,3 +136,27 @@ Channel report
 - Every number can be explained.
 - Alerts appear before exports.
 - Exports include warnings and confidence notes when needed.
+
+## Visual reference
+
+Two static HTML mockups live in `mockups/` as visual targets for Phase 5
+implementation. Both render the same product surfaces (Revenue Command
+Center, Channel Revenue Table, Company / Sector Comparison, Smart Issue
+Panel, Outside-CMS Monitor, Monthly Close, Export Center) and the same
+role-restricted views.
+
+| Mockup | Stack | License posture |
+|---|---|---|
+| `mockups/ums-smart-revenue-command-center.html` | Anthropic Sans/Serif/Mono from `mockups/FontsPP/` | Canonical Anthropic-licensed reference. |
+| `mockups/ums-smart-revenue-command-center-soft-dark.html` | Mona Sans + Monaspace Neon + Newsreader from `mockups/FontsGH/` | OFL-1.1 sibling; redistributable variant. |
+
+Each mockup has matching QA screenshots in `mockups/qa/` (one per role
+and section) captured by `mockups/qa/generate-screenshots.py` (canonical)
+and `mockups/qa/generate-screenshots-soft-dark.py` (soft dark). Both
+generators follow the same `roleSelect` + page-hash drive contract so
+they stay parallel.
+
+The canonical mockup remains the authoritative visual reference per
+`DESIGN.md`. The soft-dark variant exists so the design can be shared
+and reviewed externally without bundling proprietary fonts; it is not a
+new design direction.

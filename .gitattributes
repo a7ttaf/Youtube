@@ -7,3 +7,10 @@
 # check on these paths so `git diff --check` does not flag upstream
 # artifacts.
 .agents/** -whitespace
+
+# Vendored OFL-1.1 font license text. Must be preserved verbatim per the
+# license; upstream contains trailing whitespace on at least one line.
+# Source: SIL OFL 1.1 license body shipped alongside Mona Sans,
+# Monaspace, and Newsreader. See mockups/FontsGH/README.md for family
+# sources and license posture.
+mockups/FontsGH/LICENSE-*.txt -whitespace
