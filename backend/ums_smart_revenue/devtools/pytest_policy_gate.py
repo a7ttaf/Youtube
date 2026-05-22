@@ -20,8 +20,11 @@ FORBIDDEN_SYMBOLS = frozenset(
         "pytest.skip",
         "pytest.xfail",
         "self.skipTest",
+        "super.skipTest",
         "unittest.skip",
         "unittest.SkipTest",
+        "unittest.case.SkipTest",
+        "unittest.TestCase.skipTest",
         "unittest.expectedFailure",
         "unittest.skipIf",
         "unittest.skipUnless",
@@ -291,6 +294,9 @@ def _qualified_name(node: ast.AST, import_aliases: dict[str, str]) -> str:
     if isinstance(node, ast.Attribute):
         parent = _qualified_name(node.value, import_aliases)
         return f"{parent}.{node.attr}" if parent else node.attr
+    if isinstance(node, ast.Call):
+        if isinstance(node.func, ast.Name) and node.func.id == "super":
+            return "super"
     return ""
 
 

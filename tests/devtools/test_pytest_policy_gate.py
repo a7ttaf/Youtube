@@ -488,3 +488,62 @@ def test_mark_xfail_is_blocked():
     symbols = {violation.symbol for violation in violations}
     assert "pytest.mark.skip" in symbols
     assert "pytest.mark.xfail" in symbols
+
+
+def test_policy_gate_catches_super_skip_test(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_super_skip.py",
+        """
+import unittest
+
+
+class TestRevenue(unittest.TestCase):
+    def test_revenue_contract_is_checked(self):
+        super().skipTest("not ready")
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "super.skipTest"
+
+
+def test_policy_gate_catches_unittest_testcase_skip_test(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_testcase_skip.py",
+        """
+import unittest
+
+
+class TestRevenue(unittest.TestCase):
+    def test_revenue_contract_is_checked(self):
+        unittest.TestCase.skipTest(self, "not ready")
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "unittest.TestCase.skipTest"
+
+
+def test_policy_gate_catches_unittest_case_skip_test_via_getattr(tmp_path):
+    write_test_file(
+        tmp_path,
+        "test_case_skipTest.py",
+        """
+import unittest.case
+
+
+def test_revenue_contract_is_checked():
+    raise unittest.case.SkipTest("not ready")
+""",
+    )
+
+    violations = find_policy_violations(tmp_path)
+
+    assert len(violations) == 1
+    assert violations[0].symbol == "unittest.case.SkipTest"
