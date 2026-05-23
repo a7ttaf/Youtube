@@ -11,6 +11,9 @@ from ums_smart_revenue.connectors.google_source_parsers.adsense_management impor
 from ums_smart_revenue.connectors.google_source_parsers.base import (
     ParserError,
     SourceRowParser,
+    require_dict,
+    require_int,
+    require_str,
 )
 from ums_smart_revenue.connectors.google_source_parsers.source_row_keys import (
     build_source_row_key,
@@ -29,4 +32,7 @@ __all__ = [
     "YouTubeAnalyticsParser",
     "YouTubeReportingParser",
     "build_source_row_key",
+    "require_dict",
+    "require_int",
+    "require_str",
 ]

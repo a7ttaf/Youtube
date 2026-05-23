@@ -13,7 +13,11 @@ from decimal import Decimal
 from typing import Final
 from uuid import UUID
 
-from ums_smart_revenue.connectors.google_source_parsers.base import ParserError
+from ums_smart_revenue.connectors.google_source_parsers.base import (
+    ParserError,
+    require_dict,
+    require_str,
+)
 from ums_smart_revenue.connectors.google_source_parsers.source_row_keys import (
     build_source_row_key,
 )
@@ -41,20 +45,20 @@ class AdSenseManagementParser:
         *,
         tenant_id: UUID,
     ) -> Iterable[ParsedSourceRow]:
-        request = self._require_dict(payload, "request")
+        request = require_dict(payload, "request")
         headers = payload.get("headers")
         rows = payload.get("rows")
-        report_id = self._require_str(payload, "report_id")
+        report_id = require_str(payload, "report_id")
         if not isinstance(headers, list):
             raise ParserError("headers must be a list")
         if not isinstance(rows, list):
             raise ParserError("rows must be a list")
 
-        account_raw = self._require_str(request, "accountId")
+        account_raw = require_str(request, "accountId")
         account_id = account_raw.removeprefix("accounts/")
-        period_start = self._parse_iso_date(self._require_dict(self._require_dict(request, "dateRange"), "startDate"))
-        period_end = self._parse_iso_date(self._require_dict(self._require_dict(request, "dateRange"), "endDate"))
-        currency = self._require_str(request, "currencyCode")
+        period_start = self._parse_iso_date(require_dict(require_dict(request, "dateRange"), "startDate"))
+        period_end = self._parse_iso_date(require_dict(require_dict(request, "dateRange"), "endDate"))
+        currency = require_str(request, "currencyCode")
 
         dim_names = [
             h["name"] for h in headers
@@ -105,20 +109,6 @@ class AdSenseManagementParser:
                     source_report_id=report_id,
                     raw_payload={"dimensions": dim_values, "metric": metric_name, "value": raw_value},
                 )
-
-    @staticmethod
-    def _require_dict(d: dict[str, object], key: str) -> dict[str, object]:
-        value = d.get(key)
-        if not isinstance(value, dict):
-            raise ParserError(f"missing or non-dict field: {key!r}")
-        return value
-
-    @staticmethod
-    def _require_str(d: dict[str, object], key: str) -> str:
-        value = d.get(key)
-        if not isinstance(value, str):
-            raise ParserError(f"missing or non-str field: {key!r}")
-        return value
 
     @staticmethod
     def _parse_iso_date(d: dict[str, object]) -> date:

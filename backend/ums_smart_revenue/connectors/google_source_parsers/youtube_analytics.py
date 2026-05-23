@@ -11,7 +11,11 @@ from decimal import Decimal
 from typing import Final
 from uuid import UUID
 
-from ums_smart_revenue.connectors.google_source_parsers.base import ParserError
+from ums_smart_revenue.connectors.google_source_parsers.base import (
+    ParserError,
+    require_dict,
+    require_str,
+)
 from ums_smart_revenue.connectors.google_source_parsers.source_row_keys import (
     build_source_row_key,
 )
@@ -42,7 +46,7 @@ class YouTubeAnalyticsParser:
         *,
         tenant_id: UUID,
     ) -> Iterable[ParsedSourceRow]:
-        request = self._require_dict(payload, "query_request")
+        request = require_dict(payload, "query_request")
         column_headers = payload.get("columnHeaders")
         rows = payload.get("rows")
         if not isinstance(column_headers, list):
@@ -50,12 +54,12 @@ class YouTubeAnalyticsParser:
         if not isinstance(rows, list):
             raise ParserError("rows must be a list")
 
-        period_start = date.fromisoformat(self._require_str(request, "startDate"))
-        period_end = date.fromisoformat(self._require_str(request, "endDate"))
-        currency = self._require_str(request, "currency")
-        metrics_csv = self._require_str(request, "metrics")
-        dimensions_csv = self._require_str(request, "dimensions")
-        ids = self._require_str(request, "ids")
+        period_start = date.fromisoformat(require_str(request, "startDate"))
+        period_end = date.fromisoformat(require_str(request, "endDate"))
+        currency = require_str(request, "currency")
+        metrics_csv = require_str(request, "metrics")
+        dimensions_csv = require_str(request, "dimensions")
+        ids = require_str(request, "ids")
         # FIX: Include `ids` in query_signature so two payloads identical except
         # for the contentOwner/channel account produce distinct source_row_keys.
         # Without this, the repo PK (tenant_id, source_system, source_row_key)
@@ -120,17 +124,3 @@ class YouTubeAnalyticsParser:
                     source_report_id=None,
                     raw_payload={"dimensions": dim_values, "metric": metric_name, "value": raw_value},
                 )
-
-    @staticmethod
-    def _require_dict(d: dict[str, object], key: str) -> dict[str, object]:
-        value = d.get(key)
-        if not isinstance(value, dict):
-            raise ParserError(f"missing or non-dict field: {key!r}")
-        return value
-
-    @staticmethod
-    def _require_str(d: dict[str, object], key: str) -> str:
-        value = d.get(key)
-        if not isinstance(value, str):
-            raise ParserError(f"missing or non-str field: {key!r}")
-        return value

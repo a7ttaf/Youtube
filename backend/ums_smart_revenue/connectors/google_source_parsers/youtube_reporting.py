@@ -10,7 +10,12 @@ from datetime import date
 from decimal import Decimal
 from uuid import UUID
 
-from ums_smart_revenue.connectors.google_source_parsers.base import ParserError
+from ums_smart_revenue.connectors.google_source_parsers.base import (
+    ParserError,
+    require_dict,
+    require_int,
+    require_str,
+)
 from ums_smart_revenue.connectors.google_source_parsers.source_row_keys import (
     build_source_row_key,
 )
@@ -40,22 +45,22 @@ class YouTubeReportingParser:
         *,
         tenant_id: UUID,
     ) -> Iterable[ParsedSourceRow]:
-        metadata = self._require_dict(payload, "report_metadata")
+        metadata = require_dict(payload, "report_metadata")
         rows = payload.get("rows")
         if not isinstance(rows, list):
             raise ParserError("payload['rows'] must be a list")
-        report_id = self._require_str(metadata, "report_id")
-        report_type = self._require_str(metadata, "report_type")
+        report_id = require_str(metadata, "report_id")
+        report_type = require_str(metadata, "report_type")
 
         for row in rows:
             if not isinstance(row, dict):
                 raise ParserError("each rows[*] must be a dict")
-            line_index = self._require_int(row, "line_index")
-            date_range = self._require_dict(row, "date_range")
-            period_start = date.fromisoformat(self._require_str(date_range, "start"))
-            period_end = date.fromisoformat(self._require_str(date_range, "end"))
-            dimensions = self._require_dict(row, "dimensions")
-            metrics = self._require_dict(row, "metrics")
+            line_index = require_int(row, "line_index")
+            date_range = require_dict(row, "date_range")
+            period_start = date.fromisoformat(require_str(date_range, "start"))
+            period_end = date.fromisoformat(require_str(date_range, "end"))
+            dimensions = require_dict(row, "dimensions")
+            metrics = require_dict(row, "metrics")
 
             channel = dimensions.get("channel")
             content_owner = dimensions.get("content_owner")
@@ -93,24 +98,3 @@ class YouTubeReportingParser:
                 source_report_id=report_id,
                 raw_payload=dict(row),
             )
-
-    @staticmethod
-    def _require_dict(d: dict[str, object], key: str) -> dict[str, object]:
-        value = d.get(key)
-        if not isinstance(value, dict):
-            raise ParserError(f"missing or non-dict field: {key!r}")
-        return value
-
-    @staticmethod
-    def _require_str(d: dict[str, object], key: str) -> str:
-        value = d.get(key)
-        if not isinstance(value, str):
-            raise ParserError(f"missing or non-str field: {key!r}")
-        return value
-
-    @staticmethod
-    def _require_int(d: dict[str, object], key: str) -> int:
-        value = d.get(key)
-        if not isinstance(value, int):
-            raise ParserError(f"missing or non-int field: {key!r}")
-        return value
