@@ -342,4 +342,4 @@ stuck on the bootstrap slug for every subsequent call.
 - `python -m pytest -q` → **821 passed**.
 - `npm --prefix frontend run test` → **32 passed** (4 + 23 + 5 across
   `TenantContext`, `client`, `AppShell`; +4 from this follow-up).
-- `git diff --check` → clean (LF/CRLF warnings only).
+- `git diff --check` → LF/CRLF warnings only (no whitespace errors that fail the gate).
