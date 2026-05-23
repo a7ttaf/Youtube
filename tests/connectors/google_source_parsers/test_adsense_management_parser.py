@@ -69,6 +69,40 @@ def test_earnings_and_payment_keys_differ() -> None:
     assert not (set(r.source_row_key for r in e) & set(r.source_row_key for r in p))
 
 
+def test_mixed_settled_and_estimated_metrics_are_labeled_per_metric() -> None:
+    """A single AdSense report containing both a settled (PAID_AMOUNT) and an
+    estimated metric must label each emitted row by its own metric.
+
+    Regression: the old report-level any()-based derivation tagged every row
+    'settled'/'payment_report' as soon as one settled metric was present,
+    mislabeling the estimated rows.
+    """
+    payload = {
+        "request": {
+            "accountId": "accounts/pub-test-001",
+            "dateRange": {
+                "startDate": {"year": 2026, "month": 4, "day": 1},
+                "endDate": {"year": 2026, "month": 4, "day": 30},
+            },
+            "currencyCode": "USD",
+        },
+        "report_id": "adsense-mixed-2026-04",
+        "headers": [
+            {"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "USD"},
+            {"name": "ESTIMATED_EARNINGS", "type": "METRIC_CURRENCY", "currencyCode": "USD"},
+        ],
+        "rows": [
+            {"cells": [{"value": "500.000000"}, {"value": "123.456789"}]},
+        ],
+    }
+    rows = list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+    by_metric = {r.metric_key: r for r in rows}
+    assert by_metric["PAID_AMOUNT"].value_kind == "settled"
+    assert by_metric["PAID_AMOUNT"].report_type == "payment_report"
+    assert by_metric["ESTIMATED_EARNINGS"].value_kind == "estimated"
+    assert by_metric["ESTIMATED_EARNINGS"].report_type == "earnings_report"
+
+
 def test_rejects_non_finite_amount() -> None:
     """NaN Decimal strings must fail at the parser, not downstream."""
     payload = _load("sample_earnings_report_2026_04.json")

@@ -6,13 +6,13 @@ is always 'estimated' because Analytics never returns settled values.
 """
 
 from collections.abc import Iterable
-from datetime import date
 from typing import Final
 from uuid import UUID
 
 from ums_smart_revenue.connectors.google_source_parsers.base import (
     ParserError,
     parse_decimal_amount,
+    parse_iso_date,
     require_dict,
     require_str,
 )
@@ -54,8 +54,8 @@ class YouTubeAnalyticsParser:
         if not isinstance(rows, list):
             raise ParserError("rows must be a list")
 
-        period_start = date.fromisoformat(require_str(request, "startDate"))
-        period_end = date.fromisoformat(require_str(request, "endDate"))
+        period_start = parse_iso_date(require_str(request, "startDate"), field="startDate")
+        period_end = parse_iso_date(require_str(request, "endDate"), field="endDate")
         currency = require_str(request, "currency")
         metrics_csv = require_str(request, "metrics")
         dimensions_csv = require_str(request, "dimensions")
@@ -66,14 +66,23 @@ class YouTubeAnalyticsParser:
         # silently collapses cross-account data in a multi-CMS tenant.
         query_signature = f"{ids}|{metrics_csv}|{dimensions_csv}"
 
-        dimension_names = [
-            h["name"] for h in column_headers
-            if isinstance(h, dict) and h.get("columnType") == "DIMENSION"
-        ]
-        metric_names = [
-            h["name"] for h in column_headers
-            if isinstance(h, dict) and h.get("columnType") == "METRIC"
-        ]
+        # Validate header shape before indexing: a typed header missing its
+        # name must raise the parser's typed ParserError, not a bare KeyError.
+        dimension_names: list[str] = []
+        metric_names: list[str] = []
+        for h in column_headers:
+            if not isinstance(h, dict):
+                raise ParserError("each columnHeaders[*] must be an object")
+            column_type = h.get("columnType")
+            if column_type not in {"DIMENSION", "METRIC"}:
+                continue
+            name = h.get("name")
+            if not isinstance(name, str):
+                raise ParserError("each DIMENSION/METRIC header requires a string name")
+            if column_type == "DIMENSION":
+                dimension_names.append(name)
+            else:
+                metric_names.append(name)
 
         for data_row in rows:
             if not isinstance(data_row, list):

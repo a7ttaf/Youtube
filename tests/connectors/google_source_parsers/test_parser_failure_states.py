@@ -67,3 +67,112 @@ def test_adsense_rejects_missing_date_range() -> None:
     }
     with pytest.raises(ParserError):
         list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_youtube_reporting_rejects_boolean_line_index() -> None:
+    """bool is a subclass of int; True must not be silently treated as 1."""
+    payload = {
+        "report_metadata": {"report_id": "r", "report_type": "t"},
+        "rows": [{
+            "line_index": True,
+            "date_range": {"start": "2026-04-01", "end": "2026-04-30"},
+            "dimensions": {"channel": "UC_x", "content_owner": "cms-1"},
+            "metrics": {"estimatedRevenue": "10.00", "currencyCode": "USD"},
+        }],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_youtube_reporting_rejects_malformed_date() -> None:
+    """date.fromisoformat ValueError must surface as ParserError."""
+    payload = {
+        "report_metadata": {"report_id": "r", "report_type": "t"},
+        "rows": [{
+            "line_index": 0,
+            "date_range": {"start": "2026-13-01", "end": "2026-04-30"},  # month 13
+            "dimensions": {"channel": "UC_x", "content_owner": "cms-1"},
+            "metrics": {"estimatedRevenue": "10.00", "currencyCode": "USD"},
+        }],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_youtube_analytics_rejects_malformed_date() -> None:
+    payload = {
+        "query_request": {
+            "ids": "contentOwner==cms-1",
+            "startDate": "not-a-date",
+            "endDate": "2026-04-30",
+            "metrics": "estimatedRevenue",
+            "dimensions": "channel",
+            "currency": "USD",
+        },
+        "columnHeaders": [
+            {"name": "channel", "columnType": "DIMENSION", "dataType": "STRING"},
+            {"name": "estimatedRevenue", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [["UC_x", "100.00"]],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_youtube_analytics_rejects_header_missing_name() -> None:
+    """A typed columnHeader without a name must raise ParserError, not KeyError."""
+    payload = {
+        "query_request": {
+            "ids": "contentOwner==cms-1",
+            "startDate": "2026-04-01",
+            "endDate": "2026-04-30",
+            "metrics": "estimatedRevenue",
+            "dimensions": "channel",
+            "currency": "USD",
+        },
+        "columnHeaders": [
+            {"columnType": "DIMENSION", "dataType": "STRING"},  # missing 'name'
+            {"name": "estimatedRevenue", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [["UC_x", "100.00"]],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_adsense_rejects_invalid_calendar_date() -> None:
+    """date(year, month, day) ValueError must surface as ParserError."""
+    payload = {
+        "request": {
+            "accountId": "accounts/pub-1",
+            "dateRange": {
+                "startDate": {"year": 2026, "month": 13, "day": 1},  # month 13
+                "endDate": {"year": 2026, "month": 4, "day": 30},
+            },
+            "currencyCode": "USD",
+        },
+        "report_id": "r",
+        "headers": [{"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "USD"}],
+        "rows": [],
+    }
+    with pytest.raises(ParserError):
+        list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_adsense_rejects_header_missing_name() -> None:
+    """A typed AdSense header without a name must raise ParserError, not KeyError."""
+    payload = {
+        "request": {
+            "accountId": "accounts/pub-1",
+            "dateRange": {
+                "startDate": {"year": 2026, "month": 4, "day": 1},
+                "endDate": {"year": 2026, "month": 4, "day": 30},
+            },
+            "currencyCode": "USD",
+        },
+        "report_id": "r",
+        "headers": [{"type": "METRIC_CURRENCY", "currencyCode": "USD"}],  # missing 'name'
+        "rows": [],
+    }
+    with pytest.raises(ParserError):
+        list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))

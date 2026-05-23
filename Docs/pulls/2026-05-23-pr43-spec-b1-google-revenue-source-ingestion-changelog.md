@@ -66,6 +66,6 @@ Nothing. Legacy `currency_exchange_rates` table, `CurrencyExchangeRateORM`, `fin
 
 ## Pytest delta
 
-- Pre-PR baseline (PR #41 / pre-PR #42 branch creation): 821 tests
+- Pre-PR #43 baseline (post-PR #42 docs-only merge): 821 tests
 - Post-PR #43: 910 tests
 - **Net new: +89 tests** across 17 new test files + extensions to existing test files.

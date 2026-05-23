@@ -119,3 +119,52 @@ def test_key_length_is_64_chars() -> None:
         dimensions={},
     )
     assert len(key) == 64
+
+
+def test_dimension_values_with_delimiters_do_not_collide() -> None:
+    """Regression: unescaped '&'/'=' in the old canonical form let two
+    distinct dimension sets serialise identically and silently overwrite
+    each other via the unique upsert key.
+
+    {"a": "b", "c": "d"} and {"a": "b&c=d"} both joined to the string
+    "a=b&c=d" before this fix.
+    """
+    two_dimensions = build_source_row_key(
+        source_system="youtube_reporting",
+        source_report_id="r",
+        line_index=0,
+        dimensions={"a": "b", "c": "d"},
+    )
+    one_dimension = build_source_row_key(
+        source_system="youtube_reporting",
+        source_report_id="r",
+        line_index=0,
+        dimensions={"a": "b&c=d"},
+    )
+    assert two_dimensions != one_dimension
+
+
+def test_field_boundary_shift_does_not_collide() -> None:
+    """Regression: the old '|'-joined canonical form let a value containing
+    '|' shift across a field boundary and collide. For AdSense,
+    (source_report_id='a', account_id='b|c') and
+    (source_report_id='a|b', account_id='c') both produced
+    "...|a|b|c|..." before this fix.
+    """
+    account_owns_pipe = build_source_row_key(
+        source_system="adsense_management",
+        source_report_id="a",
+        account_id="b|c",
+        period_start="2026-04-01",
+        period_end="2026-04-30",
+        dimensions={},
+    )
+    report_owns_pipe = build_source_row_key(
+        source_system="adsense_management",
+        source_report_id="a|b",
+        account_id="c",
+        period_start="2026-04-01",
+        period_end="2026-04-30",
+        dimensions={},
+    )
+    assert account_owns_pipe != report_owns_pipe

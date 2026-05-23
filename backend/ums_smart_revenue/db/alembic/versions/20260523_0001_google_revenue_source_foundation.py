@@ -145,7 +145,12 @@ def _create_google_revenue_source_rows_table() -> None:
             "raw_payload",
             sa.JSON().with_variant(postgresql.JSONB(), "postgresql"),
             nullable=False,
-            server_default=sa.text("'{}'::jsonb"),
+            # Portable empty-JSON default. PostgreSQL coerces the '{}' literal
+            # to jsonb on assignment, and it stays valid under non-Postgres
+            # dialects (e.g. SQLite migration testing). Matches the ORM model's
+            # server_default in db/source_models.py; a '{}'::jsonb cast here
+            # would diverge from the model and break non-Postgres DDL.
+            server_default=sa.text("'{}'"),
         ),
         sa.Column("imported_by", sa.Uuid(), nullable=True),
         sa.Column(

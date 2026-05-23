@@ -7,6 +7,7 @@ identifiers.
 """
 
 import hashlib
+import json
 from typing import Final
 
 _PREFIX: Final[dict[str, str]] = {
@@ -23,12 +24,18 @@ _PREFIX: Final[dict[str, str]] = {
 #          repositories never re-derive it.
 # Database/ORM: None directly. The output is written to
 #               google_revenue_source_rows.source_row_key by the repository.
-# Standards: Pure function. Source-system-specific canonical string before
-#            hashing so identical identifiers in two different systems can
-#            never collide.
+# Standards: Pure function. The canonical input is a structured JSON document
+#            (json.dumps with sort_keys + tight separators), NOT a
+#            delimiter-joined string. JSON quoting/escaping makes field and
+#            dimension boundaries unambiguous, so two distinct rows can never
+#            serialise to the same canonical form (no |/&/= collision). The
+#            source-system prefix keeps identical identifiers in different
+#            systems distinct.
 # Blast Radius: Idempotency of source-row ingestion depends on this hash
-#               being stable across runs. No graph projection impact
-#               detected.
+#               being stable across runs. google_revenue_source_rows is new
+#               in this PR with no persisted keys, so changing the
+#               canonical form has no production-data impact. No graph
+#               projection impact detected.
 # Connections:
 #   - File: backend/ums_smart_revenue/connectors/google_source_rows/dataclasses.py
 #     -> ParsedSourceRow.source_row_key consumer.
@@ -41,38 +48,44 @@ def build_source_row_key(*, source_system: str, **fields: object) -> str:
     prefix = _PREFIX[source_system]
 
     if source_system == "youtube_reporting":
-        canonical = (
-            f"{prefix}|"
-            f"{fields['source_report_id']}|"
-            f"{fields['line_index']}|"
-            f"{_canonical_dimensions(fields.get('dimensions') or {})}"
-        )
+        canonical_payload: dict[str, object] = {
+            "prefix": prefix,
+            "source_report_id": fields["source_report_id"],
+            "line_index": fields["line_index"],
+            "dimensions": _canonical_dimensions(fields.get("dimensions") or {}),
+        }
     elif source_system == "youtube_analytics":
-        canonical = (
-            f"{prefix}|"
-            f"{fields['query_signature']}|"
-            f"{fields['period_start']}|"
-            f"{fields['period_end']}|"
-            f"{_canonical_dimensions(fields.get('dimensions') or {})}"
-        )
+        canonical_payload = {
+            "prefix": prefix,
+            "query_signature": fields["query_signature"],
+            "period_start": fields["period_start"],
+            "period_end": fields["period_end"],
+            "dimensions": _canonical_dimensions(fields.get("dimensions") or {}),
+        }
     else:  # adsense_management
-        canonical = (
-            f"{prefix}|"
-            f"{fields['source_report_id']}|"
-            f"{fields['account_id']}|"
-            f"{fields['period_start']}|"
-            f"{fields['period_end']}|"
-            f"{_canonical_dimensions(fields.get('dimensions') or {})}"
-        )
+        canonical_payload = {
+            "prefix": prefix,
+            "source_report_id": fields["source_report_id"],
+            "account_id": fields["account_id"],
+            "period_start": fields["period_start"],
+            "period_end": fields["period_end"],
+            "dimensions": _canonical_dimensions(fields.get("dimensions") or {}),
+        }
 
+    # sort_keys gives cross-process stability; tight separators keep the digest
+    # input compact. JSON escaping is what removes the delimiter-collision risk.
+    canonical = json.dumps(canonical_payload, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
-def _canonical_dimensions(dimensions: dict[str, object]) -> str:
-    """Stable tuple representation of a dimensions dict.
+def _canonical_dimensions(dimensions: dict[str, object]) -> list[list[object]]:
+    """Stable, key-sorted [key, value] pairs for a dimensions dict.
 
-    Dict iteration order is insertion-stable in CPython but this is a
-    cross-process key; we sort by key to guarantee stability across runs.
+    Returned as a JSON-serialisable list of [key, value] lists so the caller
+    can embed it inside the canonical JSON payload. Sorting by key guarantees
+    stability across runs regardless of dict insertion order. Because the
+    surrounding json.dumps escapes every key and value, a dimension value
+    containing '&', '=', or '|' can no longer collide with a different
+    dimension set (the previous "&".join(f"{k}={v}") form could).
     """
-    sorted_items = sorted(dimensions.items(), key=lambda kv: kv[0])
-    return "&".join(f"{k}={v}" for k, v in sorted_items)
+    return [[key, value] for key, value in sorted(dimensions.items(), key=lambda kv: kv[0])]

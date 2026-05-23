@@ -3,7 +3,7 @@ source_models.GoogleRevenueSourceRowORM.
 
 These are SQLite-friendly assertions via metadata.create_all(). The
 PostgreSQL-backed migration round-trip lives at
-tests/db/test_google_revenue_source_migration.py.
+tests/db/test_google_revenue_source_migration_postgres.py.
 """
 
 from collections.abc import Iterator

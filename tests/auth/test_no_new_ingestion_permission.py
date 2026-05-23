@@ -1,8 +1,10 @@
-"""B1 does not introduce a new permission for Google source-ingestion.
+"""B1 does not modify the permission set.
 
 Existing connectors.run_jobs covers ingestion job authorization. This
-test pins the contract: no new connectors.* or ingestion.* permission
-appeared in this PR.
+test pins the entire permission set as a B1 scope invariant: no permission
+values added or removed relative to the PR #41 baseline. (The assertions
+below intentionally guard the full set, not only connectors.*/ingestion.*,
+so any out-of-scope permission drift in B1 is caught.)
 """
 
 from ums_smart_revenue.auth.permissions import Permission

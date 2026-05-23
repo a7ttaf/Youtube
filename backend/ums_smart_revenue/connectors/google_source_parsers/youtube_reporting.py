@@ -6,12 +6,12 @@ a dict. Emits ParsedSourceRow instances with value_kind='estimated'.
 """
 
 from collections.abc import Iterable
-from datetime import date
 from uuid import UUID
 
 from ums_smart_revenue.connectors.google_source_parsers.base import (
     ParserError,
     parse_decimal_amount,
+    parse_iso_date,
     require_dict,
     require_int,
     require_str,
@@ -57,8 +57,8 @@ class YouTubeReportingParser:
                 raise ParserError("each rows[*] must be a dict")
             line_index = require_int(row, "line_index")
             date_range = require_dict(row, "date_range")
-            period_start = date.fromisoformat(require_str(date_range, "start"))
-            period_end = date.fromisoformat(require_str(date_range, "end"))
+            period_start = parse_iso_date(require_str(date_range, "start"), field="date_range.start")
+            period_end = parse_iso_date(require_str(date_range, "end"), field="date_range.end")
             dimensions = require_dict(row, "dimensions")
             metrics = require_dict(row, "metrics")
 

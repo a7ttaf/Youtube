@@ -18,4 +18,7 @@ def test_manage_fx_rates_permission_does_not_exist() -> None:
 
 def test_no_finance_manage_fx_rates_value_in_permissions() -> None:
     values = {p.value for p in Permission}
-    assert "finance.manage_fx_rates" not in values
+    assert "finance.manage_fx_rates" not in values, (
+        "B1 spec section 3 prohibits the finance.manage_fx_rates permission value. "
+        "If a later spec introduces FX management, remove this guard as part of that spec."
+    )

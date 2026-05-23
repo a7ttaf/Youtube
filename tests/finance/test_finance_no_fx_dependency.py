@@ -20,11 +20,19 @@ def _module_imports_currency_exchange_rate_orm(path: Path) -> bool:
     source = path.read_text(encoding="utf-8")
     tree = ast.parse(source, filename=str(path))
     for node in ast.walk(tree):
+        # `from ... import CurrencyExchangeRateORM [as anything]`: matching on
+        # alias.name (the original symbol) already covers aliased imports.
         if isinstance(node, ast.ImportFrom):
             for alias in node.names:
                 if alias.name == "CurrencyExchangeRateORM":
                     return True
+        # Qualified access: `module.CurrencyExchangeRateORM`.
         if isinstance(node, ast.Attribute) and node.attr == "CurrencyExchangeRateORM":
+            return True
+        # Bare name: catches `from ...models import *` followed by a direct
+        # `CurrencyExchangeRateORM(...)` reference, which the ImportFrom check
+        # above cannot see because alias.name is "*".
+        if isinstance(node, ast.Name) and node.id == "CurrencyExchangeRateORM":
             return True
     return False
 

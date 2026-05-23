@@ -60,16 +60,23 @@ class AdSenseManagementParser:
         period_end = self._parse_iso_date(require_dict(require_dict(request, "dateRange"), "endDate"))
         currency = require_str(request, "currencyCode")
 
-        dim_names = [
-            h["name"] for h in headers
-            if isinstance(h, dict) and h.get("type") == "DIMENSION"
-        ]
-        metric_names = [
-            h["name"] for h in headers
-            if isinstance(h, dict) and h.get("type") == "METRIC_CURRENCY"
-        ]
-        report_type = "payment_report" if any(m in _SETTLED_METRICS for m in metric_names) else "earnings_report"
-        default_value_kind = "settled" if report_type == "payment_report" else "estimated"
+        # Validate header shape before indexing: a typed header missing its
+        # name must raise the parser's typed ParserError, not a bare KeyError.
+        dim_names: list[str] = []
+        metric_names: list[str] = []
+        for h in headers:
+            if not isinstance(h, dict):
+                raise ParserError("each headers[*] must be an object")
+            header_type = h.get("type")
+            if header_type not in {"DIMENSION", "METRIC_CURRENCY"}:
+                continue
+            name = h.get("name")
+            if not isinstance(name, str):
+                raise ParserError("each DIMENSION/METRIC_CURRENCY header requires a string name")
+            if header_type == "DIMENSION":
+                dim_names.append(name)
+            else:
+                metric_names.append(name)
 
         for raw_row in rows:
             if not isinstance(raw_row, dict):
@@ -84,6 +91,14 @@ class AdSenseManagementParser:
             for metric_name, raw_value in metric_values.items():
                 if not isinstance(raw_value, str):
                     raise ParserError(f"metric {metric_name} value must be a string")
+                # Derive value_kind + report_type per metric, not once per
+                # report: a single AdSense report can mix settled (PAID/UNPAID)
+                # and estimated metrics. A report-level any()-based label would
+                # tag estimated rows as 'settled' and corrupt downstream
+                # payment-vs-estimate interpretation.
+                is_settled = metric_name in _SETTLED_METRICS
+                value_kind = "settled" if is_settled else "estimated"
+                report_type = "payment_report" if is_settled else "earnings_report"
                 source_row_key = build_source_row_key(
                     source_system=self.source_system,
                     source_report_id=f"{report_id}|{metric_name}",
@@ -103,7 +118,7 @@ class AdSenseManagementParser:
                     period_start=period_start,
                     period_end=period_end,
                     metric_key=metric_name,
-                    value_kind=default_value_kind,
+                    value_kind=value_kind,
                     amount_native=parse_decimal_amount(raw_value, metric_key=metric_name),
                     currency_code=currency,
                     source_report_id=report_id,
@@ -115,6 +130,16 @@ class AdSenseManagementParser:
         year = d.get("year")
         month = d.get("month")
         day = d.get("day")
-        if not all(isinstance(v, int) for v in (year, month, day)):
+        # bool is a subclass of int; exclude it so True/False can't slip
+        # through as 1/0 calendar components.
+        if not all(isinstance(v, int) and not isinstance(v, bool) for v in (year, month, day)):
             raise ParserError("dateRange.{startDate,endDate} require int year/month/day")
-        return date(year, month, day)  # type: ignore[arg-type]
+        try:
+            return date(year, month, day)  # type: ignore[arg-type]
+        except ValueError as exc:
+            # date() raises ValueError for out-of-range calendar values
+            # (e.g. month 13, day 32); surface it as the typed ParserError
+            # so malformed payloads stay on the parser's failure contract.
+            raise ParserError(
+                f"dateRange has invalid calendar date: {year:04d}-{month:02d}-{day:02d}"
+            ) from exc

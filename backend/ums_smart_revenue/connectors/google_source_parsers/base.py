@@ -7,6 +7,7 @@ Repositories never re-derive the key.
 """
 
 from collections.abc import Iterable
+from datetime import date
 from decimal import Decimal, InvalidOperation
 from typing import Protocol
 from uuid import UUID
@@ -49,9 +50,15 @@ def require_str(d: dict[str, object], key: str) -> str:
 
 
 def require_int(d: dict[str, object], key: str) -> int:
-    """Raise ParserError if d[key] is missing or not an int."""
+    """Raise ParserError if d[key] is missing or not an int.
+
+    bool is a subclass of int, so an explicit bool guard is required: without
+    it ``True``/``False`` would be accepted and silently normalised to 1/0,
+    which can collide with legitimate integer rows (e.g. line_index) and
+    corrupt source_row_key dedup.
+    """
     value = d.get(key)
-    if not isinstance(value, int):
+    if isinstance(value, bool) or not isinstance(value, int):
         raise ParserError(f"missing or non-int field: {key!r}")
     return value
 
@@ -76,6 +83,22 @@ def parse_decimal_amount(raw_value: str, *, metric_key: str) -> Decimal:
             f"metric {metric_key!r} value must be finite, got {raw_value!r}"
         )
     return amount
+
+
+def parse_iso_date(raw_value: str, *, field: str) -> date:
+    """Parse an ISO-8601 date string, raising ParserError on malformed input.
+
+    date.fromisoformat raises a bare ValueError for malformed values, which
+    would escape the parser's typed failure contract. Wrapping it here keeps
+    every parser's date handling on the ParserError path so callers can
+    translate parser failures uniformly.
+    """
+    try:
+        return date.fromisoformat(raw_value)
+    except ValueError as exc:
+        raise ParserError(
+            f"{field} must be an ISO-8601 date string, got {raw_value!r}"
+        ) from exc
 
 
 class SourceRowParser(Protocol):
