@@ -1,27 +1,17 @@
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
 
 from ums_smart_revenue.devtools.quality_gate import (
     GateCommand,
+    _resolve_npm,
     build_gate_commands,
     build_test_gate_commands,
     run_gate,
 )
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-
-
-def _resolved_npm() -> str:
-    """Resolve the npm executable; on Windows npm ships as npm.cmd."""
-    npm = shutil.which("npm") or shutil.which("npm.cmd")
-    if npm is None:
-        raise RuntimeError(
-            "npm not found on PATH; install Node.js to run frontend tests."
-        )
-    return npm
 
 RUFF_ENTRYPOINT = "import runpy; runpy.run_module('ruff', run_name='__main__')"
 PYTEST_POLICY_ENTRYPOINT = (
@@ -118,7 +108,7 @@ def test_gate_commands_cover_required_local_validation_contract():
         ),
         GateCommand(
             label="Frontend tests (Vitest)",
-            command=(_resolved_npm(), "--prefix", "frontend", "run", "test"),
+            command=(_resolve_npm(), "--prefix", "frontend", "run", "test"),
         ),
         GateCommand(
             label="Git diff whitespace check",

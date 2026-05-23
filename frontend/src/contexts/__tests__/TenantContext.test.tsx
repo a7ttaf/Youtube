@@ -15,18 +15,19 @@ describe("TenantContext", () => {
     expect(result.current.displayName).toBeNull();
   });
 
-  it("merges id and displayName when hydrate is called", () => {
+  it("merges id, displayName, and slug when hydrate is called with a non-bootstrap slug", () => {
     const { result } = renderHook(() => useTenant(), { wrapper });
+    expect(result.current.tenantSlug).toBe("ums");
     act(() => {
       result.current.hydrate({
-        id: "00000000-0000-0000-0000-000000000001",
-        slug: "ums",
-        display_name: "UMS",
+        id: "00000000-0000-0000-0000-0000000000ac",
+        slug: "acme",
+        display_name: "Acme Holdings",
       });
     });
-    expect(result.current.id).toBe("00000000-0000-0000-0000-000000000001");
-    expect(result.current.displayName).toBe("UMS");
-    expect(result.current.tenantSlug).toBe("ums");
+    expect(result.current.id).toBe("00000000-0000-0000-0000-0000000000ac");
+    expect(result.current.displayName).toBe("Acme Holdings");
+    expect(result.current.tenantSlug).toBe("acme");
   });
 
   it("throws when useTenant is called outside <TenantProvider>", () => {

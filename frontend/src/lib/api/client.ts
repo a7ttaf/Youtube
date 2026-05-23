@@ -40,10 +40,18 @@ function buildHeaders(
 }
 
 async function parseBody(res: Response): Promise<unknown> {
-  if (res.status === 204) return undefined;
+  if (res.status === 204 || res.status === 205 || res.status === 304) {
+    return undefined;
+  }
   const contentType = res.headers.get("Content-Type") ?? "";
-  if (contentType.includes("application/json")) return res.json();
-  return res.text();
+  const text = await res.text();
+  if (!contentType.includes("application/json")) return text;
+  if (text.length === 0) return undefined;
+  try {
+    return JSON.parse(text);
+  } catch {
+    return text;
+  }
 }
 
 type RequestOptions = RequestInit & { bodyIsJson?: boolean };

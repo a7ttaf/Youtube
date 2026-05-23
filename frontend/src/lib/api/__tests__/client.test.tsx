@@ -17,6 +17,7 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
+  vi.unstubAllEnvs();
 });
 
 function jsonResponse(body: unknown, init: ResponseInit = {}) {
@@ -226,5 +227,32 @@ describe("useApiClient response handling", () => {
     const { result } = renderHook(() => useApiClient(), { wrapper });
     await expect(result.current.get("/x")).rejects.toBeInstanceOf(TypeError);
     await expect(result.current.get("/x")).rejects.not.toBeInstanceOf(ApiError);
+  });
+
+  it("returns undefined for an empty 200 body that claims application/json", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response("", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const { result } = renderHook(() => useApiClient(), { wrapper });
+    const payload = await result.current.get("/x");
+    expect(payload).toBeUndefined();
+  });
+
+  it("wraps a malformed application/json 5xx body in ApiError with the raw text body", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response("<html>500 internal</html>", {
+        status: 500,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const { result } = renderHook(() => useApiClient(), { wrapper });
+    await expect(result.current.get("/x")).rejects.toMatchObject({
+      name: "ApiError",
+      status: 500,
+      body: "<html>500 internal</html>",
+    });
   });
 });

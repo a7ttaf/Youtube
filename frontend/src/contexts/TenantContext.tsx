@@ -35,6 +35,7 @@ export function TenantProvider({ children }: { children: ReactNode }) {
   const hydrate = useCallback((payload: TenantHydrationPayload) => {
     setState((previous) => ({
       ...previous,
+      tenantSlug: payload.slug,
       id: payload.id,
       displayName: payload.display_name,
     }));

@@ -194,8 +194,10 @@ Expected: Python ≥ 3.14.
 python scripts/run_validation_gate.py
 ```
 
-Expected: `808 passed in ~90s`, ruff clean, AST policy clean, both
-`git diff --check` clean.
+Expected: pytest suite passes with no failures. Ruff clean. AST policy
+clean. Both `git diff --check` invocations clean. (Exact totals and
+wall-clock time intentionally not pinned — they drift with unrelated
+tests.)
 
 Do not commit anything yet; this is just baseline verification.
 
@@ -822,8 +824,9 @@ Expected: 9 passing.
 python scripts/run_validation_gate.py
 ```
 
-Expected: 817 passed (+9 from baseline 808). Ruff clean. AST policy
-clean. Both diff checks clean.
+Expected: pytest suite passes with no failures, including the 9 new
+`/tenants/me` cases added in Tasks 1.2–1.5. Ruff clean. AST policy
+clean. Both diff checks clean. (Exact suite totals not pinned.)
 
 - [ ] **Step 6: Commit**
 
@@ -984,11 +987,12 @@ afterEach(() => {
 - [ ] **Step 3: Smoke-run Vitest with no tests**
 
 ```bash
-source ~/.bashrc && cd frontend && npm test ; cd ..
+source ~/.bashrc && cd frontend && npm test -- --passWithNoTests ; cd ..
 ```
 
-Expected: Vitest reports "No test files found" with exit code 0 (or 1
-depending on the Vitest version; either way no crash, no config error).
+Expected: Vitest exits with code 0 deterministically thanks to
+`--passWithNoTests` (added in Vitest 1.x; without it, modern Vitest
+exits 1 when no test files match). No jsdom or jest-dom config error.
 If it crashes complaining about jsdom or jest-dom, re-check Steps 1-2.
 
 - [ ] **Step 4: Commit**
