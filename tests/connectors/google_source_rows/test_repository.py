@@ -13,6 +13,7 @@ The SQLite engine is used for speed; the dialect-aware upsert helper
 """
 
 from collections.abc import Iterator
+from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import uuid4
@@ -258,3 +259,29 @@ def test_list_filters_combine(session: Session) -> None:
     )
     assert len(filtered) == 1
     assert filtered[0].source_system == "youtube_reporting"
+
+
+def test_list_for_channel_returns_only_matches(session: Session) -> None:
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+
+    def _channel_row(key: str, channel: str) -> ParsedSourceRow:
+        # dataclasses.replace produces a new frozen ParsedSourceRow with
+        # only the youtube_channel_id overridden — clearer than rebuilding
+        # every field by hand for each variant.
+        return replace(_row(source_row_key=key), youtube_channel_id=channel)
+
+    repo.upsert_many(
+        TENANT_A,
+        [
+            _channel_row("p" * 64, "UC_alpha"),
+            _channel_row("q" * 64, "UC_alpha"),
+            _channel_row("r" * 64, "UC_beta"),
+        ],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=None,
+    )
+    alpha = repo.list_for_channel(
+        TENANT_A, youtube_channel_id="UC_alpha", report_month="2026-04"
+    )
+    assert len(alpha) == 2
+    assert {r.youtube_channel_id for r in alpha} == {"UC_alpha"}
