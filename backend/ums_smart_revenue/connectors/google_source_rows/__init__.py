@@ -16,6 +16,9 @@ from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
     IsoCurrency,
     ParsedSourceRow,
 )
+from ums_smart_revenue.connectors.google_source_rows.repository import (
+    SqlAlchemyCurrenciesRepository,
+)
 
 __all__ = [
     "ALLOWED_SOURCE_SYSTEMS",
@@ -27,4 +30,5 @@ __all__ = [
     "GoogleRevenueSourceRowValidationError",
     "IsoCurrency",
     "ParsedSourceRow",
+    "SqlAlchemyCurrenciesRepository",
 ]
