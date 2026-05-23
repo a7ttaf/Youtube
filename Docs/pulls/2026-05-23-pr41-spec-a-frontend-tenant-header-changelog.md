@@ -343,3 +343,49 @@ stuck on the bootstrap slug for every subsequent call.
 - `npm --prefix frontend run test` → **32 passed** (4 + 23 + 5 across
   `TenantContext`, `client`, `AppShell`; +4 from this follow-up).
 - `git diff --check` → LF/CRLF warnings only (no whitespace errors that fail the gate).
+
+---
+
+## Follow-up after `02c724f` — Codex P2: strict JSON on success path
+
+### P2 — Reject malformed JSON in 2xx success responses
+
+Codex flagged that `parseBody` swallowed `JSON.parse` failures on the
+success path, returning raw text typed as `T`. This violated the typed
+contract of `useApiClient<T>`: callers received an HTML/error string
+where they expected a typed JSON object, processing corrupted data as
+if it were valid.
+
+- `frontend/src/lib/api/client.ts`
+  - Internal `JsonParseError` carries the malformed `rawText`.
+  - `parseBody(res, { strictJson })` rejects on malformed JSON when
+    `strictJson: true`; default behavior unchanged so the error path
+    still preserves the raw text in `ApiError.body` (matches the prior
+    CodeRabbit "preserve ApiError body" review).
+  - `request<T>` calls `parseBody(res, { strictJson: true })` on the
+    success path. A `JsonParseError` is rewrapped as
+    `ApiError(200, rawText, url)` so consumers handle it through the
+    same boundary they already use for HTTP errors; the original 2xx
+    status is preserved so consumers can distinguish "server said OK
+    but lied about JSON" from network 5xx.
+
+### Tests
+
+- `frontend/src/lib/api/__tests__/client.test.tsx`
+  - New: `rejects a malformed application/json 2xx success body via
+    ApiError so callers cannot process raw text as the typed T` — mocks
+    a `200 + Content-Type: application/json + <html>not really
+    json</html>` body, asserts `ApiError { status: 200, body:
+    "<html>not really json</html>" }`.
+  - Regression test for the error-path behavior (`wraps a malformed
+    application/json 5xx body in ApiError with the raw text body`) is
+    unchanged and still passes — the permissive default for the error
+    path is preserved.
+
+### Validation rerun
+
+- `python -m ruff check backend tests` → clean.
+- `python -m pytest -q` → **821 passed**.
+- `npm --prefix frontend run test` → **33 passed** (4 + 24 + 5 across
+  `TenantContext`, `client`, `AppShell`; +1 from this follow-up).
+- `git diff --check` → LF/CRLF warnings only (no whitespace errors that fail the gate).

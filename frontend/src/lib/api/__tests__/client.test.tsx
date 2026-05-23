@@ -287,4 +287,19 @@ describe("useApiClient response handling", () => {
       body: "<html>500 internal</html>",
     });
   });
+
+  it("rejects a malformed application/json 2xx success body via ApiError so callers cannot process raw text as the typed T", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      new Response("<html>not really json</html>", {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    const { result } = renderHook(() => useApiClient(), { wrapper });
+    await expect(result.current.get("/x")).rejects.toMatchObject({
+      name: "ApiError",
+      status: 200,
+      body: "<html>not really json</html>",
+    });
+  });
 });

@@ -50,7 +50,30 @@ function buildHeaders(
   return headers;
 }
 
-async function parseBody(res: Response): Promise<unknown> {
+type ParseBodyOptions = {
+  // When true, a malformed `application/json` body REJECTS via JsonParseError.
+  // Used on the success path so consumers cannot accidentally process raw
+  // HTML/error text as if it were a typed `T`. The error path keeps the
+  // permissive default so ApiError.body still carries the raw text for
+  // diagnostics (matches the prior CodeRabbit "preserve ApiError body"
+  // review on PR #41).
+  strictJson?: boolean;
+};
+
+class JsonParseError extends Error {
+  readonly name = "JsonParseError";
+  constructor(
+    message: string,
+    public readonly rawText: string,
+  ) {
+    super(message);
+  }
+}
+
+async function parseBody(
+  res: Response,
+  options: ParseBodyOptions = {},
+): Promise<unknown> {
   if (res.status === 204 || res.status === 205 || res.status === 304) {
     return undefined;
   }
@@ -60,7 +83,11 @@ async function parseBody(res: Response): Promise<unknown> {
   if (text.length === 0) return undefined;
   try {
     return JSON.parse(text);
-  } catch {
+  } catch (parseError) {
+    if (options.strictJson) {
+      const reason = parseError instanceof Error ? parseError.message : "parse failed";
+      throw new JsonParseError(reason, text);
+    }
     return text;
   }
 }
@@ -102,7 +129,24 @@ export function useApiClient() {
         const body = await parseBody(res);
         throw new ApiError(`${res.status} ${res.statusText}`, res.status, body, url);
       }
-      return (await parseBody(res)) as T;
+      try {
+        return (await parseBody(res, { strictJson: true })) as T;
+      } catch (parseError) {
+        if (parseError instanceof JsonParseError) {
+          // Surface malformed-JSON success bodies through the same ApiError
+          // boundary callers already handle, instead of returning raw text
+          // typed as `T`. The raw text is preserved on ApiError.body for
+          // diagnostics; the status stays the original 2xx so consumers can
+          // distinguish "server said OK but lied about JSON" from network 5xx.
+          throw new ApiError(
+            `${res.status} malformed JSON response: ${parseError.message}`,
+            res.status,
+            parseError.rawText,
+            url,
+          );
+        }
+        throw parseError;
+      }
     }
 
     return {
