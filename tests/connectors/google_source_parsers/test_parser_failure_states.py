@@ -176,3 +176,104 @@ def test_adsense_rejects_header_missing_name() -> None:
     }
     with pytest.raises(ParserError):
         list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_adsense_rejects_unsupported_header_type() -> None:
+    """An unsupported header type fails closed (ParserError) rather than being
+    skipped, which would shift cells and mislabel revenue values."""
+    payload = {
+        "request": {
+            "accountId": "accounts/pub-1",
+            "dateRange": {
+                "startDate": {"year": 2026, "month": 4, "day": 1},
+                "endDate": {"year": 2026, "month": 4, "day": 30},
+            },
+            "currencyCode": "USD",
+        },
+        "report_id": "r",
+        "headers": [
+            {"name": "CLICKS", "type": "METRIC_TALLY"},  # not dimension/currency
+            {"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "USD"},
+        ],
+        "rows": [{"cells": [{"value": "10"}, {"value": "5.00"}]}],
+    }
+    with pytest.raises(ParserError):
+        list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_youtube_analytics_rejects_unsupported_column_type() -> None:
+    """An unsupported columnType fails closed (ParserError) rather than being
+    skipped, which would misalign values with metrics."""
+    payload = {
+        "query_request": {
+            "ids": "contentOwner==cms-1",
+            "startDate": "2026-04-01",
+            "endDate": "2026-04-30",
+            "metrics": "estimatedRevenue",
+            "dimensions": "channel",
+            "currency": "USD",
+        },
+        "columnHeaders": [
+            {"name": "channel", "columnType": "DIMENSION", "dataType": "STRING"},
+            {"name": "views", "columnType": "TALLY", "dataType": "INTEGER"},  # unsupported
+            {"name": "estimatedRevenue", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [["UC_x", "1000", "100.00"]],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_youtube_analytics_rejects_multi_month_range() -> None:
+    """A query spanning more than one calendar month would mis-bucket report_month."""
+    payload = {
+        "query_request": {
+            "ids": "contentOwner==cms-1",
+            "startDate": "2026-04-01",
+            "endDate": "2026-05-31",  # crosses April -> May
+            "metrics": "estimatedRevenue",
+            "dimensions": "channel",
+            "currency": "USD",
+        },
+        "columnHeaders": [
+            {"name": "channel", "columnType": "DIMENSION", "dataType": "STRING"},
+            {"name": "estimatedRevenue", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [["UC_x", "100.00"]],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_adsense_rejects_multi_month_range() -> None:
+    """A dateRange spanning more than one calendar month would mis-bucket report_month."""
+    payload = {
+        "request": {
+            "accountId": "accounts/pub-1",
+            "dateRange": {
+                "startDate": {"year": 2026, "month": 4, "day": 1},
+                "endDate": {"year": 2026, "month": 5, "day": 31},  # crosses month
+            },
+            "currencyCode": "USD",
+        },
+        "report_id": "r",
+        "headers": [{"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "USD"}],
+        "rows": [{"cells": [{"value": "5.00"}]}],
+    }
+    with pytest.raises(ParserError):
+        list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_youtube_reporting_rejects_multi_month_row() -> None:
+    """A reporting row whose date_range crosses a calendar month would mis-bucket."""
+    payload = {
+        "report_metadata": {"report_id": "r", "report_type": "t"},
+        "rows": [{
+            "line_index": 0,
+            "date_range": {"start": "2026-04-01", "end": "2026-05-31"},  # crosses month
+            "dimensions": {"channel": "UC_x", "content_owner": "cms-1"},
+            "metrics": {"estimatedRevenue": "10.00", "currencyCode": "USD"},
+        }],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))

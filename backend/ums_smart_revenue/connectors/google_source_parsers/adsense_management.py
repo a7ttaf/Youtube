@@ -59,34 +59,48 @@ class AdSenseManagementParser:
         period_start = self._parse_iso_date(require_dict(require_dict(request, "dateRange"), "startDate"))
         period_end = self._parse_iso_date(require_dict(require_dict(request, "dateRange"), "endDate"))
         currency = require_str(request, "currencyCode")
+        # report_month is derived from period_start, so a dateRange spanning
+        # more than one calendar month would mis-bucket every row; fail closed.
+        if (period_start.year, period_start.month) != (period_end.year, period_end.month):
+            raise ParserError(
+                "dateRange must fall within a single calendar month for "
+                f"report_month bucketing, got {period_start.isoformat()}..{period_end.isoformat()}"
+            )
 
-        # Validate header shape before indexing: a typed header missing its
-        # name must raise the parser's typed ParserError, not a bare KeyError.
-        dim_names: list[str] = []
-        metric_names: list[str] = []
+        # Keep each header's (type, name) in declaration order so row cells can
+        # be routed positionally (cells[i] belongs to headers[i]). An
+        # unsupported header type fails closed: skipping it would shift every
+        # later cell into the wrong column and silently mislabel revenue values
+        # (e.g. ingest a METRIC_TALLY click count as a currency amount). A typed
+        # header missing its name likewise raises ParserError, not KeyError.
+        header_specs: list[tuple[str, str]] = []
         for h in headers:
             if not isinstance(h, dict):
                 raise ParserError("each headers[*] must be an object")
             header_type = h.get("type")
             if header_type not in {"DIMENSION", "METRIC_CURRENCY"}:
-                continue
+                raise ParserError(f"unsupported headers[*].type: {header_type!r}")
             name = h.get("name")
             if not isinstance(name, str):
                 raise ParserError("each DIMENSION/METRIC_CURRENCY header requires a string name")
-            if header_type == "DIMENSION":
-                dim_names.append(name)
-            else:
-                metric_names.append(name)
+            header_specs.append((header_type, name))
 
         for raw_row in rows:
             if not isinstance(raw_row, dict):
                 raise ParserError("each rows[*] must be a dict with 'cells'")
             cells = raw_row.get("cells")
-            if not isinstance(cells, list) or len(cells) != len(headers):
+            if not isinstance(cells, list) or len(cells) != len(header_specs):
                 raise ParserError("row.cells length must match headers")
-            values = [cell.get("value") if isinstance(cell, dict) else None for cell in cells]
-            dim_values = dict(zip(dim_names, values[:len(dim_names)], strict=True))
-            metric_values = dict(zip(metric_names, values[len(dim_names):], strict=True))
+            # Route each cell to its header by position; only METRIC_CURRENCY
+            # cells become monetary amounts.
+            dim_values: dict[str, object] = {}
+            metric_values: dict[str, object] = {}
+            for (header_type, name), cell in zip(header_specs, cells, strict=True):
+                value = cell.get("value") if isinstance(cell, dict) else None
+                if header_type == "DIMENSION":
+                    dim_values[name] = value
+                else:
+                    metric_values[name] = value
 
             for metric_name, raw_value in metric_values.items():
                 if not isinstance(raw_value, str):

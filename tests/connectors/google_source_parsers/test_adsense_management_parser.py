@@ -96,11 +96,17 @@ def test_mixed_settled_and_estimated_metrics_are_labeled_per_metric() -> None:
         ],
     }
     rows = list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+    # Pin the exact contract before collapsing into a lookup so an extra or
+    # duplicated row cannot pass silently.
+    assert len(rows) == 2
+    assert {r.metric_key for r in rows} == {"PAID_AMOUNT", "ESTIMATED_EARNINGS"}
     by_metric = {r.metric_key: r for r in rows}
     assert by_metric["PAID_AMOUNT"].value_kind == "settled"
     assert by_metric["PAID_AMOUNT"].report_type == "payment_report"
+    assert by_metric["PAID_AMOUNT"].amount_native == Decimal("500.000000")
     assert by_metric["ESTIMATED_EARNINGS"].value_kind == "estimated"
     assert by_metric["ESTIMATED_EARNINGS"].report_type == "earnings_report"
+    assert by_metric["ESTIMATED_EARNINGS"].amount_native == Decimal("123.456789")
 
 
 def test_rejects_non_finite_amount() -> None:

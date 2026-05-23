@@ -101,3 +101,27 @@ def test_rejects_non_finite_amount() -> None:
     bad["rows"] = [first_row, *bad["rows"][1:]]
     with pytest.raises(ParserError):
         list(YouTubeAnalyticsParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_different_currency_produces_distinct_keys() -> None:
+    """The same ids/metrics/dimensions/period fetched in a different currency
+    must produce distinct source_row_keys, otherwise one currency pull would
+    overwrite the other on the unique upsert key.
+    """
+    base = _load_fixture("sample_query_response_2026_04.json")
+    other = {**base, "query_request": {**base["query_request"], "currency": "EUR"}}
+    a = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(base, tenant_id=TENANT_ID))
+    b = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(other, tenant_id=TENANT_ID))
+    assert set(a).isdisjoint(set(b))
+
+
+def test_different_filters_produce_distinct_keys() -> None:
+    """Two pulls differing only by `filters` must produce distinct keys;
+    filtered datasets are distinct even when the returned dimensions match.
+    """
+    base = _load_fixture("sample_query_response_2026_04.json")
+    us = {**base, "query_request": {**base["query_request"], "filters": "country==US"}}
+    ca = {**base, "query_request": {**base["query_request"], "filters": "country==CA"}}
+    a = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(us, tenant_id=TENANT_ID))
+    b = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(ca, tenant_id=TENANT_ID))
+    assert set(a).isdisjoint(set(b))

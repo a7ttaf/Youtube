@@ -109,10 +109,20 @@ def _seed_currencies() -> None:
 
 
 def _flip_v1_supported_set() -> None:
-    placeholders = ",".join(f"'{c}'" for c in _SUPPORTED_V1_CODES)
+    # Dialect-safe UPDATE: let SQLAlchemy render now() and bind the IN(...)
+    # values per dialect, instead of hard-coding PostgreSQL now() and manually
+    # interpolating the code list into raw SQL (which is not portable to the
+    # SQLite migration-testing path and bypasses dialect-safe bind rendering).
+    currencies = sa.table(
+        "currencies",
+        sa.column("code", sa.Text()),
+        sa.column("is_supported", sa.Boolean()),
+        sa.column("activated_at", sa.DateTime(timezone=True)),
+    )
     op.execute(
-        f"UPDATE currencies SET is_supported = true, activated_at = now() "
-        f"WHERE code IN ({placeholders})"
+        currencies.update()
+        .where(currencies.c.code.in_(_SUPPORTED_V1_CODES))
+        .values(is_supported=True, activated_at=sa.func.now())
     )
 
 

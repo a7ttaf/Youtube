@@ -59,6 +59,13 @@ class YouTubeReportingParser:
             date_range = require_dict(row, "date_range")
             period_start = parse_iso_date(require_str(date_range, "start"), field="date_range.start")
             period_end = parse_iso_date(require_str(date_range, "end"), field="date_range.end")
+            # report_month is derived from period_start; a row whose range
+            # crosses a calendar-month boundary would be mis-bucketed.
+            if (period_start.year, period_start.month) != (period_end.year, period_end.month):
+                raise ParserError(
+                    "row date_range must fall within a single calendar month for "
+                    f"report_month bucketing, got {period_start.isoformat()}..{period_end.isoformat()}"
+                )
             dimensions = require_dict(row, "dimensions")
             metrics = require_dict(row, "metrics")
 

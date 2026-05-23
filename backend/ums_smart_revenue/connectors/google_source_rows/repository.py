@@ -9,6 +9,7 @@ chain.
 """
 
 from collections.abc import Iterable
+from copy import deepcopy
 from dataclasses import replace
 from uuid import UUID, uuid4
 
@@ -257,15 +258,22 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
                 f"source_row_key must be {SOURCE_ROW_KEY_LENGTH} chars "
                 f"(got {len(row.source_row_key)})"
             )
-        if row.amount_native < 0:
+        if not row.amount_native.is_finite() or row.amount_native < 0:
+            # Guard NaN/Infinity at the repository boundary too: Decimal("NaN")
+            # < 0 raises InvalidOperation, which would bypass this typed
+            # validation error even though parsers already reject non-finite
+            # amounts upstream.
             raise GoogleRevenueSourceRowValidationError(
-                "amount_native must be >= 0"
+                "amount_native must be a finite Decimal >= 0"
             )
         if not isinstance(row.raw_payload, dict):
             raise GoogleRevenueSourceRowValidationError(
                 "raw_payload must be a dict"
             )
-        return replace(row, raw_payload=dict(row.raw_payload))
+        # Deep-copy: raw_payload holds nested dicts (date_range, dimensions,
+        # metrics), so a shallow dict() copy would still let a caller mutate
+        # those nested objects after upsert_many and change what was persisted.
+        return replace(row, raw_payload=deepcopy(row.raw_payload))
 
     def _require_currencies(self, codes: set[str]) -> None:
         if not codes:

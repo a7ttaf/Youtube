@@ -65,35 +65,59 @@ class YouTubeAnalyticsParser:
         # Without this, the repo PK (tenant_id, source_system, source_row_key)
         # silently collapses cross-account data in a multi-CMS tenant.
         query_signature = f"{ids}|{metrics_csv}|{dimensions_csv}"
+        # A different currency or filter expression for the same
+        # ids/metrics/dimensions/period is a distinct dataset; fold both into
+        # the row key (as structured fields, below) so one cannot overwrite the
+        # other on the unique upsert key. filters is optional in the request.
+        filters = request.get("filters")
+        if filters is not None and not isinstance(filters, str):
+            raise ParserError("query_request.filters must be a string when present")
+        # report_month is derived from period_start, so a range spanning more
+        # than one calendar month would mis-bucket every returned row; fail
+        # closed and require single-month queries.
+        if (period_start.year, period_start.month) != (period_end.year, period_end.month):
+            raise ParserError(
+                "reports.query range must fall within a single calendar month for "
+                f"report_month bucketing, got {period_start.isoformat()}..{period_end.isoformat()}"
+            )
 
-        # Validate header shape before indexing: a typed header missing its
-        # name must raise the parser's typed ParserError, not a bare KeyError.
-        dimension_names: list[str] = []
-        metric_names: list[str] = []
+        # Keep each header's (type, name) in declaration order so row cells can
+        # be routed positionally (data_row[i] belongs to columnHeaders[i]). An
+        # unsupported columnType fails closed: silently skipping it would leave
+        # the positional routing misaligned and could associate a value with
+        # the wrong metric. A typed header missing its name likewise raises
+        # ParserError, not KeyError.
+        header_specs: list[tuple[str, str]] = []
         for h in column_headers:
             if not isinstance(h, dict):
                 raise ParserError("each columnHeaders[*] must be an object")
             column_type = h.get("columnType")
             if column_type not in {"DIMENSION", "METRIC"}:
-                continue
+                raise ParserError(f"unsupported columnHeaders[*].columnType: {column_type!r}")
             name = h.get("name")
             if not isinstance(name, str):
                 raise ParserError("each DIMENSION/METRIC header requires a string name")
-            if column_type == "DIMENSION":
-                dimension_names.append(name)
-            else:
-                metric_names.append(name)
+            header_specs.append((column_type, name))
+
+        metric_names = [name for column_type, name in header_specs if column_type == "METRIC"]
 
         for data_row in rows:
             if not isinstance(data_row, list):
                 raise ParserError("each rows[*] must be a list (tabular)")
-            if len(data_row) != len(column_headers):
+            if len(data_row) != len(header_specs):
                 raise ParserError(
-                    f"row length {len(data_row)} != columnHeaders length {len(column_headers)}"
+                    f"row length {len(data_row)} != columnHeaders length {len(header_specs)}"
                 )
 
-            dim_values = dict(zip(dimension_names, data_row[:len(dimension_names)], strict=True))
-            metric_values = dict(zip(metric_names, data_row[len(dimension_names):], strict=True))
+            # Route each value to its header by position; only DIMENSION values
+            # populate dim_values and only METRIC values populate metric_values.
+            dim_values: dict[str, object] = {}
+            metric_values: dict[str, object] = {}
+            for (column_type, name), value in zip(header_specs, data_row, strict=True):
+                if column_type == "DIMENSION":
+                    dim_values[name] = value
+                else:
+                    metric_values[name] = value
 
             channel = dim_values.get("channel")
             if not isinstance(channel, str):
@@ -111,6 +135,8 @@ class YouTubeAnalyticsParser:
                 source_row_key = build_source_row_key(
                     source_system=self.source_system,
                     query_signature=f"{query_signature}|{metric_name}",
+                    currency=currency,
+                    filters=filters,
                     period_start=period_start.isoformat(),
                     period_end=period_end.isoformat(),
                     dimensions=dim_values,

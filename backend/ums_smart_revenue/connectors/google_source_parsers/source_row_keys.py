@@ -58,6 +58,11 @@ def build_source_row_key(*, source_system: str, **fields: object) -> str:
         canonical_payload = {
             "prefix": prefix,
             "query_signature": fields["query_signature"],
+            # currency + filters are distinct dataset axes: the same
+            # ids/metrics/dimensions/period fetched in a different currency or
+            # with a different filter expression is a different source row.
+            "currency": fields.get("currency"),
+            "filters": fields.get("filters"),
             "period_start": fields["period_start"],
             "period_end": fields["period_end"],
             "dimensions": _canonical_dimensions(fields.get("dimensions") or {}),

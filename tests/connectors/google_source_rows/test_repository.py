@@ -332,6 +332,29 @@ def test_upsert_many_does_not_alias_caller_raw_payload(session: Session) -> None
     assert "new_field" not in persisted.raw_payload
 
 
+def test_rejects_nan_amount_native(session: Session) -> None:
+    """A non-finite amount must raise the typed validation error, not leak
+    decimal.InvalidOperation from `Decimal('NaN') < 0`.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = _row(source_row_key="u" * 64, amount="NaN")
+    with pytest.raises(GoogleRevenueSourceRowValidationError):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
+def test_validate_deep_copies_nested_raw_payload(session: Session) -> None:
+    """_validate must deep-copy raw_payload so a caller mutating a NESTED dict
+    cannot reach into the persisted row. A shallow dict() copy shares the
+    nested objects (date_range/dimensions/metrics) with the caller.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    nested: dict[str, object] = {"dimensions": {"channel": "UC_x", "country": "US"}}
+    validated = repo._validate(replace(_row(source_row_key="v" * 64), raw_payload=nested))
+    # Mutate the caller's nested dict; the validated copy must be unaffected.
+    nested["dimensions"]["country"] = "MUTATED"
+    assert validated.raw_payload == {"dimensions": {"channel": "UC_x", "country": "US"}}
+
+
 def test_non_usd_source_rows_visible_at_repository_layer(session: Session) -> None:
     """B1 makes non-USD source rows queryable at the repository layer.
 
