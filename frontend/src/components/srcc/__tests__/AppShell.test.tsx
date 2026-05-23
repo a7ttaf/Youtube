@@ -1,5 +1,5 @@
 // frontend/src/components/srcc/__tests__/AppShell.test.tsx
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -86,6 +86,37 @@ describe("AppShell tenant proof tag", () => {
     );
     await screen.findByTestId("tenant-proof");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears stale tenantError on successful retry after an earlier failure (outside-diff CodeRabbit regression)", async () => {
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock
+      .mockResolvedValueOnce(jsonResponse({ detail: "transient 503" }, 503))
+      .mockResolvedValueOnce(
+        jsonResponse({
+          id: "00000000-0000-0000-0000-000000000001",
+          slug: "ums",
+          display_name: "UMS",
+        }),
+      );
+    render(
+      <TenantProvider initialSlug="ums">
+        <AppShell />
+      </TenantProvider>,
+    );
+    const tag = await screen.findByTestId("tenant-proof");
+    await waitFor(() => expect(tag.textContent).toMatch(/503/));
+
+    // Switch role → displayedRole changes → effect re-fires.
+    // After the prior 503, hasRequestedTenantRef was reset to false and
+    // tenant.id is still null, so the guard allows the retry which consumes
+    // the success mock above.
+    const roleSelect = screen.getByLabelText(/current role/i) as HTMLSelectElement;
+    fireEvent.change(roleSelect, { target: { value: "finance" } });
+
+    await waitFor(() => expect(tag.textContent).toContain("UMS (ums)"));
+    expect(tag.textContent).not.toMatch(/503/);
+    expect(tag.textContent).not.toContain("transient 503");
   });
 
   it("fires the bootstrap /tenants/me call without X-UMS-Tenant so the gateway is the tenant authority", async () => {

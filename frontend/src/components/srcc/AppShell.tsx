@@ -338,7 +338,14 @@ export default function AppShell() {
     hasRequestedTenantRef.current = true;
     client
       .get<TenantRead>("/tenants/me")
-      .then(tenant.hydrate)
+      .then((payload) => {
+        tenant.hydrate(payload);
+        // FIX: Clear any stale tenantError from a prior failed attempt so a
+        // successful retry re-renders the hydrated success state. Without
+        // this, the proof tag stayed pinned to the failure branch (Line
+        // 364) even after the user retried and /tenants/me returned 200.
+        setTenantError(null);
+      })
       .catch((error: unknown) => {
         // FIX: Clear the one-shot guard on failure so a future dependency
         // change (role switch, client rebuild after slug change) can retry

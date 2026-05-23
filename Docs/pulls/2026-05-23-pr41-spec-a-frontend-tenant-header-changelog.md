@@ -389,3 +389,39 @@ if it were valid.
 - `npm --prefix frontend run test` → **33 passed** (4 + 24 + 5 across
   `TenantContext`, `client`, `AppShell`; +1 from this follow-up).
 - `git diff --check` → LF/CRLF warnings only (no whitespace errors that fail the gate).
+
+---
+
+## Follow-up after `d9c3c75` — CodeRabbit outside-diff: clear stale tenantError on successful retry
+
+CodeRabbit's review on `02c724f` posted an outside-diff finding on
+`frontend/src/components/srcc/AppShell.tsx:335-350` noting that
+`tenantError` was set on fetch failure but never cleared on a later
+successful retry — leaving the proof tag stuck on the failure branch
+after the user retried and `/tenants/me` returned 200.
+
+### Fix
+
+- `frontend/src/components/srcc/AppShell.tsx:339-348`
+  - The success path now calls `setTenantError(null)` alongside
+    `tenant.hydrate(payload)` so a later retry re-renders the hydrated
+    success state instead of holding the prior error branch.
+
+### Tests
+
+- `frontend/src/components/srcc/__tests__/AppShell.test.tsx`
+  - New: `clears stale tenantError on successful retry after an earlier
+    failure (outside-diff CodeRabbit regression)`. Mocks fetch with
+    `mockResolvedValueOnce(503)` then `mockResolvedValueOnce(200)`,
+    waits for the 503 message in the proof tag, switches preview role
+    via `fireEvent.change` to force the bootstrap effect to re-fire,
+    and asserts the proof tag now shows `UMS (ums)` AND no longer
+    contains the stale `503` / `transient 503` text.
+
+### Validation rerun
+
+- `python -m ruff check backend tests` → clean.
+- `python -m pytest -q` → **821 passed**.
+- `npm --prefix frontend run test` → **34 passed** (4 + 24 + 6 across
+  `TenantContext`, `client`, `AppShell`; +1 from this follow-up).
+- `git diff --check` → LF/CRLF warnings only (no whitespace errors that fail the gate).
