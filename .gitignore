@@ -162,6 +162,9 @@ desktop.ini
 .pydevproject
 
 # Node / frontend (for the future frontend/ workspace)
+# The Python-convention lib/ rule above must not suppress frontend source.
+!frontend/src/lib/
+!frontend/src/lib/**
 node_modules/
 .next/
 out/
