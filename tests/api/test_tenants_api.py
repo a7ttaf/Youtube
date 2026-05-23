@@ -240,6 +240,27 @@ def test_tenants_me_rejects_duplicate_tenant_headers(client_db_mode):
     assert response.json()["detail"] == "X-UMS-Tenant must be provided exactly once"
 
 
+def test_tenants_me_rejects_mismatched_duplicate_tenant_headers(client_db_mode):
+    """Different values across duplicate X-UMS-Tenant headers must also 400.
+
+    Regression coverage requested in the CodeRabbit review of PR #41: the
+    resolver must reject every duplicate-header case (identical OR mismatched)
+    before silently selecting one of the values.
+    """
+    request = client_db_mode.build_request(
+        "GET",
+        "/tenants/me",
+        headers=[
+            ("X-UMS-Tenant", "ums"),
+            ("X-UMS-Tenant", "not-a-tenant"),
+            *_gateway_headers().items(),
+        ],
+    )
+    response = client_db_mode.send(request)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "X-UMS-Tenant must be provided exactly once"
+
+
 # ---------------------------------------------------------------------------
 # Case 5 — unknown slug → 404
 # ---------------------------------------------------------------------------

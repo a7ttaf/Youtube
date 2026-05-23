@@ -55,6 +55,19 @@ describe("AppShell tenant proof tag", () => {
     expect(tag.textContent).toMatch(/503/);
   });
 
+  it("appends the JSON body.detail string to the proof tag when present", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse({ detail: "Tenant registry unavailable" }, 503),
+    );
+    render(
+      <TenantProvider>
+        <AppShell />
+      </TenantProvider>,
+    );
+    const tag = await screen.findByTestId("tenant-proof");
+    expect(tag.textContent).toContain("Tenant registry unavailable");
+  });
+
   it("fires fetch exactly once under <StrictMode> (re-entry guard)", async () => {
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
     fetchMock.mockResolvedValue(

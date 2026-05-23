@@ -97,6 +97,48 @@ describe("useApiClient URL resolution", () => {
     await result.current.get("/tenants/me");
     expect(lastFetchArgs()![0]).toBe("https://api.example.com/tenants/me");
   });
+
+  it("passes through an absolute https:// path without prepending the base", async () => {
+    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse({ ok: true }),
+    );
+    const { result } = renderHook(() => useApiClient(), { wrapper });
+    await result.current.get("https://other.example.com/tenants/me");
+    expect(lastFetchArgs()![0]).toBe("https://other.example.com/tenants/me");
+  });
+
+  it("passes through an absolute http:// path without prepending the base", async () => {
+    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse({ ok: true }),
+    );
+    const { result } = renderHook(() => useApiClient(), { wrapper });
+    await result.current.get("http://127.0.0.1:8000/tenants/me");
+    expect(lastFetchArgs()![0]).toBe("http://127.0.0.1:8000/tenants/me");
+  });
+});
+
+describe("useApiClient Accept header default", () => {
+  it("sets Accept: application/json by default on GET", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse({ ok: true }),
+    );
+    const { result } = renderHook(() => useApiClient(), { wrapper });
+    await result.current.get("/x");
+    const headers = new Headers(lastFetchArgs()![1]?.headers);
+    expect(headers.get("Accept")).toBe("application/json");
+  });
+
+  it("preserves a caller-supplied Accept header instead of overwriting it", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse({ ok: true }),
+    );
+    const { result } = renderHook(() => useApiClient(), { wrapper });
+    await result.current.get("/x", { headers: { Accept: "text/csv" } });
+    const headers = new Headers(lastFetchArgs()![1]?.headers);
+    expect(headers.get("Accept")).toBe("text/csv");
+  });
 });
 
 describe("useApiClient Content-Type handling", () => {

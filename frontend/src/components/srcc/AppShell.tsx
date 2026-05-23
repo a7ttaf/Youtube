@@ -335,8 +335,19 @@ export default function AppShell() {
       .catch(setTenantError);
   }, [client, tenant.id, tenant.hydrate]);
 
+  const tenantErrorDetail =
+    tenantError instanceof ApiError &&
+    typeof tenantError.body === "object" &&
+    tenantError.body !== null &&
+    typeof (tenantError.body as { detail?: unknown }).detail === "string" &&
+    (tenantError.body as { detail: string }).detail.trim().length > 0
+      ? (tenantError.body as { detail: string }).detail
+      : null;
+
   const tenantProofLabel = tenantError
-    ? `Tenant: ${tenant.tenantSlug}; /tenants/me failed: ${tenantError.message}`
+    ? `Tenant: ${tenant.tenantSlug}; /tenants/me failed: ${tenantError.message}${
+        tenantErrorDetail ? ` — ${tenantErrorDetail}` : ""
+      }`
     : tenant.id
       ? `Tenant: ${tenant.displayName} (${tenant.tenantSlug}) — id ${tenant.id}`
       : `Tenant: ${tenant.tenantSlug} (loading…)`;

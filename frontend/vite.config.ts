@@ -14,6 +14,16 @@ export default defineConfig(({ mode }) => {
   const gatewayToken =
     env.VITE_DEV_GATEWAY_TOKEN ?? env.UMS_TRUSTED_GATEWAY_TOKEN ?? "";
 
+  if (mode === "development" && !gatewayToken) {
+    // Surface a single startup hint so missing trusted-gateway secrets do not
+    // silently 401 every proxied tenant-scoped call during local development.
+    // The token is read from Node env only — it never reaches the browser.
+    console.warn(
+      "[vite] VITE_DEV_GATEWAY_TOKEN (or UMS_TRUSTED_GATEWAY_TOKEN) is empty; " +
+        `proxied routes (${TENANT_SCOPED_ROUTES.join(", ")}) will 401.`,
+    );
+  }
+
   return {
     plugins: [react(), tailwindcss()],
     resolve: {

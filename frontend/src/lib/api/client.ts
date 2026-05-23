@@ -16,6 +16,7 @@ export class ApiError extends Error {
 }
 
 function resolveUrl(path: string): string {
+  if (/^https?:\/\//i.test(path)) return path;
   const raw = import.meta.env.VITE_API_BASE_URL ?? "";
   const base = raw.replace(/\/+$/, "");
   const normalisedPath = path.startsWith("/") ? path : `/${path}`;
@@ -28,6 +29,9 @@ function buildHeaders(
   hasJsonBody: boolean,
 ): Headers {
   const headers = new Headers(init);
+  if (!headers.has("Accept")) {
+    headers.set("Accept", "application/json");
+  }
   if (hasJsonBody && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
