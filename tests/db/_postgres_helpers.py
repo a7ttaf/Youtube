@@ -16,9 +16,12 @@ def require_postgres_url() -> str:
             "UMS_TEST_DATABASE_URL required for PostgreSQL migration round-trip tests. "
             "Spin up disposable Postgres: "
             "`docker run --rm -d --name ums-mig-pg -p 55432:5432 "
-            "-e POSTGRES_PASSWORD=ums postgres:18-alpine`, then "
+            "-e POSTGRES_PASSWORD=ums postgres:18-alpine`, then set "
+            "UMS_TEST_DATABASE_URL. PowerShell: "
             "`$env:UMS_TEST_DATABASE_URL = "
             "'postgresql+psycopg://postgres:ums@localhost:55432/postgres'`. "
+            "POSIX shell: "
+            "`export UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/postgres`. "
             "SQLite is not a valid substitute for this test."
         )
     return url

@@ -40,10 +40,13 @@ def _module_imports_currency_exchange_rate_orm(path: Path) -> bool:
 def test_no_finance_module_outside_legacy_imports_currency_exchange_rate_orm() -> None:
     offenders = []
     for path in FINANCE_DIR.glob("**/*.py"):
-        if path.name in ALLOWED_LEGACY_FILES:
+        # Match the exact relative path, not just the basename, so a nested
+        # file that happens to be named exchange_rates.py is not allowlisted.
+        rel_path = path.relative_to(FINANCE_DIR).as_posix()
+        if rel_path in ALLOWED_LEGACY_FILES:
             continue
         if _module_imports_currency_exchange_rate_orm(path):
-            offenders.append(str(path.relative_to(FINANCE_DIR)))
+            offenders.append(rel_path)
     assert not offenders, (
         "B1 forbids new finance modules from depending on CurrencyExchangeRateORM "
         f"for official money. Offenders: {offenders}"

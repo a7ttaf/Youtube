@@ -53,8 +53,8 @@ PR #42 landed the design pivot: B1 is Google source-reported revenue ingestion f
 
 ## Validation
 
-- `python scripts/run_validation_gate.py` (with `UMS_TEST_DATABASE_URL` set): **6/6 steps green** (ruff → AST policy → pytest 910 passed → vitest 34 passed → git diff --check worktree → git diff --check staged).
-- Pytest delta from PR #41 baseline (821): **+89 tests** across 17 new test files + extensions to existing test files.
+- `python scripts/run_validation_gate.py` (with `UMS_TEST_DATABASE_URL` set): **6/6 steps green** (ruff → AST policy → pytest 938 passed → vitest 34 passed → git diff --check worktree → git diff --check staged).
+- Pytest delta from PR #41 baseline (821): **+117 tests** (+89 in 17 new test files at submission; +28 review-hardening regressions added during Codex/CodeRabbit review).
 - PostgreSQL migration round-trip: 6/6 passed on disposable `postgres:18-alpine`.
 - Frontend tests: 34 passed (unchanged from PR #41; no frontend code touched).
 - AST policy gate: still passes (no skip/xfail introduced).
@@ -64,7 +64,7 @@ PR #42 landed the design pivot: B1 is Google source-reported revenue ingestion f
 1. `tests/db/test_google_revenue_source_migration_postgres.py` used `from tests.db._postgres_helpers import POSTGRES_URL`. Full-suite pytest collection can't resolve `tests.db.X` because `tests/db/` is the test file's home (pytest's `prepend` mode puts `tests/db/` on sys.path, not the rootdir). Fixed by switching to sibling import `from _postgres_helpers import POSTGRES_URL`.
 2. Parser tests use `importlib.resources.files("tests.connectors._fixtures.X")` which requires `tests/` and `tests/connectors/` to be regular packages (not PEP 420 namespace packages). Fixed by adding empty `__init__.py` to both directories.
 
-Both fixes landed in commit `3a4da12` (post Phase 9 docs commit). After the fix, the full validation gate is green on the first try.
+Both fixes landed in commit `3a4da12` (post Phase 9 docs commit). After applying that commit, the full validation gate ran fully green (the earlier failures were only in the gate's first run, before `3a4da12`).
 
 ## Blast radius
 

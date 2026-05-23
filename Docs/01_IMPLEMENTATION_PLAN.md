@@ -132,13 +132,14 @@ running on the operator's workstation.
   raw payload references, and idempotent Google source row keys. Existing
   `currency_exchange_rates` scaffolding is legacy/inert and must not become
   the official finance source.
-    - ✅ PR #43: storage + synthetic-fixture parsers for Google revenue source
-      ingestion. `currencies` + `google_revenue_source_rows` tables on
-      `FinanceBase`, repository with idempotent `upsert_many`, parsers for
-      YouTube Reporting / YouTube Analytics / AdSense Management. No live
-      OAuth, no live API client. Legacy `currency_exchange_rates` preserved as
-      inert scaffolding. PostgreSQL migration round-trip on disposable
-      `postgres:18-alpine`.
+    - ⏳ PR #43 (foundation only): storage + synthetic-fixture parsers for
+      Google revenue source ingestion. `currencies` + `google_revenue_source_rows`
+      tables on `FinanceBase`, repository with idempotent `upsert_many`, parsers
+      for YouTube Reporting / YouTube Analytics / AdSense Management. Legacy
+      `currency_exchange_rates` preserved as inert scaffolding. PostgreSQL
+      migration round-trip on disposable `postgres:18-alpine`. Remaining: live
+      OAuth/API connector (B2), FX/conversion (B3) — scaffolding-only, so marked
+      ⏳ not ✅.
 
 ---
 

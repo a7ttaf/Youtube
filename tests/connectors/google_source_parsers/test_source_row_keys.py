@@ -107,7 +107,7 @@ def test_different_source_systems_produce_distinct_keys() -> None:
 
 
 def test_unknown_source_system_raises() -> None:
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="source_system"):
         build_source_row_key(source_system="not_a_real_source")  # type: ignore[call-arg]
 
 

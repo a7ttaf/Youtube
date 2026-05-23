@@ -31,18 +31,20 @@
 
 ### Tests
 
+_Per-file counts reflect the final PR state, including the review-hardening regression tests added during Codex/CodeRabbit review (see the Pytest delta below for the original vs. hardening split)._
+
 - `tests/db/test_iso_4217_snapshot.py` — 8 tests (smoke + uniqueness + immutability guard).
 - `tests/db/test_source_models.py` — 10 tests (ORM column shape + uniqueness + FKs + indexes + insert/select round-trip).
 - `tests/db/test_google_revenue_source_migration.py` — 2 metadata tests.
 - `tests/db/_postgres_helpers.py` — fail-fast env guard.
 - `tests/db/test_google_revenue_source_migration_postgres.py` — 6 PostgreSQL round-trip tests.
 - `tests/connectors/google_source_rows/test_currencies_repository.py` — 5 tests.
-- `tests/connectors/google_source_rows/test_repository.py` — 16 tests (idempotency, tenant isolation, validation, id stability, raw_payload alias safety, non-USD visibility).
-- `tests/connectors/google_source_parsers/test_source_row_keys.py` — 7 tests.
+- `tests/connectors/google_source_rows/test_repository.py` — 19 tests (idempotency, tenant isolation, validation incl. NaN/non-Decimal amount, id stability, raw_payload deep-copy alias safety, non-USD visibility).
+- `tests/connectors/google_source_parsers/test_source_row_keys.py` — 9 tests.
 - `tests/connectors/google_source_parsers/test_youtube_reporting_parser.py` — 9 tests.
-- `tests/connectors/google_source_parsers/test_youtube_analytics_parser.py` — 9 tests.
-- `tests/connectors/google_source_parsers/test_adsense_management_parser.py` — 7 tests.
-- `tests/connectors/google_source_parsers/test_parser_failure_states.py` — 4 tests.
+- `tests/connectors/google_source_parsers/test_youtube_analytics_parser.py` — 13 tests.
+- `tests/connectors/google_source_parsers/test_adsense_management_parser.py` — 8 tests.
+- `tests/connectors/google_source_parsers/test_parser_failure_states.py` — 21 tests.
 - `tests/connectors/test_google_source_ingestion_flow.py` — 3 tests (end-to-end + rerun + malformed-payload safety).
 - `tests/finance/test_finance_no_fx_dependency.py` — 1 AST guard.
 - `tests/auth/test_no_fx_permission.py` — 2 tests.
