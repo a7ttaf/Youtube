@@ -18,6 +18,7 @@ from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
 )
 from ums_smart_revenue.connectors.google_source_rows.repository import (
     SqlAlchemyCurrenciesRepository,
+    SqlAlchemyGoogleRevenueSourceRowRepository,
 )
 
 __all__ = [
@@ -31,4 +32,5 @@ __all__ = [
     "IsoCurrency",
     "ParsedSourceRow",
     "SqlAlchemyCurrenciesRepository",
+    "SqlAlchemyGoogleRevenueSourceRowRepository",
 ]
