@@ -17,11 +17,14 @@ Define initial API endpoints for the UMS Smart Revenue Control Center.
 /finance-close
 /adsense
 /exports
-/exchange-rates
+/exchange-rates  (legacy scaffold; not official finance source)
 /audit
 ```
 
 The `/connectors` group is part of the implemented API surface and is detailed in the Connectors section below.
+The current `/exchange-rates` group is historical scaffolding only. Revised
+B1 work must prioritize Google/YouTube/AdSense source-reported monetary
+ingestion rather than expanding exchange-rate APIs.
 
 ## Authentication and authorization source
 
@@ -155,10 +158,10 @@ AdSense payment rows for the same month. It requires global
 finance-month scope, audits both `REVENUE_VIEWED` and `PAYMENT_VIEWED`, returns
 match status, totals, gap, issues, and audit event metadata, and excludes
 non-paid AdSense rows from the paid total while still reporting their count.
-This endpoint does not calculate tax, bank gaps, net revenue, or allocation
-rules. Until exchange-rate support exists, `currency` must be `USD`; payment
-rows in another currency are excluded from the match and surfaced as
-reconciliation issues.
+This endpoint does not calculate tax, bank gaps, net revenue, allocation
+rules, or market FX conversions. Until source-reported non-USD matching exists,
+`currency` must be `USD`; payment rows in another currency are excluded from
+the match and surfaced as reconciliation issues.
 
 `POST /revenue/months/{month}/bank-reconciliation` records finance-provided
 bank receipt metadata for a finance month. It requires
@@ -167,8 +170,9 @@ bank receipt metadata for a finance month. It requires
 then audits `BANK_RECONCILIATION_RECORDED`. Rows are upserted by
 `(month, bank_reference)` and store normalized USD receipt values supplied by
 finance, transfer fee metadata, FX difference metadata, notes, source report
-reference, and recorder metadata. The endpoint does not calculate exchange
-rates, allocate transfer/FX gaps to channels, or calculate net revenue.
+reference, and recorder metadata. The endpoint does not calculate market
+exchange rates, derive official Google revenue from FX, allocate transfer/FX
+gaps to channels, or calculate net revenue.
 
 `GET /revenue/months/{month}/bank-reconciliation` is an implemented
 holding-level finance read that compares paid USD AdSense payment metadata with
@@ -274,27 +278,20 @@ listing all months. When `month` is provided, the same permission on that
 for that scope. It returns payment metadata only; it does not expose bank
 reconciliation data and does not calculate revenue.
 
-### Exchange rates
+### Exchange rates (legacy scaffold)
 
 ```http
 POST /exchange-rates/sync
 GET /exchange-rates/latest?base_currency=EUR&quote_currency=USD&as_of_date=2026-04-22&provider_key=ecb
 ```
 
-`POST /exchange-rates/sync` is an implemented FX-rate ingestion foundation for
-connector or scheduled jobs. It requires `connectors.run_jobs` on the requested
-`provider_key` connector scope, requires a non-empty reason, upserts by
-`(rate_date, base_currency, quote_currency, provider_key)`, stores the raw
-provider payload in SQL for traceability, and audits `EXCHANGE_RATE_SYNCED`.
-Responses expose normalized rate metadata but do not expose raw payload values.
-
-`GET /exchange-rates/latest` returns the latest stored rate on or before
-`as_of_date` for a currency pair, optionally restricted to one `provider_key`.
-It requires global `finance.view_revenue` because these rates can affect future
-finance normalization. This endpoint reads SQL source-of-truth FX rows only. It
-does not fetch an external provider, choose the final corporate FX policy, or
-apply rates to AdSense payment, bank reconciliation, export, or net-revenue
-calculations yet.
+These endpoints exist as pre-S2 scaffolding around `currency_exchange_rates`.
+They are not the B1 path for official finance values and must not be expanded
+into `MANAGE_FX_RATES`, manual uploads, ECB/exchangerate provider sync, or
+locked-month FX behavior. Official revenue, payment, tax, deduction, and
+reconciliation values must come from Google/YouTube/AdSense source reports and
+finance-entered bank evidence. Market FX rates may later support display-only
+conversion if the response clearly labels the converted amount as non-official.
 
 ### Connectors
 
@@ -322,6 +319,11 @@ GET /reports/raw-files/{raw_file_id}
 ```
 
 Raw report metadata records the immutable file reference before parsing. `POST /reports/raw-files` requires `source`, `report_type`, `report_month`, `storage_uri`, `checksum`, `parse_status`, and `reason`; responses include `id`, `source`, `report_type`, `report_month`, `storage_uri`, `checksum`, `parse_status`, `downloaded_by`, `downloaded_at`, and `audit_event`. `GET /reports/raw-files` is offset-paginated with `limit` capped at `100`, optional `source`, `report_type`, and `report_month` filters, and returns `items` plus `pagination.limit`, `pagination.offset`, `pagination.returned`, and `pagination.has_more`.
+
+Future Google source-ingestion endpoints should expose source rows linked to
+these raw files. Those rows preserve Google-reported amounts, currencies,
+account/report identity, period boundaries, and raw payload references before
+any normalized finance facts are written.
 
 ### Exports
 
@@ -424,8 +426,10 @@ Audit event reads require `audit.view`. Sensitive audit `details` are masked unl
 
 - Backend enforces permissions.
 - Backend does not expose graph/Neo4j endpoints in the active roadmap.
-- Every money API must support currency parameter.
-- Every money API must return confidence and source metadata.
+- Every money API must return source currency, confidence, and source metadata.
+- Currency parameters are allowed only where implemented. If a response applies
+  display-only conversion, it must expose the native/source amount separately
+  and label the conversion as non-official.
 - Export APIs may run async jobs or return guarded on-demand artifacts,
   depending on the endpoint contract.
 

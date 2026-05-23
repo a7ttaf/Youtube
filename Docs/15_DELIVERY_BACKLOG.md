@@ -56,9 +56,11 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
 
 ## P2 — Advanced features
 
-- ⏳ Automated currency rate integration foundation — remaining:
-  `currency_exchange_rates` schema scaffolding + design doc (PR #16,
-  `Docs/18`); engine, fetcher, fallback policy not built.
+- ⏳ Display-only currency conversion foundation — remaining:
+  official finance ingestion must first preserve Google/YouTube/AdSense
+  reported amounts and currencies per `Docs/18`. Public/provider FX rates are
+  not an official source for monthly revenue, tax, deduction, AdSense payment,
+  or reconciliation values.
 - ⏳ Anomaly detection foundation for source-backed month-over-month
   revenue movement — remaining: not started.
 - ⏳ Detailed Shorts revenue handling foundation — remaining: not started.
@@ -98,8 +100,8 @@ single P-tier above.
 - ✅ Governance + quickstart docs (PR #11).
 - ✅ CI gate (Elite-CI vendored) + Dependabot (PRs #14, #17).
 - ✅ Docker + docker-compose stack (PR #15).
-- ✅ Architecture docs: multi-tenant (`Docs/17`), multi-currency
-  (`Docs/18`) — PR #16.
+- ✅ Architecture docs: multi-tenant (`Docs/17`), source-reported currency
+  policy (`Docs/18`, revised 2026-05-23) — PR #16 plus B1 planning update.
 - 🗑️ Neo4j graph component retired entirely (PR #12).
 - ✅ Local validation gate: `scripts/run_validation_gate.py` invokes
   `backend/ums_smart_revenue/devtools/quality_gate.py` which runs ruff
@@ -131,8 +133,10 @@ single P-tier above.
    built.
 3. ⏳ Payment gap explanation — remaining: bank reconciliation repo
    (PR #29) is the substrate; comparison + explanation pass not built.
-4. ⏳ Bank/transfer/FX data source — remaining: bank recon repo (PR #29)
-   and `currency_exchange_rates` scaffolding; real FX provider not wired.
+4. ⏳ Bank/transfer/local-currency variance evidence — remaining: bank recon
+   repo (PR #29) is the substrate; variance explanations must reconcile
+   Google/AdSense reported money, bank receipts, transfer fees, and bank-side
+   currency effects without treating public FX rates as official revenue.
 5. ⏳ Confidence labels that finance trusts — remaining: column
    scaffolding in revenue facts; computation rules + UI surfacing not
    built.

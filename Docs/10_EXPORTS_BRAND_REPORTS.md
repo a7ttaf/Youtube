@@ -117,7 +117,7 @@ updated_at
 ```
 
 Implementation note:
-The backend foundation supports finance export requests for `FINANCE_EXCEL`, `EXECUTIVE_PDF`, and `BRANDED_SLIDE_PACK`, plus non-financial `ANALYTICS_SUMMARY_CSV` requests for export operators. Finance exports require both revenue export permission and revenue visibility for the requested scope. Group exports are checked against every member channel. Currency is currently restricted to USD until an exchange-rate source is implemented.
+The backend foundation supports finance export requests for `FINANCE_EXCEL`, `EXECUTIVE_PDF`, and `BRANDED_SLIDE_PACK`, plus non-financial `ANALYTICS_SUMMARY_CSV` requests for export operators. Finance exports require both revenue export permission and revenue visibility for the requested scope. Group exports are checked against every member channel. Currency is currently restricted to USD until source-reported non-USD handling is implemented. Official exports must not use public FX rates as the source for revenue, payment, tax, deduction, or reconciliation values.
 
 `GET /exports/{export_id}/finance-workbook-preview` is implemented for `FINANCE_EXCEL` only. It builds workbook-ready data from SQL source-of-truth rows: monthly revenue facts, approved/pending manual overrides, AdSense payment metadata, bank reconciliation receipt rows, finance month-close state, net-revenue summary, payment match summary, bank confirmation summary, and smart alerts. Month-wide AdSense payment and bank receipt rows are included only for global exports because phase 1 does not attribute cash receipts to sector, company, group, or channel scopes. It does not depend on a graph database.
 
@@ -132,7 +132,7 @@ The default artifact store writes to a local filesystem path and exposes object-
 ## Acceptance checks
 
 - User can export by holding, sector, company, group, or channel.
-- Queued export metadata uses USD because currency selection is currently restricted to USD.
+- Queued export metadata uses USD because currency selection is currently restricted to USD; future non-USD exports must be backed by source-reported currency evidence or clearly labeled display conversion.
 - Planned finance workbook preview includes the sheet manifest and source-backed explanations needed for XLSX generation.
 - Finance workbook downloads produce a valid XLSX file with the planned sheet names.
 - Executive PDF downloads produce a valid PDF with the planned management-summary sections.

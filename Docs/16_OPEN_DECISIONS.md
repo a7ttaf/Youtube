@@ -1,8 +1,8 @@
 # Open Decisions
 
-## Status (2026-05-22)
+## Status (2026-05-23)
 
-Reconciled through PR #36 (S2 multi-tenant integration). Decisions that
+Reconciled through PR #42 (B1 source-reported revenue pivot). Decisions that
 are now made are listed under "Closed (with PR ref)". Items in the topic
 sections below remain genuinely open.
 
@@ -23,6 +23,12 @@ sections below remain genuinely open.
 - ✅ **Export engine: Python libraries** — `openpyxl` / `reportlab`-class
   approach via the export artifacts in PR #9 + tenant-scoped export jobs
   in PR #36.
+- ✅ **Multi-currency model: source-reported money is authoritative** — official
+  finance values come from Google/YouTube/AdSense source reports in their
+  reported currency. The earlier FX-rate-led design (manual rate table, provider
+  sync, locked-month FX freeze) is retired; market-rate conversion is deferred to
+  a future display-only spec and must never drive official totals. Established in
+  the B1 pivot (PR #42); see `Docs/18_MULTI_CURRENCY_ENGINE.md`.
 
 ## Stack decisions
 
@@ -42,9 +48,12 @@ sections below remain genuinely open.
 - Should unresolved payment gap appear as holding-level only or allocated to channels?
 - Who can approve manual overrides?
 - What happens if bank amount is not available?
-- Which FX rate should be used before UAE USD account is active?
-- Which FX provider is authoritative for automated `currency_exchange_rates`
-  imports, and what fallback policy applies when a requested rate is missing?
+- Which Google/YouTube/AdSense report currency is authoritative when a source
+  offers account currency, payment currency, and/or metric-level `currencyCode`?
+- Which Google source wins when YouTube estimated revenue and AdSense
+  settled/payment reports disagree for the same month?
+- How should bank-side local-currency variance be explained when the official
+  Google/AdSense source value is in a different currency?
 - How to treat UAE USD account after activation?
 
 ## UI decisions

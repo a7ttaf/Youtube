@@ -36,14 +36,15 @@ CREATE TABLE tenants (
     id               UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     slug             TEXT NOT NULL UNIQUE,             -- 'ums', 'rotana'
     display_name     TEXT NOT NULL,
-    primary_currency CHAR(3) NOT NULL DEFAULT 'USD',   -- ISO 4217
-    fx_provider_settings JSONB NOT NULL DEFAULT '{"providers":["ECB"],"priority_order":["ECB"],"usd_pivot_enabled":false}'::jsonb,
+    primary_currency TEXT NOT NULL DEFAULT 'USD',      -- ISO 4217 display/default
     status           TEXT NOT NULL DEFAULT 'ACTIVE',   -- ACTIVE|SUSPENDED|ARCHIVED
     onboarding_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     CONSTRAINT ck_tenants_slug_lower CHECK (slug = lower(slug)),
-    CONSTRAINT ck_tenants_fx_provider_settings_object CHECK (jsonb_typeof(fx_provider_settings) = 'object'),
+    CONSTRAINT ck_tenants_primary_currency_format CHECK (
+      length(primary_currency) = 3 AND primary_currency = upper(primary_currency)
+    ),
     CONSTRAINT ck_tenants_status CHECK (status IN ('ACTIVE','SUSPENDED','ARCHIVED'))
 );
 ```
@@ -230,7 +231,7 @@ The index migration is reversible in isolation with `DROP INDEX CONCURRENTLY`. O
 | **Per-tenant disable** | `tenants.status = 'SUSPENDED'`: tenant resolver returns 423 Locked. Data stays in place. |
 | **Per-tenant offboarding** | `tenants.status = 'ARCHIVED'` → blocks new connectors, exports, and writes; reads still allowed for finance reconciliation completion. |
 | **Cross-tenant reporting** | Only platform-admin endpoints; explicit allowlist; audited. |
-| **Tenant onboarding CLI** | Phase 8 — `ums-admin tenant create <slug>` inserts the row, seeds default roles, provisions OAuth credential placeholders, configures FX provider, creates the bootstrap `SUPER_OWNER` user. < 30 minute end-to-end. |
+| **Tenant onboarding CLI** | Phase 8 — `ums-admin tenant create <slug>` inserts the row, seeds default roles, provisions Google OAuth credential placeholders, records the primary display currency, creates the bootstrap `SUPER_OWNER` user. < 30 minute end-to-end. |
 
 ---
 

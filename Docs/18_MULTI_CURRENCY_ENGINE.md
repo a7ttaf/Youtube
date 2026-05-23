@@ -1,333 +1,363 @@
-# Multi-Currency Engine
+# Source-Reported Currency Policy
 
-> Status: **planned** — Phase S2 schema; wired into reconciliation in Phase 4.
-> Replaces the previous USD-only storage model. **All math in `Decimal`, never `float`.**
-
----
-
-## Why multi-currency
-
-Channels operate across multiple economies: AdSense pays in USD, bank receipts arrive in AED for the UAE-based holding, an Egyptian sector reports in EGP, royalties may originate in EUR or GBP. Storing everything as a single denomination loses information and hides FX impact from finance. The system must:
-
-1. **Store the native amount as the source of truth.** Conversion happens on read, not at storage.
-2. **Freeze the FX rate used when a month is locked.** A locked month must produce the same numbers a year later.
-3. **Cite the rate.** Every converted display value is explainable down to "rate X.YZZZ from provider P on date D".
-4. **Aggregate sensibly across currencies.** Mixed-currency rollups show in the tenant's primary currency by default, with an explicit "native (per-currency)" view.
-
-This page describes the data model, the conversion pipeline, the API surface, the display rules, and the test invariants.
+> Status: **planned** - revised on 2026-05-23.
+> Replaces the earlier FX-rate-led multi-currency design. Official finance
+> values come from Google/YouTube/AdSense source reports, not from third-party
+> exchange-rate reconstruction.
 
 ---
 
-## Storage rule
+## Why this changed
 
-For every monetary value, two columns:
+UMS monthly finance must match the values that YouTube and AdSense report.
+In markets where currency rates are unstable, especially Egypt-facing finance
+workflows, deriving official monthly revenue from a public FX feed or a manual
+rate table creates numbers that can disagree with Google settlement and bank
+evidence.
 
-| Column | Type | Meaning |
-|---|---|---|
-| `amount_native` | `NUMERIC(20, 6)` | The amount as reported by the source. Never converted in place. |
-| `currency_iso4217` | `CHAR(3)` | The ISO 4217 code in upper case (e.g. `'AED'`, `'USD'`). |
+The design rule is therefore:
 
-**Existing `*_usd` columns are deprecated.** A migration backfills `(amount_native, 'USD')` for every existing row and removes the suffix in API responses. The columns themselves stay for one release cycle to allow rollback.
+1. **Google-reported money is authoritative.** Store the amount and currency
+   exactly as the YouTube / AdSense report provides it.
+2. **FX rates are not an official finance source.** Market rates can be used
+   later for clearly labeled display conversion only.
+3. **Month close freezes source evidence.** A locked month preserves imported
+   source rows, selected revenue facts, AdSense payments, bank receipts, and
+   reconciliation decisions. It does not freeze a derived FX rate in B1.
+4. **No manual rate workflow in B1.** Do not add `Permission.MANAGE_FX_RATES`,
+   `fx_rates`, `fx_locked_month_rates`, manual FX CSV upload, ECB sync, or
+   exchangerate.host sync to the B1 source-of-truth path.
 
-**Why NUMERIC(20, 6):** 20 digits of precision is enough for trillions of any currency; 6 decimal places cover all current ISO 4217 minor unit scales (UYI has 0, most have 2-3, no real currency exceeds 6).
-
-**Decimal in code:**
-
-```python
-from decimal import Decimal, getcontext
-
-# All money math uses Decimal at this precision. Quantize at the display edge.
-getcontext().prec = 28
-```
-
-`float` is treated as a bug in money modules. `mypy --strict` stays enabled, and a repo-local AST guard blocks `float` annotations, `float()` casts, and float literals in money modules; ruff alone does not provide this domain-specific guarantee.
+This page now describes the source-reported money model, the minimum currency
+reference data still needed for validation, the Google ingestion boundary, and
+the testing contract for the revised B1.
 
 ---
 
-## Currencies
+## Source-of-truth rules
 
-`currencies` table (platform-wide, seeded from ISO 4217):
+Every official monetary row must preserve:
+
+| Field | Meaning |
+|---|---|
+| `amount_native` | Amount exactly as reported by the source. |
+| `currency_code` | ISO 4217 code reported by the source or requested from the Google report API. |
+| `source_system` | `youtube_reporting`, `youtube_analytics`, or `adsense_management`. |
+| `source_account_id` | Google account, AdSense account, content owner, or channel context. |
+| `report_month` | Canonical `YYYY-MM` finance month. |
+| `period_start` / `period_end` | Exact report date range. |
+| `source_report_id` / `raw_file_id` | Link back to the downloaded report or API result. |
+| `raw_payload` | Original row or source metadata needed for audit/debugging. |
+| `ingested_at` / `imported_by` | Provenance for the connector run or operator-controlled import. |
+
+Official calculations must not overwrite native source amounts with converted
+values. Any later conversion envelope must remain separate from the official
+source row and be labeled as display-only.
+
+---
+
+## Currency reference
+
+The `currencies` table is still useful as reference data. It validates Google
+report currency codes and user/tenant display preferences; it does not imply
+that UMS manages official exchange rates.
 
 ```sql
 CREATE TABLE currencies (
-    code            CHAR(3) PRIMARY KEY,
-    numeric_code    CHAR(3) NOT NULL,
-    name            TEXT NOT NULL,
-    minor_unit      SMALLINT,                    -- 2 for USD, 0 for JPY/UYI, NULL for ISO "N.A."
-    is_supported    BOOLEAN NOT NULL DEFAULT FALSE,
-    activated_at    TIMESTAMPTZ,
-    CONSTRAINT ck_currencies_code_upper CHECK (code = upper(code)),
-    CONSTRAINT ck_currencies_minor_unit CHECK (minor_unit IS NULL OR minor_unit BETWEEN 0 AND 6),
-    CONSTRAINT ck_currencies_supported_minor_unit CHECK (is_supported = FALSE OR minor_unit IS NOT NULL)
+    code             text PRIMARY KEY,
+    numeric_code     text NOT NULL,
+    name             text NOT NULL,
+    minor_unit       integer,
+    is_supported     boolean NOT NULL DEFAULT false,
+    activated_at     timestamptz,
+    CONSTRAINT ck_currencies_code_format CHECK (
+        length(code) = 3 AND code = upper(code)
+    ),
+    CONSTRAINT ck_currencies_numeric_code_format CHECK (
+        length(numeric_code) = 3
+    ),
+    CONSTRAINT uq_currencies_numeric_code UNIQUE (numeric_code),
+    CONSTRAINT ck_currencies_minor_unit_range
+        CHECK (minor_unit IS NULL OR minor_unit BETWEEN 0 AND 6),
+    CONSTRAINT ck_currencies_supported_minor
+        CHECK (is_supported = false OR minor_unit IS NOT NULL),
+    CONSTRAINT ck_currencies_supported_activated
+        CHECK (is_supported = false OR activated_at IS NOT NULL)
 );
 ```
 
-**v1.0 supported set (`is_supported = TRUE`):** `AED`, `USD`, `EUR`, `GBP`, `SAR`, `EGP`. Any other ISO code can be flipped on by a platform admin without code changes — the seed inserts the full ISO 4217 list as unsupported rows. ISO entries with minor unit `N.A.` are stored with `minor_unit = NULL` and cannot be marked supported until finance defines an explicit display/rounding rule.
+Seed the full ISO 4217 snapshot as unsupported rows, then mark the v1 display
+set as supported: `AED`, `USD`, `EUR`, `GBP`, `SAR`, `EGP`.
+
+`tenants.primary_currency` and `users.preferred_currency` may reference this
+table for display defaults. They must not drive official finance conversion in
+B1.
 
 ---
 
-## FX rate snapshots
+## Planned Google source row storage
 
-`fx_rates` table:
+B1 should introduce a source-row table for monetary values returned by Google
+reports. Exact implementation can split reports and rows into two physical
+tables, but the contract below is the minimum storage shape.
 
 ```sql
-CREATE TABLE fx_rates (
-    id              UUID PRIMARY KEY DEFAULT gen_random_uuid(),
-    tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-    provider        TEXT NOT NULL,                -- 'ECB', 'EXCHANGERATE_HOST', 'MANUAL_CSV'
-    base_code       CHAR(3) NOT NULL REFERENCES currencies(code),
-    quote_code      CHAR(3) NOT NULL REFERENCES currencies(code),
-    rate            NUMERIC(20, 10) NOT NULL,     -- amount in QUOTE per 1 of BASE
-    as_of_date      DATE NOT NULL,                -- the day this rate applies
-    source_ref      TEXT,                         -- raw provider reference
-    ingested_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    ingested_by     UUID,                         -- tenant user for manual CSV uploads
-    ingested_by_platform_admin UUID,              -- platform admin for cross-tenant ops
-    CONSTRAINT uq_fx_rates_unique
-        UNIQUE (tenant_id, provider, base_code, quote_code, as_of_date),
-    CONSTRAINT fk_fx_rates_ingested_by_tenant
-        FOREIGN KEY (tenant_id, ingested_by) REFERENCES users(tenant_id, id),
-    CONSTRAINT fk_fx_rates_ingested_by_platform_admin
-        FOREIGN KEY (ingested_by_platform_admin) REFERENCES platform_admins(id),
-    CONSTRAINT ck_fx_rates_positive_rate CHECK (rate > 0),
-    CONSTRAINT ck_fx_rates_distinct CHECK (base_code <> quote_code),
-    CONSTRAINT ck_fx_rates_one_manual_actor
-        CHECK (NOT (ingested_by IS NOT NULL AND ingested_by_platform_admin IS NOT NULL))
+CREATE TABLE google_revenue_source_rows (
+    id                 uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    tenant_id          uuid NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
+    source_system      text NOT NULL,
+    source_row_key     text NOT NULL,
+    source_account_id  text NOT NULL,
+    content_owner_id   text,
+    youtube_channel_id text,
+    report_type        text NOT NULL,
+    report_month       text NOT NULL,
+    period_start       date NOT NULL,
+    period_end         date NOT NULL,
+    metric_key         text NOT NULL,
+    value_kind         text NOT NULL,
+    amount_native      numeric(20, 6) NOT NULL,
+    currency_code      text NOT NULL REFERENCES currencies(code),
+    source_report_id   text,
+    raw_file_id        uuid REFERENCES raw_report_files(id) ON DELETE RESTRICT,
+    raw_payload        jsonb NOT NULL DEFAULT '{}'::jsonb,
+    imported_by        uuid,
+    ingested_at        timestamptz NOT NULL DEFAULT now(),
+    CONSTRAINT uq_google_revenue_source_rows_key
+        UNIQUE (tenant_id, source_system, source_row_key),
+    CONSTRAINT ck_google_revenue_source_rows_month_format CHECK (
+        length(report_month) = 7
+        AND substr(report_month, 5, 1) = '-'
+        AND substr(report_month, 1, 1) BETWEEN '0' AND '9'
+        AND substr(report_month, 2, 1) BETWEEN '0' AND '9'
+        AND substr(report_month, 3, 1) BETWEEN '0' AND '9'
+        AND substr(report_month, 4, 1) BETWEEN '0' AND '9'
+        AND substr(report_month, 6, 2) BETWEEN '01' AND '12'
+    ),
+    CONSTRAINT ck_google_revenue_source_rows_period_order
+        CHECK (period_end >= period_start),
+    CONSTRAINT ck_google_revenue_source_rows_amount_non_negative
+        CHECK (amount_native >= 0),
+    CONSTRAINT ck_google_revenue_source_rows_source_system CHECK (
+        source_system IN (
+            'youtube_reporting',
+            'youtube_analytics',
+            'adsense_management'
+        )
+    ),
+    CONSTRAINT ck_google_revenue_source_rows_value_kind CHECK (
+        value_kind IN ('estimated', 'settled', 'adjustment', 'tax', 'deduction')
+    )
 );
-CREATE INDEX ix_fx_rates_lookup ON fx_rates (tenant_id, base_code, quote_code, as_of_date DESC);
+
+CREATE INDEX ix_google_revenue_source_rows_month
+    ON google_revenue_source_rows (tenant_id, report_month, source_system);
+CREATE INDEX ix_google_revenue_source_rows_channel
+    ON google_revenue_source_rows (tenant_id, youtube_channel_id, report_month)
+    WHERE youtube_channel_id IS NOT NULL;
 ```
 
-Automated sync leaves both actor columns NULL. Manual tenant-user uploads set `ingested_by`; platform-wide uploads set `ingested_by_platform_admin`. Tenant-user provenance is constrained by `(tenant_id, ingested_by)` so a rate row cannot point at a user from another tenant.
+`source_row_key` is a deterministic connector-built key from Google source
+identifiers, report type, date range, metric, channel/content-owner context,
+and row dimensions. It avoids nullable-column uniqueness traps and makes
+re-ingestion idempotent.
 
-**Semantics:** rate is `quote_per_base` — i.e. 1 unit of `base_code` is worth `rate` units of `quote_code`. To convert an amount: `target = amount_native * rate(native -> target, on_date)`.
-
-**Missing rate:** the conversion service raises `FxRateUnavailable`, never silently returns 0 or null. The UI then shows the value in its native currency with a "rate unavailable" warning. Locked-month rollups require all FX to be present (smart-alert `RATE_MISSING_FOR_LOCKED_MONTH`).
+`monthly_channel_revenue_facts` can remain the normalized serving table for
+current APIs, but selected values should be copied from Google source rows with
+their source references preserved. Later paired-column migration can replace
+the existing `*_usd` fields; B1 does not need market FX to start ingestion.
 
 ---
 
-## FX provider abstraction
+## Google connector boundaries
 
-```python
-class FxRateProvider(Protocol):
-    name: str
-    async def fetch_rates(self, *, as_of_date: date,
-                          base: str, quotes: Iterable[str]) -> Iterable[FxRateInput]:
-        ...
-```
+Primary source APIs:
 
-Implementations:
+- YouTube Reporting API: bulk reports for channel/content-owner reporting.
+- YouTube Analytics API: targeted queries and validation, including monetary
+  metrics when the account has the required access.
+- AdSense Management API: earnings and payment reports. When report APIs expose
+  currency controls such as `currencyCode`, B1 must make the request policy
+  explicit and still store the currency returned by Google with each monetary
+  row.
 
-| Provider | Module | Notes |
-|---|---|---|
-| **ECB** (European Central Bank) | `finance/fx/providers/ecb.py` | Free, public, daily reference rates; EUR-pivot — derives cross rates. Default. |
-| **exchangerate.host** | `finance/fx/providers/exchangerate_host.py` | Free, multiple bases; fallback if ECB doesn't cover a pair. |
-| **Manual CSV upload** | `finance/fx/providers/manual_csv.py` | Finance uploads a `.csv` for unusual currencies or audit-mandated official rates. |
-| Future: **OANDA, XE, central bank feeds** | — | Pluggable; just implement the protocol. |
+B1 connector behavior:
 
-Provider choice is **per-tenant**, configured in `tenants.fx_provider_settings JSONB` on the `tenants` table. Multiple providers can be enabled with a priority order.
+1. Fetch or download the Google report.
+2. Store raw file/API metadata before parsing.
+3. Parse rows into `google_revenue_source_rows`.
+4. Upsert by `(tenant_id, source_system, source_row_key)`.
+5. Normalize selected source rows into existing revenue/payment tables only
+   after source provenance is persisted.
 
-Expected JSON shape:
+The connector layer owns OAuth credentials, retry, quota/auth failures, report
+availability, and parse errors. Finance services consume stored SQL rows; they
+do not call Google APIs directly and do not calculate official FX.
 
-```json
-{
-  "providers": ["ECB", "EXCHANGERATE_HOST", "MANUAL_CSV"],
-  "priority_order": ["MANUAL_CSV", "ECB", "EXCHANGERATE_HOST"],
-  "usd_pivot_enabled": false,
-  "manual_csv_requires_approval": true
-}
-```
+Official docs used for this design direction:
 
-The settings model is validated by a Pydantic schema at write time and backed by a database `CHECK (jsonb_typeof(fx_provider_settings) = 'object')` so malformed scalar/list values cannot be stored.
-
-### Sync job
-
-Celery beat task `workers/fx_sync_job.py` runs daily at 02:00 UTC per tenant; pulls yesterday's rates for all (base_code, quote_code) pairs used by that tenant's data; writes to `fx_rates`. Idempotent per tenant: the `(tenant_id, provider, base_code, quote_code, as_of_date)` unique constraint ensures retries do not duplicate rates while allowing tenant-specific provider choices and manual overrides.
+- YouTube Analytics and Reporting APIs:
+  <https://developers.google.com/youtube/analytics/>
+- YouTube Analytics `reports.query`:
+  <https://developers.google.com/youtube/analytics/reference/reports/query>
+- AdSense Management API:
+  <https://developers.google.com/adsense/management/>
+- AdSense `accounts.reports.generate`:
+  <https://developers.google.com/adsense/management/reference/rest/v2/accounts.reports/generate>
 
 ---
 
-## Conversion service
+## What happens to exchange rates
 
-```python
-# backend/ums_smart_revenue/finance/fx/service.py (sketch)
-class FxConversionService:
-    async def convert(
-        self,
-        amount: Decimal,
-        from_code: str,
-        to_code: str,
-        *,
-        on_date: date,
-        prefer_provider: str | None = None,
-    ) -> FxConversion:
-        ...
-    async def convert_many(...) -> list[FxConversion]: ...
+The existing `currency_exchange_rates` scaffold is legacy infrastructure. It
+can remain inert until a cleanup PR retires it, but B1 must not expand it into
+an official finance workflow.
 
-@dataclass(frozen=True)
-class FxConversion:
-    amount_native: Decimal
-    amount_converted: Decimal
-    from_code: str
-    to_code: str
-    rate: Decimal
-    rate_as_of: date
-    provider: str
-```
+Deferred / removed from B1:
 
-Conversion never mutates the source row. It returns an `FxConversion` envelope so the UI can render both the converted value and the source rate.
+- `fx_rates`
+- `fx_locked_month_rates`
+- `tenants.fx_provider_settings`
+- `Permission.MANAGE_FX_RATES`
+- `/fx/rates/manual-upload`
+- `/fx/sync`
+- ECB / exchangerate.host / manual CSV provider priority
+- locked-month FX freeze tests
+- conversion-service property tests
 
-**Identity conversions:** When `from_code == to_code`, the service short-circuits and returns an `FxConversion` with `rate = Decimal("1")`, `provider = "IDENTITY"`, and `rate_as_of = on_date`. This sentinel does not correspond to a provider table row and performs no database lookup.
-
-**Rate lookup order:**
-1. Exact `(tenant_id, base_code, quote_code, as_of_date)` match using the tenant's `priority_order`; if multiple providers have that exact date, choose the first provider in priority order, then the newest `ingested_at` within that provider.
-2. Most recent `(tenant_id, base_code, quote_code, on_or_before=as_of_date)` from the first provider in priority order that has an eligible rate.
-3. Most recent across any allowed provider for the tenant.
-4. Cross-rate via USD pivot (`(base_code, USD)` * `(USD, quote_code)`).
-5. Failure → `FxRateUnavailable`.
-
-Step 4 is only used when explicitly enabled per-tenant. Pivoted rates are marked in the `FxConversion` envelope so the explanation engine can label them `B_RECONCILED` instead of `A_OFFICIAL`.
+Future display-only conversion may return as a separate spec, likely with a
+name such as `display_fx_rates`, and must be visibly non-official in API
+responses, explain drawers, exports, and audit notes.
 
 ---
 
-## Locked-month FX freeze
+## API surface direction
 
-When a finance month is locked:
+B1 should build on existing connector and report surfaces instead of creating
+rate-management APIs.
 
-1. The conversion service is asked to compute the rate used for every monetary value in that month.
-2. The selected rates are persisted to `fx_locked_month_rates(tenant_id, month, base_code, quote_code, as_of_date, rate, provider)`.
-3. Subsequent reads of locked-month values use the **locked rate**, not the live one.
-4. Unlocking the month deletes the locked rates and recomputes from current `fx_rates`. Unlock requires the standard reason + audit event.
-
-On read, the conversion service first checks whether `on_date` falls inside a locked finance month. If the month is locked, lookup is against `fx_locked_month_rates` rather than `fx_rates`, keyed by `(tenant_id, month, base_code, quote_code, as_of_date)`. When the original lock-time selection used "most recent on or before", the chosen `as_of_date` is persisted with the locked row and reused exactly; the read path never re-runs provider priority or recency selection for locked months.
-
-```sql
-CREATE TABLE fx_locked_month_rates (
-    tenant_id       UUID NOT NULL REFERENCES tenants(id) ON DELETE RESTRICT,
-    month           DATE NOT NULL,
-    base_code       CHAR(3) NOT NULL REFERENCES currencies(code),
-    quote_code      CHAR(3) NOT NULL REFERENCES currencies(code),
-    rate            NUMERIC(20, 10) NOT NULL,
-    provider        TEXT NOT NULL,
-    as_of_date      DATE NOT NULL,
-    locked_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (tenant_id, month, base_code, quote_code, as_of_date),
-    CONSTRAINT ck_fx_locked_month_rates_positive CHECK (rate > 0),
-    CONSTRAINT ck_fx_locked_month_rates_distinct CHECK (base_code <> quote_code)
-);
-CREATE INDEX ix_fx_locked_month_rates_month ON fx_locked_month_rates (tenant_id, month, as_of_date);
-```
-
-This guarantees that re-running last March's executive PDF a year later produces identical numbers.
-
----
-
-## API surface
-
-### Request a value in a specific currency
+Use / extend:
 
 ```http
-GET /revenue/months/2026-04/net-revenue?currency=AED
-GET /revenue/months/2026-04/net-revenue
-    Accept-Currency: AED
+GET  /connectors/credentials
+POST /connectors/credentials
+POST /connectors/jobs
+POST /reports/raw-files
+GET  /reports/raw-files
+POST /revenue/facts
+POST /adsense/sync-payments
 ```
 
-Resolution order:
-1. `?currency=` query param (highest precedence).
-2. `Accept-Currency` header.
-3. User preference `users.preferred_currency`.
-4. Tenant default `tenants.primary_currency`.
-
-### Currency in responses
-
-Every monetary node carries:
-
-```json
-{
-  "amount": "1234567.890000",
-  "currency": "AED",
-  "native": {
-    "amount": "336000.000000",
-    "currency": "USD"
-  },
-  "fx": {
-    "rate": "3.6725",
-    "rate_as_of": "2026-04-30",
-    "provider": "ECB",
-    "is_pivoted": false
-  }
-}
-```
-
-If the requested currency equals the native currency, `fx` is `null`.
-
-### Endpoints for the engine itself
+Future source-row endpoints, if needed, should expose Google source evidence,
+not FX rates:
 
 ```http
-GET  /platform/currencies              # supported codes
-GET  /fx/rates?base=USD&quote=AED&from=2026-01-01&to=2026-04-30
-POST /fx/rates/manual-upload           # CSV; requires MANAGE_FX_RATES permission
-POST /fx/sync                          # trigger a sync; CONNECTOR_ADMIN+
+GET /revenue/source-rows?month=2026-03&source_system=adsense_management
+GET /revenue/source-rows/{id}
 ```
 
-A new `Permission.MANAGE_FX_RATES` is added in the same Phase S2 migration.
+These reads require finance revenue visibility and must redact raw payload
+fields that could expose credentials, private account metadata, or other
+sensitive Google data.
 
 ---
 
-## Display rules (frontend)
+## Section 5 - Testing for revised B1
 
-- Numbers render `1,234,567 AED` (locale + ISO suffix).
-- On hover: native amount + rate + provider + date.
-- On the Explain drawer: a dedicated FX row when the displayed currency ≠ native.
-- A global currency switcher in the top bar (`AED ▾`) updates every visible number; preference saved to `users.preferred_currency`.
-- The Channel Revenue Table allows toggling to "native (mixed)" mode that suppresses the sum row and shows per-currency subtotals.
+Replace the old FX Section 5 inventory with source-ingestion tests.
+
+### Source model and migration tests
+
+- `currencies` seed includes the full ISO snapshot and the v1 supported display
+  set.
+- Google source-row storage preserves source system, source account/channel
+  identifiers, report month/date range, native amount, currency code, source
+  reference, ingestion timestamp, and raw payload.
+- Money uses `numeric`; currency codes use `text` plus ISO-format checks.
+- B1 migration does not create `fx_rates`, `fx_locked_month_rates`,
+  `tenants.fx_provider_settings`, or `MANAGE_FX_RATES`.
+- Migration round-trip runs against PostgreSQL for JSONB, numeric, FK, and
+  index behavior.
+
+### Repository tests
+
+- Insert and upsert Google source rows by deterministic source key.
+- Re-ingesting the same Google row is idempotent and does not duplicate
+  revenue.
+- Tenant isolation is enforced on every read and write.
+- Raw payload and source provenance survive round-trip.
+- Missing amount, currency code, source system, source account, report month,
+  or source key fails closed with a typed validation error.
+
+### Connector job tests
+
+- YouTube Reporting ingestion stores raw metadata before normalized source
+  rows.
+- YouTube Analytics monetary query ingestion stores source rows without FX
+  conversion.
+- AdSense report ingestion stores source rows without FX conversion.
+- API/client failures create typed connector errors and do not create partial
+  finance rows.
+- Retrying an already-ingested report updates ingestion metadata safely without
+  duplicating source revenue.
+
+### Finance integration tests
+
+- Revenue reports, exports, payment matching, and reconciliation consume
+  Google-reported native amounts or existing selected source facts.
+- No official total depends on `currency_exchange_rates`, `fx_rates`, or a
+  market-rate provider.
+- Month close locks selected source values and reconciliation inputs, not an
+  FX-rate cache.
+- If both estimated YouTube revenue and settled AdSense revenue exist, tests
+  assert that the API labels them distinctly and does not silently replace one
+  with the other.
+
+### Permission tests
+
+- Connector admins can configure or run Google ingestion through connector
+  permissions.
+- Finance admins can review and reconcile imported finance data.
+- No role can add manual FX rates because B1 exposes no manual FX-rate route
+  and no `MANAGE_FX_RATES` permission.
+
+### Explicit B1 non-tests
+
+- No `FxConversionService` tests.
+- No Hypothesis FX round-trip, identity, sum-invariance, pivot, or locked-rate
+  tests.
+- No ECB / exchangerate.host / manual CSV provider tests.
+- No `/fx/*` API tests.
+- No paired-column migration tests for every existing `*_usd` field unless a
+  separate paired-column migration spec is explicitly approved.
 
 ---
 
-## Test invariants
+## Blast radius
 
-Property-based tests via `hypothesis`:
+Design-only change in this docs update. The implementation PR for revised B1
+will touch PostgreSQL models/migrations, connector ingestion services,
+repository tests, and finance reader tests.
 
-1. **Round-trip consistency**: `convert(amount, A, B) → convert(result, B, A)` yields the original amount within rounding tolerance (`abs(diff) ≤ 10^-minor_unit`).
-2. **Identity**: `convert(x, A, A)` returns `FxConversion(amount_native=x, amount_converted=x, from_code=A, to_code=A, rate=Decimal("1"), rate_as_of=on_date, provider="IDENTITY")`.
-3. **Sum invariance**: `sum(convert(x_i, A, B))` differs from `convert(sum(x_i), A, B)` by at most the rounding tolerance × N.
-4. **Locked-month immutability**: after a month is locked, any subsequent conversion of any value in that month uses the locked rate, regardless of `fx_rates` changes.
-5. **Pivoted rate consistency**: a USD-pivoted rate (`A→USD→B`) is within 0.5% of the direct rate when both are available (sanity check on provider data).
-6. **Mixed-currency total refusal**: aggregating mixed currencies without an explicit target raises `MixedCurrencyAggregation`.
+PostgreSQL remains the source of truth. Neo4j is retired from the active
+architecture and must not be reintroduced as a financial source.
 
----
-
-## Migration sequence (Phase S2)
-
-`20260520_0002_multi_currency_engine`:
-
-1. Create `currencies`, seed full ISO 4217 list, flip the v1.0 set to `is_supported = TRUE`.
-2. Add `tenants.fx_provider_settings JSONB` if it was not already created by the tenant foundation migration, with the object-shape check shown above.
-3. Ensure `users(tenant_id, id)` has a non-partial unique key from the tenant foundation/backfill migration before creating `fx_rates`, because `fx_rates(tenant_id, ingested_by)` references that exact column set.
-4. Create `fx_rates`, `fx_locked_month_rates`.
-5. For each monetary column on a tenant-scoped table:
-   1. Add distinct paired columns named from the source field, e.g. `bank_received_amount_native` and `bank_received_amount_currency_iso4217` for `bank_received_amount_usd`. Do not reuse generic `amount_native` / `currency_iso4217` names on tables with more than one monetary value.
-   2. Backfill only non-null source values: `<field>_native = <field>_usd`, `<field>_currency_iso4217 = 'USD'`.
-   3. Preserve original nullability. If `<field>_usd` was NOT NULL, validate a `CHECK (<field>_native IS NOT NULL AND <field>_currency_iso4217 IS NOT NULL)` before setting both new columns `NOT NULL`. If the original field was nullable, leave both nullable and add `CHECK ((<field>_native IS NULL) = (<field>_currency_iso4217 IS NULL))` so unknown monetary values remain representable.
-   4. Add FK on `<field>_currency_iso4217 → currencies(code)`.
-6. Validate the `tenants.primary_currency` column created by `20260520_0001_multi_tenant_foundation`; do not add it a second time.
-7. Add `users.preferred_currency CHAR(3) NULL`.
-8. Add FK constraints `tenants.primary_currency -> currencies(code)` and `users.preferred_currency -> currencies(code)` after `currencies` is seeded, using `NOT VALID` then `VALIDATE CONSTRAINT` for existing installs.
-9. Add `Permission.MANAGE_FX_RATES` row in `permissions`.
-
-The original `*_usd` columns are kept for one release as deprecated; flagged in `pyproject.toml` removal-target list.
+Potential graph projection impact: none in the active architecture. If a future
+read model projects `monthly_channel_revenue_facts` from Google source rows, it
+must preserve source provenance and must not calculate official finance values
+from display FX.
 
 ---
 
-## Acceptance gates
+## Open decisions before implementation
 
-- Any monetary endpoint can serve any of `{AED, USD, EUR, GBP, SAR, EGP}` via `?currency=` or `Accept-Currency`.
-- Locked-month re-export reproduces byte-for-byte (after deterministic timestamps are masked) one month later, demonstrating FX freeze.
-- Manual CSV upload for unusual rates works for an offline test fixture.
-- Hypothesis suite green: round-trip, identity, sum invariance, locked-month immutability.
-
----
-
-## Open decisions (close before Phase S2)
-
-- Tenant-level toggle for USD-pivoted cross rates: allow by default or opt-in. (Recommend opt-in; UAE banks prefer the direct AED↔USD rate.)
-- Whether `MANUAL_CSV` provider always overrides automated rates when present, or only when no automated rate exists. (Recommend "manual wins for that as_of_date".)
-- Display rule for cumulative-since-inception aggregates that span multiple locked-month FX regimes. (Recommend a banner explaining the rate transitions.)
+- Exact YouTube report types available to the UMS account.
+- Which monetary metrics are authoritative for estimated YouTube revenue.
+- Whether AdSense settled earnings or paid payment reports win when both are
+  present for the same month.
+- Whether Google reports should be requested in account currency or with an
+  explicit `currencyCode`.
+- How outside-CMS channels obtain official source rows.
+- How bank receipt variance should be explained when it reflects bank timing,
+  fees, or local currency settlement rather than a Google-reported revenue
+  difference.

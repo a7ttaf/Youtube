@@ -173,6 +173,40 @@ currency_exchange_rates (
   unique (rate_date, base_currency, quote_currency, provider_key)
 );
 
+currencies (
+  code text primary key,
+  numeric_code text not null,
+  name text not null,
+  minor_unit integer null,
+  is_supported boolean not null default false,
+  activated_at timestamptz null,
+  unique (numeric_code)
+);
+
+google_revenue_source_rows (
+  id uuid primary key,
+  tenant_id uuid not null references tenants(id),
+  source_system text not null,
+  source_row_key text not null,
+  source_account_id text not null,
+  content_owner_id text null,
+  youtube_channel_id text null,
+  report_type text not null,
+  report_month text not null,
+  period_start date not null,
+  period_end date not null,
+  metric_key text not null,
+  value_kind text not null,
+  amount_native numeric(20, 6) not null,
+  currency_code text not null references currencies(code),
+  source_report_id text null,
+  raw_file_id uuid null references raw_report_files(id) on delete restrict,
+  raw_payload jsonb not null,
+  imported_by uuid null,
+  ingested_at timestamptz not null default now(),
+  unique (tenant_id, source_system, source_row_key)
+);
+
 finance_month_close (
   tenant_id uuid not null references tenants(id),
   month text,
@@ -201,10 +235,13 @@ finance_month_close (
 -- matching finance month is locked. Month-level bank gaps are derived in SQL
 -- services from paid USD AdSense payment rows versus normalized bank receipts;
 -- transfer/FX gaps are not allocated to channels in this phase.
--- Currency exchange rates are SQL source-of-truth provider observations for
--- future non-USD normalization. The foundation upserts provider/date/pair rows
--- and exposes latest-rate reads, but it does not yet apply rates to payments,
--- bank receipts, exports, or net-revenue calculations.
+-- currency_exchange_rates is legacy scaffolding for provider observations. It
+-- is not the official finance source and is not expanded by the revised B1
+-- plan.
+-- google_revenue_source_rows is the planned source-ingestion foundation for
+-- Google/YouTube/AdSense monetary reports. It stores source-reported amounts,
+-- currencies, period/report identity, idempotent row keys, and raw payload
+-- references before values are selected for finance fact tables.
 -- Monthly channel revenue facts store optional official Shorts, longform, and
 -- subscription revenue component columns when source reports provide those
 -- values. Component columns are nullable, non-negative, and their known sum
