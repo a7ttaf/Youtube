@@ -316,6 +316,8 @@ export default function AppShell() {
   //          render the typed ApiError message in the dev-only proof tag on failure.
   // Database/ORM: None (frontend API call only).
   // Standards: useRef re-entry guard keeps fetch count at 1 under React StrictMode.
+  //            Effect is gated on displayedRole so sessions that immediately
+  //            render <AccessDeniedState/> never issue a bootstrap fetch.
   // Blast Radius: None detected (read-only; does not mutate financial state).
   // Connections:
   //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET helper.
@@ -325,15 +327,17 @@ export default function AppShell() {
   const client = useApiClient();
   const hasRequestedTenantRef = useRef(false);
   const [tenantError, setTenantError] = useState<ApiError | Error | null>(null);
+  const displayedRole = CAN_PREVIEW_ROLES ? previewRole : authenticatedRole;
 
   useEffect(() => {
+    if (!displayedRole) return;
     if (hasRequestedTenantRef.current || tenant.id) return;
     hasRequestedTenantRef.current = true;
     client
       .get<TenantRead>("/tenants/me")
       .then(tenant.hydrate)
       .catch(setTenantError);
-  }, [client, tenant.id, tenant.hydrate]);
+  }, [client, tenant.id, tenant.hydrate, displayedRole]);
 
   const tenantErrorDetail =
     tenantError instanceof ApiError &&
@@ -352,7 +356,6 @@ export default function AppShell() {
       ? `Tenant: ${tenant.displayName} (${tenant.tenantSlug}) — id ${tenant.id}`
       : `Tenant: ${tenant.tenantSlug} (loading…)`;
 
-  const displayedRole = CAN_PREVIEW_ROLES ? previewRole : authenticatedRole;
   if (!displayedRole) {
     return <AccessDeniedState />;
   }

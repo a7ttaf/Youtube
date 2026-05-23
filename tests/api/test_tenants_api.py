@@ -412,3 +412,37 @@ def test_tenants_me_headers_mode_returns_bootstrap_after_gateway_auth(
     payload = response.json()
     assert payload["slug"] == "ums"
     assert payload["id"] == str(BOOTSTRAP_TENANT_ID)
+
+
+# ---------------------------------------------------------------------------
+# Case 10 — no tenant middleware installed → controlled 503 (not 500)
+# ---------------------------------------------------------------------------
+# create_app(database_url=None) does NOT install TenantResolverMiddleware nor
+# DefaultTenantMiddleware (the `if resolved_database_url:` branch is skipped).
+# A request whose principal dependency succeeds therefore reaches
+# require_current_tenant() with no TENANT_CTX set. The route must map the
+# resulting TenantContextMissing into a controlled 503 instead of an
+# unhandled 500, preserving fail-closed semantics.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def client_no_tenant_middleware():
+    """App constructed without any tenant middleware (database_url unset)."""
+    app = create_app(database_url=None, authz_source="headers")
+    with TestClient(app) as client:
+        yield client
+
+
+def test_tenants_me_returns_503_when_tenant_middleware_missing(
+    client_no_tenant_middleware,
+):
+    response = client_no_tenant_middleware.get(
+        "/tenants/me",
+        headers=_full_principal_headers(),
+    )
+    assert response.status_code == 503
+    assert (
+        response.json()["detail"]
+        == "Tenant resolver middleware is not installed"
+    )

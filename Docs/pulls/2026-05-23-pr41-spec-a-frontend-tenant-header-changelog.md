@@ -217,3 +217,68 @@
   to this PR (it appeared in `M frontend/package-lock.json` in `git status`).
   This PR brings it in scope by modifying `package.json`; the regenerated
   lockfile is committed as a deliberate addition.
+
+---
+
+## Review-fix follow-up (Codex P1 / P2 / P3 + CodeRabbit `Safe Public Contracts`)
+
+The first push hit the unresolved Codex and CodeRabbit threads listed below.
+This follow-up resolves them in a single commit without re-scoping the PR.
+
+### P1 — Trusted-gateway token no longer leakable via `VITE_*`
+
+- `frontend/vite.config.ts`
+  - Removed the `VITE_DEV_GATEWAY_TOKEN` fallback. Vite injects every
+    `VITE_*` variable into the client bundle through `import.meta.env`,
+    so a developer following the previous variable-name convention could
+    have unintentionally embedded a real trusted-gateway secret in the
+    browser. The token now reads from `UMS_TRUSTED_GATEWAY_TOKEN` only —
+    a server-only name that already governed the backend.
+  - Updated the startup-warning text and added a `Purpose / Standards /
+    Blast Radius` block documenting the secret-handling rule.
+- `.env.example`, `README.md`
+  - Added the new `VITE_DEV_*` variables (backend URL, user id, email,
+    role, scope type) plus an explicit “never alias the token under
+    `VITE_*`” note. Resolves the CodeRabbit `Safe Public Contracts` ❌
+    blocker.
+
+### P1 — Vite dev proxy injects the full trusted-principal header set
+
+- `frontend/vite.config.ts`
+  - The proxy now injects `X-User-Email`, `X-Role`, and `X-Scope-Type`
+    alongside `X-User-ID` and the gateway token. Without these,
+    `current_principal_from_headers` returned 401 in the default
+    `UMS_AUTHZ_SOURCE=headers` mode and `/tenants/me` could never
+    bootstrap from the browser during local development.
+
+### P2 — `/tenants/me` returns a controlled 503 when no tenant middleware is installed
+
+- `backend/ums_smart_revenue/api/tenants.py`
+  - `require_current_tenant()` is now wrapped: `TenantContextMissing`
+    is translated into `HTTPException(503, "Tenant resolver middleware
+    is not installed")`. `create_app(database_url=None)` is a valid app
+    configuration that does not install tenant middleware, and the
+    previous code surfaced an unhandled 500 for that path.
+- `tests/api/test_tenants_api.py`
+  - Added `test_tenants_me_returns_503_when_tenant_middleware_missing`
+    constructed via `create_app(database_url=None, authz_source="headers")`
+    and the full principal headers. Asserts `503` + the new detail.
+
+### P3 — AppShell skips `/tenants/me` when no role is present
+
+- `frontend/src/components/srcc/AppShell.tsx`
+  - `displayedRole` is now computed before the effect and the effect
+    body exits early when no role is set, so sessions that immediately
+    render `<AccessDeniedState/>` no longer issue a bootstrap fetch
+    (avoids unnecessary network traffic and 401 audit noise on
+    access-denied sessions).
+
+### Validation rerun
+
+- `python -m ruff check backend tests scripts` → clean.
+- `python -m pytest -q -p no:cacheprovider --basetemp .pytest-tmp` →
+  **821 passed** (was 819 before this follow-up; +2 from the new 503
+  case and one regression-coverage assertion already in this PR).
+- `npm --prefix frontend run test` → **28 passed** (3 + 21 + 4 across
+  `TenantContext`, `client`, `AppShell`).
+- `git diff --check` → clean.
