@@ -68,5 +68,5 @@ Nothing. Legacy `currency_exchange_rates` table, `CurrencyExchangeRateORM`, `fin
 
 - Pre-PR #43 baseline (post-PR #42 docs-only merge): 821 tests
 - Post-PR #43 (original submission): 910 tests
-- Post-PR #43 (incl. Codex/CodeRabbit review hardening): 928 tests
-- **Net new: +107 tests** (+89 in the original 17 new test files; +18 review-hardening regressions added to existing test files).
+- Post-PR #43 (incl. Codex/CodeRabbit review hardening): 938 tests
+- **Net new: +117 tests** (+89 in the original 17 new test files; +28 review-hardening regressions added to existing test files).

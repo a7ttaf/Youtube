@@ -125,3 +125,33 @@ def test_different_filters_produce_distinct_keys() -> None:
     a = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(us, tenant_id=TENANT_ID))
     b = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(ca, tenant_id=TENANT_ID))
     assert set(a).isdisjoint(set(b))
+
+
+def test_reordered_metrics_produce_same_key() -> None:
+    """Reordering the metrics CSV must not change source_row_key — the same
+    dataset re-requested with reordered metrics must upsert, not duplicate.
+    """
+    base = _load_fixture("sample_query_response_2026_04.json")  # metrics: estimatedRevenue,grossRevenue
+    reordered = {**base, "query_request": {**base["query_request"], "metrics": "grossRevenue,estimatedRevenue"}}
+    a = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(base, tenant_id=TENANT_ID))
+    b = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(reordered, tenant_id=TENANT_ID))
+    assert a == b
+
+
+def test_reordered_filters_produce_same_key() -> None:
+    """Reordering filter clauses must not change source_row_key (idempotency)."""
+    base = _load_fixture("sample_query_response_2026_04.json")
+    p1 = {**base, "query_request": {**base["query_request"], "filters": "country==US;day==2026-04-01"}}
+    p2 = {**base, "query_request": {**base["query_request"], "filters": "day==2026-04-01;country==US"}}
+    a = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(p1, tenant_id=TENANT_ID))
+    b = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(p2, tenant_id=TENANT_ID))
+    assert a == b
+
+
+def test_missing_rows_is_zero_result() -> None:
+    """A reports.query response that omits `rows` (no data for the range) must
+    yield zero rows, not a ParserError, so sparse-channel runs do not fail.
+    """
+    base = _load_fixture("sample_query_response_2026_04.json")
+    no_rows = {k: v for k, v in base.items() if k != "rows"}
+    assert list(YouTubeAnalyticsParser().parse(no_rows, tenant_id=TENANT_ID)) == []

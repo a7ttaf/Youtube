@@ -342,6 +342,16 @@ def test_rejects_nan_amount_native(session: Session) -> None:
         repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
 
 
+def test_rejects_non_decimal_amount(session: Session) -> None:
+    """A non-Decimal amount_native must raise the typed validation error, not
+    AttributeError from calling .is_finite() on a non-Decimal.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = replace(_row(source_row_key="x" * 64), amount_native="1.23")  # str, not Decimal
+    with pytest.raises(GoogleRevenueSourceRowValidationError):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
 def test_validate_deep_copies_nested_raw_payload(session: Session) -> None:
     """_validate must deep-copy raw_payload so a caller mutating a NESTED dict
     cannot reach into the persisted row. A shallow dict() copy shares the

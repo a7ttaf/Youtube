@@ -59,6 +59,13 @@ class YouTubeReportingParser:
             date_range = require_dict(row, "date_range")
             period_start = parse_iso_date(require_str(date_range, "start"), field="date_range.start")
             period_end = parse_iso_date(require_str(date_range, "end"), field="date_range.end")
+            # Reject reversed ranges before month bucketing: end must be on or
+            # after start; fail closed so a malformed payload stays typed.
+            if period_end < period_start:
+                raise ParserError(
+                    "row date_range.end must be on or after start, got "
+                    f"{period_start.isoformat()}..{period_end.isoformat()}"
+                )
             # report_month is derived from period_start; a row whose range
             # crosses a calendar-month boundary would be mis-bucketed.
             if (period_start.year, period_start.month) != (period_end.year, period_end.month):

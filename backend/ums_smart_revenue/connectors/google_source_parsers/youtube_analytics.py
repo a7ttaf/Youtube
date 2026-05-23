@@ -27,6 +27,15 @@ _MONETARY_METRICS: Final[frozenset[str]] = frozenset(
 )
 
 
+def _canonical_csv(value: str, sep: str) -> str:
+    """Order-independent canonical form of a ``sep``-delimited list.
+
+    Sorting the parts keeps source_row_key stable when a caller reorders the
+    same metric/dimension/filter set across runs, preserving idempotency.
+    """
+    return sep.join(sorted(part.strip() for part in value.split(sep) if part.strip()))
+
+
 # ============================================================================
 # Purpose: Translate YouTube Analytics reports.query payloads into
 #          ParsedSourceRow rows, one per monetary metric per data row.
@@ -48,7 +57,13 @@ class YouTubeAnalyticsParser:
     ) -> Iterable[ParsedSourceRow]:
         request = require_dict(payload, "query_request")
         column_headers = payload.get("columnHeaders")
+        # reports.query omits `rows` entirely when there is no data for the
+        # range; treat a missing/null rows as a clean zero-result (emit nothing)
+        # rather than failing ingestion for a sparse channel. A present
+        # non-list rows is still malformed.
         rows = payload.get("rows")
+        if rows is None:
+            rows = []
         if not isinstance(column_headers, list):
             raise ParserError("columnHeaders must be a list")
         if not isinstance(rows, list):
@@ -64,7 +79,12 @@ class YouTubeAnalyticsParser:
         # for the contentOwner/channel account produce distinct source_row_keys.
         # Without this, the repo PK (tenant_id, source_system, source_row_key)
         # silently collapses cross-account data in a multi-CMS tenant.
-        query_signature = f"{ids}|{metrics_csv}|{dimensions_csv}"
+        # Canonicalise (sort) the metric/dimension lists so a rerun that only
+        # reorders the CSV hashes to the same key (idempotency) rather than
+        # inserting a duplicate financial row.
+        query_signature = (
+            f"{ids}|{_canonical_csv(metrics_csv, ',')}|{_canonical_csv(dimensions_csv, ',')}"
+        )
         # A different currency or filter expression for the same
         # ids/metrics/dimensions/period is a distinct dataset; fold both into
         # the row key (as structured fields, below) so one cannot overwrite the
@@ -72,6 +92,17 @@ class YouTubeAnalyticsParser:
         filters = request.get("filters")
         if filters is not None and not isinstance(filters, str):
             raise ParserError("query_request.filters must be a string when present")
+        # Canonicalise filter clauses (order-independent) for the same
+        # idempotency reason as metrics/dimensions above; YouTube Analytics
+        # separates filter clauses with ';'.
+        filters_key = _canonical_csv(filters, ";") if filters else filters
+        # Reject reversed ranges before month bucketing: endDate must be on or
+        # after startDate; fail closed so a malformed payload stays typed.
+        if period_end < period_start:
+            raise ParserError(
+                "reports.query endDate must be on or after startDate, got "
+                f"{period_start.isoformat()}..{period_end.isoformat()}"
+            )
         # report_month is derived from period_start, so a range spanning more
         # than one calendar month would mis-bucket every returned row; fail
         # closed and require single-month queries.
@@ -97,6 +128,10 @@ class YouTubeAnalyticsParser:
             name = h.get("name")
             if not isinstance(name, str):
                 raise ParserError("each DIMENSION/METRIC header requires a string name")
+            if (column_type, name) in header_specs:
+                # Duplicate header would overwrite the earlier cell in
+                # dim_values/metric_values and silently corrupt the row mapping.
+                raise ParserError(f"duplicate columnHeaders entry: {column_type}.{name}")
             header_specs.append((column_type, name))
 
         metric_names = [name for column_type, name in header_specs if column_type == "METRIC"]
@@ -136,7 +171,7 @@ class YouTubeAnalyticsParser:
                     source_system=self.source_system,
                     query_signature=f"{query_signature}|{metric_name}",
                     currency=currency,
-                    filters=filters,
+                    filters=filters_key,
                     period_start=period_start.isoformat(),
                     period_end=period_end.isoformat(),
                     dimensions=dim_values,

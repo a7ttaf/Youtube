@@ -59,6 +59,14 @@ class AdSenseManagementParser:
         period_start = self._parse_iso_date(require_dict(require_dict(request, "dateRange"), "startDate"))
         period_end = self._parse_iso_date(require_dict(require_dict(request, "dateRange"), "endDate"))
         currency = require_str(request, "currencyCode")
+        # Reject reversed ranges before month bucketing: endDate must be on or
+        # after startDate. The DB has a period-order constraint, but fail closed
+        # here so a malformed payload stays on the parser's typed contract.
+        if period_end < period_start:
+            raise ParserError(
+                "dateRange.endDate must be on or after startDate, got "
+                f"{period_start.isoformat()}..{period_end.isoformat()}"
+            )
         # report_month is derived from period_start, so a dateRange spanning
         # more than one calendar month would mis-bucket every row; fail closed.
         if (period_start.year, period_start.month) != (period_end.year, period_end.month):
@@ -83,6 +91,10 @@ class AdSenseManagementParser:
             name = h.get("name")
             if not isinstance(name, str):
                 raise ParserError("each DIMENSION/METRIC_CURRENCY header requires a string name")
+            if (header_type, name) in header_specs:
+                # Duplicate header would overwrite the earlier cell in
+                # dim_values/metric_values and silently corrupt the row mapping.
+                raise ParserError(f"duplicate headers entry: {header_type}.{name}")
             header_specs.append((header_type, name))
 
         for raw_row in rows:
@@ -96,7 +108,9 @@ class AdSenseManagementParser:
             dim_values: dict[str, object] = {}
             metric_values: dict[str, object] = {}
             for (header_type, name), cell in zip(header_specs, cells, strict=True):
-                value = cell.get("value") if isinstance(cell, dict) else None
+                if not isinstance(cell, dict) or "value" not in cell:
+                    raise ParserError("each row.cells[*] must be an object containing 'value'")
+                value = cell["value"]
                 if header_type == "DIMENSION":
                     dim_values[name] = value
                 else:

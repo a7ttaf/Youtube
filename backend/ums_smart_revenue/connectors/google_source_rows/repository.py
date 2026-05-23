@@ -11,6 +11,7 @@ chain.
 from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import replace
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -257,6 +258,13 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
             raise GoogleRevenueSourceRowValidationError(
                 f"source_row_key must be {SOURCE_ROW_KEY_LENGTH} chars "
                 f"(got {len(row.source_row_key)})"
+            )
+        if not isinstance(row.amount_native, Decimal):
+            # Guard the type first: .is_finite()/comparison on a non-Decimal
+            # (None, str, ...) would raise AttributeError/TypeError and bypass
+            # this typed validation contract.
+            raise GoogleRevenueSourceRowValidationError(
+                "amount_native must be a Decimal"
             )
         if not row.amount_native.is_finite() or row.amount_native < 0:
             # Guard NaN/Infinity at the repository boundary too: Decimal("NaN")

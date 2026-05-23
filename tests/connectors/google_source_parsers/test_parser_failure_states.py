@@ -277,3 +277,125 @@ def test_youtube_reporting_rejects_multi_month_row() -> None:
     }
     with pytest.raises(ParserError):
         list(YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_adsense_rejects_reversed_date_range() -> None:
+    """A reversed same-month dateRange (end before start) must fail closed."""
+    payload = {
+        "request": {
+            "accountId": "accounts/pub-1",
+            "dateRange": {
+                "startDate": {"year": 2026, "month": 4, "day": 30},
+                "endDate": {"year": 2026, "month": 4, "day": 1},  # before start
+            },
+            "currencyCode": "USD",
+        },
+        "report_id": "r",
+        "headers": [{"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "USD"}],
+        "rows": [{"cells": [{"value": "5.00"}]}],
+    }
+    with pytest.raises(ParserError):
+        list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_youtube_analytics_rejects_reversed_date_range() -> None:
+    """A reversed same-month range must fail closed before month bucketing."""
+    payload = {
+        "query_request": {
+            "ids": "contentOwner==cms-1",
+            "startDate": "2026-04-30",
+            "endDate": "2026-04-01",  # before start, same month
+            "metrics": "estimatedRevenue",
+            "dimensions": "channel",
+            "currency": "USD",
+        },
+        "columnHeaders": [
+            {"name": "channel", "columnType": "DIMENSION", "dataType": "STRING"},
+            {"name": "estimatedRevenue", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [["UC_x", "100.00"]],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_youtube_reporting_rejects_reversed_date_range() -> None:
+    """A reporting row with end before start must fail closed."""
+    payload = {
+        "report_metadata": {"report_id": "r", "report_type": "t"},
+        "rows": [{
+            "line_index": 0,
+            "date_range": {"start": "2026-04-30", "end": "2026-04-01"},  # reversed
+            "dimensions": {"channel": "UC_x", "content_owner": "cms-1"},
+            "metrics": {"estimatedRevenue": "10.00", "currencyCode": "USD"},
+        }],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_adsense_rejects_non_dict_cell() -> None:
+    """A row cell that is not an object with a 'value' must fail closed rather
+    than silently becoming None (which a DIMENSION cell would accept)."""
+    payload = {
+        "request": {
+            "accountId": "accounts/pub-1",
+            "dateRange": {
+                "startDate": {"year": 2026, "month": 4, "day": 1},
+                "endDate": {"year": 2026, "month": 4, "day": 30},
+            },
+            "currencyCode": "USD",
+        },
+        "report_id": "r",
+        "headers": [
+            {"name": "COUNTRY", "type": "DIMENSION"},
+            {"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "USD"},
+        ],
+        "rows": [{"cells": ["EG", {"value": "5.00"}]}],  # first cell bare string
+    }
+    with pytest.raises(ParserError):
+        list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_adsense_rejects_duplicate_header() -> None:
+    """Duplicate headers would overwrite cells in the row mapping; fail closed."""
+    payload = {
+        "request": {
+            "accountId": "accounts/pub-1",
+            "dateRange": {
+                "startDate": {"year": 2026, "month": 4, "day": 1},
+                "endDate": {"year": 2026, "month": 4, "day": 30},
+            },
+            "currencyCode": "USD",
+        },
+        "report_id": "r",
+        "headers": [
+            {"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "USD"},
+            {"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "USD"},  # dup
+        ],
+        "rows": [{"cells": [{"value": "1.00"}, {"value": "2.00"}]}],
+    }
+    with pytest.raises(ParserError):
+        list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_youtube_analytics_rejects_duplicate_header() -> None:
+    """Duplicate columnHeaders would overwrite cells in the row mapping; fail closed."""
+    payload = {
+        "query_request": {
+            "ids": "contentOwner==cms-1",
+            "startDate": "2026-04-01",
+            "endDate": "2026-04-30",
+            "metrics": "estimatedRevenue",
+            "dimensions": "channel",
+            "currency": "USD",
+        },
+        "columnHeaders": [
+            {"name": "channel", "columnType": "DIMENSION", "dataType": "STRING"},
+            {"name": "estimatedRevenue", "columnType": "METRIC", "dataType": "FLOAT"},
+            {"name": "estimatedRevenue", "columnType": "METRIC", "dataType": "FLOAT"},  # dup
+        ],
+        "rows": [["UC_x", "100.00", "200.00"]],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
