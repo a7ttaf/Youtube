@@ -119,15 +119,23 @@ CREATE TABLE google_revenue_source_rows (
     amount_native      numeric(20, 6) NOT NULL,
     currency_code      text NOT NULL REFERENCES currencies(code),
     source_report_id   text,
-    raw_file_id        uuid,
+    raw_file_id        uuid REFERENCES raw_report_files(id) ON DELETE RESTRICT,
     raw_payload        jsonb NOT NULL DEFAULT '{}'::jsonb,
     imported_by        uuid,
     ingested_at        timestamptz NOT NULL DEFAULT now(),
     CONSTRAINT uq_google_revenue_source_rows_key
         UNIQUE (tenant_id, source_system, source_row_key),
     CONSTRAINT ck_google_revenue_source_rows_month_format CHECK (
-        length(report_month) = 7 AND substr(report_month, 5, 1) = '-'
+        length(report_month) = 7
+        AND substr(report_month, 5, 1) = '-'
+        AND substr(report_month, 1, 1) BETWEEN '0' AND '9'
+        AND substr(report_month, 2, 1) BETWEEN '0' AND '9'
+        AND substr(report_month, 3, 1) BETWEEN '0' AND '9'
+        AND substr(report_month, 4, 1) BETWEEN '0' AND '9'
+        AND substr(report_month, 6, 2) BETWEEN '01' AND '12'
     ),
+    CONSTRAINT ck_google_revenue_source_rows_period_order
+        CHECK (period_end >= period_start),
     CONSTRAINT ck_google_revenue_source_rows_amount_non_negative
         CHECK (amount_native >= 0),
     CONSTRAINT ck_google_revenue_source_rows_source_system CHECK (

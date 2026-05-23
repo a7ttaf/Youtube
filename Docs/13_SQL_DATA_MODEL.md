@@ -173,6 +173,16 @@ currency_exchange_rates (
   unique (rate_date, base_currency, quote_currency, provider_key)
 );
 
+currencies (
+  code text primary key,
+  numeric_code text not null,
+  name text not null,
+  minor_unit integer null,
+  is_supported boolean not null default false,
+  activated_at timestamp null,
+  unique (numeric_code)
+);
+
 google_revenue_source_rows (
   id uuid primary key,
   tenant_id uuid not null references tenants(id),
@@ -190,7 +200,7 @@ google_revenue_source_rows (
   amount_native numeric(20, 6) not null,
   currency_code text not null references currencies(code),
   source_report_id text null,
-  raw_file_id uuid null,
+  raw_file_id uuid null references raw_report_files(id),
   raw_payload jsonb not null,
   imported_by uuid null,
   ingested_at timestamp not null default now(),

@@ -23,6 +23,12 @@ sections below remain genuinely open.
 - ✅ **Export engine: Python libraries** — `openpyxl` / `reportlab`-class
   approach via the export artifacts in PR #9 + tenant-scoped export jobs
   in PR #36.
+- ✅ **Multi-currency model: source-reported money is authoritative** — official
+  finance values come from Google/YouTube/AdSense source reports in their
+  reported currency. The earlier FX-rate-led design (manual rate table, provider
+  sync, locked-month FX freeze) is retired; market-rate conversion is deferred to
+  a future display-only spec and must never drive official totals. Established in
+  the B1 pivot (PR #42); see `Docs/18_MULTI_CURRENCY_ENGINE.md`.
 
 ## Stack decisions
 
