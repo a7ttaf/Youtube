@@ -5,6 +5,9 @@ pre-recorded payload (loaded by tests from
 tests/connectors/_fixtures/) and emits an iterable of ParsedSourceRow.
 """
 
+from ums_smart_revenue.connectors.google_source_parsers.adsense_management import (
+    AdSenseManagementParser,
+)
 from ums_smart_revenue.connectors.google_source_parsers.base import (
     ParserError,
     SourceRowParser,
@@ -19,14 +22,8 @@ from ums_smart_revenue.connectors.google_source_parsers.youtube_reporting import
     YouTubeReportingParser,
 )
 
-# The following re-exports are uncommented as each module ships in Phase 4
-# (Task 4.12). Keep this file importable until each lands.
-# from ums_smart_revenue.connectors.google_source_parsers.adsense_management import (
-#     AdSenseManagementParser,
-# )
-
 __all__ = [
-    # "AdSenseManagementParser",
+    "AdSenseManagementParser",
     "ParserError",
     "SourceRowParser",
     "YouTubeAnalyticsParser",
