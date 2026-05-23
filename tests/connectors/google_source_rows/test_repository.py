@@ -330,3 +330,27 @@ def test_upsert_many_does_not_alias_caller_raw_payload(session: Session) -> None
     assert persisted is not None
     assert persisted.raw_payload == {"original_metric": "estimatedRevenue"}
     assert "new_field" not in persisted.raw_payload
+
+
+def test_non_usd_source_rows_visible_at_repository_layer(session: Session) -> None:
+    """B1 makes non-USD source rows queryable at the repository layer.
+
+    Any future surfacing through an API endpoint is out of scope.
+    This test pins the visibility contract: a caller that asks for all
+    source rows for a tenant/month MUST see non-USD rows alongside USD
+    rows - no silent filter, no automatic conversion.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    base = _row(source_row_key="s" * 64)
+    repo.upsert_many(
+        TENANT_A,
+        [
+            base,
+            replace(base, source_row_key="t" * 64, currency_code="EGP"),
+        ],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=None,
+    )
+    rows = repo.list(TENANT_A, report_month="2026-04")
+    currencies = {r.currency_code for r in rows}
+    assert currencies == {"USD", "EGP"}
