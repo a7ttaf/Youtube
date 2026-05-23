@@ -116,6 +116,7 @@ running on the operator's workstation.
   notices and README). Redistributable sibling to the canonical
   Anthropic-licensed mockup; referenced from
   `Docs/09_SMART_DASHBOARD_UI.md` as a visual target for Phase 5.
+- ✅ PR #<NN> — Spec A frontend `X-UMS-Tenant` header foundation. Backend `GET /tenants/me` proof endpoint depending on the existing `TenantResolverMiddleware` + `current_principal_from_headers`; React `TenantContext` seeded with bootstrap slug `"ums"`; `useApiClient()` thin fetch wrapper that sets `X-UMS-Tenant` last (cannot be overridden); AppShell dev-only proof tag; Vite dev proxy injecting trusted-gateway headers from Node env; Vitest framework wired into the local validation gate. Closes S2 spec Phase 5.
 
 ### Sx — Specced but not yet started
 

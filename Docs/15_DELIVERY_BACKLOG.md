@@ -120,6 +120,7 @@ single P-tier above.
   redistributable sibling to the canonical
   `mockups/ums-smart-revenue-command-center.html`, referenced from
   `Docs/09_SMART_DASHBOARD_UI.md` — PR #39.
+- ✅ Frontend tenant-header foundation: `TenantContext`, `useApiClient`, `GET /tenants/me`, Vite dev gateway proxy, Vitest framework + validation-gate integration — PR #<NN>.
 
 ## Hard problems to solve early
 
