@@ -6,14 +6,19 @@ PostgreSQL-backed migration round-trip lives at
 tests/db/test_google_revenue_source_migration.py.
 """
 
+import pytest
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Integer,
     Text,
     UniqueConstraint,
+    create_engine,
+    select,
 )
+from sqlalchemy.orm import Session
 
+from ums_smart_revenue.db.finance_models import FinanceBase
 from ums_smart_revenue.db.source_models import CurrencyORM
 
 
@@ -60,3 +65,29 @@ def test_currency_orm_checks() -> None:
     assert "ck_currencies_minor_unit_range" in names
     assert "ck_currencies_supported_minor" in names
     assert "ck_currencies_supported_activated" in names
+
+
+@pytest.fixture
+def session() -> Session:
+    engine = create_engine("sqlite:///:memory:")
+    FinanceBase.metadata.create_all(engine)
+    with Session(engine) as s:
+        yield s
+
+
+def test_insert_and_select_currency_row(session: Session) -> None:
+    row = CurrencyORM(
+        code="USD",
+        numeric_code="840",
+        name="US Dollar",
+        minor_unit=2,
+        is_supported=False,
+    )
+    session.add(row)
+    session.flush()
+    reloaded = session.scalar(select(CurrencyORM).where(CurrencyORM.code == "USD"))
+    assert reloaded is not None
+    assert reloaded.numeric_code == "840"
+    assert reloaded.minor_unit == 2
+    assert reloaded.is_supported is False
+    assert reloaded.activated_at is None
