@@ -5,11 +5,16 @@ from pathlib import Path
 
 from ums_smart_revenue.devtools.quality_gate import (
     GateCommand,
-    _resolve_npm,
     build_gate_commands,
     build_test_gate_commands,
     run_gate,
 )
+
+# Fixed npm path used by the gate-shape contract test so it is fully
+# deterministic and does not depend on a real npm binary being present on PATH.
+# The production resolver (_resolve_npm) is monkeypatched to return this value
+# for the duration of that test only, mirroring CodeRabbit's review guidance.
+FAKE_NPM = "/mock/npm"
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
@@ -61,7 +66,21 @@ def test_test_gate_commands_are_strict_and_test_only():
     )
 
 
-def test_gate_commands_cover_required_local_validation_contract():
+def test_gate_commands_cover_required_local_validation_contract(monkeypatch):
+    # ============================================================================
+    # Purpose: Pin the validation gate's command tuple so the contract is
+    #          provable in environments without a real npm binary, while still
+    #          exercising the production code path that injects _resolve_npm
+    #          into the Frontend tests (Vitest) gate.
+    # Database/ORM: None.
+    # Standards: Patch the resolver to a known fixed string (CodeRabbit guidance)
+    #            so the assertion tests the gate shape, not the host's PATH.
+    # Blast Radius: Test-only — production _resolve_npm behaviour is unchanged.
+    # ============================================================================
+    monkeypatch.setattr(
+        "ums_smart_revenue.devtools.quality_gate._resolve_npm",
+        lambda: FAKE_NPM,
+    )
     commands = build_gate_commands(python=sys.executable)
 
     assert commands == (
@@ -108,7 +127,7 @@ def test_gate_commands_cover_required_local_validation_contract():
         ),
         GateCommand(
             label="Frontend tests (Vitest)",
-            command=(_resolve_npm(), "--prefix", "frontend", "run", "test"),
+            command=(FAKE_NPM, "--prefix", "frontend", "run", "test"),
         ),
         GateCommand(
             label="Git diff whitespace check",
