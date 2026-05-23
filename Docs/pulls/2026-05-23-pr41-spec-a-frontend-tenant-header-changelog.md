@@ -426,3 +426,43 @@ after the user retried and `/tenants/me` returned 200.
 - `npm --prefix frontend run test` → **34 passed** (4 + 24 + 6 across
   `TenantContext`, `client`, `AppShell`; +1 from this follow-up).
 - `git diff --check` → LF/CRLF warnings only (no whitespace errors that fail the gate).
+
+---
+
+## Follow-up after `4211fce` — CodeRabbit: pin frontend devDependencies to exact versions
+
+CodeRabbit review `4350730999` (profile ASSERTIVE) flagged
+`frontend/package.json` (lines 23–33): seven devDependencies used caret
+ranges (`^`), breaking the repo's exact-version convention. Every other
+entry — `react`, `react-dom`, `tw-animate-css`, `@tailwindcss/vite`,
+`@vitejs/plugin-react`, `tailwindcss`, `typescript`, `vite` — is pinned
+exactly, so a caret range here could silently float a transitive test-tool
+upgrade past what the committed lockfile resolved.
+
+### Fix
+
+- `frontend/package.json`
+  - Pinned the seven caret-ranged devDependencies to the exact versions
+    already resolved in `package-lock.json`, so the manifest matches both
+    the repo convention and the installed tree (no version float):
+    - `@testing-library/jest-dom`: `^6.5.0` → `6.9.1`
+    - `@testing-library/react`: `^16.1.0` → `16.3.2`
+    - `@testing-library/user-event`: `^14.5.2` → `14.6.1`
+    - `@types/react`: `^19.0.0` → `19.2.15`
+    - `@types/react-dom`: `^19.0.0` → `19.2.3`
+    - `jsdom`: `^25.0.0` → `25.0.1`
+    - `vitest`: `^3.0.0` → `3.2.4`
+- `frontend/package-lock.json`
+  - `npm install` rewrote the root `packages.""` devDependency range
+    strings from caret to the exact versions. No installed package
+    changed (`up to date, audited 176 packages … found 0 vulnerabilities`);
+    only the recorded ranges moved, so lockfile and manifest stay
+    consistent.
+
+### Validation rerun
+
+- `python -m ruff check backend tests` → clean.
+- `python -m pytest -q` → **821 passed**.
+- `npm test` in `frontend/` (runs `vitest run`, vitest 3.2.4) →
+  **34 passed** (4 + 24 + 6 across `TenantContext`, `client`, `AppShell`).
+- `git diff --check` → clean.
