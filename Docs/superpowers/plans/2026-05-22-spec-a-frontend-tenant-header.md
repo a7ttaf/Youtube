@@ -2094,7 +2094,9 @@ python scripts/run_validation_gate.py
 Expected: every step green:
 1. Ruff backend, tests, and scripts
 2. Pytest no skip or xfail policy
-3. Pytest full suite — 817 passed (808 baseline + 9 from `test_tenants_api.py`)
+3. Pytest full suite — passes with no failures (includes the new
+   `test_tenants_api.py` cases; exact totals intentionally not pinned —
+   they drift with unrelated tests)
 4. Frontend tests (Vitest) — TenantContext + client + AppShell suites all pass
 5. Git diff whitespace check
 6. Git staged diff whitespace check
@@ -2198,7 +2200,9 @@ Contents must cover (mirror PR #39 report):
 - Phased execution table mirroring this plan's phases 0–7
 - Quality checks performed (the gate, including the new Vitest step)
 - Blast-radius statement (verbatim: `No graph projection impact detected.`)
-- Pre-existing baseline (pytest count delta from 808 → 817)
+- Pre-existing baseline (pytest suite green before and after; the new
+  `/tenants/me` cases are additive — exact count delta intentionally not
+  pinned so the report does not drift with unrelated tests)
 - Validation that could NOT be run (none, ideally)
 - Remaining risks (code, repo-size, license-compliance, reviewer-flow)
 - Follow-up recommendations (Spec B/C/D from the conversation)
