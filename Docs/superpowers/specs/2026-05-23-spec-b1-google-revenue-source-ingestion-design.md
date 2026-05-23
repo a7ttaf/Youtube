@@ -89,7 +89,7 @@ google_revenue_source_rows (
   amount_native numeric(20, 6) not null,
   currency_code text not null references currencies(code),
   source_report_id text null,
-  raw_file_id uuid null,
+  raw_file_id uuid null references raw_report_files(id) on delete restrict,
   raw_payload jsonb not null default '{}'::jsonb,
   imported_by uuid null,
   ingested_at timestamptz not null default now(),
@@ -100,6 +100,7 @@ google_revenue_source_rows (
 Recommended constraints:
 
 - `report_month` uses the existing `YYYY-MM` format.
+- `period_end >= period_start`.
 - `amount_native >= 0`.
 - `source_system in ('youtube_reporting', 'youtube_analytics',
   'adsense_management')`.

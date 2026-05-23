@@ -775,6 +775,7 @@
       target_tables = {fk.referred_table.name for fk in fks}
       assert "tenants" in target_tables
       assert "currencies" in target_tables
+      assert "raw_report_files" in target_tables
 
 
   def test_google_revenue_source_row_indexes() -> None:
@@ -857,6 +858,11 @@
               ["currency_code"], ["currencies.code"],
               name="fk_google_revenue_source_rows_currency",
           ),
+          ForeignKeyConstraint(
+              ["raw_file_id"], ["raw_report_files.id"],
+              name="fk_google_revenue_source_rows_raw_file",
+              ondelete="RESTRICT",
+          ),
           UniqueConstraint(
               "tenant_id", "source_system", "source_row_key",
               name="uq_google_revenue_source_rows_source_key",
@@ -878,6 +884,10 @@
               "AND substr(report_month, 4, 1) BETWEEN '0' AND '9' "
               "AND substr(report_month, 6, 2) BETWEEN '01' AND '12'",
               name="ck_google_revenue_source_rows_report_month_format",
+          ),
+          CheckConstraint(
+              "period_end >= period_start",
+              name="ck_google_revenue_source_rows_period_order",
           ),
           CheckConstraint(
               "length(source_row_key) = 64",
@@ -1078,6 +1088,11 @@
               ["currency_code"], ["currencies.code"],
               name="fk_google_revenue_source_rows_currency",
           ),
+          sa.ForeignKeyConstraint(
+              ["raw_file_id"], ["raw_report_files.id"],
+              name="fk_google_revenue_source_rows_raw_file",
+              ondelete="RESTRICT",
+          ),
           sa.UniqueConstraint(
               "tenant_id", "source_system", "source_row_key",
               name="uq_google_revenue_source_rows_source_key",
@@ -1099,6 +1114,10 @@
               "AND substr(report_month, 4, 1) BETWEEN '0' AND '9' "
               "AND substr(report_month, 6, 2) BETWEEN '01' AND '12'",
               name="ck_google_revenue_source_rows_report_month_format",
+          ),
+          sa.CheckConstraint(
+              "period_end >= period_start",
+              name="ck_google_revenue_source_rows_period_order",
           ),
           sa.CheckConstraint(
               "length(source_row_key) = 64",
