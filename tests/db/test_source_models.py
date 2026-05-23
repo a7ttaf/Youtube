@@ -6,6 +6,8 @@ PostgreSQL-backed migration round-trip lives at
 tests/db/test_google_revenue_source_migration.py.
 """
 
+from collections.abc import Iterator
+
 import pytest
 from sqlalchemy import (
     Boolean,
@@ -68,11 +70,14 @@ def test_currency_orm_checks() -> None:
 
 
 @pytest.fixture
-def session() -> Session:
+def session() -> Iterator[Session]:
     engine = create_engine("sqlite:///:memory:")
     FinanceBase.metadata.create_all(engine)
-    with Session(engine) as s:
-        yield s
+    try:
+        with Session(engine) as s:
+            yield s
+    finally:
+        engine.dispose()
 
 
 def test_insert_and_select_currency_row(session: Session) -> None:
