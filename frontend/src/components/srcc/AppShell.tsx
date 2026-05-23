@@ -318,6 +318,9 @@ export default function AppShell() {
   // Standards: useRef re-entry guard keeps fetch count at 1 under React StrictMode.
   //            Effect is gated on displayedRole so sessions that immediately
   //            render <AccessDeniedState/> never issue a bootstrap fetch.
+  //            The guard is reset in the failure path so a subsequent dep
+  //            change (role switch, provider rebuild) can retry — a transient
+  //            5xx must not permanently pin tenantSlug to the bootstrap value.
   // Blast Radius: None detected (read-only; does not mutate financial state).
   // Connections:
   //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET helper.
@@ -336,7 +339,14 @@ export default function AppShell() {
     client
       .get<TenantRead>("/tenants/me")
       .then(tenant.hydrate)
-      .catch(setTenantError);
+      .catch((error: unknown) => {
+        // FIX: Clear the one-shot guard on failure so a future dependency
+        // change (role switch, client rebuild after slug change) can retry
+        // the bootstrap fetch. Without this, a transient 5xx on first load
+        // permanently disabled re-hydration and pinned X-UMS-Tenant to "ums".
+        hasRequestedTenantRef.current = false;
+        setTenantError(error as ApiError | Error);
+      });
   }, [client, tenant.id, tenant.hydrate, displayedRole]);
 
   const tenantErrorDetail =

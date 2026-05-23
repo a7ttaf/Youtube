@@ -1,3 +1,4 @@
+import path from "node:path";
 import { fileURLToPath, URL } from "node:url";
 
 import tailwindcss from "@tailwindcss/vite";
@@ -6,16 +7,32 @@ import { defineConfig, loadEnv } from "vite";
 
 const TENANT_SCOPED_ROUTES = ["/tenants"];
 
+// Repo root is one level above this file (frontend/vite.config.ts -> ..).
+// Resolving relative to import.meta.url (not process.cwd()) makes the env
+// lookup deterministic regardless of where the dev command is launched
+// (`cd frontend && npm run dev` vs `npm --prefix frontend run dev` from root):
+// without this, loadEnv resolved to frontend/.env and silently skipped the
+// repo-root .env where UMS_TRUSTED_GATEWAY_TOKEN and the VITE_DEV_* dev
+// defaults are documented, leaving the dev proxy 401-ing.
+const REPO_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+);
+
 export default defineConfig(({ mode }) => {
   // ============================================================================
-  // Purpose: Load env from the project root in Node only. VITE_-prefixed names
-  //          are EXPOSED to the client bundle via import.meta.env, so secrets
-  //          must use non-VITE_ names (UMS_TRUSTED_GATEWAY_TOKEN). Non-secret
-  //          dev defaults (user id/email/role/scope_type) may keep VITE_DEV_*.
+  // Purpose: Load env from the repository root in Node only. VITE_-prefixed
+  //          names are EXPOSED to the client bundle via import.meta.env, so
+  //          secrets must use non-VITE_ names (UMS_TRUSTED_GATEWAY_TOKEN).
+  //          Non-secret dev defaults (user id/email/role/scope_type) keep the
+  //          VITE_DEV_ prefix only because they are intentionally non-secret.
   // Standards: Server-only secret read from process env; never embedded in code.
+  //            envDir is pinned to REPO_ROOT so root `.env.example` documents
+  //            the canonical location and `cd frontend && npm run dev` cannot
+  //            silently load a different env file.
   // Blast Radius: Frontend dev proxy only — no production bundle exposure.
   // ============================================================================
-  const env = loadEnv(mode, process.cwd(), "");
+  const env = loadEnv(mode, REPO_ROOT, "");
   const backendTarget = env.VITE_DEV_BACKEND_URL ?? "http://127.0.0.1:8000";
   const gatewayUserId =
     env.VITE_DEV_GATEWAY_USER_ID ?? "00000000-0000-0000-0000-0000000000aa";
@@ -41,6 +58,10 @@ export default defineConfig(({ mode }) => {
 
   return {
     plugins: [react(), tailwindcss()],
+    // envDir must mirror the loadEnv() lookup above so Vite's own runtime
+    // env handling (e.g. import.meta.env) reads from the same repo-root
+    // .env files as the dev proxy code.
+    envDir: REPO_ROOT,
     resolve: {
       alias: {
         "@": fileURLToPath(new URL("./src", import.meta.url)),
