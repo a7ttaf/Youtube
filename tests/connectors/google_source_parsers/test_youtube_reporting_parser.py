@@ -4,7 +4,12 @@ from decimal import Decimal
 from importlib import resources
 from uuid import uuid4
 
-from ums_smart_revenue.connectors.google_source_parsers import YouTubeReportingParser
+import pytest
+
+from ums_smart_revenue.connectors.google_source_parsers import (
+    ParserError,
+    YouTubeReportingParser,
+)
 
 TENANT_ID = uuid4()
 
@@ -78,3 +83,16 @@ def test_raw_payload_carries_the_input_row_dict() -> None:
     for row in rows:
         assert "dimensions" in row.raw_payload
         assert "metrics" in row.raw_payload
+
+
+def test_missing_content_owner_raises_parser_error() -> None:
+    """source_account_id must come from content_owner, not a sentinel."""
+    payload = _load_fixture("sample_estimated_revenue_2026_04.json")
+    # Remove content_owner from the first row's dimensions.
+    bad = {**payload}
+    bad["rows"] = [
+        {**r, "dimensions": {k: v for k, v in r["dimensions"].items() if k != "content_owner"}}
+        for r in bad["rows"]
+    ]
+    with pytest.raises(ParserError):
+        list(YouTubeReportingParser().parse(bad, tenant_id=TENANT_ID))

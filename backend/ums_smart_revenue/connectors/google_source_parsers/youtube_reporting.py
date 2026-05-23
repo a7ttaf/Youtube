@@ -66,6 +66,13 @@ class YouTubeReportingParser:
             content_owner = dimensions.get("content_owner")
             if not isinstance(channel, str):
                 raise ParserError("dimensions.channel must be a string")
+            # FIX: Fail closed if content_owner is missing or non-string. The
+            # previous branch silently substituted "unknown" for
+            # source_account_id, which risked mis-attributing source rows in
+            # multi-CMS tenants. Per CLAUDE.md ("preserve every financial
+            # number's source") we surface the bad payload instead.
+            if not isinstance(content_owner, str):
+                raise ParserError("dimensions.content_owner is required for YouTube Reporting rows")
 
             amount_raw = metrics.get("estimatedRevenue")
             if not isinstance(amount_raw, str):
@@ -84,8 +91,8 @@ class YouTubeReportingParser:
             yield ParsedSourceRow(
                 source_system=self.source_system,
                 source_row_key=source_row_key,
-                source_account_id=str(content_owner) if content_owner else "unknown",
-                content_owner_id=str(content_owner) if content_owner else None,
+                source_account_id=content_owner,
+                content_owner_id=content_owner,
                 youtube_channel_id=channel,
                 report_type=report_type,
                 report_month=f"{period_start.year:04d}-{period_start.month:02d}",
