@@ -8,16 +8,24 @@ function wrapper({ children }: { children: ReactNode }) {
 }
 
 describe("TenantContext", () => {
-  it("seeds with the bootstrap slug and null id/displayName", () => {
+  it("seeds with an empty slug and null id/displayName so bootstrap is not pinned", () => {
     const { result } = renderHook(() => useTenant(), { wrapper });
-    expect(result.current.tenantSlug).toBe("ums");
+    expect(result.current.tenantSlug).toBe("");
     expect(result.current.id).toBeNull();
     expect(result.current.displayName).toBeNull();
   });
 
+  it("honors initialSlug when callers explicitly seed a tenant (tests, storybooks)", () => {
+    function seededWrapper({ children }: { children: ReactNode }) {
+      return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
+    }
+    const { result } = renderHook(() => useTenant(), { wrapper: seededWrapper });
+    expect(result.current.tenantSlug).toBe("ums");
+  });
+
   it("merges id, displayName, and slug when hydrate is called with a non-bootstrap slug", () => {
     const { result } = renderHook(() => useTenant(), { wrapper });
-    expect(result.current.tenantSlug).toBe("ums");
+    expect(result.current.tenantSlug).toBe("");
     act(() => {
       result.current.hydrate({
         id: "00000000-0000-0000-0000-0000000000ac",

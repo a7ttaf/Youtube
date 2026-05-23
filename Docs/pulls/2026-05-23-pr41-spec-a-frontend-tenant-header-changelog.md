@@ -282,3 +282,64 @@ This follow-up resolves them in a single commit without re-scoping the PR.
 - `npm --prefix frontend run test` → **28 passed** (3 + 21 + 4 across
   `TenantContext`, `client`, `AppShell`).
 - `git diff --check` → clean.
+
+---
+
+## Follow-up after `79611268` — Codex P2: bootstrap from resolved identity
+
+### P2 — Bootstrap tenant context from resolved identity, not a hardcoded slug
+
+Codex flagged that `TenantProvider`'s initial state hardcoded
+`tenantSlug: "ums"`, so `useApiClient()` injected `X-UMS-Tenant: ums`
+on the very first `/tenants/me` request. In `UMS_AUTHZ_SOURCE=database`
+mode the SQL principal loader joins `users` on `(tenant_id=ums.id,
+user_id=<gateway>)`; a valid user from a non-UMS tenant returns no row
+and `current_principal_from_database` raises 403, leaving the client
+stuck on the bootstrap slug for every subsequent call.
+
+- `frontend/src/contexts/TenantContext.tsx`
+  - `TenantProvider` now accepts an optional `initialSlug` prop, default
+    `""`. Production `main.tsx` keeps the empty default so the bootstrap
+    call is intentionally tenant-agnostic; tests/storybooks that need a
+    specific seed pass `initialSlug="ums"` explicitly.
+- `frontend/src/lib/api/client.ts`
+  - `buildHeaders()` only sets `X-UMS-Tenant` when `tenantSlug` is
+    non-empty. The pre-hydration window sends no tenant header — and
+    any caller-supplied `X-UMS-Tenant` is stripped — so the trusted
+    gateway / dev proxy stays the sole source of truth for tenant
+    identity during bootstrap.
+- `frontend/vite.config.ts`
+  - Dev proxy now injects `X-UMS-Tenant` from
+    `VITE_DEV_GATEWAY_TENANT_SLUG` (default `ums`), mirroring the
+    production reverse-proxy contract that owns tenant resolution.
+- `.env.example`
+  - Documents the new `VITE_DEV_GATEWAY_TENANT_SLUG` variable next to
+    the existing `VITE_DEV_GATEWAY_*` dev defaults.
+- `frontend/src/components/srcc/AppShell.tsx`
+  - The dev-only proof tag falls back to `(resolving…)` while the slug
+    is still empty so the pre-hydration label stays readable.
+
+### Tests
+
+- `frontend/src/contexts/__tests__/TenantContext.test.tsx`
+  - Default-seed assertion updated to expect an empty slug; new test
+    confirms `initialSlug` is honored when callers explicitly seed.
+- `frontend/src/lib/api/__tests__/client.test.tsx`
+  - Existing slug-dependent tests now wrap with
+    `<TenantProvider initialSlug="ums">`. New `bootstrap (empty slug)
+    behavior` describe block asserts `X-UMS-Tenant` is omitted on the
+    bootstrap window, and that caller-supplied `X-UMS-Tenant` is
+    stripped during that window.
+- `frontend/src/components/srcc/__tests__/AppShell.test.tsx`
+  - New bootstrap test renders `<TenantProvider>` (empty default), mocks
+    `/tenants/me` returning `slug: "acme"`, asserts the proof tag shows
+    `Acme Holdings (acme)` after hydration AND the bootstrap fetch
+    carried no `X-UMS-Tenant` header.
+
+### Validation rerun
+
+- `python -m ruff check backend tests` → clean.
+- `python -m pytest -q` → **821 passed**.
+- `npm --prefix frontend run test` → **32 passed** (4 + 23 + 5 across
+  `TenantContext`, `client`, `AppShell`; +4 from this follow-up).
+- `git diff --check` → clean (LF/CRLF warnings only).

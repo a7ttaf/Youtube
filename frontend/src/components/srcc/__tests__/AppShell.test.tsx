@@ -33,7 +33,7 @@ describe("AppShell tenant proof tag", () => {
       }),
     );
     render(
-      <TenantProvider>
+      <TenantProvider initialSlug="ums">
         <AppShell />
       </TenantProvider>,
     );
@@ -47,7 +47,7 @@ describe("AppShell tenant proof tag", () => {
       jsonResponse({ detail: "Tenant registry unavailable" }, 503),
     );
     render(
-      <TenantProvider>
+      <TenantProvider initialSlug="ums">
         <AppShell />
       </TenantProvider>,
     );
@@ -60,7 +60,7 @@ describe("AppShell tenant proof tag", () => {
       jsonResponse({ detail: "Tenant registry unavailable" }, 503),
     );
     render(
-      <TenantProvider>
+      <TenantProvider initialSlug="ums">
         <AppShell />
       </TenantProvider>,
     );
@@ -86,5 +86,27 @@ describe("AppShell tenant proof tag", () => {
     );
     await screen.findByTestId("tenant-proof");
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("fires the bootstrap /tenants/me call without X-UMS-Tenant so the gateway is the tenant authority", async () => {
+    const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+    fetchMock.mockResolvedValue(
+      jsonResponse({
+        id: "00000000-0000-0000-0000-0000000000ac",
+        slug: "acme",
+        display_name: "Acme Holdings",
+      }),
+    );
+    render(
+      <TenantProvider>
+        <AppShell />
+      </TenantProvider>,
+    );
+    const tag = await screen.findByTestId("tenant-proof");
+    expect(tag.textContent).toContain("Acme Holdings (acme)");
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [, init] = fetchMock.mock.calls.at(-1)!;
+    const sentHeaders = new Headers((init as RequestInit | undefined)?.headers);
+    expect(sentHeaders.has("X-UMS-Tenant")).toBe(false);
   });
 });

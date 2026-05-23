@@ -6,6 +6,10 @@ import { ApiError, useApiClient } from "@/lib/api/client";
 import { TenantProvider } from "@/contexts/TenantContext";
 
 function wrapper({ children }: { children: React.ReactNode }) {
+  return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
+}
+
+function bootstrapWrapper({ children }: { children: React.ReactNode }) {
   return <TenantProvider>{children}</TenantProvider>;
 }
 
@@ -75,6 +79,34 @@ describe("useApiClient header injection", () => {
     const sent = new Headers(lastFetchArgs()![1]?.headers);
     expect(sent.get("X-UMS-Tenant")).toBe("ums");
     expect(sent.get("X-Other")).toBe("1");
+  });
+});
+
+describe("useApiClient bootstrap (empty slug) behavior", () => {
+  it("omits X-UMS-Tenant when the provider slug is empty so the gateway can authoritatively inject it", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse({ ok: true }),
+    );
+    const { result } = renderHook(() => useApiClient(), {
+      wrapper: bootstrapWrapper,
+    });
+    await result.current.get("/tenants/me");
+    const headers = new Headers(lastFetchArgs()![1]?.headers);
+    expect(headers.has("X-UMS-Tenant")).toBe(false);
+  });
+
+  it("strips any caller-supplied X-UMS-Tenant during the bootstrap window so the browser cannot forge a tenant", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+      jsonResponse({ ok: true }),
+    );
+    const { result } = renderHook(() => useApiClient(), {
+      wrapper: bootstrapWrapper,
+    });
+    await result.current.get("/tenants/me", {
+      headers: { "X-UMS-Tenant": "evil" },
+    });
+    const headers = new Headers(lastFetchArgs()![1]?.headers);
+    expect(headers.has("X-UMS-Tenant")).toBe(false);
   });
 });
 

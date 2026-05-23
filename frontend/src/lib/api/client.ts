@@ -35,7 +35,18 @@ function buildHeaders(
   if (hasJsonBody && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
-  headers.set("X-UMS-Tenant", tenantSlug);
+  // Only inject X-UMS-Tenant when the provider has a resolved slug. An empty
+  // sentinel means we are still in the pre-hydration bootstrap window — the
+  // trusted gateway / dev proxy is the authoritative source for tenant
+  // identity in that window. Sending a hardcoded fallback here would pin
+  // every non-UMS user's /tenants/me to "ums" and 403 their principal load
+  // in database-auth mode. Caller-supplied X-UMS-Tenant is also stripped so
+  // the browser bundle can never forge a tenant scope.
+  if (tenantSlug) {
+    headers.set("X-UMS-Tenant", tenantSlug);
+  } else {
+    headers.delete("X-UMS-Tenant");
+  }
   return headers;
 }
 

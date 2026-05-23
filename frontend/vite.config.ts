@@ -40,6 +40,12 @@ export default defineConfig(({ mode }) => {
     env.VITE_DEV_GATEWAY_USER_EMAIL ?? "dev@ums.local";
   const gatewayRole = env.VITE_DEV_GATEWAY_ROLE ?? "assistant_analyst";
   const gatewayScopeType = env.VITE_DEV_GATEWAY_SCOPE_TYPE ?? "global";
+  // Tenant slug injected by the dev proxy mirrors the production reverse-proxy
+  // model: the trusted gateway is the source of truth for tenant identity,
+  // not the browser bundle. The frontend bootstraps with an empty slug and
+  // discovers its real tenant from /tenants/me; this default keeps local
+  // dev pointed at the seeded "ums" tenant unless explicitly overridden.
+  const gatewayTenantSlug = env.VITE_DEV_GATEWAY_TENANT_SLUG ?? "ums";
   // SECURITY: Read trusted-gateway token from a non-VITE_ env var only. Any
   // VITE_*-prefixed variable Vite reads here also becomes available to client
   // code via import.meta.env at build time, which would leak the token into
@@ -88,6 +94,13 @@ export default defineConfig(({ mode }) => {
                   proxyReq.setHeader("X-Scope-Type", gatewayScopeType);
                 if (gatewayToken)
                   proxyReq.setHeader("X-UMS-Trusted-Gateway-Token", gatewayToken);
+                // Override or supply X-UMS-Tenant from the proxy. The
+                // bootstrap call from <TenantProvider> ships with no slug,
+                // and downstream calls may carry a stale "ums" — the proxy
+                // is the authority during dev, matching the production
+                // gateway contract.
+                if (gatewayTenantSlug)
+                  proxyReq.setHeader("X-UMS-Tenant", gatewayTenantSlug);
               });
             },
           },

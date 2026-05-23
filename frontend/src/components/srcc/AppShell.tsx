@@ -358,13 +358,16 @@ export default function AppShell() {
       ? (tenantError.body as { detail: string }).detail
       : null;
 
+  // Pre-hydration the slug is intentionally empty — show a sentinel rather
+  // than a stray space so the dev proof tag stays readable.
+  const displaySlug = tenant.tenantSlug || "(resolving…)";
   const tenantProofLabel = tenantError
-    ? `Tenant: ${tenant.tenantSlug}; /tenants/me failed: ${tenantError.message}${
+    ? `Tenant: ${displaySlug}; /tenants/me failed: ${tenantError.message}${
         tenantErrorDetail ? ` — ${tenantErrorDetail}` : ""
       }`
     : tenant.id
       ? `Tenant: ${tenant.displayName} (${tenant.tenantSlug}) — id ${tenant.id}`
-      : `Tenant: ${tenant.tenantSlug} (loading…)`;
+      : `Tenant: ${displaySlug} (loading…)`;
 
   if (!displayedRole) {
     return <AccessDeniedState />;
