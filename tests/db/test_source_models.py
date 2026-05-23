@@ -12,6 +12,7 @@ import pytest
 from sqlalchemy import (
     Boolean,
     CheckConstraint,
+    ForeignKeyConstraint,
     Integer,
     Text,
     UniqueConstraint,
@@ -21,7 +22,10 @@ from sqlalchemy import (
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import FinanceBase
-from ums_smart_revenue.db.source_models import CurrencyORM
+from ums_smart_revenue.db.source_models import (
+    CurrencyORM,
+    GoogleRevenueSourceRowORM,
+)
 
 
 def test_currency_orm_table_name() -> None:
@@ -96,3 +100,80 @@ def test_insert_and_select_currency_row(session: Session) -> None:
     assert reloaded.minor_unit == 2
     assert reloaded.is_supported is False
     assert reloaded.activated_at is None
+
+
+def test_google_revenue_source_row_table_name() -> None:
+    assert GoogleRevenueSourceRowORM.__tablename__ == "google_revenue_source_rows"
+
+
+def test_google_revenue_source_row_columns() -> None:
+    columns = {c.name: c for c in GoogleRevenueSourceRowORM.__table__.columns}
+    expected = {
+        "id",
+        "tenant_id",
+        "source_system",
+        "source_row_key",
+        "source_account_id",
+        "content_owner_id",
+        "youtube_channel_id",
+        "report_type",
+        "report_month",
+        "period_start",
+        "period_end",
+        "metric_key",
+        "value_kind",
+        "amount_native",
+        "currency_code",
+        "source_report_id",
+        "raw_file_id",
+        "raw_payload",
+        "imported_by",
+        "ingested_at",
+    }
+    assert set(columns) == expected
+    assert columns["id"].primary_key is True
+    assert columns["tenant_id"].nullable is False
+    assert columns["source_system"].nullable is False
+    assert columns["source_row_key"].nullable is False
+    assert columns["source_account_id"].nullable is False
+    assert columns["content_owner_id"].nullable is True
+    assert columns["youtube_channel_id"].nullable is True
+    assert columns["report_type"].nullable is False
+    assert columns["report_month"].nullable is False
+    assert columns["period_start"].nullable is False
+    assert columns["period_end"].nullable is False
+    assert columns["metric_key"].nullable is False
+    assert columns["value_kind"].nullable is False
+    assert columns["amount_native"].nullable is False
+    assert columns["currency_code"].nullable is False
+    assert columns["source_report_id"].nullable is True
+    assert columns["raw_file_id"].nullable is True
+    assert columns["raw_payload"].nullable is False
+    assert columns["imported_by"].nullable is True
+    assert columns["ingested_at"].nullable is False
+
+
+def test_google_revenue_source_row_unique_source_row_key() -> None:
+    uniques = [
+        c for c in GoogleRevenueSourceRowORM.__table__.constraints
+        if isinstance(c, UniqueConstraint)
+    ]
+    named = {c.name for c in uniques}
+    assert "uq_google_revenue_source_rows_source_key" in named
+
+
+def test_google_revenue_source_row_tenant_fk_present() -> None:
+    fks = [
+        c for c in GoogleRevenueSourceRowORM.__table__.constraints
+        if isinstance(c, ForeignKeyConstraint)
+    ]
+    target_tables = {fk.referred_table.name for fk in fks}
+    assert "tenants" in target_tables
+    assert "currencies" in target_tables
+    assert "raw_report_files" in target_tables
+
+
+def test_google_revenue_source_row_indexes() -> None:
+    index_names = {ix.name for ix in GoogleRevenueSourceRowORM.__table__.indexes}
+    assert "ix_google_revenue_source_rows_tenant_month_source" in index_names
+    assert "ix_google_revenue_source_rows_tenant_channel_month" in index_names
