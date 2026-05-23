@@ -55,8 +55,12 @@ class YouTubeAnalyticsParser:
         currency = self._require_str(request, "currency")
         metrics_csv = self._require_str(request, "metrics")
         dimensions_csv = self._require_str(request, "dimensions")
-        query_signature = f"{metrics_csv}|{dimensions_csv}"
         ids = self._require_str(request, "ids")
+        # FIX: Include `ids` in query_signature so two payloads identical except
+        # for the contentOwner/channel account produce distinct source_row_keys.
+        # Without this, the repo PK (tenant_id, source_system, source_row_key)
+        # silently collapses cross-account data in a multi-CMS tenant.
+        query_signature = f"{ids}|{metrics_csv}|{dimensions_csv}"
 
         dimension_names = [
             h["name"] for h in column_headers

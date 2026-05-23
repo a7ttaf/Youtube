@@ -65,3 +65,21 @@ def test_parser_uses_youtube_analytics_source_system() -> None:
     payload = _load_fixture("sample_query_response_2026_04.json")
     rows = list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
     assert all(r.source_system == "youtube_analytics" for r in rows)
+
+
+def test_different_ids_produce_distinct_keys() -> None:
+    """Two payloads identical except for `ids` MUST produce distinct source_row_keys.
+
+    Without per-account scoping, the repo PK
+    (tenant_id, source_system, source_row_key) would silently collapse
+    cross-account data in a multi-CMS or multi-channel-account tenant.
+    """
+    base = _load_fixture("sample_query_response_2026_04.json")
+    other = {**base, "query_request": {**base["query_request"], "ids": "contentOwner==cms-test-OTHER"}}
+
+    a_keys = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(base, tenant_id=TENANT_ID))
+    b_keys = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(other, tenant_id=TENANT_ID))
+
+    assert set(a_keys).isdisjoint(set(b_keys)), (
+        "source_row_keys must differ when `ids` differs (per-account scope)"
+    )
