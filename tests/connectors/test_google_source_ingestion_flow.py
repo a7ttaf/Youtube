@@ -143,3 +143,14 @@ def test_rerun_with_identical_fixtures_produces_zero_new_rows(session: Session) 
     second_count = session.query(GoogleRevenueSourceRowORM).filter_by(tenant_id=TENANT_ID).count()
 
     assert second_count == first_count
+
+
+def test_malformed_payload_raises_parser_error_without_partial_writes(session: Session) -> None:
+    from ums_smart_revenue.connectors.google_source_parsers import ParserError
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)  # noqa: F841
+    bad_payload = {"report_metadata": {"report_id": "x", "report_type": "y"}, "rows": "not a list"}
+    with pytest.raises(ParserError):
+        list(YouTubeReportingParser().parse(bad_payload, tenant_id=TENANT_ID))
+    # No rows were yielded, so no upsert call - partial writes are impossible
+    # because the parser fails before producing any ParsedSourceRow.
+    assert session.query(GoogleRevenueSourceRowORM).filter_by(tenant_id=TENANT_ID).count() == 0
