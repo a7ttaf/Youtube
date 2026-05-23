@@ -1,0 +1,21 @@
+{
+  "request": {
+    "accountId": "accounts/pub-test-001",
+    "dateRange": {"startDate": {"year": 2026, "month": 4, "day": 1}, "endDate": {"year": 2026, "month": 4, "day": 30}},
+    "metrics": ["ESTIMATED_EARNINGS"],
+    "dimensions": ["PRODUCT_CODE", "COUNTRY_CODE"],
+    "currencyCode": "USD",
+    "reportingTimeZone": "ACCOUNT_TIME_ZONE"
+  },
+  "report_id": "adsense-earnings-2026-04-001",
+  "headers": [
+    {"name": "PRODUCT_CODE", "type": "DIMENSION"},
+    {"name": "COUNTRY_CODE", "type": "DIMENSION"},
+    {"name": "ESTIMATED_EARNINGS", "type": "METRIC_CURRENCY", "currencyCode": "USD"}
+  ],
+  "rows": [
+    {"cells": [{"value": "AFC"}, {"value": "US"}, {"value": "789.120000"}]},
+    {"cells": [{"value": "AFC"}, {"value": "EG"}, {"value": "12.340000"}]},
+    {"cells": [{"value": "AFS"}, {"value": "GB"}, {"value": "45.670000"}]}
+  ]
+}
