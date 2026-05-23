@@ -42,9 +42,12 @@ sections below remain genuinely open.
 - Should unresolved payment gap appear as holding-level only or allocated to channels?
 - Who can approve manual overrides?
 - What happens if bank amount is not available?
-- Which FX rate should be used before UAE USD account is active?
-- Which FX provider is authoritative for automated `currency_exchange_rates`
-  imports, and what fallback policy applies when a requested rate is missing?
+- Which Google/YouTube/AdSense report currency is authoritative when a source
+  offers account currency, payment currency, and/or metric-level `currencyCode`?
+- Which Google source wins when YouTube estimated revenue and AdSense
+  settled/payment reports disagree for the same month?
+- How should bank-side local-currency variance be explained when the official
+  Google/AdSense source value is in a different currency?
 - How to treat UAE USD account after activation?
 
 ## UI decisions

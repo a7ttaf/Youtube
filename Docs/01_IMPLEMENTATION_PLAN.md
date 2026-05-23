@@ -125,10 +125,13 @@ running on the operator's workstation.
   (RLS) + Postgres GUC + composite foreign keys + tenant-scoped unique
   keys + `app_tenant` / `app_platform` Postgres roles. None implemented
   in code. Spec for the S3 PR series not yet written.
-- **Multi-currency engine.** `Docs/18_MULTI_CURRENCY_ENGINE.md` specifies
-  `currencies` + `fx_rates` tables with paired `amount_native` storage;
-  only `currency_exchange_rates` schema scaffolding exists, no rate
-  fetcher, no fallback policy. Required for P2 currency-rate integration.
+- **Source-reported currency foundation.**
+  `Docs/18_MULTI_CURRENCY_ENGINE.md` was revised on 2026-05-23 to make
+  Google/YouTube/AdSense reported money the official finance source. The next
+  B1 storage cut should preserve source amounts, currencies, report identity,
+  raw payload references, and idempotent Google source row keys. Existing
+  `currency_exchange_rates` scaffolding is legacy/inert and must not become
+  the official finance source.
 
 ---
 
@@ -226,7 +229,8 @@ unmapped-channel report are the remaining gaps.
 - ⏳ Daily/monthly channel metrics — not shipped (no real ingestion).
 - ⏳ Monthly revenue facts where available — not shipped (no real
   ingestion).
-- ⏳ Revenue source labels — not shipped (no real ingestion).
+- ⏳ Revenue source labels and source-reported currency evidence — not
+  shipped (no real ingestion).
 
 ### Acceptance gate
 
@@ -238,7 +242,8 @@ unmapped-channel report are the remaining gaps.
 Scaffolding only. This is the single largest gap between doc-claimed state
 and reality: the entire phase depends on real YouTube API ingestion, which
 has not been started. Credentials and raw-storage substrates exist to plug
-into.
+into. The ingestion work must store Google-reported monetary values and
+currencies as source evidence before any finance facts consume them.
 
 ---
 
@@ -258,7 +263,8 @@ into.
 
 ### Outputs
 
-- ⏳ Monthly AdSense payment table — schema only.
+- ⏳ Monthly AdSense payment table — schema only; real pulls must preserve
+  Google's reported payment currency and source report identity.
 - ⏳ Payment match status — not driven.
 - ⏳ Payment gap value — not computed.
 
@@ -270,7 +276,8 @@ into.
 ### Status (2026-05-22)
 
 Same shape as Phase 2: schema and tenant-scoped repos exist; no real pull
-or matching pass runs.
+or matching pass runs. Matching must start from AdSense-reported payment
+amounts/currencies, not market FX-derived amounts.
 
 ---
 
@@ -328,8 +335,10 @@ the largest blockers.
 
 ### Acceptance gate
 
-- ⏳ A user can select month + group + currency and receive gross,
-  deduction, net, and explanation — not yet met.
+- ⏳ A user can select month + group and receive source-backed gross,
+  deduction, net, currency, and explanation — not yet met. Optional display
+  conversion is later work and must be labeled non-official unless it is the
+  currency reported by Google/AdSense.
 
 ### Status (2026-05-22)
 
