@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 import subprocess
 import sys
 from collections.abc import Callable, Sequence
@@ -37,6 +38,16 @@ class GateCommand:
     command: tuple[str, ...]
 
 
+def _resolve_npm() -> str:
+    """Resolve an npm executable. On Windows, npm is npm.cmd."""
+    npm = shutil.which("npm") or shutil.which("npm.cmd")
+    if npm is None:
+        raise RuntimeError(
+            "npm not found on PATH; install Node.js to run frontend tests."
+        )
+    return npm
+
+
 # ============================================================================
 # Purpose: Build the local validation gate required before upload, push, or
 # review-readiness claims, including the gate wrapper script itself.
@@ -66,6 +77,10 @@ def build_gate_commands(*, python: str = sys.executable) -> tuple[GateCommand, .
             ),
         ),
         *build_test_gate_commands(python=python),
+        GateCommand(
+            label="Frontend tests (Vitest)",
+            command=(_resolve_npm(), "--prefix", "frontend", "run", "test"),
+        ),
         GateCommand(
             label="Git diff whitespace check",
             command=("git", "diff", "--check"),

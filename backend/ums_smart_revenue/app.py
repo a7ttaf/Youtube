@@ -45,6 +45,7 @@ from ums_smart_revenue.api.revenue import (
 )
 from ums_smart_revenue.api.revenue import router as revenue_router
 from ums_smart_revenue.api.security import router as security_router
+from ums_smart_revenue.api.tenants import router as tenants_router
 from ums_smart_revenue.api.users import router as users_router
 from ums_smart_revenue.config.settings import (
     AUTHZ_SOURCE_DATABASE,
@@ -119,6 +120,7 @@ def create_app(
     app.include_router(reports_router)
     app.include_router(revenue_router)
     app.include_router(security_router)
+    app.include_router(tenants_router)
     app.include_router(users_router)
 
     def health_payload() -> dict[str, object]:

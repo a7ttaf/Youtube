@@ -1,0 +1,448 @@
+# tests/api/test_tenants_api.py
+"""Endpoint tests for GET /tenants/me (Spec A).
+
+Cases 1-9 from Docs/superpowers/specs/2026-05-22-spec-a-frontend-tenant-header-design.md
+section 9.1. Fixtures mirror tests/api/test_database_principals.py.
+"""
+
+from __future__ import annotations
+
+import os
+from datetime import UTC, datetime
+from uuid import UUID
+
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from ums_smart_revenue.app import (
+    TrustedGatewayTenantResolverMiddleware,
+    create_app,
+)
+from ums_smart_revenue.auth.models import UserPrincipal
+from ums_smart_revenue.db.security_models import (
+    AccessScopeORM,
+    RoleORM,
+    SecurityBase,
+    UserORM,
+    UserRoleAssignmentORM,
+)
+from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.models import TenantStatus
+
+TEST_USER_ID = UUID("00000000-0000-0000-0000-0000000000aa")
+BOOTSTRAP_TENANT_ID = UUID(UMS_TENANT_ID)
+BOOTSTRAP_DISPLAY = "UMS"
+
+
+def _gateway_headers(user_id: UUID = TEST_USER_ID) -> dict[str, str]:
+    return {
+        "X-User-ID": str(user_id),
+        "X-UMS-Trusted-Gateway-Token": os.environ["UMS_TRUSTED_GATEWAY_TOKEN"],
+    }
+
+
+def _full_principal_headers(user_id: UUID = TEST_USER_ID) -> dict[str, str]:
+    """Return the full set of trusted-gateway headers required by
+    current_principal_from_headers in authz_source="headers" mode.
+
+    In database mode current_principal_from_headers is overridden to
+    current_principal_from_database, which only needs X-User-ID + token.
+    In headers mode the raw dependency is active and requires all five fields:
+    X-User-ID, X-User-Email, X-Role, X-Scope-Type, and the gateway token.
+    X-Scope-Id is omitted because X-Scope-Type="global" must not have a scope_id.
+    """
+    return {
+        "X-User-ID": str(user_id),
+        "X-User-Email": "spec-a@example.invalid",
+        "X-Role": ROLE_KEY,
+        "X-Scope-Type": "global",
+        "X-UMS-Trusted-Gateway-Token": os.environ["UMS_TRUSTED_GATEWAY_TOKEN"],
+    }
+
+
+@pytest.fixture
+def db_engine_url(tmp_path):
+    db_path = tmp_path / "spec_a.sqlite"
+    return f"sqlite:///{db_path}"
+
+
+@pytest.fixture
+def seeded_engine(db_engine_url):
+    engine = create_engine(db_engine_url, future=True)
+    TenantBase.metadata.create_all(engine)
+    SecurityBase.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine, future=True)
+    with session_factory() as session:
+        _seed_bootstrap_tenant(session)
+        _seed_enabled_user(session)
+        session.commit()
+    yield engine
+    engine.dispose()
+
+
+def _seed_bootstrap_tenant(session: Session) -> None:
+    now = datetime.now(UTC)
+    session.add(
+        TenantORM(
+            id=BOOTSTRAP_TENANT_ID,
+            slug="ums",
+            display_name=BOOTSTRAP_DISPLAY,
+            primary_currency="USD",
+            status=TenantStatus.ACTIVE.value,
+            onboarding_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    )
+
+
+SCOPE_ID = UUID("00000000-0000-0000-0000-0000000000b1")
+ROLE_KEY = "assistant_analyst"
+
+
+def _seed_enabled_user(session: Session) -> None:
+    """Seed ONE enabled SQL principal so the principal loader can hydrate it.
+
+    Column set reconciled against backend/ums_smart_revenue/db/security_models.py:
+    - RoleORM PK is ``key`` (Text), not ``id``; no ``tenant_id``/``status`` columns.
+    - UserORM status values are lowercase ('active'); bool field is ``is_service_account``.
+    - UserRoleAssignmentORM uses ``role_key``, ``scope_id`` (FK → AccessScopeORM.id),
+      and ``active`` (bool); no ``status`` column.
+    - AccessScopeORM row is required because the loader joins on ``scope_id``.
+    """
+    now = datetime.now(UTC)
+    role = RoleORM(
+        key=ROLE_KEY,
+        label="Assistant Analyst",
+        description="Assigned-scope analyst for analytics without default finance access.",
+        service_only=False,
+        created_at=now,
+    )
+    scope = AccessScopeORM(
+        id=SCOPE_ID,
+        scope_type="global",
+        scope_id=None,
+        label="Global",
+        created_at=now,
+        tenant_id=BOOTSTRAP_TENANT_ID,
+    )
+    user = UserORM(
+        id=TEST_USER_ID,
+        tenant_id=BOOTSTRAP_TENANT_ID,
+        email="spec-a@example.invalid",
+        display_name="Spec A Test User",
+        status="active",
+        is_service_account=False,
+        created_at=now,
+        updated_at=now,
+    )
+    assignment = UserRoleAssignmentORM(
+        id=UUID("00000000-0000-0000-0000-0000000000a2"),
+        tenant_id=BOOTSTRAP_TENANT_ID,
+        user_id=TEST_USER_ID,
+        role_key=ROLE_KEY,
+        scope_id=SCOPE_ID,
+        active=True,
+        assigned_at=now,
+    )
+    session.add_all([role, scope, user, assignment])
+
+
+@pytest.fixture
+def app_db_mode(seeded_engine):
+    app = create_app(database_url=str(seeded_engine.url), authz_source="database")
+    return app
+
+
+@pytest.fixture
+def client_db_mode(app_db_mode):
+    with TestClient(app_db_mode) as client:
+        yield client
+
+
+# ---------------------------------------------------------------------------
+# Case 1 — happy path
+# ---------------------------------------------------------------------------
+
+
+def test_tenants_me_returns_bootstrap_tenant_for_resolved_slug(
+    client_db_mode,
+):
+    response = client_db_mode.get(
+        "/tenants/me",
+        headers={"X-UMS-Tenant": "ums", **_gateway_headers()},
+    )
+    assert response.status_code == 200, response.text
+    payload = response.json()
+    assert payload == {
+        "id": str(BOOTSTRAP_TENANT_ID),
+        "slug": "ums",
+        "display_name": BOOTSTRAP_DISPLAY,
+    }
+    assert response.headers.get("Vary") and "X-UMS-Tenant" in response.headers["Vary"]
+
+
+# ---------------------------------------------------------------------------
+# Case 2 — missing X-UMS-Tenant header → 400
+# ---------------------------------------------------------------------------
+
+
+def test_tenants_me_rejects_missing_tenant_header(client_db_mode):
+    response = client_db_mode.get("/tenants/me", headers=_gateway_headers())
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Tenant slug must not be blank"
+    assert "X-UMS-Tenant" in (response.headers.get("Vary") or "")
+
+
+# ---------------------------------------------------------------------------
+# Case 3 — whitespace slug → 400 / over-255-char slug → 400
+# ---------------------------------------------------------------------------
+
+
+def test_tenants_me_rejects_whitespace_tenant_header(client_db_mode):
+    response = client_db_mode.get(
+        "/tenants/me",
+        headers={"X-UMS-Tenant": "   ", **_gateway_headers()},
+    )
+    assert response.status_code == 400
+    assert response.json()["detail"] == "Tenant slug must not be blank"
+
+
+def test_tenants_me_rejects_overlong_tenant_header(client_db_mode):
+    response = client_db_mode.get(
+        "/tenants/me",
+        headers={"X-UMS-Tenant": "a" * 256, **_gateway_headers()},
+    )
+    assert response.status_code == 400
+    assert "at most 255 characters" in response.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Case 4 — duplicate X-UMS-Tenant header → 400
+# ---------------------------------------------------------------------------
+
+
+def test_tenants_me_rejects_duplicate_tenant_headers(client_db_mode):
+    request = client_db_mode.build_request(
+        "GET",
+        "/tenants/me",
+        headers=[
+            ("X-UMS-Tenant", "ums"),
+            ("X-UMS-Tenant", "ums"),
+            *_gateway_headers().items(),
+        ],
+    )
+    response = client_db_mode.send(request)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "X-UMS-Tenant must be provided exactly once"
+
+
+def test_tenants_me_rejects_mismatched_duplicate_tenant_headers(client_db_mode):
+    """Different values across duplicate X-UMS-Tenant headers must also 400.
+
+    Regression coverage requested in the CodeRabbit review of PR #41: the
+    resolver must reject every duplicate-header case (identical OR mismatched)
+    before silently selecting one of the values.
+    """
+    request = client_db_mode.build_request(
+        "GET",
+        "/tenants/me",
+        headers=[
+            ("X-UMS-Tenant", "ums"),
+            ("X-UMS-Tenant", "not-a-tenant"),
+            *_gateway_headers().items(),
+        ],
+    )
+    response = client_db_mode.send(request)
+    assert response.status_code == 400
+    assert response.json()["detail"] == "X-UMS-Tenant must be provided exactly once"
+
+
+# ---------------------------------------------------------------------------
+# Case 5 — unknown slug → 404
+# ---------------------------------------------------------------------------
+
+
+def test_tenants_me_returns_404_for_unknown_slug(client_db_mode):
+    response = client_db_mode.get(
+        "/tenants/me",
+        headers={"X-UMS-Tenant": "not-a-tenant", **_gateway_headers()},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Tenant 'not-a-tenant' not found"
+
+
+# ---------------------------------------------------------------------------
+# Case 6 — custom-wired app whose authorizer always denies → 403
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def client_deny_authz(seeded_engine):
+    """Isolated app whose tenant authorizer denies every resolution."""
+    from fastapi import FastAPI
+    from sqlalchemy.orm import sessionmaker
+
+    from ums_smart_revenue.api.dependencies import (
+        current_db_session,
+        current_principal_from_headers,
+    )
+    from ums_smart_revenue.api.tenants import router as tenants_router
+    from ums_smart_revenue.db.session import session_dependency
+
+    app = FastAPI()
+    session_factory = sessionmaker(bind=seeded_engine, future=True)
+    app.include_router(tenants_router)
+    app.dependency_overrides[current_db_session] = session_dependency(session_factory)
+
+    # ============================================================================
+    # Purpose: Stub out the principal dependency so the route dependency graph
+    #          succeeds and the request reaches the resolver's authorize_tenant
+    #          check, isolating the 403 path to the authorizer outcome rather
+    #          than a principal-lookup failure (401/503).
+    # Database/ORM: None — returns an in-memory UserPrincipal with no SQL read.
+    # Standards: Minimal valid construction; only required fields set explicitly.
+    # Blast Radius: Test fixture only; no production path affected.
+    # ============================================================================
+    def _stub_principal() -> UserPrincipal:
+        return UserPrincipal(
+            user_id=str(TEST_USER_ID),
+            email="spec-a-deny@example.invalid",
+            tenant_id=str(BOOTSTRAP_TENANT_ID),
+        )
+
+    app.dependency_overrides[current_principal_from_headers] = _stub_principal
+    app.add_middleware(
+        TrustedGatewayTenantResolverMiddleware,
+        session_factory=lambda: session_factory(),
+        authorize_tenant=lambda *_: False,
+    )
+    with TestClient(app) as client:
+        yield client
+
+
+def test_tenants_me_returns_403_when_authorizer_denies(client_deny_authz):
+    response = client_deny_authz.get(
+        "/tenants/me",
+        headers={"X-UMS-Tenant": "ums", **_gateway_headers()},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Tenant access denied"
+
+
+# ---------------------------------------------------------------------------
+# Case 7 — missing / invalid gateway auth → 401
+# ---------------------------------------------------------------------------
+# current_trusted_gateway_identity raises HTTP_401_UNAUTHORIZED for both:
+#   (a) missing/empty X-User-ID (dependencies.py:127-131)
+#   (b) missing or wrong X-UMS-Trusted-Gateway-Token (_require_trusted_gateway_token:273)
+# TrustedGatewayTenantResolverMiddleware intercepts these before the resolver,
+# so the response is emitted from _send_http_exception, not the route handler.
+# ---------------------------------------------------------------------------
+
+
+def test_tenants_me_returns_401_when_gateway_user_id_missing(client_db_mode):
+    headers = _gateway_headers()
+    headers.pop("X-User-ID")
+    headers["X-UMS-Tenant"] = "ums"
+    response = client_db_mode.get("/tenants/me", headers=headers)
+    assert response.status_code == 401
+
+
+def test_tenants_me_returns_401_when_gateway_token_invalid(client_db_mode):
+    response = client_db_mode.get(
+        "/tenants/me",
+        headers={
+            "X-UMS-Tenant": "ums",
+            "X-User-ID": str(TEST_USER_ID),
+            "X-UMS-Trusted-Gateway-Token": "definitely-not-the-token",
+        },
+    )
+    assert response.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Cases 8-9 — headers-mode (DefaultTenantMiddleware) behaviour
+# ---------------------------------------------------------------------------
+# create_app(authz_source="headers") wires DefaultTenantMiddleware (binds the
+# bootstrap tenant unconditionally) without overriding current_principal_from_headers.
+# The raw current_principal_from_headers dependency therefore remains active and
+# requires: X-User-ID, X-User-Email, X-Role, X-Scope-Type, and the gateway token.
+# Without ALL of these, the principal dependency raises 401 before the route runs.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def client_headers_mode(seeded_engine):
+    app = create_app(database_url=str(seeded_engine.url), authz_source="headers")
+    with TestClient(app) as client:
+        yield client
+
+
+def test_tenants_me_headers_mode_requires_gateway_auth(client_headers_mode):
+    """Default headers mode must NOT leak the bootstrap tenant identity to
+    unauthenticated callers. The principal dependency fails closed even when
+    DefaultTenantMiddleware would have bound the bootstrap tenant.
+    """
+    response = client_headers_mode.get("/tenants/me")
+    assert response.status_code == 401
+
+
+def test_tenants_me_headers_mode_returns_bootstrap_after_gateway_auth(
+    client_headers_mode,
+):
+    """Headers mode is documented as a developer-shortcut for bootstrap-only
+    deployments. With the full set of trusted-gateway principal headers in
+    place, DefaultTenantMiddleware binds the bootstrap tenant even when
+    X-UMS-Tenant is absent. This test documents the behavior — it is NOT
+    security coverage for /tenants/me.
+
+    NOTE: current_principal_from_headers (the active dependency in headers
+    mode, not overridden) requires X-User-ID, X-User-Email, X-Role,
+    X-Scope-Type, and X-UMS-Trusted-Gateway-Token. The spec row 9 describes
+    "full trusted principal headers" — _gateway_headers() alone (only
+    X-User-ID + token) would return 401 because email/role/scope are absent.
+    This test therefore supplies all required fields via _full_principal_headers().
+    """
+    response = client_headers_mode.get("/tenants/me", headers=_full_principal_headers())
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["slug"] == "ums"
+    assert payload["id"] == str(BOOTSTRAP_TENANT_ID)
+
+
+# ---------------------------------------------------------------------------
+# Case 10 — no tenant middleware installed → controlled 503 (not 500)
+# ---------------------------------------------------------------------------
+# create_app(database_url=None) does NOT install TenantResolverMiddleware nor
+# DefaultTenantMiddleware (the `if resolved_database_url:` branch is skipped).
+# A request whose principal dependency succeeds therefore reaches
+# require_current_tenant() with no TENANT_CTX set. The route must map the
+# resulting TenantContextMissing into a controlled 503 instead of an
+# unhandled 500, preserving fail-closed semantics.
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def client_no_tenant_middleware():
+    """App constructed without any tenant middleware (database_url unset)."""
+    app = create_app(database_url=None, authz_source="headers")
+    with TestClient(app) as client:
+        yield client
+
+
+def test_tenants_me_returns_503_when_tenant_middleware_missing(
+    client_no_tenant_middleware,
+):
+    response = client_no_tenant_middleware.get(
+        "/tenants/me",
+        headers=_full_principal_headers(),
+    )
+    assert response.status_code == 503
+    assert (
+        response.json()["detail"]
+        == "Tenant resolver middleware is not installed"
+    )
