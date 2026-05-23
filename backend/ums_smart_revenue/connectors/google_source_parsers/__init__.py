@@ -12,17 +12,17 @@ from ums_smart_revenue.connectors.google_source_parsers.base import (
 from ums_smart_revenue.connectors.google_source_parsers.source_row_keys import (
     build_source_row_key,
 )
+from ums_smart_revenue.connectors.google_source_parsers.youtube_reporting import (
+    YouTubeReportingParser,
+)
 
 # The following re-exports are uncommented as each module ships in Phase 4
-# (Tasks 4.6, 4.9, 4.12). Keep this file importable until each lands.
+# (Tasks 4.9, 4.12). Keep this file importable until each lands.
 # from ums_smart_revenue.connectors.google_source_parsers.adsense_management import (
 #     AdSenseManagementParser,
 # )
 # from ums_smart_revenue.connectors.google_source_parsers.youtube_analytics import (
 #     YouTubeAnalyticsParser,
-# )
-# from ums_smart_revenue.connectors.google_source_parsers.youtube_reporting import (
-#     YouTubeReportingParser,
 # )
 
 __all__ = [
@@ -30,6 +30,6 @@ __all__ = [
     "ParserError",
     "SourceRowParser",
     # "YouTubeAnalyticsParser",
-    # "YouTubeReportingParser",
+    "YouTubeReportingParser",
     "build_source_row_key",
 ]

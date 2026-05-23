@@ -1,0 +1,116 @@
+"""Parser for YouTube Reporting API report payloads.
+
+Consumes a pre-recorded payload shaped like the parser-friendly JSON
+the connector would emit after converting the upstream CSV report into
+a dict. Emits ParsedSourceRow instances with value_kind='estimated'.
+"""
+
+from collections.abc import Iterable
+from datetime import date
+from decimal import Decimal
+from uuid import UUID
+
+from ums_smart_revenue.connectors.google_source_parsers.base import ParserError
+from ums_smart_revenue.connectors.google_source_parsers.source_row_keys import (
+    build_source_row_key,
+)
+from ums_smart_revenue.connectors.google_source_rows import ParsedSourceRow
+
+
+# ============================================================================
+# Purpose: Translate YouTube Reporting API estimated-revenue payloads into
+#          ParsedSourceRow rows (one per input line). No live download.
+# Database/ORM: None directly. ParsedSourceRow is the parser/repository
+#               boundary.
+# Standards: Source amount + currency preserved exactly. Deterministic
+#            source_row_key via build_source_row_key. value_kind is
+#            'estimated' because the Reporting API reports estimated
+#            revenue, not settled payments.
+# Blast Radius: No DB write. No graph projection impact detected.
+# Connections:
+#   - File: tests/connectors/_fixtures/youtube_reporting/ -> Synthetic
+#     payloads consumed by parser tests.
+# ============================================================================
+class YouTubeReportingParser:
+    source_system = "youtube_reporting"
+
+    def parse(
+        self,
+        payload: dict[str, object],
+        *,
+        tenant_id: UUID,
+    ) -> Iterable[ParsedSourceRow]:
+        metadata = self._require_dict(payload, "report_metadata")
+        rows = payload.get("rows")
+        if not isinstance(rows, list):
+            raise ParserError("payload['rows'] must be a list")
+        report_id = self._require_str(metadata, "report_id")
+        report_type = self._require_str(metadata, "report_type")
+
+        for row in rows:
+            if not isinstance(row, dict):
+                raise ParserError("each rows[*] must be a dict")
+            line_index = self._require_int(row, "line_index")
+            date_range = self._require_dict(row, "date_range")
+            period_start = date.fromisoformat(self._require_str(date_range, "start"))
+            period_end = date.fromisoformat(self._require_str(date_range, "end"))
+            dimensions = self._require_dict(row, "dimensions")
+            metrics = self._require_dict(row, "metrics")
+
+            channel = dimensions.get("channel")
+            content_owner = dimensions.get("content_owner")
+            if not isinstance(channel, str):
+                raise ParserError("dimensions.channel must be a string")
+
+            amount_raw = metrics.get("estimatedRevenue")
+            if not isinstance(amount_raw, str):
+                raise ParserError("metrics.estimatedRevenue must be a string for Decimal precision")
+            currency = metrics.get("currencyCode")
+            if not isinstance(currency, str):
+                raise ParserError("metrics.currencyCode must be a string")
+
+            source_row_key = build_source_row_key(
+                source_system=self.source_system,
+                source_report_id=report_id,
+                line_index=line_index,
+                dimensions=dimensions,
+            )
+
+            yield ParsedSourceRow(
+                source_system=self.source_system,
+                source_row_key=source_row_key,
+                source_account_id=str(content_owner) if content_owner else "unknown",
+                content_owner_id=str(content_owner) if content_owner else None,
+                youtube_channel_id=channel,
+                report_type=report_type,
+                report_month=f"{period_start.year:04d}-{period_start.month:02d}",
+                period_start=period_start,
+                period_end=period_end,
+                metric_key="estimatedRevenue",
+                value_kind="estimated",
+                amount_native=Decimal(amount_raw),
+                currency_code=currency,
+                source_report_id=report_id,
+                raw_payload=dict(row),
+            )
+
+    @staticmethod
+    def _require_dict(d: dict[str, object], key: str) -> dict[str, object]:
+        value = d.get(key)
+        if not isinstance(value, dict):
+            raise ParserError(f"missing or non-dict field: {key!r}")
+        return value
+
+    @staticmethod
+    def _require_str(d: dict[str, object], key: str) -> str:
+        value = d.get(key)
+        if not isinstance(value, str):
+            raise ParserError(f"missing or non-str field: {key!r}")
+        return value
+
+    @staticmethod
+    def _require_int(d: dict[str, object], key: str) -> int:
+        value = d.get(key)
+        if not isinstance(value, int):
+            raise ParserError(f"missing or non-int field: {key!r}")
+        return value
