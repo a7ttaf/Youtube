@@ -365,6 +365,27 @@ def test_validate_deep_copies_nested_raw_payload(session: Session) -> None:
     assert validated.raw_payload == {"dimensions": {"channel": "UC_x", "country": "US"}}
 
 
+def test_read_path_deep_copies_nested_raw_payload(session: Session) -> None:
+    """The read path (_to_entry) must deep-copy raw_payload too: mutating a
+    nested dict on a returned entry must not alias the live ORM row and leak
+    into a subsequent read.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    key = "rd" * 32  # 64 chars
+    repo.upsert_many(
+        TENANT_A,
+        [replace(_row(source_row_key=key), raw_payload={"dimensions": {"country": "US"}})],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=None,
+    )
+    first = repo.get_exact(TENANT_A, source_system="youtube_reporting", source_row_key=key)
+    assert first is not None
+    first.raw_payload["dimensions"]["country"] = "MUTATED"  # caller mutates a nested object
+    second = repo.get_exact(TENANT_A, source_system="youtube_reporting", source_row_key=key)
+    assert second is not None
+    assert second.raw_payload == {"dimensions": {"country": "US"}}
+
+
 def test_non_usd_source_rows_visible_at_repository_layer(session: Session) -> None:
     """B1 makes non-USD source rows queryable at the repository layer.
 

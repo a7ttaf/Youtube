@@ -53,9 +53,9 @@ PR #42 landed the design pivot: B1 is Google source-reported revenue ingestion f
 
 ## Validation
 
-- `python scripts/run_validation_gate.py` (with `UMS_TEST_DATABASE_URL` set): **6/6 steps green** (ruff → AST policy → pytest 938 passed → vitest 34 passed → git diff --check worktree → git diff --check staged).
-- Pytest delta from PR #41 baseline (821): **+117 tests** (+89 in 17 new test files at submission; +28 review-hardening regressions added during Codex/CodeRabbit review).
-- PostgreSQL migration round-trip: 6/6 passed on disposable `postgres:18-alpine`.
+- `python scripts/run_validation_gate.py` (with `UMS_TEST_DATABASE_URL` set): **6/6 steps green** (ruff → AST policy → pytest 941 passed → vitest 34 passed → git diff --check worktree → git diff --check staged).
+- Pytest delta from PR #41 baseline (821): **+120 tests** (+89 in 17 new test files at submission; +31 review-hardening regressions added during Codex/CodeRabbit review).
+- PostgreSQL: 7/7 passed on disposable `postgres:18-alpine` (6 migration round-trip + 1 repository upsert covering the production `on_conflict_do_update` path).
 - Frontend tests: 34 passed (unchanged from PR #41; no frontend code touched).
 - AST policy gate: still passes (no skip/xfail introduced).
 - `python -m pytest tests/api/ tests/finance/ -q`: 420 pre-existing tests pass (no regressions).

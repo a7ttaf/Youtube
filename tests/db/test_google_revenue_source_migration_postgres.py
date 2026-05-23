@@ -5,13 +5,23 @@ upgrade head (20260521_0001) -> upgrade 20260523_0001 -> downgrade -1
 reverses the upgrade.
 """
 
+from datetime import date
+from decimal import Decimal
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 from _postgres_helpers import POSTGRES_URL  # sibling module (pytest's prepend mode puts tests/db on sys.path)
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.orm import Session
+
+from ums_smart_revenue.connectors.google_source_rows import (
+    ParsedSourceRow,
+    SqlAlchemyGoogleRevenueSourceRowRepository,
+)
+from ums_smart_revenue.db.tenant_models import TenantORM
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
@@ -127,3 +137,52 @@ def test_round_trip_idempotency(
     # Should not raise; re-upgrade must succeed cleanly.
     inspector = inspect(fresh_engine)
     assert "currencies" in inspector.get_table_names()
+
+
+def test_repository_upsert_round_trip_on_postgres(
+    alembic_config: Config, fresh_engine: object
+) -> None:
+    """Exercise the production upsert path on real PostgreSQL —
+    `postgresql.insert(...).on_conflict_do_update(...)` — which the SQLite
+    repository suite cannot reach. Covers insert, conflict-update of a mutable
+    field, and id preservation across the conflict.
+    """
+    command.upgrade(alembic_config, "20260523_0001")
+    tenant_id = uuid4()
+
+    def _row(amount: str) -> ParsedSourceRow:
+        return ParsedSourceRow(
+            source_system="youtube_reporting",
+            source_row_key="p" * 64,
+            source_account_id="acct-pg",
+            content_owner_id=None,
+            youtube_channel_id="UC_pg",
+            report_type="channel_monthly_estimated_revenue",
+            report_month="2026-04",
+            period_start=date(2026, 4, 1),
+            period_end=date(2026, 4, 30),
+            metric_key="estimatedRevenue",
+            value_kind="estimated",
+            amount_native=Decimal(amount),
+            currency_code="USD",  # seeded + flipped to supported by the migration
+            source_report_id="r-pg",
+            raw_payload={"dimensions": {"country": "US"}},
+        )
+
+    with Session(fresh_engine) as session:
+        session.add(TenantORM(id=tenant_id, slug="pg-tenant", display_name="PG Tenant"))
+        session.flush()
+        repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+
+        first = repo.upsert_many(
+            tenant_id, [_row("100.000000")], raw_file_id=None, imported_by=None
+        )
+        second = repo.upsert_many(
+            tenant_id, [_row("150.000000")], raw_file_id=None, imported_by=None
+        )
+        session.commit()
+
+        assert first[0].id == second[0].id, "id must be preserved across the on-conflict update"
+        rows = repo.list(tenant_id, report_month="2026-04")
+        assert len(rows) == 1, "conflict must update in place, not insert a duplicate"
+        assert rows[0].amount_native == Decimal("150.000000")

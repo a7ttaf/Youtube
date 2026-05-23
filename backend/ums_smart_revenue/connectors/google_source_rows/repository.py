@@ -329,7 +329,10 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
             currency_code=row.currency_code,
             source_report_id=row.source_report_id,
             raw_file_id=str(row.raw_file_id) if row.raw_file_id else None,
-            raw_payload=dict(row.raw_payload or {}),
+            # Deep-copy on the read path too: a shallow dict() would let a
+            # caller mutate entry.raw_payload["dimensions"] (a nested object)
+            # and alias it back into the live ORM row in the session.
+            raw_payload=deepcopy(row.raw_payload or {}),
             imported_by=str(row.imported_by) if row.imported_by else None,
             ingested_at=row.ingested_at,
         )

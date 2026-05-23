@@ -75,6 +75,11 @@ class YouTubeAnalyticsParser:
         metrics_csv = require_str(request, "metrics")
         dimensions_csv = require_str(request, "dimensions")
         ids = require_str(request, "ids")
+        # content_owner_id holds the BARE id (the part after "==") so it is
+        # usable for joins/filters; source_account_id keeps the raw `ids`
+        # selector. This matches the YouTube Reporting parser, which also stores
+        # the bare content_owner rather than a selector string.
+        content_owner_id = ids.split("==", 1)[1] if ids.startswith("contentOwner==") else None
         # FIX: Include `ids` in query_signature so two payloads identical except
         # for the contentOwner/channel account produce distinct source_row_keys.
         # Without this, the repo PK (tenant_id, source_system, source_row_key)
@@ -181,7 +186,7 @@ class YouTubeAnalyticsParser:
                     source_system=self.source_system,
                     source_row_key=source_row_key,
                     source_account_id=ids,
-                    content_owner_id=ids if ids.startswith("contentOwner==") else None,
+                    content_owner_id=content_owner_id,
                     youtube_channel_id=channel,
                     report_type="reports.query",
                     report_month=f"{period_start.year:04d}-{period_start.month:02d}",

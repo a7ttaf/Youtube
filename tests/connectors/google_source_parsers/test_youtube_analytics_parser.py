@@ -155,3 +155,15 @@ def test_missing_rows_is_zero_result() -> None:
     base = _load_fixture("sample_query_response_2026_04.json")
     no_rows = {k: v for k, v in base.items() if k != "rows"}
     assert list(YouTubeAnalyticsParser().parse(no_rows, tenant_id=TENANT_ID)) == []
+
+
+def test_content_owner_id_is_bare_id_not_selector() -> None:
+    """content_owner_id stores the bare id (after '=='), not the full
+    `contentOwner==...` selector, matching the Reporting parser and keeping
+    the field usable for joins/filters. source_account_id keeps the selector.
+    """
+    payload = _load_fixture("sample_query_response_2026_04.json")  # ids: contentOwner==cms-test-1
+    rows = list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+    assert rows
+    assert all(r.source_account_id == "contentOwner==cms-test-1" for r in rows)
+    assert all(r.content_owner_id == "cms-test-1" for r in rows)
