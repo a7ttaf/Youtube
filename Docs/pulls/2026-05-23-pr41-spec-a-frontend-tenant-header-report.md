@@ -1,7 +1,7 @@
-# PR #<NN> — Spec A Frontend `X-UMS-Tenant` Header Foundation — Report
+# PR #41 — Spec A Frontend `X-UMS-Tenant` Header Foundation — Report
 
 **Date:** 2026-05-23
-**PR:** https://github.com/XGenerationy/Youtube/pull/<NN>
+**PR:** https://github.com/XGenerationy/Youtube/pull/41
 **Branch:** `pr/spec-a-frontend-tenant-header`
 **Base:** `main` at `c79ab3f` (PR #40 merge commit — Spec A design doc)
 **Status:** Implementation PR — closes S2 spec Phase 5 (frontend tenant header).

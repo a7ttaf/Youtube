@@ -1,7 +1,7 @@
-# PR #<NN> — Spec A Frontend `X-UMS-Tenant` Header Foundation — Changelog
+# PR #41 — Spec A Frontend `X-UMS-Tenant` Header Foundation — Changelog
 
 **Date:** 2026-05-23
-**PR:** https://github.com/XGenerationy/Youtube/pull/<NN>
+**PR:** https://github.com/XGenerationy/Youtube/pull/41
 **Branch:** `pr/spec-a-frontend-tenant-header`
 **Base:** `main` at `c79ab3f` (PR #40 merge commit)
 
@@ -79,12 +79,11 @@
 
 ### Per-PR documentation
 
-- `Docs/pulls/2026-05-23-prTBD-spec-a-frontend-tenant-header-report.md`
-  (this PR's report — rename `prTBD` → `pr<NN>` after PR open).
-- `Docs/pulls/2026-05-23-prTBD-spec-a-frontend-tenant-header-changelog.md`
-  (this file — rename similarly).
-- `Docs/pulls/2026-05-23-prTBD-spec-a-frontend-tenant-header-handoff.md`
-  (rename similarly).
+- `Docs/pulls/2026-05-23-pr41-spec-a-frontend-tenant-header-report.md`
+  (this PR's report).
+- `Docs/pulls/2026-05-23-pr41-spec-a-frontend-tenant-header-changelog.md`
+  (this file).
+- `Docs/pulls/2026-05-23-pr41-spec-a-frontend-tenant-header-handoff.md`
 
 ---
 
@@ -147,7 +146,7 @@
 
 - `Docs/01_IMPLEMENTATION_PLAN.md` — One new bullet appended to the existing
   `### S0/S1 catch-up (2026-05-22)` subsection:
-  `✅ PR #<NN> — Spec A frontend X-UMS-Tenant header foundation …`.
+  `✅ PR #41 — Spec A frontend X-UMS-Tenant header foundation …`.
 - `Docs/15_DELIVERY_BACKLOG.md` — One new bullet appended to
   `## Cross-cutting shipped`:
   `✅ Frontend tenant-header foundation: TenantContext, useApiClient, GET /tenants/me …`.

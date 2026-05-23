@@ -1,7 +1,7 @@
-# PR #<NN> — Spec A Frontend `X-UMS-Tenant` Header Foundation — Handoff
+# PR #41 — Spec A Frontend `X-UMS-Tenant` Header Foundation — Handoff
 
 **Date:** 2026-05-23
-**PR:** https://github.com/XGenerationy/Youtube/pull/<NN>
+**PR:** https://github.com/XGenerationy/Youtube/pull/41
 **Branch:** `pr/spec-a-frontend-tenant-header`
 **Base:** `main` at `c79ab3f` (PR #40 merge commit — Spec A design doc)
 **Status at handoff:** Local validation gate green (819 pytest + 21 Vitest
@@ -82,9 +82,9 @@ Per spec §3:
 | Docs modified | `Docs/01_IMPLEMENTATION_PLAN.md` | Inline PR mark |
 | Docs modified | `Docs/15_DELIVERY_BACKLOG.md` | Inline PR mark |
 | Docs new | `Docs/superpowers/plans/2026-05-22-spec-a-frontend-tenant-header.md` | Implementation plan |
-| Docs new | `Docs/pulls/2026-05-23-prTBD-spec-a-frontend-tenant-header-report.md` | This PR's report |
-| Docs new | `Docs/pulls/2026-05-23-prTBD-spec-a-frontend-tenant-header-changelog.md` | This PR's changelog |
-| Docs new | `Docs/pulls/2026-05-23-prTBD-spec-a-frontend-tenant-header-handoff.md` | This file |
+| Docs new | `Docs/pulls/2026-05-23-pr41-spec-a-frontend-tenant-header-report.md` | This PR's report |
+| Docs new | `Docs/pulls/2026-05-23-pr41-spec-a-frontend-tenant-header-changelog.md` | This PR's changelog |
+| Docs new | `Docs/pulls/2026-05-23-pr41-spec-a-frontend-tenant-header-handoff.md` | This file |
 
 Total: 26 files created or modified.
 
@@ -196,10 +196,8 @@ threads and checks clear.
    backed by `connector_runs` / `raw_reports` schema.
 3. **Spec D** — Multi-currency engine: `currencies` + `fx_rates` tables.
    `Docs/18_MULTI_CURRENCY_ENGINE.md` specifies the shape.
-4. **Optional** — After PR #<NN> merges, replace `prTBD` tokens in the three
-   `Docs/pulls/2026-05-23-prTBD-*` filenames with the actual PR number
-   (Task 7.5). Update the `<NN>` placeholders inside all five changed docs
-   (`Docs/01`, `Docs/15`, and the three pulls/ files).
+4. **Done** — PR #41 placeholders replaced and files renamed via Task 7.5.
+   All five docs updated (`Docs/01`, `Docs/15`, and the three pulls/ files).
 
 ---
 
