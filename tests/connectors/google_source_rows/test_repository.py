@@ -129,6 +129,25 @@ def test_upsert_many_is_idempotent_on_rerun(session: Session) -> None:
     assert count == 1
 
 
+def test_upsert_many_preserves_id_on_conflict(session: Session) -> None:
+    """Re-upserting the same source_row_key must preserve the original id.
+
+    Guards against a future refactor that accidentally adds 'id': uuid4()
+    to the ON CONFLICT set_ clause.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    key = "d" * 64
+    first = repo.upsert_many(
+        TENANT_A, [_row(source_row_key=key, amount="100.000000")],
+        raw_file_id=RAW_FILE_ID, imported_by=None,
+    )
+    second = repo.upsert_many(
+        TENANT_A, [_row(source_row_key=key, amount="150.000000")],
+        raw_file_id=RAW_FILE_ID, imported_by=None,
+    )
+    assert first[0].id == second[0].id, "id must be preserved on conflict update"
+
+
 def test_upsert_many_updates_mutable_fields_on_conflict(session: Session) -> None:
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     key = "d" * 64
