@@ -7,12 +7,12 @@ is always 'estimated' because Analytics never returns settled values.
 
 from collections.abc import Iterable
 from datetime import date
-from decimal import Decimal
 from typing import Final
 from uuid import UUID
 
 from ums_smart_revenue.connectors.google_source_parsers.base import (
     ParserError,
+    parse_decimal_amount,
     require_dict,
     require_str,
 )
@@ -119,7 +119,7 @@ class YouTubeAnalyticsParser:
                     period_end=period_end,
                     metric_key=metric_name,
                     value_kind="estimated",
-                    amount_native=Decimal(raw_value),
+                    amount_native=parse_decimal_amount(raw_value, metric_key=metric_name),
                     currency_code=currency,
                     source_report_id=None,
                     raw_payload={"dimensions": dim_values, "metric": metric_name, "value": raw_value},

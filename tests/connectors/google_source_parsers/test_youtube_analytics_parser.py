@@ -4,7 +4,12 @@ from decimal import Decimal
 from importlib import resources
 from uuid import uuid4
 
-from ums_smart_revenue.connectors.google_source_parsers import YouTubeAnalyticsParser
+import pytest
+
+from ums_smart_revenue.connectors.google_source_parsers import (
+    ParserError,
+    YouTubeAnalyticsParser,
+)
 
 TENANT_ID = uuid4()
 
@@ -83,3 +88,16 @@ def test_different_ids_produce_distinct_keys() -> None:
     assert set(a_keys).isdisjoint(set(b_keys)), (
         "source_row_keys must differ when `ids` differs (per-account scope)"
     )
+
+
+def test_rejects_non_finite_amount() -> None:
+    """Infinity/NaN Decimal strings must fail at the parser, not downstream."""
+    payload = _load_fixture("sample_query_response_2026_04.json")
+    bad = {**payload}
+    # columnHeaders order is [channel, country, estimatedRevenue, grossRevenue];
+    # mutate the first row's estimatedRevenue (index 2) to Infinity.
+    first_row = list(bad["rows"][0])
+    first_row[2] = "Infinity"
+    bad["rows"] = [first_row, *bad["rows"][1:]]
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(bad, tenant_id=TENANT_ID))

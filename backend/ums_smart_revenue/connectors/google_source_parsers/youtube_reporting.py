@@ -7,11 +7,11 @@ a dict. Emits ParsedSourceRow instances with value_kind='estimated'.
 
 from collections.abc import Iterable
 from datetime import date
-from decimal import Decimal
 from uuid import UUID
 
 from ums_smart_revenue.connectors.google_source_parsers.base import (
     ParserError,
+    parse_decimal_amount,
     require_dict,
     require_int,
     require_str,
@@ -100,7 +100,7 @@ class YouTubeReportingParser:
                 period_end=period_end,
                 metric_key="estimatedRevenue",
                 value_kind="estimated",
-                amount_native=Decimal(amount_raw),
+                amount_native=parse_decimal_amount(amount_raw, metric_key="estimatedRevenue"),
                 currency_code=currency,
                 source_report_id=report_id,
                 raw_payload=dict(row),

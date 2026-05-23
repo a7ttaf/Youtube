@@ -7,6 +7,7 @@ Repositories never re-derive the key.
 """
 
 from collections.abc import Iterable
+from decimal import Decimal, InvalidOperation
 from typing import Protocol
 from uuid import UUID
 
@@ -53,6 +54,28 @@ def require_int(d: dict[str, object], key: str) -> int:
     if not isinstance(value, int):
         raise ParserError(f"missing or non-int field: {key!r}")
     return value
+
+
+def parse_decimal_amount(raw_value: str, *, metric_key: str) -> Decimal:
+    """Parse a string-typed money value into a Decimal, rejecting NaN/Infinity.
+
+    Decimal("NaN") and Decimal("Infinity") construct cleanly, so without an
+    explicit check they would flow downstream and the repository's
+    `amount_native >= 0` guard would surface NaN as a cryptic
+    InvalidOperation. Fail with a labeled ParserError at the parser
+    boundary instead.
+    """
+    try:
+        amount = Decimal(raw_value)
+    except InvalidOperation as exc:
+        raise ParserError(
+            f"metric {metric_key!r} value must be a valid Decimal string, got {raw_value!r}"
+        ) from exc
+    if not amount.is_finite():
+        raise ParserError(
+            f"metric {metric_key!r} value must be finite, got {raw_value!r}"
+        )
+    return amount
 
 
 class SourceRowParser(Protocol):

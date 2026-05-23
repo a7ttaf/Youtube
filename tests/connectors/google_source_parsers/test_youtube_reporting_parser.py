@@ -96,3 +96,14 @@ def test_missing_content_owner_raises_parser_error() -> None:
     ]
     with pytest.raises(ParserError):
         list(YouTubeReportingParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_rejects_non_finite_amount() -> None:
+    """NaN/Infinity Decimal strings must fail at the parser, not downstream."""
+    payload = _load_fixture("sample_estimated_revenue_2026_04.json")
+    bad = {**payload}
+    bad["rows"] = [
+        {**bad["rows"][0], "metrics": {**bad["rows"][0]["metrics"], "estimatedRevenue": "NaN"}},
+    ]
+    with pytest.raises(ParserError):
+        list(YouTubeReportingParser().parse(bad, tenant_id=TENANT_ID))
