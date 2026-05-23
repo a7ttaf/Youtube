@@ -8,10 +8,10 @@ reverses the upgrade.
 from pathlib import Path
 
 import pytest
+from _postgres_helpers import POSTGRES_URL  # sibling module (pytest's prepend mode puts tests/db on sys.path)
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
-from tests.db._postgres_helpers import POSTGRES_URL
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 
