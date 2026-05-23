@@ -1,8 +1,8 @@
 # Open Decisions
 
-## Status (2026-05-22)
+## Status (2026-05-23)
 
-Reconciled through PR #36 (S2 multi-tenant integration). Decisions that
+Reconciled through PR #42 (B1 source-reported revenue pivot). Decisions that
 are now made are listed under "Closed (with PR ref)". Items in the topic
 sections below remain genuinely open.
 

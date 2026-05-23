@@ -179,7 +179,7 @@ currencies (
   name text not null,
   minor_unit integer null,
   is_supported boolean not null default false,
-  activated_at timestamp null,
+  activated_at timestamptz null,
   unique (numeric_code)
 );
 
@@ -200,10 +200,10 @@ google_revenue_source_rows (
   amount_native numeric(20, 6) not null,
   currency_code text not null references currencies(code),
   source_report_id text null,
-  raw_file_id uuid null references raw_report_files(id),
+  raw_file_id uuid null references raw_report_files(id) on delete restrict,
   raw_payload jsonb not null,
   imported_by uuid null,
-  ingested_at timestamp not null default now(),
+  ingested_at timestamptz not null default now(),
   unique (tenant_id, source_system, source_row_key)
 );
 
