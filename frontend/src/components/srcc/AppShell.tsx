@@ -1,4 +1,8 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
+
+import { ApiError, useApiClient } from "@/lib/api/client";
+import type { TenantRead } from "@/lib/api/types";
+import { useTenant } from "@/contexts/TenantContext";
 import {
   AUDIT_EVENTS,
   AUDIT_SUMMARY,
@@ -307,6 +311,36 @@ export default function AppShell() {
     "Revenue Flow",
   );
 
+  // ============================================================================
+  // Purpose: Fire /tenants/me once on mount; hydrate TenantContext on success or
+  //          render the typed ApiError message in the dev-only proof tag on failure.
+  // Database/ORM: None (frontend API call only).
+  // Standards: useRef re-entry guard keeps fetch count at 1 under React StrictMode.
+  // Blast Radius: None detected (read-only; does not mutate financial state).
+  // Connections:
+  //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET helper.
+  //   - File: frontend/src/contexts/TenantContext.tsx -> hydrate() stores id/displayName.
+  // ============================================================================
+  const tenant = useTenant();
+  const client = useApiClient();
+  const hasRequestedTenantRef = useRef(false);
+  const [tenantError, setTenantError] = useState<ApiError | Error | null>(null);
+
+  useEffect(() => {
+    if (hasRequestedTenantRef.current || tenant.id) return;
+    hasRequestedTenantRef.current = true;
+    client
+      .get<TenantRead>("/tenants/me")
+      .then(tenant.hydrate)
+      .catch(setTenantError);
+  }, [client, tenant.id, tenant.hydrate]);
+
+  const tenantProofLabel = tenantError
+    ? `Tenant: ${tenant.tenantSlug}; /tenants/me failed: ${tenantError.message}`
+    : tenant.id
+      ? `Tenant: ${tenant.displayName} (${tenant.tenantSlug}) — id ${tenant.id}`
+      : `Tenant: ${tenant.tenantSlug} (loading…)`;
+
   const displayedRole = CAN_PREVIEW_ROLES ? previewRole : authenticatedRole;
   if (!displayedRole) {
     return <AccessDeniedState />;
@@ -318,6 +352,26 @@ export default function AppShell() {
 
   return (
     <div className="app">
+      {import.meta.env.DEV && (
+        <small
+          data-testid="tenant-proof"
+          style={{
+            position: "fixed",
+            bottom: 8,
+            right: 8,
+            fontSize: 11,
+            opacity: 0.6,
+            padding: "2px 6px",
+            borderRadius: 4,
+            background: "rgba(0,0,0,0.4)",
+            color: "#fff",
+            zIndex: 9999,
+            pointerEvents: "none",
+          }}
+        >
+          {tenantProofLabel}
+        </small>
+      )}
       {/* ============================================================ sidebar */}
       <aside className="sidebar" aria-label="Primary navigation">
         <div className="brand">
