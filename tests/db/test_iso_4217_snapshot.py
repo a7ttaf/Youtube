@@ -5,6 +5,8 @@ dated module (e.g. iso_4217_2027_03.py) plus a new migration, not by
 mutating this file.
 """
 
+import pytest
+
 from ums_smart_revenue.db.iso_4217_2026_05 import ISO_4217_CURRENCIES_2026_05
 
 SUPPORTED_V1 = ("AED", "USD", "EUR", "GBP", "SAR", "EGP")
@@ -56,3 +58,9 @@ def test_v1_supported_codes_have_known_minor_unit() -> None:
 def test_row_count_smoke() -> None:
     # Sanity check that the snapshot is the full ISO list, not just the v1 set.
     assert len(ISO_4217_CURRENCIES_2026_05) >= 150
+
+
+def test_snapshot_entries_are_read_only() -> None:
+    first_entry = ISO_4217_CURRENCIES_2026_05[0]
+    with pytest.raises(TypeError):
+        first_entry["code"] = "XXX"  # type: ignore[index]

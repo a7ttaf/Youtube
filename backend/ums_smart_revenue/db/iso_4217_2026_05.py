@@ -6,9 +6,11 @@ plain dict so historical migrations cannot break if downstream
 dataclasses (connectors/google_source_rows/dataclasses.py) ever change.
 """
 
+from collections.abc import Mapping
+from types import MappingProxyType
 from typing import Final
 
-ISO_4217_CURRENCIES_2026_05: Final[tuple[dict[str, object], ...]] = (
+_RAW_ISO_4217_CURRENCIES_2026_05: Final[tuple[dict[str, object], ...]] = (
     {"code": "AED", "numeric_code": "784", "name": "UAE Dirham", "minor_unit": 2},
     {"code": "AFN", "numeric_code": "971", "name": "Afghani", "minor_unit": 2},
     {"code": "ALL", "numeric_code": "008", "name": "Lek", "minor_unit": 2},
@@ -216,4 +218,8 @@ ISO_4217_CURRENCIES_2026_05: Final[tuple[dict[str, object], ...]] = (
     {"code": "ZAR", "numeric_code": "710", "name": "Rand", "minor_unit": 2},
     {"code": "ZMW", "numeric_code": "967", "name": "Zambian Kwacha", "minor_unit": 2},
     {"code": "ZWG", "numeric_code": "924", "name": "Zimbabwe Gold", "minor_unit": 2},
+)
+
+ISO_4217_CURRENCIES_2026_05: Final[tuple[Mapping[str, object], ...]] = tuple(
+    MappingProxyType(entry) for entry in _RAW_ISO_4217_CURRENCIES_2026_05
 )
