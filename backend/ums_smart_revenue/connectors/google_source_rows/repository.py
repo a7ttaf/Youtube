@@ -9,6 +9,7 @@ chain.
 """
 
 from collections.abc import Iterable
+from dataclasses import replace
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -21,6 +22,7 @@ from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
     ALLOWED_VALUE_KINDS,
     SOURCE_ROW_KEY_LENGTH,
     GoogleRevenueSourceRowEntry,
+    GoogleRevenueSourceRowError,
     GoogleRevenueSourceRowValidationError,
     IsoCurrency,
     ParsedSourceRow,
@@ -116,17 +118,19 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         materialised = list(rows)
         if not materialised:
             return []
-        for row in materialised:
-            self._validate(row)
+        # Defensive copy of raw_payload via _validate prevents caller mutation
+        # from racing the pending flush; the reference exchange_rates.py pipeline
+        # follows the same pattern in _normalize_rate_input.
+        validated = [self._validate(r) for r in materialised]
         # Pre-check currency existence so callers receive a typed domain
         # error instead of the raw FK violation surfaced by the DB.
-        self._require_currencies({r.currency_code for r in materialised})
+        self._require_currencies({r.currency_code for r in validated})
 
         written: list[GoogleRevenueSourceRowEntry] = []
         dialect_insert = self._dialect_insert(
             self._session.get_bind().dialect.name
         )
-        for row in materialised:
+        for row in validated:
             # Explicit Python-side UUID keeps SQLite tests (no
             # gen_random_uuid() function) consistent with PostgreSQL
             # production; on conflict the existing id is preserved
@@ -239,7 +243,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         )
         return self._to_entry(row) if row is not None else None
 
-    def _validate(self, row: ParsedSourceRow) -> None:
+    def _validate(self, row: ParsedSourceRow) -> ParsedSourceRow:
         if row.source_system not in ALLOWED_SOURCE_SYSTEMS:
             raise GoogleRevenueSourceRowValidationError(
                 f"unknown source_system: {row.source_system!r}"
@@ -261,6 +265,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
             raise GoogleRevenueSourceRowValidationError(
                 "raw_payload must be a dict"
             )
+        return replace(row, raw_payload=dict(row.raw_payload))
 
     def _require_currencies(self, codes: set[str]) -> None:
         if not codes:
@@ -282,7 +287,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
             return sqlite_insert
         if dialect_name == "postgresql":
             return postgresql_insert
-        raise GoogleRevenueSourceRowValidationError(
+        raise GoogleRevenueSourceRowError(
             f"unsupported dialect for source-row upsert: {dialect_name}"
         )
 

@@ -285,3 +285,29 @@ def test_list_for_channel_returns_only_matches(session: Session) -> None:
     )
     assert len(alpha) == 2
     assert {r.youtube_channel_id for r in alpha} == {"UC_alpha"}
+
+
+def test_upsert_many_does_not_alias_caller_raw_payload(session: Session) -> None:
+    """Mutating the caller's raw_payload dict after upsert must not affect persisted state.
+
+    Guards against the repository passing raw_payload by reference into the
+    SQLAlchemy insert/update statements without a defensive copy.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    payload: dict[str, object] = {"original_metric": "estimatedRevenue"}
+    base = _row(source_row_key="z" * 64)
+    row_with_payload = replace(base, raw_payload=payload)
+    repo.upsert_many(
+        TENANT_A, [row_with_payload],
+        raw_file_id=RAW_FILE_ID, imported_by=None,
+    )
+    # Caller mutates their dict AFTER the call.
+    payload["original_metric"] = "MUTATED"
+    payload["new_field"] = "leak"
+
+    persisted = repo.get_exact(
+        TENANT_A, source_system="youtube_reporting", source_row_key="z" * 64,
+    )
+    assert persisted is not None
+    assert persisted.raw_payload == {"original_metric": "estimatedRevenue"}
+    assert "new_field" not in persisted.raw_payload
