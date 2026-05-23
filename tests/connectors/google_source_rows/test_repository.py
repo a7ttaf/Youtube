@@ -238,3 +238,23 @@ def test_get_exact_returns_none_for_missing(session: Session) -> None:
         TENANT_A, source_system="youtube_reporting", source_row_key="m" * 64
     )
     assert entry is None
+
+
+def test_list_filters_combine(session: Session) -> None:
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    repo.upsert_many(
+        TENANT_A,
+        [
+            _row(source_row_key="n" * 64, source_system="youtube_reporting"),
+            _row(source_row_key="o" * 64, source_system="adsense_management"),
+        ],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=None,
+    )
+    filtered = repo.list(
+        TENANT_A,
+        report_month="2026-04",
+        source_system="youtube_reporting",
+    )
+    assert len(filtered) == 1
+    assert filtered[0].source_system == "youtube_reporting"
