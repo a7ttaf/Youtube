@@ -412,7 +412,8 @@ after the user retried and `/tenants/me` returned 200.
 - `frontend/src/components/srcc/__tests__/AppShell.test.tsx`
   - New: `clears stale tenantError on successful retry after an earlier
     failure (outside-diff CodeRabbit regression)`. Mocks fetch with
-    `mockResolvedValueOnce(503)` then `mockResolvedValueOnce(200)`,
+    `mockResolvedValueOnce(jsonResponse({ detail: "transient 503" }, 503))`
+    then `mockResolvedValueOnce(jsonResponse(<UMS payload>, 200))`,
     waits for the 503 message in the proof tag, switches preview role
     via `fireEvent.change` to force the bootstrap effect to re-fire,
     and asserts the proof tag now shows `UMS (ums)` AND no longer
