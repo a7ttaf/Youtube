@@ -383,6 +383,42 @@ def test_rejects_non_str_currency_code(session: Session) -> None:
         repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
 
 
+def test_rejects_non_str_required_text_column(session: Session) -> None:
+    """A required text column written straight to SQL (e.g. report_type) must
+    raise the typed validation error if non-str, not surface later as a
+    driver/DB error.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = replace(_row(source_row_key="m" * 64), report_type=123)
+    with pytest.raises(GoogleRevenueSourceRowValidationError):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
+def test_rejects_malformed_report_month(session: Session) -> None:
+    """A report_month that is not YYYY-MM with month 01-12 must raise the typed
+    validation error at the repository boundary, mirroring the DB CHECK rather
+    than deferring to a raw IntegrityError on flush.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = replace(_row(source_row_key="n" * 64), report_month="2026-13")
+    with pytest.raises(GoogleRevenueSourceRowValidationError):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
+def test_rejects_reversed_period(session: Session) -> None:
+    """period_end before period_start must raise the typed validation error,
+    mirroring the DB period-order CHECK instead of a raw IntegrityError.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = replace(
+        _row(source_row_key="o" * 64),
+        period_start=date(2026, 4, 30),
+        period_end=date(2026, 4, 1),
+    )
+    with pytest.raises(GoogleRevenueSourceRowValidationError):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
 def test_validate_deep_copies_nested_raw_payload(session: Session) -> None:
     """_validate must deep-copy raw_payload so a caller mutating a NESTED dict
     cannot reach into the persisted row. A shallow dict() copy shares the

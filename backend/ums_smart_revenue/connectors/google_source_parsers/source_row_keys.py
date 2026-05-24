@@ -76,9 +76,16 @@ def build_source_row_key(*, source_system: str, **fields: object) -> str:
             "dimensions": _canonical_dimensions(fields.get("dimensions") or {}),
         }
     else:  # adsense_management
+        # Keyed on the STABLE logical identity: metric + account + period +
+        # dimensions. The run-specific report_id is intentionally excluded (and
+        # is preserved separately as source_report_id provenance): AdSense
+        # regenerates reports for the same month/account/dimensions under a new
+        # report identifier, so folding report_id into the key would make a
+        # rerun insert duplicate financial rows instead of updating the prior
+        # ones — the same idempotency hazard fixed for youtube_reporting.
         canonical_payload = {
             "prefix": prefix,
-            "source_report_id": fields["source_report_id"],
+            "metric_key": fields["metric_key"],
             "account_id": fields["account_id"],
             "period_start": fields["period_start"],
             "period_end": fields["period_end"],

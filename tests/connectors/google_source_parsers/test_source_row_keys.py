@@ -46,10 +46,10 @@ def test_youtube_analytics_key_uses_query_signature_and_period() -> None:
     assert key1 == key2
 
 
-def test_adsense_management_key_uses_account_period_dimensions() -> None:
+def test_adsense_management_key_uses_metric_account_period_dimensions() -> None:
     key = build_source_row_key(
         source_system="adsense_management",
-        source_report_id="adsense-report-2026-04",
+        metric_key="ESTIMATED_EARNINGS",
         account_id="pub-test-001",
         period_start="2026-04-01",
         period_end="2026-04-30",
@@ -57,6 +57,29 @@ def test_adsense_management_key_uses_account_period_dimensions() -> None:
     )
     assert len(key) == 64
     assert all(c in "0123456789abcdef" for c in key)
+
+
+def test_adsense_management_key_excludes_run_specific_report_id() -> None:
+    """The AdSense key must NOT depend on a run-specific report_id: it is not a
+    parameter of the key at all. The same metric/account/period/dimensions
+    yields the same key regardless of which report generation produced it, so a
+    regenerated report updates in place instead of inserting duplicate revenue.
+    """
+    kwargs = dict(
+        source_system="adsense_management",
+        account_id="pub-test-001",
+        period_start="2026-04-01",
+        period_end="2026-04-30",
+        dimensions={"product": "AFC"},
+    )
+    assert (
+        build_source_row_key(metric_key="PAID_AMOUNT", **kwargs)
+        != build_source_row_key(metric_key="ESTIMATED_EARNINGS", **kwargs)
+    ), "different metrics for the same row must stay distinct"
+    assert (
+        build_source_row_key(metric_key="PAID_AMOUNT", **kwargs)
+        == build_source_row_key(metric_key="PAID_AMOUNT", **kwargs)
+    ), "same logical identity must be stable"
 
 
 def test_different_inputs_produce_distinct_keys() -> None:
@@ -106,7 +129,7 @@ def test_different_source_systems_produce_distinct_keys() -> None:
     )
     ads = build_source_row_key(
         source_system="adsense_management",
-        source_report_id="r-1",
+        metric_key="PAID_AMOUNT",
         account_id="acct",
         period_start="2026-04-01",
         period_end="2026-04-30",
@@ -159,24 +182,24 @@ def test_dimension_values_with_delimiters_do_not_collide() -> None:
 def test_field_boundary_shift_does_not_collide() -> None:
     """Regression: the old '|'-joined canonical form let a value containing
     '|' shift across a field boundary and collide. For AdSense,
-    (source_report_id='a', account_id='b|c') and
-    (source_report_id='a|b', account_id='c') both produced
-    "...|a|b|c|..." before this fix.
+    (metric_key='a', account_id='b|c') and
+    (metric_key='a|b', account_id='c') both produced
+    "...|a|b|c|..." before the JSON canonical form fixed it.
     """
     account_owns_pipe = build_source_row_key(
         source_system="adsense_management",
-        source_report_id="a",
+        metric_key="a",
         account_id="b|c",
         period_start="2026-04-01",
         period_end="2026-04-30",
         dimensions={},
     )
-    report_owns_pipe = build_source_row_key(
+    metric_owns_pipe = build_source_row_key(
         source_system="adsense_management",
-        source_report_id="a|b",
+        metric_key="a|b",
         account_id="c",
         period_start="2026-04-01",
         period_end="2026-04-30",
         dimensions={},
     )
-    assert account_owns_pipe != report_owns_pipe
+    assert account_owns_pipe != metric_owns_pipe

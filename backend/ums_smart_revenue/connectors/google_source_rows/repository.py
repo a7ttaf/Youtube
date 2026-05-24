@@ -8,9 +8,11 @@ channel/month list, exact source-key lookup. No conversion, no provider
 chain.
 """
 
+import re
 from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import replace
+from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
 
@@ -33,6 +35,12 @@ from ums_smart_revenue.db.source_models import (
     CurrencyORM,
     GoogleRevenueSourceRowORM,
 )
+
+# YYYY-MM with a calendar-valid month (01-12). Mirrors the DB CHECK
+# ck_google_revenue_source_rows_report_month_format at the typed-validation
+# boundary so a malformed report_month surfaces as a typed error, not a raw
+# DB IntegrityError on flush.
+_REPORT_MONTH_RE = re.compile(r"\d{4}-(0[1-9]|1[0-2])\Z")
 
 
 # ============================================================================
@@ -246,14 +254,24 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         return self._to_entry(row) if row is not None else None
 
     def _validate(self, row: ParsedSourceRow) -> ParsedSourceRow:
-        # Guard the string-typed identity fields first: a non-str source_system
-        # or value_kind raises a raw TypeError on frozenset membership (an
-        # unhashable list/dict), a non-str source_row_key raises TypeError on
-        # len(), and a non-str currency_code raises TypeError when upsert_many
-        # builds {r.currency_code for r in validated} for the _require_currencies
-        # pre-check. All would bypass this method's typed-error contract for a
-        # malformed caller that ignores the ParsedSourceRow annotations.
-        for field_name in ("source_system", "value_kind", "source_row_key", "currency_code"):
+        # Guard every required string column first. The first four are also used
+        # in type-assuming Python ops (frozenset membership, len(), the
+        # {r.currency_code} set comprehension), where a non-str would raise a raw
+        # TypeError; the rest are written straight into the INSERT, where a non-str
+        # would surface later as a driver/DB error. Either way a malformed caller
+        # that ignores the ParsedSourceRow annotations must hit this method's
+        # typed-error contract, not a raw exception. (Nullable string columns —
+        # content_owner_id, youtube_channel_id, source_report_id — are excluded.)
+        for field_name in (
+            "source_system",
+            "value_kind",
+            "source_row_key",
+            "currency_code",
+            "source_account_id",
+            "report_type",
+            "report_month",
+            "metric_key",
+        ):
             if not isinstance(getattr(row, field_name), str):
                 raise GoogleRevenueSourceRowValidationError(
                     f"{field_name} must be a str"
@@ -289,6 +307,22 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         if not isinstance(row.raw_payload, dict):
             raise GoogleRevenueSourceRowValidationError(
                 "raw_payload must be a dict"
+            )
+        # Mirror the report_month + period-order DB CHECKs at the typed-validation
+        # boundary: a malformed ParsedSourceRow from any non-parser caller (or a
+        # future parser regression) must raise GoogleRevenueSourceRowValidationError
+        # here, not a raw DB IntegrityError on flush.
+        if not _REPORT_MONTH_RE.match(row.report_month):
+            raise GoogleRevenueSourceRowValidationError(
+                f"report_month must be YYYY-MM with month 01-12, got {row.report_month!r}"
+            )
+        if not isinstance(row.period_start, date) or not isinstance(row.period_end, date):
+            raise GoogleRevenueSourceRowValidationError(
+                "period_start and period_end must be dates"
+            )
+        if row.period_end < row.period_start:
+            raise GoogleRevenueSourceRowValidationError(
+                "period_end must be on or after period_start"
             )
         # Deep-copy: raw_payload holds nested dicts (date_range, dimensions,
         # metrics), so a shallow dict() copy would still let a caller mutate

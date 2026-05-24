@@ -63,6 +63,22 @@ def test_source_row_key_stable_across_reruns_for_payments() -> None:
     assert sorted(r.source_row_key for r in a) == sorted(r.source_row_key for r in b)
 
 
+def test_source_row_key_ignores_run_specific_report_id() -> None:
+    """A regenerated report (new report_id) for the same month/account/
+    dimensions must yield identical source_row_keys, so the rerun updates in
+    place instead of inserting duplicate revenue rows. report_id stays as
+    provenance on source_report_id but must not enter the dedup key.
+    """
+    base = _load("sample_earnings_report_2026_04.json")
+    regenerated = _load("sample_earnings_report_2026_04.json")
+    regenerated["report_id"] = f"{base['report_id']}-regenerated"
+    a = list(AdSenseManagementParser().parse(base, tenant_id=TENANT_ID))
+    b = list(AdSenseManagementParser().parse(regenerated, tenant_id=TENANT_ID))
+    assert sorted(r.source_row_key for r in a) == sorted(r.source_row_key for r in b)
+    # report_id is preserved as provenance, just not folded into the key.
+    assert all(r.source_report_id == f"{base['report_id']}-regenerated" for r in b)
+
+
 def test_earnings_and_payment_keys_differ() -> None:
     e = list(AdSenseManagementParser().parse(_load("sample_earnings_report_2026_04.json"), tenant_id=TENANT_ID))
     p = list(AdSenseManagementParser().parse(_load("sample_payment_report_2026_04.json"), tenant_id=TENANT_ID))

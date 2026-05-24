@@ -146,9 +146,15 @@ class AdSenseManagementParser:
                 is_settled = metric_name in _SETTLED_METRICS
                 value_kind = "settled" if is_settled else "estimated"
                 report_type = "payment_report" if is_settled else "earnings_report"
+                # FIX: key on the stable logical identity (metric + account +
+                # period + dimensions), NOT the run-specific report_id. report_id
+                # is preserved as source_report_id provenance below, but folding
+                # it into the dedup key let a regenerated report (new report_id)
+                # for the same month/account/dimensions insert duplicate revenue
+                # rows on rerun instead of updating in place.
                 source_row_key = build_source_row_key(
                     source_system=self.source_system,
-                    source_report_id=f"{report_id}|{metric_name}",
+                    metric_key=metric_name,
                     account_id=account_id,
                     period_start=period_start.isoformat(),
                     period_end=period_end.isoformat(),
