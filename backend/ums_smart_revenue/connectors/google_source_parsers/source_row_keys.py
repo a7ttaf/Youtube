@@ -48,16 +48,24 @@ def build_source_row_key(*, source_system: str, **fields: object) -> str:
     prefix = _PREFIX[source_system]
 
     if source_system == "youtube_reporting":
-        # Keyed on the STABLE logical identity: report_type + period +
-        # dimensions. Both source_report_id and line_index are intentionally
+        # Keyed on the STABLE logical identity: report_type + currency + period
+        # + dimensions. Both source_report_id and line_index are intentionally
         # excluded — YouTube Reporting emits replacement/backfilled reports for
         # the same window with a NEW report id (newer createTime) and unsorted
         # rows, so keying on the report id or row position would make corrected
         # reruns insert duplicate rows instead of updating the prior rows for
         # the same period/dimensions.
+        # FIX: currency is part of the row's logical identity and is now a
+        # REQUIRED key axis (bracket access), mirroring the youtube_analytics
+        # and adsense_management branches below. The parser stamps a per-row
+        # metrics.currencyCode, so the same report_type/period/dimensions
+        # reported in a different currency is a distinct monetary row; omitting
+        # currency let two distinct-currency rows collide onto one upsert key
+        # and silently overwrite each other (CLAUDE.md rule 4).
         canonical_payload: dict[str, object] = {
             "prefix": prefix,
             "report_type": fields["report_type"],
+            "currency": fields["currency"],
             "period_start": fields["period_start"],
             "period_end": fields["period_end"],
             "dimensions": _canonical_dimensions(fields.get("dimensions") or {}),

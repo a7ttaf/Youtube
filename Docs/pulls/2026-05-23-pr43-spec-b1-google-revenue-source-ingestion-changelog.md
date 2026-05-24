@@ -58,6 +58,10 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 
 ## Changed
 
+### Review hardening round 9
+
+- `backend/ums_smart_revenue/connectors/google_source_parsers/source_row_keys.py` + `…/youtube_reporting.py` — `currency` is now a **required** key axis for the `youtube_reporting` `source_row_key`, matching the `youtube_analytics` and `adsense_management` branches. The parser stamps a per-row `metrics.currencyCode`, but the key omitted it, so two rows identical in `report_type`/period/`dimensions` but differing in currency hashed to the **same** upsert key and silently overwrote each other (financial data loss — CLAUDE.md rule 4). `source_report_id`/`line_index` stay excluded, so backfill idempotency is unchanged (a corrected rerun carries the same currency). **Blast radius:** `source_row_key` derivation only; `google_revenue_source_rows` is new in this PR with no persisted keys (disposable pre-alpha), so no migration/backfill. Tests: +2 (a `youtube_reporting` includes-currency key case and a parser-level distinct-currency no-collision regression); the currency-required guard now covers all three source systems.
+
 ### Review hardening round 8
 
 - `Docs/pulls/2026-05-23-pr43-spec-b1-google-revenue-source-ingestion-{changelog,report}.md` — the doc-summary bullets described the `Docs/01_IMPLEMENTATION_PLAN.md` and `Docs/15_DELIVERY_BACKLOG.md` entries with a ✅ (done) marker, but both authoritative docs deliberately record those entries as ⏳ (foundation-only — the scaffolding-only honesty rule, no live ingestion path yet). Both summaries now read ⏳ to match the docs they actually describe. Doc-only marker consistency; no code, test, or behavior change.

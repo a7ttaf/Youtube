@@ -159,3 +159,25 @@ def test_report_id_does_not_affect_source_row_key() -> None:
     a = sorted(r.source_row_key for r in YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
     b = sorted(r.source_row_key for r in YouTubeReportingParser().parse(backfill, tenant_id=TENANT_ID))
     assert a == b
+
+
+def test_distinct_currency_rows_do_not_collide_on_source_row_key() -> None:
+    """Two rows with identical report_type/period/dimensions but a different
+    currency are distinct monetary rows and must produce DISTINCT
+    source_row_keys, so an idempotent upsert keeps both instead of one silently
+    overwriting the other (CLAUDE.md rule 4: preserve every financial number's
+    source). Before currency was added to the youtube_reporting key, these
+    collided onto a single upsert key.
+    """
+    payload = _load_fixture("sample_estimated_revenue_2026_04.json")
+    base = payload["rows"][0]
+    usd_row = {**base, "metrics": {**base["metrics"], "currencyCode": "USD"}}
+    eur_row = {
+        **base,
+        "line_index": base["line_index"] + 1,
+        "metrics": {**base["metrics"], "currencyCode": "EUR"},
+    }
+    only_currency_differs = {**payload, "rows": [usd_row, eur_row]}
+    rows = list(YouTubeReportingParser().parse(only_currency_differs, tenant_id=TENANT_ID))
+    assert {r.currency_code for r in rows} == {"USD", "EUR"}
+    assert rows[0].source_row_key != rows[1].source_row_key

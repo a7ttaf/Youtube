@@ -14,6 +14,7 @@ def test_youtube_reporting_key_is_deterministic() -> None:
     key1 = build_source_row_key(
         source_system="youtube_reporting",
         report_type="channel_basic_a2",
+        currency="USD",
         period_start="2026-04-01",
         period_end="2026-04-30",
         dimensions={"channel": "UC_x", "country": "US"},
@@ -21,11 +22,32 @@ def test_youtube_reporting_key_is_deterministic() -> None:
     key2 = build_source_row_key(
         source_system="youtube_reporting",
         report_type="channel_basic_a2",
+        currency="USD",
         period_start="2026-04-01",
         period_end="2026-04-30",
         dimensions={"country": "US", "channel": "UC_x"},  # dict order varies
     )
     assert key1 == key2
+
+
+def test_youtube_reporting_key_includes_currency() -> None:
+    """Currency is part of the YouTube Reporting row identity: the same
+    report_type/period/dimensions reported in a different currency must NOT
+    collapse to one upsert key (mirrors the youtube_analytics/adsense keys).
+    The parser stamps a per-row metrics.currencyCode, so a distinct-currency
+    row is a distinct monetary row and must hash to a distinct key.
+    """
+    kwargs = dict(
+        source_system="youtube_reporting",
+        report_type="channel_basic_a2",
+        period_start="2026-04-01",
+        period_end="2026-04-30",
+        dimensions={"channel": "UC_x"},
+    )
+    assert (
+        build_source_row_key(currency="USD", **kwargs)
+        != build_source_row_key(currency="EUR", **kwargs)
+    )
 
 
 def test_youtube_analytics_key_uses_query_signature_and_period() -> None:
@@ -85,9 +107,12 @@ def test_currency_is_required_for_currency_keyed_branches() -> None:
     """currency is a financial-identity field for the currency-keyed source
     systems, so omitting it must fail closed (loud KeyError) instead of silently
     hashing None and risking a distinct-currency upsert-key collision (CLAUDE.md
-    rule 4). filters stays optional, so this guard is currency-specific.
+    rule 4). All three source systems carry a per-row/per-report currency, so
+    all three require it; filters stays optional, so this guard is
+    currency-specific.
     """
     for source_system, identity in (
+        ("youtube_reporting", {"report_type": "channel_basic_a2"}),
         ("youtube_analytics", {"query_signature": "estimatedRevenue|channel"}),
         ("adsense_management", {"metric_key": "PAID_AMOUNT", "account_id": "pub-1"}),
     ):
@@ -133,6 +158,7 @@ def test_different_inputs_produce_distinct_keys() -> None:
         build_source_row_key(
             source_system="youtube_reporting",
             report_type="channel_basic_a2",
+            currency="USD",
             period_start="2026-04-01",
             period_end="2026-04-30",
             dimensions={"k": "v"},
@@ -140,6 +166,7 @@ def test_different_inputs_produce_distinct_keys() -> None:
         build_source_row_key(
             source_system="youtube_reporting",
             report_type="content_owner_basic_a3",
+            currency="USD",
             period_start="2026-04-01",
             period_end="2026-04-30",
             dimensions={"k": "v"},
@@ -147,6 +174,7 @@ def test_different_inputs_produce_distinct_keys() -> None:
         build_source_row_key(
             source_system="youtube_reporting",
             report_type="channel_basic_a2",
+            currency="USD",
             period_start="2026-04-01",
             period_end="2026-04-30",
             dimensions={"k": "w"},
@@ -159,6 +187,7 @@ def test_different_source_systems_produce_distinct_keys() -> None:
     yt = build_source_row_key(
         source_system="youtube_reporting",
         report_type="channel_basic_a2",
+        currency="USD",
         period_start="2026-04-01",
         period_end="2026-04-30",
         dimensions={},
@@ -192,6 +221,7 @@ def test_key_length_is_64_chars() -> None:
     key = build_source_row_key(
         source_system="youtube_reporting",
         report_type="t",
+        currency="USD",
         period_start="2026-04-01",
         period_end="2026-04-30",
         dimensions={},
@@ -210,6 +240,7 @@ def test_dimension_values_with_delimiters_do_not_collide() -> None:
     two_dimensions = build_source_row_key(
         source_system="youtube_reporting",
         report_type="t",
+        currency="USD",
         period_start="2026-04-01",
         period_end="2026-04-30",
         dimensions={"a": "b", "c": "d"},
@@ -217,6 +248,7 @@ def test_dimension_values_with_delimiters_do_not_collide() -> None:
     one_dimension = build_source_row_key(
         source_system="youtube_reporting",
         report_type="t",
+        currency="USD",
         period_start="2026-04-01",
         period_end="2026-04-30",
         dimensions={"a": "b&c=d"},

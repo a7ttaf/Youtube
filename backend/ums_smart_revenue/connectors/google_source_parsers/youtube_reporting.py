@@ -103,6 +103,12 @@ class YouTubeReportingParser:
             source_row_key = build_source_row_key(
                 source_system=self.source_system,
                 report_type=report_type,
+                # FIX: pass the per-row currency into the key. currency is a
+                # financial-identity axis (matches youtube_analytics/adsense): the
+                # same report_type/period/dimensions reported in a different
+                # currency is a distinct monetary row and must not collapse onto
+                # one upsert key and overwrite the other (CLAUDE.md rule 4).
+                currency=currency,
                 period_start=period_start.isoformat(),
                 period_end=period_end.isoformat(),
                 dimensions=dimensions,
