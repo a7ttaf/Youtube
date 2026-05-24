@@ -72,26 +72,43 @@ def require_int(d: dict[str, object], key: str) -> int:
     return value
 
 
-def parse_decimal_amount(raw_value: str, *, metric_key: str) -> Decimal:
-    """Parse a string-typed money value into a Decimal, rejecting NaN/Infinity.
+def parse_decimal_amount(raw_value: object, *, metric_key: str) -> Decimal:
+    """Normalise a source money value into a finite Decimal.
 
-    Decimal("NaN") and Decimal("Infinity") construct cleanly, so without an
-    explicit check they would flow downstream and the repository's
-    `amount_native >= 0` guard would surface NaN as a cryptic
-    InvalidOperation. Fail with a labeled ParserError at the parser
-    boundary instead.
+    Accepts the JSON shapes Google revenue payloads actually emit: Decimal
+    strings (AdSense report cells, YouTube Reporting CSV) and JSON numbers
+    (YouTube Analytics reports.query FLOAT/INTEGER cells, which json.loads
+    yields as float/int). Floats are routed through str() so the shortest
+    round-trip decimal is used, avoiding binary artifacts such as
+    Decimal(0.1) == Decimal("0.1000000000000000055..."). bool is rejected
+    explicitly because it is an int subclass yet is never a real money value.
+    NaN and Infinity construct cleanly as Decimal, so they are rejected here
+    rather than surfacing later as a cryptic InvalidOperation at the
+    repository's `amount_native >= 0` guard.
     """
-    try:
-        amount = Decimal(raw_value)
-    except InvalidOperation as exc:
+    if isinstance(raw_value, bool):
         raise ParserError(
-            f"metric {metric_key!r} value must be a valid Decimal string, got {raw_value!r}"
-        ) from exc
-    if not amount.is_finite():
+            f"metric {metric_key!r} value must be a number or Decimal string, got bool"
+        )
+    if isinstance(raw_value, (int, float)):
+        candidate = Decimal(str(raw_value))
+    elif isinstance(raw_value, str):
+        try:
+            candidate = Decimal(raw_value)
+        except InvalidOperation as exc:
+            raise ParserError(
+                f"metric {metric_key!r} value must be a valid Decimal string, got {raw_value!r}"
+            ) from exc
+    else:
+        raise ParserError(
+            f"metric {metric_key!r} value must be a number or Decimal string, "
+            f"got {type(raw_value).__name__}"
+        )
+    if not candidate.is_finite():
         raise ParserError(
             f"metric {metric_key!r} value must be finite, got {raw_value!r}"
         )
-    return amount
+    return candidate
 
 
 def parse_iso_date(raw_value: str, *, field: str) -> date:

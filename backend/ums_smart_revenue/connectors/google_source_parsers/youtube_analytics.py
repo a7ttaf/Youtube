@@ -200,10 +200,12 @@ class YouTubeAnalyticsParser:
                 if metric_name not in _MONETARY_METRICS:
                     continue  # B1 only tracks monetary metrics.
                 raw_value = metric_values[metric_name]
-                if not isinstance(raw_value, str):
-                    raise ParserError(
-                        f"metric {metric_name} value must be a string for Decimal precision"
-                    )
+                # FIX: reports.query returns FLOAT/INTEGER metric cells as JSON
+                # numbers (per columnHeaders[].dataType), not strings. The prior
+                # str-only guard raised ParserError on valid Analytics payloads,
+                # blocking ingestion. parse_decimal_amount now safely normalises
+                # str/int/float (rejecting bool and other types), so numeric
+                # cells parse correctly and the guard is removed.
 
                 source_row_key = build_source_row_key(
                     source_system=self.source_system,

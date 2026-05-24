@@ -188,3 +188,49 @@ def test_reordered_multi_value_filter_produces_same_key() -> None:
     a = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(p1, tenant_id=TENANT_ID))
     b = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(p2, tenant_id=TENANT_ID))
     assert a == b
+
+
+def test_parse_accepts_numeric_metric_values() -> None:
+    """reports.query returns FLOAT/INTEGER metric cells as JSON numbers, not
+    strings (per columnHeaders[].dataType). The parser must normalise numeric
+    cells to Decimal; rejecting them blocks ingestion of real Analytics revenue
+    reports. Floats route through str() so no binary-float artifact appears.
+    """
+    base = _load_fixture("sample_query_response_2026_04.json")
+    # columnHeaders order: [channel, country, estimatedRevenue, grossRevenue].
+    # Send the metric cells as JSON numbers (float + int) like the live API.
+    numeric = {**base, "rows": [["UC_test_alpha", "US", 1234.56789, 1500]]}
+    rows = list(YouTubeAnalyticsParser().parse(numeric, tenant_id=TENANT_ID))
+    by_metric = {r.metric_key: r.amount_native for r in rows}
+    assert by_metric["estimatedRevenue"] == Decimal("1234.56789")
+    assert by_metric["grossRevenue"] == Decimal("1500")
+    # Routed through str(): no binary-float noise (Decimal(float) would give
+    # "1234.5678899999999..."). This pins the safe normalization path.
+    assert str(by_metric["estimatedRevenue"]) == "1234.56789"
+
+
+def test_rejects_bool_metric_value() -> None:
+    """bool is an int subclass but is never a real money value; it must fail
+    closed at the parser rather than coerce to Decimal(0)/Decimal(1)."""
+    base = _load_fixture("sample_query_response_2026_04.json")
+    bad = {**base, "rows": [["UC_test_alpha", "US", True, "1500.000000"]]}
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_rejects_non_numeric_non_string_metric_value() -> None:
+    """A metric cell that is neither a number nor a Decimal string (e.g. null)
+    must fail closed at the parser, not silently coerce or crash downstream."""
+    base = _load_fixture("sample_query_response_2026_04.json")
+    bad = {**base, "rows": [["UC_test_alpha", "US", None, "1500.000000"]]}
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_rejects_non_finite_float_amount() -> None:
+    """A non-finite float metric cell (inf/nan, which Python's json accepts)
+    must be rejected at the parser, mirroring the Decimal-string Infinity case."""
+    base = _load_fixture("sample_query_response_2026_04.json")
+    bad = {**base, "rows": [["UC_test_alpha", "US", float("inf"), "1500.000000"]]}
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(bad, tenant_id=TENANT_ID))

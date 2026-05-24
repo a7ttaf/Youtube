@@ -27,7 +27,7 @@ PR #42 landed the design pivot: B1 is Google source-reported revenue ingestion f
 
 - `backend/ums_smart_revenue/connectors/google_source_parsers/` package: `base.py` (`SourceRowParser` protocol, `ParserError`, shared `require_dict`/`require_str`/`require_int`/`parse_decimal_amount` helpers), `source_row_keys.py` (`build_source_row_key` returns full 64-char SHA-256 hex), and 3 parsers — `YouTubeReportingParser`, `YouTubeAnalyticsParser`, `AdSenseManagementParser`.
 - `YouTubeAnalyticsParser` `query_signature` includes the request `ids` field, scoping `source_row_key` per-account (caught during review — without it, multi-CMS tenants would silently collide cross-account data).
-- `parse_decimal_amount` rejects non-finite values (`NaN`, `Infinity`) with labeled `ParserError`.
+- `parse_decimal_amount` normalises `str | int | float` money values to `Decimal` (floats routed through `str()` to avoid binary artifacts; `bool` and other types rejected) and rejects non-finite values (`NaN`, `Infinity`) with labeled `ParserError`. `YouTubeAnalyticsParser` accepts numeric `reports.query` metric cells — the live API emits FLOAT/INTEGER columns (`columnHeaders[].dataType`) as JSON numbers, so a prior str-only guard would have rejected valid revenue reports (Codex P1, fixed this round).
 - `YouTubeReportingParser` fails closed when `content_owner` is missing — no `"unknown"` sentinel.
 - Synthetic fixtures under `tests/connectors/_fixtures/` (YouTube Reporting, YouTube Analytics, AdSense earnings + payment, plus byte-identical `_rerun.json` pairs for idempotency proofs). All values invented: channel IDs `UC_test_*`, AdSense `pub-test-*`, content owner `cms-test-*`. No real Google data.
 - End-to-end test at `tests/connectors/test_google_source_ingestion_flow.py` parses all 4 fixtures, upserts via repository, asserts row count and zero-new-row idempotency on rerun.
@@ -54,8 +54,8 @@ PR #42 landed the design pivot: B1 is Google source-reported revenue ingestion f
 ## Validation
 
 - Round 1 (`python scripts/run_validation_gate.py`, `UMS_TEST_DATABASE_URL` set): **6/6 steps green** (ruff → AST policy → pytest 961 passed → vitest 34 passed → git diff --check worktree → staged).
-- Review passes (cumulative): `python -m ruff check backend tests scripts` clean → `python -m pytest -q` **978 passed** (full suite, incl. the 9 PostgreSQL migration/upsert tests on disposable `postgres:18-alpine`) → `git diff --check` clean. No frontend touched, so vitest unchanged (34).
-- Pytest delta from PR #41 baseline (821): **+157 tests** (+89 in 17 new test files at submission; +68 review-hardening regressions across the Codex/CodeRabbit rounds).
+- Review passes (cumulative): `python -m ruff check backend tests scripts` clean → `python -m pytest -q` **982 passed** (full suite, incl. the 9 PostgreSQL migration/upsert tests on disposable `postgres:18-alpine`) → `git diff --check` clean. No frontend touched, so vitest unchanged (34).
+- Pytest delta from PR #41 baseline (821): **+161 tests** (+89 in 17 new test files at submission; +72 review-hardening regressions across the Codex/CodeRabbit rounds, incl. 4 for numeric `reports.query` metric-cell acceptance).
 - PostgreSQL: 9/9 passed on disposable `postgres:18-alpine` (6 migration round-trip + 1 repository upsert covering the production `on_conflict_do_update` path + 1 raw_payload object-shape CHECK rejection via direct SQL + 1 amount-finite CHECK: NaN rejected by the CHECK, +Infinity by the NUMERIC type).
 - Frontend tests: 34 passed (unchanged from PR #41; no frontend code touched).
 - AST policy gate: still passes (no skip/xfail introduced).
