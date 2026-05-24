@@ -90,6 +90,10 @@ def parse_decimal_amount(raw_value: object, *, metric_key: str) -> Decimal:
         raise ParserError(
             f"metric {metric_key!r} value must be a number or Decimal string, got bool"
         )
+    # FIX: accept JSON numeric metric cells (int/float from reports.query, kept
+    # distinct from the bool case rejected above) and normalize via str() into a
+    # Decimal; the prior str-only contract rejected valid YouTube Analytics
+    # payloads. raw_value -> candidate; non-numeric/non-str still raises ParserError.
     if isinstance(raw_value, (int, float)):
         candidate = Decimal(str(raw_value))
     elif isinstance(raw_value, str):
