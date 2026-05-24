@@ -23,7 +23,12 @@ from ums_smart_revenue.connectors.google_source_parsers.source_row_keys import (
 )
 from ums_smart_revenue.connectors.google_source_rows import ParsedSourceRow
 
-_SETTLED_METRICS: Final[frozenset[str]] = frozenset({"PAID_AMOUNT", "UNPAID_AMOUNT"})
+# FIX: UNPAID_AMOUNT is outstanding (not-yet-paid) earnings, not settled cash;
+# the module contract above states only PAID_AMOUNT is settled. Tagging
+# UNPAID_AMOUNT as value_kind='settled'/'payment_report' would mislabel an
+# unpaid balance as finalized cash and corrupt finalized-vs-estimated totals
+# and payment reconciliation (CLAUDE.md rule 4). Only PAID_AMOUNT is settled.
+_SETTLED_METRICS: Final[frozenset[str]] = frozenset({"PAID_AMOUNT"})
 
 
 # ============================================================================
@@ -156,7 +161,7 @@ class AdSenseManagementParser:
                 if not isinstance(raw_value, str):
                     raise ParserError(f"metric {metric_name} value must be a string")
                 # Derive value_kind + report_type per metric, not once per
-                # report: a single AdSense report can mix settled (PAID/UNPAID)
+                # report: a single AdSense report can mix settled (PAID_AMOUNT)
                 # and estimated metrics. A report-level any()-based label would
                 # tag estimated rows as 'settled' and corrupt downstream
                 # payment-vs-estimate interpretation.

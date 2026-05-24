@@ -125,6 +125,43 @@ def test_mixed_settled_and_estimated_metrics_are_labeled_per_metric() -> None:
     assert by_metric["ESTIMATED_EARNINGS"].amount_native == Decimal("123.456789")
 
 
+def test_unpaid_amount_is_classified_as_estimated() -> None:
+    """UNPAID_AMOUNT is outstanding (not-yet-paid) earnings, so it must be
+    labeled value_kind='estimated'/'earnings_report' — only PAID_AMOUNT is
+    settled (see module contract).
+
+    Regression: _SETTLED_METRICS previously included UNPAID_AMOUNT, which
+    mislabeled unpaid balances as settled cash and would corrupt
+    finalized-vs-estimated and payment-reconciliation totals.
+    """
+    payload = {
+        "request": {
+            "accountId": "accounts/pub-test-001",
+            "dateRange": {
+                "startDate": {"year": 2026, "month": 4, "day": 1},
+                "endDate": {"year": 2026, "month": 4, "day": 30},
+            },
+            "currencyCode": "USD",
+        },
+        "report_id": "adsense-unpaid-2026-04",
+        "headers": [
+            {"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "USD"},
+            {"name": "UNPAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "USD"},
+        ],
+        "rows": [
+            {"cells": [{"value": "500.000000"}, {"value": "75.000000"}]},
+        ],
+    }
+    rows = list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+    assert len(rows) == 2
+    by_metric = {r.metric_key: r for r in rows}
+    assert by_metric["PAID_AMOUNT"].value_kind == "settled"
+    assert by_metric["PAID_AMOUNT"].report_type == "payment_report"
+    assert by_metric["UNPAID_AMOUNT"].value_kind == "estimated"
+    assert by_metric["UNPAID_AMOUNT"].report_type == "earnings_report"
+    assert by_metric["UNPAID_AMOUNT"].amount_native == Decimal("75.000000")
+
+
 def test_rejects_non_finite_amount() -> None:
     """NaN Decimal strings must fail at the parser, not downstream."""
     payload = _load("sample_earnings_report_2026_04.json")
