@@ -53,8 +53,9 @@ PR #42 landed the design pivot: B1 is Google source-reported revenue ingestion f
 
 ## Validation
 
-- `python scripts/run_validation_gate.py` (with `UMS_TEST_DATABASE_URL` set): **6/6 steps green** (ruff → AST policy → pytest 961 passed → vitest 34 passed → git diff --check worktree → git diff --check staged).
-- Pytest delta from PR #41 baseline (821): **+140 tests** (+89 in 17 new test files at submission; +51 review-hardening regressions added during Codex/CodeRabbit review).
+- Round 1 (`python scripts/run_validation_gate.py`, `UMS_TEST_DATABASE_URL` set): **6/6 steps green** (ruff → AST policy → pytest 961 passed → vitest 34 passed → git diff --check worktree → staged).
+- Round 2 (this review pass): `python -m ruff check backend tests` clean → `python -m pytest -q` **973 passed** (full suite, incl. the 8 PostgreSQL migration/upsert tests on disposable `postgres:18-alpine`) → `git diff --check` clean. No frontend touched, so vitest unchanged (34).
+- Pytest delta from PR #41 baseline (821): **+152 tests** (+89 in 17 new test files at submission; +63 review-hardening regressions across two Codex/CodeRabbit rounds).
 - PostgreSQL: 8/8 passed on disposable `postgres:18-alpine` (6 migration round-trip + 1 repository upsert covering the production `on_conflict_do_update` path + 1 raw_payload object-shape CHECK rejection via direct SQL).
 - Frontend tests: 34 passed (unchanged from PR #41; no frontend code touched).
 - AST policy gate: still passes (no skip/xfail introduced).
@@ -81,7 +82,7 @@ Both fixes landed in commit `3a4da12` (post Phase 9 docs commit). After applying
 
 - **Pre-merge**: PR #43 depends on a disposable Postgres for the migration round-trip test. CI must spin one up or the test fails fast at collection (by design — no silent skip).
 - **Fixture drift risk**: synthetic fixture payloads mirror Google API shapes from public documentation. If Google changes the upstream response shape, parsers may need follow-up. The synthetic-data discipline (`tests/connectors/_fixtures/README.md`) must be enforced on every future fixture addition.
-- **`YouTubeAnalyticsParser` `query_signature` review**: post-fix the canonical string is `f"{ids}|{metrics_csv}|{dimensions_csv}|{metric_name}"`. Per-account scoping is now correct, but future parsers consuming new Google API shapes should follow the same pattern.
+- **`YouTubeAnalyticsParser` `query_signature` review**: post-fix the query signature is `f"{ids}|{canonical(dimensions_csv)}|{metric_name}"` — `ids` restores per-account scoping and `metrics` is deliberately excluded (each row is tagged with its own `metric_key`, so co-requesting an extra metric must not change an existing row's key). That signature is then embedded as one field in the structured, sorted-key JSON document that `build_source_row_key` SHA-256 hashes (alongside `currency`, `filters`, and the period), so delimiter collisions are not possible. Future parsers consuming new Google API shapes should follow the same canonical-field pattern.
 
 ## Follow-up recommendations
 

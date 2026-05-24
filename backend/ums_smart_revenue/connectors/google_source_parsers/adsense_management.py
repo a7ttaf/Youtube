@@ -47,7 +47,13 @@ class AdSenseManagementParser:
     ) -> Iterable[ParsedSourceRow]:
         request = require_dict(payload, "request")
         headers = payload.get("headers")
+        # FIX: reports.generate omits `rows` entirely for a no-activity period;
+        # treat a missing/null rows as a clean zero-result (emit nothing) rather
+        # than failing ingestion for a valid empty report. Mirrors
+        # YouTubeAnalyticsParser. A present non-list rows is still malformed.
         rows = payload.get("rows")
+        if rows is None:
+            rows = []
         report_id = require_str(payload, "report_id")
         if not isinstance(headers, list):
             raise ParserError("headers must be a list")
@@ -55,7 +61,18 @@ class AdSenseManagementParser:
             raise ParserError("rows must be a list")
 
         account_raw = require_str(request, "accountId")
+        # FIX: Fail closed on a malformed accountId instead of silently
+        # normalising it. AdSense always returns "accounts/<id>"; a value
+        # without the prefix (e.g. "pub-1") or with an empty suffix
+        # ("accounts/") would produce an invalid source_account_id and weaken
+        # source_row_key idempotency/key consistency.
+        if not account_raw.startswith("accounts/"):
+            raise ParserError("request.accountId must start with 'accounts/'")
         account_id = account_raw.removeprefix("accounts/")
+        if not account_id:
+            raise ParserError(
+                "request.accountId must include a non-empty account id after 'accounts/'"
+            )
         period_start = self._parse_iso_date(require_dict(require_dict(request, "dateRange"), "startDate"))
         period_end = self._parse_iso_date(require_dict(require_dict(request, "dateRange"), "endDate"))
         currency = require_str(request, "currencyCode")

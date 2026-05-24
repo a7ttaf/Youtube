@@ -72,6 +72,91 @@ def test_youtube_analytics_rejects_mismatched_row_length() -> None:
         list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
 
 
+def test_adsense_rejects_account_id_without_prefix() -> None:
+    """request.accountId not starting with 'accounts/' must fail closed rather
+    than being kept as-is, which would yield an invalid source_account_id and
+    weaken source_row_key idempotency."""
+    payload = {
+        "request": {
+            "accountId": "pub-1",  # missing the 'accounts/' prefix
+            "dateRange": {
+                "startDate": {"year": 2026, "month": 4, "day": 1},
+                "endDate": {"year": 2026, "month": 4, "day": 30},
+            },
+            "currencyCode": "USD",
+        },
+        "report_id": "r",
+        "headers": [{"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "USD"}],
+        "rows": [{"cells": [{"value": "5.00"}]}],
+    }
+    with pytest.raises(ParserError):
+        list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_adsense_rejects_empty_account_id() -> None:
+    """A bare 'accounts/' prefix with an empty id must fail closed."""
+    payload = {
+        "request": {
+            "accountId": "accounts/",  # empty id after the prefix
+            "dateRange": {
+                "startDate": {"year": 2026, "month": 4, "day": 1},
+                "endDate": {"year": 2026, "month": 4, "day": 30},
+            },
+            "currencyCode": "USD",
+        },
+        "report_id": "r",
+        "headers": [{"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "USD"}],
+        "rows": [{"cells": [{"value": "5.00"}]}],
+    }
+    with pytest.raises(ParserError):
+        list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_youtube_analytics_rejects_compact_iso_date() -> None:
+    """date.fromisoformat (Python 3.11+) accepts compact YYYYMMDD, but the
+    YouTube API contract is canonical YYYY-MM-DD; a compact form must fail
+    closed rather than being normalised to an unintended calendar day."""
+    payload = {
+        "query_request": {
+            "ids": "contentOwner==cms-1",
+            "startDate": "20260401",  # compact, not YYYY-MM-DD
+            "endDate": "2026-04-30",
+            "metrics": "estimatedRevenue",
+            "dimensions": "channel",
+            "currency": "USD",
+        },
+        "columnHeaders": [
+            {"name": "channel", "columnType": "DIMENSION", "dataType": "STRING"},
+            {"name": "estimatedRevenue", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [["UC_x", "100.00"]],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_youtube_analytics_rejects_iso_week_date() -> None:
+    """ISO week-date forms like 2026-W14-1 also parse via date.fromisoformat on
+    Python 3.11+; they must fail closed against the YYYY-MM-DD contract."""
+    payload = {
+        "query_request": {
+            "ids": "contentOwner==cms-1",
+            "startDate": "2026-W14-1",  # ISO week date, not YYYY-MM-DD
+            "endDate": "2026-04-30",
+            "metrics": "estimatedRevenue",
+            "dimensions": "channel",
+            "currency": "USD",
+        },
+        "columnHeaders": [
+            {"name": "channel", "columnType": "DIMENSION", "dataType": "STRING"},
+            {"name": "estimatedRevenue", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [["UC_x", "100.00"]],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+
+
 def test_adsense_rejects_missing_date_range() -> None:
     payload = {
         "request": {"accountId": "accounts/pub-1", "currencyCode": "USD"},

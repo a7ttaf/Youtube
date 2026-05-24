@@ -8,15 +8,16 @@ channel/month list, exact source-key lookup. No conversion, no provider
 chain.
 """
 
+import json
 import re
 from collections.abc import Iterable
 from copy import deepcopy
 from dataclasses import replace
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -40,7 +41,11 @@ from ums_smart_revenue.db.source_models import (
 # ck_google_revenue_source_rows_report_month_format at the typed-validation
 # boundary so a malformed report_month surfaces as a typed error, not a raw
 # DB IntegrityError on flush.
-_REPORT_MONTH_RE = re.compile(r"\d{4}-(0[1-9]|1[0-2])\Z")
+# FIX: [0-9] (ASCII) not \d. \d also matches Unicode decimal digits (e.g.
+# the Arabic-Indic "٢٠٢٦-٠٤"), which would pass this guard but fail the DB
+# CHECK (substr BETWEEN '0' AND '9', ASCII-only) — leaking a raw
+# IntegrityError instead of the typed GoogleRevenueSourceRowValidationError.
+_REPORT_MONTH_RE = re.compile(r"[0-9]{4}-(0[1-9]|1[0-2])\Z")
 
 
 # ============================================================================
@@ -98,10 +103,16 @@ class SqlAlchemyCurrenciesRepository:
 #            (tenant_id, source_system, source_row_key). Domain-level
 #            validation runs BEFORE any write so the typed error contract
 #            (GoogleRevenueSourceRowValidationError) replaces opaque DB
-#            CHECK / FK violations. Validation covers: source_row_key
-#            length (== 64), source_system membership, value_kind
-#            membership, non-negative amount, raw_payload dict type, and
-#            currency_code existence in the currencies reference table.
+#            CHECK / FK violations. Validation covers: required + nullable
+#            string column types, source_row_key length (== 64),
+#            source_system membership, value_kind membership, finite
+#            non-negative amount within Numeric(20, 6) scale, report_month
+#            ASCII format + agreement with the period's calendar month,
+#            date-only (not datetime) period bounds, JSON-serialisable
+#            raw_payload dict, and currency_code existence in the
+#            currencies reference table. Provenance (raw_file_id/imported_by)
+#            is preserved via COALESCE on conflict so a later replay that
+#            omits it cannot erase audit lineage.
 #            Tenant ID is a positional UUID arg on every method; the
 #            repository does NOT read TENANT_CTX directly so callers
 #            retain explicit control of scope.
@@ -145,7 +156,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
             # gen_random_uuid() function) consistent with PostgreSQL
             # production; on conflict the existing id is preserved
             # because id is not in the set_ payload.
-            statement = dialect_insert(GoogleRevenueSourceRowORM).values(
+            insert_stmt = dialect_insert(GoogleRevenueSourceRowORM).values(
                 id=uuid4(),
                 tenant_id=tenant_id,
                 source_system=row.source_system,
@@ -166,7 +177,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
                 raw_payload=row.raw_payload,
                 imported_by=imported_by,
             )
-            statement = statement.on_conflict_do_update(
+            statement = insert_stmt.on_conflict_do_update(
                 index_elements=[
                     GoogleRevenueSourceRowORM.tenant_id,
                     GoogleRevenueSourceRowORM.source_system,
@@ -185,9 +196,20 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
                     "amount_native": row.amount_native,
                     "currency_code": row.currency_code,
                     "source_report_id": row.source_report_id,
-                    "raw_file_id": raw_file_id,
+                    # FIX: COALESCE(new, existing) for provenance instead of an
+                    # unconditional overwrite. A later replay/import path that
+                    # lacks raw_file_id/imported_by (passes None) must NOT erase
+                    # the audit lineage recorded on the original ingest; a
+                    # genuinely new file/importer (non-None) still replaces it.
+                    "raw_file_id": func.coalesce(
+                        insert_stmt.excluded.raw_file_id,
+                        GoogleRevenueSourceRowORM.raw_file_id,
+                    ),
                     "raw_payload": row.raw_payload,
-                    "imported_by": imported_by,
+                    "imported_by": func.coalesce(
+                        insert_stmt.excluded.imported_by,
+                        GoogleRevenueSourceRowORM.imported_by,
+                    ),
                 },
             ).returning(GoogleRevenueSourceRowORM)
             orm_row = self._session.execute(statement).scalar_one()
@@ -260,8 +282,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         # TypeError; the rest are written straight into the INSERT, where a non-str
         # would surface later as a driver/DB error. Either way a malformed caller
         # that ignores the ParsedSourceRow annotations must hit this method's
-        # typed-error contract, not a raw exception. (Nullable string columns —
-        # content_owner_id, youtube_channel_id, source_report_id — are excluded.)
+        # typed-error contract, not a raw exception.
         for field_name in (
             "source_system",
             "value_kind",
@@ -275,6 +296,20 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
             if not isinstance(getattr(row, field_name), str):
                 raise GoogleRevenueSourceRowValidationError(
                     f"{field_name} must be a str"
+                )
+        # FIX: Nullable text columns were previously unchecked. None is allowed,
+        # but a non-str/non-None value (e.g. a list/dict from a loose non-parser
+        # caller) would otherwise be written straight into the INSERT and
+        # surface as a raw driver/DB error instead of this typed contract.
+        for nullable_field in (
+            "content_owner_id",
+            "youtube_channel_id",
+            "source_report_id",
+        ):
+            value = getattr(row, nullable_field)
+            if value is not None and not isinstance(value, str):
+                raise GoogleRevenueSourceRowValidationError(
+                    f"{nullable_field} must be a str or None"
                 )
         if row.source_system not in ALLOWED_SOURCE_SYSTEMS:
             raise GoogleRevenueSourceRowValidationError(
@@ -304,10 +339,33 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
             raise GoogleRevenueSourceRowValidationError(
                 "amount_native must be a finite Decimal >= 0"
             )
+        # FIX: amount_native maps to Numeric(20, 6). PostgreSQL silently ROUNDS
+        # a value whose scale exceeds 6 fractional digits on write, which would
+        # alter the source-reported amount (CLAUDE.md rule 4: preserve every
+        # financial number's source value exactly). Reject >6 fractional digits
+        # at the boundary so the stored value can never diverge from the source.
+        # (exponent is always int here — the is_finite() guard above rules out
+        # the special 'n'/'N'/'F' exponents of NaN/Infinity.)
+        exponent = row.amount_native.as_tuple().exponent
+        if isinstance(exponent, int) and exponent < -6:
+            raise GoogleRevenueSourceRowValidationError(
+                "amount_native must not exceed 6 fractional digits "
+                f"(column is Numeric(20, 6)), got {row.amount_native}"
+            )
         if not isinstance(row.raw_payload, dict):
             raise GoogleRevenueSourceRowValidationError(
                 "raw_payload must be a dict"
             )
+        # FIX: raw_payload is written to a JSON/JSONB column. A dict containing
+        # non-JSON-serialisable values (set, custom object, non-str keys) would
+        # otherwise fail late as an opaque driver serialization error on flush;
+        # surface it here as the typed validation contract instead.
+        try:
+            json.dumps(row.raw_payload)
+        except (TypeError, ValueError) as exc:
+            raise GoogleRevenueSourceRowValidationError(
+                "raw_payload must be JSON-serialisable"
+            ) from exc
         # Mirror the report_month + period-order DB CHECKs at the typed-validation
         # boundary: a malformed ParsedSourceRow from any non-parser caller (or a
         # future parser regression) must raise GoogleRevenueSourceRowValidationError
@@ -316,9 +374,18 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
             raise GoogleRevenueSourceRowValidationError(
                 f"report_month must be YYYY-MM with month 01-12, got {row.report_month!r}"
             )
-        if not isinstance(row.period_start, date) or not isinstance(row.period_end, date):
+        # FIX: datetime is a subclass of date, so a bare isinstance(..., date)
+        # lets a timestamp through; the DATE columns would then silently
+        # truncate it. period_start/period_end are date-only by contract, so
+        # reject datetime explicitly rather than coercing caller-provided values.
+        if (
+            not isinstance(row.period_start, date)
+            or not isinstance(row.period_end, date)
+            or isinstance(row.period_start, datetime)
+            or isinstance(row.period_end, datetime)
+        ):
             raise GoogleRevenueSourceRowValidationError(
-                "period_start and period_end must be dates"
+                "period_start and period_end must be date values (not datetime)"
             )
         if row.period_end < row.period_start:
             raise GoogleRevenueSourceRowValidationError(

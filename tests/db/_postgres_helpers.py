@@ -9,9 +9,24 @@ import os
 from typing import Final
 
 
+# ============================================================================
+# Purpose: Resolve a non-empty PostgreSQL SQLAlchemy URL for the migration
+#          round-trip tests, failing fast with actionable setup guidance when
+#          UMS_TEST_DATABASE_URL is absent or blank.
+# Database/ORM: None (returns a connection URL string; touches no models).
+# Standards: No inputs; returns the trimmed URL str. Raises RuntimeError (never
+#            a test skip) so the no-skip AST policy gate stays honoured. SQLite
+#            is not a valid substitute for these PostgreSQL-native migrations.
+# Blast Radius: Test harness only. No graph projection impact detected.
+# Connections:
+#   - File: tests/db/test_google_revenue_source_migration_postgres.py -> caller.
+# ============================================================================
 def require_postgres_url() -> str:
+    # FIX: treat blank/whitespace-only values as missing. `if not url` let a
+    # value like "   " through, which then fails later with an opaque DB
+    # connection error instead of this fail-fast setup contract.
     url = os.environ.get("UMS_TEST_DATABASE_URL")
-    if not url:
+    if url is None or not url.strip():
         raise RuntimeError(
             "UMS_TEST_DATABASE_URL required for PostgreSQL migration round-trip tests. "
             "Spin up disposable Postgres: "
@@ -24,7 +39,7 @@ def require_postgres_url() -> str:
             "`export UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/postgres`. "
             "SQLite is not a valid substitute for this test."
         )
-    return url
+    return url.strip()
 
 
 POSTGRES_URL: Final[str] = require_postgres_url()

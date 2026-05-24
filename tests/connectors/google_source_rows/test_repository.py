@@ -465,6 +465,124 @@ def test_read_path_deep_copies_nested_raw_payload(session: Session) -> None:
     assert second.raw_payload == {"dimensions": {"country": "US"}}
 
 
+def test_rejects_unicode_digit_report_month(session: Session) -> None:
+    """report_month with Unicode decimal digits (e.g. Arabic-Indic '٢٠٢٦-٠٤')
+    must raise the typed validation error. The Python guard uses [0-9] (ASCII)
+    to mirror the ASCII-only DB CHECK, so such a value cannot slip past
+    _validate and surface as a raw IntegrityError on flush.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = replace(_row(source_row_key="ud" * 32), report_month="٢٠٢٦-٠٤")
+    with pytest.raises(GoogleRevenueSourceRowValidationError, match=r"report_month must be YYYY-MM"):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
+def test_rejects_non_str_nullable_text_column(session: Session) -> None:
+    """A nullable text column (content_owner_id) accepts None, but a non-str,
+    non-None value (list/dict from a loose non-parser caller) must raise the
+    typed validation error rather than flowing into SQL as a driver/DB error.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = replace(_row(source_row_key="nl" * 32), content_owner_id=["cms-1"])
+    with pytest.raises(GoogleRevenueSourceRowValidationError, match=r"content_owner_id must be a str or None"):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
+def test_rejects_datetime_period_bounds(session: Session) -> None:
+    """datetime is a subclass of date; a timestamp must raise the typed
+    validation error instead of being silently truncated into the DATE columns,
+    which would alter the caller-provided period boundaries.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = replace(
+        _row(source_row_key="dt" * 32),
+        period_start=datetime(2026, 4, 1, 12, 0, tzinfo=UTC),
+        period_end=datetime(2026, 4, 30, 12, 0, tzinfo=UTC),
+    )
+    with pytest.raises(GoogleRevenueSourceRowValidationError, match=r"must be date values"):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
+def test_rejects_amount_exceeding_six_fractional_digits(session: Session) -> None:
+    """amount_native maps to Numeric(20, 6); a value with >6 fractional digits
+    would be silently ROUNDED by the DB on write, altering the source amount.
+    It must raise the typed validation error at the boundary instead.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = _row(source_row_key="sc" * 32, amount="1.1234567")  # 7 fractional digits
+    with pytest.raises(GoogleRevenueSourceRowValidationError, match=r"6 fractional digits"):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
+def test_accepts_amount_at_six_fractional_digits(session: Session) -> None:
+    """Exactly 6 fractional digits is the Numeric(20, 6) scale and must be
+    accepted unchanged — the boundary guard rejects >6, not ==6.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    ok = _row(source_row_key="s6" * 32, amount="1.123456")
+    written = repo.upsert_many(TENANT_A, [ok], raw_file_id=RAW_FILE_ID, imported_by=None)
+    assert written[0].amount_native == Decimal("1.123456")
+
+
+def test_rejects_non_json_serialisable_raw_payload(session: Session) -> None:
+    """raw_payload is written to a JSON/JSONB column; a dict holding a
+    non-serialisable value (a set) must raise the typed validation error rather
+    than failing late as an opaque driver serialization error on flush.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = replace(_row(source_row_key="js" * 32), raw_payload={"tags": {1, 2, 3}})
+    with pytest.raises(GoogleRevenueSourceRowValidationError, match=r"raw_payload must be JSON-serialisable"):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
+def test_upsert_preserves_provenance_when_reimport_omits_it(session: Session) -> None:
+    """Re-importing an existing row through a path that lacks provenance
+    (raw_file_id/imported_by = None) must NOT erase the audit lineage recorded
+    on the original ingest. A genuinely new file/importer still replaces it.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    key = "pv" * 32
+    importer_1 = uuid4()
+    file_2 = uuid4()
+    importer_2 = uuid4()
+
+    # Phase 1: first import carries provenance.
+    repo.upsert_many(
+        TENANT_A, [_row(source_row_key=key)],
+        raw_file_id=RAW_FILE_ID, imported_by=importer_1,
+    )
+    # Phase 2: replay without provenance (both None) must preserve the original.
+    repo.upsert_many(
+        TENANT_A, [_row(source_row_key=key, amount="999.000000")],
+        raw_file_id=None, imported_by=None,
+    )
+    # expire_all so the verification reads fresh DB state rather than the
+    # session's identity-map copy (which the upsert does not re-populate).
+    session.expire_all()
+    preserved = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.source_row_key == key
+        )
+    ).one()
+    assert preserved.amount_native == Decimal("999.000000")  # mutable field still updated
+    assert preserved.raw_file_id == RAW_FILE_ID  # provenance preserved, not nulled
+    assert preserved.imported_by == importer_1
+
+    # Phase 3: a genuinely new file/importer (non-None) does replace.
+    repo.upsert_many(
+        TENANT_A, [_row(source_row_key=key)],
+        raw_file_id=file_2, imported_by=importer_2,
+    )
+    session.expire_all()
+    replaced = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.source_row_key == key
+        )
+    ).one()
+    assert replaced.raw_file_id == file_2
+    assert replaced.imported_by == importer_2
+
+
 def test_non_usd_source_rows_visible_at_repository_layer(session: Session) -> None:
     """B1 makes non-USD source rows queryable at the repository layer.
 

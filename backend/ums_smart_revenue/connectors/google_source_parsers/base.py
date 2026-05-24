@@ -95,19 +95,29 @@ def parse_decimal_amount(raw_value: str, *, metric_key: str) -> Decimal:
 
 
 def parse_iso_date(raw_value: str, *, field: str) -> date:
-    """Parse an ISO-8601 date string, raising ParserError on malformed input.
+    """Parse a strict YYYY-MM-DD date string, raising ParserError otherwise.
 
     date.fromisoformat raises a bare ValueError for malformed values, which
-    would escape the parser's typed failure contract. Wrapping it here keeps
-    every parser's date handling on the ParserError path so callers can
-    translate parser failures uniformly.
+    would escape the parser's typed failure contract. It also (Python 3.11+)
+    accepts non-canonical ISO forms the YouTube APIs never emit — compact
+    YYYYMMDD and week dates like 2026-W14-1 — which would be silently
+    normalised to an unintended calendar day. Wrapping it here keeps every
+    parser's date handling on the ParserError path, and the isoformat()
+    round-trip enforces the exact YYYY-MM-DD contract: the zero-padded
+    canonical form is the only string date.fromisoformat both accepts and
+    reproduces, so anything else fails closed.
     """
     try:
-        return date.fromisoformat(raw_value)
+        parsed = date.fromisoformat(raw_value)
     except ValueError as exc:
         raise ParserError(
             f"{field} must be an ISO-8601 date string, got {raw_value!r}"
         ) from exc
+    if parsed.isoformat() != raw_value:
+        raise ParserError(
+            f"{field} must be a canonical YYYY-MM-DD date string, got {raw_value!r}"
+        )
+    return parsed
 
 
 class SourceRowParser(Protocol):

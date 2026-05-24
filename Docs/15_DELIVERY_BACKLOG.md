@@ -128,9 +128,14 @@ single P-tier above.
   source-row keys (full 64-char SHA-256 hex), storage repository, synthetic-
   fixture parsers for YouTube Reporting / YouTube Analytics / AdSense
   Management. PostgreSQL-backed migration round-trip on disposable
-  `postgres:18-alpine` — PR #43. Remaining: live OAuth/API connector (B2),
-  FX/conversion (B3). Marked ⏳ (not ✅) per the scaffolding-only honesty rule
-  above — no real ingestion path yet.
+  `postgres:18-alpine` — PR #43. Review-hardened (CodeRabbit + Codex round):
+  repository typed-validation boundary extended (ASCII report_month,
+  nullable-text types, date-not-datetime, ≤6-decimal scale, JSON-serialisable
+  raw_payload) + provenance-preserving upsert (COALESCE), AdSense fail-closed
+  accountId / empty-report handling, and strict YYYY-MM-DD parsing — see
+  `Docs/pulls/2026-05-23-pr43-…report.md`. Remaining: live OAuth/API connector
+  (B2), FX/conversion (B3). Marked ⏳ (not ✅) per the scaffolding-only honesty
+  rule above — no real ingestion path yet.
 
 ## Hard problems to solve early
 

@@ -137,3 +137,28 @@ def test_rejects_non_finite_amount() -> None:
     bad["rows"] = [first_row, *bad["rows"][1:]]
     with pytest.raises(ParserError):
         list(AdSenseManagementParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_missing_rows_is_treated_as_empty_report() -> None:
+    """AdSense omits `rows` entirely for a no-activity period. The parser must
+    treat a missing rows key as a clean zero-result (emit nothing), mirroring
+    YouTubeAnalyticsParser, instead of failing ingestion for a valid empty
+    report. A present-but-non-list rows is still malformed (covered elsewhere).
+    """
+    payload = {
+        "request": {
+            "accountId": "accounts/pub-test-001",
+            "dateRange": {
+                "startDate": {"year": 2026, "month": 4, "day": 1},
+                "endDate": {"year": 2026, "month": 4, "day": 30},
+            },
+            "currencyCode": "USD",
+        },
+        "report_id": "adsense-empty-2026-04",
+        "headers": [
+            {"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "USD"},
+        ],
+        # no "rows" key at all — a legitimate no-activity period
+    }
+    rows = list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+    assert rows == []
