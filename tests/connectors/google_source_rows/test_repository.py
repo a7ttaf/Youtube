@@ -583,6 +583,55 @@ def test_upsert_preserves_provenance_when_reimport_omits_it(session: Session) ->
     assert replaced.imported_by == importer_2
 
 
+def test_rejects_amount_exceeding_integer_precision(session: Session) -> None:
+    """Numeric(20, 6) allows at most 14 integer digits; a larger integer part
+    must raise the typed validation error rather than failing later as a raw
+    PostgreSQL numeric field overflow on INSERT.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = _row(source_row_key="ip" * 32, amount="100000000000000")  # 10**14 → 15 integer digits
+    with pytest.raises(GoogleRevenueSourceRowValidationError, match=r"14 integer digits"):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
+def test_validate_accepts_amount_at_max_numeric_precision(session: Session) -> None:
+    """The full Numeric(20, 6) envelope — 14 integer + 6 fractional digits — must
+    pass validation unchanged; the precision/scale guards reject only values
+    beyond it. Asserted via _validate directly, not an upsert round-trip:
+    SQLite stores Numeric as float64, which cannot hold 20 significant digits
+    (real Numeric(20,6) storage is covered by the PostgreSQL round-trip test).
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    row = _row(source_row_key="i4" * 32, amount="99999999999999.999999")
+    validated = repo._validate(row)
+    assert validated.amount_native == Decimal("99999999999999.999999")
+
+
+def test_rejects_non_str_raw_payload_keys(session: Session) -> None:
+    """json.dumps silently coerces non-string dict keys (int 1 → "1"), which
+    would mutate audit evidence and can collide keys. The repository must reject
+    non-string keys (including nested) to keep the dict[str, object] contract.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad_top = replace(_row(source_row_key="ky" * 32), raw_payload={1: "numeric-key"})
+    with pytest.raises(GoogleRevenueSourceRowValidationError, match=r"keys must be strings"):
+        repo.upsert_many(TENANT_A, [bad_top], raw_file_id=RAW_FILE_ID, imported_by=None)
+    bad_nested = replace(_row(source_row_key="kn" * 32), raw_payload={"dimensions": {2: "v"}})
+    with pytest.raises(GoogleRevenueSourceRowValidationError, match=r"keys must be strings"):
+        repo.upsert_many(TENANT_A, [bad_nested], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
+def test_rejects_non_finite_float_in_raw_payload(session: Session) -> None:
+    """raw_payload with NaN/Infinity floats must be rejected — PostgreSQL JSONB
+    disallows them, so json.dumps(allow_nan=False) surfaces it as the typed
+    validation error instead of a late driver error on flush.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = replace(_row(source_row_key="nf" * 32), raw_payload={"v": float("inf")})
+    with pytest.raises(GoogleRevenueSourceRowValidationError, match=r"finite numbers"):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
 def test_non_usd_source_rows_visible_at_repository_layer(session: Session) -> None:
     """B1 makes non-USD source rows queryable at the repository layer.
 

@@ -37,9 +37,9 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 - `tests/db/test_source_models.py` — 11 tests (ORM column shape + uniqueness + FKs + indexes + insert/select round-trip + report_month digit-CHECK).
 - `tests/db/test_google_revenue_source_migration.py` — 2 metadata tests.
 - `tests/db/_postgres_helpers.py` — fail-fast env guard.
-- `tests/db/test_google_revenue_source_migration_postgres.py` — 8 PostgreSQL tests (6 migration round-trip + 1 repository upsert on the production `on_conflict_do_update` path + 1 raw_payload object-shape CHECK rejection via direct SQL).
+- `tests/db/test_google_revenue_source_migration_postgres.py` — 9 PostgreSQL tests (6 migration round-trip + 1 repository upsert on the production `on_conflict_do_update` path + 1 raw_payload object-shape CHECK rejection via direct SQL + 1 amount-finite guard: NaN rejected by the CHECK, +Infinity rejected by the NUMERIC type, both via direct SQL).
 - `tests/connectors/google_source_rows/test_currencies_repository.py` — 5 tests.
-- `tests/connectors/google_source_rows/test_repository.py` — 34 tests (idempotency, tenant isolation, validation incl. NaN/non-Decimal amount, non-str guards for all required string columns, report_month-format/period-order/report_month↔period-consistency checks, id stability, raw_payload deep-copy alias safety on write + read paths, non-USD visibility; round-2 hardening: ASCII-digit report_month, nullable-text type guard, date-not-datetime period bounds, ≤6-decimal scale accept/reject, JSON-serialisable raw_payload, COALESCE provenance preservation on re-import).
+- `tests/connectors/google_source_rows/test_repository.py` — 38 tests (idempotency, tenant isolation, validation incl. NaN/non-Decimal amount, non-str guards for all required string columns, report_month-format/period-order/report_month↔period-consistency checks, id stability, raw_payload deep-copy alias safety on write + read paths, non-USD visibility; round-2 hardening: ASCII-digit report_month, nullable-text type guard, date-not-datetime period bounds, ≤6-decimal scale accept/reject, JSON-serialisable raw_payload, COALESCE provenance preservation on re-import; round-3 hardening: Numeric(20,6) integer-digit precision accept/reject, non-string raw_payload key rejection, NaN/Infinity float rejection).
 - `tests/connectors/google_source_parsers/test_source_row_keys.py` — 11 tests (incl. AdSense key excludes run-specific report_id, includes currency).
 - `tests/connectors/google_source_parsers/test_youtube_reporting_parser.py` — 12 tests.
 - `tests/connectors/google_source_parsers/test_youtube_analytics_parser.py` — 16 tests.
@@ -57,6 +57,12 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 - `Docs/pulls/2026-05-23-pr43-spec-b1-google-revenue-source-ingestion-handoff.md` (handoff).
 
 ## Changed
+
+### Review hardening round 3 (Codex P2)
+
+- `backend/ums_smart_revenue/connectors/google_source_rows/repository.py` — `_validate` now also bounds the **integer** part of `amount_native` (≤14 integer digits, completing the `Numeric(20,6)` envelope alongside the round-2 ≤6-fractional scale guard) so an oversized value fails as a typed error, not a raw PG numeric overflow; `raw_payload` validation now rejects **non-string keys** (recursive `_require_str_keys`, since `json.dumps` silently coerces them) and **NaN/Infinity** floats (`json.dumps(allow_nan=False)`, which PG JSONB rejects).
+- `backend/ums_smart_revenue/db/source_models.py` + `…/alembic/versions/20260523_0001_…py` — added Postgres-only CHECK `ck_google_revenue_source_rows_amount_finite` (`amount_native < 'Infinity'::numeric`) so a direct-SQL/backfill writer cannot persist a NaN amount (which `>= 0` admits); ±Infinity is already blocked by the `NUMERIC(20,6)` type. ORM constraint is `ddl_if(dialect="postgresql")` so the SQLite test metadata is unaffected.
+- Deferred (scope, not bugs): Codex suggested the YouTube Analytics parser accept dimensionless / non-`channel` queries. B1 is intentionally channel-scoped and **fails closed** (loud `ParserError`, no silent loss) on other shapes; supporting CMS-aggregate analytics is a deliberate B2 (live-connector) decision. Recorded under Remaining risks in the report.
 
 ### Review hardening round 2 (Codex + CodeRabbit)
 
@@ -79,4 +85,5 @@ Nothing. Legacy `currency_exchange_rates` table, `CurrencyExchangeRateORM`, `fin
 - Post-PR #43 (original submission): 910 tests
 - Post-PR #43 (review hardening round 1, Codex/CodeRabbit): 961 tests
 - Post-PR #43 (review hardening round 2, Codex/CodeRabbit): 973 tests
-- **Net new: +152 tests** (+89 in the original 17 new test files; +63 review-hardening regressions across existing test files).
+- Post-PR #43 (review hardening round 3 — Numeric precision + raw_payload key/finite guards + DB finite CHECK): 978 tests
+- **Net new: +157 tests** (+89 in the original 17 new test files; +68 review-hardening regressions across existing test files).

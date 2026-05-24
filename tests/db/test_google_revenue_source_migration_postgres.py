@@ -15,7 +15,7 @@ from _postgres_helpers import POSTGRES_URL  # sibling module (pytest's prepend m
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.google_source_rows import (
@@ -225,3 +225,54 @@ def test_raw_payload_object_check_rejects_non_object(
                 ),
                 {"tenant_id": tenant_id, "key": "q" * 64},
             )
+
+
+def _insert_amount_sql(conn: object, tenant_id: object, key: str, amount: str) -> None:
+    conn.execute(
+        text(
+            "INSERT INTO google_revenue_source_rows "
+            "(tenant_id, source_system, source_row_key, source_account_id, "
+            " report_type, report_month, period_start, period_end, metric_key, "
+            " value_kind, amount_native, currency_code, raw_payload) VALUES "
+            "(:tenant_id, 'youtube_reporting', :key, 'acct', 'rt', '2026-04', "
+            " '2026-04-01', '2026-04-30', 'estimatedRevenue', 'estimated', "
+            " CAST(:amt AS numeric), 'USD', '{}')"
+        ),
+        {"tenant_id": tenant_id, "key": key, "amt": amount},
+    )
+
+
+def test_amount_finite_check_rejects_nan_and_infinity(
+    alembic_config: Config, fresh_engine: object
+) -> None:
+    """Non-finite monetary values cannot land in the source-of-truth table via a
+    direct-SQL write (a path that bypasses the repository's is_finite() guard).
+
+    Two distinct DB mechanisms enforce this, and the test pins both:
+      - NaN IS storable in NUMERIC(20,6) and `amount_native >= 0` admits it (NaN
+        sorts above every finite value), so the ck_..._amount_finite CHECK is
+        what rejects it -> IntegrityError.
+      - +Infinity is rejected even earlier by the NUMERIC(20,6) column type
+        itself ("cannot hold an infinite value") -> DataError.
+    """
+    command.upgrade(alembic_config, "20260523_0001")
+    inspector = inspect(fresh_engine)
+    checks = {
+        c["name"] for c in inspector.get_check_constraints("google_revenue_source_rows")
+    }
+    assert "ck_google_revenue_source_rows_amount_finite" in checks
+
+    tenant_id = uuid4()
+    with Session(fresh_engine) as session:
+        session.add(TenantORM(id=tenant_id, slug="pg-fin", display_name="PG Fin"))
+        session.commit()
+
+    # NaN: stored by the type, rejected by our CHECK constraint.
+    with pytest.raises(IntegrityError):  # noqa: PT012 - multi-statement raises block
+        with fresh_engine.begin() as conn:
+            _insert_amount_sql(conn, tenant_id, "0" + "f" * 63, "NaN")
+
+    # +Infinity: rejected by the NUMERIC(20,6) column type before the CHECK.
+    with pytest.raises(DataError):  # noqa: PT012 - multi-statement raises block
+        with fresh_engine.begin() as conn:
+            _insert_amount_sql(conn, tenant_id, "1" + "f" * 63, "Infinity")

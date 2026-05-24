@@ -181,6 +181,18 @@ class GoogleRevenueSourceRowORM(FinanceBase):
             "amount_native >= 0",
             name="ck_google_revenue_source_rows_nonneg",
         ),
+        # A NUMERIC(20,6) column already rejects ±Infinity at the type level, but
+        # NaN IS storable and `>= 0` admits it (NaN sorts above every finite
+        # value), so a direct-SQL / backfill / future-service writer could land a
+        # NaN amount in this source-of-truth table. This finite bound rejects NaN
+        # (NaN < 'Infinity' is false), mirroring the repository's is_finite()
+        # guard at the schema boundary. Postgres-only via ddl_if: the literal
+        # 'Infinity'::numeric is not valid SQLite, and this metadata builds the
+        # SQLite test tables via create_all.
+        CheckConstraint(
+            "amount_native < 'Infinity'::numeric",
+            name="ck_google_revenue_source_rows_amount_finite",
+        ).ddl_if(dialect="postgresql"),
         CheckConstraint(
             "source_system IN ('youtube_reporting', 'youtube_analytics', 'adsense_management')",
             name="ck_google_revenue_source_rows_source_system",

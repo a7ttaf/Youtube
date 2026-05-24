@@ -48,6 +48,27 @@ from ums_smart_revenue.db.source_models import (
 _REPORT_MONTH_RE = re.compile(r"[0-9]{4}-(0[1-9]|1[0-2])\Z")
 
 
+def _require_str_keys(value: object) -> None:
+    """Recursively assert every mapping key inside a raw_payload is a str.
+
+    json.dumps silently coerces non-string dict keys (e.g. int 1 -> "1"), which
+    would mutate caller-provided audit evidence and can collide two distinct
+    keys into one. Enforcing str keys keeps the dict[str, object] contract
+    intact before the JSON/JSONB write rather than letting the shape change
+    silently on serialisation.
+    """
+    if isinstance(value, dict):
+        for key, sub_value in value.items():
+            if not isinstance(key, str):
+                raise GoogleRevenueSourceRowValidationError(
+                    f"raw_payload keys must be strings, got {type(key).__name__}"
+                )
+            _require_str_keys(sub_value)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _require_str_keys(item)
+
+
 # ============================================================================
 # Purpose: Read-only access to platform-wide ISO 4217 currency reference data.
 # Database/ORM: currencies (CurrencyORM).
@@ -352,19 +373,36 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
                 "amount_native must not exceed 6 fractional digits "
                 f"(column is Numeric(20, 6)), got {row.amount_native}"
             )
+        # FIX: bound the integer part too. Numeric(20, 6) allows 20 total
+        # significant digits with 6 fractional -> at most 14 integer digits; the
+        # scale guard above only caps the fraction. A value like 10**14 would
+        # otherwise pass here and fail later as a raw PostgreSQL numeric-overflow
+        # on INSERT, escaping this typed contract. Decimal.adjusted() is the
+        # exponent of the most-significant digit, so >= 14 means >14 integer
+        # digits (i.e. magnitude >= 10**14).
+        if row.amount_native.adjusted() >= 14:
+            raise GoogleRevenueSourceRowValidationError(
+                "amount_native must not exceed 14 integer digits "
+                f"(column is Numeric(20, 6)), got {row.amount_native}"
+            )
         if not isinstance(row.raw_payload, dict):
             raise GoogleRevenueSourceRowValidationError(
                 "raw_payload must be a dict"
             )
-        # FIX: raw_payload is written to a JSON/JSONB column. A dict containing
-        # non-JSON-serialisable values (set, custom object, non-str keys) would
-        # otherwise fail late as an opaque driver serialization error on flush;
-        # surface it here as the typed validation contract instead.
+        # FIX: raw_payload is written to a JSON/JSONB column.
+        #  - _require_str_keys: json.dumps alone is NOT a sufficient shape check
+        #    because it silently coerces non-str keys to strings (and can
+        #    key-collide), so enforce the dict[str, object] key contract first.
+        #  - allow_nan=False: default json.dumps emits NaN/Infinity tokens that
+        #    PostgreSQL JSONB then rejects on write; fail here instead so the
+        #    error stays on the typed boundary. The except also catches
+        #    non-serialisable values (set, custom object).
+        _require_str_keys(row.raw_payload)
         try:
-            json.dumps(row.raw_payload)
+            json.dumps(row.raw_payload, allow_nan=False)
         except (TypeError, ValueError) as exc:
             raise GoogleRevenueSourceRowValidationError(
-                "raw_payload must be JSON-serialisable"
+                "raw_payload must be JSON-serialisable with finite numbers"
             ) from exc
         # Mirror the report_month + period-order DB CHECKs at the typed-validation
         # boundary: a malformed ParsedSourceRow from any non-parser caller (or a
