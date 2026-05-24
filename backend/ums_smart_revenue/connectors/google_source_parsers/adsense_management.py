@@ -155,6 +155,10 @@ class AdSenseManagementParser:
                 source_row_key = build_source_row_key(
                     source_system=self.source_system,
                     metric_key=metric_name,
+                    # currency is part of the logical identity: the same
+                    # metric/account/period/dimensions in a different currency is
+                    # a distinct monetary row and must not collide on the key.
+                    currency=currency,
                     account_id=account_id,
                     period_start=period_start.isoformat(),
                     period_end=period_end.isoformat(),

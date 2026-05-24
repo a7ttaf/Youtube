@@ -86,6 +86,11 @@ def build_source_row_key(*, source_system: str, **fields: object) -> str:
         canonical_payload = {
             "prefix": prefix,
             "metric_key": fields["metric_key"],
+            # currency is part of the row's logical identity: the same
+            # metric/account/period/dimensions reported in a different currency
+            # is a distinct monetary row, so it must not collapse to one upsert
+            # key (mirrors the youtube_analytics branch above).
+            "currency": fields.get("currency"),
             "account_id": fields["account_id"],
             "period_start": fields["period_start"],
             "period_end": fields["period_end"],

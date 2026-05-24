@@ -324,6 +324,20 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
             raise GoogleRevenueSourceRowValidationError(
                 "period_end must be on or after period_start"
             )
+        # report_month must match the period it summarises, and the period must
+        # stay within that single calendar month: the parsers derive
+        # report_month from period_start and reject cross-month ranges, so a
+        # mismatched bucket (e.g. report_month '2026-04' with a May period) means
+        # a non-parser caller would misattribute revenue to the wrong month.
+        period_month = f"{row.period_start.year:04d}-{row.period_start.month:02d}"
+        if row.report_month != period_month or (row.period_end.year, row.period_end.month) != (
+            row.period_start.year,
+            row.period_start.month,
+        ):
+            raise GoogleRevenueSourceRowValidationError(
+                f"report_month {row.report_month!r} must match a single calendar-month "
+                f"period starting {row.period_start.isoformat()}"
+            )
         # Deep-copy: raw_payload holds nested dicts (date_range, dimensions,
         # metrics), so a shallow dict() copy would still let a caller mutate
         # those nested objects after upsert_many and change what was persisted.

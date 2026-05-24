@@ -419,6 +419,18 @@ def test_rejects_reversed_period(session: Session) -> None:
         repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
 
 
+def test_rejects_report_month_period_mismatch(session: Session) -> None:
+    """A well-formed report_month that disagrees with period_start's calendar
+    month (e.g. '2026-05' over an April period) must raise the typed validation
+    error, so a non-parser caller cannot misattribute revenue to the wrong
+    month bucket.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = replace(_row(source_row_key="p" * 64), report_month="2026-05")  # period is April
+    with pytest.raises(GoogleRevenueSourceRowValidationError):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
 def test_validate_deep_copies_nested_raw_payload(session: Session) -> None:
     """_validate must deep-copy raw_payload so a caller mutating a NESTED dict
     cannot reach into the persisted row. A shallow dict() copy shares the

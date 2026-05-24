@@ -59,6 +59,25 @@ def test_adsense_management_key_uses_metric_account_period_dimensions() -> None:
     assert all(c in "0123456789abcdef" for c in key)
 
 
+def test_adsense_management_key_includes_currency() -> None:
+    """Currency is part of the AdSense row identity: the same
+    metric/account/period/dimensions reported in a different currency must NOT
+    collapse to one upsert key (mirrors the youtube_analytics key).
+    """
+    kwargs = dict(
+        source_system="adsense_management",
+        metric_key="PAID_AMOUNT",
+        account_id="pub-1",
+        period_start="2026-04-01",
+        period_end="2026-04-30",
+        dimensions={"product": "AFC"},
+    )
+    assert (
+        build_source_row_key(currency="USD", **kwargs)
+        != build_source_row_key(currency="EUR", **kwargs)
+    )
+
+
 def test_adsense_management_key_excludes_run_specific_report_id() -> None:
     """The AdSense key must NOT depend on a run-specific report_id: it is not a
     parameter of the key at all. The same metric/account/period/dimensions
