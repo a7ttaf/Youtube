@@ -352,6 +352,26 @@ def test_rejects_non_decimal_amount(session: Session) -> None:
         repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
 
 
+def test_rejects_non_str_source_system(session: Session) -> None:
+    """A non-str source_system must raise the typed validation error, not a raw
+    TypeError from `unhashable not in frozenset` membership.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = replace(_row(source_row_key="y" * 64), source_system=["youtube_reporting"])
+    with pytest.raises(GoogleRevenueSourceRowValidationError):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
+def test_rejects_non_str_source_row_key(session: Session) -> None:
+    """A non-str source_row_key must raise the typed validation error, not a raw
+    TypeError from len() on a non-sized value.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = replace(_row(source_row_key="z" * 64), source_row_key=12345)
+    with pytest.raises(GoogleRevenueSourceRowValidationError):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
 def test_validate_deep_copies_nested_raw_payload(session: Session) -> None:
     """_validate must deep-copy raw_payload so a caller mutating a NESTED dict
     cannot reach into the persisted row. A shallow dict() copy shares the

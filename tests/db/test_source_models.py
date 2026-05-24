@@ -205,5 +205,12 @@ def test_report_month_check_rejects_non_digit_month(session: Session) -> None:
         raw_payload={},
     )
     session.add(row)
-    with pytest.raises(IntegrityError):
+    # Narrow the assertion to the report_month CHECK so an unrelated
+    # IntegrityError (e.g. a future FK/uniqueness change) cannot silently mask
+    # a regression in this constraint. SQLite reports the constraint name on
+    # newer builds and the generic "CHECK constraint failed" on older ones.
+    with pytest.raises(
+        IntegrityError,
+        match="ck_google_revenue_source_rows_report_month_format|CHECK constraint failed",
+    ):
         session.flush()

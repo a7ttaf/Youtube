@@ -85,6 +85,22 @@ def test_raw_payload_carries_the_input_row_dict() -> None:
         assert "metrics" in row.raw_payload
 
 
+def test_raw_payload_is_isolated_from_caller_mutation() -> None:
+    """parse() must deep-copy each source row into raw_payload: mutating a
+    NESTED object on the caller's input payload after parsing must not rewrite
+    the stored audit evidence. A shallow dict(row) copy would leave the nested
+    dimensions/metrics objects aliased to the caller.
+    """
+    payload = _load_fixture("sample_estimated_revenue_2026_04.json")
+    rows = list(YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
+    input_rows = payload["rows"]
+    assert isinstance(input_rows, list) and input_rows
+    for input_row in input_rows:
+        input_row["dimensions"]["channel"] = "UC_MUTATED_AFTER_PARSE"
+    for row in rows:
+        assert row.raw_payload["dimensions"]["channel"] != "UC_MUTATED_AFTER_PARSE"
+
+
 def test_missing_content_owner_raises_parser_error() -> None:
     """source_account_id must come from content_owner, not a sentinel."""
     payload = _load_fixture("sample_estimated_revenue_2026_04.json")

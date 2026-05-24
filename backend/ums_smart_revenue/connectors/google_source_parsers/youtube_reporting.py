@@ -6,6 +6,7 @@ a dict. Emits ParsedSourceRow instances with value_kind='estimated'.
 """
 
 from collections.abc import Iterable
+from copy import deepcopy
 from uuid import UUID
 
 from ums_smart_revenue.connectors.google_source_parsers.base import (
@@ -122,5 +123,12 @@ class YouTubeReportingParser:
                 amount_native=parse_decimal_amount(amount_raw, metric_key="estimatedRevenue"),
                 currency_code=currency,
                 source_report_id=report_id,
-                raw_payload=dict(row),
+                # FIX: deep-copy the source row so the persisted audit payload
+                # cannot be altered by later mutation of the caller's input
+                # payload. dict(row) only shallow-copies, leaving the nested
+                # date_range/dimensions/metrics objects aliased to the caller
+                # between parse() and upsert_many(); analytics/adsense already
+                # build owned dicts from parsed primitives, so only this parser
+                # copied the raw input row directly.
+                raw_payload=deepcopy(row),
             )

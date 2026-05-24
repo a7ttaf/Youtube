@@ -24,6 +24,20 @@ def test_youtube_reporting_rejects_missing_metadata() -> None:
         list(YouTubeReportingParser().parse({}, tenant_id=TENANT_ID))
 
 
+def test_parsers_reject_non_object_payload() -> None:
+    """A non-object top-level payload (JSON list/string) must raise ParserError,
+    not a raw AttributeError from `.get` on a non-dict. Each parser's first
+    action is require_dict(payload, ...), so the container guard lives there.
+    """
+    for parser in (
+        YouTubeReportingParser(),
+        YouTubeAnalyticsParser(),
+        AdSenseManagementParser(),
+    ):
+        with pytest.raises(ParserError):
+            list(parser.parse(["not", "an", "object"], tenant_id=TENANT_ID))
+
+
 def test_youtube_reporting_rejects_non_string_amount() -> None:
     payload = {
         "report_metadata": {"report_id": "r", "report_type": "t"},

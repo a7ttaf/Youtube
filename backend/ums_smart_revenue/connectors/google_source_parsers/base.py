@@ -34,7 +34,16 @@ class ParserError(ValueError):
 #     -> Replace per-parser staticmethod helpers with these imports.
 # ============================================================================
 def require_dict(d: dict[str, object], key: str) -> dict[str, object]:
-    """Raise ParserError if d[key] is missing or not a dict."""
+    """Raise ParserError if d is not a mapping, or d[key] is missing/not a dict.
+
+    The container guard matters at the parse() entry point: each parser's first
+    call is require_dict(payload, ...), so a non-object top-level payload (a
+    JSON list/string/number) would otherwise raise a raw AttributeError on
+    ``.get`` instead of the parser's typed ParserError, bypassing callers that
+    handle parser failures uniformly.
+    """
+    if not isinstance(d, dict):
+        raise ParserError(f"expected an object to read field {key!r} from")
     value = d.get(key)
     if not isinstance(value, dict):
         raise ParserError(f"missing or non-dict field: {key!r}")

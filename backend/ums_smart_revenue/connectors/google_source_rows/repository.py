@@ -246,6 +246,16 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         return self._to_entry(row) if row is not None else None
 
     def _validate(self, row: ParsedSourceRow) -> ParsedSourceRow:
+        # Guard the string-typed identity fields first: a non-str source_system
+        # or value_kind raises a raw TypeError on frozenset membership (an
+        # unhashable list/dict), and a non-str source_row_key raises TypeError
+        # on len(). Both would bypass this method's typed-error contract for a
+        # malformed caller that ignores the ParsedSourceRow annotations.
+        for field_name in ("source_system", "value_kind", "source_row_key"):
+            if not isinstance(getattr(row, field_name), str):
+                raise GoogleRevenueSourceRowValidationError(
+                    f"{field_name} must be a str"
+                )
         if row.source_system not in ALLOWED_SOURCE_SYSTEMS:
             raise GoogleRevenueSourceRowValidationError(
                 f"unknown source_system: {row.source_system!r}"
