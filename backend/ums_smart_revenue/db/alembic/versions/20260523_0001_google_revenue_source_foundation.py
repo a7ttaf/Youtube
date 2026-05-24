@@ -191,16 +191,6 @@ def _create_google_revenue_source_rows_table() -> None:
             "amount_native >= 0",
             name="ck_google_revenue_source_rows_nonneg",
         ),
-        # A NUMERIC(20,6) column already rejects ±Infinity at the type level, but
-        # NaN IS storable and `>= 0` admits it (NaN sorts above every finite
-        # value), so a direct-SQL / backfill / future-service writer could land a
-        # NaN amount in this source-of-truth table. This finite bound rejects NaN
-        # (NaN < 'Infinity' is false), mirroring the repository's is_finite()
-        # guard at the schema boundary.
-        sa.CheckConstraint(
-            "amount_native < 'Infinity'::numeric",
-            name="ck_google_revenue_source_rows_amount_finite",
-        ),
         sa.CheckConstraint(
             "source_system IN ('youtube_reporting', 'youtube_analytics', 'adsense_management')",
             name="ck_google_revenue_source_rows_source_system",
@@ -229,18 +219,28 @@ def _create_google_revenue_source_rows_table() -> None:
             name="ck_google_revenue_source_rows_source_row_key_length",
         ),
     )
-    # PostgreSQL is the financial source of truth; enforce that raw_payload is a
-    # JSON object (not array/scalar/null) at the DB level. The repository already
-    # validates dict shape, but a DB CHECK keeps non-repository write paths
-    # (direct SQL, future services, backfills) aligned with the key/value audit-
-    # object contract. jsonb_typeof is PostgreSQL-only, so guard by dialect; the
-    # ORM mirrors this PG-only via ddl_if(dialect="postgresql") in
-    # db/source_models.py, and downgrade drops the table (and this CHECK) wholesale.
+    # PostgreSQL is the financial source of truth; these two CHECKs keep
+    # non-repository write paths (direct SQL, future services, backfills) aligned
+    # with the repository's validation contract. Both use PostgreSQL-only syntax
+    # (jsonb_typeof; the 'Infinity'::numeric cast), so they are added by dialect
+    # rather than inline — an inline `::numeric` cast is a hard SQLite CREATE
+    # TABLE syntax error, which would break the documented SQLite Alembic
+    # fallback path for the rest of the chain. The ORM mirrors both PG-only via
+    # ddl_if(dialect="postgresql") in db/source_models.py, and downgrade drops
+    # the table (and these CHECKs) wholesale.
+    #  - raw_payload_object: raw_payload must be a JSON object (not array/scalar).
+    #  - amount_finite: rejects NaN (storable in NUMERIC, and `>= 0` admits it);
+    #    ±Infinity is already rejected by the NUMERIC(20,6) type itself.
     if op.get_bind().dialect.name == "postgresql":
         op.create_check_constraint(
             "ck_google_revenue_source_rows_raw_payload_object",
             "google_revenue_source_rows",
             "jsonb_typeof(raw_payload) = 'object'",
+        )
+        op.create_check_constraint(
+            "ck_google_revenue_source_rows_amount_finite",
+            "google_revenue_source_rows",
+            "amount_native < 'Infinity'::numeric",
         )
     op.create_index(
         "ix_google_revenue_source_rows_tenant_month_source",
