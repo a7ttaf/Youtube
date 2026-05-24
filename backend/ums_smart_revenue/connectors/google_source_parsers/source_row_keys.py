@@ -48,10 +48,13 @@ def build_source_row_key(*, source_system: str, **fields: object) -> str:
     prefix = _PREFIX[source_system]
 
     if source_system == "youtube_reporting":
+        # line_index is intentionally excluded: YouTube Reporting files are
+        # unsorted and backfills can reorder/reassign row positions, so a
+        # positional index would make the key unstable across reruns and break
+        # idempotent upserts. The report id + dimensions identify the logical row.
         canonical_payload: dict[str, object] = {
             "prefix": prefix,
             "source_report_id": fields["source_report_id"],
-            "line_index": fields["line_index"],
             "dimensions": _canonical_dimensions(fields.get("dimensions") or {}),
         }
     elif source_system == "youtube_analytics":

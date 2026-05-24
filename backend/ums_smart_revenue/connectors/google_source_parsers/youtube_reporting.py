@@ -55,7 +55,11 @@ class YouTubeReportingParser:
         for row in rows:
             if not isinstance(row, dict):
                 raise ParserError("each rows[*] must be a dict")
-            line_index = require_int(row, "line_index")
+            # Validate line_index is a well-formed int (payload-shape check),
+            # but do NOT use it in the source_row_key: YouTube Reporting rows
+            # are unsorted/backfilled, so a positional index would break
+            # idempotent upserts (see source_row_keys.build_source_row_key).
+            require_int(row, "line_index")
             date_range = require_dict(row, "date_range")
             period_start = parse_iso_date(require_str(date_range, "start"), field="date_range.start")
             period_end = parse_iso_date(require_str(date_range, "end"), field="date_range.end")
@@ -98,7 +102,6 @@ class YouTubeReportingParser:
             source_row_key = build_source_row_key(
                 source_system=self.source_system,
                 source_report_id=report_id,
-                line_index=line_index,
                 dimensions=dimensions,
             )
 

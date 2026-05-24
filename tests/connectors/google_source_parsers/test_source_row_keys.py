@@ -14,13 +14,11 @@ def test_youtube_reporting_key_is_deterministic() -> None:
     key1 = build_source_row_key(
         source_system="youtube_reporting",
         source_report_id="report-001",
-        line_index=42,
         dimensions={"channel": "UC_x", "country": "US"},
     )
     key2 = build_source_row_key(
         source_system="youtube_reporting",
         source_report_id="report-001",
-        line_index=42,
         dimensions={"country": "US", "channel": "UC_x"},  # dict order varies
     )
     assert key1 == key2
@@ -58,24 +56,23 @@ def test_adsense_management_key_uses_account_period_dimensions() -> None:
 
 
 def test_different_inputs_produce_distinct_keys() -> None:
+    # Distinguished by report id and dimensions (line_index is intentionally
+    # NOT part of the youtube_reporting key — see the parser idempotency test).
     keys = {
         build_source_row_key(
             source_system="youtube_reporting",
             source_report_id="r-1",
-            line_index=0,
             dimensions={"k": "v"},
         ),
         build_source_row_key(
             source_system="youtube_reporting",
             source_report_id="r-2",
-            line_index=0,
             dimensions={"k": "v"},
         ),
         build_source_row_key(
             source_system="youtube_reporting",
             source_report_id="r-1",
-            line_index=1,
-            dimensions={"k": "v"},
+            dimensions={"k": "w"},
         ),
     }
     assert len(keys) == 3
@@ -85,7 +82,6 @@ def test_different_source_systems_produce_distinct_keys() -> None:
     yt = build_source_row_key(
         source_system="youtube_reporting",
         source_report_id="r-1",
-        line_index=0,
         dimensions={},
     )
     ana = build_source_row_key(
@@ -115,7 +111,6 @@ def test_key_length_is_64_chars() -> None:
     key = build_source_row_key(
         source_system="youtube_reporting",
         source_report_id="x",
-        line_index=0,
         dimensions={},
     )
     assert len(key) == 64
@@ -132,13 +127,11 @@ def test_dimension_values_with_delimiters_do_not_collide() -> None:
     two_dimensions = build_source_row_key(
         source_system="youtube_reporting",
         source_report_id="r",
-        line_index=0,
         dimensions={"a": "b", "c": "d"},
     )
     one_dimension = build_source_row_key(
         source_system="youtube_reporting",
         source_report_id="r",
-        line_index=0,
         dimensions={"a": "b&c=d"},
     )
     assert two_dimensions != one_dimension

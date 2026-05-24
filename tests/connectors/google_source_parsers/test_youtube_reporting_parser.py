@@ -107,3 +107,21 @@ def test_rejects_non_finite_amount() -> None:
     ]
     with pytest.raises(ParserError):
         list(YouTubeReportingParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_line_index_does_not_affect_source_row_key() -> None:
+    """line_index is positional/unstable across YouTube Reporting backfills, so
+    it must NOT affect source_row_key. The same logical rows (same report id +
+    dimensions) keep stable keys even when their line_index values change —
+    otherwise a reordered backfill would insert duplicates instead of upserting.
+    """
+    payload = _load_fixture("sample_estimated_revenue_2026_04.json")
+    shifted = {
+        **payload,
+        "rows": [
+            {**row, "line_index": row["line_index"] + 100} for row in payload["rows"]
+        ],
+    }
+    a = sorted(r.source_row_key for r in YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
+    b = sorted(r.source_row_key for r in YouTubeReportingParser().parse(shifted, tenant_id=TENANT_ID))
+    assert a == b
