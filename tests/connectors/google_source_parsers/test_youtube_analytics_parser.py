@@ -107,6 +107,22 @@ def test_channel_scoped_ids_selector_is_accepted() -> None:
     assert all(r.content_owner_id is None for r in rows)
 
 
+def test_missing_currency_defaults_to_usd() -> None:
+    """`currency` is an optional reports.query request parameter; the YouTube
+    Analytics API defaults financial metrics to USD when it is omitted. A replay
+    payload that drops the optional parameter must ingest as USD rather than
+    failing closed.
+    """
+    base = _load_fixture("sample_query_response_2026_04.json")
+    request_without_currency = {
+        k: v for k, v in base["query_request"].items() if k != "currency"
+    }
+    payload = {**base, "query_request": request_without_currency}
+    rows = list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+    assert rows  # ingests rather than failing closed
+    assert all(r.currency_code == "USD" for r in rows)
+
+
 def test_rejects_non_finite_amount() -> None:
     """Infinity/NaN Decimal strings must fail at the parser, not downstream."""
     payload = _load_fixture("sample_query_response_2026_04.json")

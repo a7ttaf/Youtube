@@ -98,7 +98,21 @@ class YouTubeAnalyticsParser:
 
         period_start = parse_iso_date(require_str(request, "startDate"), field="startDate")
         period_end = parse_iso_date(require_str(request, "endDate"), field="endDate")
-        currency = require_str(request, "currency")
+        # FIX: `currency` is an OPTIONAL reports.query request parameter — the
+        # YouTube Analytics API defaults financial metrics to USD when it is
+        # omitted, so a replay payload that drops the optional parameter is
+        # valid and must ingest as USD rather than fail closed. We default ONLY
+        # on true omission (matching the API contract); a present-but-malformed
+        # value (null/empty/non-string) is still rejected as a typed ParserError
+        # so a corrupt currency is never silently coerced.
+        if "currency" in request:
+            currency = request["currency"]
+            if not isinstance(currency, str) or not currency:
+                raise ParserError(
+                    "query_request.currency must be a non-empty string when present"
+                )
+        else:
+            currency = "USD"
         # `metrics` is validated for payload shape but intentionally NOT part of
         # the row key: the parser persists only monetary metrics and tags each
         # row with its own metric_key, so co-requesting an extra metric (e.g.

@@ -186,6 +186,33 @@ def test_youtube_analytics_rejects_malformed_ids_selector(bad_ids: str) -> None:
         list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
 
 
+@pytest.mark.parametrize("bad_currency", ["", None, 123])
+def test_youtube_analytics_rejects_malformed_currency_when_present(
+    bad_currency: object,
+) -> None:
+    """`currency` is optional (omission defaults to USD), but a present-but-
+    malformed value — empty string, null, or non-string — is malformed and must
+    fail closed rather than be silently coerced (the default applies only to
+    true omission, per the API contract)."""
+    payload = {
+        "query_request": {
+            "ids": "contentOwner==cms-1",
+            "startDate": "2026-04-01",
+            "endDate": "2026-04-30",
+            "metrics": "estimatedRevenue",
+            "dimensions": "channel",
+            "currency": bad_currency,
+        },
+        "columnHeaders": [
+            {"name": "channel", "columnType": "DIMENSION", "dataType": "STRING"},
+            {"name": "estimatedRevenue", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [["UC_x", "100.00"]],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+
+
 def test_adsense_rejects_missing_date_range() -> None:
     payload = {
         "request": {"accountId": "accounts/pub-1", "currencyCode": "USD"},
