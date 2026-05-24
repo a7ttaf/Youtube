@@ -125,3 +125,21 @@ def test_line_index_does_not_affect_source_row_key() -> None:
     a = sorted(r.source_row_key for r in YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
     b = sorted(r.source_row_key for r in YouTubeReportingParser().parse(shifted, tenant_id=TENANT_ID))
     assert a == b
+
+
+def test_report_id_does_not_affect_source_row_key() -> None:
+    """A backfilled/corrected report gets a NEW report_id for the same period;
+    the key must stay stable (report_type + period + dimensions) so the
+    correction UPDATES the prior rows instead of inserting duplicates.
+    """
+    payload = _load_fixture("sample_estimated_revenue_2026_04.json")
+    backfill = {
+        **payload,
+        "report_metadata": {
+            **payload["report_metadata"],
+            "report_id": "yt-rep-BACKFILL-correction-999",
+        },
+    }
+    a = sorted(r.source_row_key for r in YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
+    b = sorted(r.source_row_key for r in YouTubeReportingParser().parse(backfill, tenant_id=TENANT_ID))
+    assert a == b

@@ -7,6 +7,9 @@ tests/db/test_google_revenue_source_migration_postgres.py.
 """
 
 from collections.abc import Iterator
+from datetime import date
+from decimal import Decimal
+from uuid import uuid4
 
 import pytest
 from sqlalchemy import (
@@ -19,6 +22,7 @@ from sqlalchemy import (
     create_engine,
     select,
 )
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import FinanceBase
@@ -177,3 +181,29 @@ def test_google_revenue_source_row_indexes() -> None:
     index_names = {ix.name for ix in GoogleRevenueSourceRowORM.__table__.indexes}
     assert "ix_google_revenue_source_rows_tenant_month_source" in index_names
     assert "ix_google_revenue_source_rows_tenant_channel_month" in index_names
+
+
+def test_report_month_check_rejects_non_digit_month(session: Session) -> None:
+    """The report_month CHECK must reject non-digit month characters (e.g.
+    '2026-0A'): the prior lexical `substr(...,6,2) BETWEEN '01' AND '12'` alone
+    accepted '0A'. SQLite enforces the CHECK on flush.
+    """
+    row = GoogleRevenueSourceRowORM(
+        id=uuid4(),
+        tenant_id=uuid4(),
+        source_system="youtube_reporting",
+        source_row_key="z" * 64,
+        source_account_id="acct",
+        report_type="channel_basic_a2",
+        report_month="2026-0A",  # non-digit month character
+        period_start=date(2026, 4, 1),
+        period_end=date(2026, 4, 30),
+        metric_key="estimatedRevenue",
+        value_kind="estimated",
+        amount_native=Decimal("1.000000"),
+        currency_code="USD",
+        raw_payload={},
+    )
+    session.add(row)
+    with pytest.raises(IntegrityError):
+        session.flush()

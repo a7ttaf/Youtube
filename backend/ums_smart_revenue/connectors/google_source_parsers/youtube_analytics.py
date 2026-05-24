@@ -99,7 +99,12 @@ class YouTubeAnalyticsParser:
         period_start = parse_iso_date(require_str(request, "startDate"), field="startDate")
         period_end = parse_iso_date(require_str(request, "endDate"), field="endDate")
         currency = require_str(request, "currency")
-        metrics_csv = require_str(request, "metrics")
+        # `metrics` is validated for payload shape but intentionally NOT part of
+        # the row key: the parser persists only monetary metrics and tags each
+        # row with its own metric_key, so co-requesting an extra metric (e.g.
+        # estimatedRevenue vs estimatedRevenue,views) must not change the key of
+        # an existing revenue row — otherwise the rerun inserts duplicates.
+        require_str(request, "metrics")
         dimensions_csv = require_str(request, "dimensions")
         ids = require_str(request, "ids")
         # FIX: content_owner_id holds the BARE id (the part after "==") so it
@@ -112,12 +117,11 @@ class YouTubeAnalyticsParser:
         # for the contentOwner/channel account produce distinct source_row_keys.
         # Without this, the repo PK (tenant_id, source_system, source_row_key)
         # silently collapses cross-account data in a multi-CMS tenant.
-        # Canonicalise (sort) the metric/dimension lists so a rerun that only
-        # reorders the CSV hashes to the same key (idempotency) rather than
-        # inserting a duplicate financial row.
-        query_signature = (
-            f"{ids}|{_canonical_csv(metrics_csv, ',')}|{_canonical_csv(dimensions_csv, ',')}"
-        )
+        # Canonicalise (sort) the dimension list so a rerun that only reorders
+        # it hashes to the same key. Metrics are deliberately excluded (see the
+        # require_str note above); each row's own metric is folded in per-row
+        # via metric_name below.
+        query_signature = f"{ids}|{_canonical_csv(dimensions_csv, ',')}"
         # A different currency or filter expression for the same
         # ids/metrics/dimensions/period is a distinct dataset; fold both into
         # the row key (as structured fields, below) so one cannot overwrite the

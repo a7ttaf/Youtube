@@ -101,7 +101,9 @@ class YouTubeReportingParser:
 
             source_row_key = build_source_row_key(
                 source_system=self.source_system,
-                source_report_id=report_id,
+                report_type=report_type,
+                period_start=period_start.isoformat(),
+                period_end=period_end.isoformat(),
                 dimensions=dimensions,
             )
 

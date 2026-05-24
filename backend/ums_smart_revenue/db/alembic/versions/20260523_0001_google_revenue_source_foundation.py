@@ -205,6 +205,8 @@ def _create_google_revenue_source_rows_table() -> None:
             "AND substr(report_month, 2, 1) BETWEEN '0' AND '9' "
             "AND substr(report_month, 3, 1) BETWEEN '0' AND '9' "
             "AND substr(report_month, 4, 1) BETWEEN '0' AND '9' "
+            "AND substr(report_month, 6, 1) BETWEEN '0' AND '9' "
+            "AND substr(report_month, 7, 1) BETWEEN '0' AND '9' "
             "AND substr(report_month, 6, 2) BETWEEN '01' AND '12'",
             name="ck_google_revenue_source_rows_report_month_format",
         ),
