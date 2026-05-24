@@ -133,7 +133,8 @@ single P-tier above.
   nullable-text types, date-not-datetime, ≤6-decimal scale, JSON-serialisable
   raw_payload) + provenance-preserving upsert (COALESCE), AdSense fail-closed
   accountId / empty-report handling, and strict YYYY-MM-DD parsing — see
-  `Docs/pulls/2026-05-23-pr43-…report.md`. Remaining: live OAuth/API connector
+  `Docs/pulls/2026-05-23-pr43-spec-b1-google-revenue-source-ingestion-report.md`.
+  Remaining: live OAuth/API connector
   (B2), FX/conversion (B3). Marked ⏳ (not ✅) per the scaffolding-only honesty
   rule above — no real ingestion path yet.
 

@@ -64,7 +64,7 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 - `backend/ums_smart_revenue/connectors/google_source_parsers/adsense_management.py` — fail closed on a `request.accountId` missing the `accounts/` prefix or with an empty id; missing/null `rows` now treated as a clean empty report (mirrors `YouTubeAnalyticsParser`).
 - `backend/ums_smart_revenue/connectors/google_source_parsers/base.py` — `parse_iso_date` enforces canonical `YYYY-MM-DD` via an `isoformat()` round-trip (rejects Python 3.11+ compact `YYYYMMDD` and ISO week-date forms).
 - `tests/db/_postgres_helpers.py` — `require_postgres_url` rejects whitespace-only `UMS_TEST_DATABASE_URL` and returns the trimmed value; added the standard contract block.
-- `Docs/pulls/2026-05-23-pr43-…report.md` — corrected the stale `query_signature` description (excludes `metrics`; embedded as a structured JSON field, not a raw delimited string).
+- `Docs/pulls/2026-05-23-pr43-spec-b1-google-revenue-source-ingestion-report.md` — corrected the stale `query_signature` description (excludes `metrics`; embedded as a structured JSON field, not a raw delimited string).
 - `backend/ums_smart_revenue/db/alembic/env.py` — added `from ums_smart_revenue.db import source_models  # noqa: F401  # registers tables on FinanceBase`.
 - `Docs/01_IMPLEMENTATION_PLAN.md` — added ✅ PR #43 sub-bullet under "Source-reported currency foundation" section.
 - `Docs/15_DELIVERY_BACKLOG.md` — added ✅ PR #43 bullet under "Cross-cutting shipped".

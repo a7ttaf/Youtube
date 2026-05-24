@@ -54,7 +54,7 @@ PR #42 landed the design pivot: B1 is Google source-reported revenue ingestion f
 ## Validation
 
 - Round 1 (`python scripts/run_validation_gate.py`, `UMS_TEST_DATABASE_URL` set): **6/6 steps green** (ruff → AST policy → pytest 961 passed → vitest 34 passed → git diff --check worktree → staged).
-- Round 2 (this review pass): `python -m ruff check backend tests` clean → `python -m pytest -q` **973 passed** (full suite, incl. the 8 PostgreSQL migration/upsert tests on disposable `postgres:18-alpine`) → `git diff --check` clean. No frontend touched, so vitest unchanged (34).
+- Round 2 (this review pass): `python -m ruff check backend tests scripts` clean → `python -m pytest -q` **973 passed** (full suite, incl. the 8 PostgreSQL migration/upsert tests on disposable `postgres:18-alpine`) → `git diff --check` clean. No frontend touched, so vitest unchanged (34).
 - Pytest delta from PR #41 baseline (821): **+152 tests** (+89 in 17 new test files at submission; +63 review-hardening regressions across two Codex/CodeRabbit rounds).
 - PostgreSQL: 8/8 passed on disposable `postgres:18-alpine` (6 migration round-trip + 1 repository upsert covering the production `on_conflict_do_update` path + 1 raw_payload object-shape CHECK rejection via direct SQL).
 - Frontend tests: 34 passed (unchanged from PR #41; no frontend code touched).
