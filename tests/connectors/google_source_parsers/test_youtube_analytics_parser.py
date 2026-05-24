@@ -90,6 +90,23 @@ def test_different_ids_produce_distinct_keys() -> None:
     )
 
 
+def test_channel_scoped_ids_selector_is_accepted() -> None:
+    """A `channel==<id>` selector is a valid alternative to `contentOwner==<id>`
+    and must ingest: source_account_id keeps the raw selector and there is no
+    content owner (content_owner_id is None). Guards against the malformed-ids
+    fail-closed guard over-restricting the channel-scoped path.
+    """
+    base = _load_fixture("sample_query_response_2026_04.json")
+    channel_scoped = {
+        **base,
+        "query_request": {**base["query_request"], "ids": "channel==UC-test-1"},
+    }
+    rows = list(YouTubeAnalyticsParser().parse(channel_scoped, tenant_id=TENANT_ID))
+    assert rows  # ingests rather than failing closed
+    assert all(r.source_account_id == "channel==UC-test-1" for r in rows)
+    assert all(r.content_owner_id is None for r in rows)
+
+
 def test_rejects_non_finite_amount() -> None:
     """Infinity/NaN Decimal strings must fail at the parser, not downstream."""
     payload = _load_fixture("sample_query_response_2026_04.json")

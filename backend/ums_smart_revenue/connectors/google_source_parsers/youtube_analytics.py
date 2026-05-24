@@ -107,12 +107,23 @@ class YouTubeAnalyticsParser:
         require_str(request, "metrics")
         dimensions_csv = require_str(request, "dimensions")
         ids = require_str(request, "ids")
-        # FIX: content_owner_id holds the BARE id (the part after "==") so it
-        # is usable for joins/filters; source_account_id keeps the raw `ids`
-        # selector. The previous branch stored the full `contentOwner==...`
-        # selector here, duplicating source_account_id's shape and breaking the
-        # dedicated field. Matches the YouTube Reporting parser.
-        content_owner_id = ids.split("==", 1)[1] if ids.startswith("contentOwner==") else None
+        # FIX: Fail closed on a malformed `ids` selector. The YouTube Analytics
+        # API contract requires a structured selector — `channel==<id>` or
+        # `contentOwner==<id>`. Arbitrary text (unprefixed garbage, or a bare
+        # `contentOwner==`/`channel==` with an empty id) would otherwise persist
+        # a revenue row whose source_account_id/content_owner_id cannot be tied
+        # back to a real owner or channel, weakening account attribution.
+        # Mirrors the AdSense parser's accountId prefix/suffix guard.
+        selector_kind, sep, selector_id = ids.partition("==")
+        if sep != "==" or selector_kind not in {"channel", "contentOwner"} or not selector_id:
+            raise ParserError(
+                "query_request.ids must be 'channel==<id>' or 'contentOwner==<id>', "
+                f"got {ids!r}"
+            )
+        # content_owner_id holds the BARE id (the part after "==") so it is
+        # usable for joins/filters; source_account_id keeps the raw `ids`
+        # selector. A channel-scoped selector has no content owner.
+        content_owner_id = selector_id if selector_kind == "contentOwner" else None
         # FIX: Include `ids` in query_signature so two payloads identical except
         # for the contentOwner/channel account produce distinct source_row_keys.
         # Without this, the repo PK (tenant_id, source_system, source_row_key)

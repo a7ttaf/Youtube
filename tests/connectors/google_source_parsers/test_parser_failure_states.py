@@ -157,6 +157,35 @@ def test_youtube_analytics_rejects_iso_week_date() -> None:
         list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
 
 
+@pytest.mark.parametrize(
+    "bad_ids",
+    ["garbage", "contentOwner==", "channel==", "video==abc", "==cms-1", "cms-1"],
+)
+def test_youtube_analytics_rejects_malformed_ids_selector(bad_ids: str) -> None:
+    """The YouTube Analytics `ids` selector must be 'channel==<id>' or
+    'contentOwner==<id>'. An unprefixed value, an unsupported prefix, or an
+    empty id after '==' would persist a revenue row with no resolvable
+    owner/channel attribution, so it must fail closed instead of ingesting an
+    unattributable row (mirrors the AdSense accountId guard)."""
+    payload = {
+        "query_request": {
+            "ids": bad_ids,
+            "startDate": "2026-04-01",
+            "endDate": "2026-04-30",
+            "metrics": "estimatedRevenue",
+            "dimensions": "channel",
+            "currency": "USD",
+        },
+        "columnHeaders": [
+            {"name": "channel", "columnType": "DIMENSION", "dataType": "STRING"},
+            {"name": "estimatedRevenue", "columnType": "METRIC", "dataType": "FLOAT"},
+        ],
+        "rows": [["UC_x", "100.00"]],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+
+
 def test_adsense_rejects_missing_date_range() -> None:
     payload = {
         "request": {"accountId": "accounts/pub-1", "currencyCode": "USD"},
