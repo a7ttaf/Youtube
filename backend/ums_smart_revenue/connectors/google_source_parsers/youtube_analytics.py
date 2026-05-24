@@ -107,10 +107,14 @@ class YouTubeAnalyticsParser:
         # so a corrupt currency is never silently coerced.
         if "currency" in request:
             currency = request["currency"]
-            if not isinstance(currency, str) or not currency:
+            # FIX: reject a whitespace-only currency too — a present "   " is
+            # malformed (not a valid ISO code) and must fail closed rather than
+            # be stored/keyed as a blank currency. Store the trimmed value.
+            if not isinstance(currency, str) or not currency.strip():
                 raise ParserError(
                     "query_request.currency must be a non-empty string when present"
                 )
+            currency = currency.strip()
         else:
             currency = "USD"
         # `metrics` is validated for payload shape but intentionally NOT part of
@@ -129,24 +133,34 @@ class YouTubeAnalyticsParser:
         # back to a real owner or channel, weakening account attribution.
         # Mirrors the AdSense parser's accountId prefix/suffix guard.
         selector_kind, sep, selector_id = ids.partition("==")
+        # FIX: trim the selector id before the non-empty check so a
+        # whitespace-only suffix (`channel==   `) fails closed too — it would
+        # otherwise pass and persist a blank/invalid attribution key.
+        selector_id = selector_id.strip()
         if sep != "==" or selector_kind not in {"channel", "contentOwner"} or not selector_id:
             raise ParserError(
                 "query_request.ids must be 'channel==<id>' or 'contentOwner==<id>', "
                 f"got {ids!r}"
             )
         # content_owner_id holds the BARE id (the part after "==") so it is
-        # usable for joins/filters; source_account_id keeps the raw `ids`
-        # selector. A channel-scoped selector has no content owner.
+        # usable for joins/filters; source_account_id stores the NORMALISED
+        # `kind==id` selector (whitespace trimmed). A channel-scoped selector has
+        # no content owner.
         content_owner_id = selector_id if selector_kind == "contentOwner" else None
-        # FIX: Include `ids` in query_signature so two payloads identical except
-        # for the contentOwner/channel account produce distinct source_row_keys.
-        # Without this, the repo PK (tenant_id, source_system, source_row_key)
-        # silently collapses cross-account data in a multi-CMS tenant.
-        # Canonicalise (sort) the dimension list so a rerun that only reorders
-        # it hashes to the same key. Metrics are deliberately excluded (see the
-        # require_str note above); each row's own metric is folded in per-row
-        # via metric_name below.
-        query_signature = f"{ids}|{_canonical_csv(dimensions_csv, ',')}"
+        normalized_ids = f"{selector_kind}=={selector_id}"
+        # FIX: Build query_signature from the CANONICAL account identity
+        # (content_owner_id), NOT the raw `ids` selector. The channel identity is
+        # already folded into the key via the required dim_values["channel"]
+        # below, and content_owner_id distinguishes CMS accounts in a multi-CMS
+        # tenant. Keying on raw `ids` broke idempotency: YouTube Analytics accepts
+        # equivalent channel selectors (`channel==MINE` and `channel==<id>`) for
+        # the same channel, so switching representation between runs hashed
+        # identical revenue rows to different source_row_keys and inserted
+        # duplicates on rerun. Canonicalise (sort) the dimension list so a
+        # reorder-only rerun hashes the same; metrics are deliberately excluded
+        # (see the require_str note above), folded in per-row via metric_name.
+        account_identity = content_owner_id or ""
+        query_signature = f"{account_identity}|{_canonical_csv(dimensions_csv, ',')}"
         # A different currency or filter expression for the same
         # ids/metrics/dimensions/period is a distinct dataset; fold both into
         # the row key (as structured fields, below) so one cannot overwrite the
@@ -245,7 +259,7 @@ class YouTubeAnalyticsParser:
                 yield ParsedSourceRow(
                     source_system=self.source_system,
                     source_row_key=source_row_key,
-                    source_account_id=ids,
+                    source_account_id=normalized_ids,
                     content_owner_id=content_owner_id,
                     youtube_channel_id=channel,
                     report_type="reports.query",

@@ -159,14 +159,23 @@ def test_youtube_analytics_rejects_iso_week_date() -> None:
 
 @pytest.mark.parametrize(
     "bad_ids",
-    ["garbage", "contentOwner==", "channel==", "video==abc", "==cms-1", "cms-1"],
+    [
+        "garbage",
+        "contentOwner==",
+        "channel==",
+        "channel==   ",
+        "contentOwner==   ",
+        "video==abc",
+        "==cms-1",
+        "cms-1",
+    ],
 )
 def test_youtube_analytics_rejects_malformed_ids_selector(bad_ids: str) -> None:
     """The YouTube Analytics `ids` selector must be 'channel==<id>' or
     'contentOwner==<id>'. An unprefixed value, an unsupported prefix, or an
-    empty id after '==' would persist a revenue row with no resolvable
-    owner/channel attribution, so it must fail closed instead of ingesting an
-    unattributable row (mirrors the AdSense accountId guard)."""
+    empty/whitespace-only id after '==' would persist a revenue row with no
+    resolvable owner/channel attribution, so it must fail closed instead of
+    ingesting an unattributable row (mirrors the AdSense accountId guard)."""
     payload = {
         "query_request": {
             "ids": bad_ids,
@@ -186,14 +195,14 @@ def test_youtube_analytics_rejects_malformed_ids_selector(bad_ids: str) -> None:
         list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
 
 
-@pytest.mark.parametrize("bad_currency", ["", None, 123])
+@pytest.mark.parametrize("bad_currency", ["", "   ", None, 123])
 def test_youtube_analytics_rejects_malformed_currency_when_present(
     bad_currency: object,
 ) -> None:
     """`currency` is optional (omission defaults to USD), but a present-but-
-    malformed value — empty string, null, or non-string — is malformed and must
-    fail closed rather than be silently coerced (the default applies only to
-    true omission, per the API contract)."""
+    malformed value — empty string, whitespace-only, null, or non-string — is
+    malformed and must fail closed rather than be silently coerced (the default
+    applies only to true omission, per the API contract)."""
     payload = {
         "query_request": {
             "ids": "contentOwner==cms-1",

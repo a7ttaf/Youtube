@@ -123,6 +123,40 @@ def test_missing_currency_defaults_to_usd() -> None:
     assert all(r.currency_code == "USD" for r in rows)
 
 
+def test_surrounding_whitespace_currency_is_trimmed() -> None:
+    """A present `currency` with surrounding whitespace is trimmed and stored as
+    the bare ISO code, so "  USD  " and "USD" are the same currency (and key)."""
+    base = _load_fixture("sample_query_response_2026_04.json")
+    payload = {**base, "query_request": {**base["query_request"], "currency": "  USD  "}}
+    rows = list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+    assert rows
+    assert all(r.currency_code == "USD" for r in rows)
+
+
+def test_channel_selector_representation_does_not_change_keys() -> None:
+    """YouTube Analytics accepts equivalent channel selectors (`channel==MINE`
+    and `channel==<CHANNEL_ID>`) for the same channel. Switching representation
+    between runs must NOT change source_row_keys, or upsert_many would insert
+    duplicates instead of updating in place. The channel identity comes from the
+    row's `channel` dimension, so the dedup key derives from the canonical
+    account identity, not the raw `ids` selector string.
+    """
+    base = _load_fixture("sample_query_response_2026_04.json")
+    mine = {**base, "query_request": {**base["query_request"], "ids": "channel==MINE"}}
+    explicit = {
+        **base,
+        "query_request": {**base["query_request"], "ids": "channel==UC-explicit-id"},
+    }
+    mine_keys = sorted(
+        r.source_row_key for r in YouTubeAnalyticsParser().parse(mine, tenant_id=TENANT_ID)
+    )
+    explicit_keys = sorted(
+        r.source_row_key
+        for r in YouTubeAnalyticsParser().parse(explicit, tenant_id=TENANT_ID)
+    )
+    assert mine_keys == explicit_keys
+
+
 def test_rejects_non_finite_amount() -> None:
     """Infinity/NaN Decimal strings must fail at the parser, not downstream."""
     payload = _load_fixture("sample_query_response_2026_04.json")

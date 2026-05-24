@@ -58,6 +58,14 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 
 ## Changed
 
+### Review hardening round 7
+
+- `backend/ums_smart_revenue/connectors/google_source_parsers/youtube_analytics.py` — three follow-on guards hardening the round-6 changes:
+  - **Whitespace-only `currency`** (e.g. `"   "`) now fails closed — the malformed-currency check trims before testing, and an accepted currency is stored trimmed (`"  USD  "` → `"USD"`), keeping it idempotent in the row key.
+  - **Whitespace-only `ids` selector id** (e.g. `channel==   `) now fails closed — `selector_id` is trimmed before the non-empty check, and `source_account_id` stores the normalised `kind==id` selector.
+  - **`source_row_key` is canonicalised against the account identity, not the raw `ids` selector.** YouTube Analytics accepts equivalent channel selectors (`channel==MINE` and `channel==<CHANNEL_ID>`) for the same channel; keying `query_signature` on the raw selector let a representation switch between runs hash identical revenue rows to different keys and insert duplicates on rerun. `query_signature` now keys on `content_owner_id` (multi-CMS-account distinctness) while the channel identity is carried by the required `dim_values["channel"]` already folded into the key. **Blast radius:** `source_row_key` derivation only — no DB/model/migration change, no live persisted data at this phase (disposable pre-alpha), and the cross-account distinctness the raw selector protected is preserved by `content_owner_id`. Added a `channel==MINE`-vs-explicit-id key-equality regression test.
+- Tests: +5 cases (whitespace `currency`/`ids` rejections, a trimmed-currency acceptance, and the selector-canonicalisation regression).
+
 ### Review hardening round 6
 
 - `backend/ums_smart_revenue/connectors/google_source_parsers/adsense_management.py` — `_SETTLED_METRICS` no longer includes `UNPAID_AMOUNT`; only `PAID_AMOUNT` is settled, matching the module contract. `UNPAID_AMOUNT` is outstanding (not-yet-paid) earnings, so it now correctly emits `value_kind='estimated'`/`report_type='earnings_report'` instead of being mislabeled as settled cash, which would have corrupted finalized-vs-estimated and payment-reconciliation totals (CLAUDE.md rule 4). Added `test_unpaid_amount_is_classified_as_estimated`.
@@ -105,4 +113,5 @@ Nothing. Legacy `currency_exchange_rates` table, `CurrencyExchangeRateORM`, `fin
 - Post-PR #43 (review hardening round 4 — numeric `reports.query` metric-cell acceptance + `currency` required in source_row_key): 983 tests
 - Post-PR #43 (review hardening round 5 — zero-amount integer-digit guard + Postgres-helper fixture relocation): 984 tests
 - Post-PR #43 (review hardening round 6 — UNPAID_AMOUNT classified estimated + fail-closed on malformed Analytics `ids` selector + optional Analytics `currency` defaults to USD): 996 tests
-- **Net new: +175 tests** (+89 in the original 17 new test files; +86 review-hardening regressions across existing test files).
+- Post-PR #43 (review hardening round 7 — whitespace-only `currency`/`ids` rejection + `source_row_key` canonicalised against account identity for channel-selector idempotency): 1001 tests
+- **Net new: +180 tests** (+89 in the original 17 new test files; +91 review-hardening regressions across existing test files).
