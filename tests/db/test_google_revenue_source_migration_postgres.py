@@ -15,6 +15,7 @@ from _postgres_helpers import POSTGRES_URL  # sibling module (pytest's prepend m
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.google_source_rows import (
@@ -186,3 +187,41 @@ def test_repository_upsert_round_trip_on_postgres(
         rows = repo.list(tenant_id, report_month="2026-04")
         assert len(rows) == 1, "conflict must update in place, not insert a duplicate"
         assert rows[0].amount_native == Decimal("150.000000")
+
+
+def test_raw_payload_object_check_rejects_non_object(
+    alembic_config: Config, fresh_engine: object
+) -> None:
+    """PostgreSQL (source of truth) enforces raw_payload is a JSON object. A
+    direct-SQL insert of a JSON array — a write path that bypasses the
+    repository's dict validation — must be rejected by the
+    ck_..._raw_payload_object CHECK, proving the integrity guard holds for
+    non-repository writers (direct SQL, future services, backfills).
+    """
+    command.upgrade(alembic_config, "20260523_0001")
+    inspector = inspect(fresh_engine)
+    checks = {
+        c["name"] for c in inspector.get_check_constraints("google_revenue_source_rows")
+    }
+    assert "ck_google_revenue_source_rows_raw_payload_object" in checks
+
+    tenant_id = uuid4()
+    with Session(fresh_engine) as session:
+        session.add(TenantORM(id=tenant_id, slug="pg-chk", display_name="PG Chk"))
+        session.commit()
+
+    # '[]' coerces to a jsonb array (jsonb_typeof = 'array'), violating the CHECK.
+    with pytest.raises(IntegrityError):  # noqa: PT012 - multi-statement raises block
+        with fresh_engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO google_revenue_source_rows "
+                    "(tenant_id, source_system, source_row_key, source_account_id, "
+                    " report_type, report_month, period_start, period_end, metric_key, "
+                    " value_kind, amount_native, currency_code, raw_payload) VALUES "
+                    "(:tenant_id, 'youtube_reporting', :key, 'acct', 'rt', '2026-04', "
+                    " '2026-04-01', '2026-04-30', 'estimatedRevenue', 'estimated', "
+                    " 1.0, 'USD', '[]')"
+                ),
+                {"tenant_id": tenant_id, "key": "q" * 64},
+            )

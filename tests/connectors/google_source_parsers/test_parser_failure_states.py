@@ -215,6 +215,49 @@ def test_adsense_rejects_unsupported_header_type() -> None:
         list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
 
 
+def test_adsense_rejects_metric_currency_header_mismatch() -> None:
+    """A METRIC_CURRENCY header whose currencyCode diverges from the request
+    currencyCode must fail closed: stamping request.currencyCode on an amount
+    the header says is a different currency would mislabel a preserved value.
+    """
+    payload = {
+        "request": {
+            "accountId": "accounts/pub-1",
+            "dateRange": {
+                "startDate": {"year": 2026, "month": 4, "day": 1},
+                "endDate": {"year": 2026, "month": 4, "day": 30},
+            },
+            "currencyCode": "USD",
+        },
+        "report_id": "r",
+        "headers": [{"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "EUR"}],
+        "rows": [{"cells": [{"value": "5.00"}]}],
+    }
+    with pytest.raises(ParserError):
+        list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+
+
+def test_adsense_rejects_metric_currency_header_without_currency() -> None:
+    """A METRIC_CURRENCY header missing its currencyCode (or non-string) must
+    raise ParserError rather than silently inheriting the request currency.
+    """
+    payload = {
+        "request": {
+            "accountId": "accounts/pub-1",
+            "dateRange": {
+                "startDate": {"year": 2026, "month": 4, "day": 1},
+                "endDate": {"year": 2026, "month": 4, "day": 30},
+            },
+            "currencyCode": "USD",
+        },
+        "report_id": "r",
+        "headers": [{"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY"}],  # no currencyCode
+        "rows": [{"cells": [{"value": "5.00"}]}],
+    }
+    with pytest.raises(ParserError):
+        list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
+
+
 def test_youtube_analytics_rejects_unsupported_column_type() -> None:
     """An unsupported columnType fails closed (ParserError) rather than being
     skipped, which would misalign values with metrics."""

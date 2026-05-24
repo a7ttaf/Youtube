@@ -37,14 +37,14 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 - `tests/db/test_source_models.py` — 11 tests (ORM column shape + uniqueness + FKs + indexes + insert/select round-trip + report_month digit-CHECK).
 - `tests/db/test_google_revenue_source_migration.py` — 2 metadata tests.
 - `tests/db/_postgres_helpers.py` — fail-fast env guard.
-- `tests/db/test_google_revenue_source_migration_postgres.py` — 7 PostgreSQL tests (6 migration round-trip + 1 repository upsert on the production `on_conflict_do_update` path).
+- `tests/db/test_google_revenue_source_migration_postgres.py` — 8 PostgreSQL tests (6 migration round-trip + 1 repository upsert on the production `on_conflict_do_update` path + 1 raw_payload object-shape CHECK rejection via direct SQL).
 - `tests/connectors/google_source_rows/test_currencies_repository.py` — 5 tests.
 - `tests/connectors/google_source_rows/test_repository.py` — 23 tests (idempotency, tenant isolation, validation incl. NaN/non-Decimal amount, non-str source_system/source_row_key/currency_code typed-error guards, id stability, raw_payload deep-copy alias safety on write + read paths, non-USD visibility).
 - `tests/connectors/google_source_parsers/test_source_row_keys.py` — 9 tests.
 - `tests/connectors/google_source_parsers/test_youtube_reporting_parser.py` — 12 tests.
 - `tests/connectors/google_source_parsers/test_youtube_analytics_parser.py` — 16 tests.
 - `tests/connectors/google_source_parsers/test_adsense_management_parser.py` — 8 tests.
-- `tests/connectors/google_source_parsers/test_parser_failure_states.py` — 22 tests.
+- `tests/connectors/google_source_parsers/test_parser_failure_states.py` — 24 tests (incl. AdSense METRIC_CURRENCY header currency mismatch + missing-currency fail-closed).
 - `tests/connectors/test_google_source_ingestion_flow.py` — 3 tests (end-to-end + rerun + malformed-payload safety).
 - `tests/finance/test_finance_no_fx_dependency.py` — 1 AST guard.
 - `tests/auth/test_no_fx_permission.py` — 2 tests.
@@ -70,5 +70,5 @@ Nothing. Legacy `currency_exchange_rates` table, `CurrencyExchangeRateORM`, `fin
 
 - Pre-PR #43 baseline (post-PR #42 docs-only merge): 821 tests
 - Post-PR #43 (original submission): 910 tests
-- Post-PR #43 (incl. Codex/CodeRabbit review hardening): 951 tests
-- **Net new: +130 tests** (+89 in the original 17 new test files; +41 review-hardening regressions added to existing test files).
+- Post-PR #43 (incl. Codex/CodeRabbit review hardening): 954 tests
+- **Net new: +133 tests** (+89 in the original 17 new test files; +44 review-hardening regressions added to existing test files).

@@ -95,6 +95,25 @@ class AdSenseManagementParser:
                 # Duplicate header would overwrite the earlier cell in
                 # dim_values/metric_values and silently corrupt the row mapping.
                 raise ParserError(f"duplicate headers entry: {header_type}.{name}")
+            # FIX: A METRIC_CURRENCY header declares the ISO currency of the
+            # amounts in its column. The parser stamps request.currencyCode on
+            # every emitted row, so a header whose currencyCode diverges from
+            # the request would persist a preserved amount under the wrong ISO
+            # code and corrupt downstream finance totals (CLAUDE.md rule 4).
+            # AdSense returns monetary metrics in the requested currency, so
+            # fail closed on a missing/non-string/mismatched header currency.
+            if header_type == "METRIC_CURRENCY":
+                header_currency = h.get("currencyCode")
+                if not isinstance(header_currency, str):
+                    raise ParserError(
+                        f"METRIC_CURRENCY header {name!r} requires a string currencyCode"
+                    )
+                if header_currency != currency:
+                    raise ParserError(
+                        f"METRIC_CURRENCY header {name!r} currencyCode "
+                        f"{header_currency!r} does not match request currencyCode "
+                        f"{currency!r}"
+                    )
             header_specs.append((header_type, name))
 
         for raw_row in rows:

@@ -219,6 +219,19 @@ def _create_google_revenue_source_rows_table() -> None:
             name="ck_google_revenue_source_rows_source_row_key_length",
         ),
     )
+    # PostgreSQL is the financial source of truth; enforce that raw_payload is a
+    # JSON object (not array/scalar/null) at the DB level. The repository already
+    # validates dict shape, but a DB CHECK keeps non-repository write paths
+    # (direct SQL, future services, backfills) aligned with the key/value audit-
+    # object contract. jsonb_typeof is PostgreSQL-only, so guard by dialect; the
+    # ORM mirrors this PG-only via ddl_if(dialect="postgresql") in
+    # db/source_models.py, and downgrade drops the table (and this CHECK) wholesale.
+    if op.get_bind().dialect.name == "postgresql":
+        op.create_check_constraint(
+            "ck_google_revenue_source_rows_raw_payload_object",
+            "google_revenue_source_rows",
+            "jsonb_typeof(raw_payload) = 'object'",
+        )
     op.create_index(
         "ix_google_revenue_source_rows_tenant_month_source",
         "google_revenue_source_rows",

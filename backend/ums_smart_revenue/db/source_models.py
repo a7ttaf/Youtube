@@ -208,6 +208,14 @@ class GoogleRevenueSourceRowORM(FinanceBase):
             "length(source_row_key) = 64",
             name="ck_google_revenue_source_rows_source_row_key_length",
         ),
+        # PostgreSQL (source of truth) enforces that raw_payload is a JSON
+        # object, not an array/scalar/null. jsonb_typeof is PostgreSQL-only, so
+        # ddl_if keeps it off the SQLite create_all() path the ORM tests use;
+        # the migration applies the same CHECK guarded by dialect name.
+        CheckConstraint(
+            "jsonb_typeof(raw_payload) = 'object'",
+            name="ck_google_revenue_source_rows_raw_payload_object",
+        ).ddl_if(dialect="postgresql"),
         Index(
             "ix_google_revenue_source_rows_tenant_month_source",
             "tenant_id", "report_month", "source_system",
