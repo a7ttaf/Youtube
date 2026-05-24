@@ -58,6 +58,11 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 
 ## Changed
 
+### Review hardening round 4 (Codex P1 + CodeRabbit)
+
+- `backend/ums_smart_revenue/connectors/google_source_parsers/youtube_analytics.py` + `…/base.py` — accept numeric `reports.query` metric cells (Codex P1). `reports.query` columns are typed `FLOAT`/`INTEGER` per `columnHeaders[].dataType` and arrive as JSON numbers, so the prior str-only guard raised `ParserError` on valid YouTube Analytics revenue reports. `parse_decimal_amount` now normalises `str | int | float` → `Decimal` (floats routed through `str()` to avoid binary-float artifacts; `bool` and non-finite `NaN`/`Infinity` rejected) and the str-only guard in `youtube_analytics.py` is removed. AdSense (string report cells) and YouTube Reporting (CSV) parsers keep their str guards by design — only `reports.query` emits typed JSON numbers.
+- `backend/ums_smart_revenue/connectors/google_source_parsers/source_row_keys.py` — `currency` is now a **required** key (bracket access) in both currency-keyed branches (`youtube_analytics`, `adsense_management`) instead of `fields.get("currency")` (CodeRabbit). A caller that omits currency now fails closed with `KeyError` rather than silently hashing `None` and collapsing distinct-currency rows onto one upsert key (CLAUDE.md rule 4). `filters` stays optional. Both production parsers already pass `currency`; five `test_source_row_keys.py` cases were updated and a `test_currency_is_required_for_currency_keyed_branches` regression added.
+
 ### Review hardening round 3 (Codex P2)
 
 - `backend/ums_smart_revenue/connectors/google_source_rows/repository.py` — `_validate` now also bounds the **integer** part of `amount_native` (≤14 integer digits, completing the `Numeric(20,6)` envelope alongside the round-2 ≤6-fractional scale guard) so an oversized value fails as a typed error, not a raw PG numeric overflow; `raw_payload` validation now rejects **non-string keys** (recursive `_require_str_keys`, since `json.dumps` silently coerces them) and **NaN/Infinity** floats (`json.dumps(allow_nan=False)`, which PG JSONB rejects).
@@ -86,4 +91,5 @@ Nothing. Legacy `currency_exchange_rates` table, `CurrencyExchangeRateORM`, `fin
 - Post-PR #43 (review hardening round 1, Codex/CodeRabbit): 961 tests
 - Post-PR #43 (review hardening round 2, Codex/CodeRabbit): 973 tests
 - Post-PR #43 (review hardening round 3 — Numeric precision + raw_payload key/finite guards + DB finite CHECK): 978 tests
-- **Net new: +157 tests** (+89 in the original 17 new test files; +68 review-hardening regressions across existing test files).
+- Post-PR #43 (review hardening round 4 — numeric `reports.query` metric-cell acceptance + `currency` required in source_row_key): 983 tests
+- **Net new: +162 tests** (+89 in the original 17 new test files; +73 review-hardening regressions across existing test files).

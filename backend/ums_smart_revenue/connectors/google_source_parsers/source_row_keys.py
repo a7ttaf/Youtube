@@ -69,7 +69,11 @@ def build_source_row_key(*, source_system: str, **fields: object) -> str:
             # currency + filters are distinct dataset axes: the same
             # ids/metrics/dimensions/period fetched in a different currency or
             # with a different filter expression is a different source row.
-            "currency": fields.get("currency"),
+            # FIX: currency is REQUIRED (bracket access): a caller that omits it
+            # now fails closed with KeyError instead of silently hashing None and
+            # collapsing distinct-currency rows onto one upsert key (CLAUDE.md
+            # rule 4). filters stays optional (.get) — a query may carry none.
+            "currency": fields["currency"],
             "filters": fields.get("filters"),
             "period_start": fields["period_start"],
             "period_end": fields["period_end"],
@@ -90,7 +94,9 @@ def build_source_row_key(*, source_system: str, **fields: object) -> str:
             # metric/account/period/dimensions reported in a different currency
             # is a distinct monetary row, so it must not collapse to one upsert
             # key (mirrors the youtube_analytics branch above).
-            "currency": fields.get("currency"),
+            # FIX: required (bracket access) — omitting currency now fails closed
+            # with KeyError rather than silently hashing None (CodeRabbit).
+            "currency": fields["currency"],
             "account_id": fields["account_id"],
             "period_start": fields["period_start"],
             "period_end": fields["period_end"],
