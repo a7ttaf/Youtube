@@ -48,8 +48,8 @@ PR #42 landed the design pivot: B1 is Google source-reported revenue ingestion f
 ### Docs (Phase 9, this commit)
 
 - `Docs/pulls/2026-05-23-pr43-spec-b1-google-revenue-source-ingestion-{report,changelog,handoff}.md` (this triple).
-- `Docs/01_IMPLEMENTATION_PLAN.md` — added ✅ PR #43 sub-bullet under "Source-reported currency foundation".
-- `Docs/15_DELIVERY_BACKLOG.md` — added ✅ PR #43 bullet under "Cross-cutting shipped".
+- `Docs/01_IMPLEMENTATION_PLAN.md` — added ⏳ PR #43 sub-bullet under "Source-reported currency foundation".
+- `Docs/15_DELIVERY_BACKLOG.md` — added ⏳ PR #43 bullet under "Cross-cutting shipped".
 
 ## Validation
 

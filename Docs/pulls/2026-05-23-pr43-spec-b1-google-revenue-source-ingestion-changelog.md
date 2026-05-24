@@ -58,6 +58,10 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 
 ## Changed
 
+### Review hardening round 8
+
+- `Docs/pulls/2026-05-23-pr43-spec-b1-google-revenue-source-ingestion-{changelog,report}.md` — the doc-summary bullets described the `Docs/01_IMPLEMENTATION_PLAN.md` and `Docs/15_DELIVERY_BACKLOG.md` entries with a ✅ (done) marker, but both authoritative docs deliberately record those entries as ⏳ (foundation-only — the scaffolding-only honesty rule, no live ingestion path yet). Both summaries now read ⏳ to match the docs they actually describe. Doc-only marker consistency; no code, test, or behavior change.
+
 ### Review hardening round 7
 
 - `backend/ums_smart_revenue/connectors/google_source_parsers/youtube_analytics.py` — three follow-on guards hardening the round-6 changes:
@@ -96,8 +100,8 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 - `tests/db/_postgres_helpers.py` — `require_postgres_url` rejects whitespace-only `UMS_TEST_DATABASE_URL` and returns the trimmed value; added the standard contract block.
 - `Docs/pulls/2026-05-23-pr43-spec-b1-google-revenue-source-ingestion-report.md` — corrected the stale `query_signature` description (excludes `metrics`; embedded as a structured JSON field, not a raw delimited string).
 - `backend/ums_smart_revenue/db/alembic/env.py` — added `from ums_smart_revenue.db import source_models  # noqa: F401  # registers tables on FinanceBase`.
-- `Docs/01_IMPLEMENTATION_PLAN.md` — added ✅ PR #43 sub-bullet under "Source-reported currency foundation" section.
-- `Docs/15_DELIVERY_BACKLOG.md` — added ✅ PR #43 bullet under "Cross-cutting shipped".
+- `Docs/01_IMPLEMENTATION_PLAN.md` — added ⏳ PR #43 sub-bullet under "Source-reported currency foundation" section.
+- `Docs/15_DELIVERY_BACKLOG.md` — added ⏳ PR #43 bullet under "Cross-cutting shipped".
 
 ## Removed
 
