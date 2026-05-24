@@ -36,6 +36,33 @@ def _canonical_csv(value: str, sep: str) -> str:
     return sep.join(sorted(part.strip() for part in value.split(sep) if part.strip()))
 
 
+def _canonical_filters(filters: str | None) -> str | None:
+    """Order-independent canonical form of a YouTube Analytics filter string.
+
+    An omitted filter and a present-but-empty filter both mean "unfiltered",
+    so both normalise to None (identical row key). Clause order (``;``) and the
+    order of comma-separated values inside an ``==`` clause (e.g. ``video==a,b``)
+    are semantically irrelevant, so both are sorted. Clauses using other
+    operators keep their content intact (only their position is sorted) to
+    avoid incorrectly merging distinct filters.
+    """
+    if not filters:
+        return None
+    canonical_clauses: list[str] = []
+    for raw_clause in filters.split(";"):
+        clause = raw_clause.strip()
+        if not clause:
+            continue
+        if "==" in clause:
+            key, _, values = clause.partition("==")
+            sorted_values = ",".join(
+                sorted(v.strip() for v in values.split(",") if v.strip())
+            )
+            clause = f"{key.strip()}=={sorted_values}"
+        canonical_clauses.append(clause)
+    return ";".join(sorted(canonical_clauses)) or None
+
+
 # ============================================================================
 # Purpose: Translate YouTube Analytics reports.query payloads into
 #          ParsedSourceRow rows, one per monetary metric per data row.
@@ -75,10 +102,11 @@ class YouTubeAnalyticsParser:
         metrics_csv = require_str(request, "metrics")
         dimensions_csv = require_str(request, "dimensions")
         ids = require_str(request, "ids")
-        # content_owner_id holds the BARE id (the part after "==") so it is
-        # usable for joins/filters; source_account_id keeps the raw `ids`
-        # selector. This matches the YouTube Reporting parser, which also stores
-        # the bare content_owner rather than a selector string.
+        # FIX: content_owner_id holds the BARE id (the part after "==") so it
+        # is usable for joins/filters; source_account_id keeps the raw `ids`
+        # selector. The previous branch stored the full `contentOwner==...`
+        # selector here, duplicating source_account_id's shape and breaking the
+        # dedicated field. Matches the YouTube Reporting parser.
         content_owner_id = ids.split("==", 1)[1] if ids.startswith("contentOwner==") else None
         # FIX: Include `ids` in query_signature so two payloads identical except
         # for the contentOwner/channel account produce distinct source_row_keys.
@@ -97,10 +125,11 @@ class YouTubeAnalyticsParser:
         filters = request.get("filters")
         if filters is not None and not isinstance(filters, str):
             raise ParserError("query_request.filters must be a string when present")
-        # Canonicalise filter clauses (order-independent) for the same
-        # idempotency reason as metrics/dimensions above; YouTube Analytics
-        # separates filter clauses with ';'.
-        filters_key = _canonical_csv(filters, ";") if filters else filters
+        # Canonicalise filters for idempotency: an omitted filter and a
+        # present-but-empty filter both mean "unfiltered" (normalise to None),
+        # and clause / comma-separated multi-value order is semantically
+        # irrelevant (sorted) — see _canonical_filters.
+        filters_key = _canonical_filters(filters)
         # Reject reversed ranges before month bucketing: endDate must be on or
         # after startDate; fail closed so a malformed payload stays typed.
         if period_end < period_start:

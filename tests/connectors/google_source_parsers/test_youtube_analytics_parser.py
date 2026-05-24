@@ -167,3 +167,24 @@ def test_content_owner_id_is_bare_id_not_selector() -> None:
     assert rows
     assert all(r.source_account_id == "contentOwner==cms-test-1" for r in rows)
     assert all(r.content_owner_id == "cms-test-1" for r in rows)
+
+
+def test_empty_and_omitted_filters_produce_same_key() -> None:
+    """A present-but-empty filter and an omitted filter both mean unfiltered,
+    so they must produce the same source_row_key (idempotency)."""
+    base = _load_fixture("sample_query_response_2026_04.json")  # no filters key
+    empty = {**base, "query_request": {**base["query_request"], "filters": ""}}
+    a = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(base, tenant_id=TENANT_ID))
+    b = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(empty, tenant_id=TENANT_ID))
+    assert a == b
+
+
+def test_reordered_multi_value_filter_produces_same_key() -> None:
+    """Reordering comma-separated values inside a filter clause is semantically
+    equivalent and must produce the same source_row_key."""
+    base = _load_fixture("sample_query_response_2026_04.json")
+    p1 = {**base, "query_request": {**base["query_request"], "filters": "video==id1,id2"}}
+    p2 = {**base, "query_request": {**base["query_request"], "filters": "video==id2,id1"}}
+    a = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(p1, tenant_id=TENANT_ID))
+    b = sorted(r.source_row_key for r in YouTubeAnalyticsParser().parse(p2, tenant_id=TENANT_ID))
+    assert a == b
