@@ -39,7 +39,7 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 - `tests/db/_postgres_helpers.py` — fail-fast env guard.
 - `tests/db/test_google_revenue_source_migration_postgres.py` — 9 PostgreSQL tests (6 migration round-trip + 1 repository upsert on the production `on_conflict_do_update` path + 1 raw_payload object-shape CHECK rejection via direct SQL + 1 amount-finite guard: NaN rejected by the CHECK, +Infinity rejected by the NUMERIC type, both via direct SQL).
 - `tests/connectors/google_source_rows/test_currencies_repository.py` — 5 tests.
-- `tests/connectors/google_source_rows/test_repository.py` — 38 tests (idempotency, tenant isolation, validation incl. NaN/non-Decimal amount, non-str guards for all required string columns, report_month-format/period-order/report_month↔period-consistency checks, id stability, raw_payload deep-copy alias safety on write + read paths, non-USD visibility; round-2 hardening: ASCII-digit report_month, nullable-text type guard, date-not-datetime period bounds, ≤6-decimal scale accept/reject, JSON-serialisable raw_payload, COALESCE provenance preservation on re-import; round-3 hardening: Numeric(20,6) integer-digit precision accept/reject, non-string raw_payload key rejection, NaN/Infinity float rejection).
+- `tests/connectors/google_source_rows/test_repository.py` — 39 tests (idempotency, tenant isolation, validation incl. NaN/non-Decimal amount, non-str guards for all required string columns, report_month-format/period-order/report_month↔period-consistency checks, id stability, raw_payload deep-copy alias safety on write + read paths, non-USD visibility; round-2 hardening: ASCII-digit report_month, nullable-text type guard, date-not-datetime period bounds, ≤6-decimal scale accept/reject, JSON-serialisable raw_payload, COALESCE provenance preservation on re-import; round-3 hardening: Numeric(20,6) integer-digit precision accept/reject, non-string raw_payload key rejection, NaN/Infinity float rejection; round-5 hardening: zero amount with a positive exponent accepted by the integer-digit guard).
 - `tests/connectors/google_source_parsers/test_source_row_keys.py` — 11 tests (incl. AdSense key excludes run-specific report_id, includes currency).
 - `tests/connectors/google_source_parsers/test_youtube_reporting_parser.py` — 12 tests.
 - `tests/connectors/google_source_parsers/test_youtube_analytics_parser.py` — 16 tests.
@@ -57,6 +57,11 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 - `Docs/pulls/2026-05-23-pr43-spec-b1-google-revenue-source-ingestion-handoff.md` (handoff).
 
 ## Changed
+
+### Review hardening round 5 (Codex P1 + P2)
+
+- `tests/db/_postgres_helpers.py` + `tests/db/test_google_revenue_source_migration_postgres.py` — moved the `UMS_TEST_DATABASE_URL` resolution out of module import time into a `postgres_url` pytest fixture (Codex P1). Computing it at import made the whole `pytest -q` suite abort during *collection* (`Interrupted: 1 error during collection`, 0 tests run) on any machine/CI without Postgres, because pytest imports every test module up front. It now raises the same `RuntimeError` — never a skip, so the AST policy gate still holds — only when the Postgres suite's fixtures run, so the failure is localised to that suite and every unrelated test still collects and runs.
+- `backend/ums_smart_revenue/connectors/google_source_rows/repository.py` — `_validate` now exempts exact zero from the ≤14 integer-digit guard (Codex P2). A zero with a positive exponent (e.g. `Decimal('0E+20')`, which `parse_decimal_amount` can yield) has `adjusted()==20` and was wrongly rejected even though it is exactly 0 and fits `Numeric(20,6)`; `is_zero()` is True for any zero regardless of exponent. Added `test_validate_accepts_zero_amount_with_positive_exponent`.
 
 ### Review hardening round 4 (Codex P1 + CodeRabbit)
 
@@ -92,4 +97,5 @@ Nothing. Legacy `currency_exchange_rates` table, `CurrencyExchangeRateORM`, `fin
 - Post-PR #43 (review hardening round 2, Codex/CodeRabbit): 973 tests
 - Post-PR #43 (review hardening round 3 — Numeric precision + raw_payload key/finite guards + DB finite CHECK): 978 tests
 - Post-PR #43 (review hardening round 4 — numeric `reports.query` metric-cell acceptance + `currency` required in source_row_key): 983 tests
-- **Net new: +162 tests** (+89 in the original 17 new test files; +73 review-hardening regressions across existing test files).
+- Post-PR #43 (review hardening round 5 — zero-amount integer-digit guard + Postgres-helper fixture relocation): 984 tests
+- **Net new: +163 tests** (+89 in the original 17 new test files; +74 review-hardening regressions across existing test files).

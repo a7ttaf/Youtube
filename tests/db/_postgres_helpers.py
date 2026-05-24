@@ -1,12 +1,14 @@
 """Helper for tests that require disposable PostgreSQL.
 
-Tests that import this module MUST be runnable only when
-UMS_TEST_DATABASE_URL is set. The module raises at import time if the
-variable is missing — matching the AST policy gate's no-skip rule.
+Tests that need PostgreSQL call :func:`require_postgres_url` from a fixture
+(see ``test_google_revenue_source_migration_postgres.py``) rather than at
+import time. It raises ``RuntimeError`` — never a skip, so the AST policy
+gate's no-skip rule still holds — when ``UMS_TEST_DATABASE_URL`` is unset, so a
+missing optional dependency errors only that suite instead of aborting pytest
+collection for the entire repository.
 """
 
 import os
-from typing import Final
 
 
 # ============================================================================
@@ -40,6 +42,3 @@ def require_postgres_url() -> str:
             "SQLite is not a valid substitute for this test."
         )
     return url.strip()
-
-
-POSTGRES_URL: Final[str] = require_postgres_url()

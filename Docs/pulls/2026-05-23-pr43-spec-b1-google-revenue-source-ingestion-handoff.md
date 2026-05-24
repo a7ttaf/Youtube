@@ -36,7 +36,7 @@ Spec B1 implementation: storage + synthetic-fixture parser foundation for Google
 
 ## Failures / skipped gates
 
-None. Migration test fails fast (RuntimeError at collection) if `UMS_TEST_DATABASE_URL` is missing — by design, per AST policy.
+None. The migration suite's `postgres_url` fixture fails fast (RuntimeError at test setup, not at collection) if `UMS_TEST_DATABASE_URL` is missing — by design, per AST policy. The failure is localised to that suite, so the rest of `pytest -q` still collects and runs.
 
 ## Risks
 

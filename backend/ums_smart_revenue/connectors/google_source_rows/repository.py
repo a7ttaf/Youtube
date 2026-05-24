@@ -380,7 +380,11 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         # on INSERT, escaping this typed contract. Decimal.adjusted() is the
         # exponent of the most-significant digit, so >= 14 means >14 integer
         # digits (i.e. magnitude >= 10**14).
-        if row.amount_native.adjusted() >= 14:
+        # FIX: exempt exact zero first. A zero with a positive exponent (e.g.
+        # Decimal('0E+20'), which parsers can emit) has adjusted()==20 even
+        # though its value is 0 and fits Numeric(20, 6); is_zero() is True for
+        # any zero regardless of exponent, so a valid zero is no longer rejected.
+        if not row.amount_native.is_zero() and row.amount_native.adjusted() >= 14:
             raise GoogleRevenueSourceRowValidationError(
                 "amount_native must not exceed 14 integer digits "
                 f"(column is Numeric(20, 6)), got {row.amount_native}"

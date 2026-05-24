@@ -11,7 +11,7 @@ from pathlib import Path
 from uuid import uuid4
 
 import pytest
-from _postgres_helpers import POSTGRES_URL  # sibling module (pytest's prepend mode puts tests/db on sys.path)
+from _postgres_helpers import require_postgres_url  # sibling module (pytest's prepend mode puts tests/db on sys.path)
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, inspect, text
@@ -28,7 +28,19 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 @pytest.fixture
-def alembic_config() -> Config:
+def postgres_url() -> str:
+    # FIX: resolve UMS_TEST_DATABASE_URL inside a fixture, not at module import.
+    # pytest imports every test module during collection, so doing the lookup at
+    # import time turned a missing optional Postgres dependency into a *collection*
+    # error that aborts the entire `pytest -q` run (0 tests executed) on any
+    # machine/CI without Postgres. Resolving here localises the failure to this
+    # suite — a hard RuntimeError, never a skip (the no-skip policy gate still
+    # holds) — while every unrelated test still collects and runs.
+    return require_postgres_url()
+
+
+@pytest.fixture
+def alembic_config(postgres_url: str) -> Config:
     # Build Config WITHOUT passing the alembic.ini path. env.py only calls
     # `logging.config.fileConfig()` when `config.config_file_name is not None`.
     # `fileConfig` defaults to `disable_existing_loggers=True`, which silences
@@ -37,7 +49,7 @@ def alembic_config() -> Config:
     # Setting `script_location` and `sqlalchemy.url` directly gives alembic
     # everything it needs without touching the logging tree.
     cfg = Config()
-    cfg.set_main_option("sqlalchemy.url", POSTGRES_URL)
+    cfg.set_main_option("sqlalchemy.url", postgres_url)
     cfg.set_main_option(
         "script_location",
         str(REPO_ROOT / "backend" / "ums_smart_revenue" / "db" / "alembic"),
@@ -46,8 +58,8 @@ def alembic_config() -> Config:
 
 
 @pytest.fixture
-def fresh_engine() -> object:
-    engine = create_engine(POSTGRES_URL)
+def fresh_engine(postgres_url: str) -> object:
+    engine = create_engine(postgres_url)
     with engine.begin() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE"))
         conn.execute(text("CREATE SCHEMA public"))

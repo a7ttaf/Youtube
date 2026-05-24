@@ -42,7 +42,7 @@ PR #42 landed the design pivot: B1 is Google source-reported revenue ingestion f
 
 ### Migration round-trip (Phase 8)
 
-- `tests/db/_postgres_helpers.py` — fail-fast guard: raises `RuntimeError` at import time if `UMS_TEST_DATABASE_URL` is missing. No silent skip per the AST policy gate.
+- `tests/db/_postgres_helpers.py` — fail-fast guard: `require_postgres_url()` raises `RuntimeError` if `UMS_TEST_DATABASE_URL` is missing. Called from a `postgres_url` fixture (not at import time) so a missing optional Postgres dependency errors only this suite instead of aborting whole-suite pytest collection. No silent skip per the AST policy gate.
 - `tests/db/test_google_revenue_source_migration_postgres.py` — 6 tests against disposable `postgres:18-alpine` on host port 55432: pre-state at prior head, upgrade creates expected tables/seeds, both indexes present, partial channel/month index has WHERE clause, downgrade drops only B1 tables, full round-trip is idempotent. `alembic_config` fixture constructs `Config()` without file path to avoid `logging.fileConfig()` side-effects polluting other suites.
 
 ### Docs (Phase 9, this commit)
@@ -54,8 +54,8 @@ PR #42 landed the design pivot: B1 is Google source-reported revenue ingestion f
 ## Validation
 
 - Round 1 (`python scripts/run_validation_gate.py`, `UMS_TEST_DATABASE_URL` set): **6/6 steps green** (ruff → AST policy → pytest 961 passed → vitest 34 passed → git diff --check worktree → staged).
-- Review passes (cumulative): `python -m ruff check backend tests scripts` clean → `python -m pytest -q` **982 passed** (full suite, incl. the 9 PostgreSQL migration/upsert tests on disposable `postgres:18-alpine`) → `git diff --check` clean. No frontend touched, so vitest unchanged (34).
-- Pytest delta from PR #41 baseline (821): **+161 tests** (+89 in 17 new test files at submission; +72 review-hardening regressions across the Codex/CodeRabbit rounds, incl. 4 for numeric `reports.query` metric-cell acceptance).
+- Review passes (cumulative): `python -m ruff check backend tests scripts` clean → `python -m pytest -q` **984 passed** (full suite, incl. the 9 PostgreSQL migration/upsert tests on disposable `postgres:18-alpine`) → `git diff --check` clean. No frontend touched, so vitest unchanged (34).
+- Pytest delta from PR #41 baseline (821): **+163 tests** (+89 in 17 new test files at submission; +74 review-hardening regressions across the Codex/CodeRabbit rounds, incl. 4 for numeric `reports.query` metric-cell acceptance).
 - PostgreSQL: 9/9 passed on disposable `postgres:18-alpine` (6 migration round-trip + 1 repository upsert covering the production `on_conflict_do_update` path + 1 raw_payload object-shape CHECK rejection via direct SQL + 1 amount-finite CHECK: NaN rejected by the CHECK, +Infinity by the NUMERIC type).
 - Frontend tests: 34 passed (unchanged from PR #41; no frontend code touched).
 - AST policy gate: still passes (no skip/xfail introduced).
@@ -80,7 +80,7 @@ Both fixes landed in commit `3a4da12` (post Phase 9 docs commit). After applying
 
 ## Remaining risks
 
-- **Pre-merge**: PR #43 depends on a disposable Postgres for the migration round-trip test. CI must spin one up or the test fails fast at collection (by design — no silent skip).
+- **Pre-merge**: PR #43 depends on a disposable Postgres for the migration round-trip test. CI must spin one up or the suite's `postgres_url` fixture fails fast at test setup (by design — no silent skip; the failure is localised to that suite, not whole-suite collection).
 - **Fixture drift risk**: synthetic fixture payloads mirror Google API shapes from public documentation. If Google changes the upstream response shape, parsers may need follow-up. The synthetic-data discipline (`tests/connectors/_fixtures/README.md`) must be enforced on every future fixture addition.
 - **`YouTubeAnalyticsParser` `query_signature` review**: post-fix the query signature is `f"{ids}|{canonical(dimensions_csv)}|{metric_name}"` — `ids` restores per-account scoping and `metrics` is deliberately excluded (each row is tagged with its own `metric_key`, so co-requesting an extra metric must not change an existing row's key). That signature is then embedded as one field in the structured, sorted-key JSON document that `build_source_row_key` SHA-256 hashes (alongside `currency`, `filters`, and the period), so delimiter collisions are not possible. Future parsers consuming new Google API shapes should follow the same canonical-field pattern.
 - **Analytics query shapes are intentionally channel-scoped (deferred to B2)**: `YouTubeAnalyticsParser` requires a `dimensions` field and a `channel` dimension per row (it derives `youtube_channel_id` from it). Codex flagged that `reports.query` also permits dimensionless / non-`channel` (e.g. country/day) shapes. B1 only issues channel-scoped queries and the parser **fails closed** (loud `ParserError`, never silent data loss) on other shapes, so there is no correctness bug today. Supporting CMS-aggregate or alternative-dimension analytics is a deliberate scope decision for B2 (the live connector that owns query construction) — not a B1 fix. File: `backend/ums_smart_revenue/connectors/google_source_parsers/youtube_analytics.py` (`require_str(request, "dimensions")` ~L108; `channel` guard ~L196).

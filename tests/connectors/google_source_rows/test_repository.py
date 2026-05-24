@@ -607,6 +607,18 @@ def test_validate_accepts_amount_at_max_numeric_precision(session: Session) -> N
     assert validated.amount_native == Decimal("99999999999999.999999")
 
 
+def test_validate_accepts_zero_amount_with_positive_exponent(session: Session) -> None:
+    """A zero is valid revenue (0 integer digits) and must pass the integer-width
+    guard regardless of Decimal representation. Decimal('0E+20') — which a parser
+    can emit — has adjusted()==20 and previously tripped the >=14 integer-digit
+    guard even though it is exactly 0 and fits Numeric(20, 6). Asserted via
+    _validate directly (SQLite cannot round-trip the exotic exponent faithfully).
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    validated = repo._validate(_row(source_row_key="z0" * 32, amount="0E+20"))
+    assert validated.amount_native == Decimal(0)
+
+
 def test_rejects_non_str_raw_payload_keys(session: Session) -> None:
     """json.dumps silently coerces non-string dict keys (int 1 → "1"), which
     would mutate audit evidence and can collide keys. The repository must reject
