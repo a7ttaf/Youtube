@@ -372,6 +372,17 @@ def test_rejects_non_str_source_row_key(session: Session) -> None:
         repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
 
 
+def test_rejects_non_str_currency_code(session: Session) -> None:
+    """A non-str currency_code must raise the typed validation error in
+    _validate, not a raw TypeError when upsert_many builds the currency set
+    ({r.currency_code ...}) for the _require_currencies pre-check.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    bad = replace(_row(source_row_key="c" * 64), currency_code=["USD"])  # unhashable
+    with pytest.raises(GoogleRevenueSourceRowValidationError):
+        repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
+
+
 def test_validate_deep_copies_nested_raw_payload(session: Session) -> None:
     """_validate must deep-copy raw_payload so a caller mutating a NESTED dict
     cannot reach into the persisted row. A shallow dict() copy shares the

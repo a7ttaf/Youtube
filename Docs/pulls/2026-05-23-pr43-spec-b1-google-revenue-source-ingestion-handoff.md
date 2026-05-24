@@ -27,7 +27,7 @@ Spec B1 implementation: storage + synthetic-fixture parser foundation for Google
 
 ## Tests run locally
 
-- Full suite (with `UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/postgres`): **950 passed in ~105s** (910 original + 40 review-hardening regression tests added during Codex/CodeRabbit review).
+- Full suite (with `UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/postgres`): **951 passed in ~105s** (910 original + 41 review-hardening regression tests added during Codex/CodeRabbit review).
 - Ruff: clean across `backend` and `tests`.
 - `git diff --check` (worktree + staged): clean.
 - AST policy gate: passes (no `pytest.skip`/`xfail` introduced).

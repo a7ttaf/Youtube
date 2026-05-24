@@ -39,7 +39,7 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 - `tests/db/_postgres_helpers.py` — fail-fast env guard.
 - `tests/db/test_google_revenue_source_migration_postgres.py` — 7 PostgreSQL tests (6 migration round-trip + 1 repository upsert on the production `on_conflict_do_update` path).
 - `tests/connectors/google_source_rows/test_currencies_repository.py` — 5 tests.
-- `tests/connectors/google_source_rows/test_repository.py` — 22 tests (idempotency, tenant isolation, validation incl. NaN/non-Decimal amount, non-str source_system/source_row_key typed-error guards, id stability, raw_payload deep-copy alias safety on write + read paths, non-USD visibility).
+- `tests/connectors/google_source_rows/test_repository.py` — 23 tests (idempotency, tenant isolation, validation incl. NaN/non-Decimal amount, non-str source_system/source_row_key/currency_code typed-error guards, id stability, raw_payload deep-copy alias safety on write + read paths, non-USD visibility).
 - `tests/connectors/google_source_parsers/test_source_row_keys.py` — 9 tests.
 - `tests/connectors/google_source_parsers/test_youtube_reporting_parser.py` — 12 tests.
 - `tests/connectors/google_source_parsers/test_youtube_analytics_parser.py` — 16 tests.
@@ -70,5 +70,5 @@ Nothing. Legacy `currency_exchange_rates` table, `CurrencyExchangeRateORM`, `fin
 
 - Pre-PR #43 baseline (post-PR #42 docs-only merge): 821 tests
 - Post-PR #43 (original submission): 910 tests
-- Post-PR #43 (incl. Codex/CodeRabbit review hardening): 950 tests
-- **Net new: +129 tests** (+89 in the original 17 new test files; +40 review-hardening regressions added to existing test files).
+- Post-PR #43 (incl. Codex/CodeRabbit review hardening): 951 tests
+- **Net new: +130 tests** (+89 in the original 17 new test files; +41 review-hardening regressions added to existing test files).
