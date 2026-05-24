@@ -58,6 +58,11 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 
 ## Changed
 
+### Review hardening round 6
+
+- `backend/ums_smart_revenue/connectors/google_source_parsers/adsense_management.py` — `_SETTLED_METRICS` no longer includes `UNPAID_AMOUNT`; only `PAID_AMOUNT` is settled, matching the module contract. `UNPAID_AMOUNT` is outstanding (not-yet-paid) earnings, so it now correctly emits `value_kind='estimated'`/`report_type='earnings_report'` instead of being mislabeled as settled cash, which would have corrupted finalized-vs-estimated and payment-reconciliation totals (CLAUDE.md rule 4). Added `test_unpaid_amount_is_classified_as_estimated`.
+- `backend/ums_smart_revenue/connectors/google_source_parsers/youtube_analytics.py` — the parser now fails closed on a malformed `query_request.ids` selector. The YouTube Analytics contract requires a structured `channel==<id>` or `contentOwner==<id>` value; arbitrary/unprefixed text or a bare `contentOwner==`/`channel==` with an empty id previously persisted a revenue row whose `source_account_id`/`content_owner_id` could not be tied back to a real owner or channel. This mirrors the AdSense parser's `accountId` prefix/suffix guard. Added 6 parametrized failure-state cases and a positive `channel==`-scoped acceptance test.
+
 ### Review hardening round 5 (Codex P1 + P2)
 
 - `tests/db/_postgres_helpers.py` + `tests/db/test_google_revenue_source_migration_postgres.py` — moved the `UMS_TEST_DATABASE_URL` resolution out of module import time into a `postgres_url` pytest fixture (Codex P1). Computing it at import made the whole `pytest -q` suite abort during *collection* (`Interrupted: 1 error during collection`, 0 tests run) on any machine/CI without Postgres, because pytest imports every test module up front. It now raises the same `RuntimeError` — never a skip, so the AST policy gate still holds — only when the Postgres suite's fixtures run, so the failure is localised to that suite and every unrelated test still collects and runs.
@@ -98,4 +103,5 @@ Nothing. Legacy `currency_exchange_rates` table, `CurrencyExchangeRateORM`, `fin
 - Post-PR #43 (review hardening round 3 — Numeric precision + raw_payload key/finite guards + DB finite CHECK): 978 tests
 - Post-PR #43 (review hardening round 4 — numeric `reports.query` metric-cell acceptance + `currency` required in source_row_key): 983 tests
 - Post-PR #43 (review hardening round 5 — zero-amount integer-digit guard + Postgres-helper fixture relocation): 984 tests
-- **Net new: +163 tests** (+89 in the original 17 new test files; +74 review-hardening regressions across existing test files).
+- Post-PR #43 (review hardening round 6 — UNPAID_AMOUNT classified estimated + fail-closed on malformed Analytics `ids` selector): 992 tests
+- **Net new: +171 tests** (+89 in the original 17 new test files; +82 review-hardening regressions across existing test files).
