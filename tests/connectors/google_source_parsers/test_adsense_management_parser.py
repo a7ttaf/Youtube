@@ -254,3 +254,24 @@ def test_unknown_header_type_still_fails_closed() -> None:
     }
     with pytest.raises(ParserError):
         list(AdSenseManagementParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_whitespace_account_id_suffix_raises() -> None:
+    """An accountId whose id after 'accounts/' is only whitespace must fail
+    closed — it would otherwise pass the non-empty check and persist a blank
+    source_account_id / source_row_key axis (CLAUDE.md rule 4).
+    """
+    payload = _load("sample_earnings_report_2026_04.json")
+    bad = {**payload, "request": {**payload["request"], "accountId": "accounts/   "}}
+    with pytest.raises(ParserError):
+        list(AdSenseManagementParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_blank_currency_code_raises() -> None:
+    """A blank/whitespace request.currencyCode is not a valid ISO code and must
+    fail closed rather than persist a blank currency_code (CLAUDE.md rule 4).
+    """
+    payload = _load("sample_earnings_report_2026_04.json")
+    bad = {**payload, "request": {**payload["request"], "currencyCode": "   "}}
+    with pytest.raises(ParserError):
+        list(AdSenseManagementParser().parse(bad, tenant_id=TENANT_ID))

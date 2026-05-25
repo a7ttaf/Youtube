@@ -353,3 +353,29 @@ def test_rejects_non_finite_float_amount() -> None:
     bad = {**base, "rows": [["UC_test_alpha", "US", float("inf"), "1500.000000"]]}
     with pytest.raises(ParserError):
         list(YouTubeAnalyticsParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_blank_channel_dimension_raises() -> None:
+    """A whitespace-only channel dimension value is not a valid attribution
+    identity and must fail closed rather than persist a blank youtube_channel_id
+    (the prior isinstance-only check let it through).
+    """
+    base = _load_fixture("sample_query_response_2026_04.json")
+    # columnHeaders order: [channel, country, estimatedRevenue, grossRevenue].
+    bad = {**base, "rows": [["   ", "US", "1234.567890", "1500.000000"]]}
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_whitespace_padded_channel_is_trimmed_and_keyed_consistently() -> None:
+    """A channel dimension with surrounding whitespace is the same identity as
+    the trimmed one: it is stored trimmed and hashes to the same source_row_key,
+    so padding drift across reruns cannot duplicate rows (idempotency).
+    """
+    base = _load_fixture("sample_query_response_2026_04.json")
+    clean = list(YouTubeAnalyticsParser().parse(base, tenant_id=TENANT_ID))
+    # Pad the channel cell (index 0) of every data row.
+    padded_rows = [[f"  {row[0]}  ", *row[1:]] for row in base["rows"]]
+    padded = list(YouTubeAnalyticsParser().parse({**base, "rows": padded_rows}, tenant_id=TENANT_ID))
+    assert {r.youtube_channel_id for r in padded} == {r.youtube_channel_id for r in clean}
+    assert sorted(r.source_row_key for r in padded) == sorted(r.source_row_key for r in clean)

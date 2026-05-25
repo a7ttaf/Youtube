@@ -58,6 +58,13 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 
 ## Changed
 
+### Review hardening round 12
+
+- All three Google source parsers — string **identity and currency** fields are now rejected/normalised when blank or whitespace-only, instead of being only type-checked. The shared `require_str`/`isinstance` guards accepted `""` and `"   "`, which would have persisted a blank `source_account_id`, `youtube_channel_id`, or `currency_code` and folded a blank into the dedup key (CLAUDE.md rule 4):
+  - `youtube_reporting.py` — `channel` must be a non-blank string (it is the required identity and the `source_account_id` fallback) and is stored trimmed; a present-but-blank/whitespace `content_owner` is now treated the **same as absent** (`content_owner_id=None`, `source_account_id` falls back to the channel) so it never yields a blank identity; `metrics.currencyCode` must be non-blank. The `source_row_key` is built from the **normalised** identity (trimmed channel, blank/absent `content_owner` dropped) so whitespace padding or a blank-vs-omitted `content_owner` hash to one key and upsert in place. +5 tests.
+  - `youtube_analytics.py` — the `channel` dimension must be a non-blank string and is written back trimmed so the row key hashes the canonical channel (mirrors the existing `currency`/selector-id trimming). +2 tests.
+  - `adsense_management.py` — the `accountId` id after `accounts/` is now trimmed before the non-empty check (so `"accounts/   "` fails closed), and `request.currencyCode` must be non-blank. +2 tests.
+
 ### Review hardening round 11
 
 - `backend/ums_smart_revenue/connectors/google_source_parsers/youtube_analytics.py` — `includeHistoricalChannelData` is now folded into the Analytics row key. The flag selects a different content-owner dataset (true includes pre-link channel history), so two runs differing only in it return different revenue but previously hashed to the same upsert key and could overwrite each other (CLAUDE.md rule 4). Optional (defaults to the API default `False`); a present non-bool fails closed. +2 tests.

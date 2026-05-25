@@ -82,39 +82,64 @@ class YouTubeReportingParser:
             metrics = require_dict(row, "metrics")
 
             channel = dimensions.get("channel")
-            content_owner = dimensions.get("content_owner")
-            if not isinstance(channel, str):
-                raise ParserError("dimensions.channel must be a string")
+            # FIX: channel is the required attribution identity AND the fallback
+            # for source_account_id when content_owner is absent, so it must be a
+            # NON-BLANK string. The prior isinstance-only check let a whitespace
+            # value through and produced a blank youtube_channel_id /
+            # source_account_id. Store the trimmed id.
+            if not isinstance(channel, str) or not channel.strip():
+                raise ParserError("dimensions.channel must be a non-empty string")
+            channel = channel.strip()
             # FIX: content_owner is OPTIONAL. YouTube Reporting bulk reports are
             # generated for either a content owner OR a single channel, and a
             # channel-scoped report legitimately omits content_owner. When present
-            # it must be a string (fail closed on a malformed type); when absent,
-            # source_account_id falls back to the channel id below — a real source
-            # identity, not the "unknown" sentinel the original branch used, so we
-            # still preserve attribution (CLAUDE.md "preserve every financial
-            # number's source") without rejecting valid channel-scoped reports.
+            # it must be a string (fail closed on a malformed type). A present-but-
+            # blank/whitespace content_owner carries no CMS identity, so it is
+            # treated the SAME as absent: content_owner_id becomes None and
+            # source_account_id falls back to the channel id below — never a blank
+            # identity (CLAUDE.md rule 4). Normalising blank to None also makes a
+            # blank and an omitted content_owner hash to one source_row_key.
+            content_owner = dimensions.get("content_owner")
             if content_owner is not None and not isinstance(content_owner, str):
                 raise ParserError("dimensions.content_owner must be a string when present")
+            content_owner = content_owner.strip() if isinstance(content_owner, str) else None
+            if not content_owner:
+                content_owner = None
 
             amount_raw = metrics.get("estimatedRevenue")
             if not isinstance(amount_raw, str):
                 raise ParserError("metrics.estimatedRevenue must be a string for Decimal precision")
             currency = metrics.get("currencyCode")
-            if not isinstance(currency, str):
-                raise ParserError("metrics.currencyCode must be a string")
+            # FIX: reject a blank/whitespace currency: it is not a valid ISO code
+            # and would persist as a blank currency_code and fold a blank into the
+            # row key (mirrors the YouTube Analytics / AdSense currency guards;
+            # CLAUDE.md rule 4). Store the trimmed code.
+            if not isinstance(currency, str) or not currency.strip():
+                raise ParserError("metrics.currencyCode must be a non-empty string")
+            currency = currency.strip()
 
+            # FIX: build the dedup key from the NORMALISED identity — the trimmed
+            # channel, and content_owner dropped when blank/absent — so trivially
+            # different inputs (whitespace padding, or a blank vs omitted
+            # content_owner) hash to ONE key and upsert in place instead of
+            # inserting duplicate revenue rows (idempotency, CLAUDE.md rule 4).
+            # Any other dimensions are preserved as-is.
+            key_dimensions = {**dimensions, "channel": channel}
+            if content_owner is None:
+                key_dimensions.pop("content_owner", None)
+            else:
+                key_dimensions["content_owner"] = content_owner
             source_row_key = build_source_row_key(
                 source_system=self.source_system,
                 report_type=report_type,
-                # FIX: pass the per-row currency into the key. currency is a
-                # financial-identity axis (matches youtube_analytics/adsense): the
-                # same report_type/period/dimensions reported in a different
-                # currency is a distinct monetary row and must not collapse onto
-                # one upsert key and overwrite the other (CLAUDE.md rule 4).
+                # currency is a financial-identity axis (matches youtube_analytics
+                # /adsense): the same report_type/period/dimensions reported in a
+                # different currency is a distinct monetary row and must not
+                # collapse onto one upsert key and overwrite the other (rule 4).
                 currency=currency,
                 period_start=period_start.isoformat(),
                 period_end=period_end.isoformat(),
-                dimensions=dimensions,
+                dimensions=key_dimensions,
             )
 
             yield ParsedSourceRow(

@@ -197,3 +197,90 @@ def test_distinct_currency_rows_do_not_collide_on_source_row_key() -> None:
     rows = list(YouTubeReportingParser().parse(only_currency_differs, tenant_id=TENANT_ID))
     assert {r.currency_code for r in rows} == {"USD", "EUR"}
     assert rows[0].source_row_key != rows[1].source_row_key
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+def test_blank_channel_raises(blank: str) -> None:
+    """A whitespace-only channel is not a valid attribution identity and must
+    fail closed rather than persist a blank youtube_channel_id/source_account_id
+    (the prior isinstance-only check let it through).
+    """
+    payload = _load_fixture("sample_estimated_revenue_2026_04.json")
+    bad = {
+        **payload,
+        "rows": [{**r, "dimensions": {**r["dimensions"], "channel": blank}} for r in payload["rows"]],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeReportingParser().parse(bad, tenant_id=TENANT_ID))
+
+
+def test_blank_content_owner_falls_back_to_channel() -> None:
+    """A present-but-blank/whitespace content_owner carries no CMS identity, so
+    it is treated like an absent one: content_owner_id is None and
+    source_account_id falls back to the channel (never a blank identity).
+    """
+    payload = _load_fixture("sample_estimated_revenue_2026_04.json")
+    blanked = {
+        **payload,
+        "rows": [{**r, "dimensions": {**r["dimensions"], "content_owner": "   "}} for r in payload["rows"]],
+    }
+    rows = list(YouTubeReportingParser().parse(blanked, tenant_id=TENANT_ID))
+    assert rows
+    for row in rows:
+        assert row.content_owner_id is None
+        assert row.source_account_id == row.youtube_channel_id
+
+
+def test_blank_and_absent_content_owner_hash_to_same_source_row_key() -> None:
+    """A blank content_owner and an omitted one are the same logical identity
+    (channel-scoped), so they must produce identical source_row_keys — otherwise
+    a rerun that serialises the blank differently would insert duplicate revenue
+    rows instead of upserting (idempotency, CLAUDE.md rule 4).
+    """
+    payload = _load_fixture("sample_estimated_revenue_2026_04.json")
+    blanked = {
+        **payload,
+        "rows": [{**r, "dimensions": {**r["dimensions"], "content_owner": "  "}} for r in payload["rows"]],
+    }
+    absent = {
+        **payload,
+        "rows": [
+            {**r, "dimensions": {k: v for k, v in r["dimensions"].items() if k != "content_owner"}}
+            for r in payload["rows"]
+        ],
+    }
+    a = sorted(r.source_row_key for r in YouTubeReportingParser().parse(blanked, tenant_id=TENANT_ID))
+    b = sorted(r.source_row_key for r in YouTubeReportingParser().parse(absent, tenant_id=TENANT_ID))
+    assert a == b
+
+
+def test_whitespace_padded_channel_is_trimmed_and_keyed_consistently() -> None:
+    """A channel with surrounding whitespace is the same identity as the trimmed
+    one: it is stored trimmed and hashes to the same source_row_key, so padding
+    drift across reruns cannot duplicate rows (idempotency).
+    """
+    payload = _load_fixture("sample_estimated_revenue_2026_04.json")
+    clean = list(YouTubeReportingParser().parse(payload, tenant_id=TENANT_ID))
+    padded_payload = {
+        **payload,
+        "rows": [
+            {**r, "dimensions": {**r["dimensions"], "channel": f"  {r['dimensions']['channel']}  "}}
+            for r in payload["rows"]
+        ],
+    }
+    padded = list(YouTubeReportingParser().parse(padded_payload, tenant_id=TENANT_ID))
+    assert {r.youtube_channel_id for r in padded} == {r.youtube_channel_id for r in clean}
+    assert sorted(r.source_row_key for r in padded) == sorted(r.source_row_key for r in clean)
+
+
+def test_blank_currency_raises() -> None:
+    """A blank/whitespace currencyCode is not a valid ISO code and must fail
+    closed rather than persist a blank currency_code (CLAUDE.md rule 4).
+    """
+    payload = _load_fixture("sample_estimated_revenue_2026_04.json")
+    bad = {
+        **payload,
+        "rows": [{**r, "metrics": {**r["metrics"], "currencyCode": "   "}} for r in payload["rows"]],
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeReportingParser().parse(bad, tenant_id=TENANT_ID))

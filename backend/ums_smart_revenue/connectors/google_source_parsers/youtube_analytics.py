@@ -251,8 +251,15 @@ class YouTubeAnalyticsParser:
                     metric_values[name] = value
 
             channel = dim_values.get("channel")
-            if not isinstance(channel, str):
-                raise ParserError("dimensions.channel must be a string")
+            # FIX: channel is the attribution identity folded into the row key; a
+            # whitespace-only value passed the prior isinstance-only check and
+            # produced a blank youtube_channel_id. Require a non-blank string and
+            # write the trimmed id back into dim_values so the row key hashes the
+            # canonical channel (mirrors the currency / selector-id trimming above).
+            if not isinstance(channel, str) or not channel.strip():
+                raise ParserError("dimensions.channel must be a non-empty string")
+            channel = channel.strip()
+            dim_values["channel"] = channel
 
             for metric_name in metric_names:
                 if metric_name not in _MONETARY_METRICS:

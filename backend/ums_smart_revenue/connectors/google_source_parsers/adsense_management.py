@@ -83,7 +83,10 @@ class AdSenseManagementParser:
         # source_row_key idempotency/key consistency.
         if not account_raw.startswith("accounts/"):
             raise ParserError("request.accountId must start with 'accounts/'")
-        account_id = account_raw.removeprefix("accounts/")
+        # FIX: strip the suffix before the non-empty check so a whitespace-only id
+        # ("accounts/   ") fails closed too — it would otherwise pass the
+        # truthiness check and persist a blank source_account_id / key axis.
+        account_id = account_raw.removeprefix("accounts/").strip()
         if not account_id:
             raise ParserError(
                 "request.accountId must include a non-empty account id after 'accounts/'"
@@ -91,6 +94,13 @@ class AdSenseManagementParser:
         period_start = self._parse_iso_date(require_dict(require_dict(request, "dateRange"), "startDate"))
         period_end = self._parse_iso_date(require_dict(require_dict(request, "dateRange"), "endDate"))
         currency = require_str(request, "currencyCode")
+        # FIX: reject a blank/whitespace currency: it is not a valid ISO code and
+        # would persist as a blank currency_code and key axis (mirrors the YouTube
+        # Analytics currency guard; CLAUDE.md rule 4). Store the trimmed code; the
+        # METRIC_CURRENCY header check below compares against this trimmed value.
+        if not currency.strip():
+            raise ParserError("request.currencyCode must be a non-empty string")
+        currency = currency.strip()
         # Reject reversed ranges before month bucketing: endDate must be on or
         # after startDate. The DB has a period-order constraint, but fail closed
         # here so a malformed payload stays on the parser's typed contract.
