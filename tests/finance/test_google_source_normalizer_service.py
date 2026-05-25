@@ -251,3 +251,36 @@ def test_normalize_month_skips_unknown_channel_rows(session):
     )
     assert len(result.skipped) == 2
     assert all(s.reason.value == "unknown_channel" for s in result.skipped)
+
+
+def test_normalize_month_skips_unsupported_value_kind_rows(session):
+    tenant_id = uuid4()
+    _seed_tenant_and_currencies(session, tenant_id)
+    _seed_active_channel(session, tenant_id, "UC_test_tax")
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    repo.upsert_many(
+        tenant_id,
+        [
+            _yt_reporting_row(
+                channel="UC_test_tax", source_row_key_seed="t",
+                metric_key="estimatedRevenue", value_kind="tax",
+            ),
+            _yt_reporting_row(
+                channel="UC_test_tax", source_row_key_seed="d",
+                metric_key="estimatedRevenue", value_kind="deduction",
+            ),
+            _yt_reporting_row(
+                channel="UC_test_tax", source_row_key_seed="j",
+                metric_key="estimatedRevenue", value_kind="adjustment",
+            ),
+        ],
+        raw_file_id=None,
+        imported_by=None,
+    )
+    session.commit()
+
+    result = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+        month="2026-04", actor_user_id=ACTOR_USER_ID,
+    )
+    assert len(result.skipped) == 3
+    assert all(s.reason.value == "unsupported_value_kind" for s in result.skipped)

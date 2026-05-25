@@ -85,6 +85,9 @@ CANONICAL_METRIC_RULE: Mapping[str, tuple[str, ...]] = MappingProxyType(
 )
 
 
+_UNSUPPORTED_VALUE_KINDS: frozenset[str] = frozenset({"tax", "deduction", "adjustment"})
+
+
 def select_canonical_row(
     rows: list[GoogleRevenueSourceRowEntry],
 ) -> tuple[GoogleRevenueSourceRowEntry | None, list[GoogleRevenueSourceRowEntry]]:
@@ -235,7 +238,18 @@ class GoogleSourceNormalizer:
                     for r in bucket_rows
                 )
                 continue
-            # Subsequent step branches (6c-6j) wired in later tasks.
+            # Step 6(c) - drop tax/deduction/adjustment rows.
+            unsupported_in_bucket = [
+                r for r in bucket_rows if r.value_kind in _UNSUPPORTED_VALUE_KINDS
+            ]
+            for r in unsupported_in_bucket:
+                skipped.append(
+                    SkippedSourceRow(source_row_id=r.id, reason=SkipReason.UNSUPPORTED_VALUE_KIND)
+                )
+            remaining = [r for r in bucket_rows if r.value_kind not in _UNSUPPORTED_VALUE_KINDS]
+            if not remaining:
+                continue
+            # Subsequent step branches (6d-6j) wired in later tasks.
 
         result = NormalizationResult(
             created=created, updated=updated, unchanged=unchanged, skipped=skipped,
