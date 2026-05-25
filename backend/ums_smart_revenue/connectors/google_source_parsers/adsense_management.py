@@ -201,7 +201,13 @@ class AdSenseManagementParser:
                     amount_native=parse_decimal_amount(raw_value, metric_key=metric_name),
                     currency_code=currency,
                     source_report_id=report_id,
-                    raw_payload={"dimensions": dim_values, "metric": metric_name, "value": raw_value},
+                    # FIX: store an OWNED copy of dim_values per yielded row. Every
+                    # monetary metric from one input row shares the same dim_values
+                    # object, so persisting it by reference would let a later
+                    # mutation of one row's raw_payload["dimensions"] silently
+                    # corrupt sibling metric rows' audit payloads (CLAUDE.md rule
+                    # 4). Cells are scalars, so a shallow dict() copy isolates it.
+                    raw_payload={"dimensions": dict(dim_values), "metric": metric_name, "value": raw_value},
                 )
 
     @staticmethod

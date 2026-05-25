@@ -199,3 +199,29 @@ def test_missing_rows_is_treated_as_empty_report() -> None:
     }
     rows = list(AdSenseManagementParser().parse(payload, tenant_id=TENANT_ID))
     assert rows == []
+
+
+def test_sibling_metric_rows_have_isolated_raw_payload_dimensions() -> None:
+    """Every monetary metric from one input row shares the same dim_values
+    object while parsing; each yielded row must store an OWNED copy so mutating
+    one row's raw_payload dimensions cannot corrupt a sibling metric row's audit
+    payload (CLAUDE.md rule 4). The fixture has a single METRIC_CURRENCY column,
+    so a second is added so one input row yields two metric rows.
+    """
+    payload = _load("sample_earnings_report_2026_04.json")
+    currency = payload["request"]["currencyCode"]
+    first_row = payload["rows"][0]
+    two_metric = {
+        **payload,
+        "headers": [
+            *payload["headers"],
+            {"name": "ESTIMATED_EARNINGS_2", "type": "METRIC_CURRENCY", "currencyCode": currency},
+        ],
+        "rows": [{**first_row, "cells": [*first_row["cells"], {"value": "1.00"}]}],
+    }
+    rows = list(AdSenseManagementParser().parse(two_metric, tenant_id=TENANT_ID))
+    assert len(rows) == 2  # one input row, two monetary metrics
+    rows[0].raw_payload["dimensions"]["__probe__"] = "x"
+    assert "__probe__" not in rows[1].raw_payload["dimensions"], (
+        "sibling metric rows must have isolated audit payloads"
+    )

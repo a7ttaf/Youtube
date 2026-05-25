@@ -157,6 +157,24 @@ def test_channel_selector_representation_does_not_change_keys() -> None:
     assert mine_keys == explicit_keys
 
 
+def test_sibling_metric_rows_have_isolated_raw_payload_dimensions() -> None:
+    """The two monetary metrics of one data_row (estimatedRevenue, grossRevenue)
+    share the same dim_values object while parsing; each yielded row must store
+    an OWNED copy so mutating one row's raw_payload dimensions cannot corrupt the
+    sibling metric row's audit payload (CLAUDE.md rule 4).
+    """
+    payload = _load_fixture("sample_query_response_2026_04.json")
+    rows = list(YouTubeAnalyticsParser().parse(payload, tenant_id=TENANT_ID))
+    # The parser yields all monetary metrics of a data_row consecutively, so
+    # rows[0] and rows[1] are the two metrics of the first data_row.
+    assert rows[0].youtube_channel_id == rows[1].youtube_channel_id
+    assert rows[0].metric_key != rows[1].metric_key
+    rows[0].raw_payload["dimensions"]["__probe__"] = "x"
+    assert "__probe__" not in rows[1].raw_payload["dimensions"], (
+        "sibling metric rows must have isolated audit payloads"
+    )
+
+
 def test_rejects_non_finite_amount() -> None:
     """Infinity/NaN Decimal strings must fail at the parser, not downstream."""
     payload = _load_fixture("sample_query_response_2026_04.json")
