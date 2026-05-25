@@ -101,14 +101,30 @@ def test_raw_payload_is_isolated_from_caller_mutation() -> None:
         assert row.raw_payload["dimensions"]["channel"] != "UC_MUTATED_AFTER_PARSE"
 
 
-def test_missing_content_owner_raises_parser_error() -> None:
-    """source_account_id must come from content_owner, not a sentinel."""
+def test_missing_content_owner_falls_back_to_channel() -> None:
+    """content_owner is optional: a channel-scoped report omits it. When absent,
+    source_account_id falls back to the channel id (a real identity, not a
+    sentinel) and content_owner_id is None.
+    """
     payload = _load_fixture("sample_estimated_revenue_2026_04.json")
-    # Remove content_owner from the first row's dimensions.
+    channel_scoped = {**payload}
+    channel_scoped["rows"] = [
+        {**r, "dimensions": {k: v for k, v in r["dimensions"].items() if k != "content_owner"}}
+        for r in channel_scoped["rows"]
+    ]
+    rows = list(YouTubeReportingParser().parse(channel_scoped, tenant_id=TENANT_ID))
+    assert rows  # ingests rather than failing closed
+    for row in rows:
+        assert row.content_owner_id is None
+        assert row.source_account_id == row.youtube_channel_id
+
+
+def test_non_string_content_owner_raises_parser_error() -> None:
+    """A present-but-non-string content_owner is malformed and must fail closed."""
+    payload = _load_fixture("sample_estimated_revenue_2026_04.json")
     bad = {**payload}
     bad["rows"] = [
-        {**r, "dimensions": {k: v for k, v in r["dimensions"].items() if k != "content_owner"}}
-        for r in bad["rows"]
+        {**r, "dimensions": {**r["dimensions"], "content_owner": 123}} for r in bad["rows"]
     ]
     with pytest.raises(ParserError):
         list(YouTubeReportingParser().parse(bad, tenant_id=TENANT_ID))

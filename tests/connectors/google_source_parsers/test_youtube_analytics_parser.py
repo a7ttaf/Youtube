@@ -175,6 +175,40 @@ def test_sibling_metric_rows_have_isolated_raw_payload_dimensions() -> None:
     )
 
 
+def test_historical_channel_data_flag_changes_row_identity() -> None:
+    """includeHistoricalChannelData selects a different dataset (true includes
+    pre-link channel history), so two runs differing only in that flag are
+    distinct datasets and must NOT collide on the source_row_key (CLAUDE.md rule
+    4). The fixture omits the flag (API default False).
+    """
+    base = _load_fixture("sample_query_response_2026_04.json")
+    with_true = {
+        **base,
+        "query_request": {**base["query_request"], "includeHistoricalChannelData": True},
+    }
+    default_keys = sorted(
+        r.source_row_key for r in YouTubeAnalyticsParser().parse(base, tenant_id=TENANT_ID)
+    )
+    true_keys = sorted(
+        r.source_row_key for r in YouTubeAnalyticsParser().parse(with_true, tenant_id=TENANT_ID)
+    )
+    assert default_keys  # ingests with the flag omitted (defaults to False)
+    assert default_keys != true_keys
+
+
+def test_non_boolean_historical_flag_raises() -> None:
+    """A present-but-non-boolean includeHistoricalChannelData is malformed and
+    must fail closed (bool is checked before int, since bool is an int subclass).
+    """
+    base = _load_fixture("sample_query_response_2026_04.json")
+    bad = {
+        **base,
+        "query_request": {**base["query_request"], "includeHistoricalChannelData": "true"},
+    }
+    with pytest.raises(ParserError):
+        list(YouTubeAnalyticsParser().parse(bad, tenant_id=TENANT_ID))
+
+
 def test_rejects_non_finite_amount() -> None:
     """Infinity/NaN Decimal strings must fail at the parser, not downstream."""
     payload = _load_fixture("sample_query_response_2026_04.json")

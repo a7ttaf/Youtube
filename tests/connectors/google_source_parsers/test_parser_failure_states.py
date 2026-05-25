@@ -343,8 +343,11 @@ def test_adsense_rejects_header_missing_name() -> None:
 
 
 def test_adsense_rejects_unsupported_header_type() -> None:
-    """An unsupported header type fails closed (ParserError) rather than being
-    skipped, which would shift cells and mislabel revenue values."""
+    """A TRULY unknown header type fails closed (ParserError) rather than being
+    skipped, which would shift cells and mislabel revenue values. (Known
+    non-currency metric types like METRIC_TALLY are instead tolerated and routed
+    positionally — see test_non_currency_metric_headers_are_tolerated.)
+    """
     payload = {
         "request": {
             "accountId": "accounts/pub-1",
@@ -356,7 +359,7 @@ def test_adsense_rejects_unsupported_header_type() -> None:
         },
         "report_id": "r",
         "headers": [
-            {"name": "CLICKS", "type": "METRIC_TALLY"},  # not dimension/currency
+            {"name": "MYSTERY", "type": "REPORT_WIDGET"},  # not dimension/currency/known-metric
             {"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "USD"},
         ],
         "rows": [{"cells": [{"value": "10"}, {"value": "5.00"}]}],

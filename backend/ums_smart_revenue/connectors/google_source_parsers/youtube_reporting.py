@@ -85,13 +85,16 @@ class YouTubeReportingParser:
             content_owner = dimensions.get("content_owner")
             if not isinstance(channel, str):
                 raise ParserError("dimensions.channel must be a string")
-            # FIX: Fail closed if content_owner is missing or non-string. The
-            # previous branch silently substituted "unknown" for
-            # source_account_id, which risked mis-attributing source rows in
-            # multi-CMS tenants. Per CLAUDE.md ("preserve every financial
-            # number's source") we surface the bad payload instead.
-            if not isinstance(content_owner, str):
-                raise ParserError("dimensions.content_owner is required for YouTube Reporting rows")
+            # FIX: content_owner is OPTIONAL. YouTube Reporting bulk reports are
+            # generated for either a content owner OR a single channel, and a
+            # channel-scoped report legitimately omits content_owner. When present
+            # it must be a string (fail closed on a malformed type); when absent,
+            # source_account_id falls back to the channel id below — a real source
+            # identity, not the "unknown" sentinel the original branch used, so we
+            # still preserve attribution (CLAUDE.md "preserve every financial
+            # number's source") without rejecting valid channel-scoped reports.
+            if content_owner is not None and not isinstance(content_owner, str):
+                raise ParserError("dimensions.content_owner must be a string when present")
 
             amount_raw = metrics.get("estimatedRevenue")
             if not isinstance(amount_raw, str):
@@ -117,7 +120,9 @@ class YouTubeReportingParser:
             yield ParsedSourceRow(
                 source_system=self.source_system,
                 source_row_key=source_row_key,
-                source_account_id=content_owner,
+                # source_account_id is the content owner when present, else the
+                # channel id (channel-scoped report) — never a sentinel.
+                source_account_id=content_owner if content_owner is not None else channel,
                 content_owner_id=content_owner,
                 youtube_channel_id=channel,
                 report_type=report_type,

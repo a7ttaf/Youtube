@@ -225,3 +225,32 @@ def test_sibling_metric_rows_have_isolated_raw_payload_dimensions() -> None:
     assert "__probe__" not in rows[1].raw_payload["dimensions"], (
         "sibling metric rows must have isolated audit payloads"
     )
+
+
+def test_non_currency_metric_headers_are_tolerated() -> None:
+    """A report may carry non-currency metric columns (e.g. METRIC_TALLY) next to
+    the currency metrics. The parser ingests the currency revenue and ignores the
+    non-currency column (routing it positionally to keep cell alignment) instead
+    of rejecting the whole report, which would drop parseable revenue.
+    """
+    payload = _load("sample_earnings_report_2026_04.json")
+    with_tally = {
+        **payload,
+        "headers": [*payload["headers"], {"name": "CLICKS", "type": "METRIC_TALLY"}],
+        "rows": [{**r, "cells": [*r["cells"], {"value": "42"}]} for r in payload["rows"]],
+    }
+    rows = list(AdSenseManagementParser().parse(with_tally, tenant_id=TENANT_ID))
+    assert len(rows) == 3  # only the currency metric is emitted; the tally is ignored
+    assert all(r.metric_key == "ESTIMATED_EARNINGS" for r in rows)
+
+
+def test_unknown_header_type_still_fails_closed() -> None:
+    """A truly unknown header type still fails closed — no silent mis-routing."""
+    payload = _load("sample_earnings_report_2026_04.json")
+    bad = {
+        **payload,
+        "headers": [*payload["headers"], {"name": "MYSTERY", "type": "METRIC_BOGUS"}],
+        "rows": [{**r, "cells": [*r["cells"], {"value": "1"}]} for r in payload["rows"]],
+    }
+    with pytest.raises(ParserError):
+        list(AdSenseManagementParser().parse(bad, tenant_id=TENANT_ID))

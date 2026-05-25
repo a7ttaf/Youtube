@@ -30,6 +30,16 @@ from ums_smart_revenue.connectors.google_source_rows import ParsedSourceRow
 # and payment reconciliation (CLAUDE.md rule 4). Only PAID_AMOUNT is settled.
 _SETTLED_METRICS: Final[frozenset[str]] = frozenset({"PAID_AMOUNT"})
 
+# FIX: AdSense ReportResult.HeaderType includes non-currency metric types that a
+# report may carry alongside the currency metrics B1 ingests. Tolerate them —
+# route their cells positionally so column alignment is preserved, but do NOT
+# emit rows for them — instead of failing the whole report, which would drop the
+# parseable currency revenue. A truly unknown header type still fails closed (no
+# silent mis-routing).
+_TOLERATED_METRIC_HEADER_TYPES: Final[frozenset[str]] = frozenset(
+    {"METRIC_TALLY", "METRIC_RATIO", "METRIC_MILLISECONDS", "METRIC_DECIMAL"}
+)
+
 
 # ============================================================================
 # Purpose: Translate AdSense earnings + payment report payloads into
@@ -108,7 +118,10 @@ class AdSenseManagementParser:
             if not isinstance(h, dict):
                 raise ParserError("each headers[*] must be an object")
             header_type = h.get("type")
-            if header_type not in {"DIMENSION", "METRIC_CURRENCY"}:
+            if (
+                header_type not in {"DIMENSION", "METRIC_CURRENCY"}
+                and header_type not in _TOLERATED_METRIC_HEADER_TYPES
+            ):
                 raise ParserError(f"unsupported headers[*].type: {header_type!r}")
             name = h.get("name")
             if not isinstance(name, str):
@@ -154,8 +167,10 @@ class AdSenseManagementParser:
                 value = cell["value"]
                 if header_type == "DIMENSION":
                     dim_values[name] = value
-                else:
+                elif header_type == "METRIC_CURRENCY":
                     metric_values[name] = value
+                # else: tolerated non-currency metric — consumed positionally to
+                # keep cell alignment, but not emitted as a monetary row.
 
             for metric_name, raw_value in metric_values.items():
                 if not isinstance(raw_value, str):

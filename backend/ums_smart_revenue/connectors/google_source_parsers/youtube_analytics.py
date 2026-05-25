@@ -117,6 +117,19 @@ class YouTubeAnalyticsParser:
             currency = currency.strip()
         else:
             currency = "USD"
+        # FIX: includeHistoricalChannelData is an OPTIONAL reports.query flag that
+        # changes the returned dataset for content-owner queries (true includes
+        # pre-link channel history), so two runs differing only in this flag
+        # return different revenue. Fold it into the row key (default False = the
+        # API default) so distinct-flag datasets cannot collide onto one upsert
+        # key and overwrite each other (CLAUDE.md rule 4). A present non-bool is
+        # malformed and fails closed (bool is checked before int since bool is an
+        # int subclass).
+        include_historical = request.get("includeHistoricalChannelData", False)
+        if not isinstance(include_historical, bool):
+            raise ParserError(
+                "query_request.includeHistoricalChannelData must be a boolean when present"
+            )
         # `metrics` is validated for payload shape but intentionally NOT part of
         # the row key: the parser persists only monetary metrics and tags each
         # row with its own metric_key, so co-requesting an extra metric (e.g.
@@ -160,7 +173,13 @@ class YouTubeAnalyticsParser:
         # reorder-only rerun hashes the same; metrics are deliberately excluded
         # (see the require_str note above), folded in per-row via metric_name.
         account_identity = content_owner_id or ""
-        query_signature = f"{account_identity}|{_canonical_csv(dimensions_csv, ',')}"
+        # historical flag is part of the query identity: it selects a different
+        # dataset, so it must separate the row keys (see the include_historical
+        # guard above).
+        query_signature = (
+            f"{account_identity}|{_canonical_csv(dimensions_csv, ',')}"
+            f"|hist={'1' if include_historical else '0'}"
+        )
         # A different currency or filter expression for the same
         # ids/metrics/dimensions/period is a distinct dataset; fold both into
         # the row key (as structured fields, below) so one cannot overwrite the
