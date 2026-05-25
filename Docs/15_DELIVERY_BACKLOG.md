@@ -26,7 +26,7 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   #34); real ingestion not built.
 - ⏳ Monthly revenue normalization — remaining: B2 live ingestion wiring
   (revenue facts foundation in PR #2; normalization bridge from
-  google_revenue_source_rows shipped in PR #?).
+  google_revenue_source_rows shipped in PR #44).
 - ⏳ AdSense payment sync — remaining: payment ORM + repo tests (PR #26);
   real pull not built.
 - ⏳ Finance month-close screen — remaining: close-gate backend (PR #8);
@@ -141,7 +141,7 @@ single P-tier above.
 - ⏳ Google source-rows -> revenue facts normalization bridge: pure
   `select_canonical_row()` rule per `source_system`, USD-only writes,
   upfront locked-month gate via `get_or_create_month_close_row(..., for_update=True)`,
-  read-before-write CREATED/UPDATED/UNCHANGED classification — PR #?.
+  read-before-write CREATED/UPDATED/UNCHANGED classification — PR #44.
   Bridges PR #43's `google_revenue_source_rows` substrate to the existing
   `MonthlyChannelRevenueFactORM` via
   `SqlAlchemyRevenueFactRepository.record_fact()`. No schema delta, no new

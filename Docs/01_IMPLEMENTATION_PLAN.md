@@ -140,7 +140,7 @@ running on the operator's workstation.
       migration round-trip on disposable `postgres:18-alpine`. Remaining: live
       OAuth/API connector (B2), FX/conversion (B3) — scaffolding-only, so marked
       ⏳ not ✅.
-    - ⏳ PR #? - Google source-rows -> revenue facts normalizer (Spec C1).
+    - ⏳ PR #44 - Google source-rows -> revenue facts normalizer (Spec C1).
       Adds `backend/ums_smart_revenue/finance/google_source_normalizer.py`,
       five new test files under `tests/finance/`, no schema delta. Bridge
       between PR #43 substrate and existing `MonthlyChannelRevenueFactORM`
