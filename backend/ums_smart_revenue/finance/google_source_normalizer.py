@@ -10,6 +10,7 @@ See: Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.m
 """
 
 import logging
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal
@@ -376,14 +377,21 @@ class GoogleSourceNormalizer:
         result = NormalizationResult(
             created=created, updated=updated, unchanged=unchanged, skipped=skipped,
         )
+        # Aggregate skip-reason distribution (counts only, no source_row_id
+        # values) per spec Section 6.5 "Observability". Empty dict when
+        # nothing was skipped — kept in the line so log-parsers see a
+        # stable structure regardless of outcome.
+        reason_counts = Counter(s.reason.value for s in result.skipped)
         logger.info(
             "normalize_month complete tenant_id=%s month=%s "
-            "created=%d updated=%d unchanged=%d skipped=%d",
+            "created=%d updated=%d unchanged=%d skipped=%d "
+            "skipped_by_reason=%s",
             self._tenant_id,
             month,
             len(result.created),
             len(result.updated),
             len(result.unchanged),
             len(result.skipped),
+            dict(reason_counts),
         )
         return result
