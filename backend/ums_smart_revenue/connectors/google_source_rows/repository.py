@@ -15,6 +15,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
+from typing import List  # noqa: UP035
 from uuid import UUID, uuid4
 
 from sqlalchemy import func, select
@@ -158,7 +159,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         *,
         raw_file_id: UUID | None,
         imported_by: UUID | None,
-    ) -> list[GoogleRevenueSourceRowEntry]:
+    ) -> List[GoogleRevenueSourceRowEntry]:  # noqa: UP006
         materialised = list(rows)
         if not materialised:
             return []
@@ -252,7 +253,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         *,
         report_month: str | None = None,
         source_system: str | None = None,
-    ) -> list[GoogleRevenueSourceRowEntry]:
+    ) -> List[GoogleRevenueSourceRowEntry]:  # noqa: UP006
         stmt = select(GoogleRevenueSourceRowORM).where(
             GoogleRevenueSourceRowORM.tenant_id == tenant_id
         )
@@ -275,7 +276,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         *,
         youtube_channel_id: str,
         report_month: str,
-    ) -> list[GoogleRevenueSourceRowEntry]:
+    ) -> List[GoogleRevenueSourceRowEntry]:  # noqa: UP006
         rows = self._session.scalars(
             select(GoogleRevenueSourceRowORM)
             .where(
