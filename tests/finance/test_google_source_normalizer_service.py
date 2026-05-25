@@ -527,3 +527,47 @@ def test_normalize_month_uses_canonical_source_report_id(session):
         month="2026-04", actor_user_id=ACTOR_USER_ID,
     )
     assert result.created[0].source_report_id == "report-canonical-001"
+
+
+def test_normalize_month_reverse_lookup_returns_same_canonical_row(session):
+    # Given a written fact, re-applying select_canonical_row() on USD-filtered
+    # source rows for the same (tenant, month, channel, source_system) must
+    # return the same row that produced the fact. Pins the explain-endpoint
+    # contract from spec Section 2 "deterministic reverse lookup".
+    from ums_smart_revenue.finance.google_source_normalizer import (
+        SOURCE_SYSTEM_TO_SOURCE_KIND,
+        select_canonical_row,
+    )
+
+    tenant_id = uuid4()
+    _seed_tenant_and_currencies(session, tenant_id)
+    _seed_active_channel(session, tenant_id, "UC_test_rev")
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    # Multiple AdSense rows; PAID_AMOUNT must be canonical.
+    repo.upsert_many(
+        tenant_id,
+        [
+            _adsense_row(channel="UC_test_rev", metric_key="PAID_AMOUNT", source_row_key_seed="p"),
+            _adsense_row(channel="UC_test_rev", metric_key="ESTIMATED_EARNINGS", source_row_key_seed="e"),
+        ],
+        raw_file_id=None, imported_by=None,
+    )
+    session.commit()
+
+    result = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+        month="2026-04", actor_user_id=ACTOR_USER_ID,
+    )
+    written = result.created[0]
+    assert written.source_kind == "ADSENSE"
+
+    # Reverse lookup: read source rows, USD filter, re-apply rule.
+    source_rows = [
+        r for r in repo.list(tenant_id, report_month="2026-04",
+                             source_system="adsense_management")
+        if r.youtube_channel_id == "UC_test_rev" and r.currency_code == "USD"
+    ]
+    canonical, _ = select_canonical_row(source_rows)
+    assert canonical is not None
+    assert canonical.source_report_id == written.source_report_id
+    # And the source_kind mapping is the inverse: ADSENSE -> adsense_management.
+    assert SOURCE_SYSTEM_TO_SOURCE_KIND["adsense_management"].value == written.source_kind
