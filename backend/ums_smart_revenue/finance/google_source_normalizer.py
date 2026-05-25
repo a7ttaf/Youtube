@@ -14,6 +14,9 @@ from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
 
+from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
+    GoogleRevenueSourceRowEntry,
+)
 from ums_smart_revenue.finance.revenue_facts import (
     RevenueFactEntry,
     RevenueFactSourceKind,
@@ -59,3 +62,31 @@ CANONICAL_METRIC_RULE: Mapping[str, tuple[str, ...]] = MappingProxyType(
         "adsense_management": ("PAID_AMOUNT", "ESTIMATED_EARNINGS"),
     }
 )
+
+
+def select_canonical_row(
+    rows: list[GoogleRevenueSourceRowEntry],
+) -> tuple[GoogleRevenueSourceRowEntry | None, list[GoogleRevenueSourceRowEntry]]:
+    """Apply the per-source_system canonical-metric rule to a homogeneous group.
+
+    Currency-blind by design: the caller must pre-filter to USD before
+    invoking this function. Tie-break across multiple rows with the same
+    metric_key is deterministic by source_row_key ascending (multiple
+    same-metric rows can arise from dimension breakdowns, distinct
+    source_account_id, or parallel report shapes; repository ingested_at
+    order is not a stable contract).
+
+    Returns (canonical_or_None, non_canonical_rest).
+    """
+    if not rows:
+        return None, []
+    preference = CANONICAL_METRIC_RULE[rows[0].source_system]
+    for metric_key in preference:
+        candidates = sorted(
+            (r for r in rows if r.metric_key == metric_key),
+            key=lambda r: r.source_row_key,
+        )
+        if candidates:
+            canonical = candidates[0]
+            return canonical, [r for r in rows if r is not canonical]
+    return None, list(rows)
