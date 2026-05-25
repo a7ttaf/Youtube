@@ -21,17 +21,20 @@ from ums_smart_revenue.finance.revenue_facts import RevenueFactValidationError
 ACTOR_USER_ID = "00000000-0000-0000-0000-000000010001"
 
 
-def _make_engine_and_session():
+@pytest.fixture
+def session() -> Session:
     engine = create_engine("sqlite+pysqlite:///:memory:")
     TenantBase.metadata.create_all(engine)
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
-    return engine, Session(engine)
+    try:
+        with Session(engine) as s:
+            yield s
+    finally:
+        engine.dispose()
 
 
-def test_normalize_month_raises_validation_error_for_invalid_month_format():
-    _, session = _make_engine_and_session()
-    with session:
-        normalizer = GoogleSourceNormalizer(session)
-        with pytest.raises(RevenueFactValidationError, match="month must use YYYY-MM"):
-            normalizer.normalize_month(month="2026-13", actor_user_id=ACTOR_USER_ID)
+def test_normalize_month_raises_validation_error_for_invalid_month_format(session):
+    normalizer = GoogleSourceNormalizer(session)
+    with pytest.raises(RevenueFactValidationError, match="month must use YYYY-MM"):
+        normalizer.normalize_month(month="2026-13", actor_user_id=ACTOR_USER_ID)

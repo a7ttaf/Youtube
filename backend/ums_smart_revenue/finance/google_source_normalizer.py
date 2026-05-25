@@ -24,10 +24,16 @@ from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
 from ums_smart_revenue.finance.revenue_facts import (
     RevenueFactEntry,
     RevenueFactSourceKind,
+    # C1 deliberately reuses the private _validate_month / _resolve_tenant_id
+    # helpers from revenue_facts so the normalizer surfaces the SAME
+    # RevenueFactValidationError (and the same human-readable message) that
+    # record_fact() raises. See spec section 4 "Write path" and section 6.1.
     _resolve_tenant_id,
     _validate_month,
 )
 
+# Consumed by Step 1 (refused) and Steps 6-7 (start/complete) logging
+# wired in Tasks 4 and 5.
 logger = logging.getLogger(__name__)
 
 
