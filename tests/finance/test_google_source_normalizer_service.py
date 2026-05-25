@@ -174,3 +174,80 @@ def test_normalize_month_channel_ids_filter_drops_out_of_scope_rows_silently(ses
     assert not any(
         s.reason.value == "missing_channel_id" for s in result.skipped
     ), "in-scope rows must not be classified as missing_channel_id"
+
+
+def test_normalize_month_skips_missing_channel_id_rows(session):
+    tenant_id = uuid4()
+    _seed_tenant_and_currencies(session, tenant_id)
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    # AdSense rows always have youtube_channel_id=None per parser; we
+    # build ParsedSourceRow directly with channel_id=None to model the
+    # same condition for any source_system.
+    repo.upsert_many(
+        tenant_id,
+        [
+            ParsedSourceRow(
+                source_system="youtube_reporting",
+                source_row_key="m" * 64,
+                source_account_id="acct-1",
+                content_owner_id=None,
+                youtube_channel_id=None,
+                report_type="x",
+                report_month="2026-04",
+                period_start=date(2026, 4, 1),
+                period_end=date(2026, 4, 30),
+                metric_key="estimatedRevenue",
+                value_kind="estimated",
+                amount_native=Decimal("100"),
+                currency_code="USD",
+                source_report_id="r-1",
+                raw_payload={},
+            ),
+        ],
+        raw_file_id=None,
+        imported_by=None,
+    )
+    session.commit()
+
+    result = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+        month="2026-04", actor_user_id=ACTOR_USER_ID,
+    )
+    assert len(result.skipped) == 1
+    assert result.skipped[0].reason.value == "missing_channel_id"
+
+
+def test_normalize_month_skips_unknown_channel_rows(session):
+    tenant_id = uuid4()
+    _seed_tenant_and_currencies(session, tenant_id)
+    # Sub-arrange A: channel does not exist in registry at all.
+    # Sub-arrange B: channel exists but active=False.
+    session.add(
+        YouTubeChannelORM(
+            id=uuid4(),
+            tenant_id=tenant_id,
+            youtube_channel_id="UC_inactive",
+            channel_name="Inactive Ch",
+            cms_status="INSIDE_CMS",
+            revenue_required=True,
+            active=False,
+        )
+    )
+    session.flush()
+
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    repo.upsert_many(
+        tenant_id,
+        [
+            _yt_reporting_row(channel="UC_unregistered", source_row_key_seed="x"),
+            _yt_reporting_row(channel="UC_inactive", source_row_key_seed="y"),
+        ],
+        raw_file_id=None,
+        imported_by=None,
+    )
+    session.commit()
+
+    result = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+        month="2026-04", actor_user_id=ACTOR_USER_ID,
+    )
+    assert len(result.skipped) == 2
+    assert all(s.reason.value == "unknown_channel" for s in result.skipped)

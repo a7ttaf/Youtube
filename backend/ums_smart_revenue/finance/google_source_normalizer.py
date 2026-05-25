@@ -16,6 +16,7 @@ from enum import StrEnum
 from types import MappingProxyType
 from uuid import UUID
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
@@ -24,6 +25,7 @@ from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
 from ums_smart_revenue.connectors.google_source_rows.repository import (
     SqlAlchemyGoogleRevenueSourceRowRepository,
 )
+from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 from ums_smart_revenue.finance.revenue_facts import (
     RevenueFactEntry,
@@ -180,19 +182,64 @@ class GoogleSourceNormalizer:
         # When channel_ids is provided, out-of-scope rows (including null-
         # channel rows) are silently dropped, NOT classified as skips. The
         # caller restricted scope; "not requested" is not "broken".
-        # `in_scope_rows` is the input for Step 4 (MISSING_CHANNEL_ID /
-        # UNKNOWN_CHANNEL classification) wired in Task 6; the unused-local
-        # warning is suppressed here until that consumer lands.
         if normalized_channel_ids is not None:
-            in_scope_rows = [  # noqa: F841
+            in_scope_rows = [
                 row for row in all_rows
                 if row.youtube_channel_id in normalized_channel_ids
             ]
         else:
-            in_scope_rows = all_rows  # noqa: F841
+            in_scope_rows = all_rows
 
-        # Subsequent steps wired in later tasks; emit the complete log + return.
-        result = NormalizationResult(created=[], updated=[], unchanged=[], skipped=[])
+        # Step 4 - Resolve active channels for this tenant in one batched query.
+        in_scope_channel_ids = {
+            row.youtube_channel_id
+            for row in in_scope_rows
+            if row.youtube_channel_id is not None
+        }
+        active_channel_ids: set[str] = set()
+        if in_scope_channel_ids:
+            active_channel_ids = set(
+                self._session.scalars(
+                    select(YouTubeChannelORM.youtube_channel_id).where(
+                        YouTubeChannelORM.tenant_id == self._tenant_id,
+                        YouTubeChannelORM.active.is_(True),
+                        YouTubeChannelORM.youtube_channel_id.in_(in_scope_channel_ids),
+                    )
+                ).all()
+            )
+
+        # Step 5 - Bucket by (channel_id, source_system).
+        buckets: dict[tuple[str | None, str], list[GoogleRevenueSourceRowEntry]] = {}
+        for row in in_scope_rows:
+            key = (row.youtube_channel_id, row.source_system)
+            buckets.setdefault(key, []).append(row)
+
+        created: list[RevenueFactEntry] = []
+        updated: list[RevenueFactEntry] = []
+        unchanged: list[RevenueFactEntry] = []
+        skipped: list[SkippedSourceRow] = []
+
+        # Step 6 - Per-bucket processing.
+        for (channel_id, source_system), bucket_rows in buckets.items():
+            if channel_id is None:
+                # Step 6(a) - missing channel id.
+                skipped.extend(
+                    SkippedSourceRow(source_row_id=r.id, reason=SkipReason.MISSING_CHANNEL_ID)
+                    for r in bucket_rows
+                )
+                continue
+            if channel_id not in active_channel_ids:
+                # Step 6(b) - unknown / inactive channel.
+                skipped.extend(
+                    SkippedSourceRow(source_row_id=r.id, reason=SkipReason.UNKNOWN_CHANNEL)
+                    for r in bucket_rows
+                )
+                continue
+            # Subsequent step branches (6c-6j) wired in later tasks.
+
+        result = NormalizationResult(
+            created=created, updated=updated, unchanged=unchanged, skipped=skipped,
+        )
         logger.info(
             "normalize_month complete tenant_id=%s month=%s "
             "created=%d updated=%d unchanged=%d skipped=%d",
