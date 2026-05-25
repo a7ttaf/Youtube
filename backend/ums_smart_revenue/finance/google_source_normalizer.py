@@ -249,7 +249,18 @@ class GoogleSourceNormalizer:
             remaining = [r for r in bucket_rows if r.value_kind not in _UNSUPPORTED_VALUE_KINDS]
             if not remaining:
                 continue
-            # Subsequent step branches (6d-6j) wired in later tasks.
+            # Step 6(d) - USD-only filter; runs BEFORE canonical selection so
+            # a non-USD row cannot win canonical and starve an eligible USD
+            # sibling (spec Section 5 Step 6(d)).
+            non_usd = [r for r in remaining if r.currency_code != "USD"]
+            for r in non_usd:
+                skipped.append(
+                    SkippedSourceRow(source_row_id=r.id, reason=SkipReason.NON_USD_CURRENCY)
+                )
+            usd_rows = [r for r in remaining if r.currency_code == "USD"]
+            if not usd_rows:
+                continue
+            # Subsequent step branches (6e-6j) wired in later tasks.
 
         result = NormalizationResult(
             created=created, updated=updated, unchanged=unchanged, skipped=skipped,

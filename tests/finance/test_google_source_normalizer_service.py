@@ -284,3 +284,26 @@ def test_normalize_month_skips_unsupported_value_kind_rows(session):
     )
     assert len(result.skipped) == 3
     assert all(s.reason.value == "unsupported_value_kind" for s in result.skipped)
+
+
+def test_normalize_month_skips_non_usd_canonical_with_NON_USD_CURRENCY(session):  # noqa: N802
+    tenant_id = uuid4()
+    _seed_tenant_and_currencies(session, tenant_id)
+    _seed_active_channel(session, tenant_id, "UC_test_fx")
+    SqlAlchemyGoogleRevenueSourceRowRepository(session).upsert_many(
+        tenant_id,
+        [
+            _yt_reporting_row(
+                channel="UC_test_fx", source_row_key_seed="e",
+                currency="EGP", amount="500.000000",
+            ),
+        ],
+        raw_file_id=None,
+        imported_by=None,
+    )
+    session.commit()
+
+    result = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+        month="2026-04", actor_user_id=ACTOR_USER_ID,
+    )
+    assert any(s.reason.value == "non_usd_currency" for s in result.skipped)
