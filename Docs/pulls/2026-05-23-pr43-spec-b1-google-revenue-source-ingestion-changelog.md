@@ -40,11 +40,11 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 - `tests/db/test_google_revenue_source_migration_postgres.py` — 9 PostgreSQL tests (6 migration round-trip + 1 repository upsert on the production `on_conflict_do_update` path + 1 raw_payload object-shape CHECK rejection via direct SQL + 1 amount-finite guard: NaN rejected by the CHECK, +Infinity rejected by the NUMERIC type, both via direct SQL).
 - `tests/connectors/google_source_rows/test_currencies_repository.py` — 5 tests.
 - `tests/connectors/google_source_rows/test_repository.py` — 39 tests (idempotency, tenant isolation, validation incl. NaN/non-Decimal amount, non-str guards for all required string columns, report_month-format/period-order/report_month↔period-consistency checks, id stability, raw_payload deep-copy alias safety on write + read paths, non-USD visibility; round-2 hardening: ASCII-digit report_month, nullable-text type guard, date-not-datetime period bounds, ≤6-decimal scale accept/reject, JSON-serialisable raw_payload, COALESCE provenance preservation on re-import; round-3 hardening: Numeric(20,6) integer-digit precision accept/reject, non-string raw_payload key rejection, NaN/Infinity float rejection; round-5 hardening: zero amount with a positive exponent accepted by the integer-digit guard).
-- `tests/connectors/google_source_parsers/test_source_row_keys.py` — 11 tests (incl. AdSense key excludes run-specific report_id, includes currency).
-- `tests/connectors/google_source_parsers/test_youtube_reporting_parser.py` — 12 tests.
-- `tests/connectors/google_source_parsers/test_youtube_analytics_parser.py` — 16 tests.
-- `tests/connectors/google_source_parsers/test_adsense_management_parser.py` — 10 tests (incl. source_row_key ignores run-specific report_id; round-2: missing `rows` treated as empty no-activity report).
-- `tests/connectors/google_source_parsers/test_parser_failure_states.py` — 28 tests (incl. AdSense METRIC_CURRENCY header currency mismatch + missing-currency fail-closed; round-2: AdSense accountId fail-closed without `accounts/` prefix + empty id, strict YYYY-MM-DD rejecting compact `YYYYMMDD` + ISO week dates).
+- `tests/connectors/google_source_parsers/test_source_row_keys.py` — 13 tests (incl. AdSense key excludes run-specific report_id, includes currency).
+- `tests/connectors/google_source_parsers/test_youtube_reporting_parser.py` — 20 tests.
+- `tests/connectors/google_source_parsers/test_youtube_analytics_parser.py` — 29 tests.
+- `tests/connectors/google_source_parsers/test_adsense_management_parser.py` — 16 tests (incl. source_row_key ignores run-specific report_id; round-2: missing `rows` treated as empty no-activity report).
+- `tests/connectors/google_source_parsers/test_parser_failure_states.py` — 40 tests (incl. AdSense METRIC_CURRENCY header currency mismatch + missing-currency fail-closed; round-2: AdSense accountId fail-closed without `accounts/` prefix + empty id, strict YYYY-MM-DD rejecting compact `YYYYMMDD` + ISO week dates).
 - `tests/connectors/test_google_source_ingestion_flow.py` — 3 tests (end-to-end + rerun + malformed-payload safety).
 - `tests/finance/test_finance_no_fx_dependency.py` — 1 AST guard.
 - `tests/auth/test_no_fx_permission.py` — 2 tests.
@@ -140,4 +140,5 @@ Nothing. Legacy `currency_exchange_rates` table, `CurrencyExchangeRateORM`, `fin
 - Post-PR #43 (review hardening round 5 — zero-amount integer-digit guard + Postgres-helper fixture relocation): 984 tests
 - Post-PR #43 (review hardening round 6 — UNPAID_AMOUNT classified estimated + fail-closed on malformed Analytics `ids` selector + optional Analytics `currency` defaults to USD): 996 tests
 - Post-PR #43 (review hardening round 7 — whitespace-only `currency`/`ids` rejection + `source_row_key` canonicalised against account identity for channel-selector idempotency): 1001 tests
-- **Net new: +180 tests** (+89 in the original 17 new test files; +91 review-hardening regressions across existing test files).
+- Post-PR #43 (review hardening rounds 8-12 — doc-marker consistency, `currency` required key axis, per-row dimensions isolation, `includeHistoricalChannelData` key axis, optional `content_owner`, tolerated non-currency AdSense headers, blank identity/currency rejection across all three parsers): 1011 tests
+- **Net new: +190 tests** (+89 in the original 17 new test files; +101 review-hardening regressions across existing + new test files).
