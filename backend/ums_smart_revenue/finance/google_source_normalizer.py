@@ -90,6 +90,31 @@ CANONICAL_METRIC_RULE: Mapping[str, tuple[str, ...]] = MappingProxyType(
 _UNSUPPORTED_VALUE_KINDS: frozenset[str] = frozenset({"tax", "deduction", "adjustment"})
 
 
+def _payload_matches(
+    existing: RevenueFactEntry,
+    *,
+    proposed_gross: Decimal,
+    proposed_source_report_id: str | None,
+) -> bool:
+    """Compare the fields the normalizer writes against the existing fact.
+
+    Excludes actor_user_id / imported_by / timestamps per spec Section 5
+    Step 6(j) so a rerun by a different actor with identical payload stays
+    UNCHANGED.
+    """
+    return (
+        existing.gross_revenue_usd == proposed_gross
+        and existing.source_report_id == proposed_source_report_id
+        and existing.net_revenue_usd is None
+        and existing.shorts_revenue_usd is None
+        and existing.longform_revenue_usd is None
+        and existing.subscription_revenue_usd is None
+        and existing.views == 0
+        and existing.watch_time_minutes == Decimal("0")
+        and existing.confidence_score == Decimal("1.0")
+    )
+
+
 def select_canonical_row(
     rows: list[GoogleRevenueSourceRowEntry],
 ) -> tuple[GoogleRevenueSourceRowEntry | None, list[GoogleRevenueSourceRowEntry]]:
@@ -323,7 +348,30 @@ class GoogleSourceNormalizer:
                 )
                 created.append(written)
                 continue
-            # UNCHANGED / UPDATED classification wired in Task 11.
+            # Existing fact present: compare and classify.
+            if _payload_matches(
+                existing,
+                proposed_gross=canonical.amount_native,
+                proposed_source_report_id=canonical.source_report_id,
+            ):
+                unchanged.append(existing)
+                continue
+            written = facts_repo.record_fact(
+                month=month,
+                youtube_channel_id=channel_id,
+                source_kind=mapped_source_kind.value,
+                source_report_id=canonical.source_report_id,
+                gross_revenue_usd=canonical.amount_native,
+                net_revenue_usd=None,
+                shorts_revenue_usd=None,
+                longform_revenue_usd=None,
+                subscription_revenue_usd=None,
+                views=0,
+                watch_time_minutes=Decimal("0"),
+                confidence_score=Decimal("1.0"),
+                actor_user_id=actor_user_id,
+            )
+            updated.append(written)
 
         result = NormalizationResult(
             created=created, updated=updated, unchanged=unchanged, skipped=skipped,

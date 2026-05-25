@@ -422,3 +422,74 @@ def test_normalize_month_creates_revenue_facts_for_eligible_USD_rows(session):  
     assert len(result.unchanged) == 0
     assert result.created[0].source_kind == "YOUTUBE_CMS"
     assert result.created[0].gross_revenue_usd == Decimal("123.450000")
+
+
+OTHER_ACTOR_USER_ID = "00000000-0000-0000-0000-000000010002"
+
+
+def test_normalize_month_classifies_byte_identical_replay_as_unchanged(session):
+    tenant_id = uuid4()
+    _seed_tenant_and_currencies(session, tenant_id)
+    _seed_active_channel(session, tenant_id, "UC_test_replay")
+    SqlAlchemyGoogleRevenueSourceRowRepository(session).upsert_many(
+        tenant_id,
+        [_yt_reporting_row(channel="UC_test_replay", source_row_key_seed="r")],
+        raw_file_id=None, imported_by=None,
+    )
+    session.commit()
+
+    normalizer = GoogleSourceNormalizer(session, tenant_id=tenant_id)
+    first = normalizer.normalize_month(month="2026-04", actor_user_id=ACTOR_USER_ID)
+    session.commit()
+    second = normalizer.normalize_month(month="2026-04", actor_user_id=ACTOR_USER_ID)
+    assert len(first.created) == 1
+    assert len(second.created) == 0
+    assert len(second.updated) == 0
+    assert len(second.unchanged) == 1
+
+
+def test_normalize_month_classifies_amount_change_as_updated(session):
+    tenant_id = uuid4()
+    _seed_tenant_and_currencies(session, tenant_id)
+    _seed_active_channel(session, tenant_id, "UC_test_upd")
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    repo.upsert_many(
+        tenant_id,
+        [_yt_reporting_row(channel="UC_test_upd", source_row_key_seed="z", amount="100.000000")],
+        raw_file_id=None, imported_by=None,
+    )
+    session.commit()
+    normalizer = GoogleSourceNormalizer(session, tenant_id=tenant_id)
+    first = normalizer.normalize_month(month="2026-04", actor_user_id=ACTOR_USER_ID)
+    session.commit()
+    # Change the amount via the same upsert key.
+    repo.upsert_many(
+        tenant_id,
+        [_yt_reporting_row(channel="UC_test_upd", source_row_key_seed="z", amount="250.000000")],
+        raw_file_id=None, imported_by=None,
+    )
+    session.commit()
+    second = normalizer.normalize_month(month="2026-04", actor_user_id=ACTOR_USER_ID)
+    assert len(first.created) == 1
+    assert len(second.updated) == 1
+    assert second.updated[0].gross_revenue_usd == Decimal("250.000000")
+
+
+def test_normalize_month_replay_by_different_actor_with_identical_payload_is_unchanged(session):
+    tenant_id = uuid4()
+    _seed_tenant_and_currencies(session, tenant_id)
+    _seed_active_channel(session, tenant_id, "UC_test_actor")
+    SqlAlchemyGoogleRevenueSourceRowRepository(session).upsert_many(
+        tenant_id,
+        [_yt_reporting_row(channel="UC_test_actor", source_row_key_seed="a")],
+        raw_file_id=None, imported_by=None,
+    )
+    session.commit()
+    normalizer = GoogleSourceNormalizer(session, tenant_id=tenant_id)
+    normalizer.normalize_month(month="2026-04", actor_user_id=ACTOR_USER_ID)
+    session.commit()
+    result = normalizer.normalize_month(
+        month="2026-04", actor_user_id=OTHER_ACTOR_USER_ID,
+    )
+    assert len(result.unchanged) == 1
+    assert len(result.updated) == 0
