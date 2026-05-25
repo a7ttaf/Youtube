@@ -260,7 +260,28 @@ class GoogleSourceNormalizer:
             usd_rows = [r for r in remaining if r.currency_code == "USD"]
             if not usd_rows:
                 continue
-            # Subsequent step branches (6e-6j) wired in later tasks.
+            # Step 6(e) - apply pure canonical-metric rule on USD-eligible rows.
+            canonical, non_canonical_rest = select_canonical_row(usd_rows)
+
+            if canonical is None:
+                # Step 6(f) - USD candidates existed but none matched the
+                # preferred metric_keys for this source_system.
+                skipped.extend(
+                    SkippedSourceRow(
+                        source_row_id=r.id, reason=SkipReason.NO_CANONICAL_ROW,
+                    )
+                    for r in usd_rows
+                )
+                continue
+
+            # Step 6(g) - non-canonical USD siblings.
+            skipped.extend(
+                SkippedSourceRow(
+                    source_row_id=r.id, reason=SkipReason.NON_CANONICAL_METRIC,
+                )
+                for r in non_canonical_rest
+            )
+            # Subsequent step branches (6h-6j) wired in Task 10.
 
         result = NormalizationResult(
             created=created, updated=updated, unchanged=unchanged, skipped=skipped,

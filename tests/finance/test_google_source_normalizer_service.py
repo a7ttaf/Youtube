@@ -307,3 +307,90 @@ def test_normalize_month_skips_non_usd_canonical_with_NON_USD_CURRENCY(session):
         month="2026-04", actor_user_id=ACTOR_USER_ID,
     )
     assert any(s.reason.value == "non_usd_currency" for s in result.skipped)
+
+
+def _adsense_row(
+    *,
+    channel: str,
+    metric_key: str,
+    source_row_key_seed: str,
+    value_kind: str = "estimated",
+    amount: str = "100.000000",
+    currency: str = "USD",
+) -> ParsedSourceRow:
+    # AdSense parser sets youtube_channel_id=None natively. For service tests
+    # exercising channel-scoped AdSense canonical selection, build
+    # ParsedSourceRow inline with a synthesized channel_id.
+    return ParsedSourceRow(
+        source_system="adsense_management",
+        source_row_key=(source_row_key_seed * 64)[:64],
+        source_account_id="pub-test-1",
+        content_owner_id=None,
+        youtube_channel_id=channel,
+        report_type=("payment_report" if metric_key == "PAID_AMOUNT" else "earnings_report"),
+        report_month="2026-04",
+        period_start=date(2026, 4, 1),
+        period_end=date(2026, 4, 30),
+        metric_key=metric_key,
+        value_kind=("settled" if metric_key == "PAID_AMOUNT" else value_kind),
+        amount_native=Decimal(amount),
+        currency_code=currency,
+        source_report_id="r-1",
+        raw_payload={},
+    )
+
+
+def test_normalize_month_skips_no_canonical_row_with_NO_CANONICAL_ROW(session):  # noqa: N802
+    # AdSense bucket with only UNPAID_AMOUNT: no preferred metric matches.
+    tenant_id = uuid4()
+    _seed_tenant_and_currencies(session, tenant_id)
+    _seed_active_channel(session, tenant_id, "UC_test_unpaid")
+    SqlAlchemyGoogleRevenueSourceRowRepository(session).upsert_many(
+        tenant_id,
+        [
+            _adsense_row(
+                channel="UC_test_unpaid",
+                metric_key="UNPAID_AMOUNT",
+                source_row_key_seed="u",
+            ),
+        ],
+        raw_file_id=None,
+        imported_by=None,
+    )
+    session.commit()
+
+    result = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+        month="2026-04", actor_user_id=ACTOR_USER_ID,
+    )
+    assert len(result.skipped) == 1
+    assert result.skipped[0].reason.value == "no_canonical_row"
+
+
+def test_normalize_month_marks_unselected_usd_rows_as_NON_CANONICAL_METRIC(session):  # noqa: N802
+    # AdSense bucket with both PAID_AMOUNT and ESTIMATED_EARNINGS in USD:
+    # PAID_AMOUNT wins canonical; ESTIMATED_EARNINGS is marked NON_CANONICAL_METRIC.
+    tenant_id = uuid4()
+    _seed_tenant_and_currencies(session, tenant_id)
+    _seed_active_channel(session, tenant_id, "UC_test_dual")
+    SqlAlchemyGoogleRevenueSourceRowRepository(session).upsert_many(
+        tenant_id,
+        [
+            _adsense_row(
+                channel="UC_test_dual", metric_key="PAID_AMOUNT", source_row_key_seed="p",
+            ),
+            _adsense_row(
+                channel="UC_test_dual", metric_key="ESTIMATED_EARNINGS", source_row_key_seed="q",
+            ),
+        ],
+        raw_file_id=None,
+        imported_by=None,
+    )
+    session.commit()
+
+    result = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+        month="2026-04", actor_user_id=ACTOR_USER_ID,
+    )
+    assert any(s.reason.value == "non_canonical_metric" for s in result.skipped)
+    # PAID_AMOUNT path goes through to record_fact (Task 10); for the partial
+    # pipeline today it stays unhandled. Once Task 10 lands, this test still
+    # passes (CREATED grows; NON_CANONICAL_METRIC still present in skipped).
