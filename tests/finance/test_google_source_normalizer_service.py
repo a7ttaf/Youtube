@@ -557,6 +557,7 @@ def test_normalize_month_reverse_lookup_returns_same_canonical_row(session):
     result = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
         month="2026-04", actor_user_id=ACTOR_USER_ID,
     )
+    assert len(result.created) == 1
     written = result.created[0]
     assert written.source_kind == "ADSENSE"
 
@@ -568,6 +569,7 @@ def test_normalize_month_reverse_lookup_returns_same_canonical_row(session):
     ]
     canonical, _ = select_canonical_row(source_rows)
     assert canonical is not None
+    assert canonical.metric_key == "PAID_AMOUNT"
     assert canonical.source_report_id == written.source_report_id
     # And the source_kind mapping is the inverse: ADSENSE -> adsense_management.
     assert SOURCE_SYSTEM_TO_SOURCE_KIND["adsense_management"].value == written.source_kind
