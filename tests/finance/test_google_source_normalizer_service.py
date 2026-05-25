@@ -493,3 +493,37 @@ def test_normalize_month_replay_by_different_actor_with_identical_payload_is_unc
     )
     assert len(result.unchanged) == 1
     assert len(result.updated) == 0
+
+
+def test_normalize_month_writes_confidence_score_one_point_zero(session):
+    tenant_id = uuid4()
+    _seed_tenant_and_currencies(session, tenant_id)
+    _seed_active_channel(session, tenant_id, "UC_test_conf")
+    SqlAlchemyGoogleRevenueSourceRowRepository(session).upsert_many(
+        tenant_id,
+        [_yt_reporting_row(channel="UC_test_conf", source_row_key_seed="o")],
+        raw_file_id=None, imported_by=None,
+    )
+    session.commit()
+    result = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+        month="2026-04", actor_user_id=ACTOR_USER_ID,
+    )
+    assert result.created[0].confidence_score == Decimal("1.0")
+
+
+def test_normalize_month_uses_canonical_source_report_id(session):
+    tenant_id = uuid4()
+    _seed_tenant_and_currencies(session, tenant_id)
+    _seed_active_channel(session, tenant_id, "UC_test_rid")
+    # Inject a non-default source_report_id by writing a ParsedSourceRow
+    # with an explicit report id value.
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    row = _yt_reporting_row(channel="UC_test_rid", source_row_key_seed="i")
+    from dataclasses import replace as dc_replace
+    row = dc_replace(row, source_report_id="report-canonical-001")
+    repo.upsert_many(tenant_id, [row], raw_file_id=None, imported_by=None)
+    session.commit()
+    result = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+        month="2026-04", actor_user_id=ACTOR_USER_ID,
+    )
+    assert result.created[0].source_report_id == "report-canonical-001"
