@@ -23,6 +23,7 @@ from ums_smart_revenue.connectors.google_source_rows import (
     SqlAlchemyGoogleRevenueSourceRowRepository,
 )
 from ums_smart_revenue.db.finance_models import FinanceBase
+from ums_smart_revenue.db.report_models import RawReportFileORM, ReportBase
 from ums_smart_revenue.db.source_models import (
     CurrencyORM,
     GoogleRevenueSourceRowORM,
@@ -38,10 +39,22 @@ def session() -> Session:
     engine = create_engine("sqlite:///:memory:")
     FinanceBase.metadata.create_all(engine)
     TenantBase.metadata.create_all(engine)
+    ReportBase.metadata.create_all(engine)
     with Session(engine) as s:
         now = datetime.now()
         s.add_all([
             TenantORM(id=TENANT_ID, slug="tenant-x", display_name="Tenant X"),
+            # Tenant-scoped raw evidence file backing RAW_FILE_ID so upsert_many's
+            # raw_file_id pre-check (existence + tenant scope) passes.
+            RawReportFileORM(
+                id=RAW_FILE_ID,
+                tenant_id=TENANT_ID,
+                source="youtube_reporting",
+                report_type="channel_monthly_estimated_revenue",
+                report_month="2026-04",
+                file_url="memory://tenant-x/raw.json",
+                checksum="c" * 64,
+            ),
             CurrencyORM(
                 code="USD",
                 numeric_code="840",

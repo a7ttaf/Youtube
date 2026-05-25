@@ -28,6 +28,7 @@ from ums_smart_revenue.connectors.google_source_rows import (
     SqlAlchemyGoogleRevenueSourceRowRepository,
 )
 from ums_smart_revenue.db.finance_models import FinanceBase
+from ums_smart_revenue.db.report_models import RawReportFileORM, ReportBase
 from ums_smart_revenue.db.source_models import (
     CurrencyORM,
     GoogleRevenueSourceRowORM,
@@ -36,7 +37,8 @@ from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
 
 TENANT_A = uuid4()
 TENANT_B = uuid4()
-RAW_FILE_ID = uuid4()
+RAW_FILE_ID = uuid4()  # owned by TENANT_A
+RAW_FILE_ID_B = uuid4()  # owned by TENANT_B
 
 
 @pytest.fixture
@@ -44,12 +46,34 @@ def session() -> Iterator[Session]:
     engine = create_engine("sqlite:///:memory:")
     FinanceBase.metadata.create_all(engine)
     TenantBase.metadata.create_all(engine)
+    ReportBase.metadata.create_all(engine)
     try:
         with Session(engine) as s:
             s.add_all(
                 [
                     TenantORM(id=TENANT_A, slug="tenant-a", display_name="Tenant A"),
                     TenantORM(id=TENANT_B, slug="tenant-b", display_name="Tenant B"),
+                    # Raw evidence files are tenant-scoped; seed one per tenant
+                    # so upsert_many's tenant-scoped raw_file_id pre-check passes
+                    # for same-tenant links and rejects cross-tenant ones.
+                    RawReportFileORM(
+                        id=RAW_FILE_ID,
+                        tenant_id=TENANT_A,
+                        source="youtube_reporting",
+                        report_type="channel_monthly_estimated_revenue",
+                        report_month="2026-04",
+                        file_url="memory://tenant-a/raw.json",
+                        checksum="a" * 64,
+                    ),
+                    RawReportFileORM(
+                        id=RAW_FILE_ID_B,
+                        tenant_id=TENANT_B,
+                        source="youtube_reporting",
+                        report_type="channel_monthly_estimated_revenue",
+                        report_month="2026-04",
+                        file_url="memory://tenant-b/raw.json",
+                        checksum="b" * 64,
+                    ),
                     CurrencyORM(
                         code="USD",
                         numeric_code="840",
@@ -183,7 +207,7 @@ def test_tenant_isolation(session: Session) -> None:
     repo.upsert_many(
         TENANT_B,
         [_row(source_row_key=shared_key)],
-        raw_file_id=RAW_FILE_ID,
+        raw_file_id=RAW_FILE_ID_B,
         imported_by=None,
     )
     a_rows = repo.list(TENANT_A, report_month="2026-04")
@@ -191,6 +215,39 @@ def test_tenant_isolation(session: Session) -> None:
     assert len(a_rows) == 1
     assert len(b_rows) == 1
     assert a_rows[0].tenant_id != b_rows[0].tenant_id
+
+
+def test_rejects_unknown_tenant(session: Session) -> None:
+    # An unseeded tenant_id must fail with the typed error, not a raw FK error.
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    ok = _row(source_row_key="t" * 64)
+    with pytest.raises(GoogleRevenueSourceRowValidationError, match="unknown tenant_id"):
+        repo.upsert_many(uuid4(), [ok], raw_file_id=None, imported_by=None)
+
+
+def test_rejects_unknown_raw_file(session: Session) -> None:
+    # A raw_file_id with no backing row must fail with the typed error.
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    ok = _row(source_row_key="u" * 64)
+    with pytest.raises(GoogleRevenueSourceRowValidationError, match="not found for this tenant"):
+        repo.upsert_many(TENANT_A, [ok], raw_file_id=uuid4(), imported_by=None)
+
+
+def test_rejects_cross_tenant_raw_file(session: Session) -> None:
+    # TENANT_A rows must not link to TENANT_B's raw evidence file: a row can
+    # never be attributed to another tenant's provenance (tenant isolation).
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    ok = _row(source_row_key="v" * 64)
+    with pytest.raises(GoogleRevenueSourceRowValidationError, match="not found for this tenant"):
+        repo.upsert_many(TENANT_A, [ok], raw_file_id=RAW_FILE_ID_B, imported_by=None)
+
+
+def test_allows_none_raw_file(session: Session) -> None:
+    # Provenance is optional: a None raw_file_id skips the FK pre-check.
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    ok = _row(source_row_key="w" * 64)
+    written = repo.upsert_many(TENANT_A, [ok], raw_file_id=None, imported_by=None)
+    assert len(written) == 1
 
 
 def test_rejects_invalid_source_system(session: Session) -> None:
@@ -568,7 +625,20 @@ def test_upsert_preserves_provenance_when_reimport_omits_it(session: Session) ->
     assert preserved.raw_file_id == RAW_FILE_ID  # provenance preserved, not nulled
     assert preserved.imported_by == importer_1
 
-    # Phase 3: a genuinely new file/importer (non-None) does replace.
+    # Phase 3: a genuinely new file/importer (non-None) does replace. file_2 is
+    # a real TENANT_A-owned raw file so it passes the tenant-scoped FK pre-check.
+    session.add(
+        RawReportFileORM(
+            id=file_2,
+            tenant_id=TENANT_A,
+            source="youtube_reporting",
+            report_type="channel_monthly_estimated_revenue",
+            report_month="2026-04",
+            file_url="memory://tenant-a/raw-2.json",
+            checksum="d" * 64,
+        )
+    )
+    session.flush()
     repo.upsert_many(
         TENANT_A, [_row(source_row_key=key)],
         raw_file_id=file_2, imported_by=importer_2,

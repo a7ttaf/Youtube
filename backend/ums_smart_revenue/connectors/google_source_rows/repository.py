@@ -32,10 +32,12 @@ from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
     IsoCurrency,
     ParsedSourceRow,
 )
+from ums_smart_revenue.db.report_models import RawReportFileORM
 from ums_smart_revenue.db.source_models import (
     CurrencyORM,
     GoogleRevenueSourceRowORM,
 )
+from ums_smart_revenue.db.tenant_models import TenantORM
 
 # YYYY-MM with a calendar-valid month (01-12). Mirrors the DB CHECK
 # ck_google_revenue_source_rows_report_month_format at the typed-validation
@@ -164,9 +166,15 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         # from racing the pending flush; the reference exchange_rates.py pipeline
         # follows the same pattern in _normalize_rate_input.
         validated = [self._validate(r) for r in materialised]
-        # Pre-check currency existence so callers receive a typed domain
-        # error instead of the raw FK violation surfaced by the DB.
+        # Pre-check FK references at the typed-validation boundary so a bad
+        # tenant, currency, or raw file surfaces as the repository's typed
+        # GoogleRevenueSourceRowValidationError instead of the opaque DB FK
+        # violation raised on flush (same contract the docstring promises for
+        # currency_code). _require_raw_file additionally enforces tenant scope
+        # so a row can never be linked to another tenant's raw evidence file.
+        self._require_tenant(tenant_id)
         self._require_currencies({r.currency_code for r in validated})
+        self._require_raw_file(raw_file_id, tenant_id)
 
         written: list[GoogleRevenueSourceRowEntry] = []
         dialect_insert = self._dialect_insert(
@@ -464,6 +472,58 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         if missing:
             raise GoogleRevenueSourceRowValidationError(
                 f"unknown currency code(s): {sorted(missing)}"
+            )
+
+    # ========================================================================
+    # Purpose: Pre-validate the tenant FK before any write so an unknown
+    #          tenant_id surfaces as the typed validation error instead of a
+    #          raw DB FK IntegrityError on flush.
+    # Database/ORM: tenants (TenantORM) — existence read only.
+    # Standards: Typed-error contract; no mutation. Echoes only the caller's
+    #            own tenant_id (no other-tenant data) in the message.
+    # Blast Radius: Tenant isolation / audit; source-of-truth write gate.
+    # ========================================================================
+    def _require_tenant(self, tenant_id: UUID) -> None:
+        # FIX: tenant_id was written straight into the INSERT with no pre-check,
+        # so an unknown tenant failed later as a raw FK IntegrityError rather
+        # than this repository's typed validation contract.
+        exists = self._session.scalar(
+            select(TenantORM.id).where(TenantORM.id == tenant_id)
+        )
+        if exists is None:
+            raise GoogleRevenueSourceRowValidationError(
+                f"unknown tenant_id: {tenant_id}"
+            )
+
+    # ========================================================================
+    # Purpose: Pre-validate the raw-file provenance FK AND its tenant scope
+    #          before any write. A None raw_file_id is allowed (provenance is
+    #          optional). A present id must reference a raw_report_files row
+    #          owned by the SAME tenant.
+    # Database/ORM: raw_report_files (RawReportFileORM) — existence read only.
+    # Standards: Typed-error contract; no mutation. Missing-file and
+    #            wrong-tenant collapse to one "not found for this tenant"
+    #            error so the check is not a cross-tenant existence oracle.
+    # Blast Radius: Tenant isolation + audit-lineage integrity (a row must not
+    #            link to another tenant's raw evidence file).
+    # ========================================================================
+    def _require_raw_file(self, raw_file_id: UUID | None, tenant_id: UUID) -> None:
+        # FIX: upsert_many wrote any provided raw_file_id directly; the schema
+        # only checks the file exists, not that it belongs to tenant_id, so a
+        # caller could link one tenant's rows to another tenant's raw file
+        # (provenance/audit corruption + cross-tenant linkage). Scope the
+        # existence check to the tenant and fail closed otherwise.
+        if raw_file_id is None:
+            return
+        match = self._session.scalar(
+            select(RawReportFileORM.id).where(
+                RawReportFileORM.id == raw_file_id,
+                RawReportFileORM.tenant_id == tenant_id,
+            )
+        )
+        if match is None:
+            raise GoogleRevenueSourceRowValidationError(
+                f"raw_file_id {raw_file_id} not found for this tenant"
             )
 
     @staticmethod

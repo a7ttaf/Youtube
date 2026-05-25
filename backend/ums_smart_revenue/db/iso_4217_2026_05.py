@@ -161,6 +161,9 @@ _RAW_ISO_4217_CURRENCIES_2026_05: Final[tuple[dict[str, object], ...]] = (
     {"code": "USN", "numeric_code": "997", "name": "US Dollar (Next day)", "minor_unit": 2},
     {"code": "UYI", "numeric_code": "940", "name": "Uruguay Peso en Unidades Indexadas (UI)", "minor_unit": 0},
     {"code": "UYU", "numeric_code": "858", "name": "Peso Uruguayo", "minor_unit": 2},
+    # FIX: active ISO 4217 code UYW (Unidad Previsional, 927) was missing from
+    # this "complete 2026-05" snapshot, so a row legitimately reported in UYW
+    # was rejected by the currency-existence guard at ingest. Restored here.
     {"code": "UYW", "numeric_code": "927", "name": "Unidad Previsional", "minor_unit": 4},
     {"code": "UZS", "numeric_code": "860", "name": "Uzbekistan Sum", "minor_unit": 2},
     {"code": "VED", "numeric_code": "926", "name": "Bolivar Soberano", "minor_unit": 2},

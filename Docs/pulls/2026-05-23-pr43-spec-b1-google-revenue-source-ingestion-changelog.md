@@ -39,7 +39,7 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 - `tests/db/_postgres_helpers.py` — fail-fast env guard.
 - `tests/db/test_google_revenue_source_migration_postgres.py` — 9 PostgreSQL tests (6 migration round-trip + 1 repository upsert on the production `on_conflict_do_update` path + 1 raw_payload object-shape CHECK rejection via direct SQL + 1 amount-finite guard: NaN rejected by the CHECK, +Infinity rejected by the NUMERIC type, both via direct SQL).
 - `tests/connectors/google_source_rows/test_currencies_repository.py` — 5 tests.
-- `tests/connectors/google_source_rows/test_repository.py` — 39 tests (idempotency, tenant isolation, validation incl. NaN/non-Decimal amount, non-str guards for all required string columns, report_month-format/period-order/report_month↔period-consistency checks, id stability, raw_payload deep-copy alias safety on write + read paths, non-USD visibility; round-2 hardening: ASCII-digit report_month, nullable-text type guard, date-not-datetime period bounds, ≤6-decimal scale accept/reject, JSON-serialisable raw_payload, COALESCE provenance preservation on re-import; round-3 hardening: Numeric(20,6) integer-digit precision accept/reject, non-string raw_payload key rejection, NaN/Infinity float rejection; round-5 hardening: zero amount with a positive exponent accepted by the integer-digit guard).
+- `tests/connectors/google_source_rows/test_repository.py` — 43 tests (idempotency, tenant isolation, validation incl. NaN/non-Decimal amount, non-str guards for all required string columns, report_month-format/period-order/report_month↔period-consistency checks, id stability, raw_payload deep-copy alias safety on write + read paths, non-USD visibility; round-2 hardening: ASCII-digit report_month, nullable-text type guard, date-not-datetime period bounds, ≤6-decimal scale accept/reject, JSON-serialisable raw_payload, COALESCE provenance preservation on re-import; round-3 hardening: Numeric(20,6) integer-digit precision accept/reject, non-string raw_payload key rejection, NaN/Infinity float rejection; round-5 hardening: zero amount with a positive exponent accepted by the integer-digit guard).
 - `tests/connectors/google_source_parsers/test_source_row_keys.py` — 13 tests (incl. AdSense key excludes run-specific report_id, includes currency).
 - `tests/connectors/google_source_parsers/test_youtube_reporting_parser.py` — 20 tests.
 - `tests/connectors/google_source_parsers/test_youtube_analytics_parser.py` — 29 tests.
@@ -57,6 +57,14 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 - `Docs/pulls/2026-05-23-pr43-spec-b1-google-revenue-source-ingestion-handoff.md` (handoff).
 
 ## Changed
+
+### Review hardening round 14
+
+- `backend/ums_smart_revenue/connectors/google_source_rows/repository.py` — `upsert_many` now pre-validates the **tenant** and **raw-file** foreign keys at the typed-validation boundary, completing the contract it already honoured for `currency_code` (typed `GoogleRevenueSourceRowValidationError` instead of an opaque DB FK `IntegrityError` on flush):
+  - **`_require_tenant`** — an unknown `tenant_id` now fails closed with a typed error before any write (P2).
+  - **`_require_raw_file`** — a `raw_file_id` is verified to exist **and belong to the same tenant** (P1 — tenant isolation). A caller could previously attach one tenant's source rows to another tenant's raw evidence file (the schema only checked existence, not ownership), corrupting audit lineage and creating cross-tenant linkage. Missing-file and wrong-tenant collapse to a single `not found for this tenant` error so the check is **not** a cross-tenant existence oracle. A `None` `raw_file_id` is still allowed (provenance is optional) and skips the check.
+- `backend/ums_smart_revenue/db/iso_4217_2026_05.py` — added the focused inline `FIX:` comment above the round-13 `UYW` correction, per the project commenting standard for bug-fix data corrections.
+- `tests/connectors/google_source_rows/test_repository.py` + `tests/connectors/test_google_source_ingestion_flow.py` — fixtures now create `raw_report_files` (`ReportBase`) and seed **tenant-scoped** raw files so `RAW_FILE_ID` is backed by a real row (the prior tests relied on SQLite FK enforcement being off). The tenant-isolation test now gives each tenant its **own** raw file (it had linked both tenants to one file — exactly the cross-tenant link the P1 guard now forbids). +4 tests: unknown tenant rejected, unknown raw file rejected, cross-tenant raw file rejected, `None` raw file accepted.
 
 ### Review hardening round 13
 
@@ -148,4 +156,5 @@ Nothing. Legacy `currency_exchange_rates` table, `CurrencyExchangeRateORM`, `fin
 - Post-PR #43 (review hardening round 7 — whitespace-only `currency`/`ids` rejection + `source_row_key` canonicalised against account identity for channel-selector idempotency): 1001 tests
 - Post-PR #43 (review hardening rounds 8-12 — doc-marker consistency, `currency` required key axis, per-row dimensions isolation, `includeHistoricalChannelData` key axis, optional `content_owner`, tolerated non-currency AdSense headers, blank identity/currency rejection across all three parsers): 1011 tests
 - Post-PR #43 (review hardening round 13 — added active ISO code `UYW`; test-helper type-hint tightening): 1011 tests (no new tests — the `UYW` row is exercised by the existing ISO-snapshot uniqueness/format/count invariants; the type-hint change is runtime-inert).
-- **Net new: +190 tests** (+89 in the original 17 new test files; +101 review-hardening regressions across existing + new test files).
+- Post-PR #43 (review hardening round 14 — typed tenant + tenant-scoped raw-file FK pre-checks in `upsert_many`): 1015 tests (+4: unknown tenant, unknown raw file, cross-tenant raw file rejected; `None` raw file accepted).
+- **Net new: +194 tests** (+89 in the original 17 new test files; +105 review-hardening regressions across existing + new test files).
