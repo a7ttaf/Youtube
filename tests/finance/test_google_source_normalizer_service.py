@@ -394,3 +394,31 @@ def test_normalize_month_marks_unselected_usd_rows_as_NON_CANONICAL_METRIC(sessi
     # PAID_AMOUNT path goes through to record_fact (Task 10); for the partial
     # pipeline today it stays unhandled. Once Task 10 lands, this test still
     # passes (CREATED grows; NON_CANONICAL_METRIC still present in skipped).
+
+
+def test_normalize_month_creates_revenue_facts_for_eligible_USD_rows(session):  # noqa: N802
+    tenant_id = uuid4()
+    _seed_tenant_and_currencies(session, tenant_id)
+    _seed_active_channel(session, tenant_id, "UC_test_create")
+    SqlAlchemyGoogleRevenueSourceRowRepository(session).upsert_many(
+        tenant_id,
+        [
+            _yt_reporting_row(
+                channel="UC_test_create",
+                source_row_key_seed="c",
+                amount="123.450000",
+            ),
+        ],
+        raw_file_id=None,
+        imported_by=None,
+    )
+    session.commit()
+
+    result = GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+        month="2026-04", actor_user_id=ACTOR_USER_ID,
+    )
+    assert len(result.created) == 1
+    assert len(result.updated) == 0
+    assert len(result.unchanged) == 0
+    assert result.created[0].source_kind == "YOUTUBE_CMS"
+    assert result.created[0].gross_revenue_usd == Decimal("123.450000")

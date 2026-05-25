@@ -12,6 +12,7 @@ See: Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.m
 import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
+from decimal import Decimal
 from enum import StrEnum
 from types import MappingProxyType
 from uuid import UUID
@@ -31,6 +32,7 @@ from ums_smart_revenue.finance.revenue_facts import (
     RevenueFactEntry,
     RevenueFactLockedMonthError,
     RevenueFactSourceKind,
+    SqlAlchemyRevenueFactRepository,
     # C1 deliberately reuses the private _validate_month / _resolve_tenant_id
     # helpers from revenue_facts so the normalizer surfaces the SAME
     # RevenueFactValidationError (and the same human-readable message) that
@@ -281,7 +283,47 @@ class GoogleSourceNormalizer:
                 )
                 for r in non_canonical_rest
             )
-            # Subsequent step branches (6h-6j) wired in Task 10.
+            # Step 6(h) - build proposed payload from canonical row + defaults.
+            mapped_source_kind = SOURCE_SYSTEM_TO_SOURCE_KIND[source_system]
+
+            # Step 6(i) - read existing fact for (tenant, month, channel, source_kind).
+            # list_channel_month_facts() returns list[RevenueFactEntry]; filter
+            # by source_kind in Python rather than re-issuing a query.
+            facts_repo = SqlAlchemyRevenueFactRepository(
+                self._session, tenant_id=self._tenant_id
+            )
+            existing_facts = facts_repo.list_channel_month_facts(
+                month=month, youtube_channel_id=channel_id,
+            )
+            existing = next(
+                (
+                    fact for fact in existing_facts
+                    if fact.source_kind == mapped_source_kind.value
+                ),
+                None,
+            )
+
+            # Step 6(j) - classify via payload-only comparison.
+            if existing is None:
+                # CREATED path.
+                written = facts_repo.record_fact(
+                    month=month,
+                    youtube_channel_id=channel_id,
+                    source_kind=mapped_source_kind.value,
+                    source_report_id=canonical.source_report_id,
+                    gross_revenue_usd=canonical.amount_native,
+                    net_revenue_usd=None,
+                    shorts_revenue_usd=None,
+                    longform_revenue_usd=None,
+                    subscription_revenue_usd=None,
+                    views=0,
+                    watch_time_minutes=Decimal("0"),
+                    confidence_score=Decimal("1.0"),
+                    actor_user_id=actor_user_id,
+                )
+                created.append(written)
+                continue
+            # UNCHANGED / UPDATED classification wired in Task 11.
 
         result = NormalizationResult(
             created=created, updated=updated, unchanged=unchanged, skipped=skipped,
