@@ -24,8 +24,9 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   in PR #30).
 - ⏳ YouTube report ingestion — remaining: credentials repo (PRs #33,
   #34); real ingestion not built.
-- ⏳ Monthly revenue normalization — remaining: revenue facts foundation
-  (PR #2); ingestion source not wired.
+- ⏳ Monthly revenue normalization — remaining: B2 live ingestion wiring
+  (revenue facts foundation in PR #2; normalization bridge from
+  google_revenue_source_rows shipped in PR #?).
 - ⏳ AdSense payment sync — remaining: payment ORM + repo tests (PR #26);
   real pull not built.
 - ⏳ Finance month-close screen — remaining: close-gate backend (PR #8);
@@ -137,6 +138,20 @@ single P-tier above.
   Remaining: live OAuth/API connector
   (B2), FX/conversion (B3). Marked ⏳ (not ✅) per the scaffolding-only honesty
   rule above — no real ingestion path yet.
+- ⏳ Google source-rows -> revenue facts normalization bridge: pure
+  `select_canonical_row()` rule per `source_system`, USD-only writes,
+  upfront locked-month gate via `get_or_create_month_close_row(..., for_update=True)`,
+  read-before-write CREATED/UPDATED/UNCHANGED classification — PR #?.
+  Bridges PR #43's `google_revenue_source_rows` substrate to the existing
+  `MonthlyChannelRevenueFactORM` via
+  `SqlAlchemyRevenueFactRepository.record_fact()`. No schema delta, no new
+  exception classes, no Alembic migration. 26 named SQLite tests + 5-test
+  PostgreSQL companion (verifies the real `pg_advisory_xact_lock` + `SELECT
+  ... FOR UPDATE` lock path executes against a live engine). Remaining: live
+  OAuth/API connector (B2), FX/conversion (B3). Marked ⏳ (not ✅) per
+  scaffolding-only honesty rule — no live data source yet. See
+  `Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md`
+  and `Docs/superpowers/plans/2026-05-25-spec-c1-google-source-normalizer.md`.
 
 ## Hard problems to solve early
 
