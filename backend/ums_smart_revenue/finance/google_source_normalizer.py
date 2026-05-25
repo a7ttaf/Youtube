@@ -21,8 +21,10 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
     GoogleRevenueSourceRowEntry,
 )
+from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 from ums_smart_revenue.finance.revenue_facts import (
     RevenueFactEntry,
+    RevenueFactLockedMonthError,
     RevenueFactSourceKind,
     # C1 deliberately reuses the private _validate_month / _resolve_tenant_id
     # helpers from revenue_facts so the normalizer surfaces the SAME
@@ -132,10 +134,40 @@ class GoogleSourceNormalizer:
     ) -> NormalizationResult:
         # Step 0 - Input normalization.
         _validate_month(month)
-        # _normalized_channel_ids is computed here per plan Step 0 but
-        # consumed by the channel-filter logic wired in a later task.
-        _normalized_channel_ids: set[str] | None = (
+        normalized_channel_ids: set[str] | None = (
             set(channel_ids) if channel_ids is not None else None
         )
+
+        logger.info(
+            "normalize_month start tenant_id=%s month=%s channel_scope=%s actor_user_id=%s",
+            self._tenant_id,
+            month,
+            (
+                "all"
+                if normalized_channel_ids is None
+                else f"n_channels={len(normalized_channel_ids)}"
+            ),
+            actor_user_id,
+        )
+
+        # Step 1 - Upfront locked-month gate. Acquires the finance-month
+        # advisory lock + SELECT ... FOR UPDATE on the close row; may create
+        # an OPEN close row when none exists.
+        close_row = get_or_create_month_close_row(
+            self._session,
+            month,
+            tenant_id=self._tenant_id,
+            for_update=True,
+        )
+        if close_row.status == "LOCKED":
+            logger.info(
+                "normalize_month refused tenant_id=%s month=%s reason=month_locked",
+                self._tenant_id,
+                month,
+            )
+            raise RevenueFactLockedMonthError(
+                "Finance month is locked for revenue fact imports"
+            )
+
         # Subsequent steps wired in later tasks.
         return NormalizationResult(created=[], updated=[], unchanged=[], skipped=[])
