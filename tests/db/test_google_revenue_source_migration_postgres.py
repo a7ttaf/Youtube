@@ -8,13 +8,13 @@ reverses the upgrade.
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from _postgres_helpers import require_postgres_url  # sibling module (pytest's prepend mode puts tests/db on sys.path)
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import Connection, create_engine, inspect, text
 from sqlalchemy.exc import DataError, IntegrityError
 from sqlalchemy.orm import Session
 
@@ -239,7 +239,7 @@ def test_raw_payload_object_check_rejects_non_object(
             )
 
 
-def _insert_amount_sql(conn: object, tenant_id: object, key: str, amount: str) -> None:
+def _insert_amount_sql(conn: Connection, tenant_id: UUID, key: str, amount: str) -> None:
     conn.execute(
         text(
             "INSERT INTO google_revenue_source_rows "

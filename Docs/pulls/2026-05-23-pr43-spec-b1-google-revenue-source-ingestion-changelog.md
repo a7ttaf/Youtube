@@ -4,7 +4,7 @@
 
 ### Reference data + ORM
 
-- `backend/ums_smart_revenue/db/iso_4217_2026_05.py` — immutable ISO 4217 snapshot (177 currencies); entries wrapped in `MappingProxyType`.
+- `backend/ums_smart_revenue/db/iso_4217_2026_05.py` — immutable ISO 4217 snapshot (178 currencies); entries wrapped in `MappingProxyType`.
 - `backend/ums_smart_revenue/db/source_models.py` — `CurrencyORM`, `GoogleRevenueSourceRowORM` on `FinanceBase`. Cross-metadata FK technique documented inline.
 - `backend/ums_smart_revenue/db/alembic/versions/20260523_0001_google_revenue_source_foundation.py` — Alembic migration: creates `currencies` + `google_revenue_source_rows`, seeds ISO 4217, flips v1 supported set. Drops nothing.
 
@@ -57,6 +57,12 @@ _Per-file counts reflect the final PR state, including the review-hardening regr
 - `Docs/pulls/2026-05-23-pr43-spec-b1-google-revenue-source-ingestion-handoff.md` (handoff).
 
 ## Changed
+
+### Review hardening round 13
+
+- `backend/ums_smart_revenue/db/iso_4217_2026_05.py` — added the active ISO 4217 code **`UYW`** (Unidad Previsional, numeric `927`, `minor_unit` 4) in its sorted position between `UYU` and `UZS`. The module is presented as the complete ISO 4217 list as of 2026-05, but `UYW` (an active code since 2018) was omitted; because `SqlAlchemyGoogleRevenueSourceRowRepository._require_currencies()` fails closed on any code absent from the seeded `currencies` table, a source row legitimately reported in `UYW` would have been rejected at the validation boundary (an ingestion data-loss path). Correcting the *initial, not-yet-shipped* snapshot is in-scope (the migration re-seeds from it; `google_revenue_source_rows` carries no persisted data at this disposable pre-alpha phase) and does not contradict the file's forward-looking "future ISO updates land as a new dated module" rule, which governs changes *after* a snapshot has been deployed. Snapshot count 177 → 178; numeric `927` is unique; the `>= 150` count smoke test and all format/uniqueness invariants still hold (no new test needed — the new row is exercised by the existing snapshot invariant tests).
+- `tests/db/test_google_revenue_source_migration_postgres.py` — tightened `_insert_amount_sql(conn, tenant_id, …)` parameter hints from `object` to the inferable `Connection` / `UUID` (test-only readability; runtime-inert; collection + ruff verified).
+- Held (deliberately not changed — consistent with the round 3/7/11 decisions): seeding **withdrawn** ISO codes (`SLL`→`SLE`, `VEF`→`VES`, `HRK`→`EUR`) so legacy YouTube currency-allowlist values would pass `_require_currencies()`. The snapshot is the **active** ISO 4217 list as of 2026-05; withdrawn codes are not part of it, and the system deliberately fails closed on unrecognised currencies rather than persisting revenue in a non-current unit (CLAUDE.md rule 4). Ingesting historical months denominated in retired currencies is an explicit future decision (like the B2 CMS-aggregate deferral), not a B1 foundation fix. Also still held: Analytics dimensionless/non-`channel` rows and inferring AdSense currency from headers when `request.currencyCode` is omitted — B1 is channel-scoped and the connector sets currency (see round 11).
 
 ### Review hardening round 12
 
@@ -141,4 +147,5 @@ Nothing. Legacy `currency_exchange_rates` table, `CurrencyExchangeRateORM`, `fin
 - Post-PR #43 (review hardening round 6 — UNPAID_AMOUNT classified estimated + fail-closed on malformed Analytics `ids` selector + optional Analytics `currency` defaults to USD): 996 tests
 - Post-PR #43 (review hardening round 7 — whitespace-only `currency`/`ids` rejection + `source_row_key` canonicalised against account identity for channel-selector idempotency): 1001 tests
 - Post-PR #43 (review hardening rounds 8-12 — doc-marker consistency, `currency` required key axis, per-row dimensions isolation, `includeHistoricalChannelData` key axis, optional `content_owner`, tolerated non-currency AdSense headers, blank identity/currency rejection across all three parsers): 1011 tests
+- Post-PR #43 (review hardening round 13 — added active ISO code `UYW`; test-helper type-hint tightening): 1011 tests (no new tests — the `UYW` row is exercised by the existing ISO-snapshot uniqueness/format/count invariants; the type-hint change is runtime-inert).
 - **Net new: +190 tests** (+89 in the original 17 new test files; +101 review-hardening regressions across existing + new test files).

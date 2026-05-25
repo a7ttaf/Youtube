@@ -161,6 +161,7 @@ _RAW_ISO_4217_CURRENCIES_2026_05: Final[tuple[dict[str, object], ...]] = (
     {"code": "USN", "numeric_code": "997", "name": "US Dollar (Next day)", "minor_unit": 2},
     {"code": "UYI", "numeric_code": "940", "name": "Uruguay Peso en Unidades Indexadas (UI)", "minor_unit": 0},
     {"code": "UYU", "numeric_code": "858", "name": "Peso Uruguayo", "minor_unit": 2},
+    {"code": "UYW", "numeric_code": "927", "name": "Unidad Previsional", "minor_unit": 4},
     {"code": "UZS", "numeric_code": "860", "name": "Uzbekistan Sum", "minor_unit": 2},
     {"code": "VED", "numeric_code": "926", "name": "Bolivar Soberano", "minor_unit": 2},
     {"code": "VES", "numeric_code": "928", "name": "Bolivar Soberano", "minor_unit": 2},
