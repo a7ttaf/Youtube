@@ -9,10 +9,14 @@ SqlAlchemyRevenueFactRepository.record_fact().
 See: Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md
 """
 
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from types import MappingProxyType
+from uuid import UUID
+
+from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
     GoogleRevenueSourceRowEntry,
@@ -20,7 +24,11 @@ from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
 from ums_smart_revenue.finance.revenue_facts import (
     RevenueFactEntry,
     RevenueFactSourceKind,
+    _resolve_tenant_id,
+    _validate_month,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class SkipReason(StrEnum):
@@ -90,3 +98,38 @@ def select_canonical_row(
             canonical = candidates[0]
             return canonical, [r for r in rows if r is not canonical]
     return None, list(rows)
+
+
+class GoogleSourceNormalizer:
+    """Bridge google_revenue_source_rows -> MonthlyChannelRevenueFactORM.
+
+    Writes go exclusively through SqlAlchemyRevenueFactRepository.record_fact();
+    no direct ORM writes. Locked-month, active-channel, tenant, and value
+    validation are preserved by reusing that write path.
+    """
+
+    def __init__(
+        self,
+        session: Session,
+        *,
+        tenant_id: UUID | str | None = None,
+    ) -> None:
+        self._session = session
+        self._tenant_id = _resolve_tenant_id(tenant_id)
+
+    def normalize_month(
+        self,
+        *,
+        month: str,
+        channel_ids: list[str] | None = None,
+        actor_user_id: str,
+    ) -> NormalizationResult:
+        # Step 0 - Input normalization.
+        _validate_month(month)
+        # _normalized_channel_ids is computed here per plan Step 0 but
+        # consumed by the channel-filter logic wired in a later task.
+        _normalized_channel_ids: set[str] | None = (
+            set(channel_ids) if channel_ids is not None else None
+        )
+        # Subsequent steps wired in later tasks.
+        return NormalizationResult(created=[], updated=[], unchanged=[], skipped=[])
