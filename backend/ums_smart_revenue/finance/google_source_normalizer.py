@@ -21,6 +21,9 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
     GoogleRevenueSourceRowEntry,
 )
+from ums_smart_revenue.connectors.google_source_rows.repository import (
+    SqlAlchemyGoogleRevenueSourceRowRepository,
+)
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 from ums_smart_revenue.finance.revenue_facts import (
     RevenueFactEntry,
@@ -169,5 +172,35 @@ class GoogleSourceNormalizer:
                 "Finance month is locked for revenue fact imports"
             )
 
-        # Subsequent steps wired in later tasks.
-        return NormalizationResult(created=[], updated=[], unchanged=[], skipped=[])
+        # Step 2 - Fetch source rows for this tenant + month.
+        source_repo = SqlAlchemyGoogleRevenueSourceRowRepository(self._session)
+        all_rows = source_repo.list(self._tenant_id, report_month=month)
+
+        # Step 3 - Apply channel_ids scope filter.
+        # When channel_ids is provided, out-of-scope rows (including null-
+        # channel rows) are silently dropped, NOT classified as skips. The
+        # caller restricted scope; "not requested" is not "broken".
+        # `in_scope_rows` is the input for Step 4 (MISSING_CHANNEL_ID /
+        # UNKNOWN_CHANNEL classification) wired in Task 6; the unused-local
+        # warning is suppressed here until that consumer lands.
+        if normalized_channel_ids is not None:
+            in_scope_rows = [  # noqa: F841
+                row for row in all_rows
+                if row.youtube_channel_id in normalized_channel_ids
+            ]
+        else:
+            in_scope_rows = all_rows  # noqa: F841
+
+        # Subsequent steps wired in later tasks; emit the complete log + return.
+        result = NormalizationResult(created=[], updated=[], unchanged=[], skipped=[])
+        logger.info(
+            "normalize_month complete tenant_id=%s month=%s "
+            "created=%d updated=%d unchanged=%d skipped=%d",
+            self._tenant_id,
+            month,
+            len(result.created),
+            len(result.updated),
+            len(result.unchanged),
+            len(result.skipped),
+        )
+        return result
