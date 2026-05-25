@@ -1,0 +1,22 @@
+{
+  "query_request": {
+    "ids": "contentOwner==cms-test-1",
+    "startDate": "2026-04-01",
+    "endDate": "2026-04-30",
+    "metrics": "estimatedRevenue,grossRevenue",
+    "dimensions": "channel,country",
+    "currency": "USD"
+  },
+  "kind": "youtubeAnalytics#resultTable",
+  "columnHeaders": [
+    {"name": "channel", "columnType": "DIMENSION", "dataType": "STRING"},
+    {"name": "country", "columnType": "DIMENSION", "dataType": "STRING"},
+    {"name": "estimatedRevenue", "columnType": "METRIC", "dataType": "FLOAT"},
+    {"name": "grossRevenue", "columnType": "METRIC", "dataType": "FLOAT"}
+  ],
+  "rows": [
+    ["UC_test_alpha", "US", "1234.567890", "1500.000000"],
+    ["UC_test_alpha", "EG", "78.910000",   "95.000000"],
+    ["UC_test_beta",  "GB", "456.780000",  "550.000000"]
+  ]
+}

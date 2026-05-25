@@ -1,0 +1,51 @@
+{
+  "report_metadata": {
+    "report_id": "yt-rep-2026-04-channel-estimated-001",
+    "report_type": "channel_basic_a2",
+    "job_id": "synthetic-job-001",
+    "start_time": "2026-04-01T00:00:00Z",
+    "end_time": "2026-04-30T23:59:59Z",
+    "create_time": "2026-05-01T03:00:00Z"
+  },
+  "rows": [
+    {
+      "line_index": 0,
+      "date_range": {"start": "2026-04-01", "end": "2026-04-30"},
+      "dimensions": {
+        "channel": "UC_test_alpha",
+        "country": "US",
+        "content_owner": "cms-test-1"
+      },
+      "metrics": {
+        "estimatedRevenue": "1234.560000",
+        "currencyCode": "USD"
+      }
+    },
+    {
+      "line_index": 1,
+      "date_range": {"start": "2026-04-01", "end": "2026-04-30"},
+      "dimensions": {
+        "channel": "UC_test_alpha",
+        "country": "EG",
+        "content_owner": "cms-test-1"
+      },
+      "metrics": {
+        "estimatedRevenue": "78.910000",
+        "currencyCode": "USD"
+      }
+    },
+    {
+      "line_index": 2,
+      "date_range": {"start": "2026-04-01", "end": "2026-04-30"},
+      "dimensions": {
+        "channel": "UC_test_beta",
+        "country": "GB",
+        "content_owner": "cms-test-1"
+      },
+      "metrics": {
+        "estimatedRevenue": "456.780000",
+        "currencyCode": "GBP"
+      }
+    }
+  ]
+}

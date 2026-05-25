@@ -1,0 +1,15 @@
+{
+  "request": {
+    "accountId": "accounts/pub-test-001",
+    "dateRange": {"startDate": {"year": 2026, "month": 4, "day": 1}, "endDate": {"year": 2026, "month": 4, "day": 30}},
+    "metrics": ["PAID_AMOUNT"],
+    "currencyCode": "USD"
+  },
+  "report_id": "adsense-payment-2026-04-001",
+  "headers": [
+    {"name": "PAID_AMOUNT", "type": "METRIC_CURRENCY", "currencyCode": "USD"}
+  ],
+  "rows": [
+    {"cells": [{"value": "847.130000"}]}
+  ]
+}

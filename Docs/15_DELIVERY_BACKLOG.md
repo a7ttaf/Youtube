@@ -123,6 +123,20 @@ single P-tier above.
   `mockups/ums-smart-revenue-command-center.html`, referenced from
   `Docs/09_SMART_DASHBOARD_UI.md` — PR #39.
 - ✅ Frontend tenant-header foundation: `TenantContext`, `useApiClient`, `GET /tenants/me`, Vite dev gateway proxy, Vitest framework + validation-gate integration — PR #41.
+- ⏳ Google source-reported revenue ingestion foundation: `currencies`
+  reference table, tenant-scoped `google_revenue_source_rows` with idempotent
+  source-row keys (full 64-char SHA-256 hex), storage repository, synthetic-
+  fixture parsers for YouTube Reporting / YouTube Analytics / AdSense
+  Management. PostgreSQL-backed migration round-trip on disposable
+  `postgres:18-alpine` — PR #43. Review-hardened (CodeRabbit + Codex round):
+  repository typed-validation boundary extended (ASCII report_month,
+  nullable-text types, date-not-datetime, ≤6-decimal scale, JSON-serialisable
+  raw_payload) + provenance-preserving upsert (COALESCE), AdSense fail-closed
+  accountId / empty-report handling, and strict YYYY-MM-DD parsing — see
+  `Docs/pulls/2026-05-23-pr43-spec-b1-google-revenue-source-ingestion-report.md`.
+  Remaining: live OAuth/API connector
+  (B2), FX/conversion (B3). Marked ⏳ (not ✅) per the scaffolding-only honesty
+  rule above — no real ingestion path yet.
 
 ## Hard problems to solve early
 
