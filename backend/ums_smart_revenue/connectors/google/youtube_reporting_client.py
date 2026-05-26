@@ -22,10 +22,10 @@ class YouTubeReportingClient:
     def __init__(self, *, http: GoogleHttpClient) -> None:
         self._http = http
 
-    def list_supported_jobs(self, *, account_id: str) -> list[dict]:
+    def list_supported_jobs(self, *, account_id: str) -> list[dict[str, object]]:
         url = f"{_BASE}/jobs"
         token: str | None = None
-        out: list[dict] = []
+        out: list[dict[str, object]] = []
         while True:
             params: dict[str, str] = {"onBehalfOfContentOwner": account_id}
             if token:
