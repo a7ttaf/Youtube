@@ -127,6 +127,27 @@ def test_429_honors_retry_after(mock_credentials, monkeypatch) -> None:
     assert sleeps == [3.0]
 
 
+def test_429_without_retry_after_uses_backoff_schedule(mock_credentials, monkeypatch) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "ums_smart_revenue.connectors.google.http_client.time.sleep",
+        sleeps.append,
+    )
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(429, content=b"{}")
+
+    client = GoogleHttpClient(
+        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(GoogleApiRateLimitError):
+        client.request(method="GET", url="https://example.com/x")
+    assert sleeps == [1.0, 2.0, 4.0]  # 3 backoff sleeps before the 4th attempt raises
+    assert len(calls) == 4
+
+
 def test_5xx_retries_then_raises(mock_credentials, monkeypatch) -> None:
     monkeypatch.setattr(
         "ums_smart_revenue.connectors.google.http_client.time.sleep",
@@ -139,6 +160,8 @@ def test_5xx_retries_then_raises(mock_credentials, monkeypatch) -> None:
     client = GoogleHttpClient(
         credentials=mock_credentials, transport=httpx.MockTransport(handler),
     )
-    with pytest.raises(GoogleApiServerError):
+    with pytest.raises(GoogleApiServerError) as ctx:
         client.request(method="GET", url="https://example.com/x")
     assert len(calls) == 4
+    assert ctx.value.attempts == 4
+    assert ctx.value.status == 503

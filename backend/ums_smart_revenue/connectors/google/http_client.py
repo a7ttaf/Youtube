@@ -4,7 +4,7 @@ Pre-request: credentials.before_request(...) is invoked once per request so
 google-auth handles access-token refresh via its own state machine; the
 resulting headers dict is reused across retry attempts.
 
-Retry policy (spec §7):
+Retry policy (Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md §7):
     400/404/422 -> GoogleApiClientError, no retry
     401/403     -> GoogleApiAuthError, no retry
     429         -> exp backoff 1/2/4/8s max 4 attempts honoring Retry-After
@@ -83,8 +83,9 @@ class GoogleHttpClient:
         # Connections:
         #   - File: backend/ums_smart_revenue/connectors/google/errors.py ->
         #     _GoogleApiHttpError subclasses raised on each failure branch.
-        #   - File: Docs/12_BACKEND_API_SPEC.md §7 -> retry table this loop
-        #     implements (statuses, budgets, backoff, Retry-After clamp).
+        #   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-
+        #     connector-design.md §7 -> retry table this loop implements
+        #     (statuses, budgets, backoff, Retry-After clamp).
         # ====================================================================
         headers: dict[str, str] = {}
         # Build auth headers once per overall request; google-auth's own
@@ -124,7 +125,13 @@ class GoogleHttpClient:
                 attempt -= 1
                 time.sleep(timeout_backoff[timeout_attempts - 1])
                 continue
-            except httpx.ConnectError:
+            except httpx.NetworkError:
+                # Spec §7: "DNS / TCP reset" bucket — 3-attempt budget for all
+                # sub-HTTP transport failures (DNS, connect-refused, mid-
+                # response reset, server-closed-connection). httpx.NetworkError
+                # parents ConnectError/ReadError/WriteError/CloseError; httpx.
+                # TimeoutException is NOT a NetworkError so the 4-attempt
+                # timeout budget above stays separate.
                 connect_attempts += 1
                 if connect_attempts >= _MAX_CONNECT_ATTEMPTS:
                     raise GoogleApiServerError(
