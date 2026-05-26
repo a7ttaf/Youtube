@@ -81,10 +81,13 @@ class GoogleHttpClient:
         #   stays injected for tests; google-auth manages token refresh state.
         # Blast Radius: Every B2 live API call funnels through here. The
         #   error class chosen determines whether the orchestrator records a
-        #   connector_runs FAILED row with auth/client/rate-limit/server.
+        #   connector_runs FAILED row with auth/client/rate-limit/server/
+        #   response.
         # Connections:
         #   - File: backend/ums_smart_revenue/connectors/google/errors.py ->
-        #     _GoogleApiHttpError subclasses raised on each failure branch.
+        #     _GoogleApiHttpError subclasses for the HTTP-status branches;
+        #     GoogleApiResponseError (direct GoogleConnectorError, not a
+        #     _GoogleApiHttpError) for the 200-with-bad-body branch.
         #   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-
         #     connector-design.md §7 -> retry table this loop implements
         #     (statuses, budgets, backoff, Retry-After clamp).
