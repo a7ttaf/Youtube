@@ -83,3 +83,59 @@ class RawFileAlreadyParsedError(GoogleConnectorError):
     def __init__(self, *, raw_file_id: str) -> None:
         super().__init__(f"raw_file already parsed: {raw_file_id}")
         self.raw_file_id = raw_file_id
+
+
+class CredentialNotFoundError(GoogleConnectorError):
+    def __init__(self, *, connector_key: str, account_id: str) -> None:
+        super().__init__(f"no credential for {connector_key}/{account_id}")
+        self.connector_key = connector_key
+        self.account_id = account_id
+
+
+class InactiveCredentialError(GoogleConnectorError):
+    def __init__(self, *, credential_id: str, status: str) -> None:
+        super().__init__(f"credential {credential_id} is {status}, not active")
+        self.credential_id = credential_id
+        self.status = status
+
+
+class _GoogleApiHttpError(GoogleConnectorError):
+    def __init__(self, *, method: str, url: str, status: int, attempts: int = 1) -> None:
+        if attempts > 1:
+            msg = f"{method} {url}: HTTP {status} after {attempts} retries"
+        else:
+            msg = f"{method} {url}: HTTP {status}"
+        super().__init__(msg)
+        self.method = method
+        self.url = url
+        self.status = status
+        self.attempts = attempts
+
+
+class GoogleApiAuthError(_GoogleApiHttpError):
+    pass
+
+
+class GoogleApiClientError(_GoogleApiHttpError):
+    pass
+
+
+class GoogleApiRateLimitError(_GoogleApiHttpError):
+    pass
+
+
+class GoogleApiServerError(_GoogleApiHttpError):
+    pass
+
+
+class GoogleApiResponseError(GoogleConnectorError):
+    def __init__(self, *, url: str, reason: str) -> None:
+        super().__init__(f"{url}: response schema invalid ({reason})")
+        self.url = url
+        self.reason = reason
+
+
+class UnsupportedReportTypeError(GoogleConnectorError):
+    def __init__(self, *, report_type_id: str) -> None:
+        super().__init__(f"report_type_id {report_type_id} not in supported set")
+        self.report_type_id = report_type_id
