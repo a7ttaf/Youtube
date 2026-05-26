@@ -103,3 +103,55 @@ def test_list_supported_jobs_treats_empty_next_page_token_as_terminal(
     client = YouTubeReportingClient(http=http)
     jobs = client.list_supported_jobs(account_id="acct")
     assert [j["id"] for j in jobs] == ["j1"]
+
+
+def test_list_reports_for_month_passes_date_bounds(mock_credentials) -> None:
+    captured = {}
+    def handler(request: httpx.Request) -> httpx.Response:
+        captured.setdefault("queries", []).append(dict(request.url.params))
+        import json
+        return httpx.Response(200, content=json.dumps({"reports": []}).encode())
+    http = GoogleHttpClient(
+        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeReportingClient(http=http)
+    client.list_reports_for_month(
+        account_id="acct", job_id="job-1", report_month="2026-05",
+    )
+    q = captured["queries"][0]
+    assert q["startTimeAtOrAfter"] == "2026-05-01T00:00:00Z"
+    assert q["startTimeBefore"] == "2026-06-01T00:00:00Z"
+
+
+def test_list_reports_for_month_paginates(mock_credentials) -> None:
+    pages = iter([
+        {"reports": [{"id": "r1", "downloadUrl": "https://x/r1"}], "nextPageToken": "p2"},
+        {"reports": [{"id": "r2", "downloadUrl": "https://x/r2"}]},
+    ])
+    def handler(request: httpx.Request) -> httpx.Response:
+        import json
+        return httpx.Response(200, content=json.dumps(next(pages)).encode())
+    http = GoogleHttpClient(
+        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeReportingClient(http=http)
+    reports = client.list_reports_for_month(
+        account_id="acct", job_id="job-1", report_month="2026-05",
+    )
+    assert [r["id"] for r in reports] == ["r1", "r2"]
+
+
+def test_list_reports_handles_december_boundary(mock_credentials) -> None:
+    captured = {}
+    def handler(request):
+        captured["q"] = dict(request.url.params)
+        import json
+        return httpx.Response(200, content=json.dumps({"reports": []}).encode())
+    http = GoogleHttpClient(
+        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeReportingClient(http=http)
+    client.list_reports_for_month(
+        account_id="acct", job_id="j", report_month="2026-12",
+    )
+    assert captured["q"]["startTimeBefore"] == "2027-01-01T00:00:00Z"
