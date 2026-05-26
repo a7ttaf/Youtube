@@ -17,7 +17,10 @@ from ums_smart_revenue.finance.google_source_normalizer import (
     SOURCE_SYSTEM_TO_SOURCE_KIND,
     select_canonical_row,
 )
-from ums_smart_revenue.finance.revenue_facts import RevenueFactSourceKind
+from ums_smart_revenue.finance.revenue_facts import (
+    RevenueFactSourceKind,
+    RevenueFactValidationError,
+)
 
 
 def test_source_system_to_source_kind_mapping_covers_three_supported_systems():
@@ -138,3 +141,9 @@ def test_select_canonical_row_non_canonical_rest_excludes_canonical():
     # to preserve the set-comparison intent (order-independent identity check).
     assert {id(r) for r in rest} == {id(b), id(c)}
     assert canonical not in rest
+
+
+def test_select_canonical_row_raises_on_unsupported_source_system():
+    bogus = _entry(source_system="totally_bogus_system", metric_key="estimatedRevenue", source_row_key="z" * 64)
+    with pytest.raises(RevenueFactValidationError, match="Unsupported source_system"):
+        select_canonical_row([bogus])

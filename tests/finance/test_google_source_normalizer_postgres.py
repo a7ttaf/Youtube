@@ -15,6 +15,7 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 # Reuse the postgres URL helper that lives in tests/db/.
@@ -58,6 +59,13 @@ def alembic_config(postgres_url: str) -> Config:
 
 @pytest.fixture
 def fresh_engine(postgres_url: str):
+    # Resets PostgreSQL public schema for isolated integration tests.
+    # Fail-closed: refuses to run if database name does not look like a test DB.
+    db_name = make_url(postgres_url).database or ""
+    if not (db_name.startswith("test_") or db_name.endswith("_test")):
+        raise RuntimeError(
+            f"Refusing destructive schema reset for non-test database: {db_name!r}"
+        )
     engine = create_engine(postgres_url)
     with engine.begin() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE"))
@@ -66,7 +74,9 @@ def fresh_engine(postgres_url: str):
     engine.dispose()
 
 
-def _seed_pg(session, tenant_id, channel_id):
+def _seed_pg(session, tenant_id, channel_id) -> None:
+    # Seeds minimal tenant/currency/channel rows for normalizer PG tests.
+    # Defensively checks for existing USD/EGP before inserting.
     session.add(TenantORM(id=tenant_id, slug=f"pg-{tenant_id.hex[:6]}", display_name="PG"))
     # PostgreSQL currencies seeded by migration but ensure USD is supported and activated:
     # (the migration in 20260523_0001 may already do this; this is defensive)
@@ -108,6 +118,7 @@ def _pg_row(channel: str, seed: str, amount: str = "100.000000") -> ParsedSource
     )
 
 
+# Verifies CREATED path: single eligible USD row produces one fact via record_fact.
 def test_pg_created_path(alembic_config, fresh_engine):
     command.upgrade(alembic_config, "head")
     tenant_id = uuid4()
@@ -123,6 +134,7 @@ def test_pg_created_path(alembic_config, fresh_engine):
         assert len(result.created) == 1
 
 
+# Verifies UNCHANGED replay: second normalization of identical payload yields no new write.
 def test_pg_unchanged_replay(alembic_config, fresh_engine):
     command.upgrade(alembic_config, "head")
     tenant_id = uuid4()
@@ -140,6 +152,7 @@ def test_pg_unchanged_replay(alembic_config, fresh_engine):
         assert len(second.created) == 0
 
 
+# Verifies UPDATED path: changed amount produces an updated fact.
 def test_pg_updated_path(alembic_config, fresh_engine):
     command.upgrade(alembic_config, "head")
     tenant_id = uuid4()
@@ -159,6 +172,7 @@ def test_pg_updated_path(alembic_config, fresh_engine):
         assert len(second.updated) == 1
 
 
+# Verifies non-USD rows are skipped with non_usd_currency reason and produce no facts.
 def test_pg_non_usd_currency_skip(alembic_config, fresh_engine):
     command.upgrade(alembic_config, "head")
     tenant_id = uuid4()
@@ -178,6 +192,7 @@ def test_pg_non_usd_currency_skip(alembic_config, fresh_engine):
         assert len(result.created) == 0
 
 
+# Verifies LOCKED month gate: RevenueFactLockedMonthError raised before any writes.
 def test_pg_locked_month_raises(alembic_config, fresh_engine):
     command.upgrade(alembic_config, "head")
     tenant_id = uuid4()

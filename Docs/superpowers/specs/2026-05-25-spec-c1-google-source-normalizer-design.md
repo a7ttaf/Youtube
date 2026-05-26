@@ -692,5 +692,5 @@ rule):
   scaffolding-shipped but-not-yet-end-to-end deliverable (no live data
   source yet), which under the honesty rule stays `⏳` until B2 lands.
 
-**Per-PR report** at `Docs/pulls/2026-MM-DD-pr<N>-spec-c1-google-source-normalizer-report.md`
+**Per-PR report** at `Docs/pulls/2026-05-25-pr44-spec-c1-google-source-normalizer-report.md`
 follows the established PR-doc layout.

@@ -33,6 +33,7 @@ from ums_smart_revenue.finance.revenue_facts import (
     RevenueFactEntry,
     RevenueFactLockedMonthError,
     RevenueFactSourceKind,
+    RevenueFactValidationError,
     SqlAlchemyRevenueFactRepository,
     # C1 deliberately reuses the private _validate_month / _resolve_tenant_id
     # helpers from revenue_facts so the normalizer surfaces the SAME
@@ -116,6 +117,13 @@ def _payload_matches(
     )
 
 
+# ============================================================================
+# Purpose: Select one canonical row from a homogeneous group using the
+#          per-source_system metric-key preference rule.
+# Database/ORM: None (pure function operating on in-memory dataclasses).
+# Standards: Deterministic tie-breaking by source_row_key ascending.
+# Blast Radius: Incorrect selection propagates to all CREATED/UPDATED facts.
+# ============================================================================
 def select_canonical_row(
     rows: list[GoogleRevenueSourceRowEntry],
 ) -> tuple[GoogleRevenueSourceRowEntry | None, list[GoogleRevenueSourceRowEntry]]:
@@ -132,7 +140,11 @@ def select_canonical_row(
     """
     if not rows:
         return None, []
-    preference = CANONICAL_METRIC_RULE[rows[0].source_system]
+    preference = CANONICAL_METRIC_RULE.get(rows[0].source_system)
+    if preference is None:
+        raise RevenueFactValidationError(
+            f"Unsupported source_system for canonical selection: {rows[0].source_system!r}"
+        )
     for metric_key in preference:
         candidates = sorted(
             (r for r in rows if r.metric_key == metric_key),
@@ -161,6 +173,19 @@ class GoogleSourceNormalizer:
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
+    # ============================================================================
+    # Purpose: Orchestrate the full normalization pipeline for one (tenant, month):
+    #          fetch source rows, filter by scope/currency/canonical, and write
+    #          one revenue fact per eligible (channel, source_system) bucket.
+    # Database/ORM: MonthlyChannelRevenueFactORM via record_fact(); read-only on
+    #               GoogleRevenueSourceRowORM, YouTubeChannelORM, FinanceMonthCloseORM.
+    # Standards: Raises RevenueFactLockedMonthError if month is LOCKED; raises
+    #            RevenueFactValidationError on unsupported source_system.
+    # Blast Radius: Finance totals, audit trail, month-lock integrity.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/finance/revenue_facts.py -> write path.
+    #   - File: Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md
+    # ============================================================================
     def normalize_month(
         self,
         *,
@@ -249,6 +274,10 @@ class GoogleSourceNormalizer:
         updated: list[RevenueFactEntry] = []
         unchanged: list[RevenueFactEntry] = []
         skipped: list[SkippedSourceRow] = []
+        facts_repo = SqlAlchemyRevenueFactRepository(
+            self._session, tenant_id=self._tenant_id,
+        )
+        facts_by_channel: dict[str, list[RevenueFactEntry]] = {}
 
         # Step 6 - Per-bucket processing.
         for (channel_id, source_system), bucket_rows in buckets.items():
@@ -310,17 +339,20 @@ class GoogleSourceNormalizer:
                 for r in non_canonical_rest
             )
             # Step 6(h) - build proposed payload from canonical row + defaults.
-            mapped_source_kind = SOURCE_SYSTEM_TO_SOURCE_KIND[source_system]
+            mapped_source_kind = SOURCE_SYSTEM_TO_SOURCE_KIND.get(source_system)
+            if mapped_source_kind is None:
+                raise RevenueFactValidationError(
+                    f"Unsupported source_system for source kind mapping: {source_system!r}"
+                )
 
             # Step 6(i) - read existing fact for (tenant, month, channel, source_kind).
-            # list_channel_month_facts() returns list[RevenueFactEntry]; filter
-            # by source_kind in Python rather than re-issuing a query.
-            facts_repo = SqlAlchemyRevenueFactRepository(
-                self._session, tenant_id=self._tenant_id
-            )
-            existing_facts = facts_repo.list_channel_month_facts(
-                month=month, youtube_channel_id=channel_id,
-            )
+            # Cache facts per channel to avoid N+1 queries when the same
+            # channel_id appears across multiple source_system buckets.
+            if channel_id not in facts_by_channel:
+                facts_by_channel[channel_id] = facts_repo.list_channel_month_facts(
+                    month=month, youtube_channel_id=channel_id,
+                )
+            existing_facts = facts_by_channel[channel_id]
             existing = next(
                 (
                     fact for fact in existing_facts
@@ -329,6 +361,14 @@ class GoogleSourceNormalizer:
                 None,
             )
 
+            # ============================================================================
+            # Purpose: Classify the canonical row as CREATED, UPDATED, or UNCHANGED
+            #          and write to MonthlyChannelRevenueFactORM via record_fact().
+            #          Byte-identical payloads (even from different actors) yield UNCHANGED.
+            # Database/ORM: Writes via SqlAlchemyRevenueFactRepository.record_fact().
+            # Standards: Fails closed on locked months. Actor-insensitive for UNCHANGED.
+            # Blast Radius: Revenue totals, payment matching, audit trail.
+            # ============================================================================
             # Step 6(j) - classify via payload-only comparison.
             if existing is None:
                 # CREATED path.

@@ -166,11 +166,19 @@ def test_normalize_month_channel_ids_filter_drops_out_of_scope_rows_silently(ses
         channel_ids=["UC_test_in"],
         actor_user_id=ACTOR_USER_ID,
     )
-    # Out-of-scope rows must NOT appear in skipped (silently dropped).
-    skipped_ids = {s.source_row_id for s in result.skipped}
-    assert all("UC_test_out" not in s.source_row_id for s in result.skipped) or skipped_ids == set()
-    # The in-scope channel's row should not be skipped for scope reasons
-    # (it may still be skipped/created by later steps but not for scope).
+    # Out-of-scope rows must be silently dropped, not classified as skipped.
+    # Only the in-scope row should appear in any result category.
+    total_processed = (
+        len(result.created)
+        + len(result.updated)
+        + len(result.unchanged)
+        + len(result.skipped)
+    )
+    assert total_processed == 1, (
+        f"Expected exactly 1 processed row (in-scope only), got {total_processed}"
+    )
+    assert len(result.created) == 1
+    # In-scope rows must not be classified as missing_channel_id.
     assert not any(
         s.reason.value == "missing_channel_id" for s in result.skipped
     ), "in-scope rows must not be classified as missing_channel_id"
