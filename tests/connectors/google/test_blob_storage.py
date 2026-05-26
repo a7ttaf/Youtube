@@ -9,10 +9,15 @@ after upload returns the same payload.
 """
 from __future__ import annotations
 
-import pytest
+from unittest.mock import MagicMock
 
+import pytest
+from google.api_core import exceptions as gcp_exceptions
+
+from ums_smart_revenue.connectors.google.errors import BlobUploadError
 from ums_smart_revenue.connectors.runs.blob_storage import (
     BlobStorageBackend,
+    GcsBlobStorageBackend,
     LocalFileStoreBackend,
 )
 
@@ -65,3 +70,50 @@ def test_file_store_rejects_path_traversal(tmp_path, bad_uri: str) -> None:
     backend = LocalFileStoreBackend(root=tmp_path)
     with pytest.raises(ValueError):
         backend.upload(storage_uri=bad_uri, content=b"x")
+
+
+def test_gcs_upload_parses_uri_and_calls_blob_upload() -> None:
+    fake_client = MagicMock()
+    fake_bucket = MagicMock()
+    fake_blob = MagicMock()
+    fake_client.bucket.return_value = fake_bucket
+    fake_bucket.blob.return_value = fake_blob
+
+    backend = GcsBlobStorageBackend(client=fake_client)
+    backend.upload(storage_uri="gs://my-bucket/tenant/yt/key.csv", content=b"x")
+
+    fake_client.bucket.assert_called_once_with("my-bucket")
+    fake_bucket.blob.assert_called_once_with("tenant/yt/key.csv")
+    fake_blob.upload_from_string.assert_called_once_with(b"x")
+
+
+def test_gcs_upload_wraps_api_error_as_blob_upload_error() -> None:
+    fake_client = MagicMock()
+    fake_bucket = MagicMock()
+    fake_blob = MagicMock()
+    fake_client.bucket.return_value = fake_bucket
+    fake_bucket.blob.return_value = fake_blob
+    fake_blob.upload_from_string.side_effect = gcp_exceptions.GoogleAPICallError("fail")
+
+    backend = GcsBlobStorageBackend(client=fake_client)
+    with pytest.raises(BlobUploadError) as ctx:
+        backend.upload(storage_uri="gs://my-bucket/key", content=b"x")
+    assert ctx.value.storage_uri == "gs://my-bucket/key"
+
+
+def test_gcs_get_bytes_downloads_via_blob() -> None:
+    fake_client = MagicMock()
+    fake_bucket = MagicMock()
+    fake_blob = MagicMock()
+    fake_blob.download_as_bytes.return_value = b"downloaded"
+    fake_client.bucket.return_value = fake_bucket
+    fake_bucket.blob.return_value = fake_blob
+
+    backend = GcsBlobStorageBackend(client=fake_client)
+    assert backend.get_bytes(storage_uri="gs://b/k") == b"downloaded"
+
+
+def test_gcs_rejects_non_gs_scheme() -> None:
+    backend = GcsBlobStorageBackend(client=MagicMock())
+    with pytest.raises(ValueError, match="gs://"):
+        backend.upload(storage_uri="file-store://x", content=b"x")

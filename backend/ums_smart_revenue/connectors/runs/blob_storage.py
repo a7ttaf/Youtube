@@ -12,6 +12,11 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Protocol
 
+from google.api_core import exceptions as gcp_exceptions
+from google.cloud.storage import Client as GcsClient  # type: ignore[import-untyped]
+
+from ums_smart_revenue.connectors.google.errors import BlobUploadError
+
 
 class BlobStorageBackend(Protocol):
     def upload(self, *, storage_uri: str, content: bytes) -> None: ...
@@ -71,3 +76,34 @@ class LocalFileStoreBackend:
 
     def get_bytes(self, *, storage_uri: str) -> bytes:
         return self._path_for(storage_uri).read_bytes()
+
+
+_GCS_PREFIX = "gs://"
+
+
+class GcsBlobStorageBackend:
+    def __init__(self, *, client: GcsClient) -> None:
+        self._client = client
+
+    def _parse_uri(self, storage_uri: str) -> tuple[str, str]:
+        if not storage_uri.startswith(_GCS_PREFIX):
+            raise ValueError(
+                f"GcsBlobStorageBackend only handles {_GCS_PREFIX} URIs, got {storage_uri!r}"
+            )
+        rest = storage_uri[len(_GCS_PREFIX) :]
+        bucket, _, key = rest.partition("/")
+        if not bucket or not key:
+            raise ValueError(f"malformed gs:// URI: {storage_uri!r}")
+        return bucket, key
+
+    def upload(self, *, storage_uri: str, content: bytes) -> None:
+        bucket, key = self._parse_uri(storage_uri)
+        try:
+            blob = self._client.bucket(bucket).blob(key)
+            blob.upload_from_string(content)
+        except gcp_exceptions.GoogleAPICallError as exc:
+            raise BlobUploadError(storage_uri=storage_uri, inner=exc) from exc
+
+    def get_bytes(self, *, storage_uri: str) -> bytes:
+        bucket, key = self._parse_uri(storage_uri)
+        return self._client.bucket(bucket).blob(key).download_as_bytes()
