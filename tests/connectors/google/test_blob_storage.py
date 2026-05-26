@@ -9,16 +9,24 @@ after upload returns the same payload.
 """
 from __future__ import annotations
 
+import hashlib
 from unittest.mock import MagicMock
+from uuid import UUID
 
 import pytest
 from google.api_core import exceptions as gcp_exceptions
 
-from ums_smart_revenue.connectors.google.errors import BlobUploadError
+from ums_smart_revenue.connectors.google.errors import (
+    BlobChecksumMismatchError,
+    BlobUploadError,
+)
 from ums_smart_revenue.connectors.runs.blob_storage import (
     BlobStorageBackend,
     GcsBlobStorageBackend,
     LocalFileStoreBackend,
+    compute_checksum,
+    deterministic_blob_path,
+    upload_and_verify,
 )
 
 
@@ -117,3 +125,45 @@ def test_gcs_rejects_non_gs_scheme() -> None:
     backend = GcsBlobStorageBackend(client=MagicMock())
     with pytest.raises(ValueError, match="gs://"):
         backend.upload(storage_uri="file-store://x", content=b"x")
+
+
+def test_deterministic_blob_path_format() -> None:
+    path = deterministic_blob_path(
+        bucket="my-bucket",
+        tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
+        connector_key="youtube-reporting",
+        report_type="channel_basic_a2",
+        month="2026-05",
+        checksum="abc123",
+        ext="csv",
+    )
+    assert path == (
+        "gs://my-bucket/00000000-0000-0000-0000-000000000001/"
+        "youtube-reporting/channel_basic_a2/2026-05/abc123.csv"
+    )
+
+
+def test_compute_checksum_returns_hex_sha256() -> None:
+    expected = hashlib.sha256(b"hello").hexdigest()
+    assert compute_checksum(b"hello") == expected
+
+
+def test_upload_and_verify_round_trips(tmp_path) -> None:
+    backend = LocalFileStoreBackend(root=tmp_path)
+    uri = "file-store://bucket/tenant/yt/m/abc.csv"
+    checksum = upload_and_verify(
+        backend=backend, storage_uri=uri, content=b"payload"
+    )
+    assert checksum == hashlib.sha256(b"payload").hexdigest()
+
+
+def test_upload_and_verify_raises_on_checksum_mismatch(tmp_path, monkeypatch) -> None:
+    backend = LocalFileStoreBackend(root=tmp_path)
+    uri = "file-store://bucket/key"
+
+    def fake_get_bytes(*, storage_uri: str) -> bytes:
+        return b"different"
+
+    monkeypatch.setattr(backend, "get_bytes", fake_get_bytes)
+    with pytest.raises(BlobChecksumMismatchError):
+        upload_and_verify(backend=backend, storage_uri=uri, content=b"original")

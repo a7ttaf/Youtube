@@ -9,13 +9,18 @@ not supported in a single orchestrator invocation.
 """
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Protocol
+from uuid import UUID
 
 from google.api_core import exceptions as gcp_exceptions
 from google.cloud.storage import Client as GcsClient  # type: ignore[import-untyped]
 
-from ums_smart_revenue.connectors.google.errors import BlobUploadError
+from ums_smart_revenue.connectors.google.errors import (
+    BlobChecksumMismatchError,
+    BlobUploadError,
+)
 
 
 class BlobStorageBackend(Protocol):
@@ -107,3 +112,53 @@ class GcsBlobStorageBackend:
     def get_bytes(self, *, storage_uri: str) -> bytes:
         bucket, key = self._parse_uri(storage_uri)
         return self._client.bucket(bucket).blob(key).download_as_bytes()
+
+
+def deterministic_blob_path(
+    *,
+    bucket: str,
+    tenant_id: UUID,
+    connector_key: str,
+    report_type: str,
+    month: str,
+    checksum: str,
+    ext: str,
+) -> str:
+    """Build the deterministic gs:// URI for a raw report blob.
+
+    Path shape: gs://{bucket}/{tenant_id}/{connector_key}/{report_type}/{month}/{checksum}.{ext}
+    Note: account_id is intentionally NOT in the path - run context lives on
+    connector_runs. Same bytes always map to the same path, so idempotent
+    re-uploads on retry overwrite or hit the existing object.
+    """
+    return (
+        f"gs://{bucket}/{tenant_id}/{connector_key}/{report_type}/"
+        f"{month}/{checksum}.{ext}"
+    )
+
+
+def compute_checksum(content: bytes) -> str:
+    return hashlib.sha256(content).hexdigest()
+
+
+def upload_and_verify(
+    *,
+    backend: BlobStorageBackend,
+    storage_uri: str,
+    content: bytes,
+) -> str:
+    """Upload, re-read, verify SHA-256, return the computed checksum.
+
+    Raises BlobUploadError if backend.upload fails (passed through).
+    Raises BlobChecksumMismatchError if re-read bytes hash differently
+    (e.g., backend silently truncated).
+    """
+    computed = compute_checksum(content)
+    backend.upload(storage_uri=storage_uri, content=content)
+    read_back = backend.get_bytes(storage_uri=storage_uri)
+    read_back_hash = compute_checksum(read_back)
+    if read_back_hash != computed:
+        raise BlobChecksumMismatchError(
+            storage_uri=storage_uri, computed=computed, read=read_back_hash
+        )
+    return computed
