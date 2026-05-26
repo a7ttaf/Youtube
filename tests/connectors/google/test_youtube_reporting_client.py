@@ -121,16 +121,21 @@ def test_list_reports_for_month_passes_date_bounds(mock_credentials) -> None:
     q = captured["queries"][0]
     assert q["startTimeAtOrAfter"] == "2026-05-01T00:00:00Z"
     assert q["startTimeBefore"] == "2026-06-01T00:00:00Z"
+    assert q["onBehalfOfContentOwner"] == "acct"
 
 
 def test_list_reports_for_month_paginates(mock_credentials) -> None:
+    captured: dict[str, list[dict[str, str]]] = {}
     pages = iter([
         {"reports": [{"id": "r1", "downloadUrl": "https://x/r1"}], "nextPageToken": "p2"},
         {"reports": [{"id": "r2", "downloadUrl": "https://x/r2"}]},
     ])
+
     def handler(request: httpx.Request) -> httpx.Response:
+        captured.setdefault("queries", []).append(dict(request.url.params))
         import json
         return httpx.Response(200, content=json.dumps(next(pages)).encode())
+
     http = GoogleHttpClient(
         credentials=mock_credentials, transport=httpx.MockTransport(handler),
     )
@@ -139,11 +144,16 @@ def test_list_reports_for_month_paginates(mock_credentials) -> None:
         account_id="acct", job_id="job-1", report_month="2026-05",
     )
     assert [r["id"] for r in reports] == ["r1", "r2"]
+    # Page 2 must carry the pageToken from page 1's nextPageToken.
+    assert captured["queries"][1]["pageToken"] == "p2"
+    # Date-bounds must be sent on every paginated request, not only page 1.
+    assert captured["queries"][1]["startTimeAtOrAfter"] == "2026-05-01T00:00:00Z"
+    assert captured["queries"][1]["startTimeBefore"] == "2026-06-01T00:00:00Z"
 
 
 def test_list_reports_handles_december_boundary(mock_credentials) -> None:
     captured = {}
-    def handler(request):
+    def handler(request: httpx.Request) -> httpx.Response:
         captured["q"] = dict(request.url.params)
         import json
         return httpx.Response(200, content=json.dumps({"reports": []}).encode())

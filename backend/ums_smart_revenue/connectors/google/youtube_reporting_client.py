@@ -38,6 +38,25 @@ class YouTubeReportingClient:
     def __init__(self, *, http: GoogleHttpClient) -> None:
         self._http = http
 
+    # ============================================================================
+    # Purpose: List the YouTube Reporting jobs for an account, filtered to the
+    #          locked-at-ship report_type_id whitelist (B1 parser-compatible set).
+    # Database/ORM: None (read-only API call).
+    # Standards: Pagination via nextPageToken; typed errors via GoogleHttpClient
+    #            (4xx/auth/429/5xx/response). Out-of-whitelist jobs are dropped
+    #            here so the orchestrator never sees an UnsupportedReportTypeError
+    #            for known-bad report types.
+    # Blast Radius: Whitelist filter is the load-bearing guard between Google's
+    #               jobs catalog and the B1 parser; widening it requires both a
+    #               parser change and a SUPPORTED_REPORT_TYPES update.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/google/http_client.py ->
+    #     typed retry/error/response-validation pipeline.
+    #   - File: backend/ums_smart_revenue/connectors/google/report_type_whitelist.py ->
+    #     SUPPORTED_REPORT_TYPES source of truth.
+    #   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
+    #     §5.4 -> supported report types and orchestrator integration contract.
+    # ============================================================================
     def list_supported_jobs(self, *, account_id: str) -> list[dict[str, object]]:
         url = f"{_BASE}/jobs"
         token: str | None = None
@@ -55,6 +74,26 @@ class YouTubeReportingClient:
                 break
         return out
 
+    # ============================================================================
+    # Purpose: List the reports a job produced for a single calendar month,
+    #          paginated. Returns Google's report descriptors (id, downloadUrl,
+    #          startTime, etc.) for the orchestrator to fetch individually.
+    # Database/ORM: None (read-only API call).
+    # Standards: Month bounds form a half-open interval [start, next-month-start)
+    #            via _month_bounds_iso (RFC 3339 Z-suffix). Pagination via
+    #            nextPageToken with date bounds re-sent on every page so a
+    #            future refactor can't accidentally drop them after page 1.
+    # Blast Radius: Wrong month-bound math would miss reports (revenue gaps) or
+    #               double-count across boundary months (revenue inflation).
+    #               December rollover is explicit; see _month_bounds_iso.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/google/http_client.py ->
+    #     typed retry/error/response-validation pipeline.
+    #   - Helper: _month_bounds_iso (module scope above the class) -> month-to-ISO
+    #     window with December branch.
+    #   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
+    #     §5.4 -> orchestrator integration contract for per-month ingestion.
+    # ============================================================================
     def list_reports_for_month(
         self, *, account_id: str, job_id: str, report_month: str,
     ) -> list[dict[str, object]]:
