@@ -115,3 +115,26 @@ class YouTubeReportingClient:
             if not token:
                 break
         return out
+
+    # ============================================================================
+    # Purpose: Download the raw CSV bytes for one YouTube Reporting report,
+    #          given the downloadUrl returned by list_reports_for_month. Bytes
+    #          are handed straight to the orchestrator for blob upload and the
+    #          B1 parser, with no in-memory decoding or shape validation here.
+    # Database/ORM: None (read-only API download).
+    # Standards: Delegates to GoogleHttpClient.fetch_bytes so the full retry +
+    #            typed-error taxonomy (auth/client/rate-limit/server) applies
+    #            identically to JSON and binary downloads. Returns raw bytes —
+    #            no decoding, no validation, no header inference.
+    # Blast Radius: This is the only path that pulls report payloads into the
+    #               system. Adding decoding here would invert the parser's
+    #               source-of-truth on encoding and break checksum hashes
+    #               recorded against the on-disk blob.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/google/http_client.py ->
+    #     fetch_bytes (Bearer auth + spec §7 retry + typed errors).
+    #   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
+    #     §5.4 -> orchestrator integration contract (download -> blob -> parse).
+    # ============================================================================
+    def fetch_report(self, *, download_url: str) -> bytes:
+        return self._http.fetch_bytes(url=download_url)

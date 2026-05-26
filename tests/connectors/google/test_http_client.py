@@ -187,3 +187,20 @@ def test_non_object_json_raises_response_error(mock_credentials) -> None:
     )
     with pytest.raises(GoogleApiResponseError):
         client.request(method="GET", url="https://example.com/x")
+
+
+def test_fetch_bytes_retries_5xx_via_shared_helper(mock_credentials, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "ums_smart_revenue.connectors.google.http_client.time.sleep",
+        lambda _: None,
+    )
+    seq = iter([
+        httpx.Response(503, content=b""),
+        httpx.Response(200, content=b"csv-bytes"),
+    ])
+    client = GoogleHttpClient(
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(lambda r: next(seq)),
+    )
+    out = client.fetch_bytes(url="https://x/y")
+    assert out == b"csv-bytes"

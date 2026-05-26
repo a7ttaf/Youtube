@@ -4,7 +4,9 @@ Pre-request: credentials.before_request(...) is invoked once per request so
 google-auth handles access-token refresh via its own state machine; the
 resulting headers dict is reused across retry attempts.
 
-Retry policy (Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md §7):
+Retry policy (Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md §7)
+is implemented in _send_with_retry and shared by request() (JSON) and
+fetch_bytes() (raw download bodies):
     400/404/422 -> GoogleApiClientError, no retry
     401/403     -> GoogleApiAuthError, no retry
     429         -> exp backoff 1/2/4/8s max 4 attempts honoring Retry-After
@@ -64,30 +66,30 @@ class GoogleHttpClient:
             timeout=httpx.Timeout(connect=timeout_connect, read=timeout_read, write=None, pool=None),
         )
 
-    def request(
+    def _send_with_retry(
         self,
         *,
         method: str,
         url: str,
         params: Mapping[str, str] | None = None,
         json_body: Mapping[str, object] | None = None,
-    ) -> dict[str, object]:
+    ) -> httpx.Response:
         # ====================================================================
         # Purpose: Execute one Google API call with the spec §7 retry policy
         #   and translate HTTP / transport failures into the typed error
-        #   taxonomy that the orchestrator catches as GoogleConnectorError.
+        #   taxonomy. On 200 returns the raw httpx.Response for the caller to
+        #   consume (parse JSON, read bytes, etc.); on any non-200 raises the
+        #   appropriate typed error and never returns a non-200 response.
         # Database/ORM: None.
         # Standards: Typed boundary errors; no bare except; httpx transport
         #   stays injected for tests; google-auth manages token refresh state.
-        # Blast Radius: Every B2 live API call funnels through here. The
+        # Blast Radius: Every B2 live API call funnels through here via either
+        #   request() (JSON) or fetch_bytes() (raw download bodies). The
         #   error class chosen determines whether the orchestrator records a
-        #   connector_runs FAILED row with auth/client/rate-limit/server/
-        #   response.
+        #   connector_runs FAILED row with auth/client/rate-limit/server.
         # Connections:
         #   - File: backend/ums_smart_revenue/connectors/google/errors.py ->
-        #     _GoogleApiHttpError subclasses for the HTTP-status branches;
-        #     GoogleApiResponseError (direct GoogleConnectorError, not a
-        #     _GoogleApiHttpError) for the 200-with-bad-body branch.
+        #     _GoogleApiHttpError subclasses for the HTTP-status branches.
         #   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-
         #     connector-design.md §7 -> retry table this loop implements
         #     (statuses, budgets, backoff, Retry-After clamp).
@@ -152,13 +154,7 @@ class GoogleHttpClient:
             status = response.status_code
             last_status = status
             if status == 200:
-                try:
-                    body = response.json()
-                except (ValueError, json.JSONDecodeError) as exc:
-                    raise GoogleApiResponseError(url=url, reason=f"not valid json: {exc}") from exc
-                if not isinstance(body, dict):
-                    raise GoogleApiResponseError(url=url, reason=f"expected object, got {type(body).__name__}")
-                return body
+                return response
             if status in _CLIENT_STATUSES:
                 raise GoogleApiClientError(method=method, url=url, status=status)
             if status in _AUTH_STATUSES:
@@ -196,6 +192,67 @@ class GoogleHttpClient:
             method=method, url=url, status=last_status,
             attempts=_MAX_STATUS_ATTEMPTS,
         )
+
+    def request(
+        self,
+        *,
+        method: str,
+        url: str,
+        params: Mapping[str, str] | None = None,
+        json_body: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        # ====================================================================
+        # Purpose: Execute one Google JSON-API call and return the decoded
+        #   object body. Retry policy + status taxonomy delegated to
+        #   _send_with_retry; this method owns only the 200-body validation
+        #   (must be JSON, must be an object/dict).
+        # Database/ORM: None.
+        # Standards: Typed boundary errors; no bare except; google-auth manages
+        #   token refresh state via the shared retry helper.
+        # Blast Radius: All B2 JSON API clients (list_supported_jobs,
+        #   list_reports_for_month, AdSense reports, etc.) ingest via this
+        #   method. A bad-body branch returning a non-dict here would crash
+        #   downstream paginators expecting `.get("nextPageToken")` — so
+        #   GoogleApiResponseError fails closed instead.
+        # Connections:
+        #   - Method: _send_with_retry -> retry/error taxonomy.
+        #   - File: backend/ums_smart_revenue/connectors/google/errors.py ->
+        #     GoogleApiResponseError (direct GoogleConnectorError, not a
+        #     _GoogleApiHttpError) for the 200-with-bad-body branch.
+        # ====================================================================
+        response = self._send_with_retry(
+            method=method, url=url, params=params, json_body=json_body,
+        )
+        try:
+            body = response.json()
+        except (ValueError, json.JSONDecodeError) as exc:
+            raise GoogleApiResponseError(url=url, reason=f"not valid json: {exc}") from exc
+        if not isinstance(body, dict):
+            raise GoogleApiResponseError(url=url, reason=f"expected object, got {type(body).__name__}")
+        return body
+
+    def fetch_bytes(self, *, url: str) -> bytes:
+        # ====================================================================
+        # Purpose: GET a URL and return the raw response body bytes. Used for
+        #   binary/CSV downloads (e.g. YouTube Reporting downloadUrl) where
+        #   the response is not JSON and request()'s body-validation would
+        #   wrongly raise GoogleApiResponseError on a valid CSV payload.
+        # Database/ORM: None.
+        # Standards: Same Bearer-auth + full retry/error taxonomy as request()
+        #   via the shared _send_with_retry helper; no JSON parsing or
+        #   response-shape validation (raw bytes have no schema to validate).
+        # Blast Radius: B2.5 report download path. A regression here would
+        #   either crash on transient 503s (no retry) or leak a non-typed
+        #   exception past the GoogleConnectorError contract the orchestrator
+        #   catches.
+        # Connections:
+        #   - Method: _send_with_retry -> retry/error taxonomy.
+        #   - File: backend/ums_smart_revenue/connectors/google/
+        #     youtube_reporting_client.py -> fetch_report uses this for the
+        #     reports.downloadUrl CSV fetch.
+        # ====================================================================
+        response = self._send_with_retry(method="GET", url=url)
+        return response.content
 
     def close(self) -> None:
         self._client.close()

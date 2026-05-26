@@ -165,3 +165,16 @@ def test_list_reports_handles_december_boundary(mock_credentials) -> None:
         account_id="acct", job_id="j", report_month="2026-12",
     )
     assert captured["q"]["startTimeBefore"] == "2027-01-01T00:00:00Z"
+
+
+def test_fetch_report_downloads_csv_bytes(mock_credentials) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert str(request.url) == "https://yt-download/abc"
+        assert request.headers.get("Authorization") == "Bearer fake-bearer"
+        return httpx.Response(200, content=b"day,channel\n2026-05,xyz\n")
+    http = GoogleHttpClient(
+        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeReportingClient(http=http)
+    out = client.fetch_report(download_url="https://yt-download/abc")
+    assert out == b"day,channel\n2026-05,xyz\n"
