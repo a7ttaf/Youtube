@@ -1,11 +1,14 @@
 """Raw file lifecycle helper tests.
 
 mark_parsed: DOWNLOADED|FAILED -> PARSED. Refuses QUARANTINED.
-RawFileAlreadyParsedError on PARSED -> PARSED. RawFileLifecycleError otherwise.
+RawFileAlreadyParsedError on PARSED -> PARSED. RawFileLifecycleError
+otherwise (illegal transition).
 
-mark_failed: DOWNLOADED|FAILED -> FAILED (idempotent on FAILED, overwrites
-error_class/error_summary). Refuses QUARANTINED and PARSED.
-error_summary truncated to 500 chars.
+mark_failed: DOWNLOADED|FAILED -> FAILED (idempotent on FAILED, no raise).
+Refuses QUARANTINED and PARSED. Does NOT write error_class/error_summary
+to raw_report_files (no such columns per PR #32 schema; spec §3 non-goal).
+Error context flows to connector_runs.error_summary (B2.3 finish_run)
+and the REPORT_IMPORTED audit payload (B2.6, error_class only).
 """
 from __future__ import annotations
 

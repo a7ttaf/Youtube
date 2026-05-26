@@ -30,8 +30,6 @@ from ums_smart_revenue.connectors.google.errors import (
 )
 from ums_smart_revenue.db.report_models import RawReportFileORM
 
-_ERROR_SUMMARY_MAX = 500
-
 
 def _load_or_raise(
     session: Session, *, raw_file_id: UUID, tenant_id: UUID, target: str
