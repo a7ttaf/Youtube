@@ -25,6 +25,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
         "reportlab==4.5.1",
         "python-pptx==1.0.2",
         "google-cloud-secret-manager==2.28.0",
+        "google-cloud-storage==3.10.1",
     }
     expected_test_dependencies = {
         "pytest==9.0.3",
