@@ -19,7 +19,10 @@ from ums_smart_revenue.connectors.google.errors import (
     RawFileAlreadyParsedError,
     RawFileLifecycleError,
 )
-from ums_smart_revenue.connectors.runs.raw_file_helpers import mark_parsed
+from ums_smart_revenue.connectors.runs.raw_file_helpers import (
+    mark_failed,
+    mark_parsed,
+)
 from ums_smart_revenue.db.report_models import RawReportFileORM, ReportBase
 
 
@@ -96,3 +99,33 @@ def test_mark_parsed_cross_tenant_refused(session) -> None:
     rid = _insert_raw_file(session, tenant_id=tenant_a, parse_status="DOWNLOADED")
     with pytest.raises(RawFileLifecycleError):
         mark_parsed(session, raw_file_id=rid, tenant_id=tenant_b)
+
+
+def test_mark_failed_downloaded_to_failed(session) -> None:
+    tenant_id = uuid4()
+    rid = _insert_raw_file(session, tenant_id=tenant_id, parse_status="DOWNLOADED")
+    mark_failed(session, raw_file_id=rid, tenant_id=tenant_id)
+    row = session.get(RawReportFileORM, rid)
+    assert row.parse_status == "FAILED"
+
+
+def test_mark_failed_failed_to_failed_idempotent(session) -> None:
+    tenant_id = uuid4()
+    rid = _insert_raw_file(session, tenant_id=tenant_id, parse_status="FAILED")
+    mark_failed(session, raw_file_id=rid, tenant_id=tenant_id)
+    row = session.get(RawReportFileORM, rid)
+    assert row.parse_status == "FAILED"  # unchanged but no raise
+
+
+def test_mark_failed_parsed_refused(session) -> None:
+    tenant_id = uuid4()
+    rid = _insert_raw_file(session, tenant_id=tenant_id, parse_status="PARSED")
+    with pytest.raises(RawFileLifecycleError):
+        mark_failed(session, raw_file_id=rid, tenant_id=tenant_id)
+
+
+def test_mark_failed_quarantined_refused(session) -> None:
+    tenant_id = uuid4()
+    rid = _insert_raw_file(session, tenant_id=tenant_id, parse_status="QUARANTINED")
+    with pytest.raises(RawFileLifecycleError):
+        mark_failed(session, raw_file_id=rid, tenant_id=tenant_id)

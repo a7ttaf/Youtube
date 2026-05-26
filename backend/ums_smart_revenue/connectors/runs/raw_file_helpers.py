@@ -13,6 +13,8 @@ Refused (raise):
 
 Tenant scope is enforced: a (raw_file_id, tenant_id) mismatch is a
 RawFileLifecycleError, not a silent no-op.
+
+Mutations are in-place on the loaded ORM row; the caller owns flush/commit.
 """
 from __future__ import annotations
 
@@ -60,4 +62,27 @@ def mark_parsed(
         raw_file_id=str(raw_file_id),
         current=row.parse_status,
         target="PARSED",
+    )
+
+
+def mark_failed(
+    session: Session, *, raw_file_id: UUID, tenant_id: UUID
+) -> None:
+    """Transition DOWNLOADED|FAILED -> FAILED.
+
+    raw_report_files does not store error_class/error_summary (per the
+    existing PR #32 schema; spec §3 non-goal forbids adding them in B2).
+    Error details flow to connector_runs.error_summary at finish_run time
+    and to the REPORT_IMPORTED audit event payload (error_class only).
+    """
+    row = _load_or_raise(
+        session, raw_file_id=raw_file_id, tenant_id=tenant_id, target="FAILED"
+    )
+    if row.parse_status in ("DOWNLOADED", "FAILED"):
+        row.parse_status = "FAILED"
+        return
+    raise RawFileLifecycleError(
+        raw_file_id=str(raw_file_id),
+        current=row.parse_status,
+        target="FAILED",
     )
