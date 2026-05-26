@@ -24,6 +24,8 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   in PR #30).
 - ⏳ YouTube report ingestion — remaining: credentials repo (PRs #33,
   #34); real ingestion not built.
+    - ⏳ PR #47 (B2.1) — Google connector credential foundation (secret resolver dispatch +
+      gcp-secret-manager:// + local-secret:// + Google OAuth refresh wrapper).
 - ⏳ Monthly revenue normalization — remaining: B2 live ingestion wiring
   (revenue facts foundation in PR #2; normalization bridge from
   google_revenue_source_rows shipped in PR #44).

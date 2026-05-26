@@ -146,6 +146,8 @@ running on the operator's workstation.
       between PR #43 substrate and existing `MonthlyChannelRevenueFactORM`
       write path. See spec at
       `Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md`.
+    - ⏳ PR #47 (B2.1) — Google connector credential foundation (secret resolver dispatch +
+      gcp-secret-manager:// + local-secret:// + Google OAuth refresh wrapper).
 
 ---
 
