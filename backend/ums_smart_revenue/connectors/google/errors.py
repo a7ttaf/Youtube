@@ -66,3 +66,20 @@ class BlobChecksumMismatchError(GoogleConnectorError):
         self.storage_uri = storage_uri
         self.computed = computed
         self.read = read
+
+
+class RawFileLifecycleError(GoogleConnectorError):
+    def __init__(self, *, raw_file_id: str, current: str, target: str) -> None:
+        super().__init__(
+            f"illegal raw_file lifecycle transition for {raw_file_id}: "
+            f"{current} -> {target}"
+        )
+        self.raw_file_id = raw_file_id
+        self.current = current
+        self.target = target
+
+
+class RawFileAlreadyParsedError(GoogleConnectorError):
+    def __init__(self, *, raw_file_id: str) -> None:
+        super().__init__(f"raw_file already parsed: {raw_file_id}")
+        self.raw_file_id = raw_file_id

@@ -14,6 +14,8 @@ from ums_smart_revenue.connectors.google.errors import (
     MalformedSecretPayloadError,
     MalformedSecretUriError,
     OAuthRefreshError,
+    RawFileAlreadyParsedError,
+    RawFileLifecycleError,
     SecretFetchError,
     SecretNotFoundError,
     UnsupportedSecretSchemeError,
@@ -30,6 +32,8 @@ def test_all_b2_errors_subclass_google_connector_error() -> None:
         OAuthRefreshError,
         BlobUploadError,
         BlobChecksumMismatchError,
+        RawFileLifecycleError,
+        RawFileAlreadyParsedError,
     ):
         assert issubclass(cls, GoogleConnectorError), cls.__name__
 
