@@ -295,3 +295,80 @@ def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
     # raw_file_id provenance survives the upsert: the COALESCE-on-conflict
     # behaviour in the existing repo preserves it on re-runs too.
     assert source_rows[0].raw_file_id == raw_files[0].id
+
+
+def test_run_one_sweeps_running_to_failed_on_untyped_error(
+    session: Session, stub_secret_resolver
+) -> None:
+    """Untyped exception escaping both ``except`` blocks must not leave the
+    run stuck RUNNING -- the ``finally`` block sweeps it to FAILED.
+
+    Patches ``_process_one_report`` to raise a plain ``ValueError`` (the
+    same class hierarchy ``ParserError`` lives under), which is *not* a
+    ``GoogleConnectorError`` and therefore escapes both the per-report
+    ``except`` and the bucket-C ``except``. The orchestrator's outer
+    ``finally`` is the only thing standing between the connector_runs row
+    and an indefinite RUNNING state; this test pins that behaviour so a
+    later refactor cannot accidentally remove the fail-safe.
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes = _csv_for_one_row()
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator._process_one_report",
+        side_effect=ValueError(
+            "simulated parser failure (not a GoogleConnectorError)"
+        ),
+    ):
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r1", "downloadUrl": "https://yt/r1"}
+        ]
+        client.fetch_report.return_value = csv_bytes
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = (
+            lambda *, storage_uri: store[storage_uri]
+        )
+
+        with pytest.raises(ValueError, match="simulated parser failure"):
+            run_one(
+                session,
+                tenant_id=TENANT_ID,
+                connector_key=CONNECTOR_KEY,
+                account_id=ACCOUNT_ID,
+                report_month="2026-05",
+            )
+
+    # Re-fetch the run row from the DB and verify the fail-safe ran:
+    # the run must NOT be left in RUNNING; it must be swept to FAILED
+    # with the generic fail-safe error_summary.
+    run_row = session.scalar(
+        select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
+    )
+    assert run_row is not None
+    assert run_row.status == "FAILED"
+    assert "orchestrator aborted" in (run_row.error_summary or "")

@@ -271,76 +271,116 @@ def run_one(
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     parser = _parser_for_connector(connector_key)
     ordering_index = 0
+    # Sentinel flipped to True ONLY after a finish_run + session.commit()
+    # succeeds (bucket-B or bucket-C path). If both paths are short-circuited
+    # by an untyped exception (e.g. ParserError, RuntimeError) the outer
+    # ``finally`` below sweeps the connector_runs row from RUNNING to FAILED
+    # so the operator console never sees a row stuck in RUNNING forever.
+    finished = False
 
     try:
-        for report_type, parser_payload, raw_bytes in runner.produce_reports(
-            session=session,
-            run=run_entry,
-            credentials=credentials,
-            report_month=report_month,
-            account_id=account_id,
-        ):
-            counts["reports_attempted"] += 1
-            try:
-                _process_one_report(
-                    session=session,
-                    tenant_id=tenant_id,
-                    connector_key=connector_key,
-                    run_entry=run_entry,
-                    backend=backend,
-                    bucket=bucket,
-                    parser=parser,
-                    repo=repo,
-                    report_type=report_type,
-                    report_month=report_month,
-                    parser_payload=parser_payload,
-                    raw_bytes=raw_bytes,
-                    ordering_index=ordering_index,
-                    triggered_by_user_id=triggered_by_user_id,
-                    counts=counts,
-                )
-            except GoogleConnectorError as exc:
-                # Per-report containment: a single bad report -> PARTIAL run,
-                # not a terminal FAILED that loses the other reports' rows.
-                # Full bucket-B handler depth (mark_failed wiring, error
-                # summary aggregation) is T28; happy-path tests don't reach
-                # this branch.
-                per_report_failures.append((report_type, type(exc).__name__))
-                counts["reports_failed"] += 1
-            ordering_index += 1
-    except GoogleConnectorError as exc:
-        # Bucket C: a non-per-report failure (runner.produce_reports itself
-        # blew up before yielding, an unexpected typed error escaped the
-        # inner block, etc.) terminates the run as FAILED. Re-raise so the
-        # caller (CLI) sees the typed error too.
-        finish_run(
+        try:
+            for report_type, parser_payload, raw_bytes in runner.produce_reports(
+                session=session,
+                run=run_entry,
+                credentials=credentials,
+                report_month=report_month,
+                account_id=account_id,
+            ):
+                counts["reports_attempted"] += 1
+                try:
+                    _process_one_report(
+                        session=session,
+                        tenant_id=tenant_id,
+                        connector_key=connector_key,
+                        run_entry=run_entry,
+                        backend=backend,
+                        bucket=bucket,
+                        parser=parser,
+                        repo=repo,
+                        report_type=report_type,
+                        report_month=report_month,
+                        parser_payload=parser_payload,
+                        raw_bytes=raw_bytes,
+                        ordering_index=ordering_index,
+                        triggered_by_user_id=triggered_by_user_id,
+                        counts=counts,
+                    )
+                except GoogleConnectorError as exc:
+                    # Per-report containment: a single bad report -> PARTIAL run,
+                    # not a terminal FAILED that loses the other reports' rows.
+                    # Full bucket-B handler depth (mark_failed wiring, error
+                    # summary aggregation) is T28; happy-path tests don't reach
+                    # this branch.
+                    per_report_failures.append((report_type, type(exc).__name__))
+                    counts["reports_failed"] += 1
+                ordering_index += 1
+        except GoogleConnectorError as exc:
+            # Bucket C: a non-per-report failure (runner.produce_reports itself
+            # blew up before yielding, an unexpected typed error escaped the
+            # inner block, etc.) terminates the run as FAILED. Re-raise so the
+            # caller (CLI) sees the typed error too.
+            finish_run(
+                session,
+                tenant_id=tenant_id,
+                connector_run_id=UUID(run_entry.id),
+                status="FAILED",
+                counts=counts,
+                error_summary=f"{type(exc).__name__}: {exc!s}",
+            )
+            session.commit()
+            finished = True
+            raise
+
+        # Bucket B aggregate finish. Status reflects per-report outcomes:
+        # - all OK and at least one succeeded   -> SUCCEEDED
+        # - none succeeded                      -> FAILED
+        # - mixed                                -> PARTIAL
+        status = _derive_terminal_status(counts)
+        finished_run = finish_run(
             session,
             tenant_id=tenant_id,
             connector_run_id=UUID(run_entry.id),
-            status="FAILED",
+            status=status,
             counts=counts,
-            error_summary=f"{type(exc).__name__}: {exc!s}",
+            error_summary=_summarize_failures(per_report_failures),
         )
         session.commit()
-        raise
-
-    # Bucket B aggregate finish. Status reflects per-report outcomes:
-    # - all OK and at least one succeeded   -> SUCCEEDED
-    # - none succeeded                      -> FAILED
-    # - mixed                                -> PARTIAL
-    status = _derive_terminal_status(counts)
-    finished = finish_run(
-        session,
-        tenant_id=tenant_id,
-        connector_run_id=UUID(run_entry.id),
-        status=status,
-        counts=counts,
-        error_summary=_summarize_failures(per_report_failures),
-    )
-    session.commit()
-    return ConnectorRunOutcome(
-        run=finished, counts=counts, per_report_failures=per_report_failures
-    )
+        finished = True
+        return ConnectorRunOutcome(
+            run=finished_run, counts=counts, per_report_failures=per_report_failures
+        )
+    finally:
+        if not finished:
+            # An untyped error (e.g. ParserError -- subclass of ValueError,
+            # not GoogleConnectorError -- or a generic RuntimeError) escaped
+            # both the inner per-report ``except`` and the bucket-C ``except``.
+            # Without this sweep the connector_runs row would sit in RUNNING
+            # forever, which is strictly worse than FAILED for operator
+            # forensics. T28 will add typed handlers for ParserError; this
+            # block is the unconditional fail-safe.
+            #
+            # rollback() first so any partial inner-loop state (e.g. a
+            # ``RawReportFileORM`` that was added but not yet linked) is
+            # cleared before finish_run runs against a clean session.
+            session.rollback()
+            try:
+                finish_run(
+                    session,
+                    tenant_id=tenant_id,
+                    connector_run_id=UUID(run_entry.id),
+                    status="FAILED",
+                    counts=counts,
+                    error_summary="orchestrator aborted unexpectedly",
+                )
+                session.commit()
+            except Exception:
+                # Best-effort cleanup: if the rollback + finish_run path itself
+                # fails (e.g. DB disconnect), swallow it so the original
+                # exception still propagates out of the ``finally`` to the
+                # caller. Masking the primary error here would hide the real
+                # root cause from CLI and audit.
+                session.rollback()
 
 
 # ----------------------------------------------------------------------------
@@ -441,7 +481,10 @@ def _process_one_report(
         imported_by=triggered_by_user_id,
     )
     counts["rows_upserted_total"] += len(written)
-    counts["rows_upserted_created"] += len(written)
+    # T28 will add accurate split tracking via a pre-read of existing
+    # source_row_keys. Until then, the per-category split fields stay at 0
+    # rather than over-claiming everything as 'created' (which would lie on
+    # the second ingest of an already-seen month).
 
     # 7. Lifecycle transition: DOWNLOADED -> PARSED. Raises
     # ``RawFileAlreadyParsedError`` if called twice on the same file, which
@@ -813,16 +856,29 @@ def _source_system_for_connector(connector_key: str) -> str:
         ) from exc
 
 
+_EXTENSIONS: dict[str, str] = {
+    "youtube-reporting": "csv",
+    "youtube-analytics": "json",
+    "adsense-management": "json",
+}
+
+
 def _extension_for_connector(connector_key: str) -> str:
     """File extension used inside the deterministic blob URI.
 
     YouTube Reporting downloads are CSV; YouTube Analytics (B2.5) and
     AdSense (B2.6) return JSON. Centralised here so the path-builder stays
-    consistent across slices.
+    consistent across slices. Mirrors the explicit-mapping + KeyError ->
+    ValueError pattern of ``_source_system_for_connector`` so a missing
+    entry for a future B2.5/B2.6 registration fails loudly instead of
+    silently emitting ``.json``.
     """
-    if connector_key == "youtube-reporting":
-        return "csv"
-    return "json"
+    try:
+        return _EXTENSIONS[connector_key]
+    except KeyError as exc:
+        raise ValueError(
+            f"unknown connector_key for extension dispatch: {connector_key!r}"
+        ) from exc
 
 
 def _parser_for_connector(connector_key: str) -> YouTubeReportingParser:
