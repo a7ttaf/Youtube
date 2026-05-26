@@ -172,6 +172,9 @@ running on the operator's workstation.
     - ⏳ PR #48 (B2.2) — Blob storage backends (GCS + file-store) + raw_file
       lifecycle helpers (mark_parsed accepts FAILED -> PARSED retry recovery;
       mark_failed FAILED -> FAILED idempotent).
+    - ⏳ PR #49 (B2.3) — connector_runs + connector_run_raw_files ORM,
+      repository, Alembic migration, and raw_report_files tenant/id UNIQUE
+      support for composite FKs.
 - ⏳ Channel inventory file format — remaining: tenant-scoped channel
   registry exists (PR #25); bulk inventory load format not yet defined.
 - ⏳ Finance month-close input format — remaining: close-gate enforced

@@ -75,6 +75,11 @@ class RawReportFileORM(ReportBase):
             "checksum",
             name="uq_raw_report_files_source_type_month_checksum",
         ),
+        UniqueConstraint(
+            "tenant_id",
+            "id",
+            name="uq_raw_report_files_tenant_id_id",
+        ),
         CheckConstraint(
             "length(report_month) = 7 AND substr(report_month, 5, 1) = '-' "
             "AND substr(report_month, 1, 1) BETWEEN '0' AND '9' "
