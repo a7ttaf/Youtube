@@ -1,6 +1,6 @@
 # Implementation Plan
 
-## Status (2026-05-22)
+## Status (2026-05-25)
 
 Reconciled through PR #36 (S2 multi-tenant integration merged onto `main`
 at commit `96dbe73`). The original Phase 0–7 product cut below is the
@@ -140,6 +140,12 @@ running on the operator's workstation.
       migration round-trip on disposable `postgres:18-alpine`. Remaining: live
       OAuth/API connector (B2), FX/conversion (B3) — scaffolding-only, so marked
       ⏳ not ✅.
+    - ⏳ PR #44 - Google source-rows -> revenue facts normalizer (Spec C1).
+      Adds `backend/ums_smart_revenue/finance/google_source_normalizer.py`,
+      five new test files under `tests/finance/`, no schema delta. Bridge
+      between PR #43 substrate and existing `MonthlyChannelRevenueFactORM`
+      write path. See spec at
+      `Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md`.
 
 ---
 
