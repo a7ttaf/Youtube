@@ -26,6 +26,9 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   #34); real ingestion not built.
     - ⏳ PR #47 (B2.1) — Google connector credential foundation (secret resolver dispatch +
       gcp-secret-manager:// + local-secret:// + Google OAuth refresh wrapper).
+    - ⏳ PR #48 (B2.2) — Blob storage backends (GCS + file-store) + raw_file
+      lifecycle helpers (mark_parsed accepts FAILED -> PARSED retry recovery;
+      mark_failed FAILED -> FAILED idempotent).
 - ⏳ Monthly revenue normalization — remaining: B2 live ingestion wiring
   (revenue facts foundation in PR #2; normalization bridge from
   google_revenue_source_rows shipped in PR #44).

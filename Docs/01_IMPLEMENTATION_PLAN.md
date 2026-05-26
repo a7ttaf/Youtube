@@ -169,6 +169,9 @@ running on the operator's workstation.
   foundation (secret resolver dispatch + gcp-secret-manager:// +
   local-secret:// + Google OAuth refresh wrapper). Public OAuth consent flows,
   live connector ingestion, and token monitoring are not started.
+    - ⏳ PR #48 (B2.2) — Blob storage backends (GCS + file-store) + raw_file
+      lifecycle helpers (mark_parsed accepts FAILED -> PARSED retry recovery;
+      mark_failed FAILED -> FAILED idempotent).
 - ⏳ Channel inventory file format — remaining: tenant-scoped channel
   registry exists (PR #25); bulk inventory load format not yet defined.
 - ⏳ Finance month-close input format — remaining: close-gate enforced
