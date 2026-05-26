@@ -42,3 +42,26 @@ def test_file_store_get_bytes_missing_raises_file_not_found(tmp_path) -> None:
     backend = LocalFileStoreBackend(root=tmp_path)
     with pytest.raises(FileNotFoundError):
         backend.get_bytes(storage_uri="file-store://bucket/missing.csv")
+
+
+@pytest.mark.parametrize(
+    "bad_uri",
+    [
+        # Forward-slash .. traversal:
+        "file-store://../etc/passwd",
+        "file-store://foo/../../../etc/passwd",
+        "file-store://foo/bar/..",
+        # Windows backslash traversal:
+        r"file-store://..\..\..\Windows\Temp\evil.txt",
+        r"file-store://foo\..\..\Windows\Temp\evil.txt",
+        # Drive-letter / absolute path injection (Windows):
+        r"file-store://C:\Windows\Temp\evil.txt",
+        r"file-store://D:\evil.txt",
+        # NUL byte:
+        "file-store://foo\x00.txt",
+    ],
+)
+def test_file_store_rejects_path_traversal(tmp_path, bad_uri: str) -> None:
+    backend = LocalFileStoreBackend(root=tmp_path)
+    with pytest.raises(ValueError):
+        backend.upload(storage_uri=bad_uri, content=b"x")
