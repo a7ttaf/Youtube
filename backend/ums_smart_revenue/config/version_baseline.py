@@ -4,10 +4,10 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "node_lts": "24.15.0",
     },
     "backend": {
-        "fastapi": "0.136.1",
+        "fastapi": "0.136.3",
         "pydantic": "2.13.4",
-        "uvicorn": "0.47.0",
-        "sqlalchemy": "2.0.49",
+        "uvicorn": "0.48.0",
+        "sqlalchemy": "2.0.50",
         "alembic": "1.18.4",
         "psycopg": "3.3.4",
         "celery": "5.6.3",
@@ -17,7 +17,7 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "python_pptx": "1.0.2",
         "pytest": "9.0.3",
         "httpx": "0.28.1",
-        "pypdf": "6.11.0",
+        "pypdf": "6.12.1",
     },
     "datastores": {
         "postgresql": "18.3",
