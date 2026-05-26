@@ -1,10 +1,17 @@
-"""run_one orchestrator tests (B2.4 happy path, T27).
+"""run_one orchestrator tests (B2.4 happy path + failure handlers, T27 & T28).
 
 The happy-path test stubs the YouTube Reporting client and blob backend so
 the full pipeline (load credential -> resolve secret -> build OAuth ->
 start_run -> per-report blob/raw_file/parse/upsert/mark_parsed -> finish_run)
-runs against an in-memory SQLite without reaching the network. Failure
-handlers (buckets B/C) and dry-run land in T28 / T29 with their own tests.
+runs against an in-memory SQLite without reaching the network.
+
+T28 adds coverage for the spec §6 failure buckets:
+- Bucket A (pre-``start_run``): typed credential errors bubble; no connector_runs row.
+- Bucket B (per-report inner ``except``): a single failed report flips that
+  report's raw_file DOWNLOADED -> FAILED and lets the run finish as PARTIAL.
+- Bucket C (post-``start_run``, escaped the loop): any escaping exception
+  marks the run FAILED, commits, and re-raises.
+Dry-run lands in T29 with its own tests.
 """
 from __future__ import annotations
 
@@ -21,6 +28,12 @@ from ums_smart_revenue.connectors.google import (
     local_secret_resolver,
     secret_resolver,
 )
+from ums_smart_revenue.connectors.google.errors import (
+    CredentialNotFoundError,
+    GoogleApiServerError,
+    InactiveCredentialError,
+)
+from ums_smart_revenue.connectors.google_source_parsers.base import ParserError
 from ums_smart_revenue.connectors.runs.orchestrator import (
     ConnectorRunOutcome,
     run_one,
@@ -300,16 +313,25 @@ def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
 def test_run_one_sweeps_running_to_failed_on_untyped_error(
     session: Session, stub_secret_resolver
 ) -> None:
-    """Untyped exception escaping both ``except`` blocks must not leave the
-    run stuck RUNNING -- the ``finally`` block sweeps it to FAILED.
+    """Defence-in-depth: even when the typed bucket-C handler itself can't
+    record the FAILED status (e.g. the in-process ``finish_run`` call
+    raises), the outer ``finally`` sweeps the connector_runs row from
+    RUNNING to FAILED.
 
-    Patches ``_process_one_report`` to raise a plain ``ValueError`` (the
-    same class hierarchy ``ParserError`` lives under), which is *not* a
-    ``GoogleConnectorError`` and therefore escapes both the per-report
-    ``except`` and the bucket-C ``except``. The orchestrator's outer
-    ``finally`` is the only thing standing between the connector_runs row
-    and an indefinite RUNNING state; this test pins that behaviour so a
-    later refactor cannot accidentally remove the fail-safe.
+    Originally written for T27 against the narrow
+    ``except GoogleConnectorError`` handler (where an untyped ValueError
+    from ``_process_one_report`` would escape both ``except`` blocks). T28
+    widened both per-report and bucket-C handlers to ``except Exception``,
+    so a ValueError from ``_process_one_report`` is now caught at the
+    per-report level. To keep this test exercising the *fail-safe*
+    ``finally`` (rather than the now-broader bucket-C handler), we
+    simulate the only remaining path that can reach it: the post-loop
+    happy-path ``finish_run`` itself raises before ``finished = True`` is
+    set. The fail-safe runs, rolls back, and re-issues ``finish_run`` so
+    the operator console doesn't see a row stuck in RUNNING.
+
+    side_effect alternates between ``RuntimeError`` (post-loop happy-path
+    call) and a no-op (fail-safe call) so the cleanup path can succeed.
     """
     _make_credential_row(
         session,
@@ -318,6 +340,39 @@ def test_run_one_sweeps_running_to_failed_on_untyped_error(
         account_id=ACCOUNT_ID,
     )
     csv_bytes = _csv_for_one_row()
+
+    # Per-call side_effect: first call (post-loop happy-path finish_run)
+    # raises so ``finished`` stays False and the finally fires; second
+    # call (fail-safe finish_run) succeeds. The fail-safe writes the
+    # 'orchestrator aborted unexpectedly' summary the assertion below
+    # checks for.
+    call_count = {"n": 0}
+
+    def flaky_finish_run(
+        session, *, tenant_id, connector_run_id, status, counts, error_summary
+    ):
+        call_count["n"] += 1
+        if call_count["n"] == 1:
+            # Simulate a transient DB failure on the main-path commit so
+            # the fail-safe finally has something to clean up. Roll the
+            # session back first so the fail-safe's own finish_run isn't
+            # blocked by a pending transaction error.
+            session.rollback()
+            raise RuntimeError("simulated finish_run failure on main path")
+        # Fall through to the real implementation for the fail-safe call
+        # so the connector_runs row actually moves to FAILED.
+        from ums_smart_revenue.connectors.runs.repository import (
+            finish_run as real_finish_run,
+        )
+
+        return real_finish_run(
+            session,
+            tenant_id=tenant_id,
+            connector_run_id=connector_run_id,
+            status=status,
+            counts=counts,
+            error_summary=error_summary,
+        )
 
     with patch(
         "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
@@ -328,10 +383,8 @@ def test_run_one_sweeps_running_to_failed_on_untyped_error(
     ) as refresh, patch(
         "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
     ) as http_cls, patch(
-        "ums_smart_revenue.connectors.runs.orchestrator._process_one_report",
-        side_effect=ValueError(
-            "simulated parser failure (not a GoogleConnectorError)"
-        ),
+        "ums_smart_revenue.connectors.runs.orchestrator.finish_run",
+        side_effect=flaky_finish_run,
     ):
         http_cls.return_value.close.return_value = None
         refresh.return_value = None
@@ -354,7 +407,7 @@ def test_run_one_sweeps_running_to_failed_on_untyped_error(
             lambda *, storage_uri: store[storage_uri]
         )
 
-        with pytest.raises(ValueError, match="simulated parser failure"):
+        with pytest.raises(RuntimeError, match="simulated finish_run failure"):
             run_one(
                 session,
                 tenant_id=TENANT_ID,
@@ -362,6 +415,11 @@ def test_run_one_sweeps_running_to_failed_on_untyped_error(
                 account_id=ACCOUNT_ID,
                 report_month="2026-05",
             )
+
+    # Both finish_run calls must have run: the failing main-path call and
+    # the rescue fail-safe call. If only the first ran, the fail-safe
+    # never executed.
+    assert call_count["n"] == 2
 
     # Re-fetch the run row from the DB and verify the fail-safe ran:
     # the run must NOT be left in RUNNING; it must be swept to FAILED
@@ -372,3 +430,305 @@ def test_run_one_sweeps_running_to_failed_on_untyped_error(
     assert run_row is not None
     assert run_row.status == "FAILED"
     assert "orchestrator aborted" in (run_row.error_summary or "")
+
+
+# ============================================================================
+# T28: Failure handlers A/B/C
+# ============================================================================
+
+
+def test_bucket_a_no_credential_raises_and_no_run_row(
+    session: Session, stub_secret_resolver
+) -> None:
+    """Bucket A: missing credential surfaces ``CredentialNotFoundError`` and
+    must NOT create a connector_runs row.
+
+    The orchestrator's pre-``start_run`` guards are forensic-critical: a
+    half-created RUNNING row with no credential context would lie to the
+    operator console (no audit, no traceability). The credential lookup is
+    tenant + connector_key + account_id; with no row seeded, ``_load_credential``
+    returns ``None`` and ``run_one`` raises before any DB write.
+    """
+    # No credential row seeded -> _load_credential returns None.
+    with pytest.raises(CredentialNotFoundError):
+        run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id="missing-account",
+            report_month="2026-05",
+        )
+
+    # No connector_runs row should exist: Bucket A never reaches start_run.
+    assert (
+        session.scalar(
+            select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
+        )
+        is None
+    )
+
+
+def test_bucket_a_inactive_credential_raises_and_no_run_row(
+    session: Session, stub_secret_resolver
+) -> None:
+    """Bucket A: a credential row that exists but is not ``active`` must
+    surface ``InactiveCredentialError`` and must NOT create a connector_runs
+    row.
+
+    Disabled/rotated credentials should fail closed so an operator who
+    disabled an account can't accidentally drive a live ingestion against
+    that account. Mirrors the no-credential test for the run-row absence.
+    """
+    cred = _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    cred.status = "disabled"
+    session.flush()
+
+    with pytest.raises(InactiveCredentialError):
+        run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert (
+        session.scalar(
+            select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
+        )
+        is None
+    )
+
+
+def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status_partial(
+    session: Session, stub_secret_resolver
+) -> None:
+    """Bucket B: per-report failure AFTER the raw_file row is inserted.
+
+    Setup: YT client returns 2 reports. The parser succeeds on the first
+    call and raises ``ParserError`` on the second. ``ParserError`` is a
+    subclass of ``ValueError`` (NOT ``GoogleConnectorError``), so this test
+    pins the T28 widening of the inner per-report ``except`` from
+    ``GoogleConnectorError`` to ``Exception`` — without that widening, the
+    untyped ParserError would escape Bucket B and land in Bucket C, leaving
+    the run FAILED instead of the spec-required PARTIAL.
+
+    Failure point is at step (e) ``parser.parse(...)`` inside
+    ``_process_one_report``, which is AFTER step (c) inserts the raw_file
+    row in DOWNLOADED. Bucket B must mark that raw_file FAILED so the
+    operator console doesn't show a perpetually-DOWNLOADED orphan.
+
+    Expected end-state:
+    - outcome.run.status == "PARTIAL"
+    - counts.reports_succeeded == 1, reports_failed == 1
+    - raw_file #1 parse_status == "PARSED"
+    - raw_file #2 parse_status == "FAILED"
+    - no exception escapes (Bucket B contained it)
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes_a = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-01,UC_orch_alpha,cms-orch-1,10.000000,USD\n"
+    )
+    csv_bytes_b = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-02,UC_orch_beta,cms-orch-1,20.000000,USD\n"
+    )
+
+    # Wrap the real parser so the first call passes through (real parsed
+    # rows for the upsert) and the second call raises ``ParserError``.
+    # We patch the bare ``YouTubeReportingParser`` symbol the orchestrator
+    # imports so ``_parser_for_connector`` returns this stub instance.
+    from ums_smart_revenue.connectors.google_source_parsers import (
+        YouTubeReportingParser as RealParser,
+    )
+
+    real_parser = RealParser()
+    call_state = {"n": 0}
+
+    class FlakyParser:
+        def parse(self, payload, *, tenant_id):
+            call_state["n"] += 1
+            if call_state["n"] == 2:
+                raise ParserError("simulated parser failure on report 2")
+            return list(real_parser.parse(payload, tenant_id=tenant_id))
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator._parser_for_connector",
+        return_value=FlakyParser(),
+    ):
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        # Two jobs -> two reports yielded by the runner.
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"},
+            {"id": "job-2", "reportTypeId": "content_owner_basic_a3"},
+        ]
+        # One report per job; the runner walks job_id -> reports.
+        reports_by_job = {
+            "job-1": [{"id": "r1", "downloadUrl": "https://yt/r1"}],
+            "job-2": [{"id": "r2", "downloadUrl": "https://yt/r2"}],
+        }
+        client.list_reports_for_month.side_effect = (
+            lambda *, account_id, job_id, report_month: reports_by_job[job_id]
+        )
+        bytes_by_url = {"https://yt/r1": csv_bytes_a, "https://yt/r2": csv_bytes_b}
+        client.fetch_report.side_effect = (
+            lambda *, download_url: bytes_by_url[download_url]
+        )
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        # Bucket B must contain the failure -- no exception escapes run_one.
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert isinstance(outcome, ConnectorRunOutcome)
+    assert outcome.run is not None
+    assert outcome.run.status == "PARTIAL"
+    assert outcome.counts["reports_attempted"] == 2
+    assert outcome.counts["reports_succeeded"] == 1
+    assert outcome.counts["reports_failed"] == 1
+    # per_report_failures lists (report_type_id, error_class_name) for the
+    # failed report. The failing report was the second yielded
+    # (content_owner_basic_a3) and the error class is ParserError.
+    assert outcome.per_report_failures == [
+        ("content_owner_basic_a3", "ParserError")
+    ]
+
+    # Durable side-effects: raw_file #1 (channel_basic_a2) is PARSED;
+    # raw_file #2 (content_owner_basic_a3) was inserted before parser.parse
+    # raised and must have been marked FAILED by Bucket B.
+    raw_files = session.scalars(
+        select(RawReportFileORM)
+        .where(RawReportFileORM.tenant_id == TENANT_ID)
+        .order_by(RawReportFileORM.report_type)
+    ).all()
+    assert len(raw_files) == 2
+    statuses = {rf.report_type: rf.parse_status for rf in raw_files}
+    assert statuses == {
+        "channel_basic_a2": "PARSED",
+        "content_owner_basic_a3": "FAILED",
+    }
+
+    # Run row reflects PARTIAL with the failures captured in error_summary.
+    run_row = session.scalar(
+        select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
+    )
+    assert run_row is not None
+    assert run_row.status == "PARTIAL"
+    assert run_row.error_summary is not None
+    assert "ParserError" in run_row.error_summary
+
+
+def test_bucket_c_generator_error_marks_run_failed_and_reraises(
+    session: Session, stub_secret_resolver
+) -> None:
+    """Bucket C: a failure that escapes the per-report loop (pre-yield
+    failure inside ``runner.produce_reports``) must:
+    1. mark the connector_runs row FAILED via ``finish_run`` (status +
+       error_summary with the typed class name);
+    2. commit so the FAILED row is durable even if the caller crashes;
+    3. re-raise so the CLI sees the typed error.
+
+    Setup: patch ``list_supported_jobs`` to raise ``GoogleApiServerError``
+    on the first call. The runner's generator raises before yielding any
+    report, so no raw_file rows exist. The outer Bucket C except (widened
+    to ``Exception`` in T28) catches the typed error, finishes the run
+    FAILED, and re-raises.
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.side_effect = GoogleApiServerError(
+            method="GET",
+            url="https://youtubereporting.googleapis.com/v1/jobs",
+            status=503,
+            attempts=3,
+        )
+
+        # Backend wired but never invoked: failure happens before any report
+        # is yielded so no upload/download takes place.
+        backend = local_cls.return_value
+        backend.upload.side_effect = AssertionError(
+            "upload must not be called on a pre-yield generator failure"
+        )
+        backend.get_bytes.side_effect = AssertionError(
+            "get_bytes must not be called on a pre-yield generator failure"
+        )
+
+        with pytest.raises(GoogleApiServerError):
+            run_one(
+                session,
+                tenant_id=TENANT_ID,
+                connector_key=CONNECTOR_KEY,
+                account_id=ACCOUNT_ID,
+                report_month="2026-05",
+            )
+
+    # Run row must be FAILED with the typed class name in error_summary.
+    run_row = session.scalar(
+        select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
+    )
+    assert run_row is not None
+    assert run_row.status == "FAILED"
+    assert run_row.finished_at is not None
+    assert "GoogleApiServerError" in (run_row.error_summary or "")
+    # The Bucket C error_summary is NOT the generic fail-safe text -- the
+    # typed handler ran, not the belt-and-suspenders finally.
+    assert "orchestrator aborted" not in (run_row.error_summary or "")
+
+    # No raw_files: failure was pre-yield.
+    assert (
+        session.scalar(
+            select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
+        )
+        is None
+    )

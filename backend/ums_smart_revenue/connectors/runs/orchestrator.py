@@ -84,7 +84,10 @@ from ums_smart_revenue.connectors.runs.blob_storage import (
     deterministic_blob_path,
     upload_and_verify,
 )
-from ums_smart_revenue.connectors.runs.raw_file_helpers import mark_parsed
+from ums_smart_revenue.connectors.runs.raw_file_helpers import (
+    mark_failed,
+    mark_parsed,
+)
 from ums_smart_revenue.connectors.runs.repository import (
     CONNECTOR_RUN_COUNT_KEYS,
     ConnectorRunEntry,
@@ -288,6 +291,13 @@ def run_one(
                 account_id=account_id,
             ):
                 counts["reports_attempted"] += 1
+                # ``report_state`` is the per-report mutable handshake with
+                # ``_process_one_report``: after the raw_file row is flushed
+                # (step c) ``_process_one_report`` writes the id here so this
+                # except clause can mark it FAILED if a later step raises.
+                # Fresh dict per iteration -- a previous report's id must
+                # never leak into the next report's bucket B handler.
+                report_state: dict[str, object] = {}
                 try:
                     _process_one_report(
                         session=session,
@@ -305,21 +315,71 @@ def run_one(
                         ordering_index=ordering_index,
                         triggered_by_user_id=triggered_by_user_id,
                         counts=counts,
+                        report_state=report_state,
                     )
-                except GoogleConnectorError as exc:
-                    # Per-report containment: a single bad report -> PARTIAL run,
-                    # not a terminal FAILED that loses the other reports' rows.
-                    # Full bucket-B handler depth (mark_failed wiring, error
-                    # summary aggregation) is T28; happy-path tests don't reach
-                    # this branch.
+                except Exception as exc:
+                    # Bucket B: per-report containment. Widened from
+                    # ``GoogleConnectorError`` (T27) to ``Exception`` (T28) so
+                    # the inner try/except also catches non-typed failures
+                    # like ParserError (subclass of ValueError, not
+                    # GoogleConnectorError). A single bad report -> PARTIAL
+                    # run, not a terminal FAILED that loses the other
+                    # reports' rows.
                     per_report_failures.append((report_type, type(exc).__name__))
                     counts["reports_failed"] += 1
+                    # If the failure happened AFTER the raw_file row was
+                    # flushed (parse / upsert / mark_parsed), mark that
+                    # row DOWNLOADED -> FAILED so it doesn't sit
+                    # DOWNLOADED forever. Failures BEFORE the flush
+                    # (checksum / blob upload) leave the key absent and
+                    # there's nothing to mark.
+                    in_flight_raw_file_id = report_state.get("raw_file_id")
+                    if in_flight_raw_file_id is not None:
+                        try:
+                            # mark_failed only accepts DOWNLOADED|FAILED ->
+                            # FAILED. If by some race the row was already
+                            # marked PARSED before the exception fired,
+                            # mark_failed would raise RawFileLifecycleError.
+                            # In practice mark_parsed is the LAST step of
+                            # _process_one_report, so a PARSED-then-fail
+                            # race is not reachable on the YT path -- the
+                            # try/except here is belt-and-suspenders.
+                            mark_failed(
+                                session,
+                                raw_file_id=in_flight_raw_file_id,
+                                tenant_id=tenant_id,
+                            )
+                            session.commit()
+                        except Exception:
+                            # Cleanup must not mask the per-report failure
+                            # we just appended to per_report_failures. If
+                            # mark_failed itself raises (DB disconnect, race
+                            # with QUARANTINED), roll the session back to a
+                            # clean state and continue: the finish_run sweep
+                            # at the bottom of the loop will still record
+                            # the run-level error_summary correctly.
+                            session.rollback()
+                    else:
+                        # No raw_file in flight: roll back any
+                        # half-flushed state from the early-failure path
+                        # (checksum/upload exceptions) so the next
+                        # iteration starts clean.
+                        session.rollback()
                 ordering_index += 1
-        except GoogleConnectorError as exc:
-            # Bucket C: a non-per-report failure (runner.produce_reports itself
-            # blew up before yielding, an unexpected typed error escaped the
-            # inner block, etc.) terminates the run as FAILED. Re-raise so the
-            # caller (CLI) sees the typed error too.
+        except Exception as exc:
+            # Bucket C: any escaping exception (typed GoogleConnectorError
+            # *or* untyped like a runtime error from runner.produce_reports
+            # itself) terminates the run as FAILED. Widened from
+            # ``GoogleConnectorError`` (T27) to ``Exception`` (T28) so
+            # ParserError and other non-typed errors that escape the
+            # generator (e.g. from list_supported_jobs) get a proper FAILED
+            # row written instead of relying on the fail-safe finally.
+            # The inner Bucket B handler is also widened to Exception, so
+            # "in-flight raw_file" handling lives there; Bucket C primarily
+            # catches generator-level failures where no raw_file exists.
+            # Roll back any partial unflushed state so finish_run runs
+            # against a clean session.
+            session.rollback()
             finish_run(
                 session,
                 tenant_id=tenant_id,
@@ -405,12 +465,21 @@ def _process_one_report(
     ordering_index: int,
     triggered_by_user_id: UUID | None,
     counts: dict[str, int],
+    report_state: dict[str, object],
 ) -> None:
     """Run one report through blob → raw_file → parse → upsert → mark_parsed.
 
-    Raises any ``GoogleConnectorError`` from the blob / lifecycle / parser /
-    repo so the outer per-report ``except`` in ``run_one`` can record the
-    failure without aborting the whole run.
+    Raises any ``GoogleConnectorError`` / ``ParserError`` / other exception
+    from the blob / lifecycle / parser / repo so the outer per-report
+    ``except`` in ``run_one`` can record the failure without aborting the
+    whole run.
+
+    ``report_state`` is a mutable handshake dict the caller owns. As soon
+    as the ``raw_report_files`` row is flushed (step 3), this function
+    populates ``report_state["raw_file_id"]`` so the caller's bucket-B
+    handler can mark the row DOWNLOADED -> FAILED if a later step raises.
+    Failures BEFORE the flush (checksum / blob upload) leave the key
+    absent, signalling "no raw_file in flight to mark FAILED".
     """
     # 1. Checksum + deterministic URI: same bytes always map to the same path
     # so a retry overwrites or hits the existing object instead of creating a
@@ -449,6 +518,11 @@ def _process_one_report(
     session.add(raw_file)
     session.flush()
     raw_file_id = raw_file.id
+    # Hand the new raw_file_id back to ``run_one``'s per-report try/except
+    # via the mutable state dict. From this point on, any exception that
+    # escapes ``_process_one_report`` leaves a DOWNLOADED row in the DB;
+    # bucket B uses the id to flip it to FAILED instead of orphaning it.
+    report_state["raw_file_id"] = raw_file_id
 
     # 4. Join the raw file to the run with a deterministic ordering_index so
     # later reads (e.g. operator console) can replay the run in order.
