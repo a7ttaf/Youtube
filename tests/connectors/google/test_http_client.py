@@ -15,6 +15,7 @@ from ums_smart_revenue.connectors.google.errors import (
     GoogleApiAuthError,
     GoogleApiClientError,
     GoogleApiRateLimitError,
+    GoogleApiResponseError,
     GoogleApiServerError,
 )
 from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
@@ -165,3 +166,24 @@ def test_5xx_retries_then_raises(mock_credentials, monkeypatch) -> None:
     assert len(calls) == 4
     assert ctx.value.attempts == 4
     assert ctx.value.status == 503
+
+
+def test_non_json_response_raises_response_error(mock_credentials) -> None:
+    def handler(request):
+        return httpx.Response(200, content=b"<html>not json</html>")
+    client = GoogleHttpClient(
+        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(GoogleApiResponseError) as ctx:
+        client.request(method="GET", url="https://example.com/x")
+    assert "json" in ctx.value.reason.lower()
+
+
+def test_non_object_json_raises_response_error(mock_credentials) -> None:
+    def handler(request):
+        return httpx.Response(200, content=b"[1, 2, 3]")
+    client = GoogleHttpClient(
+        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+    )
+    with pytest.raises(GoogleApiResponseError):
+        client.request(method="GET", url="https://example.com/x")

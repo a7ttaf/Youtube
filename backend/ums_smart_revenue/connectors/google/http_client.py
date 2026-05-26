@@ -17,6 +17,7 @@ Retry policy (Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-de
 """
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -27,6 +28,7 @@ from ums_smart_revenue.connectors.google.errors import (
     GoogleApiAuthError,
     GoogleApiClientError,
     GoogleApiRateLimitError,
+    GoogleApiResponseError,
     GoogleApiServerError,
 )
 
@@ -147,7 +149,13 @@ class GoogleHttpClient:
             status = response.status_code
             last_status = status
             if status == 200:
-                return response.json()
+                try:
+                    body = response.json()
+                except (ValueError, json.JSONDecodeError) as exc:
+                    raise GoogleApiResponseError(url=url, reason=f"not valid json: {exc}") from exc
+                if not isinstance(body, dict):
+                    raise GoogleApiResponseError(url=url, reason=f"expected object, got {type(body).__name__}")
+                return body
             if status in _CLIENT_STATUSES:
                 raise GoogleApiClientError(method=method, url=url, status=status)
             if status in _AUTH_STATUSES:
