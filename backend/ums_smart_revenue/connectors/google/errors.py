@@ -102,7 +102,7 @@ class InactiveCredentialError(GoogleConnectorError):
 class _GoogleApiHttpError(GoogleConnectorError):
     def __init__(self, *, method: str, url: str, status: int, attempts: int = 1) -> None:
         if attempts > 1:
-            msg = f"{method} {url}: HTTP {status} after {attempts} retries"
+            msg = f"{method} {url}: HTTP {status} after {attempts} attempts"
         else:
             msg = f"{method} {url}: HTTP {status}"
         super().__init__(msg)

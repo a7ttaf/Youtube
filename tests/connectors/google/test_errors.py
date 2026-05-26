@@ -10,7 +10,14 @@ from __future__ import annotations
 from ums_smart_revenue.connectors.google.errors import (
     BlobChecksumMismatchError,
     BlobUploadError,
+    CredentialNotFoundError,
+    GoogleApiAuthError,
+    GoogleApiClientError,
+    GoogleApiRateLimitError,
+    GoogleApiResponseError,
+    GoogleApiServerError,
     GoogleConnectorError,
+    InactiveCredentialError,
     MalformedSecretPayloadError,
     MalformedSecretUriError,
     OAuthRefreshError,
@@ -18,6 +25,7 @@ from ums_smart_revenue.connectors.google.errors import (
     RawFileLifecycleError,
     SecretFetchError,
     SecretNotFoundError,
+    UnsupportedReportTypeError,
     UnsupportedSecretSchemeError,
 )
 
@@ -34,6 +42,14 @@ def test_all_b2_errors_subclass_google_connector_error() -> None:
         BlobChecksumMismatchError,
         RawFileLifecycleError,
         RawFileAlreadyParsedError,
+        CredentialNotFoundError,
+        InactiveCredentialError,
+        GoogleApiAuthError,
+        GoogleApiClientError,
+        GoogleApiRateLimitError,
+        GoogleApiServerError,
+        GoogleApiResponseError,
+        UnsupportedReportTypeError,
     ):
         assert issubclass(cls, GoogleConnectorError), cls.__name__
 
