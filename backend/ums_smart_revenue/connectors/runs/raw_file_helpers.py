@@ -4,7 +4,8 @@ Allowed transitions (spec §5.2):
 - DOWNLOADED -> PARSED  via mark_parsed (success)
 - FAILED     -> PARSED  via mark_parsed (retry recovery)
 - DOWNLOADED -> FAILED  via mark_failed
-- FAILED     -> FAILED  via mark_failed (idempotent: overwrites error fields)
+- FAILED     -> FAILED  via mark_failed (idempotent: row stays FAILED;
+                       error fields live on connector_runs / audit payload)
 
 Refused (raise):
 - QUARANTINED -> anything (terminal; externally-set)
