@@ -146,9 +146,6 @@ running on the operator's workstation.
       between PR #43 substrate and existing `MonthlyChannelRevenueFactORM`
       write path. See spec at
       `Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md`.
-    - ⏳ PR #47 (B2.1) — Google connector credential foundation (secret resolver dispatch +
-      gcp-secret-manager:// + local-secret:// + Google OAuth refresh wrapper).
-
 ---
 
 ## Phase 0 — Foundation decisions
@@ -168,7 +165,10 @@ running on the operator's workstation.
 - ✅ Final stack decision (FastAPI + PostgreSQL + Docker via PRs #1, #11,
   #15).
 - ⏳ OAuth/API access plan — remaining: credentials repository exists
-  (PRs #33, #34); real OAuth flows and token monitoring not started.
+  (PRs #33, #34); PR #47 (B2.1) has started the Google connector credential
+  foundation (secret resolver dispatch + gcp-secret-manager:// +
+  local-secret:// + Google OAuth refresh wrapper). Public OAuth consent flows,
+  live connector ingestion, and token monitoring are not started.
 - ⏳ Channel inventory file format — remaining: tenant-scoped channel
   registry exists (PR #25); bulk inventory load format not yet defined.
 - ⏳ Finance month-close input format — remaining: close-gate enforced

@@ -15,6 +15,7 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "openpyxl": "3.1.5",
         "reportlab": "4.5.1",
         "python_pptx": "1.0.2",
+        "google_cloud_secret_manager": "2.28.0",
         "pytest": "9.0.3",
         "httpx": "0.28.1",
         "pypdf": "6.12.1",

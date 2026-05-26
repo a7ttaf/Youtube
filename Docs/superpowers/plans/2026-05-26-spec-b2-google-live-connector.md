@@ -475,7 +475,7 @@ Dependency: `google-cloud-secret-manager` (already in `pyproject.toml`? — if n
 ```bash
 python -c "import google.cloud.secretmanager_v1; print('ok')"
 ```
-If `ModuleNotFoundError`, add `google-cloud-secret-manager>=2.20.0` to `pyproject.toml` under `[project.dependencies]`, then `python -m pip install -e .` and retry. Commit the `pyproject.toml` change in its own commit if added: `chore(b2.1): add google-cloud-secret-manager dependency`.
+If `ModuleNotFoundError`, add `google-cloud-secret-manager==2.28.0` to `pyproject.toml` under `[project.dependencies]`, then `python -m pip install -e .` and retry. Commit the `pyproject.toml` change in its own commit if added: `chore(b2.1): add google-cloud-secret-manager dependency`.
 
 - [ ] **Step 2: Write the failing test**
 
