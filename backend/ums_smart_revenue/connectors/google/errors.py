@@ -47,3 +47,22 @@ class OAuthRefreshError(GoogleConnectorError):
     def __init__(self, *, inner: Exception) -> None:
         super().__init__(f"oauth refresh failed: {type(inner).__name__}")
         self.inner = inner
+
+
+class BlobUploadError(GoogleConnectorError):
+    def __init__(self, *, storage_uri: str, inner: Exception) -> None:
+        super().__init__(
+            f"blob upload failed for {storage_uri}: {type(inner).__name__}"
+        )
+        self.storage_uri = storage_uri
+        self.inner = inner
+
+
+class BlobChecksumMismatchError(GoogleConnectorError):
+    def __init__(self, *, storage_uri: str, computed: str, read: str) -> None:
+        super().__init__(
+            f"checksum mismatch at {storage_uri}: computed={computed} read={read}"
+        )
+        self.storage_uri = storage_uri
+        self.computed = computed
+        self.read = read

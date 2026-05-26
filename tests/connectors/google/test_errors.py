@@ -1,12 +1,15 @@
-"""B2.1 error hierarchy tests.
+"""B2 error hierarchy tests.
 
 Every B2 error subclasses GoogleConnectorError so the orchestrator can catch
 the whole family in one except clause. Subclasses are distinguishable by
-isinstance.
+isinstance. As the B2 slices land (B2.1 secrets/oauth, B2.2 blob storage,
+B2.3/B2.4 to follow), new errors are appended to the family roster below.
 """
 from __future__ import annotations
 
 from ums_smart_revenue.connectors.google.errors import (
+    BlobChecksumMismatchError,
+    BlobUploadError,
     GoogleConnectorError,
     MalformedSecretPayloadError,
     MalformedSecretUriError,
@@ -17,7 +20,7 @@ from ums_smart_revenue.connectors.google.errors import (
 )
 
 
-def test_all_b21_errors_subclass_google_connector_error() -> None:
+def test_all_b2_errors_subclass_google_connector_error() -> None:
     for cls in (
         UnsupportedSecretSchemeError,
         MalformedSecretUriError,
@@ -25,6 +28,8 @@ def test_all_b21_errors_subclass_google_connector_error() -> None:
         SecretFetchError,
         MalformedSecretPayloadError,
         OAuthRefreshError,
+        BlobUploadError,
+        BlobChecksumMismatchError,
     ):
         assert issubclass(cls, GoogleConnectorError), cls.__name__
 
