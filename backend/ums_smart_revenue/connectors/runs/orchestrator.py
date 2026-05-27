@@ -299,25 +299,12 @@ def run_one(
     # Bucket A: pre-start_run errors. No connector_runs row is created, so
     # these surface to the caller and are recorded only at the CLI/audit
     # layer (B2.6, T37). The orchestrator never half-creates a run.
-    credential = _load_credential(
-        session,
+    credentials = _credentials_for_run(
+        session=session,
         tenant_id=tenant_id,
         connector_key=connector_key,
         account_id=account_id,
     )
-    if credential is None:
-        raise CredentialNotFoundError(
-            connector_key=connector_key, account_id=account_id
-        )
-    if credential.status != "active":
-        raise InactiveCredentialError(
-            credential_id=str(credential.id), status=credential.status
-        )
-
-    ensure_default_resolvers()
-    payload = resolve_secret(credential.encrypted_secret_ref)
-    credentials = build_credentials_from_payload(payload)
-    refresh_credentials(credentials)
 
     if dry_run:
         return _run_dry_run(
@@ -338,6 +325,35 @@ def run_one(
         credentials=credentials,
         triggered_by_user_id=triggered_by_user_id,
     )
+
+
+def _credentials_for_run(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    account_id: str,
+) -> Credentials:
+    credential = _load_credential(
+        session,
+        tenant_id=tenant_id,
+        connector_key=connector_key,
+        account_id=account_id,
+    )
+    if credential is None:
+        raise CredentialNotFoundError(
+            connector_key=connector_key, account_id=account_id
+        )
+    if credential.status != "active":
+        raise InactiveCredentialError(
+            credential_id=str(credential.id), status=credential.status
+        )
+
+    ensure_default_resolvers()
+    payload = resolve_secret(credential.encrypted_secret_ref)
+    credentials = build_credentials_from_payload(payload)
+    refresh_credentials(credentials)
+    return credentials
 
 
 # ============================================================================
@@ -1084,8 +1100,8 @@ class YouTubeReportingRunner:
     replace what the runner actually uses.
     """
 
-    @staticmethod
     def produce_reports(
+        self,
         *,
         session: Session,
         run: ConnectorRunEntry | None,
@@ -1097,28 +1113,45 @@ class YouTubeReportingRunner:
         # never references it (the connector_runs lifecycle is owned by
         # ``run_one`` itself), so the widening is a pure type contract
         # change with no behavioural effect on the live path.
-        http = GoogleHttpClient(credentials=credentials)
-        try:
-            client = YouTubeReportingClient(http=http)
-            jobs = client.list_supported_jobs(account_id=account_id)
-            for job in jobs:
-                produced = _produce_youtube_job_report(
-                    client=client,
-                    job=job,
-                    report_month=report_month,
-                    account_id=account_id,
-                )
-                if produced is None:
-                    continue
-                if isinstance(produced, ProducedReportFailure):
-                    yield produced
-                    continue
-                try:
-                    yield produced
-                finally:
-                    _cleanup_csv_report_downloads(produced.raw_reports)
-        finally:
-            http.close()
+        _ = (session, run)
+        client_type = getattr(self, "_client_type", YouTubeReportingClient)
+        yield from _produce_youtube_reports(
+            client_type=client_type,
+            credentials=credentials,
+            report_month=report_month,
+            account_id=account_id,
+        )
+
+
+def _produce_youtube_reports(
+    *,
+    client_type: type[YouTubeReportingClient],
+    credentials: Credentials,
+    report_month: str,
+    account_id: str,
+) -> Iterator[ProducedReport]:
+    http = GoogleHttpClient(credentials=credentials)
+    try:
+        client = client_type(http=http)
+        jobs = client.list_supported_jobs(account_id=account_id)
+        for job in jobs:
+            produced = _produce_youtube_job_report(
+                client=client,
+                job=job,
+                report_month=report_month,
+                account_id=account_id,
+            )
+            if produced is None:
+                continue
+            if isinstance(produced, ProducedReportFailure):
+                yield produced
+                continue
+            try:
+                yield produced
+            finally:
+                _cleanup_csv_report_downloads(produced.raw_reports)
+    finally:
+        http.close()
 
 
 def _produce_youtube_job_report(
@@ -1309,7 +1342,7 @@ def _csv_to_parser_payload(
     raw_bytes: bytes,
     report_id: str,
     report_type: str,
-    report_month: str,
+    month: str,
 ) -> dict[str, object]:
     """Convert YouTube Reporting CSV bytes to the parser-friendly dict shape.
 
@@ -1322,7 +1355,7 @@ def _csv_to_parser_payload(
     return _csv_reports_to_parser_payload(
         csv_reports=[_CsvReportDownload(report_id=report_id, raw_bytes=raw_bytes)],
         report_type=report_type,
-        report_month=report_month,
+        report_month=month,
     )
 
 

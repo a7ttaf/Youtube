@@ -206,6 +206,69 @@ def _terminal_response_or_raise(
     return None
 
 
+def _send_with_retry_response(
+    client: httpx.Client,
+    *,
+    method: str,
+    url: str,
+    params: Mapping[str, str] | None,
+    json_body: Mapping[str, object] | None,
+    headers: dict[str, str],
+) -> httpx.Response:
+    state = _RetryState(
+        status_backoff=_backoff_schedule(_MAX_STATUS_ATTEMPTS),
+        timeout_backoff=_backoff_schedule(_MAX_TIMEOUT_ATTEMPTS),
+        connect_backoff=_backoff_schedule(_MAX_CONNECT_ATTEMPTS),
+    )
+
+    # The HTTP status loop runs up to _MAX_STATUS_ATTEMPTS (4); timeouts
+    # and connect errors each carry their own independent budgets per
+    # spec §7 (timeout=4, connect=3) so a flaky DNS path can't be hidden
+    # by previous 5xx attempts and vice versa. status=0 is the sentinel
+    # for "no HTTP response produced" raised on timeout/connect exhaust.
+    while state.status_attempt < _MAX_STATUS_ATTEMPTS:
+        state.status_attempt += 1
+        response = _request_or_retry_transport(
+            client,
+            state,
+            method=method,
+            url=url,
+            params=params,
+            json_body=json_body,
+            headers=headers,
+        )
+        if response is None:
+            continue
+
+        status = response.status_code
+        state.last_status = status
+        terminal = _terminal_response_or_raise(response, method=method, url=url)
+        if terminal is not None:
+            return terminal
+        if _sleep_for_retryable_status(
+            response=response,
+            attempt=state.status_attempt,
+            method=method,
+            url=url,
+            status_backoff=state.status_backoff,
+        ):
+            continue
+        # Defensive fallthrough: any status outside the spec table
+        # (3xx redirects, 451, etc.) is surfaced as a client error so
+        # the orchestrator records a non-retryable FAILED run.
+        raise GoogleApiClientError(method=method, url=url, status=status)
+
+    # Unreachable in practice: every branch above either returns or raises.
+    # Kept as a belt-and-suspenders no-return so type checkers don't flag a
+    # fall-through path off the while loop.
+    raise GoogleApiServerError(
+        method=method,
+        url=url,
+        status=state.last_status,
+        attempts=_MAX_STATUS_ATTEMPTS,
+    )
+
+
 class GoogleHttpClient:
     def __init__(
         self,
@@ -259,57 +322,13 @@ class GoogleHttpClient:
             method=method,
             url=url,
         )
-        state = _RetryState(
-            status_backoff=_backoff_schedule(_MAX_STATUS_ATTEMPTS),
-            timeout_backoff=_backoff_schedule(_MAX_TIMEOUT_ATTEMPTS),
-            connect_backoff=_backoff_schedule(_MAX_CONNECT_ATTEMPTS),
-        )
-
-        # The HTTP status loop runs up to _MAX_STATUS_ATTEMPTS (4); timeouts
-        # and connect errors each carry their own independent budgets per
-        # spec §7 (timeout=4, connect=3) so a flaky DNS path can't be hidden
-        # by previous 5xx attempts and vice versa. status=0 is the sentinel
-        # for "no HTTP response produced" raised on timeout/connect exhaust.
-        while state.status_attempt < _MAX_STATUS_ATTEMPTS:
-            state.status_attempt += 1
-            response = _request_or_retry_transport(
-                self._client,
-                state,
-                method=method,
-                url=url,
-                params=params,
-                json_body=json_body,
-                headers=headers,
-            )
-            if response is None:
-                continue
-
-            status = response.status_code
-            state.last_status = status
-            terminal = _terminal_response_or_raise(
-                response, method=method, url=url
-            )
-            if terminal is not None:
-                return terminal
-            if _sleep_for_retryable_status(
-                response=response,
-                attempt=state.status_attempt,
-                method=method,
-                url=url,
-                status_backoff=state.status_backoff,
-            ):
-                continue
-            # Defensive fallthrough: any status outside the spec table
-            # (3xx redirects, 451, etc.) is surfaced as a client error so
-            # the orchestrator records a non-retryable FAILED run.
-            raise GoogleApiClientError(method=method, url=url, status=status)
-
-        # Unreachable in practice: every branch above either returns or
-        # raises. Kept as a belt-and-suspenders no-return so type checkers
-        # don't flag a fall-through path off the while loop.
-        raise GoogleApiServerError(
-            method=method, url=url, status=state.last_status,
-            attempts=_MAX_STATUS_ATTEMPTS,
+        return _send_with_retry_response(
+            self._client,
+            method=method,
+            url=url,
+            params=params,
+            json_body=json_body,
+            headers=headers,
         )
 
     def request(

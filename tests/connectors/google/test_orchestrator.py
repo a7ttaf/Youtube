@@ -213,7 +213,7 @@ def test_csv_adapter_aggregates_daily_breakdowns_to_monthly_channel_totals() -> 
         ),
         report_id="r-monthly",
         report_type="content_owner_estimated_revenue_a1",
-        report_month="2026-05",
+        month="2026-05",
     )
 
     assert payload["report_metadata"] == {
@@ -242,7 +242,7 @@ def test_csv_adapter_rejects_non_zero_padded_report_month() -> None:
             raw_bytes=_csv_for_one_row(),
             report_id="r-bad-month",
             report_type="content_owner_estimated_revenue_a1",
-            report_month="2026-5",
+            month="2026-5",
         )
 
 
@@ -274,7 +274,7 @@ def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff
             ),
         ]
 
-        produced_iter = YouTubeReportingRunner.produce_reports(
+        produced_iter = YouTubeReportingRunner().produce_reports(
             session=session,
             run=None,
             credentials=object(),
