@@ -287,9 +287,6 @@ class ConnectorRunner(Protocol):
 #   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
 #     §5.4 -> orchestrator contract (load → start → loop → finish).
 # ============================================================================
-# DeepSource keeps this historical complexity issue anchored here after branch
-# logic was delegated to credential, dry-run, and live-run helpers.
-# skipcq: PY-R1000
 def run_one(
     session: Session,
     *,
