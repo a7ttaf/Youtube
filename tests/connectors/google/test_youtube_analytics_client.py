@@ -68,7 +68,7 @@ def test_fetch_channel_report(mock_credentials) -> None:
         assert params["startDate"] == "2026-05-01"
         assert params["endDate"] == "2026-05-31"
         assert params["metrics"] == "estimatedRevenue,estimatedAdRevenue,grossRevenue"
-        assert params["dimensions"] == "month"
+        assert params["dimensions"] == "channel,month"
         return httpx.Response(200, content=json.dumps({"rows": [["2026-05", "USD", "1.23"]]}).encode())
     http = GoogleHttpClient(
         credentials=mock_credentials, transport=httpx.MockTransport(handler),

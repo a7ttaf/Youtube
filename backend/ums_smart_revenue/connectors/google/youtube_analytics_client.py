@@ -6,7 +6,7 @@ Query params:
   startDate=<YYYY-MM-01>
   endDate=<YYYY-MM-last>
   metrics=estimatedRevenue,...   <- locked per parser requirements
-  dimensions=month,...
+  dimensions=channel,month,...
 
 Channels are sourced from the youtube_channels registry (PR #25) filtered
 by tenant + active + revenue_required + content_owner match-or-null.
@@ -29,7 +29,7 @@ _REPORT_MONTH_PATTERN = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
 _BASE = "https://youtubeanalytics.googleapis.com/v2/reports"
 # Locked metric set; matches what YouTubeAnalyticsParser consumes.
 _METRICS = "estimatedRevenue,estimatedAdRevenue,grossRevenue"
-_DIMENSIONS = "month"
+_DIMENSIONS = "channel,month"
 
 
 # ============================================================================

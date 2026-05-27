@@ -51,6 +51,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import types as _types  # SimpleNamespace used for dry-run tenant_id proxy
 from calendar import monthrange
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
@@ -84,6 +85,12 @@ from ums_smart_revenue.connectors.google.registry import (
 from ums_smart_revenue.connectors.google.secret_resolver import (
     ensure_default_resolvers,
     resolve_secret,
+)
+from ums_smart_revenue.connectors.google.youtube_analytics_client import (
+    _DIMENSIONS as _ANALYTICS_DIMENSIONS,
+)
+from ums_smart_revenue.connectors.google.youtube_analytics_client import (
+    _METRICS as _ANALYTICS_METRICS,
 )
 from ums_smart_revenue.connectors.google.youtube_analytics_client import (
     YouTubeAnalyticsClient,
@@ -436,9 +443,13 @@ def _run_dry_run(
     parser = _parser_for_connector(connector_key)
     savepoint = session.begin_nested()
     try:
+        # Pass a lightweight proxy that carries tenant_id so runners that
+        # need it (e.g. YouTubeAnalyticsRunner) can read run.tenant_id
+        # without requiring a live ConnectorRunEntry on the dry-run path.
+        _dry_run_proxy = _types.SimpleNamespace(tenant_id=tenant_id)
         for produced in runner.produce_reports(
             session=session,
-            run=None,
+            run=_dry_run_proxy,  # type: ignore[arg-type]
             credentials=credentials,
             report_month=report_month,
             account_id=account_id,
@@ -2250,32 +2261,24 @@ class YouTubeAnalyticsRunner:
         report_month: str,
         account_id: str,
     ) -> Iterator[ProducedReport]:
-        # ``run`` is None on the T29 dry-run path; the runner body never
-        # references it (the connector_runs lifecycle is owned by ``run_one``
-        # itself), consistent with YouTubeReportingRunner's widened contract.
-        _ = run
+        # ``run`` carries the tenant_id we need for list_target_channels.
+        # On the T29 dry-run path run is None; the orchestrator still passes
+        # a ConnectorRunEntry-compatible object for dry-runs so tenant_id is
+        # always present. The connector_runs lifecycle is owned by run_one
+        # itself, consistent with YouTubeReportingRunner's widened contract.
+        # ConnectorRunEntry.tenant_id is a str; UUID() converts it for
+        # list_target_channels which requires a typed UUID boundary.
+        tenant_id: UUID = UUID(run.tenant_id)  # type: ignore[union-attr]
         http = GoogleHttpClient(credentials=credentials)
         try:
             client = YouTubeAnalyticsClient(http=http)
-            # Resolve the credential's tenant from the session-local state:
-            # list_target_channels needs the tenant_id to scope the channel
-            # query. We derive it from the session rather than carrying it on
-            # the runner because ConnectorRunner.produce_reports has access to
-            # `session` which already holds the loaded ApiConnectorCredentialORM
-            # (loaded by _load_credential earlier in run_one). Reading tenant_id
-            # from the credential row avoids adding a new protocol parameter.
-            cred_row = session.execute(
-                sa.select(ApiConnectorCredentialORM).where(
-                    ApiConnectorCredentialORM.connector_key.in_(
-                        {"youtube-analytics", "youtube_analytics"}
-                    ),
-                    ApiConnectorCredentialORM.account_id == account_id,
-                )
-            ).scalar_one()
-            tenant_id: UUID = cred_row.tenant_id
             channel_ids = list_target_channels(
                 session, tenant_id=tenant_id, account_id=account_id,
             )
+            # Hoist invariants out of the per-channel loop: these values are
+            # the same for every channel in this run and are pure computations.
+            year_str, month_str = report_month.split("-")
+            last_day = monthrange(int(year_str), int(month_str))[1]
             for channel_id in channel_ids:
                 response: dict[str, object] = client.fetch_channel_report(
                     channel_id=channel_id, report_month=report_month,
@@ -2284,18 +2287,25 @@ class YouTubeAnalyticsRunner:
                 # parser needs to build row keys and validate the date range.
                 # The client's params mirror what fetch_channel_report sends to
                 # the Google endpoint; reconstruct them from report_month.
-                year_str, month_str = report_month.split("-")
-                last_day = monthrange(int(year_str), int(month_str))[1]
+                # _ANALYTICS_DIMENSIONS/_ANALYTICS_METRICS are the single source
+                # of truth (imported from youtube_analytics_client) so the locked
+                # metric/dimension contract cannot drift between client and runner.
                 parser_payload: dict[str, object] = {
                     **response,
                     "query_request": {
                         "ids": f"channel=={channel_id}",
                         "startDate": f"{year_str}-{month_str}-01",
                         "endDate": f"{year_str}-{month_str}-{last_day:02d}",
-                        "metrics": "estimatedRevenue,estimatedAdRevenue,grossRevenue",
-                        "dimensions": "month",
+                        "metrics": _ANALYTICS_METRICS,
+                        "dimensions": _ANALYTICS_DIMENSIONS,
                     },
                 }
+                # Stored blob is the AUGMENTED parser_payload (includes injected
+                # query_request metadata), not the raw API response — this is a
+                # deliberate divergence from YouTubeReportingRunner where raw_bytes
+                # is the literal CSV from Google. Rationale: a single JSON blob can
+                # be fully replayed through YouTubeAnalyticsParser with no runner
+                # state.
                 raw_bytes = json.dumps(parser_payload, sort_keys=True).encode("utf-8")
                 yield ("youtube_analytics", parser_payload, raw_bytes)
         finally:

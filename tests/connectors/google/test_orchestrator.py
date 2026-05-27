@@ -2931,3 +2931,177 @@ def test_run_one_with_youtube_analytics_succeeds_per_channel(
     ).all()
     assert len(source_rows) == counts["rows_upserted_total"]
     assert all(r.source_system == "youtube_analytics" for r in source_rows)
+
+
+def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trips(
+    session: Session, _stub_secret_resolver, tmp_path, monkeypatch
+) -> None:
+    """End-to-end analytics ingestion against the REAL LocalFileStoreBackend.
+
+    Every other analytics orchestrator test patches LocalFileStoreBackend with
+    a MagicMock whose ``upload`` swallows any URI string, so the real
+    ``LocalFileStoreBackend._path_for`` never executes. That mask would hide
+    any scheme-mismatch bug equivalent to B2.4 Concern A (where
+    ``deterministic_blob_path`` emitted a ``gs://`` URI for a file-store
+    backend). This test mirrors test_run_one_real_local_file_store_backend_round_trips
+    for the youtube-analytics path.
+
+    This test does NOT patch LocalFileStoreBackend. It points the real backend
+    at ``tmp_path`` via env-vars, drives ``run_one`` through to SUCCEEDED for
+    two channels, then asserts each channel's bytes landed on disk at the
+    deterministic path and each persisted RawReportFileORM carries a
+    ``file-store://`` URL.
+    """
+    import hashlib as _hashlib
+    import json as _json
+
+    monkeypatch.setenv("UMS_BLOB_BACKEND", "file-store")
+    monkeypatch.setenv("UMS_LOCAL_STORE_ROOT", str(tmp_path))
+    monkeypatch.setenv("UMS_LOCAL_BLOB_BUCKET", "testbucket")
+
+    # ----- seed channels -----
+    ch_cms = YouTubeChannelORM(
+        id=uuid4(),
+        tenant_id=TENANT_ID,
+        youtube_channel_id="UC_fs_cms",
+        channel_name="CMS FS Channel",
+        content_owner_id=_ANALYTICS_ACCOUNT_ID,
+        active=True,
+        revenue_required=True,
+    )
+    ch_ext = YouTubeChannelORM(
+        id=uuid4(),
+        tenant_id=TENANT_ID,
+        youtube_channel_id="UC_fs_ext",
+        channel_name="Outside-CMS FS Channel",
+        content_owner_id=None,
+        active=True,
+        revenue_required=True,
+    )
+    session.add_all([ch_cms, ch_ext])
+    session.flush()
+
+    # ----- seed credential row -----
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ANALYTICS_CONNECTOR_KEY,
+        account_id=_ANALYTICS_ACCOUNT_ID,
+    )
+
+    report_month = "2026-05"
+
+    # Build the per-channel payloads the stub will return.
+    payload_cms = _make_analytics_parser_payload(
+        channel_id="UC_fs_cms",
+        report_month=report_month,
+    )
+    payload_ext = _make_analytics_parser_payload(
+        channel_id="UC_fs_ext",
+        report_month=report_month,
+    )
+
+    # Pre-compute the raw_bytes the runner will produce so we can assert
+    # the exact bytes on disk. The runner spreads the stub response then
+    # OVERWRITES query_request with a freshly constructed dict (using the
+    # canonical _ANALYTICS_METRICS/_ANALYTICS_DIMENSIONS constants). Mirror
+    # that logic here so the expected bytes match what lands on disk.
+    import calendar as _calendar
+    _year, _month = report_month.split("-")
+    _last_day = _calendar.monthrange(int(_year), int(_month))[1]
+
+    def _runner_query_request(channel_id: str) -> dict:
+        return {
+            "ids": f"channel=={channel_id}",
+            "startDate": f"{_year}-{_month}-01",
+            "endDate": f"{_year}-{_month}-{_last_day:02d}",
+            "metrics": "estimatedRevenue,estimatedAdRevenue,grossRevenue",
+            "dimensions": "channel,month",
+        }
+
+    augmented_cms = {**payload_cms, "query_request": _runner_query_request("UC_fs_cms")}
+    augmented_ext = {**payload_ext, "query_request": _runner_query_request("UC_fs_ext")}
+    raw_bytes_cms = _json.dumps(augmented_cms, sort_keys=True).encode("utf-8")
+    raw_bytes_ext = _json.dumps(augmented_ext, sort_keys=True).encode("utf-8")
+    checksum_cms = _hashlib.sha256(raw_bytes_cms).hexdigest()
+    checksum_ext = _hashlib.sha256(raw_bytes_ext).hexdigest()
+
+    def fake_fetch_channel_report(*, channel_id: str, report_month: str) -> dict:
+        if channel_id == "UC_fs_cms":
+            return payload_cms
+        if channel_id == "UC_fs_ext":
+            return payload_ext
+        raise ValueError(f"unexpected channel_id in stub: {channel_id!r}")
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+    ) as yt_analytics_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        # NOTE: LocalFileStoreBackend is intentionally NOT patched here -- the
+        # real backend writes to ``tmp_path`` so we can prove deterministic_blob_path
+        # emits a file-store:// scheme the backend will accept.
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        analytics_client = yt_analytics_cls.return_value
+        analytics_client.fetch_channel_report.side_effect = fake_fetch_channel_report
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=_ANALYTICS_CONNECTOR_KEY,
+            account_id=_ANALYTICS_ACCOUNT_ID,
+            report_month=report_month,
+        )
+
+    # Outcome must be SUCCEEDED: a pre-fix ValueError from
+    # LocalFileStoreBackend._path_for would have driven this to FAILED.
+    assert isinstance(outcome, ConnectorRunOutcome)
+    assert outcome.run is not None
+    assert outcome.run.status == "SUCCEEDED"
+    assert outcome.per_report_failures == []
+    assert outcome.counts["reports_succeeded"] == 2
+
+    # The deterministic path layout for analytics:
+    # file-store://{bucket}/{tenant_id}/{connector_key}/{report_type}/{month}/{checksum}.json
+    # LocalFileStoreBackend strips the scheme and treats the remainder as a
+    # relative path under root.
+    from pathlib import Path as _Path
+
+    def _expected_path(checksum: str) -> _Path:
+        return (
+            tmp_path
+            / "testbucket"
+            / str(TENANT_ID)
+            / _ANALYTICS_CONNECTOR_KEY
+            / "youtube_analytics"
+            / report_month
+            / f"{checksum}.json"
+        )
+
+    for channel_id, raw_bytes, checksum in [
+        ("UC_fs_cms", raw_bytes_cms, checksum_cms),
+        ("UC_fs_ext", raw_bytes_ext, checksum_ext),
+    ]:
+        expected_path = _expected_path(checksum)
+        assert expected_path.exists(), (
+            f"raw blob for {channel_id} did not land on disk at {expected_path}; "
+            f"tmp_path tree: {list(tmp_path.rglob('*'))}"
+        )
+        assert expected_path.read_bytes() == raw_bytes, (
+            f"blob bytes mismatch for {channel_id}"
+        )
+
+    # The persisted file_url for each channel must carry file-store scheme + bucket.
+    raw_files = session.scalars(
+        select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
+    ).all()
+    assert len(raw_files) == 2
+    for raw_file in raw_files:
+        assert raw_file.file_url.startswith("file-store://testbucket/"), (
+            f"expected file-store:// scheme + testbucket prefix; got {raw_file.file_url!r}"
+        )
+        assert raw_file.file_url.endswith(".json")
