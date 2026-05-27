@@ -189,7 +189,7 @@ running on the operator's workstation.
       LocalFileStoreBackend end-to-end through run_one. B2.5 (YouTube
       Analytics) + B2.6 (operator console) stack on top in follow-up
       PRs.
-    - ⏳ PR #TBD (B2.5) — YouTube Analytics targeted channel ingestion
+    - ⏳ PR #48 (B2.5) — YouTube Analytics targeted channel ingestion
       (includes outside-CMS channels from the youtube_channels
       registry: active + revenue_required + content_owner_id matches
       account OR is NULL); registers youtube-analytics (and the
