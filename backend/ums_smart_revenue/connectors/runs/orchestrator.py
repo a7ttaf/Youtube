@@ -287,7 +287,8 @@ class ConnectorRunner(Protocol):
 # ============================================================================
 # DeepSource keeps this historical complexity issue anchored here after branch
 # logic was delegated to credential, dry-run, and live-run helpers.
-def run_one(  # skipcq: PY-R1000
+# skipcq: PY-R1000
+def run_one(
     session: Session,
     *,
     tenant_id: UUID,
