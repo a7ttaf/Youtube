@@ -2,6 +2,7 @@
 
 URI shape:
     gcp-secret-manager://projects/{project}/secrets/{name}/versions/{version}
+    secret-manager://projects/{project}/secrets/{name}/versions/{version}
 where {version} is either an integer or 'latest'. The path after :// is the
 exact name expected by SecretManagerServiceClient.access_secret_version.
 """
@@ -22,6 +23,7 @@ from ums_smart_revenue.connectors.google.errors import (
 _NAME_PATTERN = re.compile(
     r"^projects/[^/]+/secrets/[^/]+/versions/[^/]+$"
 )
+_SUPPORTED_PREFIXES = ("gcp-secret-manager://", "secret-manager://")
 
 
 class _SecretManagerClient(Protocol):
@@ -29,7 +31,7 @@ class _SecretManagerClient(Protocol):
 
 
 class GcpSecretManagerResolver:
-    """Resolver for the gcp-secret-manager:// scheme.
+    """Resolver for GCP Secret Manager URI schemes.
 
     Inject the client at construction time (B2.1 wiring uses a real
     SecretManagerServiceClient; tests use a mock).
@@ -39,9 +41,7 @@ class GcpSecretManagerResolver:
         self._client = client
 
     def resolve(self, ref: str) -> str:
-        if not ref.startswith("gcp-secret-manager://"):
-            raise MalformedSecretUriError(ref=ref)
-        name = ref[len("gcp-secret-manager://") :]
+        name = _name_from_ref(ref)
         if not _NAME_PATTERN.match(name):
             raise MalformedSecretUriError(ref=ref)
         try:
@@ -82,3 +82,10 @@ class GcpSecretManagerResolver:
             except Exception as exc:
                 raise SecretFetchError(ref=ref, inner=exc) from exc
         return self._client
+
+
+def _name_from_ref(ref: str) -> str:
+    for prefix in _SUPPORTED_PREFIXES:
+        if ref.startswith(prefix):
+            return ref[len(prefix) :]
+    raise MalformedSecretUriError(ref=ref)

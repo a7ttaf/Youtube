@@ -44,6 +44,20 @@ def test_resolve_returns_decoded_payload() -> None:
     )
 
 
+def test_resolve_accepts_generic_secret_manager_alias() -> None:
+    client = _make_client_returning(b'{"refresh_token": "rt"}')
+    resolver = GcpSecretManagerResolver(client=client)
+
+    out = resolver.resolve(
+        "secret-manager://projects/my-proj/secrets/yt-creds/versions/latest"
+    )
+
+    assert out == '{"refresh_token": "rt"}'
+    client.access_secret_version.assert_called_once_with(
+        request={"name": "projects/my-proj/secrets/yt-creds/versions/latest"}
+    )
+
+
 def test_resolve_wraps_non_utf8_payload_as_malformed_payload() -> None:
     client = _make_client_returning(b"\xff\xfe\x00")
     resolver = GcpSecretManagerResolver(client=client)

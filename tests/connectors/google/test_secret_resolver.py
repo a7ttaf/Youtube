@@ -3,7 +3,7 @@
 A dispatcher maps a URI scheme (e.g., 'gcp-secret-manager') to a resolver
 implementation. Unknown / unimplemented schemes raise
 UnsupportedSecretSchemeError; ORM-accepted prefixes that aren't implemented
-(aws-secretsmanager://, secret-manager://, vault://, kms://, azure-keyvault://)
+(aws-secretsmanager://, vault://, kms://, azure-keyvault://)
 are intentionally unknown until a future credential-lifecycle PR.
 """
 from __future__ import annotations
@@ -65,7 +65,7 @@ def test_register_resolver_rejects_duplicate_scheme() -> None:
     assert resolve_secret("local-secret://my-key") == "first"
 
 
-def test_ensure_default_resolvers_registers_gcp_scheme(monkeypatch) -> None:
+def test_ensure_default_resolvers_registers_secret_manager_aliases(monkeypatch) -> None:
     from ums_smart_revenue.connectors.google import gcp_secret_manager
 
     monkeypatch.setattr(
@@ -77,6 +77,9 @@ def test_ensure_default_resolvers_registers_gcp_scheme(monkeypatch) -> None:
     ensure_default_resolvers()
 
     assert resolve_secret("gcp-secret-manager://projects/p/secrets/s/versions/latest") == (
+        "gcp-payload"
+    )
+    assert resolve_secret("secret-manager://projects/p/secrets/s/versions/latest") == (
         "gcp-payload"
     )
 
@@ -103,6 +106,9 @@ def test_ensure_default_resolvers_is_race_safe(monkeypatch) -> None:
 
     assert len(constructed) == 1
     assert resolve_secret("gcp-secret-manager://projects/p/secrets/s/versions/latest") == (
+        "gcp-payload"
+    )
+    assert resolve_secret("secret-manager://projects/p/secrets/s/versions/latest") == (
         "gcp-payload"
     )
 

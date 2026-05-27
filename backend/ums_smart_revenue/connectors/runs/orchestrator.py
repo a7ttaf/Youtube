@@ -173,6 +173,12 @@ class ProducedReportFailure:
     error: Exception
 
 
+@dataclass(frozen=True)
+class _CsvReportDownload:
+    report_id: str
+    raw_bytes: bytes
+
+
 ProducedReport = tuple[str, dict[str, object], bytes] | ProducedReportFailure
 
 
@@ -750,6 +756,13 @@ def _process_one_report(
             current=raw_file.parse_status,
             target="PARSED",
         )
+    if raw_file.parse_status == "FAILED":
+        # FIX: a retry of the same Google payload must reopen the evidence
+        # row before parsing and point it at the blob uploaded by this run.
+        raw_file.parse_status = "DOWNLOADED"
+        raw_file.file_url = storage_uri
+        raw_file.downloaded_by = triggered_by_user_id
+        session.flush()
     raw_file_id = raw_file.id
     # Hand the new raw_file_id back to ``run_one``'s per-report try/except
     # via the mutable state dict. From this point on, any exception that
@@ -928,9 +941,10 @@ class YouTubeReportingRunner:
       filtered by ``list_supported_jobs``.
     - ``parser_payload`` is the parser-friendly dict the existing
       ``YouTubeReportingParser`` expects (``report_metadata`` + ``rows``);
-      this runner converts the downloaded CSV bytes to that shape.
-    - ``raw_bytes`` is the unmodified CSV body that goes to blob storage so
-      the on-disk evidence matches what Google returned.
+      this runner converts one or more downloaded daily CSVs to that monthly
+      shape before parser handoff.
+    - ``raw_bytes`` is the single CSV body for one descriptor or a
+      deterministic evidence bundle for multiple daily descriptors.
 
     The class references ``YouTubeReportingClient`` by bare name so tests
     that patch
@@ -969,23 +983,38 @@ class YouTubeReportingRunner:
                 except GoogleConnectorError as exc:
                     yield ProducedReportFailure(report_type=report_type, error=exc)
                     continue
+                csv_reports: list[_CsvReportDownload] = []
                 for report in reports:
                     try:
                         download_url = _require_text(report, "downloadUrl")
                         raw_bytes = client.fetch_report(download_url=download_url)
                         report_id = _require_text(report, "id")
-                        parser_payload = _csv_to_parser_payload(
-                            raw_bytes=raw_bytes,
-                            report_id=report_id,
-                            report_type=report_type,
-                            report_month=report_month,
-                        )
                     except OAuthRefreshError:
                         raise
                     except GoogleConnectorError as exc:
                         yield ProducedReportFailure(report_type=report_type, error=exc)
                         continue
-                    yield report_type, parser_payload, raw_bytes
+                    csv_reports.append(
+                        _CsvReportDownload(report_id=report_id, raw_bytes=raw_bytes)
+                    )
+                if not csv_reports:
+                    continue
+                try:
+                    parser_payload = _csv_reports_to_parser_payload(
+                        csv_reports=csv_reports,
+                        report_type=report_type,
+                        report_month=report_month,
+                        default_content_owner=(
+                            account_id
+                            if report_type.startswith("content_owner_")
+                            else None
+                        ),
+                    )
+                    raw_bytes = _combine_csv_report_bytes(csv_reports)
+                except GoogleConnectorError as exc:
+                    yield ProducedReportFailure(report_type=report_type, error=exc)
+                    continue
+                yield report_type, parser_payload, raw_bytes
         finally:
             http.close()
 
@@ -1024,91 +1053,41 @@ def _csv_to_parser_payload(
     revenue rows, so this adapter sums all requested-month breakdown rows by
     channel, optional content_owner, and currency before parser handoff.
     """
+    return _csv_reports_to_parser_payload(
+        csv_reports=[_CsvReportDownload(report_id=report_id, raw_bytes=raw_bytes)],
+        report_type=report_type,
+        report_month=report_month,
+    )
+
+
+def _csv_reports_to_parser_payload(
+    *,
+    csv_reports: list[_CsvReportDownload],
+    report_type: str,
+    report_month: str,
+    default_content_owner: str | None = None,
+) -> dict[str, object]:
+    """Aggregate one or more daily YouTube Reporting CSVs to monthly rows."""
     import csv
     import io
 
+    report_id = _combined_report_id([csv_report.report_id for csv_report in csv_reports])
     month_start, month_end = _month_bounds(
         report_month=report_month, report_id=report_id
     )
     expected_month = f"{month_start.year:04d}-{month_start.month:02d}"
-    text = raw_bytes.decode("utf-8")
-    reader = csv.DictReader(io.StringIO(text))
     totals: dict[tuple[str, str | None, str], Decimal] = {}
-    for line_index, csv_row in enumerate(reader):
-        # Normalize the date column. YouTube Reporting CSV uses ``date`` or
-        # ``day``. The row is daily, but the parser payload below is monthly,
-        # so this date is used only to ensure the row belongs to report_month.
-        date_value = _first_present(csv_row, *_CSV_DATE_COLUMNS)
-        if not date_value:
-            raise _parser_payload_error(
-                report_id=report_id,
-                reason="csv row missing date/day column",
+    for csv_report in csv_reports:
+        text = csv_report.raw_bytes.decode("utf-8")
+        reader = csv.DictReader(io.StringIO(text))
+        for csv_row in reader:
+            _accumulate_csv_row(
+                totals=totals,
+                csv_row=csv_row,
+                report_id=csv_report.report_id,
+                expected_month=expected_month,
+                default_content_owner=default_content_owner,
             )
-        try:
-            row_date = date_cls.fromisoformat(date_value)
-        except ValueError as exc:
-            raise _parser_payload_error(
-                report_id=report_id,
-                reason=f"csv row date {date_value!r} not ISO YYYY-MM-DD",
-            ) from exc
-        row_month = f"{row_date.year:04d}-{row_date.month:02d}"
-        if row_month != expected_month:
-            raise _parser_payload_error(
-                report_id=report_id,
-                reason=(
-                    f"csv row date {date_value!r} outside requested "
-                    f"report_month {expected_month!r}"
-                ),
-            )
-
-        # Channel + optional content_owner are the monthly attribution axes.
-        # Lower-level official dimensions (video_id, country_code, etc.) are
-        # deliberately NOT forwarded as parser dimensions because that would
-        # create multiple source_row_keys for one monthly channel total.
-        channel = _first_present(csv_row, *_CSV_CHANNEL_COLUMNS)
-        if not channel:
-            raise _parser_payload_error(
-                report_id=report_id,
-                reason="csv row missing channel/channel_id column",
-            )
-        content_owner = _first_present(csv_row, "content_owner")
-
-        # Pull the estimated revenue amount. Accept either Google's
-        # documented ``estimated_partner_revenue`` /
-        # ``estimatedRevenue`` columns or the test-fixture shorthand
-        # ``ad_revenue``. The aggregate is kept as Decimal and stringified
-        # after summation so precision and trailing scale are preserved.
-        amount = _first_present(csv_row, *_CSV_REVENUE_COLUMNS)
-        if amount is None:
-            raise _parser_payload_error(
-                report_id=report_id,
-                reason="csv row missing revenue column "
-                "(expected one of: estimated_partner_revenue, "
-                "estimatedRevenue, ad_revenue)",
-            )
-        try:
-            amount_decimal = Decimal(amount)
-        except InvalidOperation as exc:
-            raise _parser_payload_error(
-                report_id=report_id,
-                reason=f"csv row revenue {amount!r} not a valid decimal",
-            ) from exc
-        if not amount_decimal.is_finite():
-            raise _parser_payload_error(
-                report_id=report_id,
-                reason=f"csv row revenue {amount!r} not finite",
-            )
-
-        currency = _first_present(csv_row, *_CSV_CURRENCY_COLUMNS)
-        if not currency:
-            raise _parser_payload_error(
-                report_id=report_id,
-                reason="csv row missing currency column "
-                "(expected one of: currency_code, currencyCode)",
-            )
-
-        key = (channel, content_owner, currency)
-        totals[key] = totals.get(key, Decimal("0")) + amount_decimal
 
     rows: list[dict[str, object]] = []
     for line_index, ((channel, content_owner, currency), total) in enumerate(
@@ -1139,6 +1118,107 @@ def _csv_to_parser_payload(
         },
         "rows": rows,
     }
+
+
+def _accumulate_csv_row(
+    *,
+    totals: dict[tuple[str, str | None, str], Decimal],
+    csv_row: dict[str, str | None],
+    report_id: str,
+    expected_month: str,
+    default_content_owner: str | None,
+) -> None:
+    # Normalize the date column. YouTube Reporting CSV uses ``date`` or
+    # ``day``. The row is daily, but the parser payload is monthly, so this
+    # date is used only to ensure the row belongs to report_month.
+    date_value = _first_present(csv_row, *_CSV_DATE_COLUMNS)
+    if not date_value:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason="csv row missing date/day column",
+        )
+    try:
+        row_date = date_cls.fromisoformat(date_value)
+    except ValueError as exc:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row date {date_value!r} not ISO YYYY-MM-DD",
+        ) from exc
+    row_month = f"{row_date.year:04d}-{row_date.month:02d}"
+    if row_month != expected_month:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=(
+                f"csv row date {date_value!r} outside requested "
+                f"report_month {expected_month!r}"
+            ),
+        )
+
+    # Channel + optional content_owner are the monthly attribution axes.
+    # Lower-level official dimensions (video_id, country_code, etc.) are
+    # deliberately NOT forwarded as parser dimensions because that would
+    # create multiple source_row_keys for one monthly channel total.
+    channel = _first_present(csv_row, *_CSV_CHANNEL_COLUMNS)
+    if not channel:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason="csv row missing channel/channel_id column",
+        )
+    content_owner = _first_present(csv_row, "content_owner") or default_content_owner
+
+    # Pull the estimated revenue amount. Accept either Google's documented
+    # ``estimated_partner_revenue`` / ``estimatedRevenue`` columns or the
+    # test-fixture shorthand ``ad_revenue``. The aggregate is kept as Decimal
+    # and stringified after summation so precision and trailing scale survive.
+    amount = _first_present(csv_row, *_CSV_REVENUE_COLUMNS)
+    if amount is None:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason="csv row missing revenue column "
+            "(expected one of: estimated_partner_revenue, "
+            "estimatedRevenue, ad_revenue)",
+        )
+    try:
+        amount_decimal = Decimal(amount)
+    except InvalidOperation as exc:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} not a valid decimal",
+        ) from exc
+    if not amount_decimal.is_finite():
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} not finite",
+        )
+
+    currency = _first_present(csv_row, *_CSV_CURRENCY_COLUMNS)
+    if not currency:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason="csv row missing currency column "
+            "(expected one of: currency_code, currencyCode)",
+        )
+
+    key = (channel, content_owner, currency)
+    totals[key] = totals.get(key, Decimal("0")) + amount_decimal
+
+
+def _combined_report_id(report_ids: list[str]) -> str:
+    if len(report_ids) == 1:
+        return report_ids[0]
+    return f"combined:{','.join(report_ids)}"
+
+
+def _combine_csv_report_bytes(csv_reports: list[_CsvReportDownload]) -> bytes:
+    if len(csv_reports) == 1:
+        return csv_reports[0].raw_bytes
+    parts = [b"# YouTube Reporting monthly aggregate evidence bundle\n"]
+    for csv_report in csv_reports:
+        parts.append(f"# report_id={csv_report.report_id}\n".encode())
+        parts.append(csv_report.raw_bytes)
+        if not csv_report.raw_bytes.endswith(b"\n"):
+            parts.append(b"\n")
+    return b"".join(parts)
 
 
 def _month_bounds(*, report_month: str, report_id: str) -> tuple[date_cls, date_cls]:

@@ -41,6 +41,7 @@ from ums_smart_revenue.connectors.runs import orchestrator as orchestrator_modul
 from ums_smart_revenue.connectors.runs.blob_storage import compute_checksum
 from ums_smart_revenue.connectors.runs.orchestrator import (
     ConnectorRunOutcome,
+    YouTubeReportingRunner,
     _csv_to_parser_payload,
     run_one,
 )
@@ -241,6 +242,69 @@ def test_csv_adapter_rejects_non_zero_padded_report_month() -> None:
             report_type="content_owner_estimated_revenue_a1",
             report_month="2026-5",
         )
+
+
+def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff(
+    session: Session,
+) -> None:
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "content_owner_estimated_revenue_a1"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r-day-1", "downloadUrl": "https://yt/r-day-1"},
+            {"id": "r-day-2", "downloadUrl": "https://yt/r-day-2"},
+        ]
+        client.fetch_report.side_effect = [
+            (
+                b"date,channel_id,estimated_partner_revenue,currency_code\n"
+                b"2026-05-01,UC_orch_alpha,1.25,USD\n"
+            ),
+            (
+                b"date,channel_id,estimated_partner_revenue,currency_code\n"
+                b"2026-05-02,UC_orch_alpha,2.75,USD\n"
+            ),
+        ]
+
+        produced = list(
+            YouTubeReportingRunner.produce_reports(
+                session=session,
+                run=None,
+                credentials=object(),
+                report_month="2026-05",
+                account_id=ACCOUNT_ID,
+            )
+        )
+
+    assert len(produced) == 1
+    report_type, parser_payload, raw_bytes = produced[0]
+    assert report_type == "content_owner_estimated_revenue_a1"
+    assert parser_payload["report_metadata"] == {
+        "report_id": "combined:r-day-1,r-day-2",
+        "report_type": "content_owner_estimated_revenue_a1",
+    }
+    assert parser_payload["rows"] == [
+        {
+            "line_index": 0,
+            "date_range": {"start": "2026-05-01", "end": "2026-05-31"},
+            "dimensions": {
+                "channel": "UC_orch_alpha",
+                "content_owner": ACCOUNT_ID,
+            },
+            "metrics": {
+                "estimatedRevenue": "4.00",
+                "currencyCode": "USD",
+            },
+        }
+    ]
+    assert b"r-day-1" in raw_bytes
+    assert b"r-day-2" in raw_bytes
 
 
 def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
@@ -717,6 +781,133 @@ def test_run_one_reuses_existing_parsed_raw_file_for_same_checksum(
     assert len(session.scalars(select(RawReportFileORM)).all()) == 1
     link = session.scalars(select(ConnectorRunRawFileORM)).one()
     assert link.raw_report_file_id == existing_raw_file.id
+    assert session.scalars(select(GoogleRevenueSourceRowORM)).all() == []
+
+
+def test_run_one_reopens_failed_raw_file_with_current_download_metadata(
+    session: Session, stub_secret_resolver
+) -> None:
+    credential = _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes = _csv_for_one_row()
+    checksum = compute_checksum(csv_bytes)
+    existing_raw_file = RawReportFileORM(
+        id=uuid4(),
+        tenant_id=TENANT_ID,
+        source="youtube_reporting",
+        report_type="channel_basic_a2",
+        report_month="2026-05",
+        file_url="file-store://old-stale-location/raw.csv",
+        checksum=checksum,
+        parse_status="FAILED",
+        downloaded_by=None,
+    )
+    session.add(existing_raw_file)
+    session.commit()
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r1", "downloadUrl": "https://yt/r1"}
+        ]
+        client.fetch_report.return_value = csv_bytes
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+            triggered_by_user_id=credential.created_by,
+        )
+
+    session.refresh(existing_raw_file)
+    assert outcome.run is not None
+    assert outcome.run.status == "SUCCEEDED"
+    assert existing_raw_file.parse_status == "PARSED"
+    assert existing_raw_file.file_url != "file-store://old-stale-location/raw.csv"
+    assert existing_raw_file.file_url in store
+    assert existing_raw_file.downloaded_by == credential.created_by
+
+
+def test_run_one_handles_duplicate_empty_daily_reports_in_one_run(
+    session: Session, stub_secret_resolver
+) -> None:
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    header_only_csv = b"date,channel,estimatedRevenue,currencyCode\n"
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r-empty-1", "downloadUrl": "https://yt/r-empty-1"},
+            {"id": "r-empty-2", "downloadUrl": "https://yt/r-empty-2"},
+        ]
+        client.fetch_report.side_effect = [header_only_csv, header_only_csv]
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "SUCCEEDED"
+    assert outcome.counts["reports_failed"] == 0
+    assert len(session.scalars(select(RawReportFileORM)).all()) == 1
+    assert len(session.scalars(select(ConnectorRunRawFileORM)).all()) == 1
     assert session.scalars(select(GoogleRevenueSourceRowORM)).all() == []
 
 

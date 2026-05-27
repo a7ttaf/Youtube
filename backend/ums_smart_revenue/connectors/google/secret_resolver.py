@@ -3,12 +3,13 @@
 resolve_secret(ref) parses the URI scheme and dispatches to a registered
 SecretResolver. Implemented schemes (registered at app/test boot):
 - gcp-secret-manager:// -> GcpSecretManagerResolver (B2.1)
+- secret-manager://     -> GcpSecretManagerResolver alias for admin API refs
 - local-secret://       -> LocalSecretResolver (B2.1, test only)
 
-Other ORM-accepted prefixes (aws-secretsmanager://, secret-manager://,
-vault://, kms://, azure-keyvault://) are intentionally unregistered until a
-future credential-lifecycle PR. They raise UnsupportedSecretSchemeError so
-B2 fails closed instead of silently dropping the secret.
+Other ORM-accepted prefixes (aws-secretsmanager://, vault://, kms://,
+azure-keyvault://) are intentionally unregistered until a future
+credential-lifecycle PR. They raise UnsupportedSecretSchemeError so B2 fails
+closed instead of silently dropping the secret.
 """
 from __future__ import annotations
 
@@ -28,6 +29,7 @@ class SecretResolver(Protocol):
         SecretFetchError on backend failure."""
 
 
+_GCP_SECRET_MANAGER_SCHEMES = ("gcp-secret-manager", "secret-manager")
 _REGISTRY: dict[str, SecretResolver] = {}
 _REGISTRY_LOCK = RLock()
 
@@ -65,16 +67,22 @@ def register_resolver(*, scheme: str, resolver: SecretResolver) -> None:
 def ensure_default_resolvers() -> None:
     """Register production secret resolvers exactly once at runtime boot."""
     with _REGISTRY_LOCK:
-        if "gcp-secret-manager" in _REGISTRY:
+        missing = [
+            scheme for scheme in _GCP_SECRET_MANAGER_SCHEMES if scheme not in _REGISTRY
+        ]
+        if not missing:
             return
         from ums_smart_revenue.connectors.google.gcp_secret_manager import (
             GcpSecretManagerResolver,
         )
 
-        register_resolver(
-            scheme="gcp-secret-manager",
-            resolver=GcpSecretManagerResolver(),
+        resolver = _REGISTRY.get("gcp-secret-manager") or _REGISTRY.get(
+            "secret-manager"
         )
+        if resolver is None:
+            resolver = GcpSecretManagerResolver()
+        for scheme in missing:
+            _REGISTRY[scheme] = resolver
 
 
 def _parse_scheme(ref: str) -> str:

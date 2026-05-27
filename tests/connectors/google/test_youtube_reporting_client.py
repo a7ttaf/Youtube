@@ -197,6 +197,53 @@ def test_list_reports_for_month_returns_oldest_create_time_first(
     assert [report["id"] for report in reports] == ["older", "newer"]
 
 
+def test_list_reports_for_month_keeps_newest_replacement_per_period(
+    mock_credentials,
+) -> None:
+    pages = iter(
+        [
+            {
+                "reports": [
+                    {
+                        "id": "may-01-old",
+                        "downloadUrl": "https://x/may-01-old",
+                        "startTime": "2026-05-01T00:00:00Z",
+                        "endTime": "2026-05-02T00:00:00Z",
+                        "createTime": "2026-05-02T03:00:00Z",
+                    },
+                    {
+                        "id": "may-01-new",
+                        "downloadUrl": "https://x/may-01-new",
+                        "startTime": "2026-05-01T00:00:00Z",
+                        "endTime": "2026-05-02T00:00:00Z",
+                        "createTime": "2026-05-03T03:00:00Z",
+                    },
+                    {
+                        "id": "may-02",
+                        "downloadUrl": "https://x/may-02",
+                        "startTime": "2026-05-02T00:00:00Z",
+                        "endTime": "2026-05-03T00:00:00Z",
+                        "createTime": "2026-05-03T04:00:00Z",
+                    },
+                ],
+            }
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _next_json_response(pages)
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeReportingClient(http=http)
+    reports = client.list_reports_for_month(
+        account_id="acct", job_id="job-1", report_month="2026-05",
+    )
+
+    assert [report["id"] for report in reports] == ["may-01-new", "may-02"]
+
+
 def test_list_reports_handles_december_boundary(mock_credentials) -> None:
     captured = {}
     def handler(request: httpx.Request) -> httpx.Response:

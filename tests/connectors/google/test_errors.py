@@ -67,6 +67,20 @@ def test_secret_not_found_carries_ref() -> None:
     assert ref in str(err)
 
 
+def test_secret_fetch_error_redacts_secret_resource_name() -> None:
+    ref = "gcp-secret-manager://projects/x/secrets/y/versions/latest"
+    inner = RuntimeError("permission denied for projects/x/secrets/y")
+
+    err = SecretFetchError(ref=ref, inner=inner)
+
+    assert err.ref == ref
+    assert err.inner is inner
+    assert ref not in str(err)
+    assert "projects/x/secrets/y" not in str(err)
+    assert "gcp-secret-manager" in str(err)
+    assert "RuntimeError" in str(err)
+
+
 def test_oauth_refresh_carries_inner_class_name() -> None:
     inner = RuntimeError("token revoked")
     err = OAuthRefreshError(inner=inner)

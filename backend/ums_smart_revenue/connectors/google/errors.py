@@ -44,7 +44,11 @@ class SecretNotFoundError(GoogleConnectorError):
 
 class SecretFetchError(GoogleConnectorError):
     def __init__(self, *, ref: str, inner: Exception) -> None:
-        super().__init__(f"secret fetch failed for {ref}: {type(inner).__name__}")
+        scheme, _, _rest = ref.partition("://")
+        redacted_locator = f"{scheme or 'unknown'} secret"
+        super().__init__(
+            f"secret fetch failed for {redacted_locator}: {type(inner).__name__}"
+        )
         self.ref = ref
         self.inner = inner
 

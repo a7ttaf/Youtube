@@ -49,6 +49,35 @@ def _report_freshness_key(report: dict[str, object]) -> tuple[str, str, str]:
     )
 
 
+def _report_period_key(report: dict[str, object]) -> tuple[str, str, str]:
+    start = _text_sort_key(report.get("startTime"))
+    end = _text_sort_key(report.get("endTime"))
+    if start or end:
+        return ("period", start, end)
+    return ("report", _text_sort_key(report.get("id")), "")
+
+
+def _newest_reports_by_period(
+    reports: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    latest: dict[tuple[str, str, str], dict[str, object]] = {}
+    for report in reports:
+        period_key = _report_period_key(report)
+        current = latest.get(period_key)
+        if current is None or _report_freshness_key(report) > _report_freshness_key(
+            current
+        ):
+            latest[period_key] = report
+    return sorted(
+        latest.values(),
+        key=lambda report: (
+            _text_sort_key(report.get("startTime")),
+            _text_sort_key(report.get("endTime")),
+            _report_freshness_key(report),
+        ),
+    )
+
+
 class YouTubeReportingClient:
     def __init__(self, *, http: GoogleHttpClient) -> None:
         self._http = http
@@ -93,11 +122,10 @@ class YouTubeReportingClient:
         return out
 
     # ============================================================================
-    # Purpose: List the reports a job produced for a single calendar month,
-    #          paginated. Returns Google's report descriptors (id, downloadUrl,
-    #          startTime, etc.) for the orchestrator to fetch individually,
-    #          sorted oldest-to-newest so replacement/fresher reports process
-    #          last.
+    # Purpose: List the newest reports a job produced for each period in a
+    #          single calendar month, paginated. Returns Google's report
+    #          descriptors (id, downloadUrl, startTime, etc.) for the
+    #          orchestrator to fetch individually, sorted by report period.
     # Database/ORM: None (read-only API call).
     # Standards: Month bounds form a half-open interval [start, next-month-start)
     #            via _month_bounds_iso (RFC 3339 Z-suffix). Pagination via
@@ -134,7 +162,7 @@ class YouTubeReportingClient:
             token = body.get("nextPageToken")
             if not token:
                 break
-        return sorted(out, key=_report_freshness_key)
+        return _newest_reports_by_period(out)
 
     # ============================================================================
     # Purpose: Download the raw CSV bytes for one YouTube Reporting report,
