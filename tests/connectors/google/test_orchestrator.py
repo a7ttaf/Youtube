@@ -10,7 +10,7 @@ T28 adds coverage for the spec §6 failure buckets:
 - Bucket B (per-report inner ``except``): a single failed report flips that
   report's raw_file DOWNLOADED -> FAILED and lets the run finish as PARTIAL.
 - Bucket C (post-``start_run``, escaped the loop): any escaping exception
-  marks the run FAILED, commits, and re-raises.
+  marks the run FAILED, commits the terminal row, and returns a FAILED outcome.
 Dry-run lands in T29 with its own tests.
 """
 from __future__ import annotations
@@ -34,6 +34,7 @@ from ums_smart_revenue.connectors.google.errors import (
     InactiveCredentialError,
 )
 from ums_smart_revenue.connectors.google_source_parsers.base import ParserError
+from ums_smart_revenue.connectors.runs.blob_storage import compute_checksum
 from ums_smart_revenue.connectors.runs.orchestrator import (
     ConnectorRunOutcome,
     run_one,
@@ -121,12 +122,15 @@ def stub_secret_resolver():
             }
         )
     }
+    saved_registry = dict(secret_resolver._REGISTRY)
+    secret_resolver._REGISTRY.clear()
     secret_resolver.register_resolver(
         scheme="local-secret",
         resolver=local_secret_resolver.LocalSecretResolver(mapping=mapping),
     )
     yield
     secret_resolver._REGISTRY.clear()
+    secret_resolver._REGISTRY.update(saved_registry)
 
 
 def _make_credential_row(
@@ -135,6 +139,7 @@ def _make_credential_row(
     tenant_id: UUID,
     connector_key: str,
     account_id: str,
+    encrypted_secret_ref: str = "local-secret://yt-creds",
 ) -> ApiConnectorCredentialORM:
     """Seed the credential row the orchestrator will load.
 
@@ -157,7 +162,7 @@ def _make_credential_row(
         tenant_id=tenant_id,
         connector_key=connector_key,
         account_id=account_id,
-        encrypted_secret_ref="local-secret://yt-creds",
+        encrypted_secret_ref=encrypted_secret_ref,
         status="active",
         created_by=actor_id,
         updated_by=actor_id,
@@ -416,6 +421,238 @@ def test_run_one_real_local_file_store_backend_round_trips(
     )
     assert raw_file.file_url.endswith(f"{expected_checksum}.csv")
     assert raw_file.checksum == expected_checksum
+
+
+def test_run_one_accepts_underscore_credential_alias(
+    session: Session, stub_secret_resolver
+) -> None:
+    """The admin credential API stores the B1 source-system key
+    ``youtube_reporting``. ``run_one`` still accepts the CLI key
+    ``youtube-reporting`` and maps it to that credential row.
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key="youtube_reporting",
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes = _csv_for_one_row()
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r1", "downloadUrl": "https://yt/r1"}
+        ]
+        client.fetch_report.return_value = csv_bytes
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "SUCCEEDED"
+    raw_file = session.scalar(
+        select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
+    )
+    assert raw_file is not None
+    assert raw_file.source == "youtube_reporting"
+
+
+def test_run_one_reuses_existing_parsed_raw_file_for_same_checksum(
+    session: Session, stub_secret_resolver
+) -> None:
+    """Retrying the same Google payload should not violate the raw-file
+    checksum unique constraint. A PARSED existing raw file is linked to the
+    new run and skipped instead of being inserted and parsed again.
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes = _csv_for_one_row()
+    checksum = compute_checksum(csv_bytes)
+    existing_raw_file = RawReportFileORM(
+        id=uuid4(),
+        tenant_id=TENANT_ID,
+        source="youtube_reporting",
+        report_type="channel_basic_a2",
+        report_month="2026-05",
+        file_url="file-store://local/existing.csv",
+        checksum=checksum,
+        parse_status="PARSED",
+    )
+    session.add(existing_raw_file)
+    session.commit()
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r1", "downloadUrl": "https://yt/r1"}
+        ]
+        client.fetch_report.return_value = csv_bytes
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "SUCCEEDED"
+    assert outcome.counts["reports_succeeded"] == 1
+    assert outcome.counts["rows_upserted_total"] == 0
+    assert len(session.scalars(select(RawReportFileORM)).all()) == 1
+    link = session.scalars(select(ConnectorRunRawFileORM)).one()
+    assert link.raw_report_file_id == existing_raw_file.id
+    assert session.scalars(select(GoogleRevenueSourceRowORM)).all() == []
+
+
+def test_run_one_marks_run_failed_when_blob_backend_configuration_is_invalid(
+    session: Session, stub_secret_resolver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Post-start blob backend setup failures must finish the run FAILED,
+    not leave connector_runs stuck in RUNNING.
+    """
+    monkeypatch.setenv("UMS_BLOB_BACKEND", "not-a-backend")
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh:
+        refresh.return_value = None
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "FAILED"
+    assert outcome.counts["reports_attempted"] == 0
+    run_row = session.scalar(
+        select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
+    )
+    assert run_row is not None
+    assert run_row.status == "FAILED"
+    assert "BlobStorageConfigurationError" in (run_row.error_summary or "")
+
+
+def test_run_one_rejects_csv_rows_without_currency(
+    session: Session, stub_secret_resolver
+) -> None:
+    """The CSV adapter must not invent USD when Google omits currency
+    metadata; that would make downstream revenue provenance ambiguous.
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes = (
+        b"date,channel,content_owner,estimatedRevenue\n"
+        b"2026-05-01,UC_orch_alpha,cms-orch-1,12.345600\n"
+    )
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r1", "downloadUrl": "https://yt/r1"}
+        ]
+        client.fetch_report.return_value = csv_bytes
+
+        local_cls.return_value.upload.side_effect = AssertionError(
+            "blob upload must not run after CSV shape rejection"
+        )
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "FAILED"
+    run_row = session.scalar(
+        select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
+    )
+    assert run_row is not None
+    assert "currency" in (run_row.error_summary or "")
+    assert session.scalars(select(RawReportFileORM)).all() == []
+    assert session.scalars(select(GoogleRevenueSourceRowORM)).all() == []
 
 
 def test_run_one_sweeps_running_to_failed_on_untyped_error(
@@ -759,7 +996,7 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
     assert "ParserError" in run_row.error_summary
 
 
-def test_bucket_c_generator_error_marks_run_failed_and_reraises(
+def test_bucket_c_generator_error_marks_run_failed_without_cli_bucket_a_exit(
     session: Session, stub_secret_resolver
 ) -> None:
     """Bucket C: a failure that escapes the per-report loop (pre-yield
@@ -767,13 +1004,14 @@ def test_bucket_c_generator_error_marks_run_failed_and_reraises(
     1. mark the connector_runs row FAILED via ``finish_run`` (status +
        error_summary with the typed class name);
     2. commit so the FAILED row is durable even if the caller crashes;
-    3. re-raise so the CLI sees the typed error.
+    3. return a FAILED outcome so the CLI exits 1 for a post-start run
+       failure instead of misclassifying it as Bucket A exit 2.
 
     Setup: patch ``list_supported_jobs`` to raise ``GoogleApiServerError``
     on the first call. The runner's generator raises before yielding any
     report, so no raw_file rows exist. The outer Bucket C except (widened
-    to ``Exception`` in T28) catches the typed error, finishes the run
-    FAILED, and re-raises.
+    to ``Exception`` in T28) catches the typed error and finishes the run
+    FAILED.
     """
     _make_credential_row(
         session,
@@ -812,14 +1050,18 @@ def test_bucket_c_generator_error_marks_run_failed_and_reraises(
             "get_bytes must not be called on a pre-yield generator failure"
         )
 
-        with pytest.raises(GoogleApiServerError):
-            run_one(
-                session,
-                tenant_id=TENANT_ID,
-                connector_key=CONNECTOR_KEY,
-                account_id=ACCOUNT_ID,
-                report_month="2026-05",
-            )
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "FAILED"
+    assert outcome.counts["reports_attempted"] == 0
+    assert outcome.per_report_failures == []
 
     # Run row must be FAILED with the typed class name in error_summary.
     run_row = session.scalar(

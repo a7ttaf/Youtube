@@ -10,8 +10,11 @@ date-bounds on list_reports_for_month.
 """
 from __future__ import annotations
 
+import ipaddress
 from datetime import date
+from urllib.parse import urlparse
 
+from ums_smart_revenue.connectors.google.errors import GoogleApiResponseError
 from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
 from ums_smart_revenue.connectors.google.report_type_whitelist import (
     SUPPORTED_REPORT_TYPES,
@@ -62,7 +65,10 @@ class YouTubeReportingClient:
         token: str | None = None
         out: list[dict[str, object]] = []
         while True:
-            params: dict[str, str] = {"onBehalfOfContentOwner": account_id}
+            params: dict[str, str] = {
+                "onBehalfOfContentOwner": account_id,
+                "includeSystemManaged": "true",
+            }
             if token:
                 params["pageToken"] = token
             body = self._http.request(method="GET", url=url, params=params)
@@ -137,4 +143,49 @@ class YouTubeReportingClient:
     #     §5.4 -> orchestrator integration contract (download -> blob -> parse).
     # ============================================================================
     def fetch_report(self, *, download_url: str) -> bytes:
+        _validate_google_download_url(download_url)
         return self._http.fetch_bytes(url=download_url)
+
+
+# ============================================================================
+# Purpose: Fail closed before fetching Google-provided report download URLs.
+# Database/ORM: None.
+# Standards: HTTPS-only Google domains; typed GoogleApiResponseError on drift.
+# Blast Radius: Connector egress only. Authorization, finance, audit, Neo4j,
+#               and exports are unaffected until bytes enter the orchestrator.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/http_client.py ->
+#     fetch_bytes performs the authenticated HTTP request after validation.
+#   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
+#     §5.4 -> downloadUrl contract.
+# ============================================================================
+def _validate_google_download_url(download_url: str) -> None:
+    parsed = urlparse(download_url)
+    if parsed.scheme != "https":
+        raise GoogleApiResponseError(
+            url="<downloadUrl>", reason="downloadUrl must use https"
+        )
+    host = (parsed.hostname or "").lower().strip(".")
+    if not host:
+        raise GoogleApiResponseError(
+            url="<downloadUrl>", reason="downloadUrl host is missing"
+        )
+    try:
+        ipaddress.ip_address(host)
+    except ValueError:
+        pass
+    else:
+        raise GoogleApiResponseError(
+            url="<downloadUrl>", reason="downloadUrl host must be a Google domain"
+        )
+    if host == "localhost" or host.endswith(".localhost"):
+        raise GoogleApiResponseError(
+            url="<downloadUrl>", reason="downloadUrl host must be a Google domain"
+        )
+    allowed_suffixes = ("googleapis.com", "googleusercontent.com")
+    if not any(
+        host == suffix or host.endswith(f".{suffix}") for suffix in allowed_suffixes
+    ):
+        raise GoogleApiResponseError(
+            url="<downloadUrl>", reason="downloadUrl host must be a Google domain"
+        )

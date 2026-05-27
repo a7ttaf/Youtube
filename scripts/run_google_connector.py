@@ -4,7 +4,7 @@
 Usage:
     python scripts/run_google_connector.py \
         --tenant <UUID> \
-        --connector {youtube-reporting | youtube-analytics | adsense-management} \
+        --connector <registered-key> \
         --account <account-id> \
         --month <YYYY-MM> \
         [--dry-run]
@@ -55,7 +55,7 @@ Exit codes (operator contract -- see Docs spec §5.4):
 #     ``known_keys()`` feeds argparse ``choices``.
 #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
 #     ``run_one``; the import side-effect registers the YouTube Reporting
-#     runner (B2.5 / B2.6 will add youtube-analytics / adsense-management).
+#     runner keys (B2.5 / B2.6 will add analytics and AdSense runners).
 #   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
 #     §5.4 -> CLI contract (flags, exit codes, dry-run semantics).
 # ============================================================================
@@ -84,9 +84,9 @@ from ums_smart_revenue.connectors.google.errors import (  # noqa: E402
 )
 
 # The orchestrator import is load-bearing for argparse: its module-level
-# ``register_connector(key="youtube-reporting", ...)`` call is what
-# populates the dispatch registry, so ``registry.known_keys()`` only sees
-# the YouTube Reporting key AFTER this import runs. ``run_one`` is the
+# ``register_connector(...)`` calls are what populate the dispatch registry,
+# so ``registry.known_keys()`` only sees the YouTube Reporting keys AFTER
+# this import runs. ``run_one`` is the
 # public callable; the side-effect on ``registry`` is what
 # ``_parse_args`` below depends on. Import order between ``registry`` and
 # ``orchestrator`` does not matter for correctness -- both run at module

@@ -13,6 +13,7 @@ import pytest
 from google.api_core import exceptions as gcp_exceptions
 
 from ums_smart_revenue.connectors.google.errors import (
+    MalformedSecretPayloadError,
     MalformedSecretUriError,
     SecretFetchError,
     SecretNotFoundError,
@@ -40,6 +41,18 @@ def test_resolve_returns_decoded_payload() -> None:
     client.access_secret_version.assert_called_once_with(
         request={"name": "projects/my-proj/secrets/yt-creds/versions/latest"}
     )
+
+
+def test_resolve_wraps_non_utf8_payload_as_malformed_payload() -> None:
+    client = _make_client_returning(b"\xff\xfe\x00")
+    resolver = GcpSecretManagerResolver(client=client)
+
+    with pytest.raises(MalformedSecretPayloadError) as ctx:
+        resolver.resolve(
+            "gcp-secret-manager://projects/my-proj/secrets/yt-creds/versions/latest"
+        )
+
+    assert "utf-8" in ctx.value.detail
 
 
 def test_resolve_raises_not_found_on_gcp_404() -> None:

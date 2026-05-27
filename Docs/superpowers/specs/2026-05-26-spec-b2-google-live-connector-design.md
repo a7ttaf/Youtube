@@ -2,11 +2,12 @@
 
 **Date:** 2026-05-26
 **Owner:** Director Software Architect / Mahmoud
-**Status:** Design lock - multi-PR live Google connector (B2.1 -> B2.6) feeding
-`google_revenue_source_rows` (PR #43 substrate). Revenue facts flow via C1 (PR #44)
-for YouTube Reporting and YouTube Analytics paths only; the AdSense path is
-ingestion/audit evidence in this phase (C1 skips AdSense rows as
-`MISSING_CHANNEL_ID` until a future account-to-channel allocation spec).
+**Status:** Design lock - PR #47 consolidates B2.1 -> B2.4; B2.5 and B2.6
+remain follow-up slices feeding `google_revenue_source_rows` (PR #43 substrate).
+Revenue facts flow via C1 (PR #44) for YouTube Reporting and YouTube Analytics
+paths only; the AdSense path is ingestion/audit evidence in this phase (C1
+skips AdSense rows as `MISSING_CHANNEL_ID` until a future account-to-channel
+allocation spec).
 **Primary docs:**
 `Docs/superpowers/specs/2026-05-23-spec-b1-google-revenue-source-ingestion-design.md`,
 `Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md`,
@@ -34,12 +35,15 @@ facts. AdSense source rows persist in `google_revenue_source_rows` as ingestion
 evidence but do not yet become revenue facts (C1's `MISSING_CHANNEL_ID` skip
 applies because `AdSenseManagementParser` emits `youtube_channel_id=None`).
 
-B2 ships as **six PRs** (B2.1 -> B2.6) rather than one because the work spans
+B2 was designed as **six logical slices** (B2.1 -> B2.6) because the work spans
 five distinct concerns (credentials, blob storage, run tracking, three HTTP
 clients, orchestration) plus a CLI, an audit wiring slice, and a mock
-end-to-end ingestion validation gate. Each slice produces compilable,
-mergeable, individually-testable code, and each slice has a well-bounded
-review surface.
+end-to-end ingestion validation gate. During delivery, B2.1 -> B2.4 were
+consolidated into PR #47 so the first live YouTube Reporting path could be
+reviewed with its run evidence, raw-file lifecycle, and CLI together. B2.5
+(YouTube Analytics) and B2.6 (AdSense Management) stay deferred follow-up PRs;
+see `Docs/01_IMPLEMENTATION_PLAN.md` and `Docs/15_DELIVERY_BACKLOG.md` for the
+active delivery sequencing.
 
 The strategic reason this slicing is correct: the substrate, parsers,
 normalizer, audit infrastructure, credentials ORM, and raw-file ORM are
@@ -465,7 +469,8 @@ class GoogleHttpClient:
 
 # youtube_reporting_client.py
 SUPPORTED_REPORT_TYPES: frozenset[str] = frozenset({
-    "channel_basic_a2", "channel_combined_a2",
+    "content_owner_estimated_revenue_a1",
+    "content_owner_ad_revenue_raw_a1",
     # ... (locked at B2.4 ship; outside list raises UnsupportedReportTypeError)
 })
 
@@ -501,7 +506,7 @@ class ConnectorRunOutcome:
 def run_one(
     session: Session, *,
     tenant_id: UUID,
-    connector_key: str,        # 'youtube-reporting' | 'youtube-analytics' | 'adsense-management'
+    connector_key: str,        # registry key, e.g. 'youtube-reporting'
     account_id: str,
     report_month: str,         # YYYY-MM
     dry_run: bool = False,
@@ -526,7 +531,7 @@ def dispatch_connector(
 ```text
 scripts/run_google_connector.py
     --tenant <UUID>
-    --connector {youtube-reporting | youtube-analytics | adsense-management}
+    --connector <registered-key>
     --account <account-id>
     --month <YYYY-MM>
     [--dry-run]

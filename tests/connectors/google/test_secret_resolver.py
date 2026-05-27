@@ -12,9 +12,11 @@ import pytest
 
 from ums_smart_revenue.connectors.google.errors import (
     MalformedSecretUriError,
+    ResolverAlreadyRegisteredError,
     UnsupportedSecretSchemeError,
 )
 from ums_smart_revenue.connectors.google.secret_resolver import (
+    ensure_default_resolvers,
     register_resolver,
     resolve_secret,
 )
@@ -24,6 +26,7 @@ from ums_smart_revenue.connectors.google.secret_resolver import (
 def _reset_registry():
     from ums_smart_revenue.connectors.google import secret_resolver as sr
     snapshot = dict(sr._REGISTRY)
+    sr._REGISTRY.clear()
     yield
     sr._REGISTRY.clear()
     sr._REGISTRY.update(snapshot)
@@ -45,6 +48,34 @@ def test_resolve_secret_dispatches_to_registered_scheme(monkeypatch) -> None:
     out = resolve_secret("local-secret://my-key")
     assert out == '{"refresh_token": "x"}'
     assert stub.calls == ["local-secret://my-key"]
+
+
+def test_register_resolver_rejects_duplicate_scheme() -> None:
+    first = _StubResolver(payload="first")
+    second = _StubResolver(payload="second")
+    register_resolver(scheme="local-secret", resolver=first)
+
+    with pytest.raises(ResolverAlreadyRegisteredError) as ctx:
+        register_resolver(scheme="local-secret", resolver=second)
+
+    assert ctx.value.scheme == "local-secret"
+    assert resolve_secret("local-secret://my-key") == "first"
+
+
+def test_ensure_default_resolvers_registers_gcp_scheme(monkeypatch) -> None:
+    from ums_smart_revenue.connectors.google import gcp_secret_manager
+
+    monkeypatch.setattr(
+        gcp_secret_manager,
+        "GcpSecretManagerResolver",
+        lambda: _StubResolver(payload="gcp-payload"),
+    )
+
+    ensure_default_resolvers()
+
+    assert resolve_secret("gcp-secret-manager://projects/p/secrets/s/versions/latest") == (
+        "gcp-payload"
+    )
 
 
 def test_resolve_secret_raises_for_unknown_scheme() -> None:

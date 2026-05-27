@@ -18,6 +18,18 @@ class UnsupportedSecretSchemeError(GoogleConnectorError):
         self.scheme = scheme
 
 
+class ResolverAlreadyRegisteredError(GoogleConnectorError):
+    def __init__(self, *, scheme: str) -> None:
+        super().__init__(f"secret resolver already registered: {scheme}")
+        self.scheme = scheme
+
+
+class ConnectorAlreadyRegisteredError(GoogleConnectorError):
+    def __init__(self, *, key: str) -> None:
+        super().__init__(f"connector already registered: {key}")
+        self.key = key
+
+
 class MalformedSecretUriError(GoogleConnectorError):
     def __init__(self, *, ref: str) -> None:
         super().__init__(f"malformed secret URI: {ref}")
@@ -56,6 +68,22 @@ class BlobUploadError(GoogleConnectorError):
         )
         self.storage_uri = storage_uri
         self.inner = inner
+
+
+class BlobDownloadError(GoogleConnectorError):
+    def __init__(self, *, storage_uri: str, inner: Exception) -> None:
+        super().__init__(
+            f"blob download failed for {storage_uri}: {type(inner).__name__}"
+        )
+        self.storage_uri = storage_uri
+        self.inner = inner
+
+
+class BlobStorageConfigurationError(GoogleConnectorError):
+    def __init__(self, *, backend: str, detail: str) -> None:
+        super().__init__(f"blob storage backend {backend!r} is invalid: {detail}")
+        self.backend = backend
+        self.detail = detail
 
 
 class BlobChecksumMismatchError(GoogleConnectorError):

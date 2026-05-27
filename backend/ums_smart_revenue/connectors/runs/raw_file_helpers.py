@@ -46,6 +46,17 @@ def _load_or_raise(
     return row
 
 
+# ============================================================================
+# Purpose: Transition a tenant-scoped raw report file to PARSED after source
+#          rows have been materialized.
+# Database/ORM: RawReportFileORM.
+# Standards: Typed lifecycle errors; caller owns flush/commit boundaries.
+# Blast Radius: Raw evidence lifecycle only. Finance facts and exports read the
+#               resulting source rows, not this helper directly.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> Calls after parser and source-row upsert.
+#   - File: backend/ums_smart_revenue/db/report_models.py -> RawReportFileORM parse_status contract.
+# ============================================================================
 def mark_parsed(
     session: Session, *, raw_file_id: UUID, tenant_id: UUID
 ) -> None:
@@ -64,6 +75,17 @@ def mark_parsed(
     )
 
 
+# ============================================================================
+# Purpose: Transition a tenant-scoped raw report file to FAILED when a
+#          per-report ingest step fails after raw-file creation.
+# Database/ORM: RawReportFileORM.
+# Standards: Typed lifecycle errors; caller owns flush/commit boundaries.
+# Blast Radius: Raw evidence lifecycle only. Finance facts, authorization,
+#               audit, Neo4j, and exports are not mutated here.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> Bucket B failure cleanup.
+#   - File: backend/ums_smart_revenue/db/report_models.py -> RawReportFileORM parse_status contract.
+# ============================================================================
 def mark_failed(
     session: Session, *, raw_file_id: UUID, tenant_id: UUID
 ) -> None:

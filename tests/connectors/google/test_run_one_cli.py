@@ -101,7 +101,7 @@ def test_cli_rejects_unknown_connector() -> None:
             "--month", "2026-05",
         ]
     )
-    assert out.returncode != 0
+    assert out.returncode == 2
     assert "not-a-thing" in out.stderr or "invalid choice" in out.stderr
 
 
@@ -118,7 +118,9 @@ def test_cli_rejects_bad_month_format() -> None:
             "--month", "2026-5",  # wrong format: single-digit month
         ]
     )
-    assert out.returncode != 0
+    assert out.returncode == 2
+    assert "--month" in out.stderr
+    assert "YYYY-MM" in out.stderr
 
 
 @pytest.fixture

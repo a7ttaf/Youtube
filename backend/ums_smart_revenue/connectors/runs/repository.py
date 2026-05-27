@@ -109,6 +109,7 @@ def link_raw_file(
     raw_report_file_id: UUID,
     ordering_index: int,
 ) -> None:
+    _validate_ordering_index(ordering_index)
     _get_run(session, tenant_id=tenant_id, connector_run_id=connector_run_id)
     _get_raw_file(session, tenant_id=tenant_id, raw_report_file_id=raw_report_file_id)
     row = ConnectorRunRawFileORM(
@@ -143,7 +144,12 @@ def finish_run(
 ) -> ConnectorRunEntry:
     normalized_status = _validate_terminal_status(status)
     normalized_counts = _validate_counts(counts)
-    row = _get_run(session, tenant_id=tenant_id, connector_run_id=connector_run_id)
+    row = _get_run(
+        session,
+        tenant_id=tenant_id,
+        connector_run_id=connector_run_id,
+        for_update=True,
+    )
     if row.status != "RUNNING":
         raise ConnectorRunValidationError("connector run is already terminal")
 
@@ -157,18 +163,54 @@ def finish_run(
     return _to_entry(row)
 
 
+# ============================================================================
+# Purpose: Fetch a tenant-scoped connector run, optionally locking it for the
+#          terminal status transition.
+# Database/ORM: ConnectorRunORM.
+# Standards: Tenant filter always applied; with_for_update protects
+#            finish_run from double terminal writes where the DB supports it.
+# Blast Radius: Connector run lifecycle only. Finance facts untouched.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     Calls finish_run from success, partial, and failure paths.
+# ============================================================================
 def _get_run(
-    session: Session, *, tenant_id: UUID, connector_run_id: UUID
+    session: Session,
+    *,
+    tenant_id: UUID,
+    connector_run_id: UUID,
+    for_update: bool = False,
 ) -> ConnectorRunORM:
-    row = session.scalars(
-        select(ConnectorRunORM).where(
-            ConnectorRunORM.tenant_id == tenant_id,
-            ConnectorRunORM.id == connector_run_id,
-        )
-    ).one_or_none()
+    stmt = select(ConnectorRunORM).where(
+        ConnectorRunORM.tenant_id == tenant_id,
+        ConnectorRunORM.id == connector_run_id,
+    )
+    if for_update:
+        stmt = stmt.with_for_update()
+    row = session.scalars(stmt).one_or_none()
     if row is None:
         raise ConnectorRunNotFoundError("Connector run not found")
     return row
+
+
+# ============================================================================
+# Purpose: Validate deterministic raw-file ordering before join-row insert.
+# Database/ORM: ConnectorRunRawFileORM.
+# Standards: Reject bools, non-integers, and negative indexes fail closed.
+# Blast Radius: Connector run evidence ordering only. Finance facts untouched.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/connector_models.py ->
+#     ConnectorRunRawFileORM.ordering_index.
+# ============================================================================
+def _validate_ordering_index(ordering_index: int) -> None:
+    if (
+        isinstance(ordering_index, bool)
+        or not isinstance(ordering_index, int)
+        or ordering_index < 0
+    ):
+        raise ConnectorRunValidationError(
+            "ordering_index must be a non-negative integer"
+        )
 
 
 def _get_raw_file(

@@ -40,6 +40,31 @@ def test_request_invokes_before_request_and_parses_json(mock_credentials) -> Non
     assert captured["auth"] == "Bearer fake-bearer"
 
 
+def test_request_passes_google_auth_transport_request_to_credentials() -> None:
+    seen: dict[str, object] = {}
+
+    class _Credentials:
+        def before_request(self, request, method, url, headers) -> None:
+            seen["request"] = request
+            seen["method"] = method
+            seen["url"] = url
+            headers["Authorization"] = "Bearer captured"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, content=b"{}")
+
+    client = GoogleHttpClient(
+        credentials=_Credentials(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    client.request(method="GET", url="https://example.com/v1/jobs")
+
+    assert seen["request"] is not None
+    assert seen["method"] == "GET"
+    assert seen["url"] == "https://example.com/v1/jobs"
+
+
 def test_request_passes_query_params(mock_credentials) -> None:
     captured = {}
 

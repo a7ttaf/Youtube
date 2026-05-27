@@ -226,6 +226,28 @@ def test_finish_run_rejects_cross_tenant_run_id(session: Session) -> None:
         )
 
 
+def test_finish_run_rejects_already_terminal_run(session: Session) -> None:
+    entry = _start_default_run(session)
+    finish_run(
+        session,
+        tenant_id=TENANT_ID,
+        connector_run_id=UUID(entry.id),
+        status="FAILED",
+        counts=_zero_counts(),
+        error_summary="first failure",
+    )
+
+    with pytest.raises(ConnectorRunValidationError, match="already terminal"):
+        finish_run(
+            session,
+            tenant_id=TENANT_ID,
+            connector_run_id=UUID(entry.id),
+            status="FAILED",
+            counts=_zero_counts(),
+            error_summary="second failure",
+        )
+
+
 def test_link_raw_file_inserts_tenant_scoped_join_row(session: Session) -> None:
     entry = _start_default_run(session)
     raw_file = _raw_file(session, tenant_id=TENANT_ID, report_type="rt-a")
@@ -243,6 +265,23 @@ def test_link_raw_file_inserts_tenant_scoped_join_row(session: Session) -> None:
     assert row.connector_run_id == UUID(entry.id)
     assert row.raw_report_file_id == raw_file.id
     assert row.ordering_index == 0
+
+
+@pytest.mark.parametrize("ordering_index", [-1, None, True, "1"])
+def test_link_raw_file_rejects_invalid_ordering_index(
+    session: Session, ordering_index
+) -> None:
+    entry = _start_default_run(session)
+    raw_file = _raw_file(session, tenant_id=TENANT_ID, report_type="rt-a")
+
+    with pytest.raises(ConnectorRunValidationError, match="ordering_index"):
+        link_raw_file(
+            session,
+            tenant_id=TENANT_ID,
+            connector_run_id=UUID(entry.id),
+            raw_report_file_id=raw_file.id,
+            ordering_index=ordering_index,
+        )
 
 
 def test_link_raw_file_rejects_raw_file_from_different_tenant(

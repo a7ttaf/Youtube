@@ -16,6 +16,7 @@ from typing import Protocol
 
 from ums_smart_revenue.connectors.google.errors import (
     MalformedSecretUriError,
+    ResolverAlreadyRegisteredError,
     UnsupportedSecretSchemeError,
 )
 
@@ -29,8 +30,47 @@ class SecretResolver(Protocol):
 _REGISTRY: dict[str, SecretResolver] = {}
 
 
+# ============================================================================
+# Purpose: Register a concrete resolver for a secret URI scheme.
+# Database/ORM: None.
+# Standards: Fail-fast duplicate registration; typed connector errors only.
+# Blast Radius: Credential secret bootstrap only. Authorization, finance,
+#               audit, Neo4j, and exports are unaffected.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/gcp_secret_manager.py -> Production resolver.
+#   - File: backend/ums_smart_revenue/connectors/google/local_secret_resolver.py -> Test/dev resolver.
+# ============================================================================
 def register_resolver(*, scheme: str, resolver: SecretResolver) -> None:
+    if scheme in _REGISTRY:
+        raise ResolverAlreadyRegisteredError(scheme=scheme)
     _REGISTRY[scheme] = resolver
+
+
+# ============================================================================
+# Purpose: Ensure production secret resolver schemes exist before live runs.
+# Database/ORM: None.
+# Standards: Idempotent runtime bootstrap; typed duplicate protection remains
+#            owned by register_resolver().
+# Blast Radius: Credential secret bootstrap only. Authorization, finance,
+#               audit, Neo4j, and exports are unaffected.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/gcp_secret_manager.py ->
+#     Production gcp-secret-manager resolver.
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     Calls before resolving the credential secret reference.
+# ============================================================================
+def ensure_default_resolvers() -> None:
+    """Register production secret resolvers exactly once at runtime boot."""
+    if "gcp-secret-manager" in _REGISTRY:
+        return
+    from ums_smart_revenue.connectors.google.gcp_secret_manager import (
+        GcpSecretManagerResolver,
+    )
+
+    register_resolver(
+        scheme="gcp-secret-manager",
+        resolver=GcpSecretManagerResolver(),
+    )
 
 
 def _parse_scheme(ref: str) -> str:

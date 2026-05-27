@@ -13,6 +13,7 @@ from typing import Protocol
 from google.api_core import exceptions as gcp_exceptions
 
 from ums_smart_revenue.connectors.google.errors import (
+    MalformedSecretPayloadError,
     MalformedSecretUriError,
     SecretFetchError,
     SecretNotFoundError,
@@ -34,7 +35,7 @@ class GcpSecretManagerResolver:
     SecretManagerServiceClient; tests use a mock).
     """
 
-    def __init__(self, *, client: _SecretManagerClient) -> None:
+    def __init__(self, *, client: _SecretManagerClient | None = None) -> None:
         self._client = client
 
     def resolve(self, ref: str) -> str:
@@ -44,10 +45,20 @@ class GcpSecretManagerResolver:
         if not _NAME_PATTERN.match(name):
             raise MalformedSecretUriError(ref=ref)
         try:
-            response = self._client.access_secret_version(request={"name": name})
+            response = self._get_client().access_secret_version(request={"name": name})
         except gcp_exceptions.NotFound as exc:
             raise SecretNotFoundError(ref=ref) from exc
         except gcp_exceptions.GoogleAPICallError as exc:
             raise SecretFetchError(ref=ref, inner=exc) from exc
         payload: bytes = response.payload.data
-        return payload.decode("utf-8")
+        try:
+            return payload.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise MalformedSecretPayloadError(detail="payload is not utf-8") from exc
+
+    def _get_client(self) -> _SecretManagerClient:
+        if self._client is None:
+            from google.cloud import secretmanager
+
+            self._client = secretmanager.SecretManagerServiceClient()
+        return self._client

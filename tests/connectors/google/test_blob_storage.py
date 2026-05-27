@@ -18,6 +18,7 @@ from google.api_core import exceptions as gcp_exceptions
 
 from ums_smart_revenue.connectors.google.errors import (
     BlobChecksumMismatchError,
+    BlobDownloadError,
     BlobUploadError,
 )
 from ums_smart_revenue.connectors.runs.blob_storage import (
@@ -119,6 +120,24 @@ def test_gcs_get_bytes_downloads_via_blob() -> None:
 
     backend = GcsBlobStorageBackend(client=fake_client)
     assert backend.get_bytes(storage_uri="gs://b/k") == b"downloaded"
+
+
+def test_gcs_get_bytes_wraps_api_error_as_blob_download_error() -> None:
+    fake_client = MagicMock()
+    fake_bucket = MagicMock()
+    fake_blob = MagicMock()
+    fake_blob.download_as_bytes.side_effect = gcp_exceptions.GoogleAPICallError(
+        "fail"
+    )
+    fake_client.bucket.return_value = fake_bucket
+    fake_bucket.blob.return_value = fake_blob
+
+    backend = GcsBlobStorageBackend(client=fake_client)
+
+    with pytest.raises(BlobDownloadError) as ctx:
+        backend.get_bytes(storage_uri="gs://my-bucket/key")
+
+    assert ctx.value.storage_uri == "gs://my-bucket/key"
 
 
 def test_gcs_rejects_non_gs_scheme() -> None:

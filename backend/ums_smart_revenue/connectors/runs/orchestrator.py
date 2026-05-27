@@ -61,9 +61,11 @@ from google.oauth2.credentials import Credentials
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.google.errors import (
+    BlobStorageConfigurationError,
     CredentialNotFoundError,
     GoogleConnectorError,
     InactiveCredentialError,
+    RawFileLifecycleError,
 )
 from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
 from ums_smart_revenue.connectors.google.oauth import (
@@ -74,7 +76,10 @@ from ums_smart_revenue.connectors.google.registry import (
     dispatch_connector,
     register_connector,
 )
-from ums_smart_revenue.connectors.google.secret_resolver import resolve_secret
+from ums_smart_revenue.connectors.google.secret_resolver import (
+    ensure_default_resolvers,
+    resolve_secret,
+)
 from ums_smart_revenue.connectors.google.youtube_reporting_client import (
     YouTubeReportingClient,
 )
@@ -257,6 +262,7 @@ def run_one(
             credential_id=str(credential.id), status=credential.status
         )
 
+    ensure_default_resolvers()
     payload = resolve_secret(credential.encrypted_secret_ref)
     credentials = build_credentials_from_payload(payload)
     refresh_credentials(credentials)
@@ -354,12 +360,8 @@ def run_one(
     # processes.
     session.commit()
 
-    runner = dispatch_connector(key=connector_key)
     counts = _zero_counts()
     per_report_failures: list[tuple[str, str]] = []
-    backend, scheme, bucket = _build_blob_backend()
-    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
-    parser = _parser_for_connector(connector_key)
     ordering_index = 0
     # Sentinel flipped to True ONLY after a finish_run + session.commit()
     # succeeds (bucket-B or bucket-C path). If both paths are short-circuited
@@ -370,6 +372,10 @@ def run_one(
 
     try:
         try:
+            runner = dispatch_connector(key=connector_key)
+            backend, scheme, bucket = _build_blob_backend()
+            repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+            parser = _parser_for_connector(connector_key)
             for report_type, parser_payload, raw_bytes in runner.produce_reports(
                 session=session,
                 run=run_entry,
@@ -488,7 +494,7 @@ def run_one(
             # Roll back any partial unflushed state so finish_run runs
             # against a clean session.
             session.rollback()
-            finish_run(
+            finished_run = finish_run(
                 session,
                 tenant_id=tenant_id,
                 connector_run_id=UUID(run_entry.id),
@@ -498,7 +504,11 @@ def run_one(
             )
             session.commit()
             finished = True
-            raise
+            return ConnectorRunOutcome(
+                run=finished_run,
+                counts=counts,
+                per_report_failures=per_report_failures,
+            )
 
         # Bucket B aggregate finish. Status reflects per-report outcomes:
         # - all OK and at least one succeeded   -> SUCCEEDED
@@ -620,23 +630,43 @@ def _process_one_report(
     # backend silently truncates the payload.
     upload_and_verify(backend=backend, storage_uri=storage_uri, content=raw_bytes)
 
-    # 3. Insert the raw_report_files row in DOWNLOADED. ``source`` mirrors the
-    # B1 parser convention (youtube_reporting / youtube_analytics /
-    # adsense_management); flush populates the id without committing so the
-    # link join can use it within the same transaction.
-    raw_file = RawReportFileORM(
-        id=uuid4(),
+    # 3. Insert or reuse the raw_report_files row in DOWNLOADED. ``source``
+    # mirrors the B1 parser convention (youtube_reporting /
+    # youtube_analytics / adsense_management); flush populates the id
+    # without committing so the link join can use it within the same
+    # transaction. The lookup is load-bearing for retries: the table has a
+    # unique key over source/report_type/month/checksum, so a re-run of the
+    # same Google payload must reuse that evidence row instead of trying a
+    # second insert.
+    source_system = _source_system_for_connector(connector_key)
+    raw_file = _find_existing_raw_file(
+        session,
         tenant_id=tenant_id,
-        source=_source_system_for_connector(connector_key),
+        source=source_system,
         report_type=report_type,
         report_month=report_month,
-        file_url=storage_uri,
         checksum=checksum,
-        parse_status="DOWNLOADED",
-        downloaded_by=triggered_by_user_id,
     )
-    session.add(raw_file)
-    session.flush()
+    if raw_file is None:
+        raw_file = RawReportFileORM(
+            id=uuid4(),
+            tenant_id=tenant_id,
+            source=source_system,
+            report_type=report_type,
+            report_month=report_month,
+            file_url=storage_uri,
+            checksum=checksum,
+            parse_status="DOWNLOADED",
+            downloaded_by=triggered_by_user_id,
+        )
+        session.add(raw_file)
+        session.flush()
+    elif raw_file.parse_status == "QUARANTINED":
+        raise RawFileLifecycleError(
+            raw_file_id=str(raw_file.id),
+            current=raw_file.parse_status,
+            target="PARSED",
+        )
     raw_file_id = raw_file.id
     # Hand the new raw_file_id back to ``run_one``'s per-report try/except
     # via the mutable state dict. From this point on, any exception that
@@ -653,6 +683,9 @@ def _process_one_report(
         raw_report_file_id=raw_file_id,
         ordering_index=ordering_index,
     )
+
+    if raw_file.parse_status == "PARSED":
+        return
 
     # 5. Parse. ``list(...)`` forces the generator so a parser failure surfaces
     # here (typed ``ParserError``) instead of mid-upsert. ParserError is *not*
@@ -688,6 +721,38 @@ def _process_one_report(
     # loop AFTER ``session.commit()`` so a commit failure (e.g. DB
     # disconnect on the per-report flush) is recorded as a failure once,
     # not double-counted as both succeeded and failed.
+
+
+# ============================================================================
+# Purpose: Locate an existing raw report evidence row for idempotent reruns.
+# Database/ORM: RawReportFileORM.
+# Standards: Tenant-scoped lookup by source/report/month/checksum; no writes.
+# Blast Radius: Raw evidence reuse only. Finance facts, authorization, audit,
+#               Neo4j, and exports are unaffected by the lookup itself.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/report_models.py ->
+#     RawReportFileORM unique evidence identity.
+#   - File: backend/ums_smart_revenue/connectors/runs/raw_file_helpers.py ->
+#     Existing rows are lifecycle-checked before PARSED reuse.
+# ============================================================================
+def _find_existing_raw_file(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    source: str,
+    report_type: str,
+    report_month: str,
+    checksum: str,
+) -> RawReportFileORM | None:
+    return session.scalar(
+        sa.select(RawReportFileORM).where(
+            RawReportFileORM.tenant_id == tenant_id,
+            RawReportFileORM.source == source,
+            RawReportFileORM.report_type == report_type,
+            RawReportFileORM.report_month == report_month,
+            RawReportFileORM.checksum == checksum,
+        )
+    )
 
 
 # ----------------------------------------------------------------------------
@@ -864,15 +929,13 @@ def _csv_to_parser_payload(
                 "estimatedRevenue, ad_revenue)",
             )
 
-        # Currency defaults to USD when the CSV omits it. YouTube Reporting
-        # CSVs from a content-owner-scoped job typically include a column;
-        # daily channel CSVs sometimes don't, and the spec settles such
-        # rows in the partner's settlement currency, which is USD for the
-        # public sample. The parser rejects a blank string, so a default
-        # is required.
         currency = _first_present(csv_row, "currency_code", "currencyCode")
         if not currency:
-            currency = "USD"
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason="csv row missing currency column "
+                "(expected one of: currency_code, currencyCode)",
+            )
 
         rows.append(
             {
@@ -949,13 +1012,25 @@ def _load_credential(
     and the create flow. Adding a new public method to that repo would
     drag in actor/audit semantics this internal load doesn't need.
     """
-    return session.scalar(
-        sa.select(ApiConnectorCredentialORM).where(
-            ApiConnectorCredentialORM.tenant_id == tenant_id,
-            ApiConnectorCredentialORM.connector_key == connector_key,
-            ApiConnectorCredentialORM.account_id == account_id,
+    for candidate_key in _credential_key_candidates(connector_key):
+        row = session.scalar(
+            sa.select(ApiConnectorCredentialORM).where(
+                ApiConnectorCredentialORM.tenant_id == tenant_id,
+                ApiConnectorCredentialORM.connector_key == candidate_key,
+                ApiConnectorCredentialORM.account_id == account_id,
+            )
         )
-    )
+        if row is not None:
+            return row
+    return None
+
+
+def _credential_key_candidates(connector_key: str) -> tuple[str, ...]:
+    candidates = [connector_key]
+    source_key = _source_system_for_connector(connector_key)
+    if source_key != connector_key:
+        candidates.append(source_key)
+    return tuple(dict.fromkeys(candidates))
 
 
 def _zero_counts() -> dict[str, int]:
@@ -1040,12 +1115,26 @@ def _build_blob_backend() -> tuple[BlobStorageBackend, str, str]:
     if backend_name == "gcs":
         # Lazy import the GCS client only on the gcs branch so SQLite test
         # runs don't pay the cost of constructing one.
-        from google.cloud.storage import Client as GcsClient  # type: ignore[import-untyped]
+        try:
+            from google.cloud.storage import Client as GcsClient  # type: ignore[import-untyped]
+        except Exception as exc:
+            raise BlobStorageConfigurationError(
+                backend=backend_name,
+                detail=f"google-cloud-storage client import failed: {type(exc).__name__}",
+            ) from exc
 
         bucket = os.getenv("UMS_GCS_BUCKET", "ums-smart-revenue-raw")
-        return GcsBlobStorageBackend(client=GcsClient()), "gs", bucket
-    raise ValueError(
-        f"unknown UMS_BLOB_BACKEND={backend_name!r} (expected 'file-store' or 'gcs')"
+        try:
+            client = GcsClient()
+        except Exception as exc:
+            raise BlobStorageConfigurationError(
+                backend=backend_name,
+                detail=f"google-cloud-storage client construction failed: {type(exc).__name__}",
+            ) from exc
+        return GcsBlobStorageBackend(client=client), "gs", bucket
+    raise BlobStorageConfigurationError(
+        backend=backend_name,
+        detail="expected 'file-store' or 'gcs'",
     )
 
 
@@ -1058,8 +1147,11 @@ def _source_system_for_connector(connector_key: str) -> str:
     """
     mapping = {
         "youtube-reporting": "youtube_reporting",
+        "youtube_reporting": "youtube_reporting",
         "youtube-analytics": "youtube_analytics",
+        "youtube_analytics": "youtube_analytics",
         "adsense-management": "adsense_management",
+        "adsense_management": "adsense_management",
     }
     try:
         return mapping[connector_key]
@@ -1071,8 +1163,11 @@ def _source_system_for_connector(connector_key: str) -> str:
 
 _EXTENSIONS: dict[str, str] = {
     "youtube-reporting": "csv",
+    "youtube_reporting": "csv",
     "youtube-analytics": "json",
+    "youtube_analytics": "json",
     "adsense-management": "json",
+    "adsense_management": "json",
 }
 
 
@@ -1102,7 +1197,7 @@ def _parser_for_connector(connector_key: str) -> YouTubeReportingParser:
     YouTube-Reporting key would not reach this point because the runner
     isn't registered.
     """
-    if connector_key == "youtube-reporting":
+    if connector_key in {"youtube-reporting", "youtube_reporting"}:
         return YouTubeReportingParser()
     raise ValueError(f"no parser bound for connector_key: {connector_key!r}")
 
@@ -1115,3 +1210,4 @@ def _parser_for_connector(connector_key: str) -> YouTubeReportingParser:
 # per-connector config in their constructors, and the dispatch contract
 # returns the registered value directly to the orchestrator.
 register_connector(key="youtube-reporting", runner=YouTubeReportingRunner())
+register_connector(key="youtube_reporting", runner=YouTubeReportingRunner())

@@ -25,6 +25,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import httpx
+from google.auth.transport.requests import Request
 
 from ums_smart_revenue.connectors.google.errors import (
     GoogleApiAuthError,
@@ -61,6 +62,7 @@ class GoogleHttpClient:
         timeout_read: float = 60.0,
     ) -> None:
         self._credentials = credentials
+        self._auth_request = Request()
         self._client = httpx.Client(
             transport=transport,
             timeout=httpx.Timeout(connect=timeout_connect, read=timeout_read, write=None, pool=None),
@@ -98,7 +100,7 @@ class GoogleHttpClient:
         # Build auth headers once per overall request; google-auth's own
         # staleness state decides whether to refresh, and the same headers
         # dict is safe to replay across retry attempts within this call.
-        self._credentials.before_request(None, method, url, headers)
+        self._credentials.before_request(self._auth_request, method, url, headers)
 
         status_backoff = _backoff_schedule(_MAX_STATUS_ATTEMPTS)
         timeout_backoff = _backoff_schedule(_MAX_TIMEOUT_ATTEMPTS)

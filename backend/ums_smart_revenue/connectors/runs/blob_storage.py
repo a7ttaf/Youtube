@@ -19,6 +19,7 @@ from google.cloud.storage import Client as GcsClient  # type: ignore[import-unty
 
 from ums_smart_revenue.connectors.google.errors import (
     BlobChecksumMismatchError,
+    BlobDownloadError,
     BlobUploadError,
 )
 
@@ -111,7 +112,10 @@ class GcsBlobStorageBackend:
 
     def get_bytes(self, *, storage_uri: str) -> bytes:
         bucket, key = self._parse_uri(storage_uri)
-        return self._client.bucket(bucket).blob(key).download_as_bytes()
+        try:
+            return self._client.bucket(bucket).blob(key).download_as_bytes()
+        except gcp_exceptions.GoogleAPICallError as exc:
+            raise BlobDownloadError(storage_uri=storage_uri, inner=exc) from exc
 
 
 def deterministic_blob_path(
