@@ -129,6 +129,7 @@ def test_gcs_rejects_non_gs_scheme() -> None:
 
 def test_deterministic_blob_path_format() -> None:
     path = deterministic_blob_path(
+        scheme="gs",
         bucket="my-bucket",
         tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
         connector_key="youtube-reporting",
@@ -139,6 +140,30 @@ def test_deterministic_blob_path_format() -> None:
     )
     assert path == (
         "gs://my-bucket/00000000-0000-0000-0000-000000000001/"
+        "youtube-reporting/channel_basic_a2/2026-05/abc123.csv"
+    )
+
+
+def test_deterministic_blob_path_emits_file_store_scheme() -> None:
+    """Sibling of ``test_deterministic_blob_path_format`` for the file-store
+    backend: same path shape, ``file-store`` scheme. Pins that
+    ``deterministic_blob_path`` no longer hardcodes ``gs://`` regardless of
+    backend (Concern A), so the orchestrator's default LocalFileStoreBackend
+    receives URIs it actually accepts.
+    """
+    path = deterministic_blob_path(
+        scheme="file-store",
+        bucket="local",
+        tenant_id=UUID("00000000-0000-0000-0000-000000000001"),
+        connector_key="youtube-reporting",
+        report_type="channel_basic_a2",
+        month="2026-05",
+        checksum="abc123",
+        ext="csv",
+    )
+    assert path.startswith("file-store://")
+    assert path == (
+        "file-store://local/00000000-0000-0000-0000-000000000001/"
         "youtube-reporting/channel_basic_a2/2026-05/abc123.csv"
     )
 

@@ -116,6 +116,7 @@ class GcsBlobStorageBackend:
 
 def deterministic_blob_path(
     *,
+    scheme: str,
     bucket: str,
     tenant_id: UUID,
     connector_key: str,
@@ -124,15 +125,21 @@ def deterministic_blob_path(
     checksum: str,
     ext: str,
 ) -> str:
-    """Build the deterministic gs:// URI for a raw report blob.
+    """Build the deterministic blob URI for a raw report.
 
-    Path shape: gs://{bucket}/{tenant_id}/{connector_key}/{report_type}/{month}/{checksum}.{ext}
+    Path shape: {scheme}://{bucket}/{tenant_id}/{connector_key}/{report_type}/{month}/{checksum}.{ext}
+
+    Scheme MUST match the backend the orchestrator built (file-store for
+    LocalFileStoreBackend, gs for GcsBlobStorageBackend); each backend
+    validates its own prefix and raises ValueError on mismatch. Same bytes
+    always map to the same path, so idempotent re-uploads on retry overwrite
+    or hit the existing object.
+
     Note: account_id is intentionally NOT in the path - run context lives on
-    connector_runs. Same bytes always map to the same path, so idempotent
-    re-uploads on retry overwrite or hit the existing object.
+    connector_runs.
     """
     return (
-        f"gs://{bucket}/{tenant_id}/{connector_key}/{report_type}/"
+        f"{scheme}://{bucket}/{tenant_id}/{connector_key}/{report_type}/"
         f"{month}/{checksum}.{ext}"
     )
 

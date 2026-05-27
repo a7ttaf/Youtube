@@ -310,6 +310,114 @@ def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
     assert source_rows[0].raw_file_id == raw_files[0].id
 
 
+def test_run_one_real_local_file_store_backend_round_trips(
+    session: Session, stub_secret_resolver, tmp_path, monkeypatch
+) -> None:
+    """End-to-end ingestion against the REAL LocalFileStoreBackend.
+
+    Every other orchestrator test patches
+    ``ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend``
+    with a MagicMock whose ``upload`` swallows any URI string, so the real
+    ``LocalFileStoreBackend._path_for`` never executes against an emitted
+    URI. That mask hid Concern A: ``deterministic_blob_path`` hardcoded
+    ``gs://`` regardless of which backend was selected, so the default
+    file-store backend rejected every URI at upload time with
+    ``ValueError("LocalFileStoreBackend only handles file-store:// URIs,
+    got 'gs://...'")``.
+
+    This test does NOT patch LocalFileStoreBackend. It points the real
+    backend at ``tmp_path`` via ``UMS_LOCAL_STORE_ROOT`` and ``UMS_LOCAL_BLOB_BUCKET``,
+    drives ``run_one`` through to SUCCEEDED, then asserts the report's bytes
+    landed on disk at the deterministic path and the persisted
+    ``RawReportFileORM.file_url`` carries the ``file-store://`` scheme.
+    """
+    import hashlib as _hashlib
+
+    monkeypatch.setenv("UMS_BLOB_BACKEND", "file-store")
+    monkeypatch.setenv("UMS_LOCAL_STORE_ROOT", str(tmp_path))
+    monkeypatch.setenv("UMS_LOCAL_BLOB_BUCKET", "testbucket")
+
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes = _csv_for_one_row()
+    expected_checksum = _hashlib.sha256(csv_bytes).hexdigest()
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        # NOTE: LocalFileStoreBackend is intentionally NOT patched here -- the
+        # real backend writes to ``tmp_path`` so we can prove deterministic_blob_path
+        # emits a scheme the backend will accept.
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r1", "downloadUrl": "https://yt/r1"}
+        ]
+        client.fetch_report.return_value = csv_bytes
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    # Outcome must be SUCCEEDED: a pre-fix ValueError from
+    # LocalFileStoreBackend._path_for would have driven this to FAILED.
+    assert isinstance(outcome, ConnectorRunOutcome)
+    assert outcome.run is not None
+    assert outcome.run.status == "SUCCEEDED"
+    assert outcome.per_report_failures == []
+    assert outcome.counts["reports_succeeded"] == 1
+
+    # The deterministic path layout:
+    # {root}/{bucket}/{tenant_id}/{report_type}/{month}/{checksum}.{ext}
+    # NOTE: the file-store URI shape is
+    #   file-store://{bucket}/{tenant_id}/{connector_key}/{report_type}/{month}/{checksum}.{ext}
+    # and LocalFileStoreBackend strips the scheme and treats the remainder
+    # as a relative path under root. So on disk we expect:
+    expected_path = (
+        tmp_path
+        / "testbucket"
+        / str(TENANT_ID)
+        / CONNECTOR_KEY
+        / "channel_basic_a2"
+        / "2026-05"
+        / f"{expected_checksum}.csv"
+    )
+    assert expected_path.exists(), (
+        f"raw blob did not land on disk at {expected_path}; "
+        f"tmp_path tree: {list(tmp_path.rglob('*'))}"
+    )
+    assert expected_path.read_bytes() == csv_bytes
+
+    # The persisted file_url must carry the file-store scheme + bucket so
+    # later re-reads dispatch to the right backend.
+    raw_file = session.scalar(
+        select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
+    )
+    assert raw_file is not None
+    assert raw_file.file_url.startswith("file-store://testbucket/"), (
+        f"expected file-store:// scheme + testbucket prefix; got {raw_file.file_url!r}"
+    )
+    assert raw_file.file_url.endswith(f"{expected_checksum}.csv")
+    assert raw_file.checksum == expected_checksum
+
+
 def test_run_one_sweeps_running_to_failed_on_untyped_error(
     session: Session, stub_secret_resolver
 ) -> None:

@@ -357,8 +357,7 @@ def run_one(
     runner = dispatch_connector(key=connector_key)
     counts = _zero_counts()
     per_report_failures: list[tuple[str, str]] = []
-    backend = _build_blob_backend()
-    bucket = _bucket_for_backend()
+    backend, scheme, bucket = _build_blob_backend()
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     parser = _parser_for_connector(connector_key)
     ordering_index = 0
@@ -393,6 +392,7 @@ def run_one(
                         connector_key=connector_key,
                         run_entry=run_entry,
                         backend=backend,
+                        scheme=scheme,
                         bucket=bucket,
                         parser=parser,
                         repo=repo,
@@ -565,6 +565,7 @@ def _process_one_report(
     connector_key: str,
     run_entry: ConnectorRunEntry,
     backend: BlobStorageBackend,
+    scheme: str,
     bucket: str,
     parser: YouTubeReportingParser,
     repo: SqlAlchemyGoogleRevenueSourceRowRepository,
@@ -594,8 +595,17 @@ def _process_one_report(
     # 1. Checksum + deterministic URI: same bytes always map to the same path
     # so a retry overwrites or hits the existing object instead of creating a
     # second copy with the same content.
+    # FIX: thread ``scheme`` (resolved alongside the backend in
+    # ``_build_blob_backend``) into ``deterministic_blob_path``. The previous
+    # code emitted ``gs://...`` regardless of which backend was selected, so
+    # the default ``LocalFileStoreBackend`` (file-store://) rejected every URI
+    # at upload time with ``ValueError("LocalFileStoreBackend only handles
+    # file-store:// URIs, got 'gs://...'")``. Real local-store ingestion was
+    # broken; only tests that patched ``LocalFileStoreBackend`` with a
+    # MagicMock masked it.
     checksum = compute_checksum(raw_bytes)
     storage_uri = deterministic_blob_path(
+        scheme=scheme,
         bucket=bucket,
         tenant_id=tenant_id,
         connector_key=connector_key,
@@ -989,42 +999,54 @@ def _summarize_failures(failures: list[tuple[str, str]]) -> str | None:
     return f"{len(failures)} report(s) failed: {items}"
 
 
-def _build_blob_backend() -> BlobStorageBackend:
-    """Construct the blob backend selected by ``UMS_BLOB_BACKEND``.
+# ============================================================================
+# Purpose: Construct (backend, scheme, bucket) for the configured blob store.
+#          Returning the triple keeps scheme/bucket selection co-located with
+#          backend construction so the orchestrator never has to ask
+#          ``isinstance(backend, ...)`` to know what URI shape to emit.
+# Database/ORM: None.
+# Standards: Lazy-import the GCS client so SQLite test runs don't pay the cost
+#            of constructing one. ``LocalFileStoreBackend`` and
+#            ``GcsBlobStorageBackend`` are imported at module scope so test
+#            patches on the bare symbol on this module replace what gets
+#            instantiated here.
+# Blast Radius: None — backend selection is internal; finance, auth, audit,
+#               Neo4j projection, and exports are unaffected.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/blob_storage.py ->
+#     LocalFileStoreBackend / GcsBlobStorageBackend / deterministic_blob_path.
+# ============================================================================
+def _build_blob_backend() -> tuple[BlobStorageBackend, str, str]:
+    """Construct (backend, scheme, bucket) for the configured blob store.
 
-    Defaults to ``file-store`` (LocalFileStoreBackend) so tests and local
-    runs don't accidentally try to reach GCS. ``LocalFileStoreBackend`` and
-    ``GcsBlobStorageBackend`` are imported at module scope so test patches
-    on ``ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend``
-    replace what this helper actually instantiates.
+    Selected by ``UMS_BLOB_BACKEND``:
+      * ``file-store`` (default): LocalFileStoreBackend rooted at
+        ``UMS_LOCAL_STORE_ROOT``. Scheme is ``file-store``; bucket is a
+        logical path segment under root (``UMS_LOCAL_BLOB_BUCKET`` default
+        ``"local"``) so deterministic URIs have the same shape as the GCS
+        branch.
+      * ``gcs``: GcsBlobStorageBackend with a real google-cloud-storage
+        client. Scheme is ``gs``; bucket is ``UMS_GCS_BUCKET``.
+
+    Returning the triple keeps scheme/bucket selection co-located with
+    backend construction — the orchestrator never has to ask
+    ``isinstance(backend, ...)`` to know what URI shape to emit.
     """
     backend_name = os.getenv("UMS_BLOB_BACKEND", "file-store")
     if backend_name == "file-store":
         root = Path(os.getenv("UMS_LOCAL_STORE_ROOT", str(Path.cwd() / "_local_blob_store")))
-        return LocalFileStoreBackend(root=root)
+        bucket = os.getenv("UMS_LOCAL_BLOB_BUCKET", "local")
+        return LocalFileStoreBackend(root=root), "file-store", bucket
     if backend_name == "gcs":
         # Lazy import the GCS client only on the gcs branch so SQLite test
         # runs don't pay the cost of constructing one.
         from google.cloud.storage import Client as GcsClient  # type: ignore[import-untyped]
 
-        return GcsBlobStorageBackend(client=GcsClient())
+        bucket = os.getenv("UMS_GCS_BUCKET", "ums-smart-revenue-raw")
+        return GcsBlobStorageBackend(client=GcsClient()), "gs", bucket
     raise ValueError(
         f"unknown UMS_BLOB_BACKEND={backend_name!r} (expected 'file-store' or 'gcs')"
     )
-
-
-def _bucket_for_backend() -> str:
-    """Return the bucket/namespace token for the deterministic blob URI.
-
-    ``deterministic_blob_path`` emits ``gs://{bucket}/...`` regardless of
-    which backend is in use (the helper is shape-only, not transport-aware).
-    The bucket token then namespaces the path; for the GCS backend it must
-    match a real bucket, for the file-store backend it's a logical prefix.
-    Bridging file-store + ``gs://`` URIs is a known gap the spec author
-    expects a later slice to address; T27 keeps the URI shape consistent
-    with what ``deterministic_blob_path`` produces today.
-    """
-    return os.getenv("UMS_GCS_BUCKET", "ums-smart-revenue-raw")
 
 
 def _source_system_for_connector(connector_key: str) -> str:
