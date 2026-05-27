@@ -58,6 +58,7 @@ from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
 TENANT_ID = UUID("00000000-0000-0000-0000-000000827001")
 ACCOUNT_ID = "content-owner-1"
 CONNECTOR_KEY = "youtube-reporting"
+DEFAULT_RESOLVER_REF = "local-secret://yt-creds"
 
 
 @pytest.fixture
@@ -139,7 +140,7 @@ def _make_credential_row(
     tenant_id: UUID,
     connector_key: str,
     account_id: str,
-    encrypted_secret_ref: str = "local-secret://yt-creds",
+    encrypted_secret_ref: str | None = None,
 ) -> ApiConnectorCredentialORM:
     """Seed the credential row the orchestrator will load.
 
@@ -157,12 +158,13 @@ def _make_credential_row(
         )
     )
     session.flush()
+    resolver_ref = encrypted_secret_ref or DEFAULT_RESOLVER_REF
     row = ApiConnectorCredentialORM(
         id=uuid4(),
         tenant_id=tenant_id,
         connector_key=connector_key,
         account_id=account_id,
-        encrypted_secret_ref=encrypted_secret_ref,
+        encrypted_secret_ref=resolver_ref,
         status="active",
         created_by=actor_id,
         updated_by=actor_id,
@@ -902,7 +904,8 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
     call_state = {"n": 0}
 
     class FlakyParser:
-        def parse(self, payload, *, tenant_id):
+        @staticmethod
+        def parse(payload, *, tenant_id):
             call_state["n"] += 1
             if call_state["n"] == 2:
                 raise ParserError("simulated parser failure on report 2")
@@ -1427,8 +1430,8 @@ def test_dry_run_savepoint_reverts_runner_side_writes(
     class WritingRunner:
         last_marker_id: UUID | None = None
 
+        @staticmethod
         def produce_reports(
-            self,
             *,
             session,
             run,
@@ -1557,7 +1560,8 @@ def test_dry_run_parser_failure_increments_reports_failed_and_keeps_per_report_f
     call_state = {"n": 0}
 
     class FlakyParser:
-        def parse(self, payload, *, tenant_id):
+        @staticmethod
+        def parse(payload, *, tenant_id):
             call_state["n"] += 1
             if call_state["n"] == 2:
                 raise ParserError("simulated parser failure on dry-run report 2")

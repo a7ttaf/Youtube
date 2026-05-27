@@ -91,7 +91,8 @@ class GcsBlobStorageBackend:
     def __init__(self, *, client: GcsClient) -> None:
         self._client = client
 
-    def _parse_uri(self, storage_uri: str) -> tuple[str, str]:
+    @staticmethod
+    def _parse_uri(storage_uri: str) -> tuple[str, str]:
         if not storage_uri.startswith(_GCS_PREFIX):
             raise ValueError(
                 f"GcsBlobStorageBackend only handles {_GCS_PREFIX} URIs, got {storage_uri!r}"

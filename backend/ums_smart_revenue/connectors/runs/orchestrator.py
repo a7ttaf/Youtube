@@ -778,8 +778,8 @@ class YouTubeReportingRunner:
     replace what the runner actually uses.
     """
 
+    @staticmethod
     def produce_reports(
-        self,
         *,
         session: Session,
         run: ConnectorRunEntry | None,
@@ -857,6 +857,7 @@ def _csv_to_parser_payload(
     import csv
     import io
 
+    expected_month = report_month.strip()
     text = raw_bytes.decode("utf-8")
     reader = csv.DictReader(io.StringIO(text))
     rows: list[dict[str, object]] = []
@@ -879,6 +880,15 @@ def _csv_to_parser_payload(
                 report_id=report_id,
                 reason=f"csv row date {date_value!r} not ISO YYYY-MM-DD",
             ) from exc
+        row_month = f"{row_date.year:04d}-{row_date.month:02d}"
+        if row_month != expected_month:
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason=(
+                    f"csv row date {date_value!r} outside requested "
+                    f"report_month {expected_month!r}"
+                ),
+            )
 
         # Channel + optional content_owner. Build the dimensions dict from
         # whatever the CSV provides; the parser only requires ``channel``

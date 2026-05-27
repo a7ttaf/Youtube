@@ -201,8 +201,14 @@ def test_cli_main_returns_2_when_credential_missing(
     class _StubSettings:
         database_url = "sqlite+pysqlite:///:memory:"
 
-    monkeypatch.setattr(module, "load_app_settings", lambda: _StubSettings())
-    monkeypatch.setattr(module, "build_session_factory", lambda _url: _fake_factory)
+    def _load_stub_settings() -> _StubSettings:
+        return _StubSettings()
+
+    def _build_fake_session_factory(_url: str):
+        return _fake_factory
+
+    monkeypatch.setattr(module, "load_app_settings", _load_stub_settings)
+    monkeypatch.setattr(module, "build_session_factory", _build_fake_session_factory)
 
     captured_err = io.StringIO()
     monkeypatch.setattr(sys, "stderr", captured_err)

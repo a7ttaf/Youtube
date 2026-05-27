@@ -70,7 +70,9 @@ def test_refresh_credentials_wraps_refresh_error() -> None:
     creds = MagicMock()
     inner = RefreshError("token revoked")
     creds.refresh.side_effect = inner
-    with patch("ums_smart_revenue.connectors.google.oauth.Request"):
-        with pytest.raises(OAuthRefreshError) as ctx:
-            refresh_credentials(creds)
+    with (
+        patch("ums_smart_revenue.connectors.google.oauth.Request"),
+        pytest.raises(OAuthRefreshError) as ctx,
+    ):
+        refresh_credentials(creds)
     assert ctx.value.inner is inner

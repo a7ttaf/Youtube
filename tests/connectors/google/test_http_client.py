@@ -7,6 +7,7 @@ decoded dict.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 
 import httpx
 import pytest
@@ -19,6 +20,13 @@ from ums_smart_revenue.connectors.google.errors import (
     GoogleApiServerError,
 )
 from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
+
+
+def _next_response(responses: Iterator[httpx.Response]) -> httpx.Response:
+    try:
+        return next(responses)
+    except StopIteration as exc:
+        raise AssertionError("unexpected extra HTTP request") from exc
 
 
 def test_request_invokes_before_request_and_parses_json(mock_credentials) -> None:
@@ -44,7 +52,8 @@ def test_request_passes_google_auth_transport_request_to_credentials() -> None:
     seen: dict[str, object] = {}
 
     class _Credentials:
-        def before_request(self, request, method, url, headers) -> None:
+        @staticmethod
+        def before_request(request, method, url, headers) -> None:
             seen["request"] = request
             seen["method"] = method
             seen["url"] = url
@@ -145,9 +154,12 @@ def test_429_honors_retry_after(mock_credentials, monkeypatch) -> None:
         httpx.Response(429, headers={"Retry-After": "3"}, content=b"{}"),
         httpx.Response(200, content=b"{}"),
     ])
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _next_response(seq)
+
     client = GoogleHttpClient(
         credentials=mock_credentials,
-        transport=httpx.MockTransport(lambda r: next(seq)),
+        transport=httpx.MockTransport(handler),
     )
     client.request(method="GET", url="https://example.com/x")
     assert sleeps == [3.0]
@@ -223,9 +235,12 @@ def test_fetch_bytes_retries_5xx_via_shared_helper(mock_credentials, monkeypatch
         httpx.Response(503, content=b""),
         httpx.Response(200, content=b"csv-bytes"),
     ])
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _next_response(seq)
+
     client = GoogleHttpClient(
         credentials=mock_credentials,
-        transport=httpx.MockTransport(lambda r: next(seq)),
+        transport=httpx.MockTransport(handler),
     )
     out = client.fetch_bytes(url="https://x/y")
     assert out == b"csv-bytes"

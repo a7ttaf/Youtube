@@ -19,7 +19,6 @@ fetch_bytes() (raw download bodies):
 """
 from __future__ import annotations
 
-import json
 import time
 from collections.abc import Mapping
 from typing import Any
@@ -50,6 +49,55 @@ def _backoff_schedule(max_attempts: int) -> list[float]:
     # (attempt - 1). Used identically by 429, 5xx, timeouts, and connect
     # errors; each retry budget consumes its own slot in the schedule.
     return [min(2.0 ** i, _BACKOFF_CAP_SECONDS) for i in range(max_attempts)]
+
+
+# ============================================================================
+# Purpose: Handle retryable HTTP status responses for Google API calls while
+#          keeping the request loop narrow enough for static analyzers to
+#          reason about each failure bucket separately.
+# Database/ORM: None.
+# Standards: Typed GoogleConnectorError subclasses; Retry-After clamped; no
+#            response body or secret data included in errors.
+# Blast Radius: Shared by request() and fetch_bytes() retry behavior.
+# Connections:
+#   - Method: GoogleHttpClient._send_with_retry -> caller that owns transport
+#     errors and success responses.
+#   - File: backend/ums_smart_revenue/connectors/google/errors.py -> typed
+#     GoogleApiRateLimitError / GoogleApiServerError boundaries.
+# ============================================================================
+def _sleep_for_retryable_status(
+    *,
+    response: httpx.Response,
+    attempt: int,
+    method: str,
+    url: str,
+    status_backoff: list[float],
+) -> bool:
+    status = response.status_code
+    if status == 429:
+        if attempt == _MAX_STATUS_ATTEMPTS:
+            raise GoogleApiRateLimitError(
+                method=method, url=url, status=429,
+                attempts=_MAX_STATUS_ATTEMPTS,
+            )
+        ra = response.headers.get("Retry-After")
+        # Retry-After is honored when integer-seconds; otherwise fall back to
+        # the exponential schedule slot. Both paths clamp at 64s to keep a
+        # misbehaving server from parking us forever.
+        sleep_s = float(ra) if ra and ra.isdigit() else status_backoff[attempt - 1]
+        time.sleep(min(sleep_s, _BACKOFF_CAP_SECONDS))
+        return True
+
+    if status in _RETRY_SERVER_STATUSES:
+        if attempt == _MAX_STATUS_ATTEMPTS:
+            raise GoogleApiServerError(
+                method=method, url=url, status=status,
+                attempts=_MAX_STATUS_ATTEMPTS,
+            )
+        time.sleep(status_backoff[attempt - 1])
+        return True
+
+    return False
 
 
 class GoogleHttpClient:
@@ -161,26 +209,13 @@ class GoogleHttpClient:
                 raise GoogleApiClientError(method=method, url=url, status=status)
             if status in _AUTH_STATUSES:
                 raise GoogleApiAuthError(method=method, url=url, status=status)
-            if status == 429:
-                if attempt == _MAX_STATUS_ATTEMPTS:
-                    raise GoogleApiRateLimitError(
-                        method=method, url=url, status=429,
-                        attempts=_MAX_STATUS_ATTEMPTS,
-                    )
-                ra = response.headers.get("Retry-After")
-                # Retry-After is honored when integer-seconds; otherwise fall
-                # back to the exponential schedule slot. Both paths clamp at
-                # 64s to keep a misbehaving server from parking us forever.
-                sleep_s = float(ra) if ra and ra.isdigit() else status_backoff[attempt - 1]
-                time.sleep(min(sleep_s, _BACKOFF_CAP_SECONDS))
-                continue
-            if status in _RETRY_SERVER_STATUSES:
-                if attempt == _MAX_STATUS_ATTEMPTS:
-                    raise GoogleApiServerError(
-                        method=method, url=url, status=status,
-                        attempts=_MAX_STATUS_ATTEMPTS,
-                    )
-                time.sleep(status_backoff[attempt - 1])
+            if _sleep_for_retryable_status(
+                response=response,
+                attempt=attempt,
+                method=method,
+                url=url,
+                status_backoff=status_backoff,
+            ):
                 continue
             # Defensive fallthrough: any status outside the spec table
             # (3xx redirects, 451, etc.) is surfaced as a client error so
@@ -227,7 +262,7 @@ class GoogleHttpClient:
         )
         try:
             body = response.json()
-        except (ValueError, json.JSONDecodeError) as exc:
+        except ValueError as exc:
             raise GoogleApiResponseError(url=url, reason=f"not valid json: {exc}") from exc
         if not isinstance(body, dict):
             raise GoogleApiResponseError(url=url, reason=f"expected object, got {type(body).__name__}")

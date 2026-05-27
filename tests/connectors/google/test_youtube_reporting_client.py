@@ -1,6 +1,9 @@
 """YouTube Reporting client tests (spec §5.4)."""
 from __future__ import annotations
 
+import json
+from collections.abc import Iterator
+
 import httpx
 import pytest  # noqa: F401 — kept for T24/T25 (pytest.raises / pytest.mark.parametrize)
 
@@ -9,6 +12,14 @@ from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
 from ums_smart_revenue.connectors.google.youtube_reporting_client import (
     YouTubeReportingClient,
 )
+
+
+def _next_json_response(pages: Iterator[dict[str, object]]) -> httpx.Response:
+    try:
+        payload = next(pages)
+    except StopIteration as exc:
+        raise AssertionError("unexpected extra HTTP request") from exc
+    return httpx.Response(200, content=json.dumps(payload).encode())
 
 
 def test_list_supported_jobs_filters_to_whitelist(mock_credentials) -> None:
@@ -20,7 +31,6 @@ def test_list_supported_jobs_filters_to_whitelist(mock_credentials) -> None:
         ]
     }
     def handler(request: httpx.Request) -> httpx.Response:
-        import json
         return httpx.Response(200, content=json.dumps(payload).encode())
 
     http = GoogleHttpClient(
@@ -40,9 +50,8 @@ def test_list_supported_jobs_paginates(mock_credentials) -> None:
         },
         {"jobs": [{"id": "j2", "reportTypeId": "content_owner_estimated_revenue_a1"}]},
     ])
-    def handler(request: httpx.Request) -> httpx.Response:
-        import json
-        return httpx.Response(200, content=json.dumps(next(pages)).encode())
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return _next_json_response(pages)
 
     http = GoogleHttpClient(
         credentials=mock_credentials, transport=httpx.MockTransport(handler),
@@ -79,7 +88,6 @@ def test_list_supported_jobs_filters_out_jobs_with_missing_report_type_id(
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        import json
         return httpx.Response(200, content=json.dumps(payload).encode())
 
     http = GoogleHttpClient(
@@ -99,7 +107,6 @@ def test_list_supported_jobs_treats_empty_next_page_token_as_terminal(
     }
 
     def handler(request: httpx.Request) -> httpx.Response:
-        import json
         return httpx.Response(200, content=json.dumps(payload).encode())
 
     http = GoogleHttpClient(
@@ -114,7 +121,6 @@ def test_list_reports_for_month_passes_date_bounds(mock_credentials) -> None:
     captured = {}
     def handler(request: httpx.Request) -> httpx.Response:
         captured.setdefault("queries", []).append(dict(request.url.params))
-        import json
         return httpx.Response(200, content=json.dumps({"reports": []}).encode())
     http = GoogleHttpClient(
         credentials=mock_credentials, transport=httpx.MockTransport(handler),
@@ -138,8 +144,7 @@ def test_list_reports_for_month_paginates(mock_credentials) -> None:
 
     def handler(request: httpx.Request) -> httpx.Response:
         captured.setdefault("queries", []).append(dict(request.url.params))
-        import json
-        return httpx.Response(200, content=json.dumps(next(pages)).encode())
+        return _next_json_response(pages)
 
     http = GoogleHttpClient(
         credentials=mock_credentials, transport=httpx.MockTransport(handler),
@@ -160,7 +165,6 @@ def test_list_reports_handles_december_boundary(mock_credentials) -> None:
     captured = {}
     def handler(request: httpx.Request) -> httpx.Response:
         captured["q"] = dict(request.url.params)
-        import json
         return httpx.Response(200, content=json.dumps({"reports": []}).encode())
     http = GoogleHttpClient(
         credentials=mock_credentials, transport=httpx.MockTransport(handler),

@@ -105,21 +105,20 @@ def test_cross_tenant_raw_file_link_rejected_by_composite_fk(
         _insert_connector_run(conn, tenant_a, run_id)
         _insert_raw_file(conn, tenant_b, raw_file_id)
 
-    with pytest.raises(IntegrityError):
-        with fresh_engine.begin() as conn:
-            conn.execute(
-                text(
-                    "INSERT INTO connector_run_raw_files "
-                    "(id, tenant_id, connector_run_id, raw_report_file_id, ordering_index) "
-                    "VALUES (:id, :tenant_id, :run_id, :raw_file_id, 0)"
-                ),
-                {
-                    "id": uuid4(),
-                    "tenant_id": tenant_a,
-                    "run_id": run_id,
-                    "raw_file_id": raw_file_id,
-                },
-            )
+    with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO connector_run_raw_files "
+                "(id, tenant_id, connector_run_id, raw_report_file_id, ordering_index) "
+                "VALUES (:id, :tenant_id, :run_id, :raw_file_id, 0)"
+            ),
+            {
+                "id": uuid4(),
+                "tenant_id": tenant_a,
+                "run_id": run_id,
+                "raw_file_id": raw_file_id,
+            },
+        )
 
 
 def test_triggered_by_user_fk_rejects_user_from_different_tenant(
@@ -141,9 +140,8 @@ def test_triggered_by_user_fk_rejects_user_from_different_tenant(
             {"id": user_id, "tenant_id": tenant_b},
         )
 
-    with pytest.raises(IntegrityError):
-        with fresh_engine.begin() as conn:
-            _insert_connector_run(conn, tenant_a, uuid4(), triggered_by_user_id=user_id)
+    with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
+        _insert_connector_run(conn, tenant_a, uuid4(), triggered_by_user_id=user_id)
 
 
 def test_downgrade_drops_b2_3_tables_and_raw_unique_only(
