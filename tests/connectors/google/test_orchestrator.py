@@ -31,6 +31,7 @@ from ums_smart_revenue.connectors.google import (
 )
 from ums_smart_revenue.connectors.google.errors import (
     CredentialNotFoundError,
+    GoogleApiResponseError,
     GoogleApiServerError,
     InactiveCredentialError,
     OAuthRefreshError,
@@ -230,6 +231,16 @@ def test_csv_adapter_aggregates_daily_breakdowns_to_monthly_channel_totals() -> 
             },
         }
     ]
+
+
+def test_csv_adapter_rejects_non_zero_padded_report_month() -> None:
+    with pytest.raises(GoogleApiResponseError, match="not YYYY-MM"):
+        _csv_to_parser_payload(
+            raw_bytes=_csv_for_one_row(),
+            report_id="r-bad-month",
+            report_type="content_owner_estimated_revenue_a1",
+            report_month="2026-5",
+        )
 
 
 def test_run_one_happy_path_writes_run_raw_file_and_source_rows(

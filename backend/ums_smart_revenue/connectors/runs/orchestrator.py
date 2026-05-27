@@ -285,86 +285,98 @@ def run_one(
     refresh_credentials(credentials)
 
     if dry_run:
-        # ====================================================================
-        # Purpose: Spec §5.4 dry-run path -- list jobs / list reports / fetch
-        #          report bytes / parse for row counts, but write NOTHING to
-        #          the database (no connector_runs row, no raw_file row, no
-        #          source-row upsert, no audit) and perform NO blob upload.
-        #          Returns counts that *would* have been written so an
-        #          operator can sanity-check an account+month before
-        #          scheduling the live run.
-        # Database/ORM: Read-only by contract. The SAVEPOINT below is a
-        #               belt-and-suspenders rollback so any unflushed writes
-        #               a future ConnectorRunner accidentally makes inside
-        #               its ``produce_reports`` (the current YT runner does
-        #               not) are reverted before the function returns.
-        # Standards: Bucket A still gates dry-run -- a missing or inactive
-        #            credential raises BEFORE this branch, identical to the
-        #            live path. The inner per-report try/except mirrors the
-        #            live Bucket B handler so one bad report doesn't abort
-        #            the dry-run -- the operator sees an honest count of
-        #            attempted vs succeeded vs failed reports.
-        # Blast Radius: None. By design, the dry-run path cannot create a
-        #               connector_runs row, attach a raw_report_file, or
-        #               upsert a source row. The SAVEPOINT rollback
-        #               guarantees this even if a future runner regresses.
-        # Connections:
-        #   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
-        #     §5.4 -> dry-run contract (counts only, no writes).
-        # ====================================================================
-        counts = _zero_counts()
-        runner = dispatch_connector(key=connector_key)
-        parser = _parser_for_connector(connector_key)
-        # SAVEPOINT defence-in-depth: any writes the runner might make
-        # (the current YT runner does not, but a future B2.5/B2.6 runner
-        # might accidentally) are scoped to this nested transaction and
-        # rolled back in the ``finally`` so the dry-run leaves zero rows
-        # behind. The ``try/finally`` ensures the rollback runs even if
-        # the for-loop itself raises (e.g. ``list_supported_jobs`` raises
-        # a transport error before the first yield).
-        savepoint = session.begin_nested()
-        try:
-            for produced in runner.produce_reports(
-                session=session,
-                run=None,
-                credentials=credentials,
-                report_month=report_month,
-                account_id=account_id,
-            ):
-                counts["reports_attempted"] += 1
-                # Per-report containment mirrors the live Bucket B handler:
-                # ParserError (untyped, subclass of ValueError) or any
-                # GoogleConnectorError on a single report increments
-                # reports_failed and continues so the dry-run still
-                # produces useful counts for the remaining reports.
-                try:
-                    if isinstance(produced, ProducedReportFailure):
-                        raise produced.error
-                    _report_type, parser_payload, _raw_bytes = produced
-                    rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
-                    counts["reports_succeeded"] += 1
-                    counts["rows_upserted_total"] += len(rows)
-                    # rows_upserted_{created,updated,unchanged} stay 0 in
-                    # dry-run because no upsert is performed -- the
-                    # category split would require a pre-read of
-                    # existing source_row_keys, which is itself a write
-                    # path we are deliberately not entering here.
-                except Exception:
-                    counts["reports_failed"] += 1
-        finally:
-            # Revert any unflushed writes from the runner / parser / future
-            # regression. ``ConnectorRunOutcome(run=None, ...)`` is the
-            # spec-required dry-run shape; the empty per_report_failures
-            # list keeps the outcome dataclass total -- per-report failure
-            # detail is not currently surfaced for dry-run since the
-            # operator's primary signal is the counts dict.
-            savepoint.rollback()
-        return ConnectorRunOutcome(
-            run=None, counts=counts, per_report_failures=[]
+        return _run_dry_run(
+            session=session,
+            tenant_id=tenant_id,
+            connector_key=connector_key,
+            account_id=account_id,
+            report_month=report_month,
+            credentials=credentials,
         )
 
-    # Bucket B/C scope starts here: every failure past start_run goes through
-    # finish_run with a terminal status so the run row reflects reality.
+    return _run_live(
+        session=session,
+        tenant_id=tenant_id,
+        connector_key=connector_key,
+        account_id=account_id,
+        report_month=report_month,
+        credentials=credentials,
+        triggered_by_user_id=triggered_by_user_id,
+    )
+
+
+# ============================================================================
+# Purpose: Spec §5.4 dry-run path -- list jobs, fetch report bytes, and parse
+#          for row counts without creating connector_runs, raw files, source
+#          rows, or blob uploads.
+# Database/ORM: Read-only by contract; a SAVEPOINT rolls back accidental
+#               runner/parser writes before returning.
+# Standards: Bucket A credential validation already happened in run_one; one
+#            bad report increments reports_failed and does not abort dry-run.
+# Blast Radius: None. No finance, audit, Neo4j, export, or auth mutation.
+# Connections:
+#   - Function: run_one -> delegates dry-run after credential resolution.
+#   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
+#     §5.4 -> dry-run contract.
+# ============================================================================
+def _run_dry_run(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    account_id: str,
+    report_month: str,
+    credentials: Credentials,
+) -> ConnectorRunOutcome:
+    counts = _zero_counts()
+    runner = dispatch_connector(key=connector_key)
+    parser = _parser_for_connector(connector_key)
+    savepoint = session.begin_nested()
+    try:
+        for produced in runner.produce_reports(
+            session=session,
+            run=None,
+            credentials=credentials,
+            report_month=report_month,
+            account_id=account_id,
+        ):
+            counts["reports_attempted"] += 1
+            try:
+                if isinstance(produced, ProducedReportFailure):
+                    raise produced.error
+                _report_type, parser_payload, _raw_bytes = produced
+                rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
+                counts["reports_succeeded"] += 1
+                counts["rows_upserted_total"] += len(rows)
+            except Exception:
+                counts["reports_failed"] += 1
+    finally:
+        savepoint.rollback()
+    return ConnectorRunOutcome(run=None, counts=counts, per_report_failures=[])
+
+
+# ============================================================================
+# Purpose: Execute the live connector run after Bucket A has passed, ensuring
+#          all post-start failures finish the connector_runs row terminally.
+# Database/ORM: ConnectorRunORM lifecycle, RawReportFileORM evidence, run/raw
+#               join rows, GoogleRevenueSourceRowORM upserts, and commits.
+# Standards: Per-report failures are contained; generator-level failures finish
+#            the run FAILED; fail-safe cleanup prevents stuck RUNNING rows.
+# Blast Radius: Finance source rows and operator-visible run state.
+# Connections:
+#   - Function: run_one -> delegates the non-dry-run path here.
+#   - Function: _process_live_reports -> per-report processing loop.
+# ============================================================================
+def _run_live(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    account_id: str,
+    report_month: str,
+    credentials: Credentials,
+    triggered_by_user_id: UUID | None,
+) -> ConnectorRunOutcome:
     run_entry = start_run(
         session,
         tenant_id=tenant_id,
@@ -373,173 +385,35 @@ def run_one(
         report_month=report_month,
         triggered_by_user_id=triggered_by_user_id,
     )
-    # ``session.commit()`` here is intentional: if the process dies during
-    # the per-report loop the connector_runs row stays RUNNING with a real
-    # ``started_at`` instead of being rolled back to nothing. Future work
-    # (no current task): a sweeper for orphaned RUNNING rows from crashed
-    # processes.
     session.commit()
 
     counts = _zero_counts()
     per_report_failures: list[tuple[str, str]] = []
     per_report_failure_details: list[tuple[str, str, str | None]] = []
-    ordering_index = 0
-    # Sentinel flipped to True ONLY after a finish_run + session.commit()
-    # succeeds (bucket-B or bucket-C path). If both paths are short-circuited
-    # by an untyped exception (e.g. ParserError, RuntimeError) the outer
-    # ``finally`` below sweeps the connector_runs row from RUNNING to FAILED
-    # so the operator console never sees a row stuck in RUNNING forever.
     finished = False
-
     try:
         try:
-            runner = dispatch_connector(key=connector_key)
-            backend, scheme, bucket = _build_blob_backend()
-            repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
-            parser = _parser_for_connector(connector_key)
-            for produced in runner.produce_reports(
+            _process_live_reports(
                 session=session,
-                run=run_entry,
-                credentials=credentials,
-                report_month=report_month,
-                account_id=account_id,
-            ):
-                if isinstance(produced, ProducedReportFailure):
-                    report_type = produced.report_type
-                    parser_payload: dict[str, object] | None = None
-                    raw_bytes: bytes | None = None
-                    produced_error: Exception | None = produced.error
-                else:
-                    report_type, parser_payload, raw_bytes = produced
-                    produced_error = None
-                counts["reports_attempted"] += 1
-                # ``report_state`` is the per-report mutable handshake with
-                # ``_process_one_report``: after the raw_file row is flushed
-                # (step c) ``_process_one_report`` writes the id here so this
-                # except clause can mark it FAILED if a later step raises.
-                # Fresh dict per iteration -- a previous report's id must
-                # never leak into the next report's bucket B handler.
-                report_state: dict[str, object] = {}
-                try:
-                    if produced_error is not None:
-                        raise produced_error
-                    if parser_payload is None or raw_bytes is None:
-                        raise RuntimeError("connector runner yielded incomplete report")
-                    rows_upserted = _process_one_report(
-                        session=session,
-                        tenant_id=tenant_id,
-                        connector_key=connector_key,
-                        run_entry=run_entry,
-                        backend=backend,
-                        scheme=scheme,
-                        bucket=bucket,
-                        parser=parser,
-                        repo=repo,
-                        report_type=report_type,
-                        report_month=report_month,
-                        parser_payload=parser_payload,
-                        raw_bytes=raw_bytes,
-                        ordering_index=ordering_index,
-                        triggered_by_user_id=triggered_by_user_id,
-                        report_state=report_state,
-                    )
-                    # M6 fix: commit each successful report BEFORE the next
-                    # iteration can run a session.rollback(). The no-raw-file
-                    # branch of bucket B (later in this except) calls
-                    # session.rollback() to clear half-flushed state from a
-                    # pre-flush failure; without this per-report commit, that
-                    # rollback would also wipe prior reports' flushed-but-
-                    # uncommitted writes (raw_file + link + source_rows +
-                    # PARSED transition) and the run row would lie to
-                    # operators with reports_succeeded > 0 but no on-disk
-                    # evidence. Transactional model: each successful report
-                    # is its own transaction; the terminal finish_run is its
-                    # own separate commit at the end.
-                    session.commit()
-                    # Increment AFTER the commit so a commit failure
-                    # propagates into the except handler and is recorded
-                    # as a failure once, not double-counted as both
-                    # succeeded and failed. ``_process_one_report`` does
-                    # NOT increment ``reports_succeeded`` itself for the
-                    # same reason -- this is the single source of truth.
-                    counts["reports_succeeded"] += 1
-                    counts["rows_upserted_total"] += rows_upserted
-                except Exception as exc:
-                    # Bucket B: per-report containment. Widened from
-                    # ``GoogleConnectorError`` (T27) to ``Exception`` (T28) so
-                    # the inner try/except also catches non-typed failures
-                    # like ParserError (subclass of ValueError, not
-                    # GoogleConnectorError). A single bad report -> PARTIAL
-                    # run, not a terminal FAILED that loses the other
-                    # reports' rows.
-                    error_class = type(exc).__name__
-                    per_report_failures.append((report_type, error_class))
-                    per_report_failure_details.append(
-                        (report_type, error_class, _safe_failure_detail(exc))
-                    )
-                    counts["reports_failed"] += 1
-                    # If the failure happened AFTER the raw_file row was
-                    # flushed (parse / upsert / mark_parsed), mark that
-                    # row DOWNLOADED -> FAILED so it doesn't sit
-                    # DOWNLOADED forever. Failures BEFORE the flush
-                    # (checksum / blob upload) leave the key absent and
-                    # there's nothing to mark.
-                    in_flight_raw_file_id = report_state.get("raw_file_id")
-                    if in_flight_raw_file_id is not None:
-                        try:
-                            # mark_failed only accepts DOWNLOADED|FAILED ->
-                            # FAILED. If by some race the row was already
-                            # marked PARSED before the exception fired,
-                            # mark_failed would raise RawFileLifecycleError.
-                            # In practice mark_parsed is the LAST step of
-                            # _process_one_report, so a PARSED-then-fail
-                            # race is not reachable on the YT path -- the
-                            # try/except here is belt-and-suspenders.
-                            mark_failed(
-                                session,
-                                raw_file_id=in_flight_raw_file_id,
-                                tenant_id=tenant_id,
-                            )
-                            session.commit()
-                        except Exception:
-                            # Cleanup must not mask the per-report failure
-                            # we just appended to per_report_failures. If
-                            # mark_failed itself raises (DB disconnect, race
-                            # with QUARANTINED), roll the session back to a
-                            # clean state and continue: the finish_run sweep
-                            # at the bottom of the loop will still record
-                            # the run-level error_summary correctly.
-                            session.rollback()
-                    else:
-                        # No raw_file in flight: roll back any
-                        # half-flushed state from the early-failure path
-                        # (checksum/upload exceptions) so the next
-                        # iteration starts clean.
-                        session.rollback()
-                ordering_index += 1
-        except Exception as exc:
-            # Bucket C: any escaping exception (typed GoogleConnectorError
-            # *or* untyped like a runtime error from runner.produce_reports
-            # itself) terminates the run as FAILED. Widened from
-            # ``GoogleConnectorError`` (T27) to ``Exception`` (T28) so
-            # ParserError and other non-typed errors that escape the
-            # generator (e.g. from list_supported_jobs) get a proper FAILED
-            # row written instead of relying on the fail-safe finally.
-            # The inner Bucket B handler is also widened to Exception, so
-            # "in-flight raw_file" handling lives there; Bucket C primarily
-            # catches generator-level failures where no raw_file exists.
-            # Roll back any partial unflushed state so finish_run runs
-            # against a clean session.
-            session.rollback()
-            finished_run = finish_run(
-                session,
                 tenant_id=tenant_id,
-                connector_run_id=UUID(run_entry.id),
-                status="FAILED",
+                connector_key=connector_key,
+                account_id=account_id,
+                report_month=report_month,
+                credentials=credentials,
+                triggered_by_user_id=triggered_by_user_id,
+                run_entry=run_entry,
                 counts=counts,
-                error_summary=f"{type(exc).__name__}: {exc!s}",
+                per_report_failures=per_report_failures,
+                per_report_failure_details=per_report_failure_details,
             )
-            session.commit()
+        except Exception as exc:
+            finished_run = _finish_failed_live_run(
+                session=session,
+                tenant_id=tenant_id,
+                run_entry=run_entry,
+                counts=counts,
+                exc=exc,
+            )
             finished = True
             return ConnectorRunOutcome(
                 run=finished_run,
@@ -547,57 +421,242 @@ def run_one(
                 per_report_failures=per_report_failures,
             )
 
-        # Bucket B aggregate finish. Status reflects per-report outcomes:
-        # - all OK and at least one succeeded   -> SUCCEEDED
-        # - none succeeded                      -> FAILED
-        # - mixed                                -> PARTIAL
-        status = _derive_terminal_status(counts)
-        finished_run = finish_run(
-            session,
+        finished_run = _finish_aggregate_live_run(
+            session=session,
             tenant_id=tenant_id,
-            connector_run_id=UUID(run_entry.id),
-            status=status,
+            run_entry=run_entry,
             counts=counts,
-            error_summary=_summarize_failures(per_report_failure_details),
+            per_report_failure_details=per_report_failure_details,
         )
-        session.commit()
         finished = True
         return ConnectorRunOutcome(
-            run=finished_run, counts=counts, per_report_failures=per_report_failures
+            run=finished_run,
+            counts=counts,
+            per_report_failures=per_report_failures,
         )
     finally:
         if not finished:
-            # An untyped error (e.g. ParserError -- subclass of ValueError,
-            # not GoogleConnectorError -- or a generic RuntimeError) escaped
-            # both the inner per-report ``except`` and the bucket-C ``except``.
-            # Without this sweep the connector_runs row would sit in RUNNING
-            # forever, which is strictly worse than FAILED for operator
-            # forensics. T28 widened bucket B/C to ``except Exception`` so
-            # ParserError is caught typed-ly; this fail-safe defends the
-            # residual case where ``finish_run`` itself fails (e.g. DB
-            # disconnect during cleanup).
-            #
-            # rollback() first so any partial inner-loop state (e.g. a
-            # ``RawReportFileORM`` that was added but not yet linked) is
-            # cleared before finish_run runs against a clean session.
-            session.rollback()
-            try:
-                finish_run(
-                    session,
-                    tenant_id=tenant_id,
-                    connector_run_id=UUID(run_entry.id),
-                    status="FAILED",
-                    counts=counts,
-                    error_summary="orchestrator aborted unexpectedly",
-                )
-                session.commit()
-            except Exception:
-                # Best-effort cleanup: if the rollback + finish_run path itself
-                # fails (e.g. DB disconnect), swallow it so the original
-                # exception still propagates out of the ``finally`` to the
-                # caller. Masking the primary error here would hide the real
-                # root cause from CLI and audit.
-                session.rollback()
+            _sweep_unfinished_live_run(
+                session=session,
+                tenant_id=tenant_id,
+                run_entry=run_entry,
+                counts=counts,
+            )
+
+
+def _process_live_reports(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    account_id: str,
+    report_month: str,
+    credentials: Credentials,
+    triggered_by_user_id: UUID | None,
+    run_entry: ConnectorRunEntry,
+    counts: dict[str, int],
+    per_report_failures: list[tuple[str, str]],
+    per_report_failure_details: list[tuple[str, str, str | None]],
+) -> None:
+    runner = dispatch_connector(key=connector_key)
+    backend, scheme, bucket = _build_blob_backend()
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    parser = _parser_for_connector(connector_key)
+    for ordering_index, produced in enumerate(
+        runner.produce_reports(
+            session=session,
+            run=run_entry,
+            credentials=credentials,
+            report_month=report_month,
+            account_id=account_id,
+        )
+    ):
+        _handle_live_produced_report(
+            session=session,
+            tenant_id=tenant_id,
+            connector_key=connector_key,
+            report_month=report_month,
+            triggered_by_user_id=triggered_by_user_id,
+            run_entry=run_entry,
+            backend=backend,
+            scheme=scheme,
+            bucket=bucket,
+            parser=parser,
+            repo=repo,
+            produced=produced,
+            ordering_index=ordering_index,
+            counts=counts,
+            per_report_failures=per_report_failures,
+            per_report_failure_details=per_report_failure_details,
+        )
+
+
+def _unpack_produced_report(
+    produced: ProducedReport,
+) -> tuple[str, dict[str, object] | None, bytes | None, Exception | None]:
+    if isinstance(produced, ProducedReportFailure):
+        return produced.report_type, None, None, produced.error
+    report_type, parser_payload, raw_bytes = produced
+    return report_type, parser_payload, raw_bytes, None
+
+
+def _handle_live_produced_report(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    report_month: str,
+    triggered_by_user_id: UUID | None,
+    run_entry: ConnectorRunEntry,
+    backend: BlobStorageBackend,
+    scheme: str,
+    bucket: str,
+    parser: YouTubeReportingParser,
+    repo: SqlAlchemyGoogleRevenueSourceRowRepository,
+    produced: ProducedReport,
+    ordering_index: int,
+    counts: dict[str, int],
+    per_report_failures: list[tuple[str, str]],
+    per_report_failure_details: list[tuple[str, str, str | None]],
+) -> None:
+    report_type, parser_payload, raw_bytes, produced_error = _unpack_produced_report(
+        produced
+    )
+    counts["reports_attempted"] += 1
+    report_state: dict[str, object] = {}
+    try:
+        if produced_error is not None:
+            raise produced_error
+        if parser_payload is None or raw_bytes is None:
+            raise RuntimeError("connector runner yielded incomplete report")
+        rows_upserted = _process_one_report(
+            session=session,
+            tenant_id=tenant_id,
+            connector_key=connector_key,
+            run_entry=run_entry,
+            backend=backend,
+            scheme=scheme,
+            bucket=bucket,
+            parser=parser,
+            repo=repo,
+            report_type=report_type,
+            report_month=report_month,
+            parser_payload=parser_payload,
+            raw_bytes=raw_bytes,
+            ordering_index=ordering_index,
+            triggered_by_user_id=triggered_by_user_id,
+            report_state=report_state,
+        )
+        session.commit()
+        counts["reports_succeeded"] += 1
+        counts["rows_upserted_total"] += rows_upserted
+    except Exception as exc:
+        _record_live_report_failure(
+            session=session,
+            tenant_id=tenant_id,
+            report_type=report_type,
+            report_state=report_state,
+            exc=exc,
+            counts=counts,
+            per_report_failures=per_report_failures,
+            per_report_failure_details=per_report_failure_details,
+        )
+
+
+def _record_live_report_failure(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    report_type: str,
+    report_state: dict[str, object],
+    exc: Exception,
+    counts: dict[str, int],
+    per_report_failures: list[tuple[str, str]],
+    per_report_failure_details: list[tuple[str, str, str | None]],
+) -> None:
+    error_class = type(exc).__name__
+    per_report_failures.append((report_type, error_class))
+    per_report_failure_details.append(
+        (report_type, error_class, _safe_failure_detail(exc))
+    )
+    counts["reports_failed"] += 1
+    in_flight_raw_file_id = report_state.get("raw_file_id")
+    if in_flight_raw_file_id is None:
+        session.rollback()
+        return
+    try:
+        mark_failed(
+            session,
+            raw_file_id=in_flight_raw_file_id,
+            tenant_id=tenant_id,
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+
+
+def _finish_failed_live_run(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    run_entry: ConnectorRunEntry,
+    counts: dict[str, int],
+    exc: Exception,
+) -> ConnectorRunEntry:
+    session.rollback()
+    finished_run = finish_run(
+        session,
+        tenant_id=tenant_id,
+        connector_run_id=UUID(run_entry.id),
+        status="FAILED",
+        counts=counts,
+        error_summary=f"{type(exc).__name__}: {exc!s}",
+    )
+    session.commit()
+    return finished_run
+
+
+def _finish_aggregate_live_run(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    run_entry: ConnectorRunEntry,
+    counts: dict[str, int],
+    per_report_failure_details: list[tuple[str, str, str | None]],
+) -> ConnectorRunEntry:
+    status = _derive_terminal_status(counts)
+    finished_run = finish_run(
+        session,
+        tenant_id=tenant_id,
+        connector_run_id=UUID(run_entry.id),
+        status=status,
+        counts=counts,
+        error_summary=_summarize_failures(per_report_failure_details),
+    )
+    session.commit()
+    return finished_run
+
+
+def _sweep_unfinished_live_run(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    run_entry: ConnectorRunEntry,
+    counts: dict[str, int],
+) -> None:
+    session.rollback()
+    try:
+        finish_run(
+            session,
+            tenant_id=tenant_id,
+            connector_run_id=UUID(run_entry.id),
+            status="FAILED",
+            counts=counts,
+            error_summary="orchestrator aborted unexpectedly",
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
 
 
 # ----------------------------------------------------------------------------
@@ -1084,6 +1143,16 @@ def _csv_to_parser_payload(
 
 def _month_bounds(*, report_month: str, report_id: str) -> tuple[date_cls, date_cls]:
     expected_month = report_month.strip()
+    if (
+        len(expected_month) != 7
+        or expected_month[4] != "-"
+        or not expected_month[:4].isdigit()
+        or not expected_month[5:].isdigit()
+    ):
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"report_month {expected_month!r} not YYYY-MM",
+        )
     try:
         year_text, month_text = expected_month.split("-", 1)
         year = int(year_text)
