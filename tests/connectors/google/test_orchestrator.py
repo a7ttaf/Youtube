@@ -37,12 +37,16 @@ from ums_smart_revenue.connectors.google.errors import (
     InactiveCredentialError,
     OAuthRefreshError,
 )
+from ums_smart_revenue.connectors.google.youtube_analytics_client import (
+    _DIMENSIONS as _ANALYTICS_DIMENSIONS,
+)
+from ums_smart_revenue.connectors.google.youtube_analytics_client import (
+    _METRICS as _ANALYTICS_METRICS,
+)
 from ums_smart_revenue.connectors.google_source_parsers.base import ParserError
 from ums_smart_revenue.connectors.runs import orchestrator as orchestrator_module
 from ums_smart_revenue.connectors.runs.blob_storage import compute_checksum
 from ums_smart_revenue.connectors.runs.orchestrator import (
-    _ANALYTICS_DIMENSIONS,  # noqa: PLC2701
-    _ANALYTICS_METRICS,  # noqa: PLC2701
     ConnectorRunOutcome,
     ProducedReportFailure,
     ProducedReportSuccess,
@@ -2739,10 +2743,9 @@ def test_dry_run_parser_failure_increments_reports_failed_and_keeps_per_report_f
 
 # ============================================================================
 # B2.5 Task 33: YouTubeAnalyticsRunner orchestrator integration test.
-# Two channels seeded: UC_orch_cms (CMS-owned) and UC_orch_ext (outside-CMS,
-# content_owner_id=None). Both satisfy active=True + revenue_required=True so
-# list_target_channels returns both. The runner fetches one report per channel
-# and the orchestrator should SUCCEED with reports_succeeded == 2.
+# One CMS-owned channel and one outside-CMS channel are seeded. Only the
+# CMS-owned channel is eligible for B2.5, so the runner fetches one targeted
+# content-owner report and the orchestrator should SUCCEED with one report.
 # ============================================================================
 
 _ANALYTICS_CONNECTOR_KEY = "youtube-analytics"
@@ -2753,6 +2756,7 @@ def _make_analytics_parser_payload(
     *,
     channel_id: str,
     report_month: str,
+    account_id: str = _ANALYTICS_ACCOUNT_ID,
 ) -> dict[str, object]:
     """Minimal valid payload for YouTubeAnalyticsParser.parse().
 
@@ -2765,14 +2769,14 @@ def _make_analytics_parser_payload(
       ``channel`` must appear as a DIMENSION header.
     - rows carries one data row: [<channel_id>, "<YYYY-MM>", <float>].
     """
-    import calendar as _calendar
     year, month = report_month.split("-")
-    last_day = _calendar.monthrange(int(year), int(month))[1]
+    first_day = f"{year}-{month}-01"
     return {
         "query_request": {
-            "ids": f"channel=={channel_id}",
-            "startDate": f"{year}-{month}-01",
-            "endDate": f"{year}-{month}-{last_day:02d}",
+            "ids": f"contentOwner=={account_id}",
+            "filters": f"channel=={channel_id}",
+            "startDate": first_day,
+            "endDate": first_day,
             "metrics": "estimatedRevenue",
             "dimensions": "channel,month",
         },
@@ -2787,15 +2791,14 @@ def _make_analytics_parser_payload(
     }
 
 
-def test_run_one_with_youtube_analytics_succeeds_per_channel(
+def test_run_one_with_youtube_analytics_succeeds_for_cms_channels_only(
     session: Session, _stub_secret_resolver
 ) -> None:
     """Drive run_one end-to-end with the youtube-analytics connector.
 
     Two channels are seeded: one CMS-owned (content_owner_id matches
     _ANALYTICS_ACCOUNT_ID) and one outside-CMS (content_owner_id=None).
-    Both satisfy active=True + revenue_required=True so list_target_channels
-    returns both.
+    Only the CMS-owned channel is eligible for B2.5.
 
     YouTubeAnalyticsClient.fetch_channel_report is patched at orchestrator
     module scope to return a parser-ready payload per channel (no network).
@@ -2804,10 +2807,10 @@ def test_run_one_with_youtube_analytics_succeeds_per_channel(
 
     Asserts:
     - outcome.run.status == "SUCCEEDED"
-    - outcome.counts["reports_succeeded"] == 2  (one per channel)
+    - outcome.counts["reports_succeeded"] == 1
     - outcome.counts["reports_failed"] == 0
-    - Two raw_report_files rows with source == "youtube_analytics"
-    - Two connector_run_raw_files join rows
+    - One raw_report_files row with source == "youtube_analytics"
+    - One connector_run_raw_files join row
     - Source rows in google_revenue_source_rows for the tenant
     """
     # ----- seed channels -----
@@ -2847,16 +2850,10 @@ def test_run_one_with_youtube_analytics_succeeds_per_channel(
         channel_id="UC_orch_cms",
         report_month=report_month,
     )
-    payload_ext = _make_analytics_parser_payload(
-        channel_id="UC_orch_ext",
-        report_month=report_month,
-    )
-
-    def fake_fetch_channel_report(*, channel_id: str, report_month: str) -> dict:
+    def fake_fetch_channel_report(*, account_id: str, channel_id: str, report_month: str) -> dict:
+        assert account_id == _ANALYTICS_ACCOUNT_ID
         if channel_id == "UC_orch_cms":
             return payload_cms
-        if channel_id == "UC_orch_ext":
-            return payload_ext
         raise ValueError(f"unexpected channel_id in stub: {channel_id!r}")
 
     with patch(
@@ -2900,18 +2897,18 @@ def test_run_one_with_youtube_analytics_succeeds_per_channel(
     assert outcome.run.status == "SUCCEEDED"
     assert outcome.per_report_failures == []
 
-    # ----- counts: one report succeeded per channel -----
+    # ----- counts: only the CMS-owned channel is fetched -----
     counts = outcome.counts
-    assert counts["reports_attempted"] == 2
-    assert counts["reports_succeeded"] == 2
+    assert counts["reports_attempted"] == 1
+    assert counts["reports_succeeded"] == 1
     assert counts["reports_failed"] == 0
-    assert counts["rows_upserted_total"] >= 2  # at least 1 source row per channel
+    assert counts["rows_upserted_total"] >= 1
 
     # ----- durable side effects: raw_report_files -----
     raw_files = session.scalars(
         select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
     ).all()
-    assert len(raw_files) == 2
+    assert len(raw_files) == 1
     for rf in raw_files:
         assert rf.parse_status == "PARSED"
         assert rf.source == "youtube_analytics"
@@ -2923,7 +2920,7 @@ def test_run_one_with_youtube_analytics_succeeds_per_channel(
             ConnectorRunRawFileORM.tenant_id == TENANT_ID
         )
     ).all()
-    assert len(links) == 2
+    assert len(links) == 1
 
     # ----- durable side effects: google_revenue_source_rows -----
     source_rows = session.scalars(
@@ -2933,6 +2930,214 @@ def test_run_one_with_youtube_analytics_succeeds_per_channel(
     ).all()
     assert len(source_rows) == counts["rows_upserted_total"]
     assert all(r.source_system == "youtube_analytics" for r in source_rows)
+
+
+def test_run_one_with_youtube_analytics_contains_channel_fetch_failures(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """A single targeted-channel API failure must stay in Bucket B.
+
+    The failing channel is ordered first so this test proves the runner yields
+    a per-report failure and then continues on to the remaining CMS-owned
+    channel instead of aborting the whole run.
+    """
+    session.add_all(
+        [
+            YouTubeChannelORM(
+                id=uuid4(),
+                tenant_id=TENANT_ID,
+                youtube_channel_id="UC_001_fail",
+                channel_name="Fail First",
+                content_owner_id=_ANALYTICS_ACCOUNT_ID,
+                active=True,
+                revenue_required=True,
+            ),
+            YouTubeChannelORM(
+                id=uuid4(),
+                tenant_id=TENANT_ID,
+                youtube_channel_id="UC_002_ok",
+                channel_name="Succeed Second",
+                content_owner_id=_ANALYTICS_ACCOUNT_ID,
+                active=True,
+                revenue_required=True,
+            ),
+        ]
+    )
+    session.flush()
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ANALYTICS_CONNECTOR_KEY,
+        account_id=_ANALYTICS_ACCOUNT_ID,
+    )
+
+    payload_ok = _make_analytics_parser_payload(
+        channel_id="UC_002_ok",
+        report_month="2026-05",
+    )
+
+    def fake_fetch_channel_report(*, account_id: str, channel_id: str, report_month: str) -> dict:
+        assert account_id == _ANALYTICS_ACCOUNT_ID
+        assert report_month == "2026-05"
+        if channel_id == "UC_001_fail":
+            raise GoogleApiServerError(
+                method="GET",
+                url="https://youtubeanalytics.googleapis.com/v2/reports",
+                status=503,
+                attempts=4,
+            )
+        if channel_id == "UC_002_ok":
+            return payload_ok
+        raise ValueError(f"unexpected channel_id in stub: {channel_id!r}")
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+    ) as yt_analytics_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+        yt_analytics_cls.return_value.fetch_channel_report.side_effect = (
+            fake_fetch_channel_report
+        )
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=_ANALYTICS_CONNECTOR_KEY,
+            account_id=_ANALYTICS_ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert isinstance(outcome, ConnectorRunOutcome)
+    assert outcome.run is not None
+    assert outcome.run.status == "PARTIAL"
+    assert outcome.counts["reports_attempted"] == 2
+    assert outcome.counts["reports_succeeded"] == 1
+    assert outcome.counts["reports_failed"] == 1
+    assert outcome.per_report_failures == [
+        ("youtube_analytics", "GoogleApiServerError")
+    ]
+
+    raw_files = session.scalars(
+        select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
+    ).all()
+    assert len(raw_files) == 1
+    assert raw_files[0].source == "youtube_analytics"
+    assert raw_files[0].parse_status == "PARSED"
+
+
+def test_run_one_with_youtube_analytics_empty_success_replaces_existing_rows(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """An empty successful rerun must delete stale rows on the content-owner scope."""
+    session.add(
+        YouTubeChannelORM(
+            id=uuid4(),
+            tenant_id=TENANT_ID,
+            youtube_channel_id="UC_stale_scope",
+            channel_name="Stale Scope Channel",
+            content_owner_id=_ANALYTICS_ACCOUNT_ID,
+            active=True,
+            revenue_required=True,
+        )
+    )
+    session.flush()
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ANALYTICS_CONNECTOR_KEY,
+        account_id=_ANALYTICS_ACCOUNT_ID,
+    )
+
+    payload_with_row = _make_analytics_parser_payload(
+        channel_id="UC_stale_scope",
+        report_month="2026-05",
+    )
+    payload_empty = {**payload_with_row, "rows": []}
+
+    def _run_with_payload(payload: dict[str, object]) -> ConnectorRunOutcome:
+        def fake_fetch_channel_report(
+            *, account_id: str, channel_id: str, report_month: str
+        ) -> dict:
+            assert account_id == _ANALYTICS_ACCOUNT_ID
+            assert channel_id == "UC_stale_scope"
+            assert report_month == "2026-05"
+            return payload
+
+        with patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+        ) as yt_analytics_cls, patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+        ) as local_cls, patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+        ) as refresh, patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+        ) as http_cls:
+            http_cls.return_value.close.return_value = None
+            refresh.return_value = None
+            yt_analytics_cls.return_value.fetch_channel_report.side_effect = (
+                fake_fetch_channel_report
+            )
+
+            backend = local_cls.return_value
+            store: dict[str, bytes] = {}
+            backend.upload.side_effect = (
+                lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+            )
+            backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+            return run_one(
+                session,
+                tenant_id=TENANT_ID,
+                connector_key=_ANALYTICS_CONNECTOR_KEY,
+                account_id=_ANALYTICS_ACCOUNT_ID,
+                report_month="2026-05",
+            )
+
+    first_outcome = _run_with_payload(payload_with_row)
+    assert first_outcome.run is not None
+    assert first_outcome.run.status == "SUCCEEDED"
+    initial_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "youtube_analytics",
+            GoogleRevenueSourceRowORM.report_type == "reports.query",
+            GoogleRevenueSourceRowORM.report_month == "2026-05",
+        )
+    ).all()
+    assert len(initial_rows) >= 1
+    assert {
+        row.source_account_id for row in initial_rows
+    } == {f"contentOwner=={_ANALYTICS_ACCOUNT_ID}"}
+
+    second_outcome = _run_with_payload(payload_empty)
+    assert second_outcome.run is not None
+    assert second_outcome.run.status == "SUCCEEDED"
+    assert second_outcome.counts["reports_attempted"] == 1
+    assert second_outcome.counts["reports_succeeded"] == 1
+    assert second_outcome.counts["rows_upserted_total"] == 0
+
+    final_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "youtube_analytics",
+            GoogleRevenueSourceRowORM.report_type == "reports.query",
+            GoogleRevenueSourceRowORM.report_month == "2026-05",
+        )
+    ).all()
+    assert final_rows == []
 
 
 def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trips(
@@ -2950,7 +3155,7 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
 
     This test does NOT patch LocalFileStoreBackend. It points the real backend
     at ``tmp_path`` via env-vars, drives ``run_one`` through to SUCCEEDED for
-    two channels, then asserts each channel's bytes landed on disk at the
+    the CMS-owned channel only, then asserts that channel's bytes landed on disk at the
     deterministic path and each persisted RawReportFileORM carries a
     ``file-store://`` URL.
     """
@@ -2997,41 +3202,32 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
         channel_id="UC_fs_cms",
         report_month=report_month,
     )
-    payload_ext = _make_analytics_parser_payload(
-        channel_id="UC_fs_ext",
-        report_month=report_month,
-    )
-
     # Pre-compute the raw_bytes the runner will produce so we can assert
     # the exact bytes on disk. The runner spreads the stub response then
     # OVERWRITES query_request with a freshly constructed dict (using the
     # canonical _ANALYTICS_METRICS/_ANALYTICS_DIMENSIONS constants). Mirror
     # that logic here so the expected bytes match what lands on disk.
-    import calendar as _calendar
     _year, _month = report_month.split("-")
-    _last_day = _calendar.monthrange(int(_year), int(_month))[1]
+    _first_day = f"{_year}-{_month}-01"
 
     def _runner_query_request(channel_id: str) -> dict:
         return {
-            "ids": f"channel=={channel_id}",
-            "startDate": f"{_year}-{_month}-01",
-            "endDate": f"{_year}-{_month}-{_last_day:02d}",
+            "ids": f"contentOwner=={_ANALYTICS_ACCOUNT_ID}",
+            "filters": f"channel=={channel_id}",
+            "startDate": _first_day,
+            "endDate": _first_day,
             "metrics": _ANALYTICS_METRICS,
             "dimensions": _ANALYTICS_DIMENSIONS,
         }
 
     augmented_cms = {**payload_cms, "query_request": _runner_query_request("UC_fs_cms")}
-    augmented_ext = {**payload_ext, "query_request": _runner_query_request("UC_fs_ext")}
-    raw_bytes_cms = _json.dumps(augmented_cms, sort_keys=True).encode("utf-8")
-    raw_bytes_ext = _json.dumps(augmented_ext, sort_keys=True).encode("utf-8")
+    raw_bytes_cms = json.dumps(augmented_cms, sort_keys=True).encode("utf-8")
     checksum_cms = _hashlib.sha256(raw_bytes_cms).hexdigest()
-    checksum_ext = _hashlib.sha256(raw_bytes_ext).hexdigest()
 
-    def fake_fetch_channel_report(*, channel_id: str, report_month: str) -> dict:
+    def fake_fetch_channel_report(*, account_id: str, channel_id: str, report_month: str) -> dict:
+        assert account_id == _ANALYTICS_ACCOUNT_ID
         if channel_id == "UC_fs_cms":
             return payload_cms
-        if channel_id == "UC_fs_ext":
-            return payload_ext
         raise ValueError(f"unexpected channel_id in stub: {channel_id!r}")
 
     with patch(
@@ -3064,7 +3260,7 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
     assert outcome.run is not None
     assert outcome.run.status == "SUCCEEDED"
     assert outcome.per_report_failures == []
-    assert outcome.counts["reports_succeeded"] == 2
+    assert outcome.counts["reports_succeeded"] == 1
 
     # The deterministic path layout for analytics:
     # file-store://{bucket}/{tenant_id}/{connector_key}/{report_type}/{month}/{checksum}.json
@@ -3083,24 +3279,20 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
             / f"{checksum}.json"
         )
 
-    for channel_id, raw_bytes, checksum in [
-        ("UC_fs_cms", raw_bytes_cms, checksum_cms),
-        ("UC_fs_ext", raw_bytes_ext, checksum_ext),
-    ]:
-        expected_path = _expected_path(checksum)
-        assert expected_path.exists(), (
-            f"raw blob for {channel_id} did not land on disk at {expected_path}; "
-            f"tmp_path tree: {list(tmp_path.rglob('*'))}"
-        )
-        assert expected_path.read_bytes() == raw_bytes, (
-            f"blob bytes mismatch for {channel_id}"
-        )
+    expected_path = _expected_path(checksum_cms)
+    assert expected_path.exists(), (
+        f"raw blob for UC_fs_cms did not land on disk at {expected_path}; "
+        f"tmp_path tree: {list(tmp_path.rglob('*'))}"
+    )
+    assert expected_path.read_bytes() == raw_bytes_cms, (
+        "blob bytes mismatch for UC_fs_cms"
+    )
 
     # The persisted file_url for each channel must carry file-store scheme + bucket.
     raw_files = session.scalars(
         select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
     ).all()
-    assert len(raw_files) == 2
+    assert len(raw_files) == 1
     for raw_file in raw_files:
         assert raw_file.file_url.startswith("file-store://testbucket/"), (
             f"expected file-store:// scheme + testbucket prefix; got {raw_file.file_url!r}"
@@ -3108,7 +3300,7 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
         assert raw_file.file_url.endswith(".json")
 
 
-def test_run_one_with_youtube_analytics_dry_run_succeeds(
+def test_run_one_with_youtube_analytics_dry_run_succeeds_for_cms_channels_only(
     session: Session, _stub_secret_resolver
 ) -> None:
     """Regression: dry-run with youtube-analytics must not raise AttributeError.
@@ -3125,14 +3317,14 @@ def test_run_one_with_youtube_analytics_dry_run_succeeds(
 
     This test exercises the exact code path: two channels seeded (one
     CMS-owned, one outside-CMS), same stub pattern as
-    test_run_one_with_youtube_analytics_succeeds_per_channel, but invoked
-    with dry_run=True.
+    test_run_one_with_youtube_analytics_succeeds_for_cms_channels_only, but
+    invoked with dry_run=True.
 
     Asserts:
     - No AttributeError (regression guard: test must FAIL before the str() fix)
     - outcome.run is None  (dry-run writes no connector_runs row)
-    - counts["reports_attempted"] == 2
-    - counts["reports_succeeded"] == 2
+    - counts["reports_attempted"] == 1
+    - counts["reports_succeeded"] == 1
     - Zero rows in connector_runs and raw_report_files
     """
     # ----- seed channels (mirrors the live-path test) -----
@@ -3171,16 +3363,10 @@ def test_run_one_with_youtube_analytics_dry_run_succeeds(
         channel_id="UC_dry_ana_cms",
         report_month=report_month,
     )
-    payload_ext = _make_analytics_parser_payload(
-        channel_id="UC_dry_ana_ext",
-        report_month=report_month,
-    )
-
-    def fake_fetch_channel_report(*, channel_id: str, report_month: str) -> dict:
+    def fake_fetch_channel_report(*, account_id: str, channel_id: str, report_month: str) -> dict:
+        assert account_id == _ANALYTICS_ACCOUNT_ID
         if channel_id == "UC_dry_ana_cms":
             return payload_cms
-        if channel_id == "UC_dry_ana_ext":
-            return payload_ext
         raise ValueError(f"unexpected channel_id in stub: {channel_id!r}")
 
     with patch(
@@ -3221,14 +3407,14 @@ def test_run_one_with_youtube_analytics_dry_run_succeeds(
     assert outcome.run is None
     assert outcome.per_report_failures == []
 
-    # ----- counts: both channels attempted + parsed cleanly -----
+    # ----- counts: only the CMS-owned channel is attempted + parsed cleanly -----
     counts = outcome.counts
-    assert counts["reports_attempted"] == 2
-    assert counts["reports_succeeded"] == 2
+    assert counts["reports_attempted"] == 1
+    assert counts["reports_succeeded"] == 1
     assert counts["reports_failed"] == 0
-    # Each channel payload has one data row -> at least 2 rows total.
+    # The single CMS payload has one data row.
     # Per-category split stays 0: no upsert runs on dry-run path.
-    assert counts["rows_upserted_total"] >= 2
+    assert counts["rows_upserted_total"] >= 1
     assert counts["rows_upserted_created"] == 0
     assert counts["rows_upserted_updated"] == 0
     assert counts["rows_upserted_unchanged"] == 0

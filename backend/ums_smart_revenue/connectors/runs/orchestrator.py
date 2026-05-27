@@ -87,14 +87,11 @@ from ums_smart_revenue.connectors.google.secret_resolver import (
     resolve_secret,
 )
 from ums_smart_revenue.connectors.google.youtube_analytics_client import (
-    _DIMENSIONS as _ANALYTICS_DIMENSIONS,
-)
-from ums_smart_revenue.connectors.google.youtube_analytics_client import (
-    _METRICS as _ANALYTICS_METRICS,
-)
-from ums_smart_revenue.connectors.google.youtube_analytics_client import (
     YouTubeAnalyticsClient,
     list_target_channels,
+)
+from ums_smart_revenue.connectors.google.youtube_analytics_client import (
+    _build_query_request as _build_analytics_query_request,
 )
 from ums_smart_revenue.connectors.google.youtube_reporting_client import (
     YouTubeReportingClient,
@@ -941,10 +938,16 @@ def _process_one_report(
             repo=repo,
             tenant_id=tenant_id,
             source_system=source_system,
-            report_type=report_type,
+            report_type=_fallback_source_report_type(
+                parser=parser,
+                default_report_type=report_type,
+            ),
             report_month=report_month,
             parsed_rows=parsed_rows,
-            fallback_source_account_id=account_id,
+            fallback_source_account_id=_fallback_source_account_id(
+                parser_payload=parser_payload,
+                default_account_id=account_id,
+            ),
         )
 
         # Lifecycle transition: DOWNLOADED -> PARSED. Raises
@@ -986,6 +989,53 @@ def _source_row_raw_file_id(raw_files: list[RawReportFileORM]) -> UUID | None:
 
 
 # ============================================================================
+# Purpose: Map the outer produced-report label to the source-row report_type
+#          used for stale-row cleanup when a successful replacement yields no
+#          parsed rows.
+# Database/ORM: None directly; the returned value scopes repository deletes.
+# Standards: Keeps the generic orchestrator aware of parser-owned report_type
+#            normalization without hardcoding row writes here.
+# Blast Radius: Source-of-truth stale-row deletion scope only.
+# Connections:
+#   - Function: _process_one_report -> provides the fallback report_type for
+#     _delete_stale_source_rows.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> emits ParsedSourceRow.report_type="reports.query".
+# ============================================================================
+def _fallback_source_report_type(
+    *, parser: YouTubeReportingParser | YouTubeAnalyticsParser, default_report_type: str,
+) -> str:
+    if isinstance(parser, YouTubeAnalyticsParser):
+        return "reports.query"
+    return default_report_type
+
+
+# ============================================================================
+# Purpose: Reuse the parsed payload's canonical account selector for stale-row
+#          cleanup when a successful replacement report yields zero rows.
+# Database/ORM: None directly; the returned value scopes repository deletes.
+# Standards: Fail closed to the persisted query_request.ids when present, else
+#            preserve legacy callers by falling back to account_id.
+# Blast Radius: Source-of-truth stale-row deletion scope only. A mismatch here
+#               can leave obsolete finance rows behind after an empty rerun.
+# Connections:
+#   - Function: _process_one_report -> passes the result to
+#     _delete_stale_source_rows after parser success.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> source_account_id matches query_request.ids.
+# ============================================================================
+def _fallback_source_account_id(
+    *, parser_payload: dict[str, object], default_account_id: str,
+) -> str:
+    query_request = parser_payload.get("query_request")
+    if isinstance(query_request, dict):
+        ids = query_request.get("ids")
+        if isinstance(ids, str) and ids.strip():
+            return ids.strip()
+    return default_account_id
+
+
+# ============================================================================
 # Purpose: Delete source rows that existed for a report scope but disappeared
 #          from the successful replacement payload.
 # Database/ORM: GoogleRevenueSourceRowORM via repository delete.
@@ -1007,19 +1057,24 @@ def _delete_stale_source_rows(
     parsed_rows: Iterable[ParsedSourceRow],
     fallback_source_account_id: str,
 ) -> None:
-    keys_by_account: dict[str, set[str]] = {}
+    keys_by_scope: dict[tuple[str, str], set[str]] = {}
     for row in parsed_rows:
-        keys_by_account.setdefault(row.source_account_id, set()).add(
+        keys_by_scope.setdefault((row.report_type, row.source_account_id), set()).add(
             row.source_row_key
         )
-    if not keys_by_account and fallback_source_account_id.strip():
-        keys_by_account[fallback_source_account_id.strip()] = set()
-    for source_account_id, keys in keys_by_account.items():
+    if not keys_by_scope and fallback_source_account_id.strip():
+        # FIX: empty successful replacements still need the PARSER-LEVEL
+        # report_type/account scope. Using the outer produced report label
+        # (`youtube_analytics`) misses persisted analytics rows, whose parser
+        # writes `report_type="reports.query"`, and leaves stale finance rows
+        # behind on rerun.
+        keys_by_scope[(report_type.strip(), fallback_source_account_id.strip())] = set()
+    for (row_report_type, source_account_id), keys in keys_by_scope.items():
         repo.delete_stale_for_scope(
             tenant_id,
             source_system=source_system,
             source_account_id=source_account_id,
-            report_type=report_type,
+            report_type=row_report_type,
             report_month=report_month,
             keep_source_row_keys=keys,
         )
@@ -2247,7 +2302,9 @@ class YouTubeAnalyticsRunner:
     parser-friendly payload dict (the raw ``reports.query`` JSON body augmented
     with the ``query_request`` key the parser needs), and the raw JSON bytes
     for blob storage and replay. The orchestrator stores each channel's blob
-    separately; it never synthesises a cross-channel bundle.
+    separately; it never synthesises a cross-channel bundle. Only channels
+    attached to the current CMS account are fetched here; outside-CMS channels
+    remain out of scope for B2.5.
 
     The class references ``YouTubeAnalyticsClient`` and ``list_target_channels``
     by bare name so tests that patch
@@ -2271,37 +2328,43 @@ class YouTubeAnalyticsRunner:
         # itself, consistent with YouTubeReportingRunner's widened contract.
         # ConnectorRunEntry.tenant_id is a str; UUID() converts it for
         # list_target_channels which requires a typed UUID boundary.
-        tenant_id: UUID = UUID(run.tenant_id)  # type: ignore[union-attr]
+        tenant_id: UUID = UUID(str(run.tenant_id))  # type: ignore[union-attr]
         http = GoogleHttpClient(credentials=credentials)
         try:
             client = YouTubeAnalyticsClient(http=http)
             channel_ids = list_target_channels(
                 session, tenant_id=tenant_id, account_id=account_id,
             )
-            # Hoist invariants out of the per-channel loop: these values are
-            # the same for every channel in this run and are pure computations.
-            year_str, month_str = report_month.split("-")
-            last_day = monthrange(int(year_str), int(month_str))[1]
             for channel_id in channel_ids:
-                response: dict[str, object] = client.fetch_channel_report(
-                    channel_id=channel_id, report_month=report_month,
+                query_request = _build_analytics_query_request(
+                    account_id=account_id,
+                    channel_id=channel_id,
+                    report_month=report_month,
                 )
+                try:
+                    response: dict[str, object] = client.fetch_channel_report(
+                        account_id=account_id,
+                        channel_id=channel_id,
+                        report_month=report_month,
+                    )
+                except OAuthRefreshError:
+                    raise
+                except GoogleConnectorError as exc:
+                    # FIX: A single targeted-channel fetch failure is a
+                    # report-scoped problem, not a run-scoped abort. Yield a
+                    # Bucket B failure so the orchestrator can mark the run
+                    # PARTIAL and continue with the remaining channels.
+                    yield ProducedReportFailure(
+                        report_type="youtube_analytics", error=exc,
+                    )
+                    continue
                 # Augment the raw response with the query_request metadata the
-                # parser needs to build row keys and validate the date range.
-                # The client's params mirror what fetch_channel_report sends to
-                # the Google endpoint; reconstruct them from report_month.
-                # _ANALYTICS_DIMENSIONS/_ANALYTICS_METRICS are the single source
-                # of truth (imported from youtube_analytics_client) so the locked
-                # metric/dimension contract cannot drift between client and runner.
+                # parser needs to build row keys and validate the range. Reuse
+                # the exact request dict the client sent so replay and stale-row
+                # cleanup see the canonical contentOwner/channel scope.
                 parser_payload: dict[str, object] = {
                     **response,
-                    "query_request": {
-                        "ids": f"channel=={channel_id}",
-                        "startDate": f"{year_str}-{month_str}-01",
-                        "endDate": f"{year_str}-{month_str}-{last_day:02d}",
-                        "metrics": _ANALYTICS_METRICS,
-                        "dimensions": _ANALYTICS_DIMENSIONS,
-                    },
+                    "query_request": dict(query_request),
                 }
                 # Stored blob is the AUGMENTED parser_payload (includes injected
                 # query_request metadata), not the raw API response — this is a

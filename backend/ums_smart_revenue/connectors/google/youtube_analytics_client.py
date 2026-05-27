@@ -1,20 +1,21 @@
-"""YouTube Analytics v2 reports.query targeted channel ingestion (spec §5.5).
+"""YouTube Analytics v2 reports.query targeted CMS-channel ingestion (spec §5.5).
 
 Endpoint: GET https://youtubeanalytics.googleapis.com/v2/reports
 Query params:
-  ids=channel==<youtube_channel_id>
+  ids=contentOwner==<cms_account_id>
+  filters=channel==<youtube_channel_id>
   startDate=<YYYY-MM-01>
-  endDate=<YYYY-MM-last>
+  endDate=<YYYY-MM-01>
   metrics=estimatedRevenue,...   <- locked per parser requirements
-  dimensions=channel,month,...
+  dimensions=channel,month
 
 Channels are sourced from the youtube_channels registry (PR #25) filtered
-by tenant + active + revenue_required + content_owner match-or-null.
+by tenant + active + revenue_required + content_owner match only. Outside-CMS
+revenue sourcing remains unresolved and is not ingested here.
 """
 from __future__ import annotations
 
 import re
-from calendar import monthrange
 from uuid import UUID
 
 from sqlalchemy import select
@@ -33,11 +34,45 @@ _DIMENSIONS = "channel,month"
 
 
 # ============================================================================
+# Purpose: Build the canonical reports.query parameter set for one CMS-owned
+#   channel-month slice. This keeps the HTTP request and the stored
+#   query_request metadata identical so stale-row cleanup and replay use the
+#   exact same account/channel scope.
+# Database/ORM: None.
+# Standards: Validates report_month once; returns deterministic str params; no
+#   network side effects.
+# Blast Radius: Finance ingestion scope and replay fidelity for YouTube
+#   Analytics payloads. A drift here would mis-attribute source rows or fetch
+#   an unsupported Google report shape.
+# Connections:
+#   - Method: YouTubeAnalyticsClient.fetch_channel_report -> sends these params
+#     to Google.
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     persists the same query_request alongside the response payload.
+# ============================================================================
+def _build_query_request(
+    *, account_id: str, channel_id: str, report_month: str,
+) -> dict[str, str]:
+    if not _REPORT_MONTH_PATTERN.fullmatch(report_month):
+        raise MalformedReportMonthError(report_month=report_month)
+    year, month = report_month.split("-")
+    first_day = f"{year}-{month}-01"
+    return {
+        "ids": f"contentOwner=={account_id}",
+        "filters": f"channel=={channel_id}",
+        "startDate": first_day,
+        "endDate": first_day,
+        "metrics": _METRICS,
+        "dimensions": _DIMENSIONS,
+    }
+
+
+# ============================================================================
 # Purpose: Query the youtube_channels registry for channels that belong to
 #   a tenant and are eligible for revenue ingestion from a given CMS account.
 #   A channel is eligible when active=True, revenue_required=True, and its
-#   content_owner_id either matches the account_id or is NULL (outside-CMS
-#   channels are always included for the tenant regardless of account).
+#   content_owner_id matches the account_id. Outside-CMS channels are excluded
+#   until their revenue source is implemented separately.
 # Database/ORM: YouTubeChannelORM (youtube_channels table).
 # Standards: Typed UUID boundary; parameterized SQLAlchemy select; ordering
 #   is deterministic (ascending youtube_channel_id) for stable test assertions
@@ -61,10 +96,7 @@ def list_target_channels(
             YouTubeChannelORM.tenant_id == tenant_id,
             YouTubeChannelORM.active.is_(True),
             YouTubeChannelORM.revenue_required.is_(True),
-            (
-                (YouTubeChannelORM.content_owner_id == account_id)
-                | (YouTubeChannelORM.content_owner_id.is_(None))
-            ),
+            YouTubeChannelORM.content_owner_id == account_id,
         )
         .order_by(YouTubeChannelORM.youtube_channel_id.asc())
     )
@@ -77,18 +109,18 @@ class YouTubeAnalyticsClient:
 
     # ============================================================================
     # Purpose: Issue a single YouTube Analytics v2 reports.query GET request for
-    #   one channel and one calendar month, returning the parsed JSON body ready
-    #   for YouTubeAnalyticsParser. Date bounds are computed from report_month so
-    #   the caller never constructs raw date strings.
+    #   one CMS-owned channel and one calendar month, returning the parsed JSON
+    #   body ready for YouTubeAnalyticsParser. The request is content-owner
+    #   scoped and channel-filtered so revenue metrics remain on a supported
+    #   Google contract while preserving per-channel ingestion.
     # Database/ORM: None.
     # Standards: Typed keyword-only parameters; delegates HTTP + retry policy
     #   entirely to GoogleHttpClient.request(); raises GoogleConnectorError
     #   subclasses (auth/rate-limit/server/client) on any non-200 outcome.
     # Blast Radius: Finance revenue ingestion — each call produces the raw
     #   payload for one channel-month. A bug here (wrong date bounds, wrong
-    #   channel id format) would produce incorrect or empty revenue rows without
-    #   raising an error. The ids= format "channel==<id>" is required by the
-    #   YouTube Analytics API and must not be altered.
+    #   account/channel scoping) would produce incorrect or empty revenue rows
+    #   without raising an error.
     # Connections:
     #   - File: backend/ums_smart_revenue/connectors/google/http_client.py ->
     #     GoogleHttpClient.request() handles Bearer auth, retry, and JSON decode.
@@ -96,18 +128,11 @@ class YouTubeAnalyticsClient:
     #     design.md §5.5 -> endpoint, metric set, and dimension contract.
     # ============================================================================
     def fetch_channel_report(
-        self, *, channel_id: str, report_month: str,
+        self, *, account_id: str, channel_id: str, report_month: str,
     ) -> dict[str, object]:
-        if not _REPORT_MONTH_PATTERN.fullmatch(report_month):
-            raise MalformedReportMonthError(report_month=report_month)
-        year, month = report_month.split("-")
-        year_i, month_i = int(year), int(month)
-        last_day = monthrange(year_i, month_i)[1]
-        params = {
-            "ids": f"channel=={channel_id}",
-            "startDate": f"{year}-{month}-01",
-            "endDate": f"{year}-{month}-{last_day:02d}",
-            "metrics": _METRICS,
-            "dimensions": _DIMENSIONS,
-        }
+        params = _build_query_request(
+            account_id=account_id,
+            channel_id=channel_id,
+            report_month=report_month,
+        )
         return self._http.request(method="GET", url=_BASE, params=params)

@@ -40,13 +40,13 @@ def _insert_channel(session, *, tenant_id, youtube_channel_id, content_owner_id,
     session.flush()
 
 
-def test_list_target_channels_includes_cms_match_and_outside_cms(session) -> None:
+def test_list_target_channels_excludes_outside_cms_channels(session) -> None:
     tenant_id = uuid4()
     _insert_channel(session, tenant_id=tenant_id, youtube_channel_id="UC-1", content_owner_id="owner-a")
     _insert_channel(session, tenant_id=tenant_id, youtube_channel_id="UC-2", content_owner_id=None)
     _insert_channel(session, tenant_id=tenant_id, youtube_channel_id="UC-3", content_owner_id="owner-b")
     channels = list_target_channels(session, tenant_id=tenant_id, account_id="owner-a")
-    assert channels == ["UC-1", "UC-2"]
+    assert channels == ["UC-1"]
 
 
 def test_list_target_channels_excludes_inactive_and_no_revenue(session) -> None:
@@ -64,9 +64,10 @@ def test_list_target_channels_excludes_inactive_and_no_revenue(session) -> None:
 def test_fetch_channel_report(mock_credentials) -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         params = dict(request.url.params)
-        assert params["ids"] == "channel==UC-xyz"
+        assert params["ids"] == "contentOwner==owner-a"
+        assert params["filters"] == "channel==UC-xyz"
         assert params["startDate"] == "2026-05-01"
-        assert params["endDate"] == "2026-05-31"
+        assert params["endDate"] == "2026-05-01"
         assert params["metrics"] == "estimatedRevenue,estimatedAdRevenue,grossRevenue"
         assert params["dimensions"] == "channel,month"
         return httpx.Response(200, content=json.dumps({"rows": [["2026-05", "USD", "1.23"]]}).encode())
@@ -74,7 +75,11 @@ def test_fetch_channel_report(mock_credentials) -> None:
         credentials=mock_credentials, transport=httpx.MockTransport(handler),
     )
     client = YouTubeAnalyticsClient(http=http)
-    body = client.fetch_channel_report(channel_id="UC-xyz", report_month="2026-05")
+    body = client.fetch_channel_report(
+        account_id="owner-a",
+        channel_id="UC-xyz",
+        report_month="2026-05",
+    )
     assert body == {"rows": [["2026-05", "USD", "1.23"]]}
 
 
@@ -83,4 +88,8 @@ def test_fetch_channel_report_rejects_malformed_report_month(mock_credentials, b
     http = GoogleHttpClient(credentials=mock_credentials, transport=httpx.MockTransport(lambda _r: httpx.Response(200)))
     client = YouTubeAnalyticsClient(http=http)
     with pytest.raises(MalformedReportMonthError):
-        client.fetch_channel_report(channel_id="UC-xyz", report_month=bad_month)
+        client.fetch_channel_report(
+            account_id="owner-a",
+            channel_id="UC-xyz",
+            report_month=bad_month,
+        )
