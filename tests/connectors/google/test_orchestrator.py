@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
+from decimal import Decimal
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
@@ -41,6 +42,7 @@ from ums_smart_revenue.connectors.runs import orchestrator as orchestrator_modul
 from ums_smart_revenue.connectors.runs.blob_storage import compute_checksum
 from ums_smart_revenue.connectors.runs.orchestrator import (
     ConnectorRunOutcome,
+    ProducedReportSuccess,
     YouTubeReportingRunner,
     _csv_to_parser_payload,
     run_one,
@@ -272,39 +274,51 @@ def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff
             ),
         ]
 
-        produced = list(
-            YouTubeReportingRunner.produce_reports(
-                session=session,
-                run=None,
-                credentials=object(),
-                report_month="2026-05",
-                account_id=ACCOUNT_ID,
-            )
+        produced_iter = YouTubeReportingRunner.produce_reports(
+            session=session,
+            run=None,
+            credentials=object(),
+            report_month="2026-05",
+            account_id=ACCOUNT_ID,
         )
-
-    assert len(produced) == 1
-    report_type, parser_payload, raw_bytes = produced[0]
-    assert report_type == "content_owner_estimated_revenue_a1"
-    assert parser_payload["report_metadata"] == {
-        "report_id": "combined:r-day-1,r-day-2",
-        "report_type": "content_owner_estimated_revenue_a1",
-    }
-    assert parser_payload["rows"] == [
-        {
-            "line_index": 0,
-            "date_range": {"start": "2026-05-01", "end": "2026-05-31"},
-            "dimensions": {
-                "channel": "UC_orch_alpha",
-                "content_owner": ACCOUNT_ID,
-            },
-            "metrics": {
-                "estimatedRevenue": "4.00",
-                "currencyCode": "USD",
-            },
-        }
-    ]
-    assert b"r-day-1" in raw_bytes
-    assert b"r-day-2" in raw_bytes
+        produced = next(produced_iter)
+        try:
+            assert isinstance(produced, ProducedReportSuccess)
+            assert produced.report_type == "content_owner_estimated_revenue_a1"
+            assert produced.parser_payload["report_metadata"] == {
+                "report_id": "combined:r-day-1,r-day-2",
+                "report_type": "content_owner_estimated_revenue_a1",
+            }
+            assert produced.parser_payload["rows"] == [
+                {
+                    "line_index": 0,
+                    "date_range": {"start": "2026-05-01", "end": "2026-05-31"},
+                    "dimensions": {
+                        "channel": "UC_orch_alpha",
+                        "content_owner": ACCOUNT_ID,
+                    },
+                    "metrics": {
+                        "estimatedRevenue": "4.00",
+                        "currencyCode": "USD",
+                    },
+                }
+            ]
+            assert [report.report_id for report in produced.raw_reports] == [
+                "r-day-1",
+                "r-day-2",
+            ]
+            assert produced.raw_reports[0].read_bytes() == (
+                b"date,channel_id,estimated_partner_revenue,currency_code\n"
+                b"2026-05-01,UC_orch_alpha,1.25,USD\n"
+            )
+            assert produced.raw_reports[1].read_bytes() == (
+                b"date,channel_id,estimated_partner_revenue,currency_code\n"
+                b"2026-05-02,UC_orch_alpha,2.75,USD\n"
+            )
+            with pytest.raises(StopIteration):
+                next(produced_iter)
+        finally:
+            produced_iter.close()
 
 
 def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
@@ -865,6 +879,10 @@ def test_run_one_handles_duplicate_empty_daily_reports_in_one_run(
         account_id=ACCOUNT_ID,
     )
     header_only_csv = b"date,channel,estimatedRevenue,currencyCode\n"
+    populated_csv = (
+        b"date,channel,estimatedRevenue,currencyCode\n"
+        b"2026-05-01,UC_orch_alpha,7.500000,USD\n"
+    )
 
     with patch(
         "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
@@ -880,13 +898,20 @@ def test_run_one_handles_duplicate_empty_daily_reports_in_one_run(
 
         client = yt_client_cls.return_value
         client.list_supported_jobs.return_value = [
-            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+            {"id": "job-1", "reportTypeId": "content_owner_estimated_revenue_a1"}
         ]
         client.list_reports_for_month.return_value = [
             {"id": "r-empty-1", "downloadUrl": "https://yt/r-empty-1"},
             {"id": "r-empty-2", "downloadUrl": "https://yt/r-empty-2"},
+            {"id": "r-populated-1", "downloadUrl": "https://yt/r-populated-1"},
+            {"id": "r-populated-2", "downloadUrl": "https://yt/r-populated-2"},
         ]
-        client.fetch_report.side_effect = [header_only_csv, header_only_csv]
+        client.fetch_report.side_effect = [
+            header_only_csv,
+            header_only_csv,
+            populated_csv,
+            populated_csv,
+        ]
 
         backend = local_cls.return_value
         store: dict[str, bytes] = {}
@@ -906,8 +931,75 @@ def test_run_one_handles_duplicate_empty_daily_reports_in_one_run(
     assert outcome.run is not None
     assert outcome.run.status == "SUCCEEDED"
     assert outcome.counts["reports_failed"] == 0
-    assert len(session.scalars(select(RawReportFileORM)).all()) == 1
-    assert len(session.scalars(select(ConnectorRunRawFileORM)).all()) == 1
+    raw_files = session.scalars(
+        select(RawReportFileORM).order_by(RawReportFileORM.checksum)
+    ).all()
+    assert len(raw_files) == 2
+    assert len(session.scalars(select(ConnectorRunRawFileORM)).all()) == 2
+    source_rows = session.scalars(select(GoogleRevenueSourceRowORM)).all()
+    assert len(source_rows) == 1
+    assert source_rows[0].amount_native == Decimal("7.500000")
+
+
+def test_run_one_skips_monthly_aggregate_when_daily_download_fails(
+    session: Session, stub_secret_resolver
+) -> None:
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes = (
+        b"date,channel,estimatedRevenue,currencyCode\n"
+        b"2026-05-01,UC_orch_alpha,7.500000,USD\n"
+    )
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "content_owner_estimated_revenue_a1"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r-ok", "downloadUrl": "https://yt/r-ok"},
+            {"id": "r-fail", "downloadUrl": "https://yt/r-fail"},
+        ]
+        client.fetch_report.side_effect = [
+            csv_bytes,
+            GoogleApiServerError(
+                method="GET", url="https://yt/r-fail", status=503, attempts=3,
+            ),
+        ]
+
+        local_cls.return_value.upload.side_effect = AssertionError(
+            "partial monthly aggregate must not be uploaded"
+        )
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "FAILED"
+    assert outcome.counts["reports_attempted"] == 1
+    assert outcome.counts["reports_succeeded"] == 0
+    assert outcome.counts["reports_failed"] == 1
+    assert session.scalars(select(RawReportFileORM)).all() == []
     assert session.scalars(select(GoogleRevenueSourceRowORM)).all() == []
 
 

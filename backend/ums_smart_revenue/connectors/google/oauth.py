@@ -40,20 +40,25 @@ def build_credentials_from_payload(payload: str) -> Credentials:
         raise MalformedSecretPayloadError(detail=f"json: {exc.msg}") from exc
     if not isinstance(data, dict):
         raise MalformedSecretPayloadError(detail="payload is not a JSON object")
-    missing = [f for f in _REQUIRED_FIELDS if not data.get(f)]
-    if missing:
-        raise MalformedSecretPayloadError(
-            detail=f"missing fields: {', '.join(missing)}"
-        )
+    fields = {field: _validated_required_field(data, field) for field in _REQUIRED_FIELDS}
     scopes = _validated_scopes(data.get("scopes"))
     return Credentials(
         token=None,  # google-auth fetches on first refresh
-        refresh_token=data["refresh_token"],
-        client_id=data["client_id"],
-        client_secret=data["client_secret"],
-        token_uri=data["token_uri"],
+        refresh_token=fields["refresh_token"],
+        client_id=fields["client_id"],
+        client_secret=fields["client_secret"],
+        token_uri=fields["token_uri"],
         scopes=scopes,
     )
+
+
+def _validated_required_field(data: dict[str, object], field: str) -> str:
+    value = data.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise MalformedSecretPayloadError(
+            detail=f"{field} must be a non-empty string"
+        )
+    return value.strip()
 
 
 def _validated_scopes(value: object) -> list[str] | None:

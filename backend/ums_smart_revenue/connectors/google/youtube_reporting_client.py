@@ -49,6 +49,20 @@ def _report_freshness_key(report: dict[str, object]) -> tuple[str, str, str]:
     )
 
 
+# ============================================================================
+# Purpose: Group replacement YouTube Reporting descriptors by the period they
+#          cover so only the newest descriptor for a day/month is downloaded.
+# Database/ORM: None.
+# Standards: Pure descriptor normalization; no network, database, or secret
+#            access. Missing period fields fall back to report id.
+# Blast Radius: Connector download selection only. Authorization, finance,
+#               audit, Neo4j, and exports are unaffected until orchestration.
+# Connections:
+#   - Function: _newest_reports_by_period -> uses this key for replacement
+#     report de-duplication.
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     consumes the sorted report descriptors returned by the client.
+# ============================================================================
 def _report_period_key(report: dict[str, object]) -> tuple[str, str, str]:
     start = _text_sort_key(report.get("startTime"))
     end = _text_sort_key(report.get("endTime"))

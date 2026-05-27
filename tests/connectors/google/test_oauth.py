@@ -58,6 +58,27 @@ def test_build_credentials_rejects_missing_field(missing_field: str) -> None:
     assert missing_field in ctx.value.detail
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("refresh_token", ""),
+        ("client_id", "   "),
+        ("client_secret", {"secret": "secret-abc"}),
+        ("token_uri", 123),
+    ],
+)
+def test_build_credentials_rejects_non_string_required_fields(
+    field: str, value: object
+) -> None:
+    payload = json.loads(_VALID_PAYLOAD)
+    payload[field] = value
+
+    with pytest.raises(MalformedSecretPayloadError) as ctx:
+        build_credentials_from_payload(json.dumps(payload))
+
+    assert field in ctx.value.detail
+
+
 def test_build_credentials_accepts_scopes_list() -> None:
     payload = json.loads(_VALID_PAYLOAD)
     payload["scopes"] = [
