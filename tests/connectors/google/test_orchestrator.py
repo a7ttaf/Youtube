@@ -732,3 +732,156 @@ def test_bucket_c_generator_error_marks_run_failed_and_reraises(
         )
         is None
     )
+
+
+def test_bucket_b_pre_flush_failure_on_second_report_preserves_first_report(
+    session: Session, stub_secret_resolver
+) -> None:
+    """M6 regression: report #1 succeeds; report #2 fails BEFORE its raw_file
+    row is flushed (``upload_and_verify`` raises in step 2 of
+    ``_process_one_report``, before the ``RawReportFileORM`` is added in
+    step 3). The Bucket B handler's ``session.rollback()`` in the
+    no-raw-file branch must NOT wipe report #1's already-flushed-but-
+    uncommitted state. Each successful report is committed individually so
+    prior successes are durable across later failures.
+
+    Without the per-report commit, a single rollback in the no-raw-file
+    branch erases report #1's RawReportFileORM, ConnectorRunRawFileORM,
+    and GoogleRevenueSourceRowORM writes — even though the in-memory
+    ``counts["reports_succeeded"]`` still reports 1, the on-disk state is
+    a lie. This test asserts the durable side-effect (raw_files in the
+    DB) survives the rollback.
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes_a = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-01,UC_orch_alpha,cms-orch-1,10.000000,USD\n"
+    )
+    csv_bytes_b = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-02,UC_orch_beta,cms-orch-1,20.000000,USD\n"
+    )
+
+    # Patch ``upload_and_verify`` on the orchestrator module so call #1
+    # behaves normally (delegates to the real backend so report #1's
+    # raw_file flush + upsert + mark_parsed all succeed) and call #2
+    # raises ``GoogleApiServerError`` BEFORE ``_process_one_report`` adds
+    # the report #2 raw_file row. This drives the no-raw-file branch of
+    # Bucket B — the branch that originally called ``session.rollback()``
+    # and wiped report #1's flushed-but-uncommitted state.
+    from ums_smart_revenue.connectors.runs import blob_storage as _blob_storage
+    real_upload_and_verify = _blob_storage.upload_and_verify
+    call_count = {"n": 0}
+
+    def flaky_upload_and_verify(*, backend, storage_uri, content):
+        call_count["n"] += 1
+        if call_count["n"] == 2:
+            raise GoogleApiServerError(
+                method="PUT", url=storage_uri, status=503, attempts=1,
+            )
+        return real_upload_and_verify(
+            backend=backend, storage_uri=storage_uri, content=content
+        )
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.upload_and_verify",
+        side_effect=flaky_upload_and_verify,
+    ):
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"},
+            {"id": "job-2", "reportTypeId": "content_owner_basic_a3"},
+        ]
+        reports_by_job = {
+            "job-1": [{"id": "r1", "downloadUrl": "https://yt/r1"}],
+            "job-2": [{"id": "r2", "downloadUrl": "https://yt/r2"}],
+        }
+        client.list_reports_for_month.side_effect = (
+            lambda *, account_id, job_id, report_month: reports_by_job[job_id]
+        )
+        bytes_by_url = {"https://yt/r1": csv_bytes_a, "https://yt/r2": csv_bytes_b}
+        client.fetch_report.side_effect = (
+            lambda *, download_url: bytes_by_url[download_url]
+        )
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    # Outcome: PARTIAL — report #1 succeeded, report #2 failed pre-flush.
+    assert isinstance(outcome, ConnectorRunOutcome)
+    assert outcome.run is not None
+    assert outcome.run.status == "PARTIAL"
+    assert outcome.counts["reports_attempted"] == 2
+    assert outcome.counts["reports_succeeded"] == 1
+    assert outcome.counts["reports_failed"] == 1
+    assert outcome.per_report_failures == [
+        ("content_owner_basic_a3", "GoogleApiServerError")
+    ]
+
+    # Critical M6 assertion: report #1's RawReportFileORM row must still
+    # exist after the run completes — proving the per-report commit made
+    # it durable BEFORE report #2's no-raw-file-branch ``session.rollback()``
+    # could wipe it. If this assertion fails with len == 0, the M6 bug is
+    # back: the rollback wiped the flushed-but-uncommitted report #1 state
+    # and the run row is now lying to operators (``reports_succeeded == 1``
+    # but no raw_file evidence).
+    raw_files = session.scalars(
+        select(RawReportFileORM)
+        .where(RawReportFileORM.tenant_id == TENANT_ID)
+        .order_by(RawReportFileORM.downloaded_at)
+    ).all()
+    assert len(raw_files) == 1, (
+        f"Expected exactly 1 raw_file (report #1's, since report #2 failed "
+        f"pre-flush). Got {len(raw_files)} — likely a session.rollback() "
+        f"wiped report #1's flushed-but-uncommitted state (M6 regression)."
+    )
+    assert raw_files[0].parse_status == "PARSED"
+    assert raw_files[0].report_type == "channel_basic_a2"
+
+    # Source rows for report #1 must also be durable.
+    source_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
+        )
+    ).all()
+    assert len(source_rows) >= 1, (
+        "Expected report #1's GoogleRevenueSourceRowORM rows to survive "
+        "report #2's rollback (M6 regression)."
+    )
+
+    # Run row reflects PARTIAL with the failing report's error in
+    # error_summary.
+    run_row = session.scalar(
+        select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
+    )
+    assert run_row is not None
+    assert run_row.status == "PARTIAL"
+    assert "GoogleApiServerError" in (run_row.error_summary or "")

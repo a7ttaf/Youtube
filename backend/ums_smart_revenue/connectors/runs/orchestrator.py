@@ -8,7 +8,8 @@ Happy path (this task, T27):
   3. ``build_credentials_from_payload(payload)`` returns a google-auth
      ``Credentials``.
   4. ``refresh_credentials(...)`` performs the initial token refresh; any
-     ``OAuthRefreshError`` escapes pre-``start_run`` (bucket A, T28).
+     ``OAuthRefreshError`` bubbles pre-``start_run`` so no connector_runs
+     row is created.
   5. ``start_run(...)`` commits the ``RUNNING`` row (forensic durability for
      ``started_at`` even if the process dies mid-loop).
   6. ``dispatch_connector(key=connector_key)`` returns a ``ConnectorRunner``
@@ -32,9 +33,9 @@ Happy path (this task, T27):
      ``session.commit()`` persists it.
   9. Returns an immutable ``ConnectorRunOutcome``.
 
-Failure handlers (buckets B/C beyond the inner per-report ``except``) and
-dry-run land in T28 / T29; audit wiring lands in B2.6 (T37). Existing files
-under ``connectors/google/`` (errors, http client, registry, secret resolvers,
+Dry-run lands in T29; bucket B/C handlers and per-report commit are wired
+by T28. Audit wiring lands in B2.6 (T37). Existing files under
+``connectors/google/`` (errors, http client, registry, secret resolvers,
 oauth, blob storage, raw-file helpers, the YT client) and the existing
 parser/repo (PR #43) are *not* touched here — T27 is additive.
 """
@@ -180,12 +181,22 @@ class ConnectorRunner(Protocol):
 #               repository / lifecycle helpers), GoogleRevenueSourceRowORM
 #               (write via SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many).
 # Standards: Typed-error contract via GoogleConnectorError subclasses.
-#            Two explicit session.commit() points: one after start_run for
-#            forensic ``started_at`` durability, one after finish_run for
-#            terminal status durability. The inner per-report block catches
-#            GoogleConnectorError so a single bad report doesn't abort the
-#            whole run; the outer try/except routes terminal failures into a
-#            FAILED finish_run (bucket C; full handler depth is T28).
+#            Transactional model -- explicit session.commit() points:
+#              - after start_run: forensic durability for the started_at
+#                marker even if the process dies mid-loop;
+#              - after each successful _process_one_report: per-report
+#                durability so a later report's pre-flush failure can't
+#                wipe earlier successes via the no-raw-file rollback (M6);
+#              - after mark_failed in bucket B: FAILED state persistence
+#                per raw_file;
+#              - after finish_run (terminal status): durability of the
+#                final run state, whether SUCCEEDED, PARTIAL, FAILED
+#                (typed bucket-C), or FAILED (fail-safe rescue).
+#            The inner per-report block catches Exception (T28 widened
+#            from GoogleConnectorError) so a single bad report -- typed
+#            OR untyped (e.g. ParserError) -- doesn't abort the whole
+#            run; the outer try/except (also widened) routes generator-
+#            level failures into a FAILED finish_run via bucket C.
 # Blast Radius: This is the ONLY production path that writes connector_runs
 #               rows, attaches raw_report_files to them, and upserts Google
 #               source rows during a live ingestion. Authorization, audit,
@@ -262,8 +273,9 @@ def run_one(
     )
     # ``session.commit()`` here is intentional: if the process dies during
     # the per-report loop the connector_runs row stays RUNNING with a real
-    # ``started_at`` instead of being rolled back to nothing. T28 will add
-    # a sweeper for orphaned RUNNING rows.
+    # ``started_at`` instead of being rolled back to nothing. Future work
+    # (no current task): a sweeper for orphaned RUNNING rows from crashed
+    # processes.
     session.commit()
 
     runner = dispatch_connector(key=connector_key)
@@ -317,6 +329,26 @@ def run_one(
                         counts=counts,
                         report_state=report_state,
                     )
+                    # M6 fix: commit each successful report BEFORE the next
+                    # iteration can run a session.rollback(). The no-raw-file
+                    # branch of bucket B (later in this except) calls
+                    # session.rollback() to clear half-flushed state from a
+                    # pre-flush failure; without this per-report commit, that
+                    # rollback would also wipe prior reports' flushed-but-
+                    # uncommitted writes (raw_file + link + source_rows +
+                    # PARSED transition) and the run row would lie to
+                    # operators with reports_succeeded > 0 but no on-disk
+                    # evidence. Transactional model: each successful report
+                    # is its own transaction; the terminal finish_run is its
+                    # own separate commit at the end.
+                    session.commit()
+                    # Increment AFTER the commit so a commit failure
+                    # propagates into the except handler and is recorded
+                    # as a failure once, not double-counted as both
+                    # succeeded and failed. ``_process_one_report`` does
+                    # NOT increment ``reports_succeeded`` itself for the
+                    # same reason -- this is the single source of truth.
+                    counts["reports_succeeded"] += 1
                 except Exception as exc:
                     # Bucket B: per-report containment. Widened from
                     # ``GoogleConnectorError`` (T27) to ``Exception`` (T28) so
@@ -417,8 +449,10 @@ def run_one(
             # both the inner per-report ``except`` and the bucket-C ``except``.
             # Without this sweep the connector_runs row would sit in RUNNING
             # forever, which is strictly worse than FAILED for operator
-            # forensics. T28 will add typed handlers for ParserError; this
-            # block is the unconditional fail-safe.
+            # forensics. T28 widened bucket B/C to ``except Exception`` so
+            # ParserError is caught typed-ly; this fail-safe defends the
+            # residual case where ``finish_run`` itself fails (e.g. DB
+            # disconnect during cleanup).
             #
             # rollback() first so any partial inner-loop state (e.g. a
             # ``RawReportFileORM`` that was added but not yet linked) is
@@ -536,18 +570,17 @@ def _process_one_report(
 
     # 5. Parse. ``list(...)`` forces the generator so a parser failure surfaces
     # here (typed ``ParserError``) instead of mid-upsert. ParserError is *not*
-    # a GoogleConnectorError, so it propagates out and the outer except in
-    # ``run_one`` (which catches GoogleConnectorError only) wouldn't trap it
-    # — T28 will add an explicit translator. For the happy-path test the
-    # parser succeeds.
+    # a GoogleConnectorError; it is caught by the widened Bucket B/C
+    # ``except Exception`` in ``run_one`` so no per-report-level translator
+    # is needed here. For the happy-path test the parser succeeds.
     parsed_rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
 
     # 6. Upsert. Returns the persisted entries (one per ParsedSourceRow);
     # the precise created-vs-updated split needs a pre-read of existing
-    # source_row_keys, which the happy-path test doesn't exercise. T28+
-    # can wire that count if downstream consumers need it; the run-level
-    # ``rows_upserted_total`` (sum of writes across all reports) is what
-    # the test asserts on.
+    # source_row_keys, which the happy-path test doesn't exercise. Future
+    # work (no current task) can wire that count if downstream consumers
+    # need it; the run-level ``rows_upserted_total`` (sum of writes across
+    # all reports) is what the test asserts on.
     written = repo.upsert_many(
         tenant_id,
         parsed_rows,
@@ -555,16 +588,20 @@ def _process_one_report(
         imported_by=triggered_by_user_id,
     )
     counts["rows_upserted_total"] += len(written)
-    # T28 will add accurate split tracking via a pre-read of existing
-    # source_row_keys. Until then, the per-category split fields stay at 0
-    # rather than over-claiming everything as 'created' (which would lie on
-    # the second ingest of an already-seen month).
+    # Future work (no current task): accurate created/updated/unchanged
+    # split via a pre-read of existing source_row_keys. Until then, the
+    # per-category split fields stay at 0 rather than over-claiming
+    # everything as 'created' (which would lie on the second ingest of an
+    # already-seen month).
 
     # 7. Lifecycle transition: DOWNLOADED -> PARSED. Raises
     # ``RawFileAlreadyParsedError`` if called twice on the same file, which
     # would only happen on a re-entrant orchestrator bug.
     mark_parsed(session, raw_file_id=raw_file_id, tenant_id=tenant_id)
-    counts["reports_succeeded"] += 1
+    # ``counts["reports_succeeded"] += 1`` lives in ``run_one``'s outer
+    # loop AFTER ``session.commit()`` so a commit failure (e.g. DB
+    # disconnect on the per-report flush) is recorded as a failure once,
+    # not double-counted as both succeeded and failed.
 
 
 # ----------------------------------------------------------------------------
