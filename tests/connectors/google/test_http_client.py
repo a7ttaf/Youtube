@@ -61,7 +61,7 @@ def test_request_passes_google_auth_transport_request_to_credentials() -> None:
             seen["url"] = url
             headers["Authorization"] = "Bearer captured"
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=b"{}")
 
     client = GoogleHttpClient(
@@ -141,7 +141,7 @@ def test_request_passes_query_params(mock_credentials) -> None:
 def test_4xx_client_errors_no_retry(mock_credentials, status) -> None:
     calls = []
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx.Request) -> httpx.Response:
         calls.append(1)
         return httpx.Response(status, content=b"{}")
 
@@ -158,7 +158,7 @@ def test_4xx_client_errors_no_retry(mock_credentials, status) -> None:
 def test_auth_errors_no_retry(mock_credentials, status) -> None:
     calls = []
 
-    def handler(request):
+    def handler(_request):
         calls.append(1)
         return httpx.Response(status, content=b"{}")
 
@@ -177,7 +177,7 @@ def test_429_retries_then_raises(mock_credentials, monkeypatch) -> None:
     )
     calls = []
 
-    def handler(request):
+    def handler(_request):
         calls.append(1)
         return httpx.Response(429, content=b"{}")
 
@@ -219,7 +219,7 @@ def test_429_without_retry_after_uses_backoff_schedule(mock_credentials, monkeyp
     )
     calls = []
 
-    def handler(request):
+    def handler(_request):
         calls.append(1)
         return httpx.Response(429, content=b"{}")
 
@@ -238,7 +238,7 @@ def test_5xx_retries_then_raises(mock_credentials, monkeypatch) -> None:
         lambda _: None,
     )
     calls = []
-    def handler(request):
+    def handler(_request):
         calls.append(1)
         return httpx.Response(503, content=b"{}")
     client = GoogleHttpClient(
@@ -252,7 +252,7 @@ def test_5xx_retries_then_raises(mock_credentials, monkeypatch) -> None:
 
 
 def test_non_json_response_raises_response_error(mock_credentials) -> None:
-    def handler(request):
+    def handler(_request):
         return httpx.Response(200, content=b"<html>not json</html>")
     client = GoogleHttpClient(
         credentials=mock_credentials, transport=httpx.MockTransport(handler),
@@ -263,7 +263,7 @@ def test_non_json_response_raises_response_error(mock_credentials) -> None:
 
 
 def test_non_object_json_raises_response_error(mock_credentials) -> None:
-    def handler(request):
+    def handler(_request):
         return httpx.Response(200, content=b"[1, 2, 3]")
     client = GoogleHttpClient(
         credentials=mock_credentials, transport=httpx.MockTransport(handler),

@@ -30,7 +30,7 @@ def test_list_supported_jobs_filters_to_whitelist(mock_credentials) -> None:
             {"id": "job-c", "reportTypeId": "channel_demographics_a1"},  # not supported
         ]
     }
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=json.dumps(payload).encode())
 
     http = GoogleHttpClient(
@@ -87,7 +87,7 @@ def test_list_supported_jobs_filters_out_jobs_with_missing_report_type_id(
         ]
     }
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=json.dumps(payload).encode())
 
     http = GoogleHttpClient(
@@ -106,7 +106,7 @@ def test_list_supported_jobs_treats_empty_next_page_token_as_terminal(
         "nextPageToken": "",  # empty-string terminator (not absent key)
     }
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx.Request) -> httpx.Response:
         return httpx.Response(200, content=json.dumps(payload).encode())
 
     http = GoogleHttpClient(
@@ -183,7 +183,7 @@ def test_list_reports_for_month_returns_oldest_create_time_first(
         ]
     )
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx.Request) -> httpx.Response:
         return _next_json_response(pages)
 
     http = GoogleHttpClient(
@@ -230,7 +230,7 @@ def test_list_reports_for_month_keeps_newest_replacement_per_period(
         ]
     )
 
-    def handler(request: httpx.Request) -> httpx.Response:
+    def handler(_request: httpx.Request) -> httpx.Response:
         return _next_json_response(pages)
 
     http = GoogleHttpClient(
@@ -290,6 +290,7 @@ def test_fetch_report_rejects_non_google_download_url_before_auth(
         called = False
 
         def fetch_bytes(self, *, url: str) -> bytes:
+            _ = url
             self.called = True
             return b""
 
