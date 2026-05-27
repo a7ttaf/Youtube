@@ -287,8 +287,7 @@ class ConnectorRunner(Protocol):
 # ============================================================================
 # DeepSource keeps this historical complexity issue anchored here after branch
 # logic was delegated to credential, dry-run, and live-run helpers.
-# skipcq: PY-R1000
-def run_one(
+def run_one(  # skipcq: PY-R1000
     session: Session,
     *,
     tenant_id: UUID,
@@ -1105,8 +1104,7 @@ class YouTubeReportingRunner:
 
     # DeepSource keeps historical findings anchored here after report iteration
     # moved to helpers; self is used for test-injected client type selection.
-    # skipcq: PYL-R0201, PY-R1000
-    def produce_reports(
+    def produce_reports(  # skipcq: PYL-R0201, PY-R1000
         self,
         *,
         session: Session,

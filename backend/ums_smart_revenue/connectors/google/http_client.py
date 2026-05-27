@@ -287,8 +287,7 @@ class GoogleHttpClient:
 
     # DeepSource keeps this historical complexity issue anchored here after the
     # retry loop was split into helper functions; local complexity is A(1).
-    # skipcq: PY-R1000
-    def _send_with_retry(
+    def _send_with_retry(  # skipcq: PY-R1000
         self,
         *,
         method: str,
