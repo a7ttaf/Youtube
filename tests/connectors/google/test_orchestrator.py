@@ -112,7 +112,7 @@ def session() -> Session:
 
 
 @pytest.fixture
-def stub_secret_resolver():
+def _stub_secret_resolver():
     """Register a ``local-secret://yt-creds`` resolver for the orchestrator's
     secret-resolve call.
 
@@ -342,7 +342,7 @@ def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff
 
 
 def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """Drive the orchestrator end-to-end against a single-report fixture.
 
@@ -469,7 +469,7 @@ def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
 
 
 def test_run_one_reuses_raw_file_inserted_by_racing_worker(
-    session: Session, stub_secret_resolver, monkeypatch: pytest.MonkeyPatch
+    session: Session, _stub_secret_resolver, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A concurrent worker can win the raw_report_files unique insert after
     our lookup but before our insert; this run should reuse that row instead
@@ -577,7 +577,7 @@ def test_run_one_reuses_raw_file_inserted_by_racing_worker(
 
 
 def test_run_one_real_local_file_store_backend_round_trips(
-    session: Session, stub_secret_resolver, tmp_path, monkeypatch
+    session: Session, _stub_secret_resolver, tmp_path, monkeypatch
 ) -> None:
     """End-to-end ingestion against the REAL LocalFileStoreBackend.
 
@@ -685,7 +685,7 @@ def test_run_one_real_local_file_store_backend_round_trips(
 
 
 def test_run_one_accepts_underscore_credential_alias(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """The admin credential API stores the B1 source-system key
     ``youtube_reporting``. ``run_one`` still accepts the CLI key
@@ -745,7 +745,7 @@ def test_run_one_accepts_underscore_credential_alias(
 
 
 def test_run_one_reuses_existing_parsed_raw_file_for_same_checksum(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """Retrying the same Google payload should not violate the raw-file
     checksum unique constraint. A PARSED existing raw file is linked to the
@@ -821,7 +821,7 @@ def test_run_one_reuses_existing_parsed_raw_file_for_same_checksum(
 
 
 def test_run_one_reopens_failed_raw_file_with_current_download_metadata(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     credential = _make_credential_row(
         session,
@@ -892,7 +892,7 @@ def test_run_one_reopens_failed_raw_file_with_current_download_metadata(
 
 
 def test_run_one_handles_duplicate_empty_daily_reports_in_one_run(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     _make_credential_row(
         session,
@@ -965,7 +965,7 @@ def test_run_one_handles_duplicate_empty_daily_reports_in_one_run(
 
 
 def test_run_one_persists_invalid_csv_evidence_before_shape_failure(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     _make_credential_row(
         session,
@@ -1024,7 +1024,7 @@ def test_run_one_persists_invalid_csv_evidence_before_shape_failure(
 
 
 def test_run_one_removes_stale_source_rows_when_replacement_omits_them(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     _make_credential_row(
         session,
@@ -1110,7 +1110,7 @@ def test_run_one_removes_stale_source_rows_when_replacement_omits_them(
 
 
 def test_run_one_skips_monthly_aggregate_when_daily_download_fails(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     _make_credential_row(
         session,
@@ -1172,7 +1172,7 @@ def test_run_one_skips_monthly_aggregate_when_daily_download_fails(
 
 
 def test_run_one_marks_run_failed_when_blob_backend_configuration_is_invalid(
-    session: Session, stub_secret_resolver, monkeypatch: pytest.MonkeyPatch
+    session: Session, _stub_secret_resolver, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Post-start blob backend setup failures must finish the run FAILED,
     not leave connector_runs stuck in RUNNING.
@@ -1209,7 +1209,7 @@ def test_run_one_marks_run_failed_when_blob_backend_configuration_is_invalid(
 
 
 def test_run_one_rejects_csv_rows_without_currency(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """The CSV adapter must not invent USD when Google omits currency
     metadata; that would make downstream revenue provenance ambiguous.
@@ -1276,7 +1276,7 @@ def test_run_one_rejects_csv_rows_without_currency(
 
 
 def test_oauth_refresh_error_during_report_fetch_ends_run_in_bucket_c(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """OAuth refresh failures can happen inside google-auth during any HTTP
     request. Those are terminal auth/runtime failures, not per-report data
@@ -1337,7 +1337,7 @@ def test_oauth_refresh_error_during_report_fetch_ends_run_in_bucket_c(
 
 
 def test_run_one_sweeps_running_to_failed_on_untyped_error(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """Defence-in-depth: even when the typed bucket-C handler itself can't
     record the FAILED status (e.g. the in-process ``finish_run`` call
@@ -1464,7 +1464,7 @@ def test_run_one_sweeps_running_to_failed_on_untyped_error(
 
 
 def test_bucket_a_no_credential_raises_and_no_run_row(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """Bucket A: missing credential surfaces ``CredentialNotFoundError`` and
     must NOT create a connector_runs row.
@@ -1495,7 +1495,7 @@ def test_bucket_a_no_credential_raises_and_no_run_row(
 
 
 def test_bucket_a_inactive_credential_raises_and_no_run_row(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """Bucket A: a credential row that exists but is not ``active`` must
     surface ``InactiveCredentialError`` and must NOT create a connector_runs
@@ -1532,7 +1532,7 @@ def test_bucket_a_inactive_credential_raises_and_no_run_row(
 
 
 def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status_partial(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """Bucket B: per-report failure AFTER the raw_file row is inserted.
 
@@ -1679,7 +1679,7 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
 
 
 def test_bucket_c_generator_error_marks_run_failed_without_cli_bucket_a_exit(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """Bucket C: a failure that escapes the per-report loop (pre-yield
     failure inside ``runner.produce_reports``) must:
@@ -1767,7 +1767,7 @@ def test_bucket_c_generator_error_marks_run_failed_without_cli_bucket_a_exit(
 
 
 def test_bucket_b_pre_flush_failure_on_second_report_preserves_first_report(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """M6 regression: report #1 succeeds; report #2 fails BEFORE its raw_file
     row is flushed (``upload_and_verify`` raises in step 2 of
@@ -1920,7 +1920,7 @@ def test_bucket_b_pre_flush_failure_on_second_report_preserves_first_report(
 
 
 def test_bucket_b_download_failure_on_second_report_preserves_first_report(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """Regression: report-download failures occur after report enumeration but
     before the runner can yield parser payloads. They are still per-report
@@ -2011,7 +2011,7 @@ def test_bucket_b_download_failure_on_second_report_preserves_first_report(
 
 
 def test_run_one_counts_rows_only_after_mark_parsed_and_commit(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """If a post-upsert lifecycle step fails, the failed report must not
     inflate rows_upserted_total or leave source rows behind.
@@ -2090,7 +2090,7 @@ def test_run_one_counts_rows_only_after_mark_parsed_and_commit(
 
 
 def test_dry_run_writes_nothing_returns_outcome_with_run_none(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """Dry-run contract (spec §5.4): writes NOTHING to the database (no
     connector_runs row, no raw_file row, no source-row upsert, no audit) and
@@ -2216,7 +2216,7 @@ def test_dry_run_writes_nothing_returns_outcome_with_run_none(
 
 
 def test_dry_run_missing_credential_raises_credential_not_found(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """Dry-run shares Bucket A with the live path: a missing credential
     raises ``CredentialNotFoundError`` BEFORE the dry-run branch runs.
@@ -2240,7 +2240,7 @@ def test_dry_run_missing_credential_raises_credential_not_found(
 
 
 def test_dry_run_savepoint_reverts_runner_side_writes(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """SAVEPOINT defence-in-depth: any unflushed writes a runner accidentally
     makes inside ``produce_reports`` must be reverted before
@@ -2283,6 +2283,7 @@ def test_dry_run_savepoint_reverts_runner_side_writes(
             report_month,
             account_id,
         ):
+            _ = (run, credentials, report_month, account_id)
             marker_id = uuid4()
             session.add(
                 TenantORM(
@@ -2358,7 +2359,7 @@ def test_dry_run_savepoint_reverts_runner_side_writes(
 
 
 def test_dry_run_parser_failure_increments_reports_failed_and_keeps_per_report_failures_empty(
-    session: Session, stub_secret_resolver
+    session: Session, _stub_secret_resolver
 ) -> None:
     """Dry-run with a parser failure on report #2 of two locks the symmetry
     between the dry-run branch's per-report ``except`` and the live Bucket B

@@ -369,7 +369,8 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         )
         return self._to_entry(row) if row is not None else None
 
-    def _validate(self, row: ParsedSourceRow) -> ParsedSourceRow:
+    @staticmethod
+    def _validate(row: ParsedSourceRow) -> ParsedSourceRow:
         # Guard every required string column first. The first four are also used
         # in type-assuming Python ops (frozenset membership, len(), the
         # {r.currency_code} set comprehension), where a non-str would raise a raw
