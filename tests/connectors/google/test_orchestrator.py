@@ -2955,7 +2955,6 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
     ``file-store://`` URL.
     """
     import hashlib as _hashlib
-    import json as _json
 
     monkeypatch.setenv("UMS_BLOB_BACKEND", "file-store")
     monkeypatch.setenv("UMS_LOCAL_STORE_ROOT", str(tmp_path))
