@@ -49,6 +49,23 @@ from ums_smart_revenue.db.tenant_models import TenantORM
 # CHECK (substr BETWEEN '0' AND '9', ASCII-only) — leaking a raw
 # IntegrityError instead of the typed GoogleRevenueSourceRowValidationError.
 _REPORT_MONTH_RE = re.compile(r"[0-9]{4}-(0[1-9]|1[0-2])\Z")
+_REQUIRED_TEXT_FIELDS = (
+    "source_system",
+    "value_kind",
+    "source_row_key",
+    "currency_code",
+    "source_account_id",
+    "report_type",
+    "report_month",
+    "metric_key",
+)
+_NULLABLE_TEXT_FIELDS = (
+    "content_owner_id",
+    "youtube_channel_id",
+    "source_report_id",
+)
+_AMOUNT_NATIVE_SCALE = 6
+_AMOUNT_NATIVE_INTEGER_DIGITS = 14
 
 
 def _require_str_keys(value: object) -> None:
@@ -70,6 +87,120 @@ def _require_str_keys(value: object) -> None:
     elif isinstance(value, (list, tuple)):
         for item in value:
             _require_str_keys(item)
+
+
+def _validate_text_fields(row: ParsedSourceRow) -> None:
+    # Guard text columns before membership checks, len(), set construction, or
+    # INSERT binding can leak raw TypeError/driver errors for loose callers.
+    for field_name in _REQUIRED_TEXT_FIELDS:
+        if not isinstance(getattr(row, field_name), str):
+            raise GoogleRevenueSourceRowValidationError(
+                f"{field_name} must be a str"
+            )
+
+    # FIX: Nullable text columns were previously unchecked. None is allowed,
+    # but a non-str/non-None value must still fail at this typed boundary.
+    for nullable_field in _NULLABLE_TEXT_FIELDS:
+        value = getattr(row, nullable_field)
+        if value is not None and not isinstance(value, str):
+            raise GoogleRevenueSourceRowValidationError(
+                f"{nullable_field} must be a str or None"
+            )
+
+
+def _validate_source_identity(row: ParsedSourceRow) -> None:
+    if row.source_system not in ALLOWED_SOURCE_SYSTEMS:
+        raise GoogleRevenueSourceRowValidationError(
+            f"unknown source_system: {row.source_system!r}"
+        )
+    if row.value_kind not in ALLOWED_VALUE_KINDS:
+        raise GoogleRevenueSourceRowValidationError(
+            f"unknown value_kind: {row.value_kind!r}"
+        )
+    if len(row.source_row_key) != SOURCE_ROW_KEY_LENGTH:
+        raise GoogleRevenueSourceRowValidationError(
+            f"source_row_key must be {SOURCE_ROW_KEY_LENGTH} chars "
+            f"(got {len(row.source_row_key)})"
+        )
+
+
+def _validate_amount_native(row: ParsedSourceRow) -> None:
+    if not isinstance(row.amount_native, Decimal):
+        raise GoogleRevenueSourceRowValidationError(
+            "amount_native must be a Decimal"
+        )
+    if not row.amount_native.is_finite():
+        raise GoogleRevenueSourceRowValidationError(
+            "amount_native must be a finite Decimal >= 0"
+        )
+    if row.amount_native < 0:
+        raise GoogleRevenueSourceRowValidationError(
+            "amount_native must be a finite Decimal >= 0"
+        )
+
+    # FIX: amount_native maps to Numeric(20, 6). Reject values the database
+    # would round or overflow so source-reported finance values stay exact.
+    if row.amount_native.as_tuple().exponent < -_AMOUNT_NATIVE_SCALE:
+        raise GoogleRevenueSourceRowValidationError(
+            "amount_native must not exceed 6 fractional digits "
+            f"(column is Numeric(20, 6)), got {row.amount_native}"
+        )
+    if (
+        not row.amount_native.is_zero()
+        and row.amount_native.adjusted() >= _AMOUNT_NATIVE_INTEGER_DIGITS
+    ):
+        raise GoogleRevenueSourceRowValidationError(
+            "amount_native must not exceed 14 integer digits "
+            f"(column is Numeric(20, 6)), got {row.amount_native}"
+        )
+
+
+def _validate_raw_payload(row: ParsedSourceRow) -> None:
+    if not isinstance(row.raw_payload, dict):
+        raise GoogleRevenueSourceRowValidationError(
+            "raw_payload must be a dict"
+        )
+    # FIX: raw_payload is written to JSON/JSONB; require string keys and finite,
+    # serialisable values before the DB adapter can mutate or reject the shape.
+    _require_str_keys(row.raw_payload)
+    try:
+        json.dumps(row.raw_payload, allow_nan=False)
+    except (TypeError, ValueError) as exc:
+        raise GoogleRevenueSourceRowValidationError(
+            "raw_payload must be JSON-serialisable with finite numbers"
+        ) from exc
+
+
+def _is_date_only(value: object) -> bool:
+    return isinstance(value, date) and not isinstance(value, datetime)
+
+
+def _validate_report_period(row: ParsedSourceRow) -> None:
+    if not _REPORT_MONTH_RE.match(row.report_month):
+        raise GoogleRevenueSourceRowValidationError(
+            f"report_month must be YYYY-MM with month 01-12, got {row.report_month!r}"
+        )
+    # FIX: datetime is a date subclass, but DATE columns would silently truncate
+    # timestamps. The repository contract requires date-only period bounds.
+    if not all(_is_date_only(value) for value in (row.period_start, row.period_end)):
+        raise GoogleRevenueSourceRowValidationError(
+            "period_start and period_end must be date values (not datetime)"
+        )
+    if row.period_end < row.period_start:
+        raise GoogleRevenueSourceRowValidationError(
+            "period_end must be on or after period_start"
+        )
+
+    period_month = f"{row.period_start.year:04d}-{row.period_start.month:02d}"
+    period_end_month = (row.period_end.year, row.period_end.month)
+    if row.report_month != period_month or period_end_month != (
+        row.period_start.year,
+        row.period_start.month,
+    ):
+        raise GoogleRevenueSourceRowValidationError(
+            f"report_month {row.report_month!r} must match a single calendar-month "
+            f"period starting {row.period_start.isoformat()}"
+        )
 
 
 # ============================================================================
@@ -371,156 +502,11 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
 
     @staticmethod
     def _validate(row: ParsedSourceRow) -> ParsedSourceRow:
-        # Guard every required string column first. The first four are also used
-        # in type-assuming Python ops (frozenset membership, len(), the
-        # {r.currency_code} set comprehension), where a non-str would raise a raw
-        # TypeError; the rest are written straight into the INSERT, where a non-str
-        # would surface later as a driver/DB error. Either way a malformed caller
-        # that ignores the ParsedSourceRow annotations must hit this method's
-        # typed-error contract, not a raw exception.
-        for field_name in (
-            "source_system",
-            "value_kind",
-            "source_row_key",
-            "currency_code",
-            "source_account_id",
-            "report_type",
-            "report_month",
-            "metric_key",
-        ):
-            if not isinstance(getattr(row, field_name), str):
-                raise GoogleRevenueSourceRowValidationError(
-                    f"{field_name} must be a str"
-                )
-        # FIX: Nullable text columns were previously unchecked. None is allowed,
-        # but a non-str/non-None value (e.g. a list/dict from a loose non-parser
-        # caller) would otherwise be written straight into the INSERT and
-        # surface as a raw driver/DB error instead of this typed contract.
-        for nullable_field in (
-            "content_owner_id",
-            "youtube_channel_id",
-            "source_report_id",
-        ):
-            value = getattr(row, nullable_field)
-            if value is not None and not isinstance(value, str):
-                raise GoogleRevenueSourceRowValidationError(
-                    f"{nullable_field} must be a str or None"
-                )
-        if row.source_system not in ALLOWED_SOURCE_SYSTEMS:
-            raise GoogleRevenueSourceRowValidationError(
-                f"unknown source_system: {row.source_system!r}"
-            )
-        if row.value_kind not in ALLOWED_VALUE_KINDS:
-            raise GoogleRevenueSourceRowValidationError(
-                f"unknown value_kind: {row.value_kind!r}"
-            )
-        if len(row.source_row_key) != SOURCE_ROW_KEY_LENGTH:
-            raise GoogleRevenueSourceRowValidationError(
-                f"source_row_key must be {SOURCE_ROW_KEY_LENGTH} chars "
-                f"(got {len(row.source_row_key)})"
-            )
-        if not isinstance(row.amount_native, Decimal):
-            # Guard the type first: .is_finite()/comparison on a non-Decimal
-            # (None, str, ...) would raise AttributeError/TypeError and bypass
-            # this typed validation contract.
-            raise GoogleRevenueSourceRowValidationError(
-                "amount_native must be a Decimal"
-            )
-        if not row.amount_native.is_finite() or row.amount_native < 0:
-            # Guard NaN/Infinity at the repository boundary too: Decimal("NaN")
-            # < 0 raises InvalidOperation, which would bypass this typed
-            # validation error even though parsers already reject non-finite
-            # amounts upstream.
-            raise GoogleRevenueSourceRowValidationError(
-                "amount_native must be a finite Decimal >= 0"
-            )
-        # FIX: amount_native maps to Numeric(20, 6). PostgreSQL silently ROUNDS
-        # a value whose scale exceeds 6 fractional digits on write, which would
-        # alter the source-reported amount (CLAUDE.md rule 4: preserve every
-        # financial number's source value exactly). Reject >6 fractional digits
-        # at the boundary so the stored value can never diverge from the source.
-        # (exponent is always int here — the is_finite() guard above rules out
-        # the special 'n'/'N'/'F' exponents of NaN/Infinity.)
-        exponent = row.amount_native.as_tuple().exponent
-        if isinstance(exponent, int) and exponent < -6:
-            raise GoogleRevenueSourceRowValidationError(
-                "amount_native must not exceed 6 fractional digits "
-                f"(column is Numeric(20, 6)), got {row.amount_native}"
-            )
-        # FIX: bound the integer part too. Numeric(20, 6) allows 20 total
-        # significant digits with 6 fractional -> at most 14 integer digits; the
-        # scale guard above only caps the fraction. A value like 10**14 would
-        # otherwise pass here and fail later as a raw PostgreSQL numeric-overflow
-        # on INSERT, escaping this typed contract. Decimal.adjusted() is the
-        # exponent of the most-significant digit, so >= 14 means >14 integer
-        # digits (i.e. magnitude >= 10**14).
-        # FIX: exempt exact zero first. A zero with a positive exponent (e.g.
-        # Decimal('0E+20'), which parsers can emit) has adjusted()==20 even
-        # though its value is 0 and fits Numeric(20, 6); is_zero() is True for
-        # any zero regardless of exponent, so a valid zero is no longer rejected.
-        if not row.amount_native.is_zero() and row.amount_native.adjusted() >= 14:
-            raise GoogleRevenueSourceRowValidationError(
-                "amount_native must not exceed 14 integer digits "
-                f"(column is Numeric(20, 6)), got {row.amount_native}"
-            )
-        if not isinstance(row.raw_payload, dict):
-            raise GoogleRevenueSourceRowValidationError(
-                "raw_payload must be a dict"
-            )
-        # FIX: raw_payload is written to a JSON/JSONB column.
-        #  - _require_str_keys: json.dumps alone is NOT a sufficient shape check
-        #    because it silently coerces non-str keys to strings (and can
-        #    key-collide), so enforce the dict[str, object] key contract first.
-        #  - allow_nan=False: default json.dumps emits NaN/Infinity tokens that
-        #    PostgreSQL JSONB then rejects on write; fail here instead so the
-        #    error stays on the typed boundary. The except also catches
-        #    non-serialisable values (set, custom object).
-        _require_str_keys(row.raw_payload)
-        try:
-            json.dumps(row.raw_payload, allow_nan=False)
-        except (TypeError, ValueError) as exc:
-            raise GoogleRevenueSourceRowValidationError(
-                "raw_payload must be JSON-serialisable with finite numbers"
-            ) from exc
-        # Mirror the report_month + period-order DB CHECKs at the typed-validation
-        # boundary: a malformed ParsedSourceRow from any non-parser caller (or a
-        # future parser regression) must raise GoogleRevenueSourceRowValidationError
-        # here, not a raw DB IntegrityError on flush.
-        if not _REPORT_MONTH_RE.match(row.report_month):
-            raise GoogleRevenueSourceRowValidationError(
-                f"report_month must be YYYY-MM with month 01-12, got {row.report_month!r}"
-            )
-        # FIX: datetime is a subclass of date, so a bare isinstance(..., date)
-        # lets a timestamp through; the DATE columns would then silently
-        # truncate it. period_start/period_end are date-only by contract, so
-        # reject datetime explicitly rather than coercing caller-provided values.
-        if (
-            not isinstance(row.period_start, date)
-            or not isinstance(row.period_end, date)
-            or isinstance(row.period_start, datetime)
-            or isinstance(row.period_end, datetime)
-        ):
-            raise GoogleRevenueSourceRowValidationError(
-                "period_start and period_end must be date values (not datetime)"
-            )
-        if row.period_end < row.period_start:
-            raise GoogleRevenueSourceRowValidationError(
-                "period_end must be on or after period_start"
-            )
-        # report_month must match the period it summarises, and the period must
-        # stay within that single calendar month: the parsers derive
-        # report_month from period_start and reject cross-month ranges, so a
-        # mismatched bucket (e.g. report_month '2026-04' with a May period) means
-        # a non-parser caller would misattribute revenue to the wrong month.
-        period_month = f"{row.period_start.year:04d}-{row.period_start.month:02d}"
-        if row.report_month != period_month or (row.period_end.year, row.period_end.month) != (
-            row.period_start.year,
-            row.period_start.month,
-        ):
-            raise GoogleRevenueSourceRowValidationError(
-                f"report_month {row.report_month!r} must match a single calendar-month "
-                f"period starting {row.period_start.isoformat()}"
-            )
+        _validate_text_fields(row)
+        _validate_source_identity(row)
+        _validate_amount_native(row)
+        _validate_raw_payload(row)
+        _validate_report_period(row)
         # Deep-copy: raw_payload holds nested dicts (date_range, dimensions,
         # metrics), so a shallow dict() copy would still let a caller mutate
         # those nested objects after upsert_many and change what was persisted.
