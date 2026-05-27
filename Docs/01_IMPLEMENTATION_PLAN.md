@@ -165,25 +165,29 @@ running on the operator's workstation.
 - ✅ Final stack decision (FastAPI + PostgreSQL + Docker via PRs #1, #11,
   #15).
 - ⏳ OAuth/API access plan — remaining: credentials repository exists
-  (PRs #33, #34); PR #47 (B2.1) has started the Google connector credential
-  foundation (secret resolver dispatch + gcp-secret-manager:// +
-  local-secret:// + Google OAuth refresh wrapper). Public OAuth consent flows,
-  live connector ingestion, and token monitoring are not started.
-    - ⏳ PR #48 (B2.2) — Blob storage backends (GCS + file-store) + raw_file
-      lifecycle helpers (mark_parsed accepts FAILED -> PARSED retry recovery;
-      mark_failed FAILED -> FAILED idempotent).
-    - ⏳ PR #49 (B2.3) — connector_runs + connector_run_raw_files ORM,
-      repository, Alembic migration, and raw_report_files tenant/id UNIQUE
-      support for composite FKs.
-    - ⏳ PR #50 (B2.4) — google-auth + httpx base client + retry policy +
-      YouTube Reporting client + report_type whitelist + run_one()
-      orchestrator + scripts/run_google_connector.py CLI with extensible
-      --connector registry. Concern A (deterministic_blob_path emitted
-      gs:// regardless of backend, so the default LocalFileStoreBackend
+  (PRs #33, #34); PR #47 stacks the full Google live connector foundation
+  (B2.1-B2.4 in one PR). Public OAuth consent flows, live connector
+  ingestion against real Google APIs, and token monitoring are not
+  started — they belong to B2.5+ slices that stack on PR #47.
+    - ⏳ PR #47 — Google live connector foundation (B2.1-B2.4 in one
+      stack): credential foundation (secret resolver dispatch +
+      gcp-secret-manager:// + local-secret:// + OAuth refresh wrapper);
+      blob storage backends (GCS + file-store) + raw_file lifecycle
+      helpers (mark_parsed accepts FAILED -> PARSED retry recovery;
+      mark_failed FAILED -> FAILED idempotent); connector_runs +
+      connector_run_raw_files ORM, repository, Alembic migration, and
+      raw_report_files tenant/id UNIQUE for composite FKs; google-auth +
+      httpx base client + retry policy + YouTube Reporting client +
+      report_type whitelist + run_one() orchestrator +
+      scripts/run_google_connector.py CLI with extensible --connector
+      registry. Concern A (deterministic_blob_path emitted gs://
+      regardless of backend, so the default LocalFileStoreBackend
       rejected every URI at upload) closed by commit 435aa58 — scheme is
       now threaded through (backend, scheme, bucket) from
       _build_blob_backend(); regression test exercises the real
-      LocalFileStoreBackend end-to-end through run_one.
+      LocalFileStoreBackend end-to-end through run_one. B2.5 (YouTube
+      Analytics) + B2.6 (operator console) stack on top in follow-up
+      PRs.
 - ⏳ Channel inventory file format — remaining: tenant-scoped channel
   registry exists (PR #25); bulk inventory load format not yet defined.
 - ⏳ Finance month-close input format — remaining: close-gate enforced
