@@ -281,7 +281,10 @@ def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff
             report_month="2026-05",
             account_id=ACCOUNT_ID,
         )
-        produced = next(produced_iter)
+        try:
+            produced = next(produced_iter)
+        except StopIteration as exc:
+            raise AssertionError("expected one aggregated YouTube report") from exc
         try:
             assert isinstance(produced, ProducedReportSuccess)
             assert produced.report_type == "content_owner_estimated_revenue_a1"
