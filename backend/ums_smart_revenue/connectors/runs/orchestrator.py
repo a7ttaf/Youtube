@@ -33,8 +33,15 @@ Happy path (this task, T27):
      ``session.commit()`` persists it.
   9. Returns an immutable ``ConnectorRunOutcome``.
 
-Dry-run lands in T29; bucket B/C handlers and per-report commit are wired
-by T28. Audit wiring lands in B2.6 (T37). Existing files under
+Dry-run (T29): skips ``start_run`` entirely -- writes NOTHING to the
+database (no connector_runs row, no raw_file, no upsert, no audit) and no
+blob upload. Exercises the runner's ``produce_reports`` for API/CSV
+shape validation and runs the parser for row counts, then returns
+``ConnectorRunOutcome(run=None, counts=...)`` so an operator can sanity
+check an account+month before scheduling the live run. A SAVEPOINT-rollback
+guards against any future runner that accidentally writes to the session.
+Bucket B/C handlers and per-report commit are wired by T28. Audit wiring
+lands in B2.6 (T37). Existing files under
 ``connectors/google/`` (errors, http client, registry, secret resolvers,
 oauth, blob storage, raw-file helpers, the YT client) and the existing
 parser/repo (PR #43) are *not* touched here — T27 is additive.
@@ -162,7 +169,7 @@ class ConnectorRunner(Protocol):
         self,
         *,
         session: Session,
-        run: ConnectorRunEntry,
+        run: ConnectorRunEntry | None,
         credentials: Credentials,
         report_month: str,
         account_id: str,
@@ -255,11 +262,80 @@ def run_one(
     refresh_credentials(credentials)
 
     if dry_run:
-        # T29 owns the dry-run path: list jobs / list reports but skip
-        # download / blob / raw_file / parse / upsert / lifecycle. Keep the
-        # placeholder so an early caller can't accidentally drive a real run
-        # against production via dry_run=True.
-        raise NotImplementedError("dry_run handled in task 29")
+        # ====================================================================
+        # Purpose: Spec §5.4 dry-run path -- list jobs / list reports / fetch
+        #          report bytes / parse for row counts, but write NOTHING to
+        #          the database (no connector_runs row, no raw_file row, no
+        #          source-row upsert, no audit) and perform NO blob upload.
+        #          Returns counts that *would* have been written so an
+        #          operator can sanity-check an account+month before
+        #          scheduling the live run.
+        # Database/ORM: Read-only by contract. The SAVEPOINT below is a
+        #               belt-and-suspenders rollback so any unflushed writes
+        #               a future ConnectorRunner accidentally makes inside
+        #               its ``produce_reports`` (the current YT runner does
+        #               not) are reverted before the function returns.
+        # Standards: Bucket A still gates dry-run -- a missing or inactive
+        #            credential raises BEFORE this branch, identical to the
+        #            live path. The inner per-report try/except mirrors the
+        #            live Bucket B handler so one bad report doesn't abort
+        #            the dry-run -- the operator sees an honest count of
+        #            attempted vs succeeded vs failed reports.
+        # Blast Radius: None. By design, the dry-run path cannot create a
+        #               connector_runs row, attach a raw_report_file, or
+        #               upsert a source row. The SAVEPOINT rollback
+        #               guarantees this even if a future runner regresses.
+        # Connections:
+        #   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
+        #     §5.4 -> dry-run contract (counts only, no writes).
+        # ====================================================================
+        counts = _zero_counts()
+        runner = dispatch_connector(key=connector_key)
+        parser = _parser_for_connector(connector_key)
+        # SAVEPOINT defence-in-depth: any writes the runner might make
+        # (the current YT runner does not, but a future B2.5/B2.6 runner
+        # might accidentally) are scoped to this nested transaction and
+        # rolled back in the ``finally`` so the dry-run leaves zero rows
+        # behind. The ``try/finally`` ensures the rollback runs even if
+        # the for-loop itself raises (e.g. ``list_supported_jobs`` raises
+        # a transport error before the first yield).
+        savepoint = session.begin_nested()
+        try:
+            for report_type, parser_payload, _raw_bytes in runner.produce_reports(
+                session=session,
+                run=None,
+                credentials=credentials,
+                report_month=report_month,
+                account_id=account_id,
+            ):
+                counts["reports_attempted"] += 1
+                # Per-report containment mirrors the live Bucket B handler:
+                # ParserError (untyped, subclass of ValueError) or any
+                # GoogleConnectorError on a single report increments
+                # reports_failed and continues so the dry-run still
+                # produces useful counts for the remaining reports.
+                try:
+                    rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
+                    counts["reports_succeeded"] += 1
+                    counts["rows_upserted_total"] += len(rows)
+                    # rows_upserted_{created,updated,unchanged} stay 0 in
+                    # dry-run because no upsert is performed -- the
+                    # category split would require a pre-read of
+                    # existing source_row_keys, which is itself a write
+                    # path we are deliberately not entering here.
+                except Exception:
+                    counts["reports_failed"] += 1
+        finally:
+            # Revert any unflushed writes from the runner / parser / future
+            # regression. ``ConnectorRunOutcome(run=None, ...)`` is the
+            # spec-required dry-run shape; the empty per_report_failures
+            # list keeps the outcome dataclass total -- per-report failure
+            # detail is not currently surfaced for dry-run since the
+            # operator's primary signal is the counts dict.
+            savepoint.rollback()
+        return ConnectorRunOutcome(
+            run=None, counts=counts, per_report_failures=[]
+        )
 
     # Bucket B/C scope starts here: every failure past start_run goes through
     # finish_run with a terminal status so the run row reflects reality.
@@ -631,11 +707,15 @@ class YouTubeReportingRunner:
         self,
         *,
         session: Session,
-        run: ConnectorRunEntry,
+        run: ConnectorRunEntry | None,
         credentials: Credentials,
         report_month: str,
         account_id: str,
     ) -> Iterator[tuple[str, dict[str, object], bytes]]:
+        # ``run`` is ``None`` on the T29 dry-run path; the runner body
+        # never references it (the connector_runs lifecycle is owned by
+        # ``run_one`` itself), so the widening is a pure type contract
+        # change with no behavioural effect on the live path.
         http = GoogleHttpClient(credentials=credentials)
         try:
             client = YouTubeReportingClient(http=http)

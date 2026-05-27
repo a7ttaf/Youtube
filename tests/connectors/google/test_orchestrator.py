@@ -885,3 +885,158 @@ def test_bucket_b_pre_flush_failure_on_second_report_preserves_first_report(
     assert run_row is not None
     assert run_row.status == "PARTIAL"
     assert "GoogleApiServerError" in (run_row.error_summary or "")
+
+
+# ============================================================================
+# T29: Dry-run
+# ============================================================================
+
+
+def test_dry_run_writes_nothing_returns_outcome_with_run_none(
+    session: Session, stub_secret_resolver
+) -> None:
+    """Dry-run contract (spec §5.4): writes NOTHING to the database (no
+    connector_runs row, no raw_file row, no source-row upsert, no audit) and
+    performs NO blob upload, but DOES exercise the runner's
+    ``produce_reports`` (which fetches CSV bytes via the YT API) and DOES
+    run the parser to validate and count rows.
+
+    Bucket A still runs (credential lookup + OAuth refresh) so a missing or
+    inactive credential fails dry-run the same way it fails a live run -- if
+    you can't even authenticate, the dry-run can't report anything useful.
+
+    Expected end-state:
+    - outcome.run is None (no connector_runs row was started)
+    - counts["reports_attempted"] == 2 (both reports were enumerated)
+    - counts["reports_succeeded"] == 2 (both parsed cleanly)
+    - counts["rows_upserted_total"] >= 2 (the dry-run counter reports what
+      WOULD have been written; the per-category created/updated/unchanged
+      split stays 0 because no upsert ran)
+    - zero rows in connector_runs and raw_report_files (defence-in-depth:
+      the SAVEPOINT-rollback in the dry-run branch reverts any writes a
+      future runner might accidentally make)
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    # Two reports yielded with the documented column set so the real parser
+    # (invoked for row-count validation) accepts them. Keeps the dry-run
+    # success path symmetric with the happy-path test fixture.
+    csv_bytes_a = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-01,UC_dry_alpha,cms-orch-1,1.230000,USD\n"
+    )
+    csv_bytes_b = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-02,UC_dry_beta,cms-orch-1,4.560000,USD\n"
+    )
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        # Patch the backend even though dry-run never uploads -- this
+        # prevents the real LocalFileStoreBackend from being instantiated
+        # and touching the filesystem / env vars for hygiene. Also assert
+        # neither upload nor get_bytes is called: dry-run must skip blob I/O.
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"},
+            {"id": "job-2", "reportTypeId": "content_owner_basic_a3"},
+        ]
+        reports_by_job = {
+            "job-1": [{"id": "r1", "downloadUrl": "https://yt/r1"}],
+            "job-2": [{"id": "r2", "downloadUrl": "https://yt/r2"}],
+        }
+        client.list_reports_for_month.side_effect = (
+            lambda *, account_id, job_id, report_month: reports_by_job[job_id]
+        )
+        bytes_by_url = {"https://yt/r1": csv_bytes_a, "https://yt/r2": csv_bytes_b}
+        client.fetch_report.side_effect = (
+            lambda *, download_url: bytes_by_url[download_url]
+        )
+
+        backend = local_cls.return_value
+        backend.upload.side_effect = AssertionError(
+            "blob upload must not be called in dry-run"
+        )
+        backend.get_bytes.side_effect = AssertionError(
+            "blob get_bytes must not be called in dry-run"
+        )
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+            dry_run=True,
+        )
+
+    # ----- outcome shape: dry-run returns run=None -----
+    assert isinstance(outcome, ConnectorRunOutcome)
+    assert outcome.run is None
+    assert outcome.per_report_failures == []
+
+    # ----- counts: both reports attempted + parsed cleanly -----
+    counts = outcome.counts
+    assert counts["reports_attempted"] == 2
+    assert counts["reports_succeeded"] == 2
+    assert counts["reports_failed"] == 0
+    # Each CSV has one data row -> at least 2 rows total. The per-category
+    # split stays 0 in dry-run because no upsert is performed.
+    assert counts["rows_upserted_total"] >= 2
+    assert counts["rows_upserted_created"] == 0
+    assert counts["rows_upserted_updated"] == 0
+    assert counts["rows_upserted_unchanged"] == 0
+
+    # ----- no DB writes: defence-in-depth via SAVEPOINT rollback -----
+    assert session.query(ConnectorRunORM).count() == 0
+    assert session.query(RawReportFileORM).count() == 0
+    assert (
+        session.query(ConnectorRunRawFileORM)
+        .filter(ConnectorRunRawFileORM.tenant_id == TENANT_ID)
+        .count()
+        == 0
+    )
+    assert (
+        session.query(GoogleRevenueSourceRowORM)
+        .filter(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
+        .count()
+        == 0
+    )
+
+
+def test_dry_run_missing_credential_raises_credential_not_found(
+    session: Session, stub_secret_resolver
+) -> None:
+    """Dry-run shares Bucket A with the live path: a missing credential
+    raises ``CredentialNotFoundError`` BEFORE the dry-run branch runs.
+
+    Without this guarantee an operator could "dry-run" against an account
+    that has no live credential and get a misleadingly clean outcome; the
+    spec instead surfaces the credential gap so the operator fixes it
+    before scheduling the live run.
+    """
+    with pytest.raises(CredentialNotFoundError):
+        run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id="missing-account",
+            report_month="2026-05",
+            dry_run=True,
+        )
+    # Bucket A still gates dry-run -- no connector_runs row materialised.
+    assert session.query(ConnectorRunORM).count() == 0
