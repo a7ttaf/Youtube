@@ -45,6 +45,12 @@ def test_list_target_channels_excludes_outside_cms_channels(session) -> None:
     _insert_channel(session, tenant_id=tenant_id, youtube_channel_id="UC-1", content_owner_id="owner-a")
     _insert_channel(session, tenant_id=tenant_id, youtube_channel_id="UC-2", content_owner_id=None)
     _insert_channel(session, tenant_id=tenant_id, youtube_channel_id="UC-3", content_owner_id="owner-b")
+    _insert_channel(
+        session,
+        tenant_id=uuid4(),
+        youtube_channel_id="UC-4",
+        content_owner_id="owner-a",
+    )
     channels = list_target_channels(session, tenant_id=tenant_id, account_id="owner-a")
     assert channels == ["UC-1"]
 

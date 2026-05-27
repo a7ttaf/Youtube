@@ -54,7 +54,7 @@ import tempfile
 import types as _types  # SimpleNamespace used for dry-run tenant_id proxy
 from calendar import monthrange
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date as date_cls
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -230,6 +230,23 @@ ProducedReport = (
     | tuple[str, dict[str, object], bytes]
     | ProducedReportFailure
 )
+
+
+@dataclass(frozen=True)
+class _DeferredStaleCleanupPlan:
+    source_system: str
+    report_type: str
+    report_month: str
+    source_account_id: str
+    keep_source_row_keys: frozenset[str]
+
+
+@dataclass
+class _DeferredAnalyticsStaleCleanupState:
+    blocked: bool = False
+    keep_source_row_keys_by_scope: dict[tuple[str, str, str, str], set[str]] = field(
+        default_factory=dict
+    )
 
 
 class ConnectorRunner(Protocol):
@@ -579,6 +596,11 @@ def _process_live_reports(
     backend, scheme, bucket = _build_blob_backend()
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     parser = _parser_for_connector(connector_key)
+    deferred_analytics_cleanup = (
+        _DeferredAnalyticsStaleCleanupState()
+        if isinstance(parser, YouTubeAnalyticsParser)
+        else None
+    )
     ordering_index = 0
     for produced in runner.produce_reports(
         session=session,
@@ -605,8 +627,15 @@ def _process_live_reports(
             counts=counts,
             per_report_failures=per_report_failures,
             per_report_failure_details=per_report_failure_details,
+            deferred_analytics_cleanup=deferred_analytics_cleanup,
         )
         ordering_index += max(raw_file_count, 1)
+    if deferred_analytics_cleanup is not None:
+        _flush_deferred_stale_cleanup_plans(
+            repo=repo,
+            tenant_id=tenant_id,
+            deferred_cleanup=deferred_analytics_cleanup,
+        )
 
 
 def _unpack_produced_report(
@@ -659,13 +688,14 @@ def _handle_live_produced_report(
     backend: BlobStorageBackend,
     scheme: str,
     bucket: str,
-    parser: YouTubeReportingParser,
+    parser: YouTubeReportingParser | YouTubeAnalyticsParser,
     repo: SqlAlchemyGoogleRevenueSourceRowRepository,
     produced: ProducedReport,
     ordering_index: int,
     counts: dict[str, int],
     per_report_failures: list[tuple[str, str]],
     per_report_failure_details: list[tuple[str, str, str | None]],
+    deferred_analytics_cleanup: _DeferredAnalyticsStaleCleanupState | None,
 ) -> int:
     report_type, parser_payload, raw_reports, produced_error = _unpack_produced_report(
         produced
@@ -694,7 +724,7 @@ def _handle_live_produced_report(
             raise produced_error
         if parser_payload is None or raw_reports is None or not raw_reports:
             raise RuntimeError("connector runner yielded incomplete report")
-        rows_upserted, raw_file_count = _process_one_report(
+        rows_upserted, raw_file_count, deferred_cleanup_plans = _process_one_report(
             session=session,
             tenant_id=tenant_id,
             connector_key=connector_key,
@@ -714,10 +744,17 @@ def _handle_live_produced_report(
             report_state=report_state,
         )
         session.commit()
+        if deferred_analytics_cleanup is not None:
+            _merge_deferred_stale_cleanup_plans(
+                deferred_cleanup=deferred_analytics_cleanup,
+                plans=deferred_cleanup_plans,
+            )
         counts["reports_succeeded"] += 1
         counts["rows_upserted_total"] += rows_upserted
         return raw_file_count
     except Exception as exc:
+        if deferred_analytics_cleanup is not None:
+            deferred_analytics_cleanup.blocked = True
         _record_live_report_failure(
             session=session,
             tenant_id=tenant_id,
@@ -866,7 +903,7 @@ def _process_one_report(
     backend: BlobStorageBackend,
     scheme: str,
     bucket: str,
-    parser: YouTubeReportingParser,
+    parser: YouTubeReportingParser | YouTubeAnalyticsParser,
     repo: SqlAlchemyGoogleRevenueSourceRowRepository,
     report_type: str,
     report_month: str,
@@ -876,7 +913,7 @@ def _process_one_report(
     ordering_index: int,
     triggered_by_user_id: UUID | None,
     report_state: dict[str, object],
-) -> tuple[int, int]:
+) -> tuple[int, int, tuple[_DeferredStaleCleanupPlan, ...]]:
     """Run one report through blob -> raw_file -> parse -> upsert -> mark_parsed.
 
     Raises any ``GoogleConnectorError`` / ``ParserError`` / other exception
@@ -892,6 +929,7 @@ def _process_one_report(
     raw_file in flight to mark FAILED".
     """
     source_system = _source_system_for_connector(connector_key)
+    deferred_cleanup_plans: tuple[_DeferredStaleCleanupPlan, ...] = ()
     raw_files = _prepare_and_link_raw_reports(
         session=session,
         tenant_id=tenant_id,
@@ -934,21 +972,39 @@ def _process_one_report(
             imported_by=triggered_by_user_id,
             replace_raw_file_id=source_row_raw_file_id is None,
         )
-        _delete_stale_source_rows(
-            repo=repo,
-            tenant_id=tenant_id,
-            source_system=source_system,
-            report_type=_fallback_source_report_type(
-                parser=parser,
-                default_report_type=report_type,
-            ),
-            report_month=report_month,
-            parsed_rows=parsed_rows,
-            fallback_source_account_id=_fallback_source_account_id(
-                parser_payload=parser_payload,
-                default_account_id=account_id,
-            ),
+        source_report_type = _fallback_source_report_type(
+            parser=parser,
+            default_report_type=report_type,
         )
+        fallback_source_account_id = _fallback_source_account_id(
+            parser_payload=parser_payload,
+            default_account_id=account_id,
+        )
+        if isinstance(parser, YouTubeAnalyticsParser):
+            # FIX: targeted analytics replaces ONE content-owner/month scope
+            # across many per-channel payloads. Deleting stale rows here, one
+            # channel at a time, lets later successes (or empty responses) erase
+            # sibling channels and lets partial runs drop rows for failed
+            # channels. Defer cleanup until the full owner-month key set is
+            # known and only flush it when every channel payload in the run
+            # succeeded.
+            deferred_cleanup_plans = _build_deferred_stale_cleanup_plans(
+                source_system=source_system,
+                report_type=source_report_type,
+                report_month=report_month,
+                parsed_rows=parsed_rows,
+                fallback_source_account_id=fallback_source_account_id,
+            )
+        else:
+            _delete_stale_source_rows(
+                repo=repo,
+                tenant_id=tenant_id,
+                source_system=source_system,
+                report_type=source_report_type,
+                report_month=report_month,
+                parsed_rows=parsed_rows,
+                fallback_source_account_id=fallback_source_account_id,
+            )
 
         # Lifecycle transition: DOWNLOADED -> PARSED. Raises
         # ``RawFileAlreadyParsedError`` if called twice on the same file, which
@@ -966,7 +1022,7 @@ def _process_one_report(
     # loop AFTER ``session.commit()`` so a commit failure (e.g. DB
     # disconnect on the per-report flush) is recorded as a failure once,
     # not double-counted as both succeeded and failed.
-    return len(written), len(raw_files)
+    return len(written), len(raw_files), deferred_cleanup_plans
 
 
 # ============================================================================
@@ -986,6 +1042,114 @@ def _source_row_raw_file_id(raw_files: list[RawReportFileORM]) -> UUID | None:
     if len(raw_files) == 1:
         return raw_files[0].id
     return None
+
+
+# ============================================================================
+# Purpose: Build the stale-row cleanup scopes implied by one successful parsed
+#          replacement payload.
+# Database/ORM: None directly; the returned plans scope later repository
+#               deletes.
+# Standards: Groups by parser-owned report_type + source_account_id and keeps
+#            empty-success cleanup aligned with the persisted analytics scope.
+# Blast Radius: Source-of-truth source-row cleanup only.
+# Connections:
+#   - Function: _process_one_report -> defers analytics cleanup until the owner
+#     scope is complete.
+#   - Function: _delete_stale_source_rows -> reuses the same scope grouping for
+#     immediate cleanup paths.
+# ============================================================================
+def _stale_source_row_keys_by_scope(
+    *,
+    report_type: str,
+    parsed_rows: Iterable[ParsedSourceRow],
+    fallback_source_account_id: str,
+) -> dict[tuple[str, str], set[str]]:
+    keys_by_scope: dict[tuple[str, str], set[str]] = {}
+    for row in parsed_rows:
+        keys_by_scope.setdefault((row.report_type, row.source_account_id), set()).add(
+            row.source_row_key
+        )
+    if not keys_by_scope and fallback_source_account_id.strip():
+        # FIX: empty successful replacements still need the PARSER-LEVEL
+        # report_type/account scope. Using the outer produced report label
+        # (`youtube_analytics`) misses persisted analytics rows, whose parser
+        # writes `report_type="reports.query"`, and leaves stale finance rows
+        # behind on rerun.
+        keys_by_scope[(report_type.strip(), fallback_source_account_id.strip())] = set()
+    return keys_by_scope
+
+
+# ============================================================================
+# Purpose: Convert one report's stale-row cleanup scopes into deferred plans the
+#          analytics run can merge across sibling channels.
+# Database/ORM: None directly; plans are flushed later through the repository.
+# Standards: Keeps per-scope keys additive so the final delete runs once per
+#            owner/month after all successful channel payloads have contributed.
+# Blast Radius: Source-of-truth source-row cleanup only.
+# Connections:
+#   - Function: _process_one_report -> uses for YouTubeAnalyticsParser only.
+#   - Function: _flush_deferred_stale_cleanup_plans -> executes the merged plans.
+# ============================================================================
+def _build_deferred_stale_cleanup_plans(
+    *,
+    source_system: str,
+    report_type: str,
+    report_month: str,
+    parsed_rows: Iterable[ParsedSourceRow],
+    fallback_source_account_id: str,
+) -> tuple[_DeferredStaleCleanupPlan, ...]:
+    return tuple(
+        _DeferredStaleCleanupPlan(
+            source_system=source_system,
+            report_type=row_report_type,
+            report_month=report_month,
+            source_account_id=source_account_id,
+            keep_source_row_keys=frozenset(keys),
+        )
+        for (row_report_type, source_account_id), keys in _stale_source_row_keys_by_scope(
+            report_type=report_type,
+            parsed_rows=parsed_rows,
+            fallback_source_account_id=fallback_source_account_id,
+        ).items()
+    )
+
+
+def _merge_deferred_stale_cleanup_plans(
+    *,
+    deferred_cleanup: _DeferredAnalyticsStaleCleanupState,
+    plans: tuple[_DeferredStaleCleanupPlan, ...],
+) -> None:
+    for plan in plans:
+        deferred_cleanup.keep_source_row_keys_by_scope.setdefault(
+            (
+                plan.source_system,
+                plan.report_type,
+                plan.report_month,
+                plan.source_account_id,
+            ),
+            set(),
+        ).update(plan.keep_source_row_keys)
+
+
+def _flush_deferred_stale_cleanup_plans(
+    *,
+    repo: SqlAlchemyGoogleRevenueSourceRowRepository,
+    tenant_id: UUID,
+    deferred_cleanup: _DeferredAnalyticsStaleCleanupState,
+) -> None:
+    if deferred_cleanup.blocked:
+        return
+    for (source_system, report_type, report_month, source_account_id), keys in (
+        deferred_cleanup.keep_source_row_keys_by_scope.items()
+    ):
+        repo.delete_stale_for_scope(
+            tenant_id,
+            source_system=source_system,
+            source_account_id=source_account_id,
+            report_type=report_type,
+            report_month=report_month,
+            keep_source_row_keys=keys,
+        )
 
 
 # ============================================================================
@@ -1057,19 +1221,11 @@ def _delete_stale_source_rows(
     parsed_rows: Iterable[ParsedSourceRow],
     fallback_source_account_id: str,
 ) -> None:
-    keys_by_scope: dict[tuple[str, str], set[str]] = {}
-    for row in parsed_rows:
-        keys_by_scope.setdefault((row.report_type, row.source_account_id), set()).add(
-            row.source_row_key
-        )
-    if not keys_by_scope and fallback_source_account_id.strip():
-        # FIX: empty successful replacements still need the PARSER-LEVEL
-        # report_type/account scope. Using the outer produced report label
-        # (`youtube_analytics`) misses persisted analytics rows, whose parser
-        # writes `report_type="reports.query"`, and leaves stale finance rows
-        # behind on rerun.
-        keys_by_scope[(report_type.strip(), fallback_source_account_id.strip())] = set()
-    for (row_report_type, source_account_id), keys in keys_by_scope.items():
+    for (row_report_type, source_account_id), keys in _stale_source_row_keys_by_scope(
+        report_type=report_type,
+        parsed_rows=parsed_rows,
+        fallback_source_account_id=fallback_source_account_id,
+    ).items():
         repo.delete_stale_for_scope(
             tenant_id,
             source_system=source_system,
