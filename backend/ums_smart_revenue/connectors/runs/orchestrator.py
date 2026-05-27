@@ -631,7 +631,9 @@ def _raw_file_count_from_state(report_state: dict[str, object]) -> int:
     raw_file_ids = report_state.get("raw_file_ids")
     if isinstance(raw_file_ids, list):
         return len(raw_file_ids)
-    return 1 if report_state.get("raw_file_id") is not None else 1
+    if report_state.get("raw_file_id") is not None:
+        return 1
+    return 0
 
 
 def _record_live_report_failure(
@@ -837,9 +839,7 @@ def _process_one_report(
         # here (typed ``ParserError``) instead of mid-upsert. ParserError is
         # caught by the widened Bucket B/C ``except Exception`` in ``run_one``.
         parsed_rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
-        primary_raw_file = next(
-            raw_file for raw_file in raw_files if raw_file.parse_status != "PARSED"
-        )
+        primary_raw_file = _first_unparsed_raw_file(raw_files)
 
         # Upsert. Returns the persisted entries (one per ParsedSourceRow); the
         # precise created-vs-updated split needs a pre-read of existing
@@ -871,6 +871,13 @@ def _process_one_report(
     # disconnect on the per-report flush) is recorded as a failure once,
     # not double-counted as both succeeded and failed.
     return len(written), len(raw_files)
+
+
+def _first_unparsed_raw_file(raw_files: list[RawReportFileORM]) -> RawReportFileORM:
+    for raw_file in raw_files:
+        if raw_file.parse_status != "PARSED":
+            return raw_file
+    raise RuntimeError("connector runner yielded no unparsed raw report file")
 
 
 # ============================================================================
@@ -1095,87 +1102,187 @@ class YouTubeReportingRunner:
             client = YouTubeReportingClient(http=http)
             jobs = client.list_supported_jobs(account_id=account_id)
             for job in jobs:
-                report_type = _require_text(job, "reportTypeId")
-                job_id = _require_text(job, "id")
-                try:
-                    reports = client.list_reports_for_month(
-                        account_id=account_id,
-                        job_id=job_id,
-                        report_month=report_month,
-                    )
-                except OAuthRefreshError:
-                    raise
-                except GoogleConnectorError as exc:
-                    yield ProducedReportFailure(report_type=report_type, error=exc)
-                    continue
-                csv_reports: dict[str, _CsvReportDownload] = {}
-                seen_checksums: set[str] = set()
-                totals: dict[tuple[str, str | None, str], Decimal] = {}
-                failed = False
-                for report in reports:
-                    try:
-                        download_url = _require_text(report, "downloadUrl")
-                        report_id = _require_text(report, "id")
-                        raw_bytes = client.fetch_report(download_url=download_url)
-                        checksum = compute_checksum(raw_bytes)
-                        if report_id in csv_reports or checksum in seen_checksums:
-                            continue
-                        _accumulate_csv_report_bytes(
-                            totals=totals,
-                            raw_bytes=raw_bytes,
-                            report_id=report_id,
-                            report_month=report_month,
-                            default_content_owner=(
-                                account_id
-                                if report_type.startswith("content_owner_")
-                                else None
-                            ),
-                        )
-                        csv_reports[report_id] = _spool_csv_report(
-                            report_id=report_id, raw_bytes=raw_bytes,
-                        )
-                        seen_checksums.add(checksum)
-                    except OAuthRefreshError:
-                        _cleanup_csv_report_downloads(tuple(csv_reports.values()))
-                        raise
-                    except GoogleConnectorError as exc:
-                        _cleanup_csv_report_downloads(tuple(csv_reports.values()))
-                        yield ProducedReportFailure(report_type=report_type, error=exc)
-                        failed = True
-                        break
-                    except Exception:
-                        _cleanup_csv_report_downloads(tuple(csv_reports.values()))
-                        raise
-                    finally:
-                        raw_bytes = b""
-                if failed:
-                    continue
-                if not csv_reports:
-                    continue
-                raw_reports = tuple(
-                    csv_reports[report_id] for report_id in sorted(csv_reports)
+                produced = _produce_youtube_job_report(
+                    client=client,
+                    job=job,
+                    report_month=report_month,
+                    account_id=account_id,
                 )
-                try:
-                    parser_payload = _parser_payload_from_csv_totals(
-                        totals=totals,
-                        report_ids=[raw_report.report_id for raw_report in raw_reports],
-                        report_type=report_type,
-                        report_month=report_month,
-                    )
-                except GoogleConnectorError as exc:
-                    _cleanup_csv_report_downloads(raw_reports)
-                    yield ProducedReportFailure(report_type=report_type, error=exc)
+                if produced is None:
+                    continue
+                if isinstance(produced, ProducedReportFailure):
+                    yield produced
                     continue
                 try:
-                    yield ProducedReportSuccess(
-                        report_type=report_type,
-                        parser_payload=parser_payload,
-                        raw_reports=raw_reports,
-                    )
+                    yield produced
                 finally:
-                    _cleanup_csv_report_downloads(raw_reports)
+                    _cleanup_csv_report_downloads(produced.raw_reports)
         finally:
             http.close()
+
+
+def _produce_youtube_job_report(
+    *,
+    client: YouTubeReportingClient,
+    job: dict[str, object],
+    report_month: str,
+    account_id: str,
+) -> ProducedReportSuccess | ProducedReportFailure | None:
+    report_type = _require_text(job, "reportTypeId")
+    job_id = _require_text(job, "id")
+    reports = _list_youtube_reports_for_job(
+        client=client,
+        account_id=account_id,
+        job_id=job_id,
+        report_type=report_type,
+        report_month=report_month,
+    )
+    if isinstance(reports, ProducedReportFailure):
+        return reports
+    return _build_youtube_report_success(
+        client=client,
+        reports=reports,
+        report_type=report_type,
+        report_month=report_month,
+        account_id=account_id,
+    )
+
+
+def _list_youtube_reports_for_job(
+    *,
+    client: YouTubeReportingClient,
+    account_id: str,
+    job_id: str,
+    report_type: str,
+    report_month: str,
+) -> list[dict[str, object]] | ProducedReportFailure:
+    try:
+        return client.list_reports_for_month(
+            account_id=account_id,
+            job_id=job_id,
+            report_month=report_month,
+        )
+    except OAuthRefreshError:
+        raise
+    except GoogleConnectorError as exc:
+        return ProducedReportFailure(report_type=report_type, error=exc)
+
+
+def _build_youtube_report_success(
+    *,
+    client: YouTubeReportingClient,
+    reports: list[dict[str, object]],
+    report_type: str,
+    report_month: str,
+    account_id: str,
+) -> ProducedReportSuccess | ProducedReportFailure | None:
+    csv_reports: dict[str, _CsvReportDownload] = {}
+    seen_checksums: set[str] = set()
+    totals: dict[tuple[str, str | None, str], Decimal] = {}
+    try:
+        failure = _download_youtube_csv_reports(
+            client=client,
+            reports=reports,
+            report_type=report_type,
+            report_month=report_month,
+            account_id=account_id,
+            csv_reports=csv_reports,
+            seen_checksums=seen_checksums,
+            totals=totals,
+        )
+        if failure is not None:
+            _cleanup_csv_report_downloads(tuple(csv_reports.values()))
+            return failure
+        if not csv_reports:
+            return None
+        raw_reports = tuple(
+            csv_reports[report_id] for report_id in sorted(csv_reports)
+        )
+        parser_payload = _parser_payload_from_csv_totals(
+            totals=totals,
+            report_ids=[raw_report.report_id for raw_report in raw_reports],
+            report_type=report_type,
+            report_month=report_month,
+        )
+        return ProducedReportSuccess(
+            report_type=report_type,
+            parser_payload=parser_payload,
+            raw_reports=raw_reports,
+        )
+    except OAuthRefreshError:
+        _cleanup_csv_report_downloads(tuple(csv_reports.values()))
+        raise
+    except GoogleConnectorError as exc:
+        _cleanup_csv_report_downloads(tuple(csv_reports.values()))
+        return ProducedReportFailure(report_type=report_type, error=exc)
+    except Exception:
+        _cleanup_csv_report_downloads(tuple(csv_reports.values()))
+        raise
+
+
+def _download_youtube_csv_reports(
+    *,
+    client: YouTubeReportingClient,
+    reports: list[dict[str, object]],
+    report_type: str,
+    report_month: str,
+    account_id: str,
+    csv_reports: dict[str, _CsvReportDownload],
+    seen_checksums: set[str],
+    totals: dict[tuple[str, str | None, str], Decimal],
+) -> ProducedReportFailure | None:
+    for report in reports:
+        failure = _download_youtube_csv_report(
+            client=client,
+            report=report,
+            report_type=report_type,
+            report_month=report_month,
+            account_id=account_id,
+            csv_reports=csv_reports,
+            seen_checksums=seen_checksums,
+            totals=totals,
+        )
+        if failure is not None:
+            return failure
+    return None
+
+
+def _download_youtube_csv_report(
+    *,
+    client: YouTubeReportingClient,
+    report: dict[str, object],
+    report_type: str,
+    report_month: str,
+    account_id: str,
+    csv_reports: dict[str, _CsvReportDownload],
+    seen_checksums: set[str],
+    totals: dict[tuple[str, str | None, str], Decimal],
+) -> ProducedReportFailure | None:
+    try:
+        download_url = _require_text(report, "downloadUrl")
+        report_id = _require_text(report, "id")
+        raw_bytes = client.fetch_report(download_url=download_url)
+        checksum = compute_checksum(raw_bytes)
+        if report_id in csv_reports or checksum in seen_checksums:
+            return None
+        _accumulate_csv_report_bytes(
+            totals=totals,
+            raw_bytes=raw_bytes,
+            report_id=report_id,
+            report_month=report_month,
+            default_content_owner=(
+                account_id if report_type.startswith("content_owner_") else None
+            ),
+        )
+        csv_reports[report_id] = _spool_csv_report(
+            report_id=report_id, raw_bytes=raw_bytes,
+        )
+        seen_checksums.add(checksum)
+        return None
+    except OAuthRefreshError:
+        raise
+    except GoogleConnectorError as exc:
+        return ProducedReportFailure(report_type=report_type, error=exc)
 
 
 def _require_text(mapping: dict[str, object], field: str) -> str:
