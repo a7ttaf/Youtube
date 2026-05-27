@@ -18,12 +18,38 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ums_smart_revenue.db.report_models import ReportBase
+from ums_smart_revenue.db.security_models import UserORM
+from ums_smart_revenue.db.tenant_models import TenantORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 _TENANT_ID_DEFAULT = text(f"'{UMS_TENANT_ID}'")
 _TENANT_ID_DEFAULT_VALUE = UUID(UMS_TENANT_ID)
+_REPORT_MONTH_CHECK_SQL = (
+    "length(report_month) = 7 AND substr(report_month, 5, 1) = '-' "
+    "AND substr(report_month, 1, 1) BETWEEN '0' AND '9' "
+    "AND substr(report_month, 2, 1) BETWEEN '0' AND '9' "
+    "AND substr(report_month, 3, 1) BETWEEN '0' AND '9' "
+    "AND substr(report_month, 4, 1) BETWEEN '0' AND '9' "
+    "AND substr(report_month, 6, 1) BETWEEN '0' AND '9' "
+    "AND substr(report_month, 7, 1) BETWEEN '0' AND '9' "
+    "AND substr(report_month, 6, 2) BETWEEN '01' AND '12'"
+)
 
 
+# ============================================================================
+# Purpose: Store one live connector execution ledger row, tenant-scoped and
+#          FK-aligned with the Alembic migration so ORM-created test schemas
+#          enforce the same tenant/user parent contracts as PostgreSQL.
+# Database/ORM: connector_runs; tenants; users.
+# Standards: SQLAlchemy constraints mirror migration names; report_month stays
+#            YYYY-MM with digit and 01-12 month validation.
+# Blast Radius: Connector-run lifecycle only. No graph projection impact detected.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/alembic/versions/20260527_0001_connector_runs.py
+#     -> migration contract this ORM mirrors.
+#   - File: backend/ums_smart_revenue/connectors/runs/repository.py ->
+#     start_run/finish_run read and write this model.
+# ============================================================================
 class ConnectorRunORM(ReportBase):
     __tablename__ = "connector_runs"
 
@@ -60,13 +86,19 @@ class ConnectorRunORM(ReportBase):
 
     __table_args__ = (
         UniqueConstraint("tenant_id", "id", name="uq_connector_runs_tenant_id"),
+        ForeignKeyConstraint(
+            ["tenant_id"],
+            [TenantORM.id],
+            name="fk_connector_runs_tenant",
+            ondelete="RESTRICT",
+        ),
+        ForeignKeyConstraint(
+            ["tenant_id", "triggered_by_user_id"],
+            [UserORM.tenant_id, UserORM.id],
+            name="fk_connector_runs_triggered_by_user",
+        ),
         CheckConstraint(
-            "length(report_month) = 7 AND substr(report_month, 5, 1) = '-' "
-            "AND substr(report_month, 1, 1) BETWEEN '0' AND '9' "
-            "AND substr(report_month, 2, 1) BETWEEN '0' AND '9' "
-            "AND substr(report_month, 3, 1) BETWEEN '0' AND '9' "
-            "AND substr(report_month, 4, 1) BETWEEN '0' AND '9' "
-            "AND substr(report_month, 6, 2) BETWEEN '01' AND '12'",
+            _REPORT_MONTH_CHECK_SQL,
             name="ck_connector_runs_report_month_format",
         ),
         CheckConstraint(

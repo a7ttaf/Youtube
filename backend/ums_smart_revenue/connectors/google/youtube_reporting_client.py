@@ -37,6 +37,18 @@ def _month_bounds_iso(report_month: str) -> tuple[str, str]:
     )
 
 
+def _text_sort_key(value: object) -> str:
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _report_freshness_key(report: dict[str, object]) -> tuple[str, str, str]:
+    return (
+        _text_sort_key(report.get("createTime")),
+        _text_sort_key(report.get("startTime")),
+        _text_sort_key(report.get("id")),
+    )
+
+
 class YouTubeReportingClient:
     def __init__(self, *, http: GoogleHttpClient) -> None:
         self._http = http
@@ -83,7 +95,9 @@ class YouTubeReportingClient:
     # ============================================================================
     # Purpose: List the reports a job produced for a single calendar month,
     #          paginated. Returns Google's report descriptors (id, downloadUrl,
-    #          startTime, etc.) for the orchestrator to fetch individually.
+    #          startTime, etc.) for the orchestrator to fetch individually,
+    #          sorted oldest-to-newest so replacement/fresher reports process
+    #          last.
     # Database/ORM: None (read-only API call).
     # Standards: Month bounds form a half-open interval [start, next-month-start)
     #            via _month_bounds_iso (RFC 3339 Z-suffix). Pagination via
@@ -120,7 +134,7 @@ class YouTubeReportingClient:
             token = body.get("nextPageToken")
             if not token:
                 break
-        return out
+        return sorted(out, key=_report_freshness_key)
 
     # ============================================================================
     # Purpose: Download the raw CSV bytes for one YouTube Reporting report,

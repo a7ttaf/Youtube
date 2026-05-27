@@ -42,6 +42,8 @@ def test_connector_run_constraints_and_indexes_match_contract() -> None:
     indexes = {i.name for i in ConnectorRunORM.__table__.indexes}
 
     assert "uq_connector_runs_tenant_id" in constraints
+    assert "fk_connector_runs_tenant" in constraints
+    assert "fk_connector_runs_triggered_by_user" in constraints
     assert "ck_connector_runs_report_month_format" in constraints
     assert "ck_connector_runs_status" in constraints
     assert "ck_connector_runs_error_summary_len" in constraints

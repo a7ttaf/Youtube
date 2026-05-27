@@ -13,9 +13,9 @@ Happy path (this task, T27):
   5. ``start_run(...)`` commits the ``RUNNING`` row (forensic durability for
      ``started_at`` even if the process dies mid-loop).
   6. ``dispatch_connector(key=connector_key)`` returns a ``ConnectorRunner``
-     instance whose ``produce_reports`` yields ``(report_type, parser_payload,
-     raw_bytes)`` tuples — one per Google report for the requested month.
-  7. For each tuple:
+     instance whose ``produce_reports`` yields downloaded report tuples or
+     ``ProducedReportFailure`` entries for per-report Google/API failures.
+  7. For each downloaded tuple:
         a. ``compute_checksum`` + ``deterministic_blob_path`` build the URI.
         b. ``upload_and_verify`` writes the blob and re-reads its SHA-256.
         c. A ``RawReportFileORM`` row is inserted with ``parse_status``
@@ -24,10 +24,10 @@ Happy path (this task, T27):
            ``ordering_index``.
         e. The parser's ``parse(...)`` is consumed into a ``list`` so an
            early ``ParserError`` does not surface mid-upsert.
-        f. ``SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many(...)``
-           upserts the rows; the returned list length feeds
-           ``rows_upserted_total``.
-        g. ``mark_parsed`` transitions the raw file ``DOWNLOADED -> PARSED``.
+        f. Inside a savepoint, ``SqlAlchemyGoogleRevenueSourceRowRepository``
+           upserts rows and ``mark_parsed`` transitions the raw file
+           ``DOWNLOADED -> PARSED``.
+        g. The outer commit succeeds before success and row counts advance.
   8. ``finish_run`` records the terminal status (SUCCEEDED / PARTIAL / FAILED)
      plus the accumulated counts and (optionally) an error summary, and
      ``session.commit()`` persists it.
@@ -159,15 +159,33 @@ class ConnectorRunOutcome:
     per_report_failures: list[tuple[str, str]]
 
 
+@dataclass(frozen=True)
+class ProducedReportFailure:
+    """One report-type-scoped failure from inside a connector runner.
+
+    The YouTube Reporting runner downloads and CSV-normalizes reports before
+    it can yield the normal tuple consumed by ``run_one``. If those pre-yield
+    per-report steps fail, this sentinel lets the orchestrator count the
+    failure in Bucket B instead of letting the generator exception escape to
+    the run-level Bucket C handler.
+    """
+
+    report_type: str
+    error: Exception
+
+
+ProducedReport = tuple[str, dict[str, object], bytes] | ProducedReportFailure
+
+
 class ConnectorRunner(Protocol):
     """Per-connector adapter contract.
 
     Each runner owns the API-client/credential bridge for its source system
     (B2.4 wires YouTube Reporting; B2.5/B2.6 will register YouTube Analytics
     and AdSense Management). ``produce_reports`` yields one tuple per Google
-    report and stays decoupled from blob storage, raw-file lifecycle,
-    upserts, and the connector_runs lifecycle — the orchestrator owns those
-    uniformly across all three connectors.
+    report or a ``ProducedReportFailure`` for a report-type-scoped pre-yield
+    failure. Blob storage, raw-file lifecycle, upserts, and the connector_runs
+    lifecycle stay owned by the orchestrator uniformly across all connectors.
     """
 
     def produce_reports(
@@ -178,7 +196,7 @@ class ConnectorRunner(Protocol):
         credentials: Credentials,
         report_month: str,
         account_id: str,
-    ) -> Iterator[tuple[str, dict[str, object], bytes]]:
+    ) -> Iterator[ProducedReport]:
         ...
 
 
@@ -307,7 +325,7 @@ def run_one(
         # a transport error before the first yield).
         savepoint = session.begin_nested()
         try:
-            for report_type, parser_payload, _raw_bytes in runner.produce_reports(
+            for produced in runner.produce_reports(
                 session=session,
                 run=None,
                 credentials=credentials,
@@ -321,6 +339,9 @@ def run_one(
                 # reports_failed and continues so the dry-run still
                 # produces useful counts for the remaining reports.
                 try:
+                    if isinstance(produced, ProducedReportFailure):
+                        raise produced.error
+                    _report_type, parser_payload, _raw_bytes = produced
                     rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
                     counts["reports_succeeded"] += 1
                     counts["rows_upserted_total"] += len(rows)
@@ -362,6 +383,7 @@ def run_one(
 
     counts = _zero_counts()
     per_report_failures: list[tuple[str, str]] = []
+    per_report_failure_details: list[tuple[str, str, str | None]] = []
     ordering_index = 0
     # Sentinel flipped to True ONLY after a finish_run + session.commit()
     # succeeds (bucket-B or bucket-C path). If both paths are short-circuited
@@ -376,13 +398,21 @@ def run_one(
             backend, scheme, bucket = _build_blob_backend()
             repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
             parser = _parser_for_connector(connector_key)
-            for report_type, parser_payload, raw_bytes in runner.produce_reports(
+            for produced in runner.produce_reports(
                 session=session,
                 run=run_entry,
                 credentials=credentials,
                 report_month=report_month,
                 account_id=account_id,
             ):
+                if isinstance(produced, ProducedReportFailure):
+                    report_type = produced.report_type
+                    parser_payload: dict[str, object] | None = None
+                    raw_bytes: bytes | None = None
+                    produced_error: Exception | None = produced.error
+                else:
+                    report_type, parser_payload, raw_bytes = produced
+                    produced_error = None
                 counts["reports_attempted"] += 1
                 # ``report_state`` is the per-report mutable handshake with
                 # ``_process_one_report``: after the raw_file row is flushed
@@ -392,7 +422,11 @@ def run_one(
                 # never leak into the next report's bucket B handler.
                 report_state: dict[str, object] = {}
                 try:
-                    _process_one_report(
+                    if produced_error is not None:
+                        raise produced_error
+                    if parser_payload is None or raw_bytes is None:
+                        raise RuntimeError("connector runner yielded incomplete report")
+                    rows_upserted = _process_one_report(
                         session=session,
                         tenant_id=tenant_id,
                         connector_key=connector_key,
@@ -408,7 +442,6 @@ def run_one(
                         raw_bytes=raw_bytes,
                         ordering_index=ordering_index,
                         triggered_by_user_id=triggered_by_user_id,
-                        counts=counts,
                         report_state=report_state,
                     )
                     # M6 fix: commit each successful report BEFORE the next
@@ -431,6 +464,7 @@ def run_one(
                     # NOT increment ``reports_succeeded`` itself for the
                     # same reason -- this is the single source of truth.
                     counts["reports_succeeded"] += 1
+                    counts["rows_upserted_total"] += rows_upserted
                 except Exception as exc:
                     # Bucket B: per-report containment. Widened from
                     # ``GoogleConnectorError`` (T27) to ``Exception`` (T28) so
@@ -439,7 +473,11 @@ def run_one(
                     # GoogleConnectorError). A single bad report -> PARTIAL
                     # run, not a terminal FAILED that loses the other
                     # reports' rows.
-                    per_report_failures.append((report_type, type(exc).__name__))
+                    error_class = type(exc).__name__
+                    per_report_failures.append((report_type, error_class))
+                    per_report_failure_details.append(
+                        (report_type, error_class, _safe_failure_detail(exc))
+                    )
                     counts["reports_failed"] += 1
                     # If the failure happened AFTER the raw_file row was
                     # flushed (parse / upsert / mark_parsed), mark that
@@ -521,7 +559,7 @@ def run_one(
             connector_run_id=UUID(run_entry.id),
             status=status,
             counts=counts,
-            error_summary=_summarize_failures(per_report_failures),
+            error_summary=_summarize_failures(per_report_failure_details),
         )
         session.commit()
         finished = True
@@ -585,9 +623,8 @@ def _process_one_report(
     raw_bytes: bytes,
     ordering_index: int,
     triggered_by_user_id: UUID | None,
-    counts: dict[str, int],
     report_state: dict[str, object],
-) -> None:
+) -> int:
     """Run one report through blob → raw_file → parse → upsert → mark_parsed.
 
     Raises any ``GoogleConnectorError`` / ``ParserError`` / other exception
@@ -685,42 +722,47 @@ def _process_one_report(
     )
 
     if raw_file.parse_status == "PARSED":
-        return
+        return 0
 
-    # 5. Parse. ``list(...)`` forces the generator so a parser failure surfaces
-    # here (typed ``ParserError``) instead of mid-upsert. ParserError is *not*
-    # a GoogleConnectorError; it is caught by the widened Bucket B/C
-    # ``except Exception`` in ``run_one`` so no per-report-level translator
-    # is needed here. For the happy-path test the parser succeeds.
-    parsed_rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
+    # 5-7. Parse, upsert, and mark_parsed inside a SAVEPOINT. The raw_file
+    # evidence row and run link are outside this savepoint so Bucket B can mark
+    # the raw file FAILED if any downstream step raises. The finance source
+    # rows and PARSED transition are inside it so a post-upsert lifecycle
+    # failure cannot leave persisted source rows attached to a FAILED raw file.
+    with session.begin_nested():
+        # Parse. ``list(...)`` forces the generator so a parser failure surfaces
+        # here (typed ``ParserError``) instead of mid-upsert. ParserError is
+        # caught by the widened Bucket B/C ``except Exception`` in ``run_one``.
+        parsed_rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
 
-    # 6. Upsert. Returns the persisted entries (one per ParsedSourceRow);
-    # the precise created-vs-updated split needs a pre-read of existing
-    # source_row_keys, which the happy-path test doesn't exercise. Future
-    # work (no current task) can wire that count if downstream consumers
-    # need it; the run-level ``rows_upserted_total`` (sum of writes across
-    # all reports) is what the test asserts on.
-    written = repo.upsert_many(
-        tenant_id,
-        parsed_rows,
-        raw_file_id=raw_file_id,
-        imported_by=triggered_by_user_id,
-    )
-    counts["rows_upserted_total"] += len(written)
+        # Upsert. Returns the persisted entries (one per ParsedSourceRow); the
+        # precise created-vs-updated split needs a pre-read of existing
+        # source_row_keys, which the happy-path test doesn't exercise. Future
+        # work (no current task) can wire that count if downstream consumers
+        # need it; the run-level ``rows_upserted_total`` (sum of writes across
+        # successful reports) is what the tests assert on.
+        written = repo.upsert_many(
+            tenant_id,
+            parsed_rows,
+            raw_file_id=raw_file_id,
+            imported_by=triggered_by_user_id,
+        )
+
+        # Lifecycle transition: DOWNLOADED -> PARSED. Raises
+        # ``RawFileAlreadyParsedError`` if called twice on the same file, which
+        # would only happen on a re-entrant orchestrator bug.
+        mark_parsed(session, raw_file_id=raw_file_id, tenant_id=tenant_id)
+
     # Future work (no current task): accurate created/updated/unchanged
     # split via a pre-read of existing source_row_keys. Until then, the
     # per-category split fields stay at 0 rather than over-claiming
     # everything as 'created' (which would lie on the second ingest of an
     # already-seen month).
-
-    # 7. Lifecycle transition: DOWNLOADED -> PARSED. Raises
-    # ``RawFileAlreadyParsedError`` if called twice on the same file, which
-    # would only happen on a re-entrant orchestrator bug.
-    mark_parsed(session, raw_file_id=raw_file_id, tenant_id=tenant_id)
     # ``counts["reports_succeeded"] += 1`` lives in ``run_one``'s outer
     # loop AFTER ``session.commit()`` so a commit failure (e.g. DB
     # disconnect on the per-report flush) is recorded as a failure once,
     # not double-counted as both succeeded and failed.
+    return len(written)
 
 
 # ============================================================================
@@ -786,7 +828,7 @@ class YouTubeReportingRunner:
         credentials: Credentials,
         report_month: str,
         account_id: str,
-    ) -> Iterator[tuple[str, dict[str, object], bytes]]:
+    ) -> Iterator[ProducedReport]:
         # ``run`` is ``None`` on the T29 dry-run path; the runner body
         # never references it (the connector_runs lifecycle is owned by
         # ``run_one`` itself), so the widening is a pure type contract
@@ -798,21 +840,29 @@ class YouTubeReportingRunner:
             for job in jobs:
                 report_type = _require_text(job, "reportTypeId")
                 job_id = _require_text(job, "id")
-                reports = client.list_reports_for_month(
-                    account_id=account_id,
-                    job_id=job_id,
-                    report_month=report_month,
-                )
-                for report in reports:
-                    download_url = _require_text(report, "downloadUrl")
-                    raw_bytes = client.fetch_report(download_url=download_url)
-                    report_id = _require_text(report, "id")
-                    parser_payload = _csv_to_parser_payload(
-                        raw_bytes=raw_bytes,
-                        report_id=report_id,
-                        report_type=report_type,
+                try:
+                    reports = client.list_reports_for_month(
+                        account_id=account_id,
+                        job_id=job_id,
                         report_month=report_month,
                     )
+                except Exception as exc:
+                    yield ProducedReportFailure(report_type=report_type, error=exc)
+                    continue
+                for report in reports:
+                    try:
+                        download_url = _require_text(report, "downloadUrl")
+                        raw_bytes = client.fetch_report(download_url=download_url)
+                        report_id = _require_text(report, "id")
+                        parser_payload = _csv_to_parser_payload(
+                            raw_bytes=raw_bytes,
+                            report_id=report_id,
+                            report_type=report_type,
+                            report_month=report_month,
+                        )
+                    except Exception as exc:
+                        yield ProducedReportFailure(report_type=report_type, error=exc)
+                        continue
                     yield report_type, parser_payload, raw_bytes
         finally:
             http.close()
@@ -1072,7 +1122,21 @@ def _derive_terminal_status(counts: dict[str, int]) -> str:
     return "PARTIAL"
 
 
-def _summarize_failures(failures: list[tuple[str, str]]) -> str | None:
+def _safe_failure_detail(exc: Exception) -> str | None:
+    """Return operator-safe detail for per-report summaries.
+
+    ``per_report_failures`` intentionally remains a compact
+    ``(report_type, error_class)`` API shape. The durable ``error_summary`` can
+    carry schema reasons, such as missing CSV currency metadata, without
+    including URLs, secret refs, storage paths, or arbitrary exception text.
+    """
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, str) and reason:
+        return reason
+    return None
+
+
+def _summarize_failures(failures: list[tuple[str, str, str | None]]) -> str | None:
     """Pack per-report failures into an operator-safe summary string.
 
     Bounded by ``finish_run``'s 500-char truncation so the connector_runs
@@ -1080,7 +1144,10 @@ def _summarize_failures(failures: list[tuple[str, str]]) -> str | None:
     """
     if not failures:
         return None
-    items = ", ".join(f"{report_type}:{error_class}" for report_type, error_class in failures)
+    items = ", ".join(
+        f"{report_type}:{error_class}{f' ({detail})' if detail else ''}"
+        for report_type, error_class, detail in failures
+    )
     return f"{len(failures)} report(s) failed: {items}"
 
 

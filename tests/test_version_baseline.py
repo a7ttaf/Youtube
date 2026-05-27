@@ -19,6 +19,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
         "SQLAlchemy==2.0.50",
         "alembic==1.18.4",
         "psycopg[binary]==3.3.4",
+        "httpx==0.28.1",
         "celery==5.6.3",
         "redis==7.4.0",
         "openpyxl==3.1.5",

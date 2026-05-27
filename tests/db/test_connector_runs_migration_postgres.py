@@ -144,6 +144,19 @@ def test_triggered_by_user_fk_rejects_user_from_different_tenant(
         _insert_connector_run(conn, tenant_a, uuid4(), triggered_by_user_id=user_id)
 
 
+def test_report_month_check_rejects_nondigit_month(
+    alembic_config: Config, fresh_engine: object
+) -> None:
+    command.upgrade(alembic_config, B2_3_HEAD)
+    tenant_id = uuid4()
+
+    with fresh_engine.begin() as conn:
+        _insert_tenant(conn, tenant_id, "tenant-a")
+
+    with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
+        _insert_connector_run(conn, tenant_id, uuid4(), report_month="2026-0a")
+
+
 def test_downgrade_drops_b2_3_tables_and_raw_unique_only(
     alembic_config: Config, fresh_engine: object
 ) -> None:
@@ -189,6 +202,7 @@ def _insert_connector_run(
     tenant_id,
     run_id,
     *,
+    report_month="2026-04",
     triggered_by_user_id=None,
 ) -> None:
     conn.execute(
@@ -197,11 +211,12 @@ def _insert_connector_run(
             "(id, tenant_id, connector_key, account_id, report_month, "
             "triggered_by_user_id, counts_json) "
             "VALUES (:id, :tenant_id, 'youtube-reporting', 'acct-test', "
-            "'2026-04', :triggered_by_user_id, '{}')"
+            ":report_month, :triggered_by_user_id, '{}')"
         ),
         {
             "id": run_id,
             "tenant_id": tenant_id,
+            "report_month": report_month,
             "triggered_by_user_id": triggered_by_user_id,
         },
     )

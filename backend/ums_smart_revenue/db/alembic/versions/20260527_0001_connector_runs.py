@@ -17,14 +17,24 @@ branch_labels = None
 depends_on = None
 
 _COUNT_JSON_TYPE = sa.JSON().with_variant(postgresql.JSONB(), "postgresql")
+_REPORT_MONTH_CHECK_SQL = (
+    "length(report_month) = 7 AND substr(report_month, 5, 1) = '-' "
+    "AND substr(report_month, 1, 1) BETWEEN '0' AND '9' "
+    "AND substr(report_month, 2, 1) BETWEEN '0' AND '9' "
+    "AND substr(report_month, 3, 1) BETWEEN '0' AND '9' "
+    "AND substr(report_month, 4, 1) BETWEEN '0' AND '9' "
+    "AND substr(report_month, 6, 1) BETWEEN '0' AND '9' "
+    "AND substr(report_month, 7, 1) BETWEEN '0' AND '9' "
+    "AND substr(report_month, 6, 2) BETWEEN '01' AND '12'"
+)
 
 
 def upgrade() -> None:
-    op.create_unique_constraint(
-        "uq_raw_report_files_tenant_id_id",
-        "raw_report_files",
-        ["tenant_id", "id"],
-    )
+    with op.batch_alter_table("raw_report_files") as batch_op:
+        batch_op.create_unique_constraint(
+            "uq_raw_report_files_tenant_id_id",
+            ["tenant_id", "id"],
+        )
     op.create_table(
         "connector_runs",
         sa.Column(
@@ -71,12 +81,7 @@ def upgrade() -> None:
         ),
         sa.UniqueConstraint("tenant_id", "id", name="uq_connector_runs_tenant_id"),
         sa.CheckConstraint(
-            "length(report_month) = 7 AND substr(report_month, 5, 1) = '-' "
-            "AND substr(report_month, 1, 1) BETWEEN '0' AND '9' "
-            "AND substr(report_month, 2, 1) BETWEEN '0' AND '9' "
-            "AND substr(report_month, 3, 1) BETWEEN '0' AND '9' "
-            "AND substr(report_month, 4, 1) BETWEEN '0' AND '9' "
-            "AND substr(report_month, 6, 2) BETWEEN '01' AND '12'",
+            _REPORT_MONTH_CHECK_SQL,
             name="ck_connector_runs_report_month_format",
         ),
         sa.CheckConstraint(
@@ -159,8 +164,8 @@ def downgrade() -> None:
         table_name="connector_runs",
     )
     op.drop_table("connector_runs")
-    op.drop_constraint(
-        "uq_raw_report_files_tenant_id_id",
-        "raw_report_files",
-        type_="unique",
-    )
+    with op.batch_alter_table("raw_report_files") as batch_op:
+        batch_op.drop_constraint(
+            "uq_raw_report_files_tenant_id_id",
+            type_="unique",
+        )

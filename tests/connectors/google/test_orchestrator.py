@@ -1240,6 +1240,171 @@ def test_bucket_b_pre_flush_failure_on_second_report_preserves_first_report(
     assert "GoogleApiServerError" in (run_row.error_summary or "")
 
 
+def test_bucket_b_download_failure_on_second_report_preserves_first_report(
+    session: Session, stub_secret_resolver
+) -> None:
+    """Regression: report-download failures occur after report enumeration but
+    before the runner can yield parser payloads. They are still per-report
+    failures and must land in Bucket B, not the run-level Bucket C.
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes_a = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-01,UC_orch_alpha,cms-orch-1,10.000000,USD\n"
+    )
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"},
+            {"id": "job-2", "reportTypeId": "content_owner_basic_a3"},
+        ]
+        reports_by_job = {
+            "job-1": [{"id": "r1", "downloadUrl": "https://yt/r1"}],
+            "job-2": [{"id": "r2", "downloadUrl": "https://yt/r2"}],
+        }
+        client.list_reports_for_month.side_effect = (
+            lambda *, account_id, job_id, report_month: reports_by_job[job_id]
+        )
+
+        def fetch_report(*, download_url: str) -> bytes:
+            if download_url == "https://yt/r2":
+                raise GoogleApiServerError(
+                    method="GET", url=download_url, status=503, attempts=4,
+                )
+            return csv_bytes_a
+
+        client.fetch_report.side_effect = fetch_report
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "PARTIAL"
+    assert outcome.counts["reports_attempted"] == 2
+    assert outcome.counts["reports_succeeded"] == 1
+    assert outcome.counts["reports_failed"] == 1
+    assert outcome.per_report_failures == [
+        ("content_owner_basic_a3", "GoogleApiServerError")
+    ]
+
+    raw_files = session.scalars(
+        select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
+    ).all()
+    assert len(raw_files) == 1
+    assert raw_files[0].parse_status == "PARSED"
+    assert raw_files[0].report_type == "channel_basic_a2"
+
+    source_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
+        )
+    ).all()
+    assert len(source_rows) == 1
+
+
+def test_run_one_counts_rows_only_after_mark_parsed_and_commit(
+    session: Session, stub_secret_resolver
+) -> None:
+    """If a post-upsert lifecycle step fails, the failed report must not
+    inflate rows_upserted_total or leave source rows behind.
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes = _csv_for_one_row()
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.mark_parsed",
+        side_effect=RuntimeError("mark_parsed failed"),
+    ):
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"},
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r1", "downloadUrl": "https://yt/r1"},
+        ]
+        client.fetch_report.return_value = csv_bytes
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "FAILED"
+    assert outcome.counts["reports_attempted"] == 1
+    assert outcome.counts["reports_succeeded"] == 0
+    assert outcome.counts["reports_failed"] == 1
+    assert outcome.counts["rows_upserted_total"] == 0
+    assert outcome.per_report_failures == [("channel_basic_a2", "RuntimeError")]
+
+    raw_file = session.scalars(
+        select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
+    ).one()
+    assert raw_file.parse_status == "FAILED"
+
+    source_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
+        )
+    ).all()
+    assert source_rows == []
+
+
 # ============================================================================
 # T29: Dry-run
 # ============================================================================

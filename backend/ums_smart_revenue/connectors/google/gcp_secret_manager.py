@@ -45,7 +45,9 @@ class GcpSecretManagerResolver:
         if not _NAME_PATTERN.match(name):
             raise MalformedSecretUriError(ref=ref)
         try:
-            response = self._get_client().access_secret_version(request={"name": name})
+            response = self._get_client(ref=ref).access_secret_version(
+                request={"name": name}
+            )
         except gcp_exceptions.NotFound as exc:
             raise SecretNotFoundError(ref=ref) from exc
         except gcp_exceptions.GoogleAPICallError as exc:
@@ -56,9 +58,27 @@ class GcpSecretManagerResolver:
         except UnicodeDecodeError as exc:
             raise MalformedSecretPayloadError(detail="payload is not utf-8") from exc
 
-    def _get_client(self) -> _SecretManagerClient:
+    def _get_client(self, *, ref: str) -> _SecretManagerClient:
+        # ============================================================================
+        # Purpose: Lazily construct the GCP Secret Manager client and preserve
+        #          construction/import/auth failures behind the connector's typed
+        #          SecretFetchError boundary.
+        # Database/ORM: None.
+        # Standards: No secret payloads in error text; typed connector error for
+        #            upstream environment, credential, import, and API-client setup
+        #            failures.
+        # Blast Radius: Secret resolution only. No graph projection impact detected.
+        # Connections:
+        #   - File: backend/ums_smart_revenue/connectors/google/secret_resolver.py ->
+        #     dispatches gcp-secret-manager:// refs to this resolver.
+        #   - File: backend/ums_smart_revenue/connectors/google/errors.py ->
+        #     SecretFetchError stores the original exception for operator logs/tests.
+        # ============================================================================
         if self._client is None:
-            from google.cloud import secretmanager
+            try:
+                from google.cloud import secretmanager
 
-            self._client = secretmanager.SecretManagerServiceClient()
+                self._client = secretmanager.SecretManagerServiceClient()
+            except Exception as exc:
+                raise SecretFetchError(ref=ref, inner=exc) from exc
         return self._client

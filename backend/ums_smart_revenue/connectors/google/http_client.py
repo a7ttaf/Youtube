@@ -24,6 +24,7 @@ from collections.abc import Mapping
 from typing import Any
 
 import httpx
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 
 from ums_smart_revenue.connectors.google.errors import (
@@ -32,6 +33,7 @@ from ums_smart_revenue.connectors.google.errors import (
     GoogleApiRateLimitError,
     GoogleApiResponseError,
     GoogleApiServerError,
+    OAuthRefreshError,
 )
 
 _CLIENT_STATUSES = frozenset({400, 404, 422})
@@ -148,7 +150,10 @@ class GoogleHttpClient:
         # Build auth headers once per overall request; google-auth's own
         # staleness state decides whether to refresh, and the same headers
         # dict is safe to replay across retry attempts within this call.
-        self._credentials.before_request(self._auth_request, method, url, headers)
+        try:
+            self._credentials.before_request(self._auth_request, method, url, headers)
+        except RefreshError as exc:
+            raise OAuthRefreshError(inner=exc) from exc
 
         status_backoff = _backoff_schedule(_MAX_STATUS_ATTEMPTS)
         timeout_backoff = _backoff_schedule(_MAX_TIMEOUT_ATTEMPTS)

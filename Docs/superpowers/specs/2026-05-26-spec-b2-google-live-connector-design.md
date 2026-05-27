@@ -470,7 +470,7 @@ class GoogleHttpClient:
 # youtube_reporting_client.py
 SUPPORTED_REPORT_TYPES: frozenset[str] = frozenset({
     "content_owner_estimated_revenue_a1",
-    "content_owner_ad_revenue_raw_a1",
+    # raw ad revenue remains excluded until a parser supports its schema
     # ... (locked at B2.4 ship; outside list raises UnsupportedReportTypeError)
 })
 

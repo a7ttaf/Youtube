@@ -11,6 +11,7 @@ from unittest.mock import MagicMock
 
 import pytest
 from google.api_core import exceptions as gcp_exceptions
+from google.cloud import secretmanager
 
 from ums_smart_revenue.connectors.google.errors import (
     MalformedSecretPayloadError,
@@ -74,6 +75,23 @@ def test_resolve_wraps_other_gcp_errors_as_fetch_error() -> None:
         resolver.resolve(
             "gcp-secret-manager://projects/x/secrets/y/versions/latest"
         )
+    assert ctx.value.inner is inner
+
+
+def test_resolve_wraps_client_construction_failure_as_fetch_error(monkeypatch) -> None:
+    ref = "gcp-secret-manager://projects/x/secrets/y/versions/latest"
+    inner = RuntimeError("ADC unavailable")
+
+    def raise_on_construct():
+        raise inner
+
+    monkeypatch.setattr(secretmanager, "SecretManagerServiceClient", raise_on_construct)
+    resolver = GcpSecretManagerResolver()
+
+    with pytest.raises(SecretFetchError) as ctx:
+        resolver.resolve(ref)
+
+    assert ctx.value.ref == ref
     assert ctx.value.inner is inner
 
 

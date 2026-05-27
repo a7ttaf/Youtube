@@ -11,6 +11,7 @@ from collections.abc import Iterator
 
 import httpx
 import pytest
+from google.auth.exceptions import RefreshError
 
 from ums_smart_revenue.connectors.google.errors import (
     GoogleApiAuthError,
@@ -18,6 +19,7 @@ from ums_smart_revenue.connectors.google.errors import (
     GoogleApiRateLimitError,
     GoogleApiResponseError,
     GoogleApiServerError,
+    OAuthRefreshError,
 )
 from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
 
@@ -72,6 +74,28 @@ def test_request_passes_google_auth_transport_request_to_credentials() -> None:
     assert seen["request"] is not None
     assert seen["method"] == "GET"
     assert seen["url"] == "https://example.com/v1/jobs"
+
+
+def test_before_request_refresh_error_is_typed_oauth_error() -> None:
+    inner = RefreshError("token revoked")
+
+    class _Credentials:
+        @staticmethod
+        def before_request(request, method, url, headers) -> None:
+            raise inner
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("HTTP request must not run after auth refresh failure")
+
+    client = GoogleHttpClient(
+        credentials=_Credentials(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(OAuthRefreshError) as ctx:
+        client.request(method="GET", url="https://example.com/v1/jobs")
+
+    assert ctx.value.inner is inner
 
 
 def test_request_passes_query_params(mock_credentials) -> None:

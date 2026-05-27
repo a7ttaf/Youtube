@@ -39,7 +39,7 @@ def test_list_supported_jobs_filters_to_whitelist(mock_credentials) -> None:
     client = YouTubeReportingClient(http=http)
     jobs = client.list_supported_jobs(account_id="content-owner-1")
     ids = {job["id"] for job in jobs}
-    assert ids == {"job-a", "job-b"}
+    assert ids == {"job-a"}
 
 
 def test_list_supported_jobs_paginates(mock_credentials) -> None:
@@ -159,6 +159,42 @@ def test_list_reports_for_month_paginates(mock_credentials) -> None:
     # Date-bounds must be sent on every paginated request, not only page 1.
     assert captured["queries"][1]["startTimeAtOrAfter"] == "2026-05-01T00:00:00Z"
     assert captured["queries"][1]["startTimeBefore"] == "2026-06-01T00:00:00Z"
+
+
+def test_list_reports_for_month_returns_oldest_create_time_first(
+    mock_credentials,
+) -> None:
+    pages = iter(
+        [
+            {
+                "reports": [
+                    {
+                        "id": "newer",
+                        "downloadUrl": "https://x/newer",
+                        "createTime": "2026-05-03T00:00:00Z",
+                    },
+                    {
+                        "id": "older",
+                        "downloadUrl": "https://x/older",
+                        "createTime": "2026-05-01T00:00:00Z",
+                    },
+                ],
+            }
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return _next_json_response(pages)
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeReportingClient(http=http)
+    reports = client.list_reports_for_month(
+        account_id="acct", job_id="job-1", report_month="2026-05",
+    )
+
+    assert [report["id"] for report in reports] == ["older", "newer"]
 
 
 def test_list_reports_handles_december_boundary(mock_credentials) -> None:
