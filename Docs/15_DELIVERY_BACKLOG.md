@@ -24,8 +24,8 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   in PR #30).
 - ⏳ YouTube report ingestion — remaining: credentials repo (PRs #33,
   #34); real ingestion not built.
-    - ⏳ PR #47 — Google live connector foundation (B2.1-B2.4 in one
-      stack): credential foundation (secret resolver dispatch +
+    - ✅ PR #47 — Google live connector foundation (B2.1-B2.4 in one
+      stack, merged 2026-05-27 as commit 52734a3): credential foundation (secret resolver dispatch +
       gcp-secret-manager:// + local-secret:// + OAuth refresh wrapper);
       blob storage backends (GCS + file-store) + raw_file lifecycle
       helpers (mark_parsed accepts FAILED -> PARSED retry recovery;

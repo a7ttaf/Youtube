@@ -170,8 +170,8 @@ running on the operator's workstation.
   (B2.1-B2.4 in one PR). Public OAuth consent flows, live connector
   ingestion against real Google APIs, and token monitoring are not
   started — they belong to B2.5+ slices that stack on PR #47.
-    - ⏳ PR #47 — Google live connector foundation (B2.1-B2.4 in one
-      stack): credential foundation (secret resolver dispatch +
+    - ✅ PR #47 — Google live connector foundation (B2.1-B2.4 in one
+      stack, merged 2026-05-27 as commit 52734a3): credential foundation (secret resolver dispatch +
       gcp-secret-manager:// + local-secret:// + OAuth refresh wrapper);
       blob storage backends (GCS + file-store) + raw_file lifecycle
       helpers (mark_parsed accepts FAILED -> PARSED retry recovery;
