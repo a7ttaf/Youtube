@@ -120,6 +120,32 @@ def _response_object_list(
     return value
 
 
+# ============================================================================
+# Purpose: Validate Google's pagination token before it is reused as pageToken.
+# Database/ORM: None.
+# Standards: Missing or empty tokens terminate pagination; malformed tokens
+#            raise typed GoogleApiResponseError at the API boundary.
+# Blast Radius: Connector API pagination only. Authorization, finance, audit,
+#               Neo4j, and exports are unaffected until descriptors are accepted.
+# Connections:
+#   - Method: YouTubeReportingClient.list_supported_jobs -> validates job pages.
+#   - Method: YouTubeReportingClient.list_reports_for_month -> validates report pages.
+# ============================================================================
+def _next_page_token(body: dict[str, object], *, url: str) -> str | None:
+    if "nextPageToken" not in body:
+        return None
+    value = body["nextPageToken"]
+    if value == "":
+        return None
+    # FIX: Distinguish terminal absence/empty-string from malformed non-string
+    # tokens so pagination cannot silently stop or reuse an object as pageToken.
+    if not isinstance(value, str) or not value.strip():
+        raise GoogleApiResponseError(
+            url=url, reason="'nextPageToken' must be a non-empty string"
+        )
+    return value
+
+
 class YouTubeReportingClient:
     def __init__(self, *, http: GoogleHttpClient) -> None:
         self._http = http
@@ -158,7 +184,7 @@ class YouTubeReportingClient:
             for job in _response_object_list(body, "jobs", url=url):
                 if job.get("reportTypeId") in SUPPORTED_REPORT_TYPES:
                     out.append(job)
-            token = body.get("nextPageToken")
+            token = _next_page_token(body, url=url)
             if not token:
                 break
         return out
@@ -201,7 +227,7 @@ class YouTubeReportingClient:
                 params["pageToken"] = token
             body = self._http.request(method="GET", url=url, params=params)
             out.extend(_response_object_list(body, "reports", url=url))
-            token = body.get("nextPageToken")
+            token = _next_page_token(body, url=url)
             if not token:
                 break
         return _newest_reports_by_period(out)

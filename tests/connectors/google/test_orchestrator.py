@@ -835,18 +835,41 @@ def test_run_one_real_local_file_store_backend_round_trips(
     assert raw_file.checksum == expected_checksum
 
 
-def test_run_one_accepts_underscore_credential_alias(
-    session: Session, _stub_secret_resolver
+@pytest.mark.parametrize(
+    ("run_connector_key", "stored_connector_key"),
+    [
+        pytest.param(
+            CONNECTOR_KEY,
+            "youtube_reporting",
+            id="hyphenated-run-key-uses-underscore-credential",
+        ),
+        pytest.param(
+            "youtube_reporting",
+            CONNECTOR_KEY,
+            id="underscore-run-key-uses-hyphenated-credential",
+        ),
+    ],
+)
+def test_run_one_accepts_youtube_reporting_credential_aliases(
+    session: Session,
+    _stub_secret_resolver,
+    run_connector_key: str,
+    stored_connector_key: str,
 ) -> None:
-    """The admin credential API stores the B1 source-system key
-    ``youtube_reporting``. ``run_one`` still accepts the CLI key
-    ``youtube-reporting`` and maps it to that credential row.
+    """``run_one`` accepts both YouTube Reporting key spellings.
+
+    The admin credential API may persist either the public connector key
+    ``youtube-reporting`` or the B1 source-system key ``youtube_reporting``;
+    orchestration must find the row from either dispatch spelling.
     """
+    account_id = (
+        f"{ACCOUNT_ID}-{run_connector_key.replace('-', 'dash').replace('_', 'under')}"
+    )
     _make_credential_row(
         session,
         tenant_id=TENANT_ID,
-        connector_key="youtube_reporting",
-        account_id=ACCOUNT_ID,
+        connector_key=stored_connector_key,
+        account_id=account_id,
     )
     csv_bytes = _csv_for_one_row()
 
@@ -881,8 +904,8 @@ def test_run_one_accepts_underscore_credential_alias(
         outcome = run_one(
             session,
             tenant_id=TENANT_ID,
-            connector_key=CONNECTOR_KEY,
-            account_id=ACCOUNT_ID,
+            connector_key=run_connector_key,
+            account_id=account_id,
             report_month="2026-05",
         )
 

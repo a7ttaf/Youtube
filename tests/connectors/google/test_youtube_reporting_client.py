@@ -135,6 +135,42 @@ def test_list_supported_jobs_treats_empty_next_page_token_as_terminal(
     assert [j["id"] for j in jobs] == ["j1"]
 
 
+@pytest.mark.parametrize("next_page_token", [None, False, 0, [], {}, "   "])
+def test_list_supported_jobs_rejects_malformed_next_page_token(
+    mock_credentials, next_page_token: object
+) -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise AssertionError("malformed nextPageToken must not be reused")
+        return httpx.Response(
+            200,
+            content=json.dumps(
+                {
+                    "jobs": [
+                        {
+                            "id": "j1",
+                            "reportTypeId": "content_owner_estimated_revenue_a1",
+                        }
+                    ],
+                    "nextPageToken": next_page_token,
+                }
+            ).encode(),
+        )
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeReportingClient(http=http)
+
+    with pytest.raises(GoogleApiResponseError, match="nextPageToken"):
+        client.list_supported_jobs(account_id="acct")
+    assert calls == 1
+
+
 def test_list_reports_for_month_passes_date_bounds(mock_credentials) -> None:
     captured = {}
     def handler(request: httpx.Request) -> httpx.Response:
@@ -177,6 +213,39 @@ def test_list_reports_for_month_paginates(mock_credentials) -> None:
     # Date-bounds must be sent on every paginated request, not only page 1.
     assert captured["queries"][1]["startTimeAtOrAfter"] == "2026-05-01T00:00:00Z"
     assert captured["queries"][1]["startTimeBefore"] == "2026-06-01T00:00:00Z"
+
+
+@pytest.mark.parametrize("next_page_token", [None, False, 0, [], {}, "   "])
+def test_list_reports_for_month_rejects_malformed_next_page_token(
+    mock_credentials, next_page_token: object
+) -> None:
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise AssertionError("malformed nextPageToken must not be reused")
+        return httpx.Response(
+            200,
+            content=json.dumps(
+                {
+                    "reports": [{"id": "r1", "downloadUrl": "https://x/r1"}],
+                    "nextPageToken": next_page_token,
+                }
+            ).encode(),
+        )
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeReportingClient(http=http)
+
+    with pytest.raises(GoogleApiResponseError, match="nextPageToken"):
+        client.list_reports_for_month(
+            account_id="acct", job_id="job-1", report_month="2026-05",
+        )
+    assert calls == 1
 
 
 @pytest.mark.parametrize("reports_payload", [{"id": "r1"}, "not-a-list", None])

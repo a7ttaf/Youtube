@@ -1982,8 +1982,21 @@ def _load_credential(
     return None
 
 
+_CREDENTIAL_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "youtube-reporting": ("youtube_reporting",),
+    "youtube_reporting": ("youtube-reporting",),
+    "youtube-analytics": ("youtube_analytics",),
+    "youtube_analytics": ("youtube-analytics",),
+    "adsense-management": ("adsense_management",),
+    "adsense_management": ("adsense-management",),
+}
+
+
 def _credential_key_candidates(connector_key: str) -> tuple[str, ...]:
     candidates = [connector_key]
+    # FIX: Credential lookup must be symmetric across public hyphen keys and
+    # stored source-system underscore keys; operators can dispatch either alias.
+    candidates.extend(_CREDENTIAL_KEY_ALIASES.get(connector_key, ()))
     source_key = _source_system_for_connector(connector_key)
     if source_key != connector_key:
         candidates.append(source_key)
