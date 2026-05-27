@@ -266,8 +266,9 @@ class SqlAlchemyCurrenciesRepository:
 #            date-only (not datetime) period bounds, JSON-serialisable
 #            raw_payload dict, and currency_code existence in the
 #            currencies reference table. Provenance (raw_file_id/imported_by)
-#            is preserved via COALESCE on conflict so a later replay that
-#            omits it cannot erase audit lineage.
+#            is preserved via COALESCE on conflict by default so a later
+#            replay that omits it cannot erase audit lineage; orchestrator
+#            aggregate replacements can opt into clearing stale raw_file_id.
 #            Tenant ID is a positional UUID arg on every method; the
 #            repository does NOT read TENANT_CTX directly so callers
 #            retain explicit control of scope.
@@ -290,6 +291,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         *,
         raw_file_id: UUID | None,
         imported_by: UUID | None,
+        replace_raw_file_id: bool = False,
     ) -> List[GoogleRevenueSourceRowEntry]:  # noqa: UP006
         materialised = list(rows)
         if not materialised:
@@ -357,14 +359,17 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
                     "amount_native": row.amount_native,
                     "currency_code": row.currency_code,
                     "source_report_id": row.source_report_id,
-                    # FIX: COALESCE(new, existing) for provenance instead of an
-                    # unconditional overwrite. A later replay/import path that
-                    # lacks raw_file_id/imported_by (passes None) must NOT erase
-                    # the audit lineage recorded on the original ingest; a
-                    # genuinely new file/importer (non-None) still replaces it.
-                    "raw_file_id": func.coalesce(
-                        insert_stmt.excluded.raw_file_id,
-                        GoogleRevenueSourceRowORM.raw_file_id,
+                    # FIX: Preserve provenance by default for replay/import
+                    # paths that lack raw evidence, but let the orchestrator
+                    # explicitly clear stale single-file lineage when a fresh
+                    # multi-file aggregate replaces the row.
+                    "raw_file_id": (
+                        insert_stmt.excluded.raw_file_id
+                        if replace_raw_file_id
+                        else func.coalesce(
+                            insert_stmt.excluded.raw_file_id,
+                            GoogleRevenueSourceRowORM.raw_file_id,
+                        )
                     ),
                     "raw_payload": row.raw_payload,
                     "imported_by": func.coalesce(

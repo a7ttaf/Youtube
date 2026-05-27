@@ -98,6 +98,24 @@ def test_list_supported_jobs_filters_out_jobs_with_missing_report_type_id(
     assert [j["id"] for j in jobs] == ["job-a"]
 
 
+@pytest.mark.parametrize("jobs_payload", [{"id": "job-a"}, "not-a-list", None])
+def test_list_supported_jobs_rejects_malformed_jobs_list(
+    mock_credentials, jobs_payload: object
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=json.dumps({"jobs": jobs_payload}).encode()
+        )
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeReportingClient(http=http)
+
+    with pytest.raises(GoogleApiResponseError, match="jobs"):
+        client.list_supported_jobs(account_id="acct")
+
+
 def test_list_supported_jobs_treats_empty_next_page_token_as_terminal(
     mock_credentials,
 ) -> None:
@@ -159,6 +177,26 @@ def test_list_reports_for_month_paginates(mock_credentials) -> None:
     # Date-bounds must be sent on every paginated request, not only page 1.
     assert captured["queries"][1]["startTimeAtOrAfter"] == "2026-05-01T00:00:00Z"
     assert captured["queries"][1]["startTimeBefore"] == "2026-06-01T00:00:00Z"
+
+
+@pytest.mark.parametrize("reports_payload", [{"id": "r1"}, "not-a-list", None])
+def test_list_reports_for_month_rejects_malformed_reports_list(
+    mock_credentials, reports_payload: object
+) -> None:
+    def handler(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200, content=json.dumps({"reports": reports_payload}).encode()
+        )
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials, transport=httpx.MockTransport(handler),
+    )
+    client = YouTubeReportingClient(http=http)
+
+    with pytest.raises(GoogleApiResponseError, match="reports"):
+        client.list_reports_for_month(
+            account_id="acct", job_id="job-1", report_month="2026-05",
+        )
 
 
 def test_list_reports_for_month_returns_oldest_create_time_first(

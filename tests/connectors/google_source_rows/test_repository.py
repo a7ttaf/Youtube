@@ -655,6 +655,36 @@ def test_upsert_preserves_provenance_when_reimport_omits_it(session: Session) ->
     assert replaced.imported_by == importer_2
 
 
+def test_upsert_can_clear_stale_raw_file_id_for_aggregate_replacement(
+    session: Session,
+) -> None:
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    key = "ag" * 32
+    repo.upsert_many(
+        TENANT_A,
+        [_row(source_row_key=key)],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=None,
+    )
+
+    repo.upsert_many(
+        TENANT_A,
+        [_row(source_row_key=key, amount="777.000000")],
+        raw_file_id=None,
+        imported_by=None,
+        replace_raw_file_id=True,
+    )
+
+    session.expire_all()
+    row = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.source_row_key == key
+        )
+    ).one()
+    assert row.amount_native == Decimal("777.000000")
+    assert row.raw_file_id is None
+
+
 def test_delete_stale_for_scope_preserves_other_scopes(session: Session) -> None:
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     keep_key = "dk" * 32

@@ -24,7 +24,7 @@ CONNECTOR_RUN_COUNT_KEYS = (
     "rows_upserted_unchanged",
 )
 TERMINAL_STATUSES = frozenset({"SUCCEEDED", "PARTIAL", "FAILED"})
-MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+MONTH_PATTERN = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
 ERROR_SUMMARY_MAX_CHARS = 500
 
 
@@ -78,7 +78,7 @@ def start_run(
     report_month: str,
     triggered_by_user_id: UUID | None,
 ) -> ConnectorRunEntry:
-    _validate_month(report_month)
+    validate_report_month(report_month)
     row = ConnectorRunORM(
         id=uuid4(),
         tenant_id=tenant_id,
@@ -238,11 +238,27 @@ def _get_raw_file(
     return row
 
 
-def _validate_month(report_month: str) -> None:
+# ============================================================================
+# Purpose: Validate the connector run month before any run-row write or
+#          orchestrator dispatch.
+# Database/ORM: None.
+# Standards: ASCII-only YYYY-MM guard shared by the repository and orchestrator.
+# Blast Radius: Connector run identity only; finance, audit, Neo4j, and exports
+#               are unaffected until a valid month reaches ingestion.
+# Connections:
+#   - Function: start_run -> validates before inserting ConnectorRunORM.
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     validates dry-run and live-run inputs before credential/network work.
+# ============================================================================
+def validate_report_month(report_month: str) -> None:
     if not MONTH_PATTERN.fullmatch(report_month):
         raise ConnectorRunValidationError(
             "report_month must use YYYY-MM with a calendar month from 01 to 12"
         )
+
+
+def _validate_month(report_month: str) -> None:
+    validate_report_month(report_month)
 
 
 def _required_text(value: str, field_name: str) -> str:

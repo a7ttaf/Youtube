@@ -109,9 +109,11 @@ from ums_smart_revenue.connectors.runs.raw_file_helpers import (
 from ums_smart_revenue.connectors.runs.repository import (
     CONNECTOR_RUN_COUNT_KEYS,
     ConnectorRunEntry,
+    ConnectorRunValidationError,
     finish_run,
     link_raw_file,
     start_run,
+    validate_report_month,
 )
 from ums_smart_revenue.db.report_models import RawReportFileORM
 from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM
@@ -301,6 +303,7 @@ def run_one(
     # Bucket A: pre-start_run errors. No connector_runs row is created, so
     # these surface to the caller and are recorded only at the CLI/audit
     # layer (B2.6, T37). The orchestrator never half-creates a run.
+    validate_report_month(report_month)
     return _run_one_with_credentials(
         session=session,
         tenant_id=tenant_id,
@@ -383,7 +386,10 @@ def _credentials_for_run(
         )
 
     ensure_default_resolvers()
-    payload = resolve_secret(credential.encrypted_secret_ref)
+    # FIX: Admin/API-created credentials may persist surrounding whitespace in
+    # the secret URI. Normalize before resolver dispatch so valid refs do not
+    # fail scheme lookup.
+    payload = resolve_secret(credential.encrypted_secret_ref.strip())
     credentials = build_credentials_from_payload(payload)
     refresh_credentials(credentials)
     return credentials
@@ -902,6 +908,7 @@ def _process_one_report(
             parsed_rows,
             raw_file_id=source_row_raw_file_id,
             imported_by=triggered_by_user_id,
+            replace_raw_file_id=source_row_raw_file_id is None,
         )
         _delete_stale_source_rows(
             repo=repo,
@@ -932,12 +939,37 @@ def _process_one_report(
     return len(written), len(raw_files)
 
 
+# ============================================================================
+# Purpose: Choose the source-row raw-file FK when exactly one persisted raw CSV
+#          supports the parsed monthly row set.
+# Database/ORM: RawReportFileORM ids only.
+# Standards: Multi-file monthly aggregates intentionally return None so source
+#            rows do not imply one raw file contains the whole aggregate.
+# Blast Radius: Raw evidence lineage only; finance values stay in PostgreSQL
+#               source rows and no graph projection impact is detected.
+# Connections:
+#   - Function: _process_one_report -> passes this value to source-row upsert.
+#   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py
+#     -> optionally clears stale raw_file_id on aggregate replacement.
+# ============================================================================
 def _source_row_raw_file_id(raw_files: list[RawReportFileORM]) -> UUID | None:
     if len(raw_files) == 1:
         return raw_files[0].id
     return None
 
 
+# ============================================================================
+# Purpose: Delete source rows that existed for a report scope but disappeared
+#          from the successful replacement payload.
+# Database/ORM: GoogleRevenueSourceRowORM via repository delete.
+# Standards: Tenant/account/month/type scoped cleanup after parser success only;
+#            no stale-row deletion occurs for failed or partial aggregates.
+# Blast Radius: Source-of-truth source rows for the connector scope. No graph
+#               projection impact detected.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py
+#     -> delete_stale_for_scope enforces tenant and report-month validation.
+# ============================================================================
 def _delete_stale_source_rows(
     *,
     repo: SqlAlchemyGoogleRevenueSourceRowRepository,
@@ -966,6 +998,18 @@ def _delete_stale_source_rows(
         )
 
 
+# ============================================================================
+# Purpose: Persist and link every raw CSV evidence file yielded for one logical
+#          report before parsing/upsert work begins.
+# Database/ORM: RawReportFileORM and ConnectorRunRawFileORM.
+# Standards: Deduplicates raw files within one logical report, records ids in
+#            report_state for bucket-B failure marking, and preserves ordering.
+# Blast Radius: Raw evidence/run linkage only; finance rows are written later
+#               and no graph projection impact is detected.
+# Connections:
+#   - Function: _handle_live_produced_report -> uses report_state on failures.
+#   - Function: _prepare_raw_report_file -> uploads/verifies each raw payload.
+# ============================================================================
 def _prepare_and_link_raw_reports(
     *,
     session: Session,
@@ -1261,7 +1305,9 @@ def _produce_youtube_reports(
     http = GoogleHttpClient(credentials=credentials)
     try:
         client = client_type(http=http)
-        jobs = client.list_supported_jobs(account_id=account_id)
+        jobs = _deduplicate_youtube_jobs_by_report_type(
+            client.list_supported_jobs(account_id=account_id)
+        )
         for job in jobs:
             produced = _produce_youtube_job_report(
                 client=client,
@@ -1283,6 +1329,33 @@ def _produce_youtube_reports(
                 _cleanup_csv_report_downloads(produced.raw_reports)
     finally:
         http.close()
+
+
+# ============================================================================
+# Purpose: Keep one YouTube Reporting job per report_type_id before report
+#          listing/downloading.
+# Database/ORM: None.
+# Standards: Deterministic first-job-wins behavior prevents double ingestion
+#            when Google exposes duplicate jobs for the same report type.
+# Blast Radius: Connector API calls and raw evidence volume only. Finance rows
+#               remain sourced from the single selected report type payload.
+# Connections:
+#   - Function: _produce_youtube_reports -> applies this before job iteration.
+#   - File: backend/ums_smart_revenue/connectors/google/youtube_reporting_client.py
+#     -> supplies validated job descriptor dictionaries.
+# ============================================================================
+def _deduplicate_youtube_jobs_by_report_type(
+    jobs: Iterable[dict[str, object]],
+) -> list[dict[str, object]]:
+    seen_report_types: set[str] = set()
+    unique_jobs: list[dict[str, object]] = []
+    for job in jobs:
+        report_type = _require_text(job, "reportTypeId")
+        if report_type in seen_report_types:
+            continue
+        seen_report_types.add(report_type)
+        unique_jobs.append(job)
+    return unique_jobs
 
 
 def _produce_youtube_job_report(
@@ -1521,6 +1594,18 @@ def _csv_reports_to_parser_payload(
     )
 
 
+# ============================================================================
+# Purpose: Decode one Google CSV report, validate its header, and fold each
+#          row into monthly parser totals.
+# Database/ORM: None.
+# Standards: UTF-8 and CSV-shape failures are typed as GoogleApiResponseError
+#            so live runs persist downloaded evidence before marking failure.
+# Blast Radius: Parser payload construction for YouTube Reporting revenue rows.
+#               No graph projection impact detected.
+# Connections:
+#   - Function: _download_youtube_csv_report -> spools raw bytes before calling.
+#   - Function: _csv_reports_to_parser_payload -> aggregates multiple raw CSVs.
+# ============================================================================
 def _accumulate_csv_report_bytes(
     *,
     totals: dict[tuple[str, str | None, str], Decimal],
@@ -1554,6 +1639,17 @@ def _accumulate_csv_report_bytes(
         )
 
 
+# ============================================================================
+# Purpose: Validate that a downloaded CSV has the columns required to build
+#          parser rows.
+# Database/ORM: None.
+# Standards: Empty/headerless/missing-column payloads become typed upstream
+#            response errors instead of parser KeyError/None drift.
+# Blast Radius: YouTube Reporting CSV acceptance only. No graph projection
+#               impact detected.
+# Connections:
+#   - Function: _accumulate_csv_report_bytes -> calls this before row parsing.
+# ============================================================================
 def _validate_csv_headers(fieldnames: list[str] | None, *, report_id: str) -> None:
     if not fieldnames:
         raise _parser_payload_error(
@@ -1740,16 +1836,13 @@ def _cleanup_csv_report_downloads(
 
 def _month_bounds(*, report_month: str, report_id: str) -> tuple[date_cls, date_cls]:
     expected_month = report_month.strip()
-    if (
-        len(expected_month) != 7
-        or expected_month[4] != "-"
-        or not expected_month[:4].isdigit()
-        or not expected_month[5:].isdigit()
-    ):
+    try:
+        validate_report_month(expected_month)
+    except ConnectorRunValidationError as exc:
         raise _parser_payload_error(
             report_id=report_id,
             reason=f"report_month {expected_month!r} not YYYY-MM",
-        )
+        ) from exc
     try:
         year_text, month_text = expected_month.split("-", 1)
         year = int(year_text)

@@ -101,7 +101,9 @@ def test_start_run_accepts_null_triggered_by_user_id(session: Session) -> None:
     assert entry.triggered_by_user_id is None
 
 
-@pytest.mark.parametrize("month", ["26-04", "2026-00", "2026-13", "202604"])
+@pytest.mark.parametrize(
+    "month", ["26-04", "2026-00", "2026-13", "202604", "٢٠٢٦-٠٤"]
+)
 def test_start_run_rejects_malformed_report_month(
     session: Session, month: str
 ) -> None:

@@ -99,7 +99,7 @@ from ums_smart_revenue.db.session import build_session_factory  # noqa: E402
 # raise but its error message is ugly (``invalid <callable> value``); using
 # ``parser.error`` below produces the standard ``argument --month: ...`` form
 # operators are used to.
-_MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
+_MONTH_PATTERN = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:

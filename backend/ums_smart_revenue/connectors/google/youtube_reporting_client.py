@@ -92,6 +92,34 @@ def _newest_reports_by_period(
     )
 
 
+# ============================================================================
+# Purpose: Validate Google list-envelope fields before callers iterate or sort
+#          descriptor objects.
+# Database/ORM: None.
+# Standards: Missing list fields mean an empty page; malformed/null/non-object
+#            list payloads raise typed GoogleApiResponseError.
+# Blast Radius: API response-shape validation only. Authorization, finance,
+#               audit, Neo4j, and exports are unaffected until descriptors are
+#               accepted by the orchestrator.
+# Connections:
+#   - Method: YouTubeReportingClient.list_supported_jobs -> validates jobs.
+#   - Method: YouTubeReportingClient.list_reports_for_month -> validates reports.
+# ============================================================================
+def _response_object_list(
+    body: dict[str, object], field: str, *, url: str
+) -> list[dict[str, object]]:
+    if field not in body:
+        return []
+    value = body[field]
+    if not isinstance(value, list) or not all(
+        isinstance(item, dict) for item in value
+    ):
+        raise GoogleApiResponseError(
+            url=url, reason=f"{field!r} must be a list of objects"
+        )
+    return value
+
+
 class YouTubeReportingClient:
     def __init__(self, *, http: GoogleHttpClient) -> None:
         self._http = http
@@ -127,7 +155,7 @@ class YouTubeReportingClient:
             if token:
                 params["pageToken"] = token
             body = self._http.request(method="GET", url=url, params=params)
-            for job in body.get("jobs", []):
+            for job in _response_object_list(body, "jobs", url=url):
                 if job.get("reportTypeId") in SUPPORTED_REPORT_TYPES:
                     out.append(job)
             token = body.get("nextPageToken")
@@ -172,7 +200,7 @@ class YouTubeReportingClient:
             if token:
                 params["pageToken"] = token
             body = self._http.request(method="GET", url=url, params=params)
-            out.extend(body.get("reports", []))
+            out.extend(_response_object_list(body, "reports", url=url))
             token = body.get("nextPageToken")
             if not token:
                 break

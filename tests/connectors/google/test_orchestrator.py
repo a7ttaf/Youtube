@@ -47,6 +47,7 @@ from ums_smart_revenue.connectors.runs.orchestrator import (
     _csv_to_parser_payload,
     run_one,
 )
+from ums_smart_revenue.connectors.runs.repository import ConnectorRunValidationError
 from ums_smart_revenue.db.connector_models import (
     ConnectorRunORM,
     ConnectorRunRawFileORM,
@@ -334,6 +335,49 @@ def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff
             assert produced.raw_reports[1].read_bytes() == (
                 b"date,channel_id,estimated_partner_revenue,currency_code\n"
                 b"2026-05-02,UC_orch_alpha,2.75,USD\n"
+            )
+            with pytest.raises(StopIteration):
+                next(produced_iter)
+        finally:
+            produced_iter.close()
+
+
+def test_youtube_reporting_runner_deduplicates_jobs_by_report_type(
+    session: Session,
+) -> None:
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-primary", "reportTypeId": "content_owner_estimated_revenue_a1"},
+            {"id": "job-duplicate", "reportTypeId": "content_owner_estimated_revenue_a1"},
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r-day-1", "downloadUrl": "https://yt/r-day-1"}
+        ]
+        client.fetch_report.return_value = (
+            b"date,channel_id,estimated_partner_revenue,currency_code\n"
+            b"2026-05-01,UC_orch_alpha,4.00,USD\n"
+        )
+
+        produced_iter = YouTubeReportingRunner().produce_reports(
+            session=session,
+            run=None,
+            credentials=object(),
+            report_month="2026-05",
+            account_id=ACCOUNT_ID,
+        )
+        try:
+            produced = next(produced_iter)
+            assert isinstance(produced, ProducedReportSuccess)
+            assert produced.report_type == "content_owner_estimated_revenue_a1"
+            assert client.list_reports_for_month.call_count == 1
+            assert client.list_reports_for_month.call_args.kwargs["job_id"] == (
+                "job-primary"
             )
             with pytest.raises(StopIteration):
                 next(produced_iter)
@@ -742,6 +786,71 @@ def test_run_one_accepts_underscore_credential_alias(
     )
     assert raw_file is not None
     assert raw_file.source == "youtube_reporting"
+
+
+def test_run_one_normalizes_secret_ref_before_resolving(
+    session: Session, _stub_secret_resolver
+) -> None:
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+        encrypted_secret_ref=f"  {DEFAULT_RESOLVER_REF}  ",
+    )
+    csv_bytes = _csv_for_one_row()
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r1", "downloadUrl": "https://yt/r1"}
+        ]
+        client.fetch_report.return_value = csv_bytes
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "SUCCEEDED"
+
+
+def test_run_one_rejects_malformed_month_before_starting_run(session: Session) -> None:
+    with pytest.raises(ConnectorRunValidationError, match="report_month"):
+        run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="٢٠٢٦-٠٤",
+        )
+
+    assert session.scalar(select(ConnectorRunORM)) is None
 
 
 def test_run_one_reuses_existing_parsed_raw_file_for_same_checksum(
