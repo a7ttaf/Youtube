@@ -42,6 +42,7 @@ from ums_smart_revenue.connectors.runs import orchestrator as orchestrator_modul
 from ums_smart_revenue.connectors.runs.blob_storage import compute_checksum
 from ums_smart_revenue.connectors.runs.orchestrator import (
     ConnectorRunOutcome,
+    ProducedReportFailure,
     ProducedReportSuccess,
     YouTubeReportingRunner,
     _csv_to_parser_payload,
@@ -237,6 +238,55 @@ def test_csv_adapter_aggregates_daily_breakdowns_to_monthly_channel_totals() -> 
     ]
 
 
+def test_csv_adapter_defaults_missing_reporting_currency_to_usd() -> None:
+    """The whitelisted YouTube Reporting CSV schema does not include a
+    currency column, so the adapter must hand the parser an explicit USD
+    currency instead of rejecting the otherwise-valid export.
+    """
+    payload = _csv_to_parser_payload(
+        raw_bytes=(
+            b"date,channel_id,content_owner,video_id,country_code,"
+            b"estimated_partner_revenue,ad_impressions\n"
+            b"2026-05-01,UC_orch_alpha,cms-orch-1,V1,US,1.10,100\n"
+            b"2026-05-02,UC_orch_alpha,cms-orch-1,V2,EG,2.20,200\n"
+        ),
+        report_id="r-no-currency",
+        report_type="content_owner_estimated_revenue_a1",
+        month="2026-05",
+    )
+
+    assert payload["rows"] == [
+        {
+            "line_index": 0,
+            "date_range": {"start": "2026-05-01", "end": "2026-05-31"},
+            "dimensions": {
+                "channel": "UC_orch_alpha",
+                "content_owner": "cms-orch-1",
+            },
+            "metrics": {
+                "estimatedRevenue": "3.30",
+                "currencyCode": "USD",
+            },
+        }
+    ]
+
+
+def test_csv_adapter_rejects_blank_present_currency() -> None:
+    """A missing Google Reporting currency column defaults to USD, but a
+    present blank currency field is malformed evidence and must fail closed.
+    """
+    with pytest.raises(GoogleApiResponseError, match="blank currency"):
+        _csv_to_parser_payload(
+            raw_bytes=(
+                b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+                b"2026-05-01,UC_orch_alpha,cms-orch-1,12.345600, \n"
+            ),
+            report_id="r-blank-currency",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
+        )
+
+
 def test_csv_adapter_rejects_non_zero_padded_report_month() -> None:
     with pytest.raises(GoogleApiResponseError, match="not YYYY-MM"):
         _csv_to_parser_payload(
@@ -335,6 +385,63 @@ def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff
             assert produced.raw_reports[1].read_bytes() == (
                 b"date,channel_id,estimated_partner_revenue,currency_code\n"
                 b"2026-05-02,UC_orch_alpha,2.75,USD\n"
+            )
+            with pytest.raises(StopIteration):
+                next(produced_iter)
+        finally:
+            produced_iter.close()
+
+
+def test_youtube_reporting_runner_preserves_prior_downloads_when_later_csv_fails(
+    session: Session,
+) -> None:
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "content_owner_estimated_revenue_a1"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r-day-1", "downloadUrl": "https://yt/r-day-1"},
+            {"id": "r-day-bad", "downloadUrl": "https://yt/r-day-bad"},
+        ]
+        client.fetch_report.side_effect = [
+            (
+                b"date,channel_id,estimated_partner_revenue,currency_code\n"
+                b"2026-05-01,UC_orch_alpha,1.25,USD\n"
+            ),
+            (
+                b"date,channel_id,currency_code\n"
+                b"2026-05-02,UC_orch_alpha,USD\n"
+            ),
+        ]
+
+        produced_iter = YouTubeReportingRunner().produce_reports(
+            session=session,
+            run=None,
+            credentials=object(),
+            report_month="2026-05",
+            account_id=ACCOUNT_ID,
+        )
+        try:
+            produced = next(produced_iter)
+            assert isinstance(produced, ProducedReportFailure)
+            assert produced.report_type == "content_owner_estimated_revenue_a1"
+            assert [report.report_id for report in produced.raw_reports] == [
+                "r-day-1",
+                "r-day-bad",
+            ]
+            assert produced.raw_reports[0].read_bytes() == (
+                b"date,channel_id,estimated_partner_revenue,currency_code\n"
+                b"2026-05-01,UC_orch_alpha,1.25,USD\n"
+            )
+            assert produced.raw_reports[1].read_bytes() == (
+                b"date,channel_id,currency_code\n"
+                b"2026-05-02,UC_orch_alpha,USD\n"
             )
             with pytest.raises(StopIteration):
                 next(produced_iter)

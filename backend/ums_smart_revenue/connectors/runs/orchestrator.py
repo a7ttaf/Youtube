@@ -140,6 +140,12 @@ _CSV_REVENUE_COLUMNS = (
     "ad_revenue",
 )
 _CSV_CURRENCY_COLUMNS = ("currency_code", "currencyCode")
+_CSV_DEFAULT_CURRENCY_BY_REPORT_TYPE = {
+    # Google's documented YouTube Reporting estimated-revenue bulk schema has
+    # no currency field; this project ingests those Reporting amounts as USD
+    # until exchange-rate support widens the finance pipeline.
+    "content_owner_estimated_revenue_a1": "USD",
+}
 
 
 # ----------------------------------------------------------------------------
@@ -1428,8 +1434,10 @@ def _build_youtube_report_success(
             totals=totals,
         )
         if failure is not None:
-            _cleanup_csv_report_downloads(tuple(csv_reports.values()))
-            return failure
+            return _failure_with_downloaded_csv_reports(
+                csv_reports=csv_reports,
+                failure=failure,
+            )
         if not csv_reports:
             return None
         raw_reports = tuple(
@@ -1450,8 +1458,11 @@ def _build_youtube_report_success(
         _cleanup_csv_report_downloads(tuple(csv_reports.values()))
         raise
     except GoogleConnectorError as exc:
-        _cleanup_csv_report_downloads(tuple(csv_reports.values()))
-        return ProducedReportFailure(report_type=report_type, error=exc)
+        return ProducedReportFailure(
+            report_type=report_type,
+            error=exc,
+            raw_reports=tuple(csv_reports.values()),
+        )
     except Exception:
         _cleanup_csv_report_downloads(tuple(csv_reports.values()))
         raise
@@ -1508,6 +1519,7 @@ def _download_youtube_csv_report(
             totals=totals,
             raw_bytes=raw_bytes,
             report_id=report_id,
+            report_type=report_type,
             report_month=report_month,
             default_content_owner=(
                 account_id if report_type.startswith("content_owner_") else None
@@ -1525,6 +1537,25 @@ def _download_youtube_csv_report(
             error=exc,
             raw_reports=raw_reports,
         )
+
+
+def _failure_with_downloaded_csv_reports(
+    *,
+    csv_reports: dict[str, _CsvReportDownload],
+    failure: ProducedReportFailure,
+) -> ProducedReportFailure:
+    raw_reports = list(csv_reports.values())
+    seen_report_ids = {raw_report.report_id for raw_report in raw_reports}
+    for raw_report in failure.raw_reports:
+        if raw_report.report_id in seen_report_ids:
+            continue
+        raw_reports.append(raw_report)
+        seen_report_ids.add(raw_report.report_id)
+    return ProducedReportFailure(
+        report_type=failure.report_type,
+        error=failure.error,
+        raw_reports=tuple(raw_reports),
+    )
 
 
 def _require_text(mapping: dict[str, object], field: str) -> str:
@@ -1582,6 +1613,7 @@ def _csv_reports_to_parser_payload(
             totals=totals,
             raw_bytes=csv_report.read_bytes(),
             report_id=csv_report.report_id,
+            report_type=report_type,
             report_month=report_month,
             default_content_owner=default_content_owner,
         )
@@ -1611,6 +1643,7 @@ def _accumulate_csv_report_bytes(
     totals: dict[tuple[str, str | None, str], Decimal],
     raw_bytes: bytes,
     report_id: str,
+    report_type: str,
     report_month: str,
     default_content_owner: str | None,
 ) -> None:
@@ -1628,7 +1661,9 @@ def _accumulate_csv_report_bytes(
             report_id=report_id, reason="csv is not valid utf-8"
         ) from exc
     reader = csv.DictReader(io.StringIO(text))
-    _validate_csv_headers(reader.fieldnames, report_id=report_id)
+    default_currency = _validate_csv_headers(
+        reader.fieldnames, report_id=report_id, report_type=report_type
+    )
     for csv_row in reader:
         _accumulate_csv_row(
             totals=totals,
@@ -1636,6 +1671,7 @@ def _accumulate_csv_report_bytes(
             report_id=report_id,
             expected_month=expected_month,
             default_content_owner=default_content_owner,
+            default_currency=default_currency,
         )
 
 
@@ -1650,7 +1686,9 @@ def _accumulate_csv_report_bytes(
 # Connections:
 #   - Function: _accumulate_csv_report_bytes -> calls this before row parsing.
 # ============================================================================
-def _validate_csv_headers(fieldnames: list[str] | None, *, report_id: str) -> None:
+def _validate_csv_headers(
+    fieldnames: list[str] | None, *, report_id: str, report_type: str
+) -> str | None:
     if not fieldnames:
         raise _parser_payload_error(
             report_id=report_id,
@@ -1665,13 +1703,22 @@ def _validate_csv_headers(fieldnames: list[str] | None, *, report_id: str) -> No
         ("date", _CSV_DATE_COLUMNS),
         ("channel", _CSV_CHANNEL_COLUMNS),
         ("revenue", _CSV_REVENUE_COLUMNS),
-        ("currency", _CSV_CURRENCY_COLUMNS),
     ):
         if not any(alias.lower() in headers for alias in aliases):
             raise _parser_payload_error(
                 report_id=report_id,
                 reason=f"csv missing {group_name} column",
             )
+    if any(alias.lower() in headers for alias in _CSV_CURRENCY_COLUMNS):
+        return None
+    default_currency = _CSV_DEFAULT_CURRENCY_BY_REPORT_TYPE.get(report_type)
+    if default_currency is not None:
+        return default_currency
+    raise _parser_payload_error(
+        report_id=report_id,
+        reason="csv missing currency column "
+        "(expected one of: currency_code, currencyCode)",
+    )
 
 
 def _parser_payload_from_csv_totals(
@@ -1724,6 +1771,7 @@ def _accumulate_csv_row(
     report_id: str,
     expected_month: str,
     default_content_owner: str | None,
+    default_currency: str | None,
 ) -> None:
     # Normalize the date column. YouTube Reporting CSV uses ``date`` or
     # ``day``. The row is daily, but the parser payload is monthly, so this
@@ -1789,6 +1837,13 @@ def _accumulate_csv_row(
         )
 
     currency = _first_present(csv_row, *_CSV_CURRENCY_COLUMNS)
+    if not currency:
+        if _row_has_any_column(csv_row, *_CSV_CURRENCY_COLUMNS):
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason="csv row blank currency value",
+            )
+        currency = default_currency
     if not currency:
         raise _parser_payload_error(
             report_id=report_id,
@@ -1873,6 +1928,11 @@ def _first_present(row: dict[str, str | None], *keys: str) -> str | None:
         if isinstance(value, str) and value.strip():
             return value.strip()
     return None
+
+
+def _row_has_any_column(row: dict[str, str | None], *keys: str) -> bool:
+    lower_keys = {k.lower() for k in row if isinstance(k, str)}
+    return any(key.lower() in lower_keys for key in keys)
 
 
 def _parser_payload_error(*, report_id: str, reason: str) -> GoogleConnectorError:
