@@ -35,7 +35,12 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
     - ⏳ PR #50 (B2.4) — google-auth + httpx base client + retry policy +
       YouTube Reporting client + report_type whitelist + run_one()
       orchestrator + scripts/run_google_connector.py CLI with extensible
-      --connector registry.
+      --connector registry. Concern A (deterministic_blob_path emitted
+      gs:// regardless of backend, so the default LocalFileStoreBackend
+      rejected every URI at upload) closed by commit 435aa58 — scheme is
+      now threaded through (backend, scheme, bucket) from
+      _build_blob_backend(); regression test exercises the real
+      LocalFileStoreBackend end-to-end through run_one.
 - ⏳ Monthly revenue normalization — remaining: B2 live ingestion wiring
   (revenue facts foundation in PR #2; normalization bridge from
   google_revenue_source_rows shipped in PR #44).
