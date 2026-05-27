@@ -30,6 +30,9 @@ _REPORT_MONTH_CHECK_SQL = (
 
 
 def upgrade() -> None:
+    # FIX: use batch_alter_table for this pre-existing table constraint so
+    # SQLite migration tests can rebuild the table while PostgreSQL still
+    # receives the tenant-scoped uniqueness needed by composite FKs.
     with op.batch_alter_table("raw_report_files") as batch_op:
         batch_op.create_unique_constraint(
             "uq_raw_report_files_tenant_id_id",
@@ -164,6 +167,8 @@ def downgrade() -> None:
         table_name="connector_runs",
     )
     op.drop_table("connector_runs")
+    # FIX: mirror the upgrade's batch operation so downgrade stays portable
+    # on SQLite test databases and removes the same FK-supporting constraint.
     with op.batch_alter_table("raw_report_files") as batch_op:
         batch_op.drop_constraint(
             "uq_raw_report_files_tenant_id_id",

@@ -21,6 +21,7 @@ from unittest.mock import patch
 from uuid import UUID, uuid4
 
 import pytest
+from google.auth.exceptions import RefreshError
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
@@ -32,11 +33,14 @@ from ums_smart_revenue.connectors.google.errors import (
     CredentialNotFoundError,
     GoogleApiServerError,
     InactiveCredentialError,
+    OAuthRefreshError,
 )
 from ums_smart_revenue.connectors.google_source_parsers.base import ParserError
+from ums_smart_revenue.connectors.runs import orchestrator as orchestrator_module
 from ums_smart_revenue.connectors.runs.blob_storage import compute_checksum
 from ums_smart_revenue.connectors.runs.orchestrator import (
     ConnectorRunOutcome,
+    _csv_to_parser_payload,
     run_one,
 )
 from ums_smart_revenue.db.connector_models import (
@@ -190,6 +194,44 @@ def _csv_for_one_row() -> bytes:
     )
 
 
+def test_csv_adapter_aggregates_daily_breakdowns_to_monthly_channel_totals() -> None:
+    """YouTube Reporting estimated-revenue CSVs are daily and may include
+    video/country/metric breakdowns; the C1 normalizer consumes monthly
+    channel totals, so the adapter must aggregate before parser handoff.
+    """
+    payload = _csv_to_parser_payload(
+        raw_bytes=(
+            b"date,channel_id,content_owner,video_id,country_code,"
+            b"estimated_partner_revenue,estimated_monetized_playbacks,"
+            b"ad_impressions,currencyCode\n"
+            b"2026-05-01,UC_orch_alpha,cms-orch-1,V1,US,1.10,10,100,USD\n"
+            b"2026-05-02,UC_orch_alpha,cms-orch-1,V2,EG,2.20,20,200,USD\n"
+        ),
+        report_id="r-monthly",
+        report_type="content_owner_estimated_revenue_a1",
+        report_month="2026-05",
+    )
+
+    assert payload["report_metadata"] == {
+        "report_id": "r-monthly",
+        "report_type": "content_owner_estimated_revenue_a1",
+    }
+    assert payload["rows"] == [
+        {
+            "line_index": 0,
+            "date_range": {"start": "2026-05-01", "end": "2026-05-31"},
+            "dimensions": {
+                "channel": "UC_orch_alpha",
+                "content_owner": "cms-orch-1",
+            },
+            "metrics": {
+                "estimatedRevenue": "3.30",
+                "currencyCode": "USD",
+            },
+        }
+    ]
+
+
 def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
     session: Session, stub_secret_resolver
 ) -> None:
@@ -315,6 +357,114 @@ def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
     # raw_file_id provenance survives the upsert: the COALESCE-on-conflict
     # behaviour in the existing repo preserves it on re-runs too.
     assert source_rows[0].raw_file_id == raw_files[0].id
+
+
+def test_run_one_reuses_raw_file_inserted_by_racing_worker(
+    session: Session, stub_secret_resolver, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A concurrent worker can win the raw_report_files unique insert after
+    our lookup but before our insert; this run should reuse that row instead
+    of failing the report.
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes = _csv_for_one_row()
+    race_winner_id = uuid4()
+    original_find = orchestrator_module._find_existing_raw_file
+    calls = {"n": 0}
+
+    def racing_find(db_session, *, tenant_id, source, report_type, report_month, checksum):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            db_session.add(
+                RawReportFileORM(
+                    id=race_winner_id,
+                    tenant_id=tenant_id,
+                    source=source,
+                    report_type=report_type,
+                    report_month=report_month,
+                    file_url="file-store://race-winner/raw.csv",
+                    checksum=checksum,
+                    parse_status="DOWNLOADED",
+                )
+            )
+            db_session.flush()
+            return None
+        return original_find(
+            db_session,
+            tenant_id=tenant_id,
+            source=source,
+            report_type=report_type,
+            report_month=report_month,
+            checksum=checksum,
+        )
+
+    monkeypatch.setattr(
+        orchestrator_module, "_find_existing_raw_file", racing_find
+    )
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r1", "downloadUrl": "https://yt/r1"}
+        ]
+        client.fetch_report.return_value = csv_bytes
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+
+        def fake_upload(*, storage_uri, content):
+            store[storage_uri] = content
+
+        def fake_get(*, storage_uri):
+            return store[storage_uri]
+
+        backend.upload.side_effect = fake_upload
+        backend.get_bytes.side_effect = fake_get
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "SUCCEEDED"
+    assert outcome.per_report_failures == []
+    assert calls["n"] >= 2
+
+    raw_files = session.scalars(
+        select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
+    ).all()
+    assert [raw_file.id for raw_file in raw_files] == [race_winner_id]
+    assert raw_files[0].parse_status == "PARSED"
+
+    link = session.scalars(
+        select(ConnectorRunRawFileORM).where(
+            ConnectorRunRawFileORM.tenant_id == TENANT_ID
+        )
+    ).one()
+    assert link.raw_report_file_id == race_winner_id
 
 
 def test_run_one_real_local_file_store_backend_round_trips(
@@ -655,6 +805,67 @@ def test_run_one_rejects_csv_rows_without_currency(
     assert "currency" in (run_row.error_summary or "")
     assert session.scalars(select(RawReportFileORM)).all() == []
     assert session.scalars(select(GoogleRevenueSourceRowORM)).all() == []
+
+
+def test_oauth_refresh_error_during_report_fetch_ends_run_in_bucket_c(
+    session: Session, stub_secret_resolver
+) -> None:
+    """OAuth refresh failures can happen inside google-auth during any HTTP
+    request. Those are terminal auth/runtime failures, not per-report data
+    failures, so the runner must let them reach run-level Bucket C.
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r1", "downloadUrl": "https://yt/r1"}
+        ]
+        client.fetch_report.side_effect = OAuthRefreshError(
+            inner=RefreshError("token revoked")
+        )
+        local_cls.return_value.upload.side_effect = AssertionError(
+            "blob upload must not run after OAuth failure"
+        )
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "FAILED"
+    assert outcome.counts["reports_attempted"] == 0
+    assert outcome.counts["reports_failed"] == 0
+    assert outcome.per_report_failures == []
+    run_row = session.scalar(
+        select(ConnectorRunORM).where(ConnectorRunORM.tenant_id == TENANT_ID)
+    )
+    assert run_row is not None
+    assert "OAuthRefreshError" in (run_row.error_summary or "")
+    assert session.scalars(select(RawReportFileORM)).all() == []
 
 
 def test_run_one_sweeps_running_to_failed_on_untyped_error(

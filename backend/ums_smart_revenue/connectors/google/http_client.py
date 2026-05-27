@@ -153,6 +153,9 @@ class GoogleHttpClient:
         try:
             self._credentials.before_request(self._auth_request, method, url, headers)
         except RefreshError as exc:
+            # FIX: google-auth can refresh during before_request; preserve it
+            # as the connector's terminal OAuth error instead of surfacing a
+            # library-specific exception or retrying with stale credentials.
             raise OAuthRefreshError(inner=exc) from exc
 
         status_backoff = _backoff_schedule(_MAX_STATUS_ATTEMPTS)
@@ -187,12 +190,13 @@ class GoogleHttpClient:
                 attempt -= 1
                 time.sleep(timeout_backoff[timeout_attempts - 1])
                 continue
-            except httpx.NetworkError:
+            except (httpx.NetworkError, httpx.ProtocolError):
                 # Spec §7: "DNS / TCP reset" bucket — 3-attempt budget for all
                 # sub-HTTP transport failures (DNS, connect-refused, mid-
                 # response reset, server-closed-connection). httpx.NetworkError
                 # parents ConnectError/ReadError/WriteError/CloseError; httpx.
-                # TimeoutException is NOT a NetworkError so the 4-attempt
+                # ProtocolError covers RemoteProtocolError/server disconnects.
+                # TimeoutException is NOT in this tuple, so the 4-attempt
                 # timeout budget above stays separate.
                 connect_attempts += 1
                 if connect_attempts >= _MAX_CONNECT_ATTEMPTS:

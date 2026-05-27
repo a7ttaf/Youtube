@@ -8,6 +8,8 @@ from __future__ import annotations
 
 SUPPORTED_REPORT_TYPES: frozenset[str] = frozenset(
     {
+        # The CSV adapter aggregates this daily/video/country breakdown into
+        # the monthly channel totals consumed by the existing B1 parser.
         "content_owner_estimated_revenue_a1",
         # The raw ad revenue report stays out until a parser explicitly
         # supports its CSV schema and finance fields.

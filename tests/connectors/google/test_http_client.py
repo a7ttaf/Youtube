@@ -268,3 +268,30 @@ def test_fetch_bytes_retries_5xx_via_shared_helper(mock_credentials, monkeypatch
     )
     out = client.fetch_bytes(url="https://x/y")
     assert out == b"csv-bytes"
+
+
+def test_remote_protocol_error_uses_connect_retry_budget(
+    mock_credentials, monkeypatch
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "ums_smart_revenue.connectors.google.http_client.time.sleep",
+        sleeps.append,
+    )
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise httpx.RemoteProtocolError("server disconnected")
+        return httpx.Response(200, content=b"{}")
+
+    client = GoogleHttpClient(
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
+    )
+
+    client.request(method="GET", url="https://example.com/x")
+
+    assert calls["n"] == 3
+    assert sleeps == [1.0, 2.0]

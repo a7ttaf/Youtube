@@ -49,9 +49,11 @@ parser/repo (PR #43) are *not* touched here — T27 is additive.
 from __future__ import annotations
 
 import os
+from calendar import monthrange
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import date as date_cls
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Protocol
 from uuid import UUID, uuid4
@@ -65,6 +67,7 @@ from ums_smart_revenue.connectors.google.errors import (
     CredentialNotFoundError,
     GoogleConnectorError,
     InactiveCredentialError,
+    OAuthRefreshError,
     RawFileLifecycleError,
 )
 from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
@@ -118,24 +121,20 @@ __all__ = [
     "run_one",
 ]
 
-# Columns the CSV-to-parser-payload adapter consumes directly (as date,
-# channel attribution, or metrics). Anything else flows into the parser's
-# ``dimensions`` dict so the source_row_key dedup picks it up. Lower-cased
-# for case-insensitive header matching.
-_RESERVED_CSV_COLUMNS = frozenset(
-    {
-        "date",
-        "day",
-        "channel",
-        "channel_id",
-        "content_owner",
-        "estimated_partner_revenue",
-        "estimatedrevenue",
-        "ad_revenue",
-        "currency_code",
-        "currencycode",
-    }
+# CSV adapter column aliases. YouTube Reporting estimated-revenue reports are
+# daily and may include extra breakdown dimensions / metric columns (video,
+# country, ad_impressions, CPM fields, etc.). The C1 normalizer consumes
+# monthly channel totals, so the adapter consumes only the identity + money
+# columns it needs and aggregates every breakdown row into that monthly shape.
+_CSV_DATE_COLUMNS = ("date", "day")
+_CSV_CHANNEL_COLUMNS = ("channel", "channel_id")
+_CSV_REVENUE_COLUMNS = (
+    "estimated_partner_revenue",
+    "estimatedRevenue",
+    "estimatedrevenue",
+    "ad_revenue",
 )
+_CSV_CURRENCY_COLUMNS = ("currency_code", "currencyCode")
 
 
 # ----------------------------------------------------------------------------
@@ -676,29 +675,17 @@ def _process_one_report(
     # same Google payload must reuse that evidence row instead of trying a
     # second insert.
     source_system = _source_system_for_connector(connector_key)
-    raw_file = _find_existing_raw_file(
+    raw_file = _get_or_create_raw_file(
         session,
         tenant_id=tenant_id,
         source=source_system,
         report_type=report_type,
         report_month=report_month,
         checksum=checksum,
+        storage_uri=storage_uri,
+        downloaded_by=triggered_by_user_id,
     )
-    if raw_file is None:
-        raw_file = RawReportFileORM(
-            id=uuid4(),
-            tenant_id=tenant_id,
-            source=source_system,
-            report_type=report_type,
-            report_month=report_month,
-            file_url=storage_uri,
-            checksum=checksum,
-            parse_status="DOWNLOADED",
-            downloaded_by=triggered_by_user_id,
-        )
-        session.add(raw_file)
-        session.flush()
-    elif raw_file.parse_status == "QUARANTINED":
+    if raw_file.parse_status == "QUARANTINED":
         raise RawFileLifecycleError(
             raw_file_id=str(raw_file.id),
             current=raw_file.parse_status,
@@ -797,6 +784,78 @@ def _find_existing_raw_file(
     )
 
 
+# ============================================================================
+# Purpose: Create the raw report evidence row idempotently, including the
+#          lookup/insert race where another worker commits the same
+#          tenant/source/report/month/checksum after our pre-insert lookup.
+# Database/ORM: RawReportFileORM insert/read; uniqueness enforced by
+#               uq_raw_report_files_source_type_month_checksum.
+# Standards: SQLAlchemy savepoint contains the duplicate insert failure; no
+#            broad rollback so the surrounding connector_runs transaction
+#            remains usable. Typed lifecycle checks stay in the caller.
+# Blast Radius: Raw evidence creation only. Finance rows are written later
+#               through the source-row repository; no graph projection impact
+#               detected.
+# Connections:
+#   - Function: _process_one_report -> caller that links/parses/upserts.
+#   - File: backend/ums_smart_revenue/db/report_models.py -> raw file unique
+#     evidence identity.
+# ============================================================================
+def _get_or_create_raw_file(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    source: str,
+    report_type: str,
+    report_month: str,
+    checksum: str,
+    storage_uri: str,
+    downloaded_by: UUID | None,
+) -> RawReportFileORM:
+    raw_file = _find_existing_raw_file(
+        session,
+        tenant_id=tenant_id,
+        source=source,
+        report_type=report_type,
+        report_month=report_month,
+        checksum=checksum,
+    )
+    if raw_file is not None:
+        return raw_file
+
+    try:
+        # FIX: the pre-insert lookup is not a lock. If another worker inserts
+        # the same raw evidence row before this flush, contain the unique
+        # violation in a SAVEPOINT, then re-read and reuse the winning row.
+        with session.begin_nested():
+            raw_file = RawReportFileORM(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                source=source,
+                report_type=report_type,
+                report_month=report_month,
+                file_url=storage_uri,
+                checksum=checksum,
+                parse_status="DOWNLOADED",
+                downloaded_by=downloaded_by,
+            )
+            session.add(raw_file)
+            session.flush()
+            return raw_file
+    except sa.exc.IntegrityError:
+        raw_file = _find_existing_raw_file(
+            session,
+            tenant_id=tenant_id,
+            source=source,
+            report_type=report_type,
+            report_month=report_month,
+            checksum=checksum,
+        )
+        if raw_file is None:
+            raise
+        return raw_file
+
+
 # ----------------------------------------------------------------------------
 # Connector runner: YouTube Reporting
 # ----------------------------------------------------------------------------
@@ -846,7 +905,9 @@ class YouTubeReportingRunner:
                         job_id=job_id,
                         report_month=report_month,
                     )
-                except Exception as exc:
+                except OAuthRefreshError:
+                    raise
+                except GoogleConnectorError as exc:
                     yield ProducedReportFailure(report_type=report_type, error=exc)
                     continue
                 for report in reports:
@@ -860,7 +921,9 @@ class YouTubeReportingRunner:
                             report_type=report_type,
                             report_month=report_month,
                         )
-                    except Exception as exc:
+                    except OAuthRefreshError:
+                        raise
+                    except GoogleConnectorError as exc:
                         yield ProducedReportFailure(report_type=report_type, error=exc)
                         continue
                     yield report_type, parser_payload, raw_bytes
@@ -896,28 +959,27 @@ def _csv_to_parser_payload(
 ) -> dict[str, object]:
     """Convert YouTube Reporting CSV bytes to the parser-friendly dict shape.
 
-    The YouTube Reporting CSV header maps to the parser's dimensions/metrics
-    dicts. This adapter is intentionally permissive about column naming so
-    it accepts both Google's documented column names (``date``, ``channel``,
-    ``content_owner``, ``estimated_partner_revenue``, ``currency_code``) and
-    the convenience short names test fixtures use (``day``, ``channel_id``,
-    ``ad_revenue``). Unknown extra columns flow into the row's
-    ``dimensions`` so the parser's dedup key sees them.
+    The estimated-revenue CSV is a daily export and can include lower-level
+    breakdown dimensions (video, country, claimed status) plus non-revenue
+    metric columns. The parser/repository layer models monthly channel
+    revenue rows, so this adapter sums all requested-month breakdown rows by
+    channel, optional content_owner, and currency before parser handoff.
     """
     import csv
     import io
 
-    expected_month = report_month.strip()
+    month_start, month_end = _month_bounds(
+        report_month=report_month, report_id=report_id
+    )
+    expected_month = f"{month_start.year:04d}-{month_start.month:02d}"
     text = raw_bytes.decode("utf-8")
     reader = csv.DictReader(io.StringIO(text))
-    rows: list[dict[str, object]] = []
+    totals: dict[tuple[str, str | None, str], Decimal] = {}
     for line_index, csv_row in enumerate(reader):
         # Normalize the date column. YouTube Reporting CSV uses ``date`` or
-        # ``day``; either is interpreted as the row's single calendar day
-        # (period_start == period_end) because the report rows are daily.
-        # The parser's date_range bucketing requires the row to fall within
-        # one calendar month, which a single day always does.
-        date_value = _first_present(csv_row, "date", "day")
+        # ``day``. The row is daily, but the parser payload below is monthly,
+        # so this date is used only to ensure the row belongs to report_month.
+        date_value = _first_present(csv_row, *_CSV_DATE_COLUMNS)
         if not date_value:
             raise _parser_payload_error(
                 report_id=report_id,
@@ -940,47 +1002,24 @@ def _csv_to_parser_payload(
                 ),
             )
 
-        # Channel + optional content_owner. Build the dimensions dict from
-        # whatever the CSV provides; the parser only requires ``channel``
-        # to be a non-blank string and treats ``content_owner`` as optional.
-        channel = _first_present(csv_row, "channel", "channel_id")
+        # Channel + optional content_owner are the monthly attribution axes.
+        # Lower-level official dimensions (video_id, country_code, etc.) are
+        # deliberately NOT forwarded as parser dimensions because that would
+        # create multiple source_row_keys for one monthly channel total.
+        channel = _first_present(csv_row, *_CSV_CHANNEL_COLUMNS)
         if not channel:
             raise _parser_payload_error(
                 report_id=report_id,
                 reason="csv row missing channel/channel_id column",
             )
-        dimensions: dict[str, object] = {"channel": channel}
         content_owner = _first_present(csv_row, "content_owner")
-        if content_owner:
-            dimensions["content_owner"] = content_owner
-        # Forward any other columns as opaque dimensions so the parser's
-        # source_row_key dedup picks them up. Excludes the date/metric
-        # columns to avoid duplicating them under dimensions.
-        for key, value in csv_row.items():
-            if key is None:
-                # csv.DictReader puts trailing un-named columns under None.
-                # Discard them; the parser doesn't accept None-keyed dicts.
-                continue
-            if key.lower() in _RESERVED_CSV_COLUMNS:
-                continue
-            if value is None or not isinstance(value, str):
-                continue
-            stripped = value.strip()
-            if stripped:
-                dimensions[key] = stripped
 
         # Pull the estimated revenue amount. Accept either Google's
         # documented ``estimated_partner_revenue`` /
         # ``estimatedRevenue`` columns or the test-fixture shorthand
-        # ``ad_revenue``. The parser requires a *string* for Decimal
-        # precision (Decimal("1.23")), so pass through as text.
-        amount = _first_present(
-            csv_row,
-            "estimated_partner_revenue",
-            "estimatedRevenue",
-            "estimatedrevenue",
-            "ad_revenue",
-        )
+        # ``ad_revenue``. The aggregate is kept as Decimal and stringified
+        # after summation so precision and trailing scale are preserved.
+        amount = _first_present(csv_row, *_CSV_REVENUE_COLUMNS)
         if amount is None:
             raise _parser_payload_error(
                 report_id=report_id,
@@ -988,8 +1027,20 @@ def _csv_to_parser_payload(
                 "(expected one of: estimated_partner_revenue, "
                 "estimatedRevenue, ad_revenue)",
             )
+        try:
+            amount_decimal = Decimal(amount)
+        except InvalidOperation as exc:
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason=f"csv row revenue {amount!r} not a valid decimal",
+            ) from exc
+        if not amount_decimal.is_finite():
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason=f"csv row revenue {amount!r} not finite",
+            )
 
-        currency = _first_present(csv_row, "currency_code", "currencyCode")
+        currency = _first_present(csv_row, *_CSV_CURRENCY_COLUMNS)
         if not currency:
             raise _parser_payload_error(
                 report_id=report_id,
@@ -997,16 +1048,26 @@ def _csv_to_parser_payload(
                 "(expected one of: currency_code, currencyCode)",
             )
 
+        key = (channel, content_owner, currency)
+        totals[key] = totals.get(key, Decimal("0")) + amount_decimal
+
+    rows: list[dict[str, object]] = []
+    for line_index, ((channel, content_owner, currency), total) in enumerate(
+        sorted(totals.items(), key=lambda item: (item[0][0], item[0][1] or "", item[0][2]))
+    ):
+        dimensions: dict[str, object] = {"channel": channel}
+        if content_owner:
+            dimensions["content_owner"] = content_owner
         rows.append(
             {
                 "line_index": line_index,
                 "date_range": {
-                    "start": row_date.isoformat(),
-                    "end": row_date.isoformat(),
+                    "start": month_start.isoformat(),
+                    "end": month_end.isoformat(),
                 },
                 "dimensions": dimensions,
                 "metrics": {
-                    "estimatedRevenue": amount,
+                    "estimatedRevenue": str(total),
                     "currencyCode": currency,
                 },
             }
@@ -1019,6 +1080,23 @@ def _csv_to_parser_payload(
         },
         "rows": rows,
     }
+
+
+def _month_bounds(*, report_month: str, report_id: str) -> tuple[date_cls, date_cls]:
+    expected_month = report_month.strip()
+    try:
+        year_text, month_text = expected_month.split("-", 1)
+        year = int(year_text)
+        month = int(month_text)
+        last_day = monthrange(year, month)[1]
+        month_start = date_cls(year, month, 1)
+        month_end = date_cls(year, month, last_day)
+    except ValueError as exc:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"report_month {expected_month!r} not YYYY-MM",
+        ) from exc
+    return month_start, month_end
 
 
 def _first_present(row: dict[str, str | None], *keys: str) -> str | None:
