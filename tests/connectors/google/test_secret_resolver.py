@@ -8,6 +8,9 @@ are intentionally unknown until a future credential-lifecycle PR.
 """
 from __future__ import annotations
 
+import time
+from concurrent.futures import ThreadPoolExecutor
+
 import pytest
 
 from ums_smart_revenue.connectors.google.errors import (
@@ -73,6 +76,32 @@ def test_ensure_default_resolvers_registers_gcp_scheme(monkeypatch) -> None:
 
     ensure_default_resolvers()
 
+    assert resolve_secret("gcp-secret-manager://projects/p/secrets/s/versions/latest") == (
+        "gcp-payload"
+    )
+
+
+def test_ensure_default_resolvers_is_race_safe(monkeypatch) -> None:
+    from ums_smart_revenue.connectors.google import gcp_secret_manager
+
+    constructed: list[_StubResolver] = []
+
+    def _slow_resolver() -> _StubResolver:
+        time.sleep(0.01)
+        resolver = _StubResolver(payload="gcp-payload")
+        constructed.append(resolver)
+        return resolver
+
+    monkeypatch.setattr(
+        gcp_secret_manager,
+        "GcpSecretManagerResolver",
+        _slow_resolver,
+    )
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        list(pool.map(lambda _idx: ensure_default_resolvers(), range(8)))
+
+    assert len(constructed) == 1
     assert resolve_secret("gcp-secret-manager://projects/p/secrets/s/versions/latest") == (
         "gcp-payload"
     )

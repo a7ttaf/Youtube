@@ -61,8 +61,10 @@ def test_unsupported_secret_scheme_carries_scheme() -> None:
 
 
 def test_secret_not_found_carries_ref() -> None:
-    err = SecretNotFoundError(ref="gcp-secret-manager://projects/x/secrets/y/versions/latest")
-    assert "y" in str(err)
+    ref = "gcp-secret-manager://projects/x/secrets/y/versions/latest"
+    err = SecretNotFoundError(ref=ref)
+    assert err.ref == ref
+    assert ref in str(err)
 
 
 def test_oauth_refresh_carries_inner_class_name() -> None:

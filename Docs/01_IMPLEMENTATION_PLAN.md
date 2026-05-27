@@ -1,14 +1,15 @@
 # Implementation Plan
 
-## Status (2026-05-25)
+## Status (2026-05-27)
 
-Reconciled through PR #36 (S2 multi-tenant integration merged onto `main`
-at commit `96dbe73`). The original Phase 0–7 product cut below is the
-durable roadmap; status markers (`✅ / ⏳ / 🗑️`) show what has shipped
-end-to-end, what is partial, and what has been removed from scope. The new
-section "Cross-cutting infrastructure (Sx)" tracks the platform-level work
-delivered outside the product phase numbering (backend foundation,
-governance/CI, multi-tenant stack).
+Mainline merge status is reconciled through PR #36 (S2 multi-tenant
+integration merged onto `main` at commit `96dbe73`), and the roadmap notes
+now include the stacked PR #47 Google live connector foundation state. The
+original Phase 0–7 product cut below is the durable roadmap; status markers
+(`✅ / ⏳ / 🗑️`) show what has shipped end-to-end, what is partial, and what
+has been removed from scope. The new section "Cross-cutting infrastructure
+(Sx)" tracks the platform-level work delivered outside the product phase
+numbering (backend foundation, governance/CI, multi-tenant stack).
 
 **Marker conventions** (also applied across `15_DELIVERY_BACKLOG.md`):
 

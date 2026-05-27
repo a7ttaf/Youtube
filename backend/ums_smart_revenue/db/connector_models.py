@@ -161,6 +161,10 @@ class ConnectorRunRawFileORM(ReportBase):
             "raw_report_file_id",
             name="uq_connector_run_raw_files_run_file",
         ),
+        CheckConstraint(
+            "ordering_index >= 0",
+            name="ck_connector_run_raw_files_ordering_index_non_negative",
+        ),
         Index(
             "ix_connector_run_raw_files_tenant_raw_file",
             "tenant_id",

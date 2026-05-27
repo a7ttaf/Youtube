@@ -4,6 +4,7 @@ from datetime import UTC, datetime
 from typing import Literal
 from uuid import UUID, uuid4
 
+import sqlalchemy as sa
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -47,6 +48,10 @@ class ConnectorRunError(ValueError):
 
 
 class ConnectorRunValidationError(ConnectorRunError):
+    pass
+
+
+class ConnectorRunLinkConflictError(ConnectorRunError):
     pass
 
 
@@ -112,15 +117,21 @@ def link_raw_file(
     _validate_ordering_index(ordering_index)
     _get_run(session, tenant_id=tenant_id, connector_run_id=connector_run_id)
     _get_raw_file(session, tenant_id=tenant_id, raw_report_file_id=raw_report_file_id)
-    row = ConnectorRunRawFileORM(
-        id=uuid4(),
-        tenant_id=tenant_id,
-        connector_run_id=connector_run_id,
-        raw_report_file_id=raw_report_file_id,
-        ordering_index=ordering_index,
-    )
-    session.add(row)
-    session.flush()
+    try:
+        with session.begin_nested():
+            row = ConnectorRunRawFileORM(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                connector_run_id=connector_run_id,
+                raw_report_file_id=raw_report_file_id,
+                ordering_index=ordering_index,
+            )
+            session.add(row)
+            session.flush()
+    except sa.exc.IntegrityError as exc:
+        raise ConnectorRunLinkConflictError(
+            "raw report file is already linked to this connector run"
+        ) from exc
 
 
 # ============================================================================

@@ -9,25 +9,20 @@ Three tests cover the operator-facing surface:
 2. ``test_cli_rejects_bad_month_format`` -- the CLI enforces ``YYYY-MM``
    beyond argparse so ``2026-5`` (single-digit month) is rejected before
    any DB / network call. Subprocess for the same reason.
-3. ``test_cli_main_returns_2_when_credential_missing`` -- in-process call
+3. ``test_cli_main_returns_2_when_database_url_missing`` -- in-process call
+   to ``main([...])`` with ``load_app_settings`` patched to return no
+   database URL. The CLI emits a clear operator error and returns exit code 2
+   before trying to construct an engine.
+4. ``test_cli_main_returns_2_when_credential_missing`` -- in-process call
    to ``main([...])`` with ``load_app_settings`` and ``build_session_factory``
    patched so the CLI gets a session backed by the seeded SQLite fixture
    below. A missing credential bubbles ``CredentialNotFoundError`` from
    ``run_one``; the CLI's ``except GoogleConnectorError`` handler prints
    ``<ClassName>: <message>`` to stderr and returns exit code 2.
 
-Spec deviation from the plan's verbatim Step 1 test:
-
-The plan's third test invokes the CLI via subprocess with no env. That
-subprocess flow would fail BEFORE ``CredentialNotFoundError`` because
-``build_session_factory(None)`` (no ``UMS_DATABASE_URL``) raises
-``TypeError`` in ``sqlalchemy.create_engine`` -- not a
-``GoogleConnectorError`` -- so the CLI's typed-error handler never runs
-and stderr would not contain ``CredentialNotFoundError``. Option C
-(in-process with monkeypatch + a real test DB session) tests the same
-exit-code-2 contract without making the test depend on an env var the
-subprocess can't reliably set across platforms. The first two tests
-remain subprocess so the argparse error paths are end-to-end real.
+The first two tests remain subprocess so the argparse error paths are
+end-to-end real. The database/credential tests run in-process so they can
+patch settings and session construction without relying on host env state.
 """
 from __future__ import annotations
 
@@ -121,6 +116,41 @@ def test_cli_rejects_bad_month_format() -> None:
     assert out.returncode == 2
     assert "--month" in out.stderr
     assert "YYYY-MM" in out.stderr
+
+
+def test_cli_main_returns_2_when_database_url_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_cli_module()
+
+    class _StubSettings:
+        database_url = None
+
+    def _load_stub_settings() -> _StubSettings:
+        return _StubSettings()
+
+    def _build_session_factory_should_not_run(_url: str):
+        raise AssertionError("build_session_factory must not run without a database URL")
+
+    monkeypatch.setattr(module, "load_app_settings", _load_stub_settings)
+    monkeypatch.setattr(
+        module, "build_session_factory", _build_session_factory_should_not_run
+    )
+
+    captured_err = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", captured_err)
+
+    exit_code = module.main(
+        [
+            "--tenant", str(TENANT_ID),
+            "--connector", "youtube-reporting",
+            "--account", "acct",
+            "--month", "2026-05",
+        ]
+    )
+
+    assert exit_code == 2
+    assert "UMS_DATABASE_URL" in captured_err.getvalue()
 
 
 @pytest.fixture

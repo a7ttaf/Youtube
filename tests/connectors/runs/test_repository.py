@@ -2,11 +2,11 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.runs.repository import (
     CONNECTOR_RUN_COUNT_KEYS,
+    ConnectorRunLinkConflictError,
     ConnectorRunValidationError,
     finish_run,
     link_raw_file,
@@ -63,6 +63,7 @@ def test_connector_run_raw_file_constraints_and_indexes_match_contract() -> None
     indexes = {i.name for i in ConnectorRunRawFileORM.__table__.indexes}
 
     assert "uq_connector_run_raw_files_run_file" in constraints
+    assert "ck_connector_run_raw_files_ordering_index_non_negative" in constraints
     assert "ix_connector_run_raw_files_tenant_raw_file" in indexes
 
 
@@ -330,7 +331,7 @@ def test_link_raw_file_duplicate_is_rejected_by_unique_constraint(
         ordering_index=0,
     )
 
-    with pytest.raises(IntegrityError):
+    with pytest.raises(ConnectorRunLinkConflictError, match="already linked"):
         link_raw_file(
             session,
             tenant_id=TENANT_ID,
@@ -338,6 +339,17 @@ def test_link_raw_file_duplicate_is_rejected_by_unique_constraint(
             raw_report_file_id=raw_file.id,
             ordering_index=1,
         )
+
+    second_raw_file = _raw_file(session, tenant_id=TENANT_ID, report_type="rt-b")
+    link_raw_file(
+        session,
+        tenant_id=TENANT_ID,
+        connector_run_id=UUID(entry.id),
+        raw_report_file_id=second_raw_file.id,
+        ordering_index=2,
+    )
+    rows = session.scalars(select(ConnectorRunRawFileORM)).all()
+    assert len(rows) == 2
 
 
 def _zero_counts() -> dict[str, int]:

@@ -58,6 +58,35 @@ def test_build_credentials_rejects_missing_field(missing_field: str) -> None:
     assert missing_field in ctx.value.detail
 
 
+def test_build_credentials_accepts_scopes_list() -> None:
+    payload = json.loads(_VALID_PAYLOAD)
+    payload["scopes"] = [
+        "https://www.googleapis.com/auth/yt-analytics.readonly",
+        "https://www.googleapis.com/auth/youtubepartner",
+    ]
+
+    creds = build_credentials_from_payload(json.dumps(payload))
+
+    assert creds.scopes == payload["scopes"]
+
+
+@pytest.mark.parametrize(
+    "scopes",
+    [
+        "https://www.googleapis.com/auth/youtubepartner",
+        {"scope": "https://www.googleapis.com/auth/youtubepartner"},
+        ["https://www.googleapis.com/auth/youtubepartner", ""],
+        ["https://www.googleapis.com/auth/youtubepartner", 123],
+    ],
+)
+def test_build_credentials_rejects_malformed_scopes(scopes: object) -> None:
+    payload = json.loads(_VALID_PAYLOAD)
+    payload["scopes"] = scopes
+
+    with pytest.raises(MalformedSecretPayloadError, match="scopes"):
+        build_credentials_from_payload(json.dumps(payload))
+
+
 def test_refresh_credentials_calls_refresh() -> None:
     creds = MagicMock()
     with patch("ums_smart_revenue.connectors.google.oauth.Request") as request_cls:

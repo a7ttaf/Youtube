@@ -45,14 +45,32 @@ def build_credentials_from_payload(payload: str) -> Credentials:
         raise MalformedSecretPayloadError(
             detail=f"missing fields: {', '.join(missing)}"
         )
+    scopes = _validated_scopes(data.get("scopes"))
     return Credentials(
         token=None,  # google-auth fetches on first refresh
         refresh_token=data["refresh_token"],
         client_id=data["client_id"],
         client_secret=data["client_secret"],
         token_uri=data["token_uri"],
-        scopes=data.get("scopes"),
+        scopes=scopes,
     )
+
+
+def _validated_scopes(value: object) -> list[str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise MalformedSecretPayloadError(
+            detail="scopes must be a list of non-empty strings"
+        )
+    scopes: list[str] = []
+    for scope in value:
+        if not isinstance(scope, str) or not scope.strip():
+            raise MalformedSecretPayloadError(
+                detail="scopes must be a list of non-empty strings"
+            )
+        scopes.append(scope.strip())
+    return scopes
 
 
 # ============================================================================

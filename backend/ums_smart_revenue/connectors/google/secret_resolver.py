@@ -12,6 +12,7 @@ B2 fails closed instead of silently dropping the secret.
 """
 from __future__ import annotations
 
+from threading import RLock
 from typing import Protocol
 
 from ums_smart_revenue.connectors.google.errors import (
@@ -28,6 +29,7 @@ class SecretResolver(Protocol):
 
 
 _REGISTRY: dict[str, SecretResolver] = {}
+_REGISTRY_LOCK = RLock()
 
 
 # ============================================================================
@@ -41,9 +43,10 @@ _REGISTRY: dict[str, SecretResolver] = {}
 #   - File: backend/ums_smart_revenue/connectors/google/local_secret_resolver.py -> Test/dev resolver.
 # ============================================================================
 def register_resolver(*, scheme: str, resolver: SecretResolver) -> None:
-    if scheme in _REGISTRY:
-        raise ResolverAlreadyRegisteredError(scheme=scheme)
-    _REGISTRY[scheme] = resolver
+    with _REGISTRY_LOCK:
+        if scheme in _REGISTRY:
+            raise ResolverAlreadyRegisteredError(scheme=scheme)
+        _REGISTRY[scheme] = resolver
 
 
 # ============================================================================
@@ -61,16 +64,17 @@ def register_resolver(*, scheme: str, resolver: SecretResolver) -> None:
 # ============================================================================
 def ensure_default_resolvers() -> None:
     """Register production secret resolvers exactly once at runtime boot."""
-    if "gcp-secret-manager" in _REGISTRY:
-        return
-    from ums_smart_revenue.connectors.google.gcp_secret_manager import (
-        GcpSecretManagerResolver,
-    )
+    with _REGISTRY_LOCK:
+        if "gcp-secret-manager" in _REGISTRY:
+            return
+        from ums_smart_revenue.connectors.google.gcp_secret_manager import (
+            GcpSecretManagerResolver,
+        )
 
-    register_resolver(
-        scheme="gcp-secret-manager",
-        resolver=GcpSecretManagerResolver(),
-    )
+        register_resolver(
+            scheme="gcp-secret-manager",
+            resolver=GcpSecretManagerResolver(),
+        )
 
 
 def _parse_scheme(ref: str) -> str:
@@ -84,7 +88,8 @@ def _parse_scheme(ref: str) -> str:
 
 def resolve_secret(ref: str) -> str:
     scheme = _parse_scheme(ref)
-    resolver = _REGISTRY.get(scheme)
+    with _REGISTRY_LOCK:
+        resolver = _REGISTRY.get(scheme)
     if resolver is None:
         raise UnsupportedSecretSchemeError(scheme=scheme)
     return resolver.resolve(ref)

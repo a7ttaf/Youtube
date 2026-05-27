@@ -147,6 +147,10 @@ def upgrade() -> None:
             "raw_report_file_id",
             name="uq_connector_run_raw_files_run_file",
         ),
+        sa.CheckConstraint(
+            "ordering_index >= 0",
+            name="ck_connector_run_raw_files_ordering_index_non_negative",
+        ),
     )
     op.create_index(
         "ix_connector_run_raw_files_tenant_raw_file",

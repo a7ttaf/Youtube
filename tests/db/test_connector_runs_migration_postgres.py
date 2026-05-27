@@ -73,6 +73,9 @@ def test_upgrade_creates_tables_constraints_and_indexes(
         c["name"] for c in inspector.get_unique_constraints("raw_report_files")
     }
     run_checks = {c["name"] for c in inspector.get_check_constraints("connector_runs")}
+    join_checks = {
+        c["name"] for c in inspector.get_check_constraints("connector_run_raw_files")
+    }
     run_indexes = {i["name"] for i in inspector.get_indexes("connector_runs")}
     join_indexes = {
         i["name"] for i in inspector.get_indexes("connector_run_raw_files")
@@ -85,6 +88,7 @@ def test_upgrade_creates_tables_constraints_and_indexes(
     assert "ck_connector_runs_status" in run_checks
     assert "ck_connector_runs_error_summary_len" in run_checks
     assert "ck_connector_runs_finished_at_order" in run_checks
+    assert "ck_connector_run_raw_files_ordering_index_non_negative" in join_checks
     assert "ix_connector_runs_tenant_connector_month" in run_indexes
     assert "ix_connector_runs_tenant_started" in run_indexes
     assert "ix_connector_run_raw_files_tenant_raw_file" in join_indexes
@@ -155,6 +159,35 @@ def test_report_month_check_rejects_nondigit_month(
 
     with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
         _insert_connector_run(conn, tenant_id, uuid4(), report_month="2026-0a")
+
+
+def test_join_ordering_index_check_rejects_negative_values(
+    alembic_config: Config, fresh_engine: object
+) -> None:
+    command.upgrade(alembic_config, B2_3_HEAD)
+    tenant_id = uuid4()
+    run_id = uuid4()
+    raw_file_id = uuid4()
+
+    with fresh_engine.begin() as conn:
+        _insert_tenant(conn, tenant_id, "tenant-a")
+        _insert_connector_run(conn, tenant_id, run_id)
+        _insert_raw_file(conn, tenant_id, raw_file_id)
+
+    with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO connector_run_raw_files "
+                "(id, tenant_id, connector_run_id, raw_report_file_id, ordering_index) "
+                "VALUES (:id, :tenant_id, :run_id, :raw_file_id, -1)"
+            ),
+            {
+                "id": uuid4(),
+                "tenant_id": tenant_id,
+                "run_id": run_id,
+                "raw_file_id": raw_file_id,
+            },
+        )
 
 
 def test_downgrade_drops_b2_3_tables_and_raw_unique_only(

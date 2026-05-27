@@ -37,7 +37,7 @@ def _load_or_raise(
     stmt = select(RawReportFileORM).where(
         RawReportFileORM.id == raw_file_id,
         RawReportFileORM.tenant_id == tenant_id,
-    )
+    ).with_for_update()
     row = session.execute(stmt).scalar_one_or_none()
     if row is None:
         raise RawFileLifecycleError(

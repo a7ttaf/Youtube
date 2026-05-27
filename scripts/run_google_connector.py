@@ -178,10 +178,11 @@ def main(argv: list[str] | None = None) -> int:
     """
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     settings = load_app_settings()
-    # ``build_session_factory`` requires a real database URL string;
-    # ``load_app_settings`` returns ``database_url=None`` if the env var is
-    # absent, which would surface here as a TypeError (correct: the operator
-    # cannot run the connector without a configured database).
+    if not settings.database_url:
+        # FIX: missing DB config is an operator contract error, not a downstream
+        # SQLAlchemy TypeError. Keep it explicit and in the CLI's exit-2 class.
+        print("UMS_DATABASE_URL is required to run the Google connector", file=sys.stderr)
+        return 2
     session_factory = build_session_factory(settings.database_url)
     with session_factory() as session:
         try:
