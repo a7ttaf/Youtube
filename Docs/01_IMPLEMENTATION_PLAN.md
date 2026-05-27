@@ -175,6 +175,10 @@ running on the operator's workstation.
     - ⏳ PR #49 (B2.3) — connector_runs + connector_run_raw_files ORM,
       repository, Alembic migration, and raw_report_files tenant/id UNIQUE
       support for composite FKs.
+    - ⏳ PR #50 (B2.4) — google-auth + httpx base client + retry policy +
+      YouTube Reporting client + report_type whitelist + run_one()
+      orchestrator + scripts/run_google_connector.py CLI with extensible
+      --connector registry.
 - ⏳ Channel inventory file format — remaining: tenant-scoped channel
   registry exists (PR #25); bulk inventory load format not yet defined.
 - ⏳ Finance month-close input format — remaining: close-gate enforced

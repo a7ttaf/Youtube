@@ -32,6 +32,10 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
     - ⏳ PR #49 (B2.3) — connector_runs + connector_run_raw_files ORM,
       repository, Alembic migration, and raw_report_files tenant/id UNIQUE
       support for composite FKs.
+    - ⏳ PR #50 (B2.4) — google-auth + httpx base client + retry policy +
+      YouTube Reporting client + report_type whitelist + run_one()
+      orchestrator + scripts/run_google_connector.py CLI with extensible
+      --connector registry.
 - ⏳ Monthly revenue normalization — remaining: B2 live ingestion wiring
   (revenue facts foundation in PR #2; normalization bridge from
   google_revenue_source_rows shipped in PR #44).
