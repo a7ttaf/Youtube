@@ -1040,3 +1040,257 @@ def test_dry_run_missing_credential_raises_credential_not_found(
         )
     # Bucket A still gates dry-run -- no connector_runs row materialised.
     assert session.query(ConnectorRunORM).count() == 0
+
+
+def test_dry_run_savepoint_reverts_runner_side_writes(
+    session: Session, stub_secret_resolver
+) -> None:
+    """SAVEPOINT defence-in-depth: any unflushed writes a runner accidentally
+    makes inside ``produce_reports`` must be reverted before
+    ``run_one(dry_run=True)`` returns.
+
+    The current ``YouTubeReportingRunner`` doesn't write to the session, so
+    ``test_dry_run_writes_nothing_returns_outcome_with_run_none`` passes
+    whether the SAVEPOINT engages or not -- it can't tell the difference
+    between "no write happened" and "a write happened but was rolled back".
+    This test injects a custom runner whose ``produce_reports`` adds and
+    flushes a marker ``TenantORM`` row before yielding, then asserts the row
+    is GONE after ``run_one`` returns. If a future refactor removes
+    ``savepoint.rollback()`` from the dry-run branch (or replaces the
+    SAVEPOINT pattern with something that doesn't actually defend), the
+    marker row would leak and this assertion would fire.
+    """
+    tenant_id = TENANT_ID
+    _make_credential_row(
+        session,
+        tenant_id=tenant_id,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+
+    # Runner stub: inserts a TenantORM marker row inside produce_reports
+    # and flushes it so the SAVEPOINT actually has state to roll back, then
+    # yields one parser-valid payload (real ``YouTubeReportingParser`` will
+    # accept ``report_metadata={"report_id":..,"report_type":..}`` plus
+    # ``rows=[]`` and emit zero ParsedSourceRow instances). The orchestrator
+    # then commits ``reports_succeeded`` for that single yielded report.
+    class WritingRunner:
+        last_marker_id: UUID | None = None
+
+        def produce_reports(
+            self,
+            *,
+            session,
+            run,
+            credentials,
+            report_month,
+            account_id,
+        ):
+            marker_id = uuid4()
+            session.add(
+                TenantORM(
+                    id=marker_id,
+                    slug=f"dry-run-marker-{marker_id}",
+                    display_name="Dry-Run Marker",
+                )
+            )
+            session.flush()
+            WritingRunner.last_marker_id = marker_id
+            yield (
+                "channel_basic_a2",
+                {
+                    "report_metadata": {
+                        "report_id": "r-marker",
+                        "report_type": "channel_basic_a2",
+                    },
+                    "rows": [],
+                },
+                b"",
+            )
+
+    # Swap the registry entry for the duration of this test; mirrors the
+    # snapshot/restore pattern in test_registry.py::_reset_registry. Without
+    # this, the orchestrator would dispatch the module-load-registered
+    # YouTubeReportingRunner (which doesn't write and wouldn't exercise the
+    # SAVEPOINT defence we're trying to lock).
+    from ums_smart_revenue.connectors.google import registry
+
+    saved_registry = dict(registry._REGISTRY)
+    registry._REGISTRY[CONNECTOR_KEY] = WritingRunner()
+
+    try:
+        with patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+        ) as refresh:
+            refresh.return_value = None
+            outcome = run_one(
+                session,
+                tenant_id=tenant_id,
+                connector_key=CONNECTOR_KEY,
+                account_id=ACCOUNT_ID,
+                report_month="2026-05",
+                dry_run=True,
+            )
+    finally:
+        registry._REGISTRY.clear()
+        registry._REGISTRY.update(saved_registry)
+
+    # Core assertion: the marker row inserted+flushed inside the runner must
+    # NOT exist after ``run_one`` returns. If the SAVEPOINT defence regresses
+    # (e.g. someone removes ``savepoint.rollback()``), this scalar fetch
+    # returns the row and the assertion fails loudly.
+    assert WritingRunner.last_marker_id is not None
+    marker = session.scalar(
+        select(TenantORM).where(TenantORM.id == WritingRunner.last_marker_id)
+    )
+    assert marker is None, (
+        "SAVEPOINT defence regressed: a runner's side-write to the session "
+        "leaked out of the dry-run branch. The session.begin_nested() / "
+        "savepoint.rollback() pattern in run_one's dry-run path must roll back "
+        "any unflushed writes made by produce_reports."
+    )
+
+    # Outcome shape is still the spec-required dry-run shape: run is None,
+    # one report was attempted (the single yield), and per_report_failures is
+    # empty (dry-run path returns this hardcoded).
+    assert outcome.run is None
+    assert outcome.counts["reports_attempted"] == 1
+    assert outcome.counts["reports_succeeded"] == 1
+    assert outcome.counts["reports_failed"] == 0
+    assert outcome.per_report_failures == []
+
+
+def test_dry_run_parser_failure_increments_reports_failed_and_keeps_per_report_failures_empty(
+    session: Session, stub_secret_resolver
+) -> None:
+    """Dry-run with a parser failure on report #2 of two locks the symmetry
+    between the dry-run branch's per-report ``except`` and the live Bucket B
+    handler's ``reports_failed`` counter.
+
+    The dry-run branch's ``except Exception: counts["reports_failed"] += 1``
+    has no existing coverage -- ``test_dry_run_writes_nothing_returns_outcome
+    _with_run_none`` only exercises the happy path where both reports parse
+    cleanly. This test pins:
+    - reports_attempted == 2, reports_succeeded == 1, reports_failed == 1
+    - per_report_failures stays empty (spec §5.4: dry-run returns counts only;
+      the per-report failure list is intentionally not surfaced from dry-run)
+    - no DB rows written (the SAVEPOINT defence still cleans up around the
+      runner's iteration even though the runner itself doesn't write)
+    - no blob upload (defensive backend stub asserts neither upload nor
+      get_bytes is invoked)
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes_a = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-01,UC_dry_alpha,cms-orch-1,1.230000,USD\n"
+    )
+    csv_bytes_b = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-02,UC_dry_beta,cms-orch-1,4.560000,USD\n"
+    )
+
+    # Wrap the real parser: call #1 passes through (a real row to count);
+    # call #2 raises ParserError to drive the dry-run branch's per-report
+    # except. Patching ``_parser_for_connector`` to return this FlakyParser
+    # mirrors the existing Bucket B test pattern (the orchestrator calls the
+    # helper once and reuses the returned instance for every report).
+    from ums_smart_revenue.connectors.google_source_parsers import (
+        YouTubeReportingParser as RealParser,
+    )
+
+    real_parser = RealParser()
+    call_state = {"n": 0}
+
+    class FlakyParser:
+        def parse(self, payload, *, tenant_id):
+            call_state["n"] += 1
+            if call_state["n"] == 2:
+                raise ParserError("simulated parser failure on dry-run report 2")
+            return list(real_parser.parse(payload, tenant_id=tenant_id))
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator._parser_for_connector",
+        return_value=FlakyParser(),
+    ):
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        # Two jobs -> two reports yielded by the runner.
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"},
+            {"id": "job-2", "reportTypeId": "content_owner_basic_a3"},
+        ]
+        reports_by_job = {
+            "job-1": [{"id": "r1", "downloadUrl": "https://yt/r1"}],
+            "job-2": [{"id": "r2", "downloadUrl": "https://yt/r2"}],
+        }
+        client.list_reports_for_month.side_effect = (
+            lambda *, account_id, job_id, report_month: reports_by_job[job_id]
+        )
+        bytes_by_url = {"https://yt/r1": csv_bytes_a, "https://yt/r2": csv_bytes_b}
+        client.fetch_report.side_effect = (
+            lambda *, download_url: bytes_by_url[download_url]
+        )
+
+        # Defensive: dry-run must never instantiate a real backend or call
+        # upload/get_bytes. The dry-run branch in run_one never invokes
+        # ``_build_blob_backend()``, but patching the bare LocalFileStoreBackend
+        # symbol guards against a regression that flips ordering.
+        backend = local_cls.return_value
+        backend.upload.side_effect = AssertionError(
+            "blob upload must not be called in dry-run"
+        )
+        backend.get_bytes.side_effect = AssertionError(
+            "blob get_bytes must not be called in dry-run"
+        )
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+            dry_run=True,
+        )
+
+    # ----- outcome contract: counts capture the failure; per-report list empty -----
+    assert isinstance(outcome, ConnectorRunOutcome)
+    assert outcome.run is None
+    assert outcome.counts["reports_attempted"] == 2
+    assert outcome.counts["reports_succeeded"] == 1
+    assert outcome.counts["reports_failed"] == 1
+    # Spec §5.4: dry-run returns counts only; per_report_failures stays
+    # empty even when individual reports fail. If a future change widens
+    # the dry-run outcome to surface per-report failures, this assertion
+    # is the canary that forces the spec update to land alongside the code.
+    assert outcome.per_report_failures == []
+
+    # ----- no DB writes: SAVEPOINT still cleans up around the iteration -----
+    assert session.query(ConnectorRunORM).count() == 0
+    assert session.query(RawReportFileORM).count() == 0
+    assert (
+        session.query(ConnectorRunRawFileORM)
+        .filter(ConnectorRunRawFileORM.tenant_id == TENANT_ID)
+        .count()
+        == 0
+    )
+    assert (
+        session.query(GoogleRevenueSourceRowORM)
+        .filter(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
+        .count()
+        == 0
+    )
