@@ -104,14 +104,16 @@ def _row(
     amount: str = "1234.560000",
     currency: str = "USD",
     source_system: str = "youtube_reporting",
+    source_account_id: str = "acct-001",
+    report_type: str = "channel_monthly_estimated_revenue",
 ) -> ParsedSourceRow:
     return ParsedSourceRow(
         source_system=source_system,
         source_row_key=source_row_key,
-        source_account_id="acct-001",
+        source_account_id=source_account_id,
         content_owner_id=None,
         youtube_channel_id="UC_test_channel",
-        report_type="channel_monthly_estimated_revenue",
+        report_type=report_type,
         report_month="2026-04",
         period_start=date(2026, 4, 1),
         period_end=date(2026, 4, 30),
@@ -651,6 +653,80 @@ def test_upsert_preserves_provenance_when_reimport_omits_it(session: Session) ->
     ).one()
     assert replaced.raw_file_id == file_2
     assert replaced.imported_by == importer_2
+
+
+def test_upsert_can_clear_stale_raw_file_id_for_aggregate_replacement(
+    session: Session,
+) -> None:
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    key = "ag" * 32
+    repo.upsert_many(
+        TENANT_A,
+        [_row(source_row_key=key)],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=None,
+    )
+
+    repo.upsert_many(
+        TENANT_A,
+        [_row(source_row_key=key, amount="777.000000")],
+        raw_file_id=None,
+        imported_by=None,
+        replace_raw_file_id=True,
+    )
+
+    session.expire_all()
+    row = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.source_row_key == key
+        )
+    ).one()
+    assert row.amount_native == Decimal("777.000000")
+    assert row.raw_file_id is None
+
+
+def test_delete_stale_for_scope_preserves_other_scopes(session: Session) -> None:
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    keep_key = "dk" * 32
+    stale_key = "ds" * 32
+    other_account_key = "da" * 32
+    other_type_key = "dt" * 32
+    repo.upsert_many(
+        TENANT_A,
+        [
+            _row(source_row_key=keep_key, source_account_id="acct-a"),
+            _row(source_row_key=stale_key, source_account_id="acct-a"),
+            _row(source_row_key=other_account_key, source_account_id="acct-b"),
+            _row(
+                source_row_key=other_type_key,
+                source_account_id="acct-a",
+                report_type="other_report_type",
+            ),
+        ],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=None,
+    )
+
+    deleted = repo.delete_stale_for_scope(
+        TENANT_A,
+        source_system="youtube_reporting",
+        source_account_id="acct-a",
+        report_type="channel_monthly_estimated_revenue",
+        report_month="2026-04",
+        keep_source_row_keys=[keep_key],
+    )
+
+    assert deleted == 1
+    remaining = {
+        row.source_row_key
+        for row in session.scalars(
+            select(GoogleRevenueSourceRowORM).where(
+                GoogleRevenueSourceRowORM.tenant_id == TENANT_A
+            )
+        )
+    }
+    assert stale_key not in remaining
+    assert {keep_key, other_account_key, other_type_key}.issubset(remaining)
 
 
 def test_rejects_amount_exceeding_integer_precision(session: Session) -> None:

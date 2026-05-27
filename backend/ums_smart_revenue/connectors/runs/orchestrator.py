@@ -1,0 +1,2200 @@
+"""B2.4 orchestrator: the public ``run_one(...)`` surface.
+
+Happy path (this task, T27):
+  1. ``_load_credential(session, tenant_id, connector_key, account_id)`` returns
+     the ``ApiConnectorCredentialORM`` row or ``None``.
+  2. ``resolve_secret(credential.encrypted_secret_ref)`` returns the payload
+     string registered behind the URI scheme.
+  3. ``build_credentials_from_payload(payload)`` returns a google-auth
+     ``Credentials``.
+  4. ``refresh_credentials(...)`` performs the initial token refresh; any
+     ``OAuthRefreshError`` bubbles pre-``start_run`` so no connector_runs
+     row is created.
+  5. ``start_run(...)`` commits the ``RUNNING`` row (forensic durability for
+     ``started_at`` even if the process dies mid-loop).
+  6. ``dispatch_connector(key=connector_key)`` returns a ``ConnectorRunner``
+     instance whose ``produce_reports`` yields downloaded report tuples or
+     ``ProducedReportFailure`` entries for per-report Google/API failures.
+  7. For each downloaded tuple:
+        a. ``compute_checksum`` + ``deterministic_blob_path`` build the URI.
+        b. ``upload_and_verify`` writes the blob and re-reads its SHA-256.
+        c. A ``RawReportFileORM`` row is inserted with ``parse_status``
+           ``DOWNLOADED``; ``session.flush()`` populates ``raw_file_id``.
+        d. ``link_raw_file`` joins the raw file to the run with a per-run
+           ``ordering_index``.
+        e. The parser's ``parse(...)`` is consumed into a ``list`` so an
+           early ``ParserError`` does not surface mid-upsert.
+        f. Inside a savepoint, ``SqlAlchemyGoogleRevenueSourceRowRepository``
+           upserts rows and ``mark_parsed`` transitions the raw file
+           ``DOWNLOADED -> PARSED``.
+        g. The outer commit succeeds before success and row counts advance.
+  8. ``finish_run`` records the terminal status (SUCCEEDED / PARTIAL / FAILED)
+     plus the accumulated counts and (optionally) an error summary, and
+     ``session.commit()`` persists it.
+  9. Returns an immutable ``ConnectorRunOutcome``.
+
+Dry-run (T29): skips ``start_run`` entirely -- writes NOTHING to the
+database (no connector_runs row, no raw_file, no upsert, no audit) and no
+blob upload. Exercises the runner's ``produce_reports`` for API/CSV
+shape validation and runs the parser for row counts, then returns
+``ConnectorRunOutcome(run=None, counts=...)`` so an operator can sanity
+check an account+month before scheduling the live run. A SAVEPOINT-rollback
+guards against any future runner that accidentally writes to the session.
+Bucket B/C handlers and per-report commit are wired by T28. Audit wiring
+lands in B2.6 (T37). Existing files under
+``connectors/google/`` (errors, http client, registry, secret resolvers,
+oauth, blob storage, raw-file helpers, the YT client) and the existing
+parser/repo (PR #43) are *not* touched here — T27 is additive.
+"""
+from __future__ import annotations
+
+import os
+import tempfile
+from calendar import monthrange
+from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
+from datetime import date as date_cls
+from decimal import Decimal, InvalidOperation
+from pathlib import Path
+from typing import Protocol
+from uuid import UUID, uuid4
+
+import sqlalchemy as sa
+from google.oauth2.credentials import Credentials
+from sqlalchemy.orm import Session
+
+from ums_smart_revenue.connectors.google.errors import (
+    BlobStorageConfigurationError,
+    CredentialNotFoundError,
+    GoogleConnectorError,
+    InactiveCredentialError,
+    OAuthRefreshError,
+    RawFileLifecycleError,
+)
+from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
+from ums_smart_revenue.connectors.google.oauth import (
+    build_credentials_from_payload,
+    refresh_credentials,
+)
+from ums_smart_revenue.connectors.google.registry import (
+    dispatch_connector,
+    register_connector,
+)
+from ums_smart_revenue.connectors.google.secret_resolver import (
+    ensure_default_resolvers,
+    resolve_secret,
+)
+from ums_smart_revenue.connectors.google.youtube_reporting_client import (
+    YouTubeReportingClient,
+)
+from ums_smart_revenue.connectors.google_source_parsers import (
+    YouTubeReportingParser,
+)
+from ums_smart_revenue.connectors.google_source_rows import (
+    ParsedSourceRow,
+    SqlAlchemyGoogleRevenueSourceRowRepository,
+)
+from ums_smart_revenue.connectors.runs.blob_storage import (
+    BlobStorageBackend,
+    GcsBlobStorageBackend,
+    LocalFileStoreBackend,
+    compute_checksum,
+    deterministic_blob_path,
+    upload_and_verify,
+)
+from ums_smart_revenue.connectors.runs.raw_file_helpers import (
+    mark_failed,
+    mark_parsed,
+)
+from ums_smart_revenue.connectors.runs.repository import (
+    CONNECTOR_RUN_COUNT_KEYS,
+    ConnectorRunEntry,
+    ConnectorRunValidationError,
+    finish_run,
+    link_raw_file,
+    start_run,
+    validate_report_month,
+)
+from ums_smart_revenue.db.report_models import RawReportFileORM
+from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM
+
+__all__ = [
+    "ConnectorRunOutcome",
+    "ConnectorRunner",
+    "ProducedReportSuccess",
+    "YouTubeReportingRunner",
+    "run_one",
+]
+
+# CSV adapter column aliases. YouTube Reporting estimated-revenue reports are
+# daily and may include extra breakdown dimensions / metric columns (video,
+# country, ad_impressions, CPM fields, etc.). The C1 normalizer consumes
+# monthly channel totals, so the adapter consumes only the identity + money
+# columns it needs and aggregates every breakdown row into that monthly shape.
+_CSV_DATE_COLUMNS = ("date", "day")
+_CSV_CHANNEL_COLUMNS = ("channel", "channel_id")
+_CSV_REVENUE_COLUMNS = (
+    "estimated_partner_revenue",
+    "estimatedRevenue",
+    "estimatedrevenue",
+    "ad_revenue",
+)
+_CSV_CURRENCY_COLUMNS = ("currency_code", "currencyCode")
+_CSV_DEFAULT_CURRENCY_BY_REPORT_TYPE = {
+    # Google's documented YouTube Reporting estimated-revenue bulk schema has
+    # no currency field; this project ingests those Reporting amounts as USD
+    # until exchange-rate support widens the finance pipeline.
+    "content_owner_estimated_revenue_a1": "USD",
+}
+
+
+# ----------------------------------------------------------------------------
+# Public surface
+# ----------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class ConnectorRunOutcome:
+    """Immutable orchestrator return value.
+
+    ``run`` is the finished ``ConnectorRunEntry`` (None is reserved for the
+    T29 dry-run branch). ``counts`` mirrors the B2.3 ``CONNECTOR_RUN_COUNT_KEYS``
+    shape that ``finish_run`` validates. ``per_report_failures`` lists
+    ``(report_type_id, error_class_name)`` for each report that failed inside
+    the per-report ``except`` handler; the happy path returns an empty list.
+    """
+
+    run: ConnectorRunEntry | None
+    counts: dict[str, int]
+    per_report_failures: list[tuple[str, str]]
+
+
+@dataclass(frozen=True)
+class ProducedReportFailure:
+    """One report-type-scoped failure from inside a connector runner.
+
+    The YouTube Reporting runner downloads and CSV-normalizes reports before
+    it can yield the normal tuple consumed by ``run_one``. If those pre-yield
+    per-report steps fail, this sentinel lets the orchestrator count the
+    failure in Bucket B instead of letting the generator exception escape to
+    the run-level Bucket C handler.
+    """
+
+    report_type: str
+    error: Exception
+    raw_reports: tuple[_CsvReportDownload, ...] = ()
+
+
+@dataclass(frozen=True)
+class _CsvReportDownload:
+    report_id: str
+    raw_bytes: bytes | None = None
+    raw_path: Path | None = None
+
+    def read_bytes(self) -> bytes:
+        if self.raw_bytes is not None:
+            return self.raw_bytes
+        if self.raw_path is None:
+            raise RuntimeError("CSV report download has no raw bytes")
+        return self.raw_path.read_bytes()
+
+    def cleanup(self) -> None:
+        if self.raw_path is None:
+            return
+        try:
+            self.raw_path.unlink()
+        except FileNotFoundError:
+            return
+
+
+@dataclass(frozen=True)
+class ProducedReportSuccess:
+    report_type: str
+    parser_payload: dict[str, object]
+    raw_reports: tuple[_CsvReportDownload, ...]
+
+
+ProducedReport = (
+    ProducedReportSuccess
+    | tuple[str, dict[str, object], bytes]
+    | ProducedReportFailure
+)
+
+
+class ConnectorRunner(Protocol):
+    """Per-connector adapter contract.
+
+    Each runner owns the API-client/credential bridge for its source system
+    (B2.4 wires YouTube Reporting; B2.5/B2.6 will register YouTube Analytics
+    and AdSense Management). ``produce_reports`` yields one tuple per Google
+    report or a ``ProducedReportFailure`` for a report-type-scoped pre-yield
+    failure. Blob storage, raw-file lifecycle, upserts, and the connector_runs
+    lifecycle stay owned by the orchestrator uniformly across all connectors.
+    """
+
+    def produce_reports(
+        self,
+        *,
+        session: Session,
+        run: ConnectorRunEntry | None,
+        credentials: Credentials,
+        report_month: str,
+        account_id: str,
+    ) -> Iterator[ProducedReport]:
+        ...
+
+
+# ============================================================================
+# Purpose: Drive one connector_runs lifecycle end-to-end for a single
+#          (tenant, connector_key, account_id, report_month). Loads the
+#          stored credential, refreshes OAuth, starts the run, iterates the
+#          dispatched runner's reports (blob upload + raw-file insert +
+#          parse + upsert + mark_parsed for each), and finishes the run.
+# Database/ORM: ApiConnectorCredentialORM (read), ConnectorRunORM /
+#               RawReportFileORM / ConnectorRunRawFileORM (write via
+#               repository / lifecycle helpers), GoogleRevenueSourceRowORM
+#               (write via SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many).
+# Standards: Typed-error contract via GoogleConnectorError subclasses.
+#            Transactional model -- explicit session.commit() points:
+#              - after start_run: forensic durability for the started_at
+#                marker even if the process dies mid-loop;
+#              - after each successful _process_one_report: per-report
+#                durability so a later report's pre-flush failure can't
+#                wipe earlier successes via the no-raw-file rollback (M6);
+#              - after mark_failed in bucket B: FAILED state persistence
+#                per raw_file;
+#              - after finish_run (terminal status): durability of the
+#                final run state, whether SUCCEEDED, PARTIAL, FAILED
+#                (typed bucket-C), or FAILED (fail-safe rescue).
+#            The inner per-report block catches Exception (T28 widened
+#            from GoogleConnectorError) so a single bad report -- typed
+#            OR untyped (e.g. ParserError) -- doesn't abort the whole
+#            run; the outer try/except (also widened) routes generator-
+#            level failures into a FAILED finish_run via bucket C.
+# Blast Radius: This is the ONLY production path that writes connector_runs
+#               rows, attaches raw_report_files to them, and upserts Google
+#               source rows during a live ingestion. Authorization, audit,
+#               finance, exports, and the Neo4j projection are unaffected:
+#               source-of-truth writes go through the existing tenant-scoped
+#               repository which keeps PostgreSQL authoritative.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/repository.py ->
+#     start_run / finish_run / link_raw_file / ConnectorRunEntry.
+#   - File: backend/ums_smart_revenue/connectors/runs/blob_storage.py ->
+#     deterministic_blob_path / compute_checksum / upload_and_verify.
+#   - File: backend/ums_smart_revenue/connectors/runs/raw_file_helpers.py ->
+#     mark_parsed (DOWNLOADED -> PARSED transition).
+#   - File: backend/ums_smart_revenue/connectors/google/secret_resolver.py ->
+#     resolve_secret (B2.1 secret-URI dispatch).
+#   - File: backend/ums_smart_revenue/connectors/google/oauth.py ->
+#     build_credentials_from_payload / refresh_credentials.
+#   - File: backend/ums_smart_revenue/connectors/google/registry.py ->
+#     register_connector / dispatch_connector (T26 dispatch).
+#   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py
+#     -> SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many.
+#   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
+#     §5.4 -> orchestrator contract (load → start → loop → finish).
+# ============================================================================
+def run_one(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    connector_key: str,
+    account_id: str,
+    report_month: str,
+    dry_run: bool = False,
+    triggered_by_user_id: UUID | None = None,
+) -> ConnectorRunOutcome:
+    """See module docstring. Returns an immutable outcome."""
+    # Bucket A: pre-start_run errors. No connector_runs row is created, so
+    # these surface to the caller and are recorded only at the CLI/audit
+    # layer (B2.6, T37). The orchestrator never half-creates a run.
+    validate_report_month(report_month)
+    return _run_one_with_credentials(
+        session=session,
+        tenant_id=tenant_id,
+        connector_key=connector_key,
+        account_id=account_id,
+        report_month=report_month,
+        dry_run=dry_run,
+        triggered_by_user_id=triggered_by_user_id,
+        credentials=_credentials_for_run(
+            session=session,
+            tenant_id=tenant_id,
+            connector_key=connector_key,
+            account_id=account_id,
+        ),
+    )
+
+
+# ============================================================================
+# Purpose: Dispatch a credential-resolved connector run to the dry-run or live
+#          path while keeping the public run_one entrypoint branch-free.
+# Database/ORM: None directly; delegated dry-run/live helpers own reads/writes.
+# Standards: Private orchestration helper with typed parameters and no logging.
+# Blast Radius: None detected; branch ownership only, no behavior change.
+# Connections:
+#   - Function: run_one -> loads credentials and calls this helper.
+#   - Function: _run_dry_run -> read-only validation path.
+#   - Function: _run_live -> stateful ingestion path.
+# ============================================================================
+def _run_one_with_credentials(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    account_id: str,
+    report_month: str,
+    dry_run: bool,
+    triggered_by_user_id: UUID | None,
+    credentials: Credentials,
+) -> ConnectorRunOutcome:
+    if dry_run:
+        return _run_dry_run(
+            session=session,
+            tenant_id=tenant_id,
+            connector_key=connector_key,
+            account_id=account_id,
+            report_month=report_month,
+            credentials=credentials,
+        )
+    return _run_live(
+        session=session,
+        tenant_id=tenant_id,
+        connector_key=connector_key,
+        account_id=account_id,
+        report_month=report_month,
+        credentials=credentials,
+        triggered_by_user_id=triggered_by_user_id,
+    )
+
+
+def _credentials_for_run(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    account_id: str,
+) -> Credentials:
+    credential = _load_credential(
+        session,
+        tenant_id=tenant_id,
+        connector_key=connector_key,
+        account_id=account_id,
+    )
+    if credential is None:
+        raise CredentialNotFoundError(
+            connector_key=connector_key, account_id=account_id
+        )
+    if credential.status != "active":
+        raise InactiveCredentialError(
+            credential_id=str(credential.id), status=credential.status
+        )
+
+    ensure_default_resolvers()
+    # FIX: Admin/API-created credentials may persist surrounding whitespace in
+    # the secret URI. Normalize before resolver dispatch so valid refs do not
+    # fail scheme lookup.
+    payload = resolve_secret(credential.encrypted_secret_ref.strip())
+    credentials = build_credentials_from_payload(payload)
+    refresh_credentials(credentials)
+    return credentials
+
+
+# ============================================================================
+# Purpose: Spec §5.4 dry-run path -- list jobs, fetch report bytes, and parse
+#          for row counts without creating connector_runs, raw files, source
+#          rows, or blob uploads.
+# Database/ORM: Read-only by contract; a SAVEPOINT rolls back accidental
+#               runner/parser writes before returning.
+# Standards: Bucket A credential validation already happened in run_one; one
+#            bad report increments reports_failed and does not abort dry-run.
+# Blast Radius: None. No finance, audit, Neo4j, export, or auth mutation.
+# Connections:
+#   - Function: run_one -> delegates dry-run after credential resolution.
+#   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
+#     §5.4 -> dry-run contract.
+# ============================================================================
+def _run_dry_run(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    account_id: str,
+    report_month: str,
+    credentials: Credentials,
+) -> ConnectorRunOutcome:
+    counts = _zero_counts()
+    runner = dispatch_connector(key=connector_key)
+    parser = _parser_for_connector(connector_key)
+    savepoint = session.begin_nested()
+    try:
+        for produced in runner.produce_reports(
+            session=session,
+            run=None,
+            credentials=credentials,
+            report_month=report_month,
+            account_id=account_id,
+        ):
+            counts["reports_attempted"] += 1
+            try:
+                if isinstance(produced, ProducedReportFailure):
+                    raise produced.error
+                if isinstance(produced, ProducedReportSuccess):
+                    parser_payload = produced.parser_payload
+                else:
+                    _report_type, parser_payload, _raw_bytes = produced
+                rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
+                counts["reports_succeeded"] += 1
+                counts["rows_upserted_total"] += len(rows)
+            except Exception:
+                counts["reports_failed"] += 1
+    finally:
+        savepoint.rollback()
+    return ConnectorRunOutcome(run=None, counts=counts, per_report_failures=[])
+
+
+# ============================================================================
+# Purpose: Execute the live connector run after Bucket A has passed, ensuring
+#          all post-start failures finish the connector_runs row terminally.
+# Database/ORM: ConnectorRunORM lifecycle, RawReportFileORM evidence, run/raw
+#               join rows, GoogleRevenueSourceRowORM upserts, and commits.
+# Standards: Per-report failures are contained; generator-level failures finish
+#            the run FAILED; fail-safe cleanup prevents stuck RUNNING rows.
+# Blast Radius: Finance source rows and operator-visible run state.
+# Connections:
+#   - Function: run_one -> delegates the non-dry-run path here.
+#   - Function: _process_live_reports -> per-report processing loop.
+# ============================================================================
+def _run_live(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    account_id: str,
+    report_month: str,
+    credentials: Credentials,
+    triggered_by_user_id: UUID | None,
+) -> ConnectorRunOutcome:
+    run_entry = start_run(
+        session,
+        tenant_id=tenant_id,
+        connector_key=connector_key,
+        account_id=account_id,
+        report_month=report_month,
+        triggered_by_user_id=triggered_by_user_id,
+    )
+    session.commit()
+
+    counts = _zero_counts()
+    per_report_failures: list[tuple[str, str]] = []
+    per_report_failure_details: list[tuple[str, str, str | None]] = []
+    finished = False
+    try:
+        try:
+            _process_live_reports(
+                session=session,
+                tenant_id=tenant_id,
+                connector_key=connector_key,
+                account_id=account_id,
+                report_month=report_month,
+                credentials=credentials,
+                triggered_by_user_id=triggered_by_user_id,
+                run_entry=run_entry,
+                counts=counts,
+                per_report_failures=per_report_failures,
+                per_report_failure_details=per_report_failure_details,
+            )
+        except Exception as exc:
+            finished_run = _finish_failed_live_run(
+                session=session,
+                tenant_id=tenant_id,
+                run_entry=run_entry,
+                counts=counts,
+                exc=exc,
+            )
+            finished = True
+            return ConnectorRunOutcome(
+                run=finished_run,
+                counts=counts,
+                per_report_failures=per_report_failures,
+            )
+
+        finished_run = _finish_aggregate_live_run(
+            session=session,
+            tenant_id=tenant_id,
+            run_entry=run_entry,
+            counts=counts,
+            per_report_failure_details=per_report_failure_details,
+        )
+        finished = True
+        return ConnectorRunOutcome(
+            run=finished_run,
+            counts=counts,
+            per_report_failures=per_report_failures,
+        )
+    finally:
+        if not finished:
+            _sweep_unfinished_live_run(
+                session=session,
+                tenant_id=tenant_id,
+                run_entry=run_entry,
+                counts=counts,
+            )
+
+
+def _process_live_reports(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    account_id: str,
+    report_month: str,
+    credentials: Credentials,
+    triggered_by_user_id: UUID | None,
+    run_entry: ConnectorRunEntry,
+    counts: dict[str, int],
+    per_report_failures: list[tuple[str, str]],
+    per_report_failure_details: list[tuple[str, str, str | None]],
+) -> None:
+    runner = dispatch_connector(key=connector_key)
+    backend, scheme, bucket = _build_blob_backend()
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    parser = _parser_for_connector(connector_key)
+    ordering_index = 0
+    for produced in runner.produce_reports(
+        session=session,
+        run=run_entry,
+        credentials=credentials,
+        report_month=report_month,
+        account_id=account_id,
+    ):
+        raw_file_count = _handle_live_produced_report(
+            session=session,
+            tenant_id=tenant_id,
+            connector_key=connector_key,
+            account_id=account_id,
+            report_month=report_month,
+            triggered_by_user_id=triggered_by_user_id,
+            run_entry=run_entry,
+            backend=backend,
+            scheme=scheme,
+            bucket=bucket,
+            parser=parser,
+            repo=repo,
+            produced=produced,
+            ordering_index=ordering_index,
+            counts=counts,
+            per_report_failures=per_report_failures,
+            per_report_failure_details=per_report_failure_details,
+        )
+        ordering_index += max(raw_file_count, 1)
+
+
+def _unpack_produced_report(
+    produced: ProducedReport,
+) -> tuple[
+    str,
+    dict[str, object] | None,
+    tuple[_CsvReportDownload, ...] | None,
+    Exception | None,
+]:
+    if isinstance(produced, ProducedReportFailure):
+        return (
+            produced.report_type,
+            None,
+            produced.raw_reports or None,
+            produced.error,
+        )
+    if isinstance(produced, ProducedReportSuccess):
+        return produced.report_type, produced.parser_payload, produced.raw_reports, None
+    report_type, parser_payload, raw_bytes = produced
+    raw_report = _CsvReportDownload(
+        report_id=_legacy_report_id(
+            parser_payload=parser_payload, report_type=report_type,
+        ),
+        raw_bytes=raw_bytes,
+    )
+    return report_type, parser_payload, (raw_report,), None
+
+
+def _legacy_report_id(
+    *, parser_payload: dict[str, object], report_type: str
+) -> str:
+    metadata = parser_payload.get("report_metadata")
+    if isinstance(metadata, dict):
+        report_id = metadata.get("report_id")
+        if isinstance(report_id, str) and report_id.strip():
+            return report_id.strip()
+    return report_type
+
+
+def _handle_live_produced_report(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    account_id: str,
+    report_month: str,
+    triggered_by_user_id: UUID | None,
+    run_entry: ConnectorRunEntry,
+    backend: BlobStorageBackend,
+    scheme: str,
+    bucket: str,
+    parser: YouTubeReportingParser,
+    repo: SqlAlchemyGoogleRevenueSourceRowRepository,
+    produced: ProducedReport,
+    ordering_index: int,
+    counts: dict[str, int],
+    per_report_failures: list[tuple[str, str]],
+    per_report_failure_details: list[tuple[str, str, str | None]],
+) -> int:
+    report_type, parser_payload, raw_reports, produced_error = _unpack_produced_report(
+        produced
+    )
+    counts["reports_attempted"] += 1
+    report_state: dict[str, object] = {}
+    try:
+        if produced_error is not None:
+            if raw_reports:
+                _prepare_and_link_raw_reports(
+                    session=session,
+                    tenant_id=tenant_id,
+                    connector_key=connector_key,
+                    run_entry=run_entry,
+                    source_system=_source_system_for_connector(connector_key),
+                    report_type=report_type,
+                    report_month=report_month,
+                    raw_reports=raw_reports,
+                    backend=backend,
+                    scheme=scheme,
+                    bucket=bucket,
+                    ordering_index=ordering_index,
+                    triggered_by_user_id=triggered_by_user_id,
+                    report_state=report_state,
+                )
+            raise produced_error
+        if parser_payload is None or raw_reports is None or not raw_reports:
+            raise RuntimeError("connector runner yielded incomplete report")
+        rows_upserted, raw_file_count = _process_one_report(
+            session=session,
+            tenant_id=tenant_id,
+            connector_key=connector_key,
+            run_entry=run_entry,
+            backend=backend,
+            scheme=scheme,
+            bucket=bucket,
+            parser=parser,
+            repo=repo,
+            report_type=report_type,
+            report_month=report_month,
+            account_id=account_id,
+            parser_payload=parser_payload,
+            raw_reports=raw_reports,
+            ordering_index=ordering_index,
+            triggered_by_user_id=triggered_by_user_id,
+            report_state=report_state,
+        )
+        session.commit()
+        counts["reports_succeeded"] += 1
+        counts["rows_upserted_total"] += rows_upserted
+        return raw_file_count
+    except Exception as exc:
+        _record_live_report_failure(
+            session=session,
+            tenant_id=tenant_id,
+            report_type=report_type,
+            report_state=report_state,
+            exc=exc,
+            counts=counts,
+            per_report_failures=per_report_failures,
+            per_report_failure_details=per_report_failure_details,
+        )
+        return _raw_file_count_from_state(report_state)
+
+
+def _raw_file_count_from_state(report_state: dict[str, object]) -> int:
+    raw_file_ids = report_state.get("raw_file_ids")
+    if isinstance(raw_file_ids, list):
+        return len(raw_file_ids)
+    if report_state.get("raw_file_id") is not None:
+        return 1
+    return 0
+
+
+def _record_live_report_failure(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    report_type: str,
+    report_state: dict[str, object],
+    exc: Exception,
+    counts: dict[str, int],
+    per_report_failures: list[tuple[str, str]],
+    per_report_failure_details: list[tuple[str, str, str | None]],
+) -> None:
+    error_class = type(exc).__name__
+    per_report_failures.append((report_type, error_class))
+    per_report_failure_details.append(
+        (report_type, error_class, _safe_failure_detail(exc))
+    )
+    counts["reports_failed"] += 1
+    in_flight_raw_file_ids = _raw_file_ids_from_state(report_state)
+    if not in_flight_raw_file_ids:
+        session.rollback()
+        return
+    try:
+        for raw_file_id in in_flight_raw_file_ids:
+            raw_file = session.get(RawReportFileORM, raw_file_id)
+            if raw_file is None or raw_file.tenant_id != tenant_id:
+                continue
+            if raw_file.parse_status == "PARSED":
+                continue
+            mark_failed(
+                session,
+                raw_file_id=raw_file_id,
+                tenant_id=tenant_id,
+            )
+        session.commit()
+    except Exception:
+        session.rollback()
+
+
+def _raw_file_ids_from_state(report_state: dict[str, object]) -> list[UUID]:
+    raw_file_ids = report_state.get("raw_file_ids")
+    if isinstance(raw_file_ids, list):
+        return [raw_file_id for raw_file_id in raw_file_ids if isinstance(raw_file_id, UUID)]
+    raw_file_id = report_state.get("raw_file_id")
+    if isinstance(raw_file_id, UUID):
+        return [raw_file_id]
+    return []
+
+
+def _finish_failed_live_run(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    run_entry: ConnectorRunEntry,
+    counts: dict[str, int],
+    exc: Exception,
+) -> ConnectorRunEntry:
+    session.rollback()
+    finished_run = finish_run(
+        session,
+        tenant_id=tenant_id,
+        connector_run_id=UUID(run_entry.id),
+        status="FAILED",
+        counts=counts,
+        error_summary=f"{type(exc).__name__}: {exc!s}",
+    )
+    session.commit()
+    return finished_run
+
+
+def _finish_aggregate_live_run(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    run_entry: ConnectorRunEntry,
+    counts: dict[str, int],
+    per_report_failure_details: list[tuple[str, str, str | None]],
+) -> ConnectorRunEntry:
+    status = _derive_terminal_status(counts)
+    finished_run = finish_run(
+        session,
+        tenant_id=tenant_id,
+        connector_run_id=UUID(run_entry.id),
+        status=status,
+        counts=counts,
+        error_summary=_summarize_failures(per_report_failure_details),
+    )
+    session.commit()
+    return finished_run
+
+
+def _sweep_unfinished_live_run(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    run_entry: ConnectorRunEntry,
+    counts: dict[str, int],
+) -> None:
+    session.rollback()
+    try:
+        finish_run(
+            session,
+            tenant_id=tenant_id,
+            connector_run_id=UUID(run_entry.id),
+            status="FAILED",
+            counts=counts,
+            error_summary="orchestrator aborted unexpectedly",
+        )
+        session.commit()
+    except Exception:
+        session.rollback()
+
+
+# ----------------------------------------------------------------------------
+# Per-report inner block
+# ----------------------------------------------------------------------------
+
+
+def _process_one_report(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    run_entry: ConnectorRunEntry,
+    backend: BlobStorageBackend,
+    scheme: str,
+    bucket: str,
+    parser: YouTubeReportingParser,
+    repo: SqlAlchemyGoogleRevenueSourceRowRepository,
+    report_type: str,
+    report_month: str,
+    account_id: str,
+    parser_payload: dict[str, object],
+    raw_reports: tuple[_CsvReportDownload, ...],
+    ordering_index: int,
+    triggered_by_user_id: UUID | None,
+    report_state: dict[str, object],
+) -> tuple[int, int]:
+    """Run one report through blob -> raw_file -> parse -> upsert -> mark_parsed.
+
+    Raises any ``GoogleConnectorError`` / ``ParserError`` / other exception
+    from the blob / lifecycle / parser / repo so the outer per-report
+    ``except`` in ``run_one`` can record the failure without aborting the
+    whole run.
+
+    ``report_state`` is a mutable handshake dict the caller owns. As each
+    ``raw_report_files`` row is flushed, this function appends its id to
+    ``report_state["raw_file_ids"]`` so the caller's bucket-B handler can
+    mark every DOWNLOADED evidence row FAILED if a later step raises.
+    Failures BEFORE the first flush leave the key absent, signalling "no
+    raw_file in flight to mark FAILED".
+    """
+    source_system = _source_system_for_connector(connector_key)
+    raw_files = _prepare_and_link_raw_reports(
+        session=session,
+        tenant_id=tenant_id,
+        connector_key=connector_key,
+        run_entry=run_entry,
+        source_system=source_system,
+        report_type=report_type,
+        report_month=report_month,
+        raw_reports=raw_reports,
+        backend=backend,
+        scheme=scheme,
+        bucket=bucket,
+        ordering_index=ordering_index,
+        triggered_by_user_id=triggered_by_user_id,
+        report_state=report_state,
+    )
+
+    # 5-7. Parse, upsert, and mark_parsed inside a SAVEPOINT. The raw_file
+    # evidence row and run link are outside this savepoint so Bucket B can mark
+    # the raw file FAILED if any downstream step raises. The finance source
+    # rows and PARSED transition are inside it so a post-upsert lifecycle
+    # failure cannot leave persisted source rows attached to a FAILED raw file.
+    with session.begin_nested():
+        # Parse. ``list(...)`` forces the generator so a parser failure surfaces
+        # here (typed ``ParserError``) instead of mid-upsert. ParserError is
+        # caught by the widened Bucket B/C ``except Exception`` in ``run_one``.
+        parsed_rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
+        source_row_raw_file_id = _source_row_raw_file_id(raw_files)
+
+        # Upsert. Returns the persisted entries (one per ParsedSourceRow); the
+        # precise created-vs-updated split needs a pre-read of existing
+        # source_row_keys, which the happy-path test doesn't exercise. Future
+        # work (no current task) can wire that count if downstream consumers
+        # need it; the run-level ``rows_upserted_total`` (sum of writes across
+        # successful reports) is what the tests assert on.
+        written = repo.upsert_many(
+            tenant_id,
+            parsed_rows,
+            raw_file_id=source_row_raw_file_id,
+            imported_by=triggered_by_user_id,
+            replace_raw_file_id=source_row_raw_file_id is None,
+        )
+        _delete_stale_source_rows(
+            repo=repo,
+            tenant_id=tenant_id,
+            source_system=source_system,
+            report_type=report_type,
+            report_month=report_month,
+            parsed_rows=parsed_rows,
+            fallback_source_account_id=account_id,
+        )
+
+        # Lifecycle transition: DOWNLOADED -> PARSED. Raises
+        # ``RawFileAlreadyParsedError`` if called twice on the same file, which
+        # would only happen on a re-entrant orchestrator bug.
+        for raw_file in raw_files:
+            if raw_file.parse_status != "PARSED":
+                mark_parsed(session, raw_file_id=raw_file.id, tenant_id=tenant_id)
+
+    # Future work (no current task): accurate created/updated/unchanged
+    # split via a pre-read of existing source_row_keys. Until then, the
+    # per-category split fields stay at 0 rather than over-claiming
+    # everything as 'created' (which would lie on the second ingest of an
+    # already-seen month).
+    # ``counts["reports_succeeded"] += 1`` lives in ``run_one``'s outer
+    # loop AFTER ``session.commit()`` so a commit failure (e.g. DB
+    # disconnect on the per-report flush) is recorded as a failure once,
+    # not double-counted as both succeeded and failed.
+    return len(written), len(raw_files)
+
+
+# ============================================================================
+# Purpose: Choose the source-row raw-file FK when exactly one persisted raw CSV
+#          supports the parsed monthly row set.
+# Database/ORM: RawReportFileORM ids only.
+# Standards: Multi-file monthly aggregates intentionally return None so source
+#            rows do not imply one raw file contains the whole aggregate.
+# Blast Radius: Raw evidence lineage only; finance values stay in PostgreSQL
+#               source rows and no graph projection impact is detected.
+# Connections:
+#   - Function: _process_one_report -> passes this value to source-row upsert.
+#   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py
+#     -> optionally clears stale raw_file_id on aggregate replacement.
+# ============================================================================
+def _source_row_raw_file_id(raw_files: list[RawReportFileORM]) -> UUID | None:
+    if len(raw_files) == 1:
+        return raw_files[0].id
+    return None
+
+
+# ============================================================================
+# Purpose: Delete source rows that existed for a report scope but disappeared
+#          from the successful replacement payload.
+# Database/ORM: GoogleRevenueSourceRowORM via repository delete.
+# Standards: Tenant/account/month/type scoped cleanup after parser success only;
+#            no stale-row deletion occurs for failed or partial aggregates.
+# Blast Radius: Source-of-truth source rows for the connector scope. No graph
+#               projection impact detected.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google_source_rows/repository.py
+#     -> delete_stale_for_scope enforces tenant and report-month validation.
+# ============================================================================
+def _delete_stale_source_rows(
+    *,
+    repo: SqlAlchemyGoogleRevenueSourceRowRepository,
+    tenant_id: UUID,
+    source_system: str,
+    report_type: str,
+    report_month: str,
+    parsed_rows: Iterable[ParsedSourceRow],
+    fallback_source_account_id: str,
+) -> None:
+    keys_by_account: dict[str, set[str]] = {}
+    for row in parsed_rows:
+        keys_by_account.setdefault(row.source_account_id, set()).add(
+            row.source_row_key
+        )
+    if not keys_by_account and fallback_source_account_id.strip():
+        keys_by_account[fallback_source_account_id.strip()] = set()
+    for source_account_id, keys in keys_by_account.items():
+        repo.delete_stale_for_scope(
+            tenant_id,
+            source_system=source_system,
+            source_account_id=source_account_id,
+            report_type=report_type,
+            report_month=report_month,
+            keep_source_row_keys=keys,
+        )
+
+
+# ============================================================================
+# Purpose: Persist and link every raw CSV evidence file yielded for one logical
+#          report before parsing/upsert work begins.
+# Database/ORM: RawReportFileORM and ConnectorRunRawFileORM.
+# Standards: Deduplicates raw files within one logical report, records ids in
+#            report_state for bucket-B failure marking, and preserves ordering.
+# Blast Radius: Raw evidence/run linkage only; finance rows are written later
+#               and no graph projection impact is detected.
+# Connections:
+#   - Function: _handle_live_produced_report -> uses report_state on failures.
+#   - Function: _prepare_raw_report_file -> uploads/verifies each raw payload.
+# ============================================================================
+def _prepare_and_link_raw_reports(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    run_entry: ConnectorRunEntry,
+    source_system: str,
+    report_type: str,
+    report_month: str,
+    raw_reports: tuple[_CsvReportDownload, ...],
+    backend: BlobStorageBackend,
+    scheme: str,
+    bucket: str,
+    ordering_index: int,
+    triggered_by_user_id: UUID | None,
+    report_state: dict[str, object],
+) -> list[RawReportFileORM]:
+    raw_files: list[RawReportFileORM] = []
+    seen_raw_file_ids: set[UUID] = set()
+    report_state["raw_file_ids"] = []
+
+    for raw_report in raw_reports:
+        raw_file = _prepare_raw_report_file(
+            session=session,
+            tenant_id=tenant_id,
+            connector_key=connector_key,
+            source_system=source_system,
+            report_type=report_type,
+            report_month=report_month,
+            raw_bytes=raw_report.read_bytes(),
+            backend=backend,
+            scheme=scheme,
+            bucket=bucket,
+            triggered_by_user_id=triggered_by_user_id,
+        )
+        if raw_file.id in seen_raw_file_ids:
+            continue
+        seen_raw_file_ids.add(raw_file.id)
+        raw_files.append(raw_file)
+        report_state["raw_file_ids"].append(raw_file.id)
+        report_state.setdefault("raw_file_id", raw_file.id)
+
+    if not raw_files:
+        raise RuntimeError("connector runner yielded no raw report files")
+
+    for offset, raw_file in enumerate(raw_files):
+        link_raw_file(
+            session,
+            tenant_id=tenant_id,
+            connector_run_id=UUID(run_entry.id),
+            raw_report_file_id=raw_file.id,
+            ordering_index=ordering_index + offset,
+        )
+    return raw_files
+
+
+# ============================================================================
+# Purpose: Persist one downloaded Google CSV as raw evidence before parsing.
+# Database/ORM: RawReportFileORM.
+# Standards: Blob round-trip is verified before DB evidence is created;
+#            tenant-scoped raw-file reuse preserves idempotent retries.
+# Blast Radius: Raw evidence and connector-run linkage only. Finance rows are
+#               written later through the source-row repository; no graph
+#               projection impact detected.
+# Connections:
+#   - Function: _process_one_report -> caller that links/parses/upserts.
+#   - File: backend/ums_smart_revenue/connectors/runs/blob_storage.py ->
+#     deterministic_blob_path / upload_and_verify / compute_checksum.
+# ============================================================================
+def _prepare_raw_report_file(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    source_system: str,
+    report_type: str,
+    report_month: str,
+    raw_bytes: bytes,
+    backend: BlobStorageBackend,
+    scheme: str,
+    bucket: str,
+    triggered_by_user_id: UUID | None,
+) -> RawReportFileORM:
+    # 1. Checksum + deterministic URI: same bytes always map to the same path
+    # so a retry overwrites or hits the existing object instead of creating a
+    # second copy with the same content.
+    checksum = compute_checksum(raw_bytes)
+    storage_uri = deterministic_blob_path(
+        scheme=scheme,
+        bucket=bucket,
+        tenant_id=tenant_id,
+        connector_key=connector_key,
+        report_type=report_type,
+        month=report_month,
+        checksum=checksum,
+        ext=_extension_for_connector(connector_key),
+    )
+
+    # 2. Upload then re-read+hash to guarantee the blob round-trips.
+    # ``upload_and_verify`` raises ``BlobChecksumMismatchError`` (typed) if a
+    # backend silently truncates the payload.
+    upload_and_verify(backend=backend, storage_uri=storage_uri, content=raw_bytes)
+
+    # 3. Insert or reuse the raw_report_files row in DOWNLOADED. ``source``
+    # mirrors the B1 parser convention (youtube_reporting /
+    # youtube_analytics / adsense_management); flush populates the id
+    # without committing so the link join can use it within the same
+    # transaction. The lookup is load-bearing for retries: the table has a
+    # unique key over source/report_type/month/checksum, so a re-run of the
+    # same Google payload must reuse that evidence row instead of trying a
+    # second insert.
+    raw_file = _get_or_create_raw_file(
+        session,
+        tenant_id=tenant_id,
+        source=source_system,
+        report_type=report_type,
+        report_month=report_month,
+        checksum=checksum,
+        storage_uri=storage_uri,
+        downloaded_by=triggered_by_user_id,
+    )
+    if raw_file.parse_status == "QUARANTINED":
+        raise RawFileLifecycleError(
+            raw_file_id=str(raw_file.id),
+            current=raw_file.parse_status,
+            target="PARSED",
+        )
+    if raw_file.parse_status == "FAILED":
+        # FIX: a retry of the same Google payload must reopen the evidence
+        # row before parsing and point it at the blob uploaded by this run.
+        raw_file.parse_status = "DOWNLOADED"
+        raw_file.file_url = storage_uri
+        raw_file.downloaded_by = triggered_by_user_id
+        session.flush()
+    return raw_file
+
+
+# ============================================================================
+# Purpose: Locate an existing raw report evidence row for idempotent reruns.
+# Database/ORM: RawReportFileORM.
+# Standards: Tenant-scoped lookup by source/report/month/checksum; no writes.
+# Blast Radius: Raw evidence reuse only. Finance facts, authorization, audit,
+#               Neo4j, and exports are unaffected by the lookup itself.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/report_models.py ->
+#     RawReportFileORM unique evidence identity.
+#   - File: backend/ums_smart_revenue/connectors/runs/raw_file_helpers.py ->
+#     Existing rows are lifecycle-checked before PARSED reuse.
+# ============================================================================
+def _find_existing_raw_file(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    source: str,
+    report_type: str,
+    report_month: str,
+    checksum: str,
+) -> RawReportFileORM | None:
+    return session.scalar(
+        sa.select(RawReportFileORM).where(
+            RawReportFileORM.tenant_id == tenant_id,
+            RawReportFileORM.source == source,
+            RawReportFileORM.report_type == report_type,
+            RawReportFileORM.report_month == report_month,
+            RawReportFileORM.checksum == checksum,
+        )
+    )
+
+
+# ============================================================================
+# Purpose: Create the raw report evidence row idempotently, including the
+#          lookup/insert race where another worker commits the same
+#          tenant/source/report/month/checksum after our pre-insert lookup.
+# Database/ORM: RawReportFileORM insert/read; uniqueness enforced by
+#               uq_raw_report_files_source_type_month_checksum.
+# Standards: SQLAlchemy savepoint contains the duplicate insert failure; no
+#            broad rollback so the surrounding connector_runs transaction
+#            remains usable. Typed lifecycle checks stay in the caller.
+# Blast Radius: Raw evidence creation only. Finance rows are written later
+#               through the source-row repository; no graph projection impact
+#               detected.
+# Connections:
+#   - Function: _process_one_report -> caller that links/parses/upserts.
+#   - File: backend/ums_smart_revenue/db/report_models.py -> raw file unique
+#     evidence identity.
+# ============================================================================
+def _get_or_create_raw_file(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    source: str,
+    report_type: str,
+    report_month: str,
+    checksum: str,
+    storage_uri: str,
+    downloaded_by: UUID | None,
+) -> RawReportFileORM:
+    raw_file = _find_existing_raw_file(
+        session,
+        tenant_id=tenant_id,
+        source=source,
+        report_type=report_type,
+        report_month=report_month,
+        checksum=checksum,
+    )
+    if raw_file is not None:
+        return raw_file
+
+    try:
+        # FIX: the pre-insert lookup is not a lock. If another worker inserts
+        # the same raw evidence row before this flush, contain the unique
+        # violation in a SAVEPOINT, then re-read and reuse the winning row.
+        with session.begin_nested():
+            raw_file = RawReportFileORM(
+                id=uuid4(),
+                tenant_id=tenant_id,
+                source=source,
+                report_type=report_type,
+                report_month=report_month,
+                file_url=storage_uri,
+                checksum=checksum,
+                parse_status="DOWNLOADED",
+                downloaded_by=downloaded_by,
+            )
+            session.add(raw_file)
+            session.flush()
+            return raw_file
+    except sa.exc.IntegrityError:
+        raw_file = _find_existing_raw_file(
+            session,
+            tenant_id=tenant_id,
+            source=source,
+            report_type=report_type,
+            report_month=report_month,
+            checksum=checksum,
+        )
+        if raw_file is None:
+            raise
+        return raw_file
+
+
+# ----------------------------------------------------------------------------
+# Connector runner: YouTube Reporting
+# ----------------------------------------------------------------------------
+
+
+class YouTubeReportingRunner:
+    """B2.4 adapter that walks YouTube Reporting jobs/reports for one month.
+
+    Each yielded success carries the report type, the parser-friendly monthly
+    payload, and the exact downloaded Google CSV files that support that
+    aggregate. The orchestrator stores each raw CSV separately; it never
+    persists a synthetic monthly evidence bundle.
+
+    The class references ``YouTubeReportingClient`` by bare name so tests
+    that patch
+    ``ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient``
+    replace what the runner actually uses.
+    """
+
+    # DeepSource keeps historical findings anchored here after report iteration
+    # moved to helpers; self is used for test-injected client type selection.
+    def produce_reports(  # skipcq: PYL-R0201, PY-R1000
+        self,
+        *,
+        session: Session,
+        run: ConnectorRunEntry | None,
+        credentials: Credentials,
+        report_month: str,
+        account_id: str,
+    ) -> Iterator[ProducedReport]:
+        # ``run`` is ``None`` on the T29 dry-run path; the runner body
+        # never references it (the connector_runs lifecycle is owned by
+        # ``run_one`` itself), so the widening is a pure type contract
+        # change with no behavioural effect on the live path.
+        _ = (session, run)
+        client_type = getattr(self, "_client_type", YouTubeReportingClient)
+        yield from _produce_youtube_reports(
+            client_type=client_type,
+            credentials=credentials,
+            report_month=report_month,
+            account_id=account_id,
+        )
+
+
+def _produce_youtube_reports(
+    *,
+    client_type: type[YouTubeReportingClient],
+    credentials: Credentials,
+    report_month: str,
+    account_id: str,
+) -> Iterator[ProducedReport]:
+    http = GoogleHttpClient(credentials=credentials)
+    try:
+        client = client_type(http=http)
+        jobs = _deduplicate_youtube_jobs_by_report_type(
+            client.list_supported_jobs(account_id=account_id)
+        )
+        for job in jobs:
+            produced = _produce_youtube_job_report(
+                client=client,
+                job=job,
+                report_month=report_month,
+                account_id=account_id,
+            )
+            if produced is None:
+                continue
+            if isinstance(produced, ProducedReportFailure):
+                try:
+                    yield produced
+                finally:
+                    _cleanup_csv_report_downloads(produced.raw_reports)
+                continue
+            try:
+                yield produced
+            finally:
+                _cleanup_csv_report_downloads(produced.raw_reports)
+    finally:
+        http.close()
+
+
+# ============================================================================
+# Purpose: Keep one YouTube Reporting job per report_type_id before report
+#          listing/downloading.
+# Database/ORM: None.
+# Standards: Deterministic first-job-wins behavior prevents double ingestion
+#            when Google exposes duplicate jobs for the same report type.
+# Blast Radius: Connector API calls and raw evidence volume only. Finance rows
+#               remain sourced from the single selected report type payload.
+# Connections:
+#   - Function: _produce_youtube_reports -> applies this before job iteration.
+#   - File: backend/ums_smart_revenue/connectors/google/youtube_reporting_client.py
+#     -> supplies validated job descriptor dictionaries.
+# ============================================================================
+def _deduplicate_youtube_jobs_by_report_type(
+    jobs: Iterable[dict[str, object]],
+) -> list[dict[str, object]]:
+    seen_report_types: set[str] = set()
+    unique_jobs: list[dict[str, object]] = []
+    for job in jobs:
+        report_type = _require_text(job, "reportTypeId")
+        if report_type in seen_report_types:
+            continue
+        seen_report_types.add(report_type)
+        unique_jobs.append(job)
+    return unique_jobs
+
+
+def _produce_youtube_job_report(
+    *,
+    client: YouTubeReportingClient,
+    job: dict[str, object],
+    report_month: str,
+    account_id: str,
+) -> ProducedReportSuccess | ProducedReportFailure | None:
+    report_type = _require_text(job, "reportTypeId")
+    job_id = _require_text(job, "id")
+    reports = _list_youtube_reports_for_job(
+        client=client,
+        account_id=account_id,
+        job_id=job_id,
+        report_type=report_type,
+        report_month=report_month,
+    )
+    if isinstance(reports, ProducedReportFailure):
+        return reports
+    return _build_youtube_report_success(
+        client=client,
+        reports=reports,
+        report_type=report_type,
+        report_month=report_month,
+        account_id=account_id,
+    )
+
+
+def _list_youtube_reports_for_job(
+    *,
+    client: YouTubeReportingClient,
+    account_id: str,
+    job_id: str,
+    report_type: str,
+    report_month: str,
+) -> list[dict[str, object]] | ProducedReportFailure:
+    try:
+        return client.list_reports_for_month(
+            account_id=account_id,
+            job_id=job_id,
+            report_month=report_month,
+        )
+    except OAuthRefreshError:
+        raise
+    except GoogleConnectorError as exc:
+        return ProducedReportFailure(report_type=report_type, error=exc)
+
+
+def _build_youtube_report_success(
+    *,
+    client: YouTubeReportingClient,
+    reports: list[dict[str, object]],
+    report_type: str,
+    report_month: str,
+    account_id: str,
+) -> ProducedReportSuccess | ProducedReportFailure | None:
+    csv_reports: dict[str, _CsvReportDownload] = {}
+    seen_checksums: set[str] = set()
+    totals: dict[tuple[str, str | None, str], Decimal] = {}
+    try:
+        failure = _download_youtube_csv_reports(
+            client=client,
+            reports=reports,
+            report_type=report_type,
+            report_month=report_month,
+            account_id=account_id,
+            csv_reports=csv_reports,
+            seen_checksums=seen_checksums,
+            totals=totals,
+        )
+        if failure is not None:
+            return _failure_with_downloaded_csv_reports(
+                csv_reports=csv_reports,
+                failure=failure,
+            )
+        if not csv_reports:
+            return None
+        raw_reports = tuple(
+            csv_reports[report_id] for report_id in sorted(csv_reports)
+        )
+        parser_payload = _parser_payload_from_csv_totals(
+            totals=totals,
+            report_ids=[raw_report.report_id for raw_report in raw_reports],
+            report_type=report_type,
+            report_month=report_month,
+        )
+        return ProducedReportSuccess(
+            report_type=report_type,
+            parser_payload=parser_payload,
+            raw_reports=raw_reports,
+        )
+    except OAuthRefreshError:
+        _cleanup_csv_report_downloads(tuple(csv_reports.values()))
+        raise
+    except GoogleConnectorError as exc:
+        return ProducedReportFailure(
+            report_type=report_type,
+            error=exc,
+            raw_reports=tuple(csv_reports.values()),
+        )
+    except Exception:
+        _cleanup_csv_report_downloads(tuple(csv_reports.values()))
+        raise
+
+
+def _download_youtube_csv_reports(
+    *,
+    client: YouTubeReportingClient,
+    reports: list[dict[str, object]],
+    report_type: str,
+    report_month: str,
+    account_id: str,
+    csv_reports: dict[str, _CsvReportDownload],
+    seen_checksums: set[str],
+    totals: dict[tuple[str, str | None, str], Decimal],
+) -> ProducedReportFailure | None:
+    for report in reports:
+        failure = _download_youtube_csv_report(
+            client=client,
+            report=report,
+            report_type=report_type,
+            report_month=report_month,
+            account_id=account_id,
+            csv_reports=csv_reports,
+            seen_checksums=seen_checksums,
+            totals=totals,
+        )
+        if failure is not None:
+            return failure
+    return None
+
+
+def _download_youtube_csv_report(
+    *,
+    client: YouTubeReportingClient,
+    report: dict[str, object],
+    report_type: str,
+    report_month: str,
+    account_id: str,
+    csv_reports: dict[str, _CsvReportDownload],
+    seen_checksums: set[str],
+    totals: dict[tuple[str, str | None, str], Decimal],
+) -> ProducedReportFailure | None:
+    csv_report: _CsvReportDownload | None = None
+    try:
+        download_url = _require_text(report, "downloadUrl")
+        report_id = _require_text(report, "id")
+        raw_bytes = client.fetch_report(download_url=download_url)
+        checksum = compute_checksum(raw_bytes)
+        if report_id in csv_reports or checksum in seen_checksums:
+            return None
+        csv_report = _spool_csv_report(report_id=report_id, raw_bytes=raw_bytes)
+        _accumulate_csv_report_bytes(
+            totals=totals,
+            raw_bytes=raw_bytes,
+            report_id=report_id,
+            report_type=report_type,
+            report_month=report_month,
+            default_content_owner=(
+                account_id if report_type.startswith("content_owner_") else None
+            ),
+        )
+        csv_reports[report_id] = csv_report
+        seen_checksums.add(checksum)
+        return None
+    except OAuthRefreshError:
+        raise
+    except GoogleConnectorError as exc:
+        raw_reports = (csv_report,) if csv_report is not None else ()
+        return ProducedReportFailure(
+            report_type=report_type,
+            error=exc,
+            raw_reports=raw_reports,
+        )
+
+
+def _failure_with_downloaded_csv_reports(
+    *,
+    csv_reports: dict[str, _CsvReportDownload],
+    failure: ProducedReportFailure,
+) -> ProducedReportFailure:
+    raw_reports = list(csv_reports.values())
+    seen_report_ids = {raw_report.report_id for raw_report in raw_reports}
+    for raw_report in failure.raw_reports:
+        if raw_report.report_id in seen_report_ids:
+            continue
+        raw_reports.append(raw_report)
+        seen_report_ids.add(raw_report.report_id)
+    return ProducedReportFailure(
+        report_type=failure.report_type,
+        error=failure.error,
+        raw_reports=tuple(raw_reports),
+    )
+
+
+def _require_text(mapping: dict[str, object], field: str) -> str:
+    """Pull a non-blank string field from a Google API descriptor or fail.
+
+    Google's REST envelopes are well-typed in practice, but a missing /
+    blank / non-string value here would translate downstream to a confusing
+    ``ParserError`` or path-builder ``ValueError``. Surface it as a typed
+    ``GoogleConnectorError`` so the outer per-report ``except`` records
+    ``GoogleApiResponseError`` against the right report.
+    """
+    from ums_smart_revenue.connectors.google.errors import GoogleApiResponseError
+
+    value = mapping.get(field)
+    if not isinstance(value, str) or not value.strip():
+        raise GoogleApiResponseError(
+            url="<descriptor>", reason=f"missing or non-string {field!r}"
+        )
+    return value.strip()
+
+
+def _csv_to_parser_payload(
+    *,
+    raw_bytes: bytes,
+    report_id: str,
+    report_type: str,
+    month: str,
+) -> dict[str, object]:
+    """Convert YouTube Reporting CSV bytes to the parser-friendly dict shape.
+
+    The estimated-revenue CSV is a daily export and can include lower-level
+    breakdown dimensions (video, country, claimed status) plus non-revenue
+    metric columns. The parser/repository layer models monthly channel
+    revenue rows, so this adapter sums all requested-month breakdown rows by
+    channel, optional content_owner, and currency before parser handoff.
+    """
+    return _csv_reports_to_parser_payload(
+        csv_reports=[_CsvReportDownload(report_id=report_id, raw_bytes=raw_bytes)],
+        report_type=report_type,
+        report_month=month,
+    )
+
+
+def _csv_reports_to_parser_payload(
+    *,
+    csv_reports: list[_CsvReportDownload],
+    report_type: str,
+    report_month: str,
+    default_content_owner: str | None = None,
+) -> dict[str, object]:
+    """Aggregate one or more daily YouTube Reporting CSVs to monthly rows."""
+    totals: dict[tuple[str, str | None, str], Decimal] = {}
+    for csv_report in csv_reports:
+        _accumulate_csv_report_bytes(
+            totals=totals,
+            raw_bytes=csv_report.read_bytes(),
+            report_id=csv_report.report_id,
+            report_type=report_type,
+            report_month=report_month,
+            default_content_owner=default_content_owner,
+        )
+
+    return _parser_payload_from_csv_totals(
+        totals=totals,
+        report_ids=[csv_report.report_id for csv_report in csv_reports],
+        report_type=report_type,
+        report_month=report_month,
+    )
+
+
+# ============================================================================
+# Purpose: Decode one Google CSV report, validate its header, and fold each
+#          row into monthly parser totals.
+# Database/ORM: None.
+# Standards: UTF-8 and CSV-shape failures are typed as GoogleApiResponseError
+#            so live runs persist downloaded evidence before marking failure.
+# Blast Radius: Parser payload construction for YouTube Reporting revenue rows.
+#               No graph projection impact detected.
+# Connections:
+#   - Function: _download_youtube_csv_report -> spools raw bytes before calling.
+#   - Function: _csv_reports_to_parser_payload -> aggregates multiple raw CSVs.
+# ============================================================================
+def _accumulate_csv_report_bytes(
+    *,
+    totals: dict[tuple[str, str | None, str], Decimal],
+    raw_bytes: bytes,
+    report_id: str,
+    report_type: str,
+    report_month: str,
+    default_content_owner: str | None,
+) -> None:
+    import csv
+    import io
+
+    month_start, _month_end = _month_bounds(
+        report_month=report_month, report_id=report_id
+    )
+    expected_month = f"{month_start.year:04d}-{month_start.month:02d}"
+    try:
+        text = raw_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise _parser_payload_error(
+            report_id=report_id, reason="csv is not valid utf-8"
+        ) from exc
+    reader = csv.DictReader(io.StringIO(text))
+    default_currency = _validate_csv_headers(
+        reader.fieldnames, report_id=report_id, report_type=report_type
+    )
+    for csv_row in reader:
+        _accumulate_csv_row(
+            totals=totals,
+            csv_row=csv_row,
+            report_id=report_id,
+            expected_month=expected_month,
+            default_content_owner=default_content_owner,
+            default_currency=default_currency,
+        )
+
+
+# ============================================================================
+# Purpose: Validate that a downloaded CSV has the columns required to build
+#          parser rows.
+# Database/ORM: None.
+# Standards: Empty/headerless/missing-column payloads become typed upstream
+#            response errors instead of parser KeyError/None drift.
+# Blast Radius: YouTube Reporting CSV acceptance only. No graph projection
+#               impact detected.
+# Connections:
+#   - Function: _accumulate_csv_report_bytes -> calls this before row parsing.
+# ============================================================================
+def _validate_csv_headers(
+    fieldnames: list[str] | None, *, report_id: str, report_type: str
+) -> str | None:
+    if not fieldnames:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason="csv missing header row",
+        )
+    headers = {
+        field.strip().lower()
+        for field in fieldnames
+        if isinstance(field, str) and field.strip()
+    }
+    for group_name, aliases in (
+        ("date", _CSV_DATE_COLUMNS),
+        ("channel", _CSV_CHANNEL_COLUMNS),
+        ("revenue", _CSV_REVENUE_COLUMNS),
+    ):
+        if not any(alias.lower() in headers for alias in aliases):
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason=f"csv missing {group_name} column",
+            )
+    if any(alias.lower() in headers for alias in _CSV_CURRENCY_COLUMNS):
+        return None
+    default_currency = _CSV_DEFAULT_CURRENCY_BY_REPORT_TYPE.get(report_type)
+    if default_currency is not None:
+        return default_currency
+    raise _parser_payload_error(
+        report_id=report_id,
+        reason="csv missing currency column "
+        "(expected one of: currency_code, currencyCode)",
+    )
+
+
+def _parser_payload_from_csv_totals(
+    *,
+    totals: dict[tuple[str, str | None, str], Decimal],
+    report_ids: list[str],
+    report_type: str,
+    report_month: str,
+) -> dict[str, object]:
+    report_id = _combined_report_id(report_ids)
+    month_start, month_end = _month_bounds(
+        report_month=report_month, report_id=report_id
+    )
+
+    rows: list[dict[str, object]] = []
+    for line_index, ((channel, content_owner, currency), total) in enumerate(
+        sorted(totals.items(), key=lambda item: (item[0][0], item[0][1] or "", item[0][2]))
+    ):
+        dimensions: dict[str, object] = {"channel": channel}
+        if content_owner:
+            dimensions["content_owner"] = content_owner
+        rows.append(
+            {
+                "line_index": line_index,
+                "date_range": {
+                    "start": month_start.isoformat(),
+                    "end": month_end.isoformat(),
+                },
+                "dimensions": dimensions,
+                "metrics": {
+                    "estimatedRevenue": str(total),
+                    "currencyCode": currency,
+                },
+            }
+        )
+
+    return {
+        "report_metadata": {
+            "report_id": report_id,
+            "report_type": report_type,
+        },
+        "rows": rows,
+    }
+
+
+def _accumulate_csv_row(
+    *,
+    totals: dict[tuple[str, str | None, str], Decimal],
+    csv_row: dict[str, str | None],
+    report_id: str,
+    expected_month: str,
+    default_content_owner: str | None,
+    default_currency: str | None,
+) -> None:
+    # Normalize the date column. YouTube Reporting CSV uses ``date`` or
+    # ``day``. The row is daily, but the parser payload is monthly, so this
+    # date is used only to ensure the row belongs to report_month.
+    date_value = _first_present(csv_row, *_CSV_DATE_COLUMNS)
+    if not date_value:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason="csv row missing date/day column",
+        )
+    try:
+        row_date = date_cls.fromisoformat(date_value)
+    except ValueError as exc:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row date {date_value!r} not ISO YYYY-MM-DD",
+        ) from exc
+    row_month = f"{row_date.year:04d}-{row_date.month:02d}"
+    if row_month != expected_month:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=(
+                f"csv row date {date_value!r} outside requested "
+                f"report_month {expected_month!r}"
+            ),
+        )
+
+    # Channel + optional content_owner are the monthly attribution axes.
+    # Lower-level official dimensions (video_id, country_code, etc.) are
+    # deliberately NOT forwarded as parser dimensions because that would
+    # create multiple source_row_keys for one monthly channel total.
+    channel = _first_present(csv_row, *_CSV_CHANNEL_COLUMNS)
+    if not channel:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason="csv row missing channel/channel_id column",
+        )
+    content_owner = _first_present(csv_row, "content_owner") or default_content_owner
+
+    # Pull the estimated revenue amount. Accept either Google's documented
+    # ``estimated_partner_revenue`` / ``estimatedRevenue`` columns or the
+    # test-fixture shorthand ``ad_revenue``. The aggregate is kept as Decimal
+    # and stringified after summation so precision and trailing scale survive.
+    amount = _first_present(csv_row, *_CSV_REVENUE_COLUMNS)
+    if amount is None:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason="csv row missing revenue column "
+            "(expected one of: estimated_partner_revenue, "
+            "estimatedRevenue, ad_revenue)",
+        )
+    try:
+        amount_decimal = Decimal(amount)
+    except InvalidOperation as exc:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} not a valid decimal",
+        ) from exc
+    if not amount_decimal.is_finite():
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"csv row revenue {amount!r} not finite",
+        )
+
+    currency = _first_present(csv_row, *_CSV_CURRENCY_COLUMNS)
+    if not currency:
+        if _row_has_any_column(csv_row, *_CSV_CURRENCY_COLUMNS):
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason="csv row blank currency value",
+            )
+        currency = default_currency
+    if not currency:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason="csv row missing currency column "
+            "(expected one of: currency_code, currencyCode)",
+        )
+
+    key = (channel, content_owner, currency)
+    totals[key] = totals.get(key, Decimal("0")) + amount_decimal
+
+
+def _combined_report_id(report_ids: list[str]) -> str:
+    if len(report_ids) == 1:
+        return report_ids[0]
+    return f"combined:{','.join(report_ids)}"
+
+
+def _spool_csv_report(*, report_id: str, raw_bytes: bytes) -> _CsvReportDownload:
+    raw_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix="ums-yt-report-",
+            suffix=".csv",
+            delete=False,
+        ) as tmp:
+            tmp.write(raw_bytes)
+            raw_path = Path(tmp.name)
+        return _CsvReportDownload(report_id=report_id, raw_path=raw_path)
+    except Exception:
+        if raw_path is not None:
+            try:
+                raw_path.unlink()
+            except FileNotFoundError:
+                pass
+        raise
+
+
+def _cleanup_csv_report_downloads(
+    raw_reports: tuple[_CsvReportDownload, ...],
+) -> None:
+    for raw_report in raw_reports:
+        raw_report.cleanup()
+
+
+def _month_bounds(*, report_month: str, report_id: str) -> tuple[date_cls, date_cls]:
+    expected_month = report_month.strip()
+    try:
+        validate_report_month(expected_month)
+    except ConnectorRunValidationError as exc:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"report_month {expected_month!r} not YYYY-MM",
+        ) from exc
+    try:
+        year_text, month_text = expected_month.split("-", 1)
+        year = int(year_text)
+        month = int(month_text)
+        last_day = monthrange(year, month)[1]
+        month_start = date_cls(year, month, 1)
+        month_end = date_cls(year, month, last_day)
+    except ValueError as exc:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason=f"report_month {expected_month!r} not YYYY-MM",
+        ) from exc
+    return month_start, month_end
+
+
+def _first_present(row: dict[str, str | None], *keys: str) -> str | None:
+    """Return the first non-blank string value among the given column keys.
+
+    csv.DictReader keys preserve the header's case, so this helper checks
+    each candidate case-insensitively against the row's actual keys.
+    """
+    lower_map = {k.lower(): k for k in row if isinstance(k, str)}
+    for key in keys:
+        actual = lower_map.get(key.lower())
+        if actual is None:
+            continue
+        value = row.get(actual)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _row_has_any_column(row: dict[str, str | None], *keys: str) -> bool:
+    lower_keys = {k.lower() for k in row if isinstance(k, str)}
+    return any(key.lower() in lower_keys for key in keys)
+
+
+def _parser_payload_error(*, report_id: str, reason: str) -> GoogleConnectorError:
+    """Wrap CSV adapter failures in a typed connector error.
+
+    Reuses ``GoogleApiResponseError`` because a malformed CSV from Google is,
+    practically, an upstream response-shape problem: the orchestrator's
+    per-report ``except`` already routes ``GoogleConnectorError`` into the
+    failure list, so a CSV-shape failure ends up classed the same as a JSON
+    list_reports failure.
+    """
+    from ums_smart_revenue.connectors.google.errors import GoogleApiResponseError
+
+    return GoogleApiResponseError(url=f"report:{report_id}", reason=reason)
+
+
+# ----------------------------------------------------------------------------
+# Private helpers
+# ----------------------------------------------------------------------------
+
+
+def _load_credential(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    connector_key: str,
+    account_id: str,
+) -> ApiConnectorCredentialORM | None:
+    """Tenant-scoped credential row lookup for ``run_one``.
+
+    Kept private to the orchestrator because the existing repository
+    (``SqlAlchemyConnectorCredentialRepository``) does not expose a
+    by-(connector_key, account_id) lookup — it serves the admin paging API
+    and the create flow. Adding a new public method to that repo would
+    drag in actor/audit semantics this internal load doesn't need.
+    """
+    for candidate_key in _credential_key_candidates(connector_key):
+        row = session.scalar(
+            sa.select(ApiConnectorCredentialORM).where(
+                ApiConnectorCredentialORM.tenant_id == tenant_id,
+                ApiConnectorCredentialORM.connector_key == candidate_key,
+                ApiConnectorCredentialORM.account_id == account_id,
+            )
+        )
+        if row is not None:
+            return row
+    return None
+
+
+_CREDENTIAL_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "youtube-reporting": ("youtube_reporting",),
+    "youtube_reporting": ("youtube-reporting",),
+    "youtube-analytics": ("youtube_analytics",),
+    "youtube_analytics": ("youtube-analytics",),
+    "adsense-management": ("adsense_management",),
+    "adsense_management": ("adsense-management",),
+}
+
+
+def _credential_key_candidates(connector_key: str) -> tuple[str, ...]:
+    candidates = [connector_key]
+    # FIX: Credential lookup must be symmetric across public hyphen keys and
+    # stored source-system underscore keys; operators can dispatch either alias.
+    candidates.extend(_CREDENTIAL_KEY_ALIASES.get(connector_key, ()))
+    source_key = _source_system_for_connector(connector_key)
+    if source_key != connector_key:
+        candidates.append(source_key)
+    return tuple(dict.fromkeys(candidates))
+
+
+def _zero_counts() -> dict[str, int]:
+    """Mirror the B2.3 ``CONNECTOR_RUN_COUNT_KEYS`` shape.
+
+    ``finish_run`` validates the exact key set on commit, so any drift
+    between this and ``CONNECTOR_RUN_COUNT_KEYS`` raises
+    ``ConnectorRunValidationError`` at finish_run time.
+    """
+    return {key: 0 for key in CONNECTOR_RUN_COUNT_KEYS}
+
+
+def _derive_terminal_status(counts: dict[str, int]) -> str:
+    """Pick the connector_runs terminal status from per-report counters.
+
+    ``finish_run`` accepts only ``{SUCCEEDED, PARTIAL, FAILED}``. ``RUNNING``
+    is not a terminal status and would be rejected with
+    ``ConnectorRunValidationError``.
+    """
+    if counts["reports_attempted"] == 0:
+        # No reports yielded at all: nothing to attribute revenue to.
+        # ``finish_run`` accepts only terminal statuses; record FAILED so the
+        # operator console flags the run instead of leaving it RUNNING.
+        return "FAILED"
+    if counts["reports_failed"] == 0:
+        return "SUCCEEDED"
+    if counts["reports_succeeded"] == 0:
+        return "FAILED"
+    return "PARTIAL"
+
+
+def _safe_failure_detail(exc: Exception) -> str | None:
+    """Return operator-safe detail for per-report summaries.
+
+    ``per_report_failures`` intentionally remains a compact
+    ``(report_type, error_class)`` API shape. The durable ``error_summary`` can
+    carry schema reasons, such as missing CSV currency metadata, without
+    including URLs, secret refs, storage paths, or arbitrary exception text.
+    """
+    reason = getattr(exc, "reason", None)
+    if isinstance(reason, str) and reason:
+        return reason
+    return None
+
+
+def _summarize_failures(failures: list[tuple[str, str, str | None]]) -> str | None:
+    """Pack per-report failures into an operator-safe summary string.
+
+    Bounded by ``finish_run``'s 500-char truncation so the connector_runs
+    column never overflows; this helper just builds the candidate text.
+    """
+    if not failures:
+        return None
+    items = ", ".join(
+        f"{report_type}:{error_class}{f' ({detail})' if detail else ''}"
+        for report_type, error_class, detail in failures
+    )
+    return f"{len(failures)} report(s) failed: {items}"
+
+
+# ============================================================================
+# Purpose: Construct (backend, scheme, bucket) for the configured blob store.
+#          Returning the triple keeps scheme/bucket selection co-located with
+#          backend construction so the orchestrator never has to ask
+#          ``isinstance(backend, ...)`` to know what URI shape to emit.
+# Database/ORM: None.
+# Standards: Lazy-import the GCS client so SQLite test runs don't pay the cost
+#            of constructing one. ``LocalFileStoreBackend`` and
+#            ``GcsBlobStorageBackend`` are imported at module scope so test
+#            patches on the bare symbol on this module replace what gets
+#            instantiated here.
+# Blast Radius: None — backend selection is internal; finance, auth, audit,
+#               Neo4j projection, and exports are unaffected.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/blob_storage.py ->
+#     LocalFileStoreBackend / GcsBlobStorageBackend / deterministic_blob_path.
+# ============================================================================
+def _build_blob_backend() -> tuple[BlobStorageBackend, str, str]:
+    """Construct (backend, scheme, bucket) for the configured blob store.
+
+    Selected by ``UMS_BLOB_BACKEND``:
+      * ``file-store`` (default): LocalFileStoreBackend rooted at
+        ``UMS_LOCAL_STORE_ROOT``. Scheme is ``file-store``; bucket is a
+        logical path segment under root (``UMS_LOCAL_BLOB_BUCKET`` default
+        ``"local"``) so deterministic URIs have the same shape as the GCS
+        branch.
+      * ``gcs``: GcsBlobStorageBackend with a real google-cloud-storage
+        client. Scheme is ``gs``; bucket is ``UMS_GCS_BUCKET``.
+
+    Returning the triple keeps scheme/bucket selection co-located with
+    backend construction — the orchestrator never has to ask
+    ``isinstance(backend, ...)`` to know what URI shape to emit.
+    """
+    backend_name = os.getenv("UMS_BLOB_BACKEND", "file-store")
+    if backend_name == "file-store":
+        root = Path(os.getenv("UMS_LOCAL_STORE_ROOT", str(Path.cwd() / "_local_blob_store")))
+        bucket = os.getenv("UMS_LOCAL_BLOB_BUCKET", "local")
+        return LocalFileStoreBackend(root=root), "file-store", bucket
+    if backend_name == "gcs":
+        # Lazy import the GCS client only on the gcs branch so SQLite test
+        # runs don't pay the cost of constructing one.
+        try:
+            from google.cloud.storage import Client as GcsClient  # type: ignore[import-untyped]
+        except Exception as exc:
+            raise BlobStorageConfigurationError(
+                backend=backend_name,
+                detail=f"google-cloud-storage client import failed: {type(exc).__name__}",
+            ) from exc
+
+        bucket = os.getenv("UMS_GCS_BUCKET", "ums-smart-revenue-raw")
+        try:
+            client = GcsClient()
+        except Exception as exc:
+            raise BlobStorageConfigurationError(
+                backend=backend_name,
+                detail=f"google-cloud-storage client construction failed: {type(exc).__name__}",
+            ) from exc
+        return GcsBlobStorageBackend(client=client), "gs", bucket
+    raise BlobStorageConfigurationError(
+        backend=backend_name,
+        detail="expected 'file-store' or 'gcs'",
+    )
+
+
+def _source_system_for_connector(connector_key: str) -> str:
+    """Map the connector_key to the ALLOWED_SOURCE_SYSTEMS member.
+
+    Keeps the orchestrator decoupled from B1's source_system string set
+    while still letting the raw_report_files row carry the value the
+    existing PR #43 repository expects.
+    """
+    mapping = {
+        "youtube-reporting": "youtube_reporting",
+        "youtube_reporting": "youtube_reporting",
+        "youtube-analytics": "youtube_analytics",
+        "youtube_analytics": "youtube_analytics",
+        "adsense-management": "adsense_management",
+        "adsense_management": "adsense_management",
+    }
+    try:
+        return mapping[connector_key]
+    except KeyError as exc:
+        raise ValueError(
+            f"unknown connector_key for source_system mapping: {connector_key!r}"
+        ) from exc
+
+
+_EXTENSIONS: dict[str, str] = {
+    "youtube-reporting": "csv",
+    "youtube_reporting": "csv",
+    "youtube-analytics": "json",
+    "youtube_analytics": "json",
+    "adsense-management": "json",
+    "adsense_management": "json",
+}
+
+
+def _extension_for_connector(connector_key: str) -> str:
+    """File extension used inside the deterministic blob URI.
+
+    YouTube Reporting downloads are CSV; YouTube Analytics (B2.5) and
+    AdSense (B2.6) return JSON. Centralised here so the path-builder stays
+    consistent across slices. Mirrors the explicit-mapping + KeyError ->
+    ValueError pattern of ``_source_system_for_connector`` so a missing
+    entry for a future B2.5/B2.6 registration fails loudly instead of
+    silently emitting ``.json``.
+    """
+    try:
+        return _EXTENSIONS[connector_key]
+    except KeyError as exc:
+        raise ValueError(
+            f"unknown connector_key for extension dispatch: {connector_key!r}"
+        ) from exc
+
+
+def _parser_for_connector(connector_key: str) -> YouTubeReportingParser:
+    """Return the source-row parser bound to a given connector key.
+
+    B2.5/B2.6 will widen this beyond YouTubeReportingParser; the helper
+    isolates that future change from ``run_one`` itself. For now any non-
+    YouTube-Reporting key would not reach this point because the runner
+    isn't registered.
+    """
+    if connector_key in {"youtube-reporting", "youtube_reporting"}:
+        return YouTubeReportingParser()
+    raise ValueError(f"no parser bound for connector_key: {connector_key!r}")
+
+
+# ----------------------------------------------------------------------------
+# Module-load registration
+# ----------------------------------------------------------------------------
+
+# An instance (not the class) is registered: B2.5/B2.6 runners may carry
+# per-connector config in their constructors, and the dispatch contract
+# returns the registered value directly to the orchestrator.
+register_connector(key="youtube-reporting", runner=YouTubeReportingRunner())
+register_connector(key="youtube_reporting", runner=YouTubeReportingRunner())

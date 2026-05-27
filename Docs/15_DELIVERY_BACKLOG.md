@@ -24,6 +24,25 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   in PR #30).
 - ⏳ YouTube report ingestion — remaining: credentials repo (PRs #33,
   #34); real ingestion not built.
+    - ⏳ PR #47 — Google live connector foundation (B2.1-B2.4 in one
+      stack): credential foundation (secret resolver dispatch +
+      gcp-secret-manager:// + local-secret:// + OAuth refresh wrapper);
+      blob storage backends (GCS + file-store) + raw_file lifecycle
+      helpers (mark_parsed accepts FAILED -> PARSED retry recovery;
+      mark_failed FAILED -> FAILED idempotent); connector_runs +
+      connector_run_raw_files ORM, repository, Alembic migration, and
+      raw_report_files tenant/id UNIQUE for composite FKs; google-auth +
+      httpx base client + retry policy + YouTube Reporting client +
+      report_type whitelist + run_one() orchestrator +
+      scripts/run_google_connector.py CLI with extensible --connector
+      registry. Concern A (deterministic_blob_path emitted gs://
+      regardless of backend, so the default LocalFileStoreBackend
+      rejected every URI at upload) closed by commit 435aa58 — scheme is
+      now threaded through (backend, scheme, bucket) from
+      _build_blob_backend(); regression test exercises the real
+      LocalFileStoreBackend end-to-end through run_one. B2.5 (YouTube
+      Analytics) + B2.6 (operator console) stack on top in follow-up
+      PRs.
 - ⏳ Monthly revenue normalization — remaining: B2 live ingestion wiring
   (revenue facts foundation in PR #2; normalization bridge from
   google_revenue_source_rows shipped in PR #44).

@@ -1,10 +1,9 @@
 import os
-from logging.config import fileConfig
+from importlib import import_module
 
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from ums_smart_revenue.db import source_models  # noqa: F401  # registers tables on FinanceBase
 from ums_smart_revenue.db.explanation_models import ExplanationBase
 from ums_smart_revenue.db.finance_models import FinanceBase
 from ums_smart_revenue.db.org_models import OrgBase
@@ -14,8 +13,27 @@ from ums_smart_revenue.db.tenant_models import TenantBase
 
 config = context.config
 
-if config.config_file_name is not None:
-    fileConfig(config.config_file_name)
+
+# ============================================================================
+# Purpose: Import model modules whose table registrations live on shared
+#          metadata bases used by Alembic autogenerate and upgrade commands.
+# Database/ORM: connector_models registers connector run tables on ReportBase;
+#               source_models registers Google source rows on FinanceBase.
+# Standards: Explicit side-effect imports through import_module so analyzers do
+#            not mistake registration imports for dead code.
+# Blast Radius: Alembic migration metadata only; runtime API behavior unchanged.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/connector_models.py -> B2 connector
+#     run tables on ReportBase.metadata.
+#   - File: backend/ums_smart_revenue/db/source_models.py -> Google source row
+#     tables on FinanceBase.metadata.
+# ============================================================================
+def _register_migration_tables() -> None:
+    import_module("ums_smart_revenue.db.connector_models")
+    import_module("ums_smart_revenue.db.source_models")
+
+
+_register_migration_tables()
 
 target_metadata = [
     SecurityBase.metadata,

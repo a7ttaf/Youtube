@@ -1,14 +1,15 @@
 # Implementation Plan
 
-## Status (2026-05-25)
+## Status (2026-05-27)
 
-Reconciled through PR #36 (S2 multi-tenant integration merged onto `main`
-at commit `96dbe73`). The original Phase 0–7 product cut below is the
-durable roadmap; status markers (`✅ / ⏳ / 🗑️`) show what has shipped
-end-to-end, what is partial, and what has been removed from scope. The new
-section "Cross-cutting infrastructure (Sx)" tracks the platform-level work
-delivered outside the product phase numbering (backend foundation,
-governance/CI, multi-tenant stack).
+Mainline merge status is reconciled through PR #36 (S2 multi-tenant
+integration merged onto `main` at commit `96dbe73`), and the roadmap notes
+now include the stacked PR #47 Google live connector foundation state. The
+original Phase 0–7 product cut below is the durable roadmap; status markers
+(`✅ / ⏳ / 🗑️`) show what has shipped end-to-end, what is partial, and what
+has been removed from scope. The new section "Cross-cutting infrastructure
+(Sx)" tracks the platform-level work delivered outside the product phase
+numbering (backend foundation, governance/CI, multi-tenant stack).
 
 **Marker conventions** (also applied across `15_DELIVERY_BACKLOG.md`):
 
@@ -146,7 +147,6 @@ running on the operator's workstation.
       between PR #43 substrate and existing `MonthlyChannelRevenueFactORM`
       write path. See spec at
       `Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md`.
-
 ---
 
 ## Phase 0 — Foundation decisions
@@ -166,7 +166,29 @@ running on the operator's workstation.
 - ✅ Final stack decision (FastAPI + PostgreSQL + Docker via PRs #1, #11,
   #15).
 - ⏳ OAuth/API access plan — remaining: credentials repository exists
-  (PRs #33, #34); real OAuth flows and token monitoring not started.
+  (PRs #33, #34); PR #47 stacks the full Google live connector foundation
+  (B2.1-B2.4 in one PR). Public OAuth consent flows, live connector
+  ingestion against real Google APIs, and token monitoring are not
+  started — they belong to B2.5+ slices that stack on PR #47.
+    - ⏳ PR #47 — Google live connector foundation (B2.1-B2.4 in one
+      stack): credential foundation (secret resolver dispatch +
+      gcp-secret-manager:// + local-secret:// + OAuth refresh wrapper);
+      blob storage backends (GCS + file-store) + raw_file lifecycle
+      helpers (mark_parsed accepts FAILED -> PARSED retry recovery;
+      mark_failed FAILED -> FAILED idempotent); connector_runs +
+      connector_run_raw_files ORM, repository, Alembic migration, and
+      raw_report_files tenant/id UNIQUE for composite FKs; google-auth +
+      httpx base client + retry policy + YouTube Reporting client +
+      report_type whitelist + run_one() orchestrator +
+      scripts/run_google_connector.py CLI with extensible --connector
+      registry. Concern A (deterministic_blob_path emitted gs://
+      regardless of backend, so the default LocalFileStoreBackend
+      rejected every URI at upload) closed by commit 435aa58 — scheme is
+      now threaded through (backend, scheme, bucket) from
+      _build_blob_backend(); regression test exercises the real
+      LocalFileStoreBackend end-to-end through run_one. B2.5 (YouTube
+      Analytics) + B2.6 (operator console) stack on top in follow-up
+      PRs.
 - ⏳ Channel inventory file format — remaining: tenant-scoped channel
   registry exists (PR #25); bulk inventory load format not yet defined.
 - ⏳ Finance month-close input format — remaining: close-gate enforced
