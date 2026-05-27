@@ -446,7 +446,10 @@ def _run_dry_run(
         # Pass a lightweight proxy that carries tenant_id so runners that
         # need it (e.g. YouTubeAnalyticsRunner) can read run.tenant_id
         # without requiring a live ConnectorRunEntry on the dry-run path.
-        _dry_run_proxy = _types.SimpleNamespace(tenant_id=tenant_id)
+        # FIX: str()-wrap tenant_id to mirror ConnectorRunEntry.tenant_id: str.
+        # UUID(uuid_object) raises AttributeError on Python 3.14 because
+        # UUID.__init__ expects a hex string, not a UUID instance.
+        _dry_run_proxy = _types.SimpleNamespace(tenant_id=str(tenant_id))
         for produced in runner.produce_reports(
             session=session,
             run=_dry_run_proxy,  # type: ignore[arg-type]

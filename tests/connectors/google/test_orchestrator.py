@@ -41,11 +41,13 @@ from ums_smart_revenue.connectors.google_source_parsers.base import ParserError
 from ums_smart_revenue.connectors.runs import orchestrator as orchestrator_module
 from ums_smart_revenue.connectors.runs.blob_storage import compute_checksum
 from ums_smart_revenue.connectors.runs.orchestrator import (
+    _ANALYTICS_DIMENSIONS,  # noqa: PLC2701
+    _ANALYTICS_METRICS,  # noqa: PLC2701
     ConnectorRunOutcome,
     ProducedReportFailure,
     ProducedReportSuccess,
     YouTubeReportingRunner,
-    _csv_to_parser_payload,
+    _csv_to_parser_payload,  # noqa: PLC2701
     run_one,
 )
 from ums_smart_revenue.connectors.runs.repository import ConnectorRunValidationError
@@ -3015,8 +3017,8 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
             "ids": f"channel=={channel_id}",
             "startDate": f"{_year}-{_month}-01",
             "endDate": f"{_year}-{_month}-{_last_day:02d}",
-            "metrics": "estimatedRevenue,estimatedAdRevenue,grossRevenue",
-            "dimensions": "channel,month",
+            "metrics": _ANALYTICS_METRICS,
+            "dimensions": _ANALYTICS_DIMENSIONS,
         }
 
     augmented_cms = {**payload_cms, "query_request": _runner_query_request("UC_fs_cms")}
@@ -3105,3 +3107,145 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
             f"expected file-store:// scheme + testbucket prefix; got {raw_file.file_url!r}"
         )
         assert raw_file.file_url.endswith(".json")
+
+
+def test_run_one_with_youtube_analytics_dry_run_succeeds(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """Regression: dry-run with youtube-analytics must not raise AttributeError.
+
+    Before the str()-cast fix, the dry-run SimpleNamespace proxy stored
+    tenant_id as a UUID object.  YouTubeAnalyticsRunner.produce_reports then
+    called ``UUID(run.tenant_id)`` which on Python 3.14 raises::
+
+        AttributeError: 'UUID' object has no attribute 'replace'
+
+    because UUID.__init__ calls ``.replace()`` on its first positional arg
+    expecting a hex string.  Any dry_run=True call with connector_key
+    "youtube-analytics" crashed before entering the channel loop.
+
+    This test exercises the exact code path: two channels seeded (one
+    CMS-owned, one outside-CMS), same stub pattern as
+    test_run_one_with_youtube_analytics_succeeds_per_channel, but invoked
+    with dry_run=True.
+
+    Asserts:
+    - No AttributeError (regression guard: test must FAIL before the str() fix)
+    - outcome.run is None  (dry-run writes no connector_runs row)
+    - counts["reports_attempted"] == 2
+    - counts["reports_succeeded"] == 2
+    - Zero rows in connector_runs and raw_report_files
+    """
+    # ----- seed channels (mirrors the live-path test) -----
+    ch_cms = YouTubeChannelORM(
+        id=uuid4(),
+        tenant_id=TENANT_ID,
+        youtube_channel_id="UC_dry_ana_cms",
+        channel_name="CMS Channel (dry)",
+        content_owner_id=_ANALYTICS_ACCOUNT_ID,
+        active=True,
+        revenue_required=True,
+    )
+    ch_ext = YouTubeChannelORM(
+        id=uuid4(),
+        tenant_id=TENANT_ID,
+        youtube_channel_id="UC_dry_ana_ext",
+        channel_name="Outside-CMS Channel (dry)",
+        content_owner_id=None,
+        active=True,
+        revenue_required=True,
+    )
+    session.add_all([ch_cms, ch_ext])
+    session.flush()
+
+    # ----- seed credential row -----
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ANALYTICS_CONNECTOR_KEY,
+        account_id=_ANALYTICS_ACCOUNT_ID,
+    )
+
+    report_month = "2026-05"
+
+    payload_cms = _make_analytics_parser_payload(
+        channel_id="UC_dry_ana_cms",
+        report_month=report_month,
+    )
+    payload_ext = _make_analytics_parser_payload(
+        channel_id="UC_dry_ana_ext",
+        report_month=report_month,
+    )
+
+    def fake_fetch_channel_report(*, channel_id: str, report_month: str) -> dict:
+        if channel_id == "UC_dry_ana_cms":
+            return payload_cms
+        if channel_id == "UC_dry_ana_ext":
+            return payload_ext
+        raise ValueError(f"unexpected channel_id in stub: {channel_id!r}")
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+    ) as yt_analytics_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        analytics_client = yt_analytics_cls.return_value
+        analytics_client.fetch_channel_report.side_effect = fake_fetch_channel_report
+
+        # Blob backend patched defensively: dry-run must never call upload/get_bytes.
+        backend = local_cls.return_value
+        backend.upload.side_effect = AssertionError(
+            "blob upload must not be called in dry-run"
+        )
+        backend.get_bytes.side_effect = AssertionError(
+            "blob get_bytes must not be called in dry-run"
+        )
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=_ANALYTICS_CONNECTOR_KEY,
+            account_id=_ANALYTICS_ACCOUNT_ID,
+            report_month=report_month,
+            dry_run=True,
+        )
+
+    # ----- outcome shape: dry-run returns run=None -----
+    assert isinstance(outcome, ConnectorRunOutcome)
+    assert outcome.run is None
+    assert outcome.per_report_failures == []
+
+    # ----- counts: both channels attempted + parsed cleanly -----
+    counts = outcome.counts
+    assert counts["reports_attempted"] == 2
+    assert counts["reports_succeeded"] == 2
+    assert counts["reports_failed"] == 0
+    # Each channel payload has one data row -> at least 2 rows total.
+    # Per-category split stays 0: no upsert runs on dry-run path.
+    assert counts["rows_upserted_total"] >= 2
+    assert counts["rows_upserted_created"] == 0
+    assert counts["rows_upserted_updated"] == 0
+    assert counts["rows_upserted_unchanged"] == 0
+
+    # ----- no DB writes: SAVEPOINT rollback reverts any runner side-effects -----
+    assert session.query(ConnectorRunORM).count() == 0
+    assert session.query(RawReportFileORM).count() == 0
+    assert (
+        session.query(ConnectorRunRawFileORM)
+        .filter(ConnectorRunRawFileORM.tenant_id == TENANT_ID)
+        .count()
+        == 0
+    )
+    assert (
+        session.query(GoogleRevenueSourceRowORM)
+        .filter(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
+        .count()
+        == 0
+    )
