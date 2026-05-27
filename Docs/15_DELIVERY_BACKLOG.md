@@ -43,6 +43,16 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
       LocalFileStoreBackend end-to-end through run_one. B2.5 (YouTube
       Analytics) + B2.6 (operator console) stack on top in follow-up
       PRs.
+    - ⏳ PR #TBD (B2.5) — YouTube Analytics targeted channel ingestion
+      (includes outside-CMS channels from the youtube_channels
+      registry: active + revenue_required + content_owner_id matches
+      account OR is NULL); registers youtube-analytics (and the
+      youtube_analytics alias) in the B2.4 connector registry; real
+      LocalFileStoreBackend round-trip + dry-run regression tests
+      included; tenant_id derived from run.tenant_id (no cross-tenant
+      credential lookup); locked metrics/dimensions constants shared
+      between client and runner so the parser-required `channel`
+      dimension cannot silently drift.
 - ⏳ Monthly revenue normalization — remaining: B2 live ingestion wiring
   (revenue facts foundation in PR #2; normalization bridge from
   google_revenue_source_rows shipped in PR #44).
