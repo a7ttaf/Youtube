@@ -3,7 +3,7 @@
 build_credentials_from_payload(payload_json) parses the resolved secret string
 and constructs google.oauth2.credentials.Credentials; missing fields or bad
 JSON -> MalformedSecretPayloadError. refresh_credentials(creds) calls
-creds.refresh(Request()); RefreshError -> OAuthRefreshError.
+creds.refresh(Request()); GoogleAuthError -> OAuthRefreshError.
 """
 from __future__ import annotations
 
@@ -11,7 +11,7 @@ import json
 from unittest.mock import MagicMock, patch
 
 import pytest
-from google.auth.exceptions import RefreshError
+from google.auth.exceptions import GoogleAuthError, RefreshError
 
 from ums_smart_revenue.connectors.google.errors import (
     MalformedSecretPayloadError,
@@ -119,6 +119,18 @@ def test_refresh_credentials_calls_refresh() -> None:
 def test_refresh_credentials_wraps_refresh_error() -> None:
     creds = MagicMock()
     inner = RefreshError("token revoked")
+    creds.refresh.side_effect = inner
+    with (
+        patch("ums_smart_revenue.connectors.google.oauth.Request"),
+        pytest.raises(OAuthRefreshError) as ctx,
+    ):
+        refresh_credentials(creds)
+    assert ctx.value.inner is inner
+
+
+def test_refresh_credentials_wraps_google_auth_transport_error() -> None:
+    creds = MagicMock()
+    inner = GoogleAuthError("token endpoint transport failed")
     creds.refresh.side_effect = inner
     with (
         patch("ums_smart_revenue.connectors.google.oauth.Request"),

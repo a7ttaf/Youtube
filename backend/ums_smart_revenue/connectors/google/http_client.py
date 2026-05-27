@@ -25,7 +25,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from google.auth.exceptions import RefreshError
+from google.auth.exceptions import GoogleAuthError
 from google.auth.transport.requests import Request
 
 from ums_smart_revenue.connectors.google.errors import (
@@ -124,7 +124,7 @@ def _auth_headers(
     headers: dict[str, str] = {}
     try:
         credentials.before_request(auth_request, method, url, headers)
-    except RefreshError as exc:
+    except GoogleAuthError as exc:
         # FIX: google-auth can refresh during before_request; preserve it
         # as the connector's terminal OAuth error instead of surfacing a
         # library-specific exception or retrying with stale credentials.
@@ -185,7 +185,7 @@ def _request_or_retry_transport(
         # iteration is still on attempt N from the loop's POV.
         _retry_after_timeout(state, method=method, url=url)
         return None
-    except (httpx.NetworkError, httpx.ProtocolError):
+    except httpx.TransportError:
         # Spec §7: "DNS / TCP reset" bucket -- 3-attempt budget for all
         # sub-HTTP transport failures. TimeoutException is handled above so
         # the 4-attempt timeout budget stays separate.

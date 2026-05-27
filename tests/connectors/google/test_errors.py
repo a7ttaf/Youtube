@@ -64,7 +64,18 @@ def test_secret_not_found_carries_ref() -> None:
     ref = "gcp-secret-manager://projects/x/secrets/y/versions/latest"
     err = SecretNotFoundError(ref=ref)
     assert err.ref == ref
-    assert ref in str(err)
+    assert ref not in str(err)
+    assert "projects/x/secrets/y" not in str(err)
+    assert "gcp-secret-manager" in str(err)
+
+
+def test_malformed_secret_uri_redacts_secret_resource_name() -> None:
+    ref = "gcp-secret-manager://projects/x/secrets/y/versions/latest"
+    err = MalformedSecretUriError(ref=ref)
+    assert err.ref == ref
+    assert ref not in str(err)
+    assert "projects/x/secrets/y" not in str(err)
+    assert "gcp-secret-manager" in str(err)
 
 
 def test_secret_fetch_error_redacts_secret_resource_name() -> None:

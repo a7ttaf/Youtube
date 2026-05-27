@@ -30,24 +30,28 @@ class ConnectorAlreadyRegisteredError(GoogleConnectorError):
         self.key = key
 
 
+def _redacted_secret_locator(ref: str) -> str:
+    scheme, _, _rest = ref.partition("://")
+    return f"{scheme or 'unknown'} secret"
+
+
 class MalformedSecretUriError(GoogleConnectorError):
     def __init__(self, *, ref: str) -> None:
-        super().__init__(f"malformed secret URI: {ref}")
+        super().__init__(f"malformed secret URI: {_redacted_secret_locator(ref)}")
         self.ref = ref
 
 
 class SecretNotFoundError(GoogleConnectorError):
     def __init__(self, *, ref: str) -> None:
-        super().__init__(f"secret not found: {ref}")
+        super().__init__(f"secret not found: {_redacted_secret_locator(ref)}")
         self.ref = ref
 
 
 class SecretFetchError(GoogleConnectorError):
     def __init__(self, *, ref: str, inner: Exception) -> None:
-        scheme, _, _rest = ref.partition("://")
-        redacted_locator = f"{scheme or 'unknown'} secret"
         super().__init__(
-            f"secret fetch failed for {redacted_locator}: {type(inner).__name__}"
+            f"secret fetch failed for {_redacted_secret_locator(ref)}: "
+            f"{type(inner).__name__}"
         )
         self.ref = ref
         self.inner = inner

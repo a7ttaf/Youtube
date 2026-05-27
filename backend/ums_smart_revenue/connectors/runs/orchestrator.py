@@ -51,7 +51,7 @@ from __future__ import annotations
 import os
 import tempfile
 from calendar import monthrange
-from collections.abc import Iterator
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 from datetime import date as date_cls
 from decimal import Decimal, InvalidOperation
@@ -91,6 +91,7 @@ from ums_smart_revenue.connectors.google_source_parsers import (
     YouTubeReportingParser,
 )
 from ums_smart_revenue.connectors.google_source_rows import (
+    ParsedSourceRow,
     SqlAlchemyGoogleRevenueSourceRowRepository,
 )
 from ums_smart_revenue.connectors.runs.blob_storage import (
@@ -173,6 +174,7 @@ class ProducedReportFailure:
 
     report_type: str
     error: Exception
+    raw_reports: tuple[_CsvReportDownload, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -562,6 +564,7 @@ def _process_live_reports(
             session=session,
             tenant_id=tenant_id,
             connector_key=connector_key,
+            account_id=account_id,
             report_month=report_month,
             triggered_by_user_id=triggered_by_user_id,
             run_entry=run_entry,
@@ -588,7 +591,12 @@ def _unpack_produced_report(
     Exception | None,
 ]:
     if isinstance(produced, ProducedReportFailure):
-        return produced.report_type, None, None, produced.error
+        return (
+            produced.report_type,
+            None,
+            produced.raw_reports or None,
+            produced.error,
+        )
     if isinstance(produced, ProducedReportSuccess):
         return produced.report_type, produced.parser_payload, produced.raw_reports, None
     report_type, parser_payload, raw_bytes = produced
@@ -617,6 +625,7 @@ def _handle_live_produced_report(
     session: Session,
     tenant_id: UUID,
     connector_key: str,
+    account_id: str,
     report_month: str,
     triggered_by_user_id: UUID | None,
     run_entry: ConnectorRunEntry,
@@ -638,6 +647,23 @@ def _handle_live_produced_report(
     report_state: dict[str, object] = {}
     try:
         if produced_error is not None:
+            if raw_reports:
+                _prepare_and_link_raw_reports(
+                    session=session,
+                    tenant_id=tenant_id,
+                    connector_key=connector_key,
+                    run_entry=run_entry,
+                    source_system=_source_system_for_connector(connector_key),
+                    report_type=report_type,
+                    report_month=report_month,
+                    raw_reports=raw_reports,
+                    backend=backend,
+                    scheme=scheme,
+                    bucket=bucket,
+                    ordering_index=ordering_index,
+                    triggered_by_user_id=triggered_by_user_id,
+                    report_state=report_state,
+                )
             raise produced_error
         if parser_payload is None or raw_reports is None or not raw_reports:
             raise RuntimeError("connector runner yielded incomplete report")
@@ -653,6 +679,7 @@ def _handle_live_produced_report(
             repo=repo,
             report_type=report_type,
             report_month=report_month,
+            account_id=account_id,
             parser_payload=parser_payload,
             raw_reports=raw_reports,
             ordering_index=ordering_index,
@@ -816,6 +843,7 @@ def _process_one_report(
     repo: SqlAlchemyGoogleRevenueSourceRowRepository,
     report_type: str,
     report_month: str,
+    account_id: str,
     parser_payload: dict[str, object],
     raw_reports: tuple[_CsvReportDownload, ...],
     ordering_index: int,
@@ -837,6 +865,127 @@ def _process_one_report(
     raw_file in flight to mark FAILED".
     """
     source_system = _source_system_for_connector(connector_key)
+    raw_files = _prepare_and_link_raw_reports(
+        session=session,
+        tenant_id=tenant_id,
+        connector_key=connector_key,
+        run_entry=run_entry,
+        source_system=source_system,
+        report_type=report_type,
+        report_month=report_month,
+        raw_reports=raw_reports,
+        backend=backend,
+        scheme=scheme,
+        bucket=bucket,
+        ordering_index=ordering_index,
+        triggered_by_user_id=triggered_by_user_id,
+        report_state=report_state,
+    )
+
+    # 5-7. Parse, upsert, and mark_parsed inside a SAVEPOINT. The raw_file
+    # evidence row and run link are outside this savepoint so Bucket B can mark
+    # the raw file FAILED if any downstream step raises. The finance source
+    # rows and PARSED transition are inside it so a post-upsert lifecycle
+    # failure cannot leave persisted source rows attached to a FAILED raw file.
+    with session.begin_nested():
+        # Parse. ``list(...)`` forces the generator so a parser failure surfaces
+        # here (typed ``ParserError``) instead of mid-upsert. ParserError is
+        # caught by the widened Bucket B/C ``except Exception`` in ``run_one``.
+        parsed_rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
+        source_row_raw_file_id = _source_row_raw_file_id(raw_files)
+
+        # Upsert. Returns the persisted entries (one per ParsedSourceRow); the
+        # precise created-vs-updated split needs a pre-read of existing
+        # source_row_keys, which the happy-path test doesn't exercise. Future
+        # work (no current task) can wire that count if downstream consumers
+        # need it; the run-level ``rows_upserted_total`` (sum of writes across
+        # successful reports) is what the tests assert on.
+        written = repo.upsert_many(
+            tenant_id,
+            parsed_rows,
+            raw_file_id=source_row_raw_file_id,
+            imported_by=triggered_by_user_id,
+        )
+        _delete_stale_source_rows(
+            repo=repo,
+            tenant_id=tenant_id,
+            source_system=source_system,
+            report_type=report_type,
+            report_month=report_month,
+            parsed_rows=parsed_rows,
+            fallback_source_account_id=account_id,
+        )
+
+        # Lifecycle transition: DOWNLOADED -> PARSED. Raises
+        # ``RawFileAlreadyParsedError`` if called twice on the same file, which
+        # would only happen on a re-entrant orchestrator bug.
+        for raw_file in raw_files:
+            if raw_file.parse_status != "PARSED":
+                mark_parsed(session, raw_file_id=raw_file.id, tenant_id=tenant_id)
+
+    # Future work (no current task): accurate created/updated/unchanged
+    # split via a pre-read of existing source_row_keys. Until then, the
+    # per-category split fields stay at 0 rather than over-claiming
+    # everything as 'created' (which would lie on the second ingest of an
+    # already-seen month).
+    # ``counts["reports_succeeded"] += 1`` lives in ``run_one``'s outer
+    # loop AFTER ``session.commit()`` so a commit failure (e.g. DB
+    # disconnect on the per-report flush) is recorded as a failure once,
+    # not double-counted as both succeeded and failed.
+    return len(written), len(raw_files)
+
+
+def _source_row_raw_file_id(raw_files: list[RawReportFileORM]) -> UUID | None:
+    if len(raw_files) == 1:
+        return raw_files[0].id
+    return None
+
+
+def _delete_stale_source_rows(
+    *,
+    repo: SqlAlchemyGoogleRevenueSourceRowRepository,
+    tenant_id: UUID,
+    source_system: str,
+    report_type: str,
+    report_month: str,
+    parsed_rows: Iterable[ParsedSourceRow],
+    fallback_source_account_id: str,
+) -> None:
+    keys_by_account: dict[str, set[str]] = {}
+    for row in parsed_rows:
+        keys_by_account.setdefault(row.source_account_id, set()).add(
+            row.source_row_key
+        )
+    if not keys_by_account and fallback_source_account_id.strip():
+        keys_by_account[fallback_source_account_id.strip()] = set()
+    for source_account_id, keys in keys_by_account.items():
+        repo.delete_stale_for_scope(
+            tenant_id,
+            source_system=source_system,
+            source_account_id=source_account_id,
+            report_type=report_type,
+            report_month=report_month,
+            keep_source_row_keys=keys,
+        )
+
+
+def _prepare_and_link_raw_reports(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    run_entry: ConnectorRunEntry,
+    source_system: str,
+    report_type: str,
+    report_month: str,
+    raw_reports: tuple[_CsvReportDownload, ...],
+    backend: BlobStorageBackend,
+    scheme: str,
+    bucket: str,
+    ordering_index: int,
+    triggered_by_user_id: UUID | None,
+    report_state: dict[str, object],
+) -> list[RawReportFileORM]:
     raw_files: list[RawReportFileORM] = []
     seen_raw_file_ids: set[UUID] = set()
     report_state["raw_file_ids"] = []
@@ -865,8 +1014,6 @@ def _process_one_report(
     if not raw_files:
         raise RuntimeError("connector runner yielded no raw report files")
 
-    # 4. Join each raw file to the run with deterministic ordering so later
-    # reads (e.g. operator console) can replay the exact evidence set.
     for offset, raw_file in enumerate(raw_files):
         link_raw_file(
             session,
@@ -875,59 +1022,7 @@ def _process_one_report(
             raw_report_file_id=raw_file.id,
             ordering_index=ordering_index + offset,
         )
-
-    if all(raw_file.parse_status == "PARSED" for raw_file in raw_files):
-        return 0, len(raw_files)
-
-    # 5-7. Parse, upsert, and mark_parsed inside a SAVEPOINT. The raw_file
-    # evidence row and run link are outside this savepoint so Bucket B can mark
-    # the raw file FAILED if any downstream step raises. The finance source
-    # rows and PARSED transition are inside it so a post-upsert lifecycle
-    # failure cannot leave persisted source rows attached to a FAILED raw file.
-    with session.begin_nested():
-        # Parse. ``list(...)`` forces the generator so a parser failure surfaces
-        # here (typed ``ParserError``) instead of mid-upsert. ParserError is
-        # caught by the widened Bucket B/C ``except Exception`` in ``run_one``.
-        parsed_rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
-        primary_raw_file = _first_unparsed_raw_file(raw_files)
-
-        # Upsert. Returns the persisted entries (one per ParsedSourceRow); the
-        # precise created-vs-updated split needs a pre-read of existing
-        # source_row_keys, which the happy-path test doesn't exercise. Future
-        # work (no current task) can wire that count if downstream consumers
-        # need it; the run-level ``rows_upserted_total`` (sum of writes across
-        # successful reports) is what the tests assert on.
-        written = repo.upsert_many(
-            tenant_id,
-            parsed_rows,
-            raw_file_id=primary_raw_file.id,
-            imported_by=triggered_by_user_id,
-        )
-
-        # Lifecycle transition: DOWNLOADED -> PARSED. Raises
-        # ``RawFileAlreadyParsedError`` if called twice on the same file, which
-        # would only happen on a re-entrant orchestrator bug.
-        for raw_file in raw_files:
-            if raw_file.parse_status != "PARSED":
-                mark_parsed(session, raw_file_id=raw_file.id, tenant_id=tenant_id)
-
-    # Future work (no current task): accurate created/updated/unchanged
-    # split via a pre-read of existing source_row_keys. Until then, the
-    # per-category split fields stay at 0 rather than over-claiming
-    # everything as 'created' (which would lie on the second ingest of an
-    # already-seen month).
-    # ``counts["reports_succeeded"] += 1`` lives in ``run_one``'s outer
-    # loop AFTER ``session.commit()`` so a commit failure (e.g. DB
-    # disconnect on the per-report flush) is recorded as a failure once,
-    # not double-counted as both succeeded and failed.
-    return len(written), len(raw_files)
-
-
-def _first_unparsed_raw_file(raw_files: list[RawReportFileORM]) -> RawReportFileORM:
-    for raw_file in raw_files:
-        if raw_file.parse_status != "PARSED":
-            return raw_file
-    raise RuntimeError("connector runner yielded no unparsed raw report file")
+    return raw_files
 
 
 # ============================================================================
@@ -1180,7 +1275,10 @@ def _produce_youtube_reports(
             if produced is None:
                 continue
             if isinstance(produced, ProducedReportFailure):
-                yield produced
+                try:
+                    yield produced
+                finally:
+                    _cleanup_csv_report_downloads(produced.raw_reports)
                 continue
             try:
                 yield produced
@@ -1327,6 +1425,7 @@ def _download_youtube_csv_report(
     seen_checksums: set[str],
     totals: dict[tuple[str, str | None, str], Decimal],
 ) -> ProducedReportFailure | None:
+    csv_report: _CsvReportDownload | None = None
     try:
         download_url = _require_text(report, "downloadUrl")
         report_id = _require_text(report, "id")
@@ -1334,6 +1433,7 @@ def _download_youtube_csv_report(
         checksum = compute_checksum(raw_bytes)
         if report_id in csv_reports or checksum in seen_checksums:
             return None
+        csv_report = _spool_csv_report(report_id=report_id, raw_bytes=raw_bytes)
         _accumulate_csv_report_bytes(
             totals=totals,
             raw_bytes=raw_bytes,
@@ -1343,15 +1443,18 @@ def _download_youtube_csv_report(
                 account_id if report_type.startswith("content_owner_") else None
             ),
         )
-        csv_reports[report_id] = _spool_csv_report(
-            report_id=report_id, raw_bytes=raw_bytes,
-        )
+        csv_reports[report_id] = csv_report
         seen_checksums.add(checksum)
         return None
     except OAuthRefreshError:
         raise
     except GoogleConnectorError as exc:
-        return ProducedReportFailure(report_type=report_type, error=exc)
+        raw_reports = (csv_report,) if csv_report is not None else ()
+        return ProducedReportFailure(
+            report_type=report_type,
+            error=exc,
+            raw_reports=raw_reports,
+        )
 
 
 def _require_text(mapping: dict[str, object], field: str) -> str:
@@ -1443,6 +1546,7 @@ def _accumulate_csv_report_bytes(
             report_id=report_id, reason="csv is not valid utf-8"
         ) from exc
     reader = csv.DictReader(io.StringIO(text))
+    _validate_csv_headers(reader.fieldnames, report_id=report_id)
     for csv_row in reader:
         _accumulate_csv_row(
             totals=totals,
@@ -1451,6 +1555,30 @@ def _accumulate_csv_report_bytes(
             expected_month=expected_month,
             default_content_owner=default_content_owner,
         )
+
+
+def _validate_csv_headers(fieldnames: list[str] | None, *, report_id: str) -> None:
+    if not fieldnames:
+        raise _parser_payload_error(
+            report_id=report_id,
+            reason="csv missing header row",
+        )
+    headers = {
+        field.strip().lower()
+        for field in fieldnames
+        if isinstance(field, str) and field.strip()
+    }
+    for group_name, aliases in (
+        ("date", _CSV_DATE_COLUMNS),
+        ("channel", _CSV_CHANNEL_COLUMNS),
+        ("revenue", _CSV_REVENUE_COLUMNS),
+        ("currency", _CSV_CURRENCY_COLUMNS),
+    ):
+        if not any(alias.lower() in headers for alias in aliases):
+            raise _parser_payload_error(
+                report_id=report_id,
+                reason=f"csv missing {group_name} column",
+            )
 
 
 def _parser_payload_from_csv_totals(

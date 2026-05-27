@@ -11,7 +11,7 @@ from collections.abc import Iterator
 
 import httpx
 import pytest
-from google.auth.exceptions import RefreshError
+from google.auth.exceptions import GoogleAuthError, RefreshError
 
 from ums_smart_revenue.connectors.google.errors import (
     GoogleApiAuthError,
@@ -78,6 +78,28 @@ def test_request_passes_google_auth_transport_request_to_credentials() -> None:
 
 def test_before_request_refresh_error_is_typed_oauth_error() -> None:
     inner = RefreshError("token revoked")
+
+    class _Credentials:
+        @staticmethod
+        def before_request(request, method, url, headers) -> None:
+            raise inner
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        raise AssertionError("HTTP request must not run after auth refresh failure")
+
+    client = GoogleHttpClient(
+        credentials=_Credentials(),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(OAuthRefreshError) as ctx:
+        client.request(method="GET", url="https://example.com/v1/jobs")
+
+    assert ctx.value.inner is inner
+
+
+def test_before_request_google_auth_error_is_typed_oauth_error() -> None:
+    inner = GoogleAuthError("token endpoint transport failed")
 
     class _Credentials:
         @staticmethod
@@ -284,6 +306,33 @@ def test_remote_protocol_error_uses_connect_retry_budget(
         calls["n"] += 1
         if calls["n"] < 3:
             raise httpx.RemoteProtocolError("server disconnected")
+        return httpx.Response(200, content=b"{}")
+
+    client = GoogleHttpClient(
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
+    )
+
+    client.request(method="GET", url="https://example.com/x")
+
+    assert calls["n"] == 3
+    assert sleeps == [1.0, 2.0]
+
+
+def test_proxy_error_uses_connect_retry_budget(
+    mock_credentials, monkeypatch
+) -> None:
+    sleeps: list[float] = []
+    monkeypatch.setattr(
+        "ums_smart_revenue.connectors.google.http_client.time.sleep",
+        sleeps.append,
+    )
+    calls = {"n": 0}
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        calls["n"] += 1
+        if calls["n"] < 3:
+            raise httpx.ProxyError("proxy failed")
         return httpx.Response(200, content=b"{}")
 
     client = GoogleHttpClient(

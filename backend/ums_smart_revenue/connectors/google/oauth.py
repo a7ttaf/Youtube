@@ -1,7 +1,7 @@
 """google-auth refresh wrapper.
 
 Parses the resolved secret payload into a google.oauth2.credentials.Credentials
-and exposes refresh_credentials() that maps google.auth.exceptions.RefreshError
+and exposes refresh_credentials() that maps google.auth.exceptions.GoogleAuthError
 to OAuthRefreshError.
 
 Required payload fields: refresh_token, client_id, client_secret, token_uri.
@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 
-from google.auth.exceptions import RefreshError
+from google.auth.exceptions import GoogleAuthError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 
@@ -81,7 +81,7 @@ def _validated_scopes(value: object) -> list[str] | None:
 # ============================================================================
 # Purpose: Force an OAuth token refresh before connector API calls begin.
 # Database/ORM: None.
-# Standards: Wrap google-auth RefreshError in OAuthRefreshError; no token leak.
+# Standards: Wrap google-auth GoogleAuthError in OAuthRefreshError; no token leak.
 # Blast Radius: Pre-start connector gate only. No run row or finance data is
 #               written when refresh fails.
 # Connections:
@@ -91,5 +91,5 @@ def _validated_scopes(value: object) -> list[str] | None:
 def refresh_credentials(credentials: Credentials) -> None:
     try:
         credentials.refresh(Request())
-    except RefreshError as exc:
+    except GoogleAuthError as exc:
         raise OAuthRefreshError(inner=exc) from exc

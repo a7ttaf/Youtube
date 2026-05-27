@@ -16,7 +16,7 @@ Dry-run lands in T29 with its own tests.
 from __future__ import annotations
 
 import json
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from unittest.mock import patch
 from uuid import UUID, uuid4
@@ -243,6 +243,23 @@ def test_csv_adapter_rejects_non_zero_padded_report_month() -> None:
             report_id="r-bad-month",
             report_type="content_owner_estimated_revenue_a1",
             month="2026-5",
+        )
+
+
+@pytest.mark.parametrize(
+    "raw_bytes",
+    [
+        b"",
+        b"2026-05-01,UC_orch_alpha,12.345600,USD\n",
+    ],
+)
+def test_csv_adapter_rejects_empty_or_headerless_csv(raw_bytes: bytes) -> None:
+    with pytest.raises(GoogleApiResponseError, match="csv missing"):
+        _csv_to_parser_payload(
+            raw_bytes=raw_bytes,
+            report_id="r-bad-csv",
+            report_type="content_owner_estimated_revenue_a1",
+            month="2026-05",
         )
 
 
@@ -732,7 +749,7 @@ def test_run_one_reuses_existing_parsed_raw_file_for_same_checksum(
 ) -> None:
     """Retrying the same Google payload should not violate the raw-file
     checksum unique constraint. A PARSED existing raw file is linked to the
-    new run and skipped instead of being inserted and parsed again.
+    new run and still parsed so account-scoped source rows are not skipped.
     """
     _make_credential_row(
         session,
@@ -794,11 +811,13 @@ def test_run_one_reuses_existing_parsed_raw_file_for_same_checksum(
     assert outcome.run is not None
     assert outcome.run.status == "SUCCEEDED"
     assert outcome.counts["reports_succeeded"] == 1
-    assert outcome.counts["rows_upserted_total"] == 0
+    assert outcome.counts["rows_upserted_total"] == 1
     assert len(session.scalars(select(RawReportFileORM)).all()) == 1
     link = session.scalars(select(ConnectorRunRawFileORM)).one()
     assert link.raw_report_file_id == existing_raw_file.id
-    assert session.scalars(select(GoogleRevenueSourceRowORM)).all() == []
+    source_rows = session.scalars(select(GoogleRevenueSourceRowORM)).all()
+    assert len(source_rows) == 1
+    assert source_rows[0].raw_file_id == existing_raw_file.id
 
 
 def test_run_one_reopens_failed_raw_file_with_current_download_metadata(
@@ -942,6 +961,152 @@ def test_run_one_handles_duplicate_empty_daily_reports_in_one_run(
     source_rows = session.scalars(select(GoogleRevenueSourceRowORM)).all()
     assert len(source_rows) == 1
     assert source_rows[0].amount_native == Decimal("7.500000")
+    assert source_rows[0].raw_file_id is None
+
+
+def test_run_one_persists_invalid_csv_evidence_before_shape_failure(
+    session: Session, stub_secret_resolver
+) -> None:
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    headerless_csv = b"2026-05-01,UC_orch_alpha,7.500000,USD\n"
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "content_owner_estimated_revenue_a1"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r-headerless", "downloadUrl": "https://yt/r-headerless"}
+        ]
+        client.fetch_report.return_value = headerless_csv
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "FAILED"
+    assert outcome.per_report_failures == [
+        ("content_owner_estimated_revenue_a1", "GoogleApiResponseError")
+    ]
+    raw_files = session.scalars(select(RawReportFileORM)).all()
+    assert len(raw_files) == 1
+    assert raw_files[0].parse_status == "FAILED"
+    assert store[raw_files[0].file_url] == headerless_csv
+    assert session.scalars(select(GoogleRevenueSourceRowORM)).all() == []
+
+
+def test_run_one_removes_stale_source_rows_when_replacement_omits_them(
+    session: Session, stub_secret_resolver
+) -> None:
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    stale_key = "st" * 32
+    session.add(
+        GoogleRevenueSourceRowORM(
+            id=uuid4(),
+            tenant_id=TENANT_ID,
+            source_system="youtube_reporting",
+            source_row_key=stale_key,
+            source_account_id=ACCOUNT_ID,
+            content_owner_id=ACCOUNT_ID,
+            youtube_channel_id="UC_stale",
+            report_type="content_owner_estimated_revenue_a1",
+            report_month="2026-05",
+            period_start=date(2026, 5, 1),
+            period_end=date(2026, 5, 31),
+            metric_key="estimatedRevenue",
+            value_kind="estimated",
+            amount_native=Decimal("1.000000"),
+            currency_code="USD",
+            source_report_id="old-report",
+            raw_file_id=None,
+            raw_payload={"sample": "stale"},
+            imported_by=None,
+        )
+    )
+    session.commit()
+    replacement_csv = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-01,UC_replacement,content-owner-1,7.500000,USD\n"
+    )
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "content_owner_estimated_revenue_a1"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r-new", "downloadUrl": "https://yt/r-new"}
+        ]
+        client.fetch_report.return_value = replacement_csv
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "SUCCEEDED"
+    source_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
+        )
+    ).all()
+    assert [row.youtube_channel_id for row in source_rows] == ["UC_replacement"]
+    assert stale_key not in {row.source_row_key for row in source_rows}
 
 
 def test_run_one_skips_monthly_aggregate_when_daily_download_fails(
@@ -1081,9 +1246,12 @@ def test_run_one_rejects_csv_rows_without_currency(
         ]
         client.fetch_report.return_value = csv_bytes
 
-        local_cls.return_value.upload.side_effect = AssertionError(
-            "blob upload must not run after CSV shape rejection"
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
         )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
 
         outcome = run_one(
             session,
@@ -1100,7 +1268,10 @@ def test_run_one_rejects_csv_rows_without_currency(
     )
     assert run_row is not None
     assert "currency" in (run_row.error_summary or "")
-    assert session.scalars(select(RawReportFileORM)).all() == []
+    raw_files = session.scalars(select(RawReportFileORM)).all()
+    assert len(raw_files) == 1
+    assert raw_files[0].parse_status == "FAILED"
+    assert store[raw_files[0].file_url] == csv_bytes
     assert session.scalars(select(GoogleRevenueSourceRowORM)).all() == []
 
 

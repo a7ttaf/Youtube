@@ -18,7 +18,7 @@ from decimal import Decimal
 from typing import List  # noqa: UP035
 from uuid import UUID, uuid4
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -246,6 +246,70 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
             written.append(self._to_entry(orm_row))
         self._session.flush()
         return written
+
+    # ========================================================================
+    # Purpose: Remove source rows that disappeared from a replacement report
+    #          while keeping the delete scoped to one tenant/account/month/type.
+    # Database/ORM: google_revenue_source_rows (GoogleRevenueSourceRowORM).
+    # Standards: Tenant-explicit repository method; typed validation before
+    #            mutation; callers pass the keys parsed from the replacement.
+    # Blast Radius: Source-of-truth source-row cleanup only. No graph projection
+    #               impact detected.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+    #     calls after a successful parser/upsert pass for a report scope.
+    # ========================================================================
+    def delete_stale_for_scope(
+        self,
+        tenant_id: UUID,
+        *,
+        source_system: str,
+        source_account_id: str,
+        report_type: str,
+        report_month: str,
+        keep_source_row_keys: Iterable[str],
+    ) -> int:
+        self._require_tenant(tenant_id)
+        for field_name, value in (
+            ("source_system", source_system),
+            ("source_account_id", source_account_id),
+            ("report_type", report_type),
+            ("report_month", report_month),
+        ):
+            if not isinstance(value, str) or not value.strip():
+                raise GoogleRevenueSourceRowValidationError(
+                    f"{field_name} must be a non-empty str"
+                )
+        if source_system not in ALLOWED_SOURCE_SYSTEMS:
+            raise GoogleRevenueSourceRowValidationError(
+                f"unknown source_system: {source_system!r}"
+            )
+        if not _REPORT_MONTH_RE.match(report_month):
+            raise GoogleRevenueSourceRowValidationError(
+                f"report_month must be YYYY-MM with month 01-12, got {report_month!r}"
+            )
+
+        keep_keys = set(keep_source_row_keys)
+        for key in keep_keys:
+            if not isinstance(key, str) or len(key) != SOURCE_ROW_KEY_LENGTH:
+                raise GoogleRevenueSourceRowValidationError(
+                    f"keep_source_row_keys must contain {SOURCE_ROW_KEY_LENGTH}-char strings"
+                )
+
+        stmt = delete(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == tenant_id,
+            GoogleRevenueSourceRowORM.source_system == source_system,
+            GoogleRevenueSourceRowORM.source_account_id == source_account_id,
+            GoogleRevenueSourceRowORM.report_type == report_type,
+            GoogleRevenueSourceRowORM.report_month == report_month,
+        )
+        if keep_keys:
+            stmt = stmt.where(
+                ~GoogleRevenueSourceRowORM.source_row_key.in_(sorted(keep_keys))
+            )
+        result = self._session.execute(stmt)
+        self._session.flush()
+        return int(result.rowcount or 0)
 
     def list(
         self,
