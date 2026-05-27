@@ -301,13 +301,45 @@ def run_one(  # skipcq: PY-R1000
     # Bucket A: pre-start_run errors. No connector_runs row is created, so
     # these surface to the caller and are recorded only at the CLI/audit
     # layer (B2.6, T37). The orchestrator never half-creates a run.
-    credentials = _credentials_for_run(
+    return _run_one_with_credentials(
         session=session,
         tenant_id=tenant_id,
         connector_key=connector_key,
         account_id=account_id,
+        report_month=report_month,
+        dry_run=dry_run,
+        triggered_by_user_id=triggered_by_user_id,
+        credentials=_credentials_for_run(
+            session=session,
+            tenant_id=tenant_id,
+            connector_key=connector_key,
+            account_id=account_id,
+        ),
     )
 
+
+# ============================================================================
+# Purpose: Dispatch a credential-resolved connector run to the dry-run or live
+#          path while keeping the public run_one entrypoint branch-free.
+# Database/ORM: None directly; delegated dry-run/live helpers own reads/writes.
+# Standards: Private orchestration helper with typed parameters and no logging.
+# Blast Radius: None detected; branch ownership only, no behavior change.
+# Connections:
+#   - Function: run_one -> loads credentials and calls this helper.
+#   - Function: _run_dry_run -> read-only validation path.
+#   - Function: _run_live -> stateful ingestion path.
+# ============================================================================
+def _run_one_with_credentials(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    connector_key: str,
+    account_id: str,
+    report_month: str,
+    dry_run: bool,
+    triggered_by_user_id: UUID | None,
+    credentials: Credentials,
+) -> ConnectorRunOutcome:
     if dry_run:
         return _run_dry_run(
             session=session,
@@ -317,7 +349,6 @@ def run_one(  # skipcq: PY-R1000
             report_month=report_month,
             credentials=credentials,
         )
-
     return _run_live(
         session=session,
         tenant_id=tenant_id,
