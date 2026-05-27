@@ -175,3 +175,11 @@ class UnsupportedReportTypeError(GoogleConnectorError):
     def __init__(self, *, report_type_id: str) -> None:
         super().__init__(f"report_type_id {report_type_id} not in supported set")
         self.report_type_id = report_type_id
+
+
+class MalformedReportMonthError(GoogleConnectorError):
+    def __init__(self, *, report_month: str) -> None:
+        super().__init__(
+            f"report_month {report_month!r} must be YYYY-MM with a calendar month 01-12"
+        )
+        self.report_month = report_month

@@ -13,14 +13,18 @@ by tenant + active + revenue_required + content_owner match-or-null.
 """
 from __future__ import annotations
 
+import re
 from calendar import monthrange
 from uuid import UUID
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.connectors.google.errors import MalformedReportMonthError
 from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
+
+_REPORT_MONTH_PATTERN = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
 
 _BASE = "https://youtubeanalytics.googleapis.com/v2/reports"
 # Locked metric set; matches what YouTubeAnalyticsParser consumes.
@@ -93,7 +97,9 @@ class YouTubeAnalyticsClient:
     # ============================================================================
     def fetch_channel_report(
         self, *, channel_id: str, report_month: str,
-    ) -> dict:
+    ) -> dict[str, object]:
+        if not _REPORT_MONTH_PATTERN.fullmatch(report_month):
+            raise MalformedReportMonthError(report_month=report_month)
         year, month = report_month.split("-")
         year_i, month_i = int(year), int(month)
         last_day = monthrange(year_i, month_i)[1]
