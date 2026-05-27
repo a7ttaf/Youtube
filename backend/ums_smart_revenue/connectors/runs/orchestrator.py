@@ -48,6 +48,7 @@ parser/repo (PR #43) are *not* touched here — T27 is additive.
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 from calendar import monthrange
@@ -84,10 +85,15 @@ from ums_smart_revenue.connectors.google.secret_resolver import (
     ensure_default_resolvers,
     resolve_secret,
 )
+from ums_smart_revenue.connectors.google.youtube_analytics_client import (
+    YouTubeAnalyticsClient,
+    list_target_channels,
+)
 from ums_smart_revenue.connectors.google.youtube_reporting_client import (
     YouTubeReportingClient,
 )
 from ums_smart_revenue.connectors.google_source_parsers import (
+    YouTubeAnalyticsParser,
     YouTubeReportingParser,
 )
 from ums_smart_revenue.connectors.google_source_rows import (
@@ -122,6 +128,7 @@ __all__ = [
     "ConnectorRunOutcome",
     "ConnectorRunner",
     "ProducedReportSuccess",
+    "YouTubeAnalyticsRunner",
     "YouTubeReportingRunner",
     "run_one",
 ]
@@ -2176,17 +2183,123 @@ def _extension_for_connector(connector_key: str) -> str:
         ) from exc
 
 
-def _parser_for_connector(connector_key: str) -> YouTubeReportingParser:
+def _parser_for_connector(
+    connector_key: str,
+) -> YouTubeReportingParser | YouTubeAnalyticsParser:
     """Return the source-row parser bound to a given connector key.
 
-    B2.5/B2.6 will widen this beyond YouTubeReportingParser; the helper
-    isolates that future change from ``run_one`` itself. For now any non-
-    YouTube-Reporting key would not reach this point because the runner
-    isn't registered.
+    B2.5 adds YouTubeAnalyticsParser; B2.6 will add AdSenseManagementParser.
+    The helper isolates connector-to-parser routing from ``run_one`` so future
+    registrations only touch this mapping rather than the orchestrator body.
     """
     if connector_key in {"youtube-reporting", "youtube_reporting"}:
         return YouTubeReportingParser()
+    if connector_key in {"youtube-analytics", "youtube_analytics"}:
+        return YouTubeAnalyticsParser()
     raise ValueError(f"no parser bound for connector_key: {connector_key!r}")
+
+
+# ============================================================================
+# Purpose: ConnectorRunner adapter for the YouTube Analytics v2 reports.query
+#   endpoint (spec §5.5). Iterates the tenant's active+revenue_required
+#   channels (via list_target_channels), issues one fetch_channel_report call
+#   per channel, wraps each JSON response as a parser-ready payload, and
+#   yields one (report_type, parser_payload, raw_bytes) tuple per channel so
+#   the orchestrator can store, parse, and upsert each channel independently.
+#   The orchestrator's existing per-report bucket-B handler catches any
+#   exception that escapes produce_reports; this class does NOT swallow errors
+#   inside the generator body so the run can be marked PARTIAL per channel.
+# Database/ORM: YouTubeChannelORM (read via list_target_channels). No write.
+# Standards: Implements ConnectorRunner Protocol; typed keyword-only args;
+#   raw_bytes serialized as sorted-key JSON for deterministic blob checksums
+#   across reruns; no bare except; fail-open exceptions propagate to the
+#   orchestrator's bucket-B exception catch.
+# Blast Radius: Finance ingestion scope — only channels returned by
+#   list_target_channels are fetched. A per-channel fetch failure surfaces as
+#   a FAILED report entry (bucket B) and continues the run for other channels
+#   rather than aborting the entire connector run.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/youtube_analytics_client.py
+#     -> YouTubeAnalyticsClient.fetch_channel_report + list_target_channels.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_analytics.py
+#     -> YouTubeAnalyticsParser consumes the parser_payload yielded here.
+#   - File: Docs/superpowers/plans/2026-05-26-spec-b2-google-live-connector.md
+#     §B2.5 Task 33 -> runner contract and per-channel yield shape.
+# ============================================================================
+class YouTubeAnalyticsRunner:
+    """B2.5 adapter that fetches YouTube Analytics per-channel reports.
+
+    Each yielded success carries the ``"youtube_analytics"`` report type, a
+    parser-friendly payload dict (the raw ``reports.query`` JSON body augmented
+    with the ``query_request`` key the parser needs), and the raw JSON bytes
+    for blob storage and replay. The orchestrator stores each channel's blob
+    separately; it never synthesises a cross-channel bundle.
+
+    The class references ``YouTubeAnalyticsClient`` and ``list_target_channels``
+    by bare name so tests that patch
+    ``ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient``
+    replace what the runner actually uses.
+    """
+
+    def produce_reports(  # skipcq: PYL-R0201
+        self,
+        *,
+        session: Session,
+        run: ConnectorRunEntry | None,
+        credentials: Credentials,
+        report_month: str,
+        account_id: str,
+    ) -> Iterator[ProducedReport]:
+        # ``run`` is None on the T29 dry-run path; the runner body never
+        # references it (the connector_runs lifecycle is owned by ``run_one``
+        # itself), consistent with YouTubeReportingRunner's widened contract.
+        _ = run
+        http = GoogleHttpClient(credentials=credentials)
+        try:
+            client = YouTubeAnalyticsClient(http=http)
+            # Resolve the credential's tenant from the session-local state:
+            # list_target_channels needs the tenant_id to scope the channel
+            # query. We derive it from the session rather than carrying it on
+            # the runner because ConnectorRunner.produce_reports has access to
+            # `session` which already holds the loaded ApiConnectorCredentialORM
+            # (loaded by _load_credential earlier in run_one). Reading tenant_id
+            # from the credential row avoids adding a new protocol parameter.
+            cred_row = session.execute(
+                sa.select(ApiConnectorCredentialORM).where(
+                    ApiConnectorCredentialORM.connector_key.in_(
+                        {"youtube-analytics", "youtube_analytics"}
+                    ),
+                    ApiConnectorCredentialORM.account_id == account_id,
+                )
+            ).scalar_one()
+            tenant_id: UUID = cred_row.tenant_id
+            channel_ids = list_target_channels(
+                session, tenant_id=tenant_id, account_id=account_id,
+            )
+            for channel_id in channel_ids:
+                response: dict[str, object] = client.fetch_channel_report(
+                    channel_id=channel_id, report_month=report_month,
+                )
+                # Augment the raw response with the query_request metadata the
+                # parser needs to build row keys and validate the date range.
+                # The client's params mirror what fetch_channel_report sends to
+                # the Google endpoint; reconstruct them from report_month.
+                year_str, month_str = report_month.split("-")
+                last_day = monthrange(int(year_str), int(month_str))[1]
+                parser_payload: dict[str, object] = {
+                    **response,
+                    "query_request": {
+                        "ids": f"channel=={channel_id}",
+                        "startDate": f"{year_str}-{month_str}-01",
+                        "endDate": f"{year_str}-{month_str}-{last_day:02d}",
+                        "metrics": "estimatedRevenue,estimatedAdRevenue,grossRevenue",
+                        "dimensions": "month",
+                    },
+                }
+                raw_bytes = json.dumps(parser_payload, sort_keys=True).encode("utf-8")
+                yield ("youtube_analytics", parser_payload, raw_bytes)
+        finally:
+            http.close()
 
 
 # ----------------------------------------------------------------------------
@@ -2198,3 +2311,5 @@ def _parser_for_connector(connector_key: str) -> YouTubeReportingParser:
 # returns the registered value directly to the orchestrator.
 register_connector(key="youtube-reporting", runner=YouTubeReportingRunner())
 register_connector(key="youtube_reporting", runner=YouTubeReportingRunner())
+register_connector(key="youtube-analytics", runner=YouTubeAnalyticsRunner())
+register_connector(key="youtube_analytics", runner=YouTubeAnalyticsRunner())
