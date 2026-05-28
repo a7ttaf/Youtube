@@ -1151,6 +1151,8 @@ def _process_one_report(
                     actor=audit_actor,
                     run=run_entry,
                     raw_file=raw_file,
+                    # Report-level total; see emit_raw_file_parsed docstring re:
+                    # multi-raw-file aggregation contract.
                     count_upserted=len(written),
                 )
 
@@ -1535,6 +1537,14 @@ def _prepare_and_link_raw_reports(
         # Only fresh inserts / FAILED-reopened rows emit DOWNLOADED -- an
         # idempotent reuse of a still-DOWNLOADED or already-PARSED raw_file
         # is not a new download lifecycle edge.
+        #
+        # Important: this emit happens OUTSIDE the per-report begin_nested()
+        # savepoint (see _process_one_report below). When a per-report parse
+        # raises, the savepoint rollback drops the upsert+mark_parsed work but
+        # the DOWNLOADED audit row stays staged in the outer transaction, where
+        # _record_live_report_failure then commits it alongside FAILED. This
+        # is intentional: the audit trail must record "we landed bytes" even
+        # if parsing fails afterward.
         if raw_file.id in newly_downloaded_raw_file_ids:
             emit_raw_file_downloaded(
                 sink=audit_sink,

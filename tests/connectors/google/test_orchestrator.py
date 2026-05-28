@@ -94,12 +94,18 @@ def _service_actor_env(monkeypatch: pytest.MonkeyPatch) -> str:
     ``run_one(..., dry_run=False)`` without each test wiring the env itself.
     Tests that explicitly verify fail-closed-on-missing-env can use
     ``monkeypatch.delenv(...)`` to override this default.
+
+    Calls load_app_settings.cache_clear() so a cached settings object from
+    an earlier-running test (different module, different env state) cannot
+    poison the actor lookup.
     """
     from ums_smart_revenue.config.settings import (
         GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
+        load_app_settings,
     )
 
     monkeypatch.setenv(GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV, _SERVICE_ACTOR_ID)
+    load_app_settings.cache_clear()
     return _SERVICE_ACTOR_ID
 
 

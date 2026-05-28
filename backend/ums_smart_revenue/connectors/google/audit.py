@@ -257,7 +257,15 @@ def emit_raw_file_parsed(
     raw_file: Any,
     count_upserted: int,
 ) -> None:
-    """Emit one REPORT_IMPORTED audit row with lifecycle=PARSED."""
+    """Emit one REPORT_IMPORTED audit row with lifecycle=PARSED.
+
+    count_upserted is the REPORT-level upsert count, repeated on each
+    per-raw-file PARSED edge when a single report produces multiple
+    raw_files (e.g., multi-channel YouTube Analytics reports). Operator-
+    console aggregation MUST NOT sum count_upserted across PARSED rows of
+    the same (run_id, report_type) tuple -- aggregate at the report or run
+    level instead.
+    """
     # Operator-console context (``source``, ``report_type``, ``report_month``):
     # see emit_run_finished above for the rationale -- these keys let the
     # operator console render a raw_report_file lifecycle row without
