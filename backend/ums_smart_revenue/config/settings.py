@@ -26,6 +26,12 @@ class AppSettings:
     # records connector-emitted audit events (T36, B2.6). Stored as ``str``
     # so it slots straight into ``UserPrincipal.user_id`` without a UUID
     # round-trip; the loader validates UUID format before assigning.
+    #
+    # Note: missing env is permitted at load time (parallels ``database_url``)
+    # so non-connector workloads can boot without this variable set. The
+    # fail-closed boundary lives at call time in
+    # ``connectors/google/audit.py::build_connector_service_principal``,
+    # which raises ``ValueError`` when the value is needed but absent.
     google_connector_service_actor_id: str | None = None
 
 
@@ -61,11 +67,15 @@ def load_app_settings() -> AppSettings:
 #               backend/ums_smart_revenue/connectors/google/audit.py
 #               (T36) when building the connector service principal that
 #               appears as the actor on connector-emitted audit rows.
-# Standards: Lazy on absence (None) — emitters/orchestrator that actually
-#            need the identity decide whether None is acceptable for their
-#            context. Strict on presence — UUID format is the only accepted
-#            shape, and ValueError carries the env name for operator
-#            triage.
+# Standards: Two-tier validation contract -- "missing env -> None (lazy at
+#            load time)" so non-connector workloads can boot without this
+#            variable set, vs. "present-but-malformed -> ValueError
+#            (fail-closed at load time)" so a typo cannot silently produce a
+#            garbage actor id. The fail-closed-when-actually-needed boundary
+#            for the None case lives in
+#            connectors/google/audit.py::build_connector_service_principal,
+#            which raises at first use. ValueError on malformed input carries
+#            the env name for operator triage.
 # Blast Radius: Audit actor identity for B2.6 connector audit emitters.
 #               No direct finance, authorization, or graph projection
 #               impact; the identity is informational on the audit row
@@ -80,7 +90,12 @@ def load_app_settings() -> AppSettings:
 #     details["actor_user_id"], so a non-user UUID here is safe.
 # ============================================================================
 def _load_google_connector_service_actor_id() -> str | None:
-    """Return the canonical UUID string for the connector service actor, or None."""
+    """Return the canonical UUID string for the connector service actor, or None.
+
+    Missing/blank env -> ``None`` (lazy; deferred fail-closed lives in
+    ``build_connector_service_principal``). Present-but-malformed env ->
+    ``ValueError`` so misconfigured deployments fail fast at boot.
+    """
     raw = environ.get(GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV)
     if raw is None:
         return None

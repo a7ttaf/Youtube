@@ -62,9 +62,13 @@ _SERVICE_ACCOUNT_EMAIL = "google-connectors@service.ums.local"
 #               to be a real ``users.id`` -- the sink stashes unknown actor
 #               UUIDs in ``details["actor_user_id"]`` and proceeds.
 # Standards: Fail closed -- missing env raises ValueError so the orchestrator
-#            cannot run with an anonymized service principal. The principal
-#            is a frozen dataclass; immutability mirrors the rest of the
-#            authorization layer.
+#            cannot run with an anonymized service principal. Note:
+#            ``AppSettings.google_connector_service_actor_id`` is lazy (None
+#            when env unset, see config/settings.py); the fail-closed
+#            boundary lives here at first emit, not at app boot, so
+#            non-connector workloads can still load settings without this
+#            env set. The principal is a frozen dataclass; immutability
+#            mirrors the rest of the authorization layer.
 # Blast Radius: Audit actor identity for connector runs. No effect on finance
 #               numbers, scope checks (the orchestrator already gated the
 #               request), or the Neo4j projection.
@@ -163,6 +167,14 @@ def emit_run_started(
 def emit_run_finished(*, sink: AuditSink, actor: UserPrincipal, run: Any) -> None:
     """Emit one CONNECTOR_JOB_RUN audit row with lifecycle=FINISHED."""
     counts = run.counts if run.counts is not None else {}
+    # Operator-console context: ``connector_key``, ``account_id``, and
+    # ``report_month`` are beyond the plan's minimal lifecycle keys. They
+    # surface enough run metadata to render a meaningful lifecycle row in
+    # the operator console without joining back to ``connector_runs``.
+    # None of these keys are secret material; ``connector_key`` and
+    # ``report_month`` are operator-supplied at run-start, and
+    # ``account_id`` is the external Google account identifier already
+    # visible in connector configuration.
     record_audit_event(
         sink=sink,
         actor=actor,
@@ -246,6 +258,10 @@ def emit_raw_file_parsed(
     count_upserted: int,
 ) -> None:
     """Emit one REPORT_IMPORTED audit row with lifecycle=PARSED."""
+    # Operator-console context (``source``, ``report_type``, ``report_month``):
+    # see emit_run_finished above for the rationale -- these keys let the
+    # operator console render a raw_report_file lifecycle row without
+    # joining back to ``connector_run_raw_files`` / ``raw_report_files``.
     record_audit_event(
         sink=sink,
         actor=actor,
@@ -289,6 +305,10 @@ def emit_raw_file_failed(
     error_class: str,
 ) -> None:
     """Emit one REPORT_IMPORTED audit row with lifecycle=FAILED."""
+    # Operator-console context (``source``, ``report_type``, ``report_month``):
+    # see emit_run_finished above for the rationale -- these keys let the
+    # operator console render a raw_report_file lifecycle row without
+    # joining back to ``connector_run_raw_files`` / ``raw_report_files``.
     record_audit_event(
         sink=sink,
         actor=actor,
