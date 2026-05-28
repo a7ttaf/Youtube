@@ -4508,15 +4508,14 @@ def test_run_one_fail_closed_when_service_actor_id_missing(
         return_value=None,
     ), patch(
         "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ):
-        with pytest.raises(ValueError) as excinfo:
-            run_one(
-                session,
-                tenant_id=TENANT_ID,
-                connector_key=CONNECTOR_KEY,
-                account_id=ACCOUNT_ID,
-                report_month="2026-05",
-            )
+    ), pytest.raises(ValueError) as excinfo:
+        run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
 
     # Error mentions the env name so an operator can act on the message.
     assert GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV in str(excinfo.value)
