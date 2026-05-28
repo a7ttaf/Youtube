@@ -420,7 +420,10 @@ class GoogleHttpClient:
         return body
 
     def fetch_bytes(self, *, url: str) -> bytes:
-        """GET a Google URL and return the raw response body bytes."""
+        """
+        GET a Google URL and return raw response bytes using bearer auth and
+        the shared retry helper.
+        """
         # ====================================================================
         # Purpose: GET a URL and return the raw response body bytes. Used for
         #   binary/CSV downloads (e.g. YouTube Reporting downloadUrl) where
