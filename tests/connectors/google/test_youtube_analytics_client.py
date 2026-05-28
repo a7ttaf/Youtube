@@ -37,8 +37,14 @@ def _build_channel(
     content_owner_id: str | None,
     active: bool = True,
     revenue_required: bool = True,
+    cms_status: str = "INSIDE_CMS",
 ) -> YouTubeChannelORM:
-    """Build one YouTubeChannelORM row for target-channel selection tests."""
+    """Build one YouTubeChannelORM row for target-channel selection tests.
+
+    ``cms_status`` defaults to ``INSIDE_CMS`` so a bare-options channel is
+    eligible for the analytics target set; pass ``"OUTSIDE_CMS"`` or
+    ``"UNKNOWN"`` to drive the exclusion cases.
+    """
     return YouTubeChannelORM(
         id=uuid4(),
         tenant_id=tenant_id,
@@ -47,6 +53,7 @@ def _build_channel(
         content_owner_id=content_owner_id,
         active=active,
         revenue_required=revenue_required,
+        cms_status=cms_status,
     )
 
 
@@ -117,6 +124,44 @@ def test_list_target_channels_excludes_inactive_and_no_revenue(
     db_session.flush()
     channels = list_target_channels(db_session, tenant_id=tenant_id, account_id="o")
     assert channels == ["UC-3"]
+
+
+def test_list_target_channels_excludes_outside_cms_tagged_channels(
+    db_session: Session,
+) -> None:
+    """Channels with a content_owner_id but ``cms_status='OUTSIDE_CMS'`` stay out.
+
+    Covers the codex P2 finding: an operator can manually flag a channel as
+    OUTSIDE_CMS while it still carries a content_owner_id (tracking /
+    manual-import workflows in `channel_issues.py`). The Analytics ingestion
+    contract is INSIDE_CMS-only, so this row must be filtered out.
+    """
+    tenant_id = uuid4()
+    db_session.add_all(
+        [
+            _build_channel(
+                tenant_id=tenant_id,
+                youtube_channel_id="UC-inside",
+                content_owner_id="o",
+                cms_status="INSIDE_CMS",
+            ),
+            _build_channel(
+                tenant_id=tenant_id,
+                youtube_channel_id="UC-outside-tagged",
+                content_owner_id="o",
+                cms_status="OUTSIDE_CMS",
+            ),
+            _build_channel(
+                tenant_id=tenant_id,
+                youtube_channel_id="UC-unknown",
+                content_owner_id="o",
+                cms_status="UNKNOWN",
+            ),
+        ]
+    )
+    db_session.flush()
+    channels = list_target_channels(db_session, tenant_id=tenant_id, account_id="o")
+    assert channels == ["UC-inside"]
 
 
 def test_fetch_channel_report(mock_credentials) -> None:

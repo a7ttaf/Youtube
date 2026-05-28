@@ -2662,12 +2662,20 @@ class YouTubeAnalyticsRunner:
                 session, tenant_id=tenant_id, account_id=account_id,
             )
             for channel_id in channel_ids:
-                query_request = _build_analytics_query_request(
-                    account_id=account_id,
-                    channel_id=channel_id,
-                    report_month=report_month,
-                )
                 try:
+                    # FIX: Build the query_request INSIDE the per-channel try so
+                    # a MalformedAnalyticsSelectorError (or any other typed
+                    # GoogleConnectorError raised by the validation in
+                    # _build_query_request) is caught as a per-channel Bucket B
+                    # failure and the run continues with sibling channels,
+                    # matching the produce_reports docstring contract. Calling
+                    # this BEFORE the try would abort the whole generator on a
+                    # single bad registry row and skip later valid channels.
+                    query_request = _build_analytics_query_request(
+                        account_id=account_id,
+                        channel_id=channel_id,
+                        report_month=report_month,
+                    )
                     response: dict[str, object] = client.fetch_channel_report(
                         account_id=account_id,
                         channel_id=channel_id,
@@ -2676,10 +2684,11 @@ class YouTubeAnalyticsRunner:
                 except OAuthRefreshError:
                     raise
                 except GoogleConnectorError as exc:
-                    # FIX: A single targeted-channel fetch failure is a
-                    # report-scoped problem, not a run-scoped abort. Yield a
-                    # Bucket B failure so the orchestrator can mark the run
-                    # PARTIAL and continue with the remaining channels.
+                    # FIX: A single targeted-channel fetch failure (or validation
+                    # rejection) is a report-scoped problem, not a run-scoped
+                    # abort. Yield a Bucket B failure so the orchestrator can
+                    # mark the run PARTIAL and continue with the remaining
+                    # channels.
                     yield ProducedReportFailure(
                         report_type="youtube_analytics", error=exc,
                     )

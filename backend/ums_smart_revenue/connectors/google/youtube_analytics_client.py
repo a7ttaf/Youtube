@@ -164,7 +164,16 @@ def calendar_month_end_iso(report_month: str) -> str:
 def list_target_channels(
     session: Session, *, tenant_id: UUID, account_id: str,
 ) -> list[str]:
-    """Return eligible CMS-owned channel IDs for the tenant/account, sorted asc."""
+    """Return eligible CMS-owned channel IDs for the tenant/account, sorted asc.
+
+    Eligibility requires ``cms_status='INSIDE_CMS'`` in addition to the
+    content-owner match: an operator can manually flag a channel as
+    ``OUTSIDE_CMS`` for tracking/manual-import workflows even while a
+    ``content_owner_id`` is recorded (see ``backend/ums_smart_revenue/org/
+    channel_issues.py``). B2.5 only ingests INSIDE_CMS revenue here, so those
+    OUTSIDE_CMS rows must be filtered out at the registry boundary instead of
+    silently leaking into the Analytics target set.
+    """
     stmt = (
         select(YouTubeChannelORM.youtube_channel_id)
         .where(
@@ -172,6 +181,12 @@ def list_target_channels(
             YouTubeChannelORM.active.is_(True),
             YouTubeChannelORM.revenue_required.is_(True),
             YouTubeChannelORM.content_owner_id == account_id,
+            # FIX: exclude channels manually tagged OUTSIDE_CMS even if they
+            # still carry a content_owner_id (tracking/manual-import case).
+            # Without this guard the Analytics run would fetch and persist CMS
+            # rows for a channel the operator has explicitly removed from the
+            # B2.5 ingestion scope.
+            YouTubeChannelORM.cms_status == "INSIDE_CMS",
         )
         .order_by(YouTubeChannelORM.youtube_channel_id.asc())
     )

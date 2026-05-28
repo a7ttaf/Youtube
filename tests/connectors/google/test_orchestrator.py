@@ -2844,6 +2844,7 @@ def test_run_one_with_youtube_analytics_succeeds_for_cms_channels_only(
         content_owner_id=_ANALYTICS_ACCOUNT_ID,
         active=True,
         revenue_required=True,
+        cms_status="INSIDE_CMS",
     )
     ch_ext = YouTubeChannelORM(
         id=uuid4(),
@@ -2853,6 +2854,7 @@ def test_run_one_with_youtube_analytics_succeeds_for_cms_channels_only(
         content_owner_id=None,
         active=True,
         revenue_required=True,
+        cms_status="INSIDE_CMS",
     )
     session.add_all([ch_cms, ch_ext])
     session.flush()
@@ -2983,6 +2985,7 @@ def test_run_one_with_youtube_analytics_contains_channel_fetch_failures(
                 content_owner_id=_ANALYTICS_ACCOUNT_ID,
                 active=True,
                 revenue_required=True,
+                cms_status="INSIDE_CMS",
             ),
             YouTubeChannelORM(
                 id=uuid4(),
@@ -2992,6 +2995,7 @@ def test_run_one_with_youtube_analytics_contains_channel_fetch_failures(
                 content_owner_id=_ANALYTICS_ACCOUNT_ID,
                 active=True,
                 revenue_required=True,
+                cms_status="INSIDE_CMS",
             ),
         ]
     )
@@ -3083,6 +3087,7 @@ def test_run_one_with_youtube_analytics_empty_success_replaces_existing_rows(
             content_owner_id=_ANALYTICS_ACCOUNT_ID,
             active=True,
             revenue_required=True,
+            cms_status="INSIDE_CMS",
         )
     )
     session.flush()
@@ -3186,6 +3191,7 @@ def test_run_one_with_youtube_analytics_keeps_sibling_cms_rows_on_full_success(
                 content_owner_id=_ANALYTICS_ACCOUNT_ID,
                 active=True,
                 revenue_required=True,
+                cms_status="INSIDE_CMS",
             ),
             YouTubeChannelORM(
                 id=uuid4(),
@@ -3195,6 +3201,7 @@ def test_run_one_with_youtube_analytics_keeps_sibling_cms_rows_on_full_success(
                 content_owner_id=_ANALYTICS_ACCOUNT_ID,
                 active=True,
                 revenue_required=True,
+                cms_status="INSIDE_CMS",
             ),
         ]
     )
@@ -3302,6 +3309,7 @@ def test_run_one_with_youtube_analytics_partial_run_preserves_failed_sibling_row
                 content_owner_id=_ANALYTICS_ACCOUNT_ID,
                 active=True,
                 revenue_required=True,
+                cms_status="INSIDE_CMS",
             ),
             YouTubeChannelORM(
                 id=uuid4(),
@@ -3311,6 +3319,7 @@ def test_run_one_with_youtube_analytics_partial_run_preserves_failed_sibling_row
                 content_owner_id=_ANALYTICS_ACCOUNT_ID,
                 active=True,
                 revenue_required=True,
+                cms_status="INSIDE_CMS",
             ),
         ]
     )
@@ -3456,6 +3465,7 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
         content_owner_id=_ANALYTICS_ACCOUNT_ID,
         active=True,
         revenue_required=True,
+        cms_status="INSIDE_CMS",
     )
     ch_ext = YouTubeChannelORM(
         id=uuid4(),
@@ -3465,6 +3475,7 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
         content_owner_id=None,
         active=True,
         revenue_required=True,
+        cms_status="INSIDE_CMS",
     )
     session.add_all([ch_cms, ch_ext])
     session.flush()
@@ -3668,6 +3679,7 @@ def test_run_one_with_youtube_analytics_dry_run_succeeds_for_cms_channels_only(
         content_owner_id=_ANALYTICS_ACCOUNT_ID,
         active=True,
         revenue_required=True,
+        cms_status="INSIDE_CMS",
     )
     ch_ext = YouTubeChannelORM(
         id=uuid4(),
@@ -3677,6 +3689,7 @@ def test_run_one_with_youtube_analytics_dry_run_succeeds_for_cms_channels_only(
         content_owner_id=None,
         active=True,
         revenue_required=True,
+        cms_status="INSIDE_CMS",
     )
     session.add_all([ch_cms, ch_ext])
     session.flush()
@@ -3812,6 +3825,7 @@ def test_run_one_with_youtube_analytics_no_eligible_channels(
                 content_owner_id=_ANALYTICS_ACCOUNT_ID,
                 active=False,
                 revenue_required=True,
+                cms_status="INSIDE_CMS",
             ),
             YouTubeChannelORM(
                 id=uuid4(),
@@ -3821,6 +3835,7 @@ def test_run_one_with_youtube_analytics_no_eligible_channels(
                 content_owner_id=_ANALYTICS_ACCOUNT_ID,
                 active=True,
                 revenue_required=False,
+                cms_status="INSIDE_CMS",
             ),
             YouTubeChannelORM(
                 id=uuid4(),
@@ -3830,6 +3845,7 @@ def test_run_one_with_youtube_analytics_no_eligible_channels(
                 content_owner_id="some-other-cms-owner",
                 active=True,
                 revenue_required=True,
+                cms_status="INSIDE_CMS",
             ),
             YouTubeChannelORM(
                 id=uuid4(),
@@ -3839,6 +3855,7 @@ def test_run_one_with_youtube_analytics_no_eligible_channels(
                 content_owner_id=_ANALYTICS_ACCOUNT_ID,
                 active=True,
                 revenue_required=True,
+                cms_status="INSIDE_CMS",
             ),
         ]
     )
@@ -3945,6 +3962,7 @@ def test_run_one_with_youtube_analytics_preserves_rows_for_deactivated_channels(
         content_owner_id=_ANALYTICS_ACCOUNT_ID,
         active=True,
         revenue_required=True,
+        cms_status="INSIDE_CMS",
     )
     ch_b = YouTubeChannelORM(
         id=uuid4(),
@@ -3954,6 +3972,7 @@ def test_run_one_with_youtube_analytics_preserves_rows_for_deactivated_channels(
         content_owner_id=_ANALYTICS_ACCOUNT_ID,
         active=True,
         revenue_required=True,
+        cms_status="INSIDE_CMS",
     )
     session.add_all([ch_a, ch_b])
     session.flush()
