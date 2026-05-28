@@ -234,6 +234,8 @@ ProducedReport = (
 
 @dataclass(frozen=True)
 class _DeferredStaleCleanupPlan:
+    """One per-scope stale-row cleanup plan deferred for analytics aggregation."""
+
     source_system: str
     report_type: str
     report_month: str
@@ -243,6 +245,13 @@ class _DeferredStaleCleanupPlan:
 
 @dataclass
 class _DeferredAnalyticsStaleCleanupState:
+    """Accumulates per-channel keep-keys for one owner/month until flush time.
+
+    ``blocked`` is set to True when any sibling channel in the run failed so the
+    cleanup is skipped and previously-persisted rows for that scope are not
+    deleted on a partial run.
+    """
+
     blocked: bool = False
     keep_source_row_keys_by_scope: dict[tuple[str, str, str, str], set[str]] = field(
         default_factory=dict
@@ -1064,6 +1073,7 @@ def _stale_source_row_keys_by_scope(
     parsed_rows: Iterable[ParsedSourceRow],
     fallback_source_account_id: str,
 ) -> dict[tuple[str, str], set[str]]:
+    """Group keep-keys by (report_type, source_account_id) for stale-row cleanup."""
     keys_by_scope: dict[tuple[str, str], set[str]] = {}
     for row in parsed_rows:
         keys_by_scope.setdefault((row.report_type, row.source_account_id), set()).add(
@@ -1098,6 +1108,7 @@ def _build_deferred_stale_cleanup_plans(
     parsed_rows: Iterable[ParsedSourceRow],
     fallback_source_account_id: str,
 ) -> tuple[_DeferredStaleCleanupPlan, ...]:
+    """Convert one channel's keep-keys into deferred plans for the analytics flush."""
     return tuple(
         _DeferredStaleCleanupPlan(
             source_system=source_system,
@@ -1119,6 +1130,7 @@ def _merge_deferred_stale_cleanup_plans(
     deferred_cleanup: _DeferredAnalyticsStaleCleanupState,
     plans: tuple[_DeferredStaleCleanupPlan, ...],
 ) -> None:
+    """Aggregate one channel's plans into the run-level deferred-cleanup state."""
     for plan in plans:
         deferred_cleanup.keep_source_row_keys_by_scope.setdefault(
             (
@@ -1137,6 +1149,7 @@ def _flush_deferred_stale_cleanup_plans(
     tenant_id: UUID,
     deferred_cleanup: _DeferredAnalyticsStaleCleanupState,
 ) -> None:
+    """Execute the merged keep-key plans once the analytics run completes cleanly."""
     if deferred_cleanup.blocked:
         return
     for (source_system, report_type, report_month, source_account_id), keys in (
@@ -1169,6 +1182,7 @@ def _flush_deferred_stale_cleanup_plans(
 def _fallback_source_report_type(
     *, parser: YouTubeReportingParser | YouTubeAnalyticsParser, default_report_type: str,
 ) -> str:
+    """Return the persisted report_type label for empty-success stale cleanup."""
     if isinstance(parser, YouTubeAnalyticsParser):
         return "reports.query"
     return default_report_type
@@ -1191,6 +1205,7 @@ def _fallback_source_report_type(
 def _fallback_source_account_id(
     *, parser_payload: dict[str, object], default_account_id: str,
 ) -> str:
+    """Return the canonical source_account_id used by the parser for cleanup scope."""
     query_request = parser_payload.get("query_request")
     if isinstance(query_request, dict):
         ids = query_request.get("ids")

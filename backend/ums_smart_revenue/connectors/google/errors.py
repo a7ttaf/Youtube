@@ -178,6 +178,8 @@ class UnsupportedReportTypeError(GoogleConnectorError):
 
 
 class MalformedReportMonthError(GoogleConnectorError):
+    """Raised when a report_month input is not a valid `YYYY-MM` string."""
+
     def __init__(self, *, report_month: str) -> None:
         super().__init__(
             f"report_month {report_month!r} must be YYYY-MM with a calendar month 01-12"

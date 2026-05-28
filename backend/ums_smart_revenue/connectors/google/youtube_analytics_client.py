@@ -53,6 +53,7 @@ _DIMENSIONS = "channel,month"
 def _build_query_request(
     *, account_id: str, channel_id: str, report_month: str,
 ) -> dict[str, str]:
+    """Return the canonical reports.query parameters for one channel-month slice."""
     if not _REPORT_MONTH_PATTERN.fullmatch(report_month):
         raise MalformedReportMonthError(report_month=report_month)
     year, month = report_month.split("-")
@@ -90,6 +91,7 @@ def _build_query_request(
 def list_target_channels(
     session: Session, *, tenant_id: UUID, account_id: str,
 ) -> list[str]:
+    """Return eligible CMS-owned channel IDs for the tenant/account, sorted asc."""
     stmt = (
         select(YouTubeChannelORM.youtube_channel_id)
         .where(
@@ -104,7 +106,10 @@ def list_target_channels(
 
 
 class YouTubeAnalyticsClient:
+    """Thin wrapper around GoogleHttpClient for YouTube Analytics reports.query."""
+
     def __init__(self, *, http: GoogleHttpClient) -> None:
+        """Bind the shared HTTP client (auth + retry + JSON decode)."""
         self._http = http
 
     # ============================================================================
@@ -130,6 +135,7 @@ class YouTubeAnalyticsClient:
     def fetch_channel_report(
         self, *, account_id: str, channel_id: str, report_month: str,
     ) -> dict[str, object]:
+        """Fetch one CMS-owned channel's monthly reports.query JSON body."""
         params = _build_query_request(
             account_id=account_id,
             channel_id=channel_id,
