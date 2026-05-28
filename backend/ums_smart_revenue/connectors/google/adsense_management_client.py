@@ -11,6 +11,8 @@ Query params (locked at ship):
     currencyCode=USD                 <- B2.6 ingests USD only; non-USD
                                         handling lives in C1's NON_USD_CURRENCY
                                         skip path, not here.
+    reportingTimeZone=GOOGLE_TIME_ZONE
+                                      <- required when requesting TOTAL_EARNINGS.
 
 AdSenseManagementParser (PR #43 contract) requires a 'report_id' on the
 payload, but AdSense reports.generate does not return a stable report id.
@@ -47,6 +49,9 @@ _METRICS = ("ESTIMATED_EARNINGS", "TOTAL_EARNINGS")
 _DIMENSIONS = "MONTH"
 # B2.6 USD-only locked. Non-USD handling is a C1 SkipReason concern.
 _CURRENCY = "USD"
+# TOTAL_EARNINGS is only valid in Google's reporting timezone. Leaving this
+# unset lets reports.generate default to account timezone and reject live calls.
+_REPORTING_TIME_ZONE = "GOOGLE_TIME_ZONE"
 
 # Single source of truth for the report-kind key folded into the deterministic
 # report_id stamp. Locked at ship: widening this set requires both a parser
@@ -101,6 +106,7 @@ def _synthesized_request(
         "dimensions": [_DIMENSIONS],
         "metrics": list(_METRICS),
         "currencyCode": _CURRENCY,
+        "reportingTimeZone": _REPORTING_TIME_ZONE,
     }
 
 
@@ -296,6 +302,7 @@ class AdSenseManagementClient:
             ("dimensions", _DIMENSIONS),
             *[("metrics", metric) for metric in _METRICS],
             ("currencyCode", _CURRENCY),
+            ("reportingTimeZone", _REPORTING_TIME_ZONE),
         ]
         response = self._http.request(method="GET", url=url, params=params)
         _reject_truncated_report_result(response_json=response, url=url)

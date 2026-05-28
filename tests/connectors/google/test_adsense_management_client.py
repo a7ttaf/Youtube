@@ -18,11 +18,11 @@ from ums_smart_revenue.connectors.google.errors import (
 from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
 
 
-def test_fetch_monthly_report_pins_currency_usd_and_date_bounds(
+def test_fetch_monthly_report_pins_currency_usd_timezone_and_date_bounds(
     mock_credentials,
 ) -> None:
-    """The client must lock dateRange=CUSTOM, MONTH dimension, USD currency, and
-    the AdSense earnings metric pair on every wire request.
+    """The client must lock dateRange=CUSTOM, MONTH dimension, USD currency,
+    Google reporting timezone, and the AdSense earnings metric pair.
 
     The first-day/last-day bounds are derived from the calendar (monthrange) so
     a 28/29/30/31-day month is covered without per-month branching.
@@ -64,6 +64,7 @@ def test_fetch_monthly_report_pins_currency_usd_and_date_bounds(
     ] == ["ESTIMATED_EARNINGS", "TOTAL_EARNINGS"]
     assert q["dimensions"] == "MONTH"
     assert q["currencyCode"] == "USD"
+    assert q["reportingTimeZone"] == "GOOGLE_TIME_ZONE"
     assert "report_id" in out
     assert out["request"] == {
         "accountId": "accounts/pub-1",
@@ -74,6 +75,7 @@ def test_fetch_monthly_report_pins_currency_usd_and_date_bounds(
         "dimensions": ["MONTH"],
         "metrics": ["ESTIMATED_EARNINGS", "TOTAL_EARNINGS"],
         "currencyCode": "USD",
+        "reportingTimeZone": "GOOGLE_TIME_ZONE",
     }
     # Wire-to-payload preservation at the HTTP boundary: the empty `headers`
     # and `rows` from the mock response must survive the adapter wrap so the
@@ -136,6 +138,7 @@ def test_adapter_wraps_response_with_deterministic_report_id() -> None:
         "dimensions": ["MONTH"],
         "metrics": ["ESTIMATED_EARNINGS", "TOTAL_EARNINGS"],
         "currencyCode": "USD",
+        "reportingTimeZone": "GOOGLE_TIME_ZONE",
     }
     assert payload["headers"] == response["headers"]
     assert payload["rows"] == response["rows"]
@@ -190,6 +193,7 @@ def test_adapter_defaults_when_response_fields_missing() -> None:
         "dimensions": ["MONTH"],
         "metrics": ["ESTIMATED_EARNINGS", "TOTAL_EARNINGS"],
         "currencyCode": "USD",
+        "reportingTimeZone": "GOOGLE_TIME_ZONE",
     }
     assert payload["headers"] == []
     assert payload["rows"] is None
