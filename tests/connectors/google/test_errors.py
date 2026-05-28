@@ -33,6 +33,7 @@ from ums_smart_revenue.connectors.google.errors import (
 
 
 def test_all_b2_errors_subclass_google_connector_error() -> None:
+    """Every typed B2 connector error must descend from ``GoogleConnectorError``."""
     for cls in (
         UnsupportedSecretSchemeError,
         MalformedSecretUriError,

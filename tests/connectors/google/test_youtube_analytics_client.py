@@ -175,6 +175,7 @@ def test_fetch_channel_report(mock_credentials) -> None:
     """
 
     def handler(request: httpx.Request) -> httpx.Response:
+        """Assert the wire request shape for one CMS-owned channel-month slice."""
         params = dict(request.url.params)
         assert params["ids"] == "contentOwner==owner-a"
         assert params["filters"] == "channel==UC-xyz"

@@ -470,6 +470,7 @@ def _run_dry_run(
     report_month: str,
     credentials: Credentials,
 ) -> ConnectorRunOutcome:
+    """Execute the connector's produce/parse path inside a rolled-back savepoint."""
     counts = _zero_counts()
     runner = dispatch_connector(key=connector_key)
     parser = _parser_for_connector(connector_key)
@@ -610,6 +611,7 @@ def _process_live_reports(
     per_report_failures: list[tuple[str, str]],
     per_report_failure_details: list[tuple[str, str, str | None]],
 ) -> None:
+    """Drive the live run end-to-end: produce, parse, upsert, and aggregate counts."""
     runner = dispatch_connector(key=connector_key)
     backend, scheme, bucket = _build_blob_backend()
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
@@ -715,6 +717,7 @@ def _handle_live_produced_report(
     per_report_failure_details: list[tuple[str, str, str | None]],
     deferred_analytics_cleanup: _DeferredAnalyticsStaleCleanupState | None,
 ) -> int:
+    """Persist one produced report (raw upload, parse, upsert) and update counts."""
     report_type, parser_payload, raw_reports, produced_error = _unpack_produced_report(
         produced
     )
@@ -1060,6 +1063,7 @@ def _process_one_report(
 #     -> optionally clears stale raw_file_id on aggregate replacement.
 # ============================================================================
 def _source_row_raw_file_id(raw_files: list[RawReportFileORM]) -> UUID | None:
+    """Return the single raw-file id when a row aggregates exactly one raw payload."""
     if len(raw_files) == 1:
         return raw_files[0].id
     return None
@@ -1322,6 +1326,7 @@ def _delete_stale_source_rows(
     parsed_rows: Iterable[ParsedSourceRow],
     fallback_source_account_id: str,
 ) -> None:
+    """Delete source rows in each scope whose keys are absent from the new parse."""
     for (row_report_type, source_account_id), keys in _stale_source_row_keys_by_scope(
         report_type=report_type,
         parsed_rows=parsed_rows,
@@ -1877,6 +1882,7 @@ def _failure_with_downloaded_csv_reports(
     csv_reports: dict[str, _CsvReportDownload],
     failure: ProducedReportFailure,
 ) -> ProducedReportFailure:
+    """Re-emit a per-report failure with already-downloaded CSV evidence attached."""
     raw_reports = list(csv_reports.values())
     seen_report_ids = {raw_report.report_id for raw_report in raw_reports}
     for raw_report in failure.raw_reports:

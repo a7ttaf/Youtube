@@ -181,6 +181,7 @@ class MalformedReportMonthError(GoogleConnectorError):
     """Raised when a report_month input is not a valid `YYYY-MM` string."""
 
     def __init__(self, *, report_month: str) -> None:
+        """Carry the offending ``report_month`` for downstream diagnostics."""
         super().__init__(
             f"report_month {report_month!r} must be YYYY-MM with a calendar month 01-12"
         )
@@ -198,6 +199,7 @@ class MalformedAnalyticsSelectorError(GoogleConnectorError):
     """
 
     def __init__(self, *, field_name: str, value: str) -> None:
+        """Carry the offending ``field_name`` / ``value`` for downstream diagnostics."""
         super().__init__(
             f"{field_name} must be a non-empty string, got {value!r}"
         )

@@ -555,9 +555,11 @@ def test_run_one_happy_path_writes_run_raw_file_and_source_rows(
         store: dict[str, bytes] = {}
 
         def fake_upload(*, storage_uri, content):
+            """Stash uploaded bytes in the in-memory blob store."""
             store[storage_uri] = content
 
         def fake_get(*, storage_uri):
+            """Read bytes back from the in-memory blob store."""
             return store[storage_uri]
 
         backend.upload.side_effect = fake_upload
@@ -701,9 +703,11 @@ def test_run_one_reuses_raw_file_inserted_by_racing_worker(
         store: dict[str, bytes] = {}
 
         def fake_upload(*, storage_uri, content):
+            """Stash uploaded bytes in the in-memory blob store."""
             store[storage_uri] = content
 
         def fake_get(*, storage_uri):
+            """Read bytes back from the in-memory blob store."""
             return store[storage_uri]
 
         backend.upload.side_effect = fake_upload
@@ -2881,6 +2885,7 @@ def test_run_one_with_youtube_analytics_succeeds_for_cms_channels_only(
         channel_id: str,
         report_month: str,
     ) -> dict:
+        """Return the CMS payload for the matching channel id; fail loud otherwise."""
         assert account_id == _ANALYTICS_ACCOUNT_ID
         assert report_month == "2026-05"
         if channel_id == "UC_orch_cms":
@@ -2906,9 +2911,11 @@ def test_run_one_with_youtube_analytics_succeeds_for_cms_channels_only(
         store: dict[str, bytes] = {}
 
         def fake_upload(*, storage_uri, content):
+            """Stash uploaded bytes in the in-memory blob store."""
             store[storage_uri] = content
 
         def fake_get(*, storage_uri):
+            """Read bytes back from the in-memory blob store."""
             return store[storage_uri]
 
         backend.upload.side_effect = fake_upload
@@ -3013,6 +3020,7 @@ def test_run_one_with_youtube_analytics_contains_channel_fetch_failures(
     )
 
     def fake_fetch_channel_report(*, account_id: str, channel_id: str, report_month: str) -> dict:
+        """Raise 503 for the failing channel; return the success payload for the other."""
         assert account_id == _ANALYTICS_ACCOUNT_ID
         assert report_month == "2026-05"
         if channel_id == "UC_001_fail":
@@ -3105,9 +3113,11 @@ def test_run_one_with_youtube_analytics_empty_success_replaces_existing_rows(
     payload_empty = {**payload_with_row, "rows": []}
 
     def _run_with_payload(payload: dict[str, object]) -> ConnectorRunOutcome:
+        """Run the analytics ingestion once with the supplied parser payload."""
         def fake_fetch_channel_report(
             *, account_id: str, channel_id: str, report_month: str
         ) -> dict:
+            """Return the closure-captured payload for the single attempted channel."""
             assert account_id == _ANALYTICS_ACCOUNT_ID
             assert channel_id == "UC_stale_scope"
             assert report_month == "2026-05"
@@ -3227,6 +3237,7 @@ def test_run_one_with_youtube_analytics_keeps_sibling_cms_rows_on_full_success(
     def fake_fetch_channel_report(
         *, account_id: str, channel_id: str, report_month: str
     ) -> dict:
+        """Return the per-channel payload from the lookup table."""
         assert account_id == _ANALYTICS_ACCOUNT_ID
         assert report_month == "2026-05"
         return payload_by_channel[channel_id]
@@ -3345,6 +3356,7 @@ def test_run_one_with_youtube_analytics_partial_run_preserves_failed_sibling_row
     def _run_with_fetch(
         fetch_impl,
     ) -> ConnectorRunOutcome:
+        """Run the analytics ingestion once with the supplied fetch implementation."""
         with patch(
             "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
         ) as yt_analytics_cls, patch(
@@ -3376,6 +3388,7 @@ def test_run_one_with_youtube_analytics_partial_run_preserves_failed_sibling_row
     def first_fetch(
         *, account_id: str, channel_id: str, report_month: str
     ) -> dict:
+        """Initial successful run: every attempted channel returns its payload."""
         assert account_id == _ANALYTICS_ACCOUNT_ID
         assert report_month == "2026-05"
         return payload_by_channel[channel_id]
@@ -3387,6 +3400,7 @@ def test_run_one_with_youtube_analytics_partial_run_preserves_failed_sibling_row
     def second_fetch(
         *, account_id: str, channel_id: str, report_month: str
     ) -> dict:
+        """Rerun: UC_keep_fail raises 503 so its sibling rows must be preserved."""
         assert account_id == _ANALYTICS_ACCOUNT_ID
         assert report_month == "2026-05"
         if channel_id == "UC_keep_fail":
@@ -3514,6 +3528,7 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
     )
 
     def _runner_query_request(channel_id: str) -> dict:
+        """Build the runner-side query_request dict (mirrors the wire request layout)."""
         return {
             "ids": f"contentOwner=={_ANALYTICS_ACCOUNT_ID}",
             "filters": f"channel=={channel_id}",
@@ -3524,6 +3539,7 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
         }
 
     def _synthesise_channel(payload: dict, channel_id: str) -> dict:
+        """Inject the `channel` dimension into payload columns/rows (mirrors the runner)."""
         column_headers = payload.get("columnHeaders") or []
         rows = payload.get("rows") or []
         if any(
@@ -3556,6 +3572,7 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
         channel_id: str,
         report_month: str,
     ) -> dict:
+        """Return the CMS payload for UC_fs_cms; fail loud on unexpected channel ids."""
         assert account_id == _ANALYTICS_ACCOUNT_ID
         assert report_month == "2026-05"
         if channel_id == "UC_fs_cms":
@@ -3601,6 +3618,7 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
     # LocalFileStoreBackend strips the scheme and treats the remainder as a
     # relative path under root.
     def _expected_path(checksum: str) -> _Path:
+        """Compute the deterministic on-disk blob path for the given checksum."""
         return (
             tmp_path
             / "testbucket"
@@ -3715,6 +3733,7 @@ def test_run_one_with_youtube_analytics_dry_run_succeeds_for_cms_channels_only(
         channel_id: str,
         report_month: str,
     ) -> dict:
+        """Return the CMS payload for UC_dry_ana_cms; fail loud on unexpected ids."""
         assert account_id == _ANALYTICS_ACCOUNT_ID
         assert report_month == "2026-05"
         if channel_id == "UC_dry_ana_cms":
@@ -4003,6 +4022,7 @@ def test_run_one_with_youtube_analytics_preserves_rows_for_deactivated_channels(
     }
 
     def fake_fetch_run1(*, account_id: str, channel_id: str, report_month: str) -> dict:
+        """Run 1: both channels are still active and return their payloads."""
         assert account_id == _ANALYTICS_ACCOUNT_ID
         assert report_month == "2026-05"
         return payload_by_channel_run1[channel_id]
@@ -4066,6 +4086,7 @@ def test_run_one_with_youtube_analytics_preserves_rows_for_deactivated_channels(
     }
 
     def fake_fetch_run2(*, account_id: str, channel_id: str, report_month: str) -> dict:
+        """Run 2: only UC_preserve_a is attempted; assert any other channel id is unreachable."""
         assert account_id == _ANALYTICS_ACCOUNT_ID
         assert report_month == "2026-05"
         if channel_id not in payload_by_channel_run2:
