@@ -297,6 +297,7 @@ def test_csv_adapter_rejects_blank_present_currency() -> None:
 
 
 def test_csv_adapter_rejects_non_zero_padded_report_month() -> None:
+    """Non-zero-padded months (e.g. ``2026-5``) must be rejected before any HTTP call."""
     with pytest.raises(GoogleApiResponseError, match="not YYYY-MM"):
         _csv_to_parser_payload(
             raw_bytes=_csv_for_one_row(),
@@ -314,6 +315,7 @@ def test_csv_adapter_rejects_non_zero_padded_report_month() -> None:
     ],
 )
 def test_csv_adapter_rejects_empty_or_headerless_csv(raw_bytes: bytes) -> None:
+    """Empty or header-only CSVs must be flagged as a structural failure."""
     with pytest.raises(GoogleApiResponseError, match="csv missing"):
         _csv_to_parser_payload(
             raw_bytes=raw_bytes,
@@ -326,6 +328,7 @@ def test_csv_adapter_rejects_empty_or_headerless_csv(raw_bytes: bytes) -> None:
 def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff(
     session: Session,
 ) -> None:
+    """The runner must aggregate the month's daily CSVs before yielding to the parser."""
     with patch(
         "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
     ) as yt_client_cls, patch(
@@ -404,6 +407,7 @@ def test_youtube_reporting_runner_aggregates_daily_reports_before_parser_handoff
 def test_youtube_reporting_runner_preserves_prior_downloads_when_later_csv_fails(
     session: Session,
 ) -> None:
+    """Mid-run CSV failures must keep the already-downloaded CSVs attached for replay."""
     with patch(
         "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
     ) as yt_client_cls, patch(
@@ -461,6 +465,7 @@ def test_youtube_reporting_runner_preserves_prior_downloads_when_later_csv_fails
 def test_youtube_reporting_runner_deduplicates_jobs_by_report_type(
     session: Session,
 ) -> None:
+    """Two jobs publishing the same report_type collapse to a single produced report."""
     with patch(
         "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
     ) as yt_client_cls, patch(
@@ -649,6 +654,7 @@ def test_run_one_reuses_raw_file_inserted_by_racing_worker(
     calls = {"n": 0}
 
     def racing_find(db_session, *, tenant_id, source, report_type, report_month, checksum):
+        """Race the duplicate-row lookup with a sibling insert to exercise the IntegrityError fallback."""
         calls["n"] += 1
         if calls["n"] == 1:
             db_session.add(
@@ -932,6 +938,7 @@ def test_run_one_accepts_youtube_reporting_credential_aliases(
 def test_run_one_normalizes_secret_ref_before_resolving(
     session: Session, _stub_secret_resolver
 ) -> None:
+    """The orchestrator must call the resolver with the normalised secret URI."""
     _make_credential_row(
         session,
         tenant_id=TENANT_ID,
@@ -982,6 +989,7 @@ def test_run_one_normalizes_secret_ref_before_resolving(
 
 
 def test_run_one_rejects_malformed_month_before_starting_run(session: Session) -> None:
+    """Malformed ``report_month`` rejects the run before any state mutation."""
     with pytest.raises(ConnectorRunValidationError, match="report_month"):
         run_one(
             session,
@@ -1073,6 +1081,7 @@ def test_run_one_reuses_existing_parsed_raw_file_for_same_checksum(
 def test_run_one_reopens_failed_raw_file_with_current_download_metadata(
     session: Session, _stub_secret_resolver
 ) -> None:
+    """A failed raw_file is reopened in-place with fresh download metadata on retry."""
     credential = _make_credential_row(
         session,
         tenant_id=TENANT_ID,
@@ -1144,6 +1153,7 @@ def test_run_one_reopens_failed_raw_file_with_current_download_metadata(
 def test_run_one_handles_duplicate_empty_daily_reports_in_one_run(
     session: Session, _stub_secret_resolver
 ) -> None:
+    """Repeated empty daily reports in the same run must not double-attribute counts."""
     _make_credential_row(
         session,
         tenant_id=TENANT_ID,
@@ -1217,6 +1227,7 @@ def test_run_one_handles_duplicate_empty_daily_reports_in_one_run(
 def test_run_one_persists_invalid_csv_evidence_before_shape_failure(
     session: Session, _stub_secret_resolver
 ) -> None:
+    """Invalid CSV evidence is persisted before the shape-validation failure is recorded."""
     _make_credential_row(
         session,
         tenant_id=TENANT_ID,
@@ -1276,6 +1287,7 @@ def test_run_one_persists_invalid_csv_evidence_before_shape_failure(
 def test_run_one_removes_stale_source_rows_when_replacement_omits_them(
     session: Session, _stub_secret_resolver
 ) -> None:
+    """Stale rows whose keys are absent from the new parse are removed under the scope."""
     _make_credential_row(
         session,
         tenant_id=TENANT_ID,
@@ -1362,6 +1374,7 @@ def test_run_one_removes_stale_source_rows_when_replacement_omits_them(
 def test_run_one_skips_monthly_aggregate_when_daily_download_fails(
     session: Session, _stub_secret_resolver
 ) -> None:
+    """A daily download failure must skip the monthly aggregate without partial writes."""
     _make_credential_row(
         session,
         tenant_id=TENANT_ID,
@@ -1627,6 +1640,7 @@ def test_run_one_sweeps_running_to_failed_on_untyped_error(
     def flaky_finish_run(
         session, *, tenant_id, connector_run_id, status, counts, error_summary
     ):
+        """Inject a transient failure on the finish-run hook to exercise the retry path."""
         call_count["n"] += 1
         if call_count["n"] == 1:
             # Simulate a transient DB failure on the main-path commit so
@@ -1833,8 +1847,10 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
     call_state = {"n": 0}
 
     class FlakyParser:
+        """Parser that fails the first call and succeeds on retry; exercises parser retry semantics."""
         @staticmethod
         def parse(payload, *, tenant_id):
+            """Raise once, then return the captured payload (mirrors the parser retry contract)."""
             call_state["n"] += 1
             if call_state["n"] == 2:
                 raise ParserError("simulated parser failure on report 2")
@@ -2061,6 +2077,7 @@ def test_bucket_b_pre_flush_failure_on_second_report_preserves_first_report(
     call_count = {"n": 0}
 
     def flaky_upload_and_verify(*, backend, storage_uri, content):
+        """Wrap upload+verify with a transient checksum mismatch to drive the verify-retry path."""
         call_count["n"] += 1
         if call_count["n"] == 2:
             raise GoogleApiServerError(
@@ -2213,6 +2230,7 @@ def test_bucket_b_download_failure_on_second_report_preserves_first_report(
         )
 
         def fetch_report(*, download_url: str) -> bytes:
+            """Return the canned single-CSV bytes for the requested report_id."""
             if download_url == "https://yt/r2":
                 raise GoogleApiServerError(
                     method="GET", url=download_url, status=503, attempts=4,
@@ -2522,6 +2540,7 @@ def test_dry_run_savepoint_reverts_runner_side_writes(
     # ``rows=[]`` and emit zero ParsedSourceRow instances). The orchestrator
     # then commits ``reports_succeeded`` for that single yielded report.
     class WritingRunner:
+        """Runner that emits one canned success payload; used to exercise non-YouTube branches."""
         last_marker_id: UUID | None = None
 
         @staticmethod
@@ -2533,6 +2552,7 @@ def test_dry_run_savepoint_reverts_runner_side_writes(
             report_month,
             account_id,
         ):
+            """Yield one ``ProducedReportSuccess`` carrying the canned parser payload + raw report."""
             _ = (run, credentials, report_month, account_id)
             marker_id = uuid4()
             session.add(
@@ -2655,8 +2675,10 @@ def test_dry_run_parser_failure_increments_reports_failed_and_keeps_per_report_f
     call_state = {"n": 0}
 
     class FlakyParser:
+        """Parser that fails on the first call and returns a parsed payload on the second."""
         @staticmethod
         def parse(payload, *, tenant_id):
+            """Raise once, then return the canned parsed payload (mirrors retry semantics)."""
             call_state["n"] += 1
             if call_state["n"] == 2:
                 raise ParserError("simulated parser failure on dry-run report 2")

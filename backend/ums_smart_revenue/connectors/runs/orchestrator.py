@@ -199,11 +199,13 @@ class ProducedReportFailure:
 
 @dataclass(frozen=True)
 class _CsvReportDownload:
+    """Spool entry pairing a CSV ``report_id`` with its in-memory bytes or temp-file path."""
     report_id: str
     raw_bytes: bytes | None = None
     raw_path: Path | None = None
 
     def read_bytes(self) -> bytes:
+        """Return the spooled CSV bytes, reading the temp file lazily if needed."""
         if self.raw_bytes is not None:
             return self.raw_bytes
         if self.raw_path is None:
@@ -211,6 +213,7 @@ class _CsvReportDownload:
         return self.raw_path.read_bytes()
 
     def cleanup(self) -> None:
+        """Best-effort unlink the temp file backing this download, ignoring missing-file errors."""
         if self.raw_path is None:
             return
         try:
@@ -221,6 +224,7 @@ class _CsvReportDownload:
 
 @dataclass(frozen=True)
 class ProducedReportSuccess:
+    """Successful producer result bundling the parser payload with its raw CSV downloads."""
     report_type: str
     parser_payload: dict[str, object]
     raw_reports: tuple[_CsvReportDownload, ...]
@@ -287,6 +291,7 @@ class ConnectorRunner(Protocol):
         report_month: str,
         account_id: str,
     ) -> Iterator[ProducedReport]:
+        """Yield each successful or failed produced report (per-report bucket-B contract)."""
         ...
 
 
@@ -395,6 +400,7 @@ def _run_one_with_credentials(
     triggered_by_user_id: UUID | None,
     credentials: Credentials,
 ) -> ConnectorRunOutcome:
+    """Run one connector slice once credentials are resolved (dispatches dry-run vs live)."""
     if dry_run:
         return _run_dry_run(
             session=session,
@@ -422,6 +428,7 @@ def _credentials_for_run(
     connector_key: str,
     account_id: str,
 ) -> Credentials:
+    """Resolve and validate the credential row for a given tenant/connector/account."""
     credential = _load_credential(
         session,
         tenant_id=tenant_id,
@@ -530,6 +537,7 @@ def _run_live(
     credentials: Credentials,
     triggered_by_user_id: UUID | None,
 ) -> ConnectorRunOutcome:
+    """Open the live ``connector_runs`` row and drive the produce/parse/upsert loop end-to-end."""
     run_entry = start_run(
         session,
         tenant_id=tenant_id,
@@ -666,6 +674,7 @@ def _unpack_produced_report(
     tuple[_CsvReportDownload, ...] | None,
     Exception | None,
 ]:
+    """Normalise a ``ProducedReport`` into its (report_type, parser_payload, raw_reports, failure)."""
     if isinstance(produced, ProducedReportFailure):
         return (
             produced.report_type,
@@ -688,6 +697,7 @@ def _unpack_produced_report(
 def _legacy_report_id(
     *, parser_payload: dict[str, object], report_type: str
 ) -> str:
+    """Recover the connector's legacy report_id from ``parser_payload.report_metadata`` if present."""
     metadata = parser_payload.get("report_metadata")
     if isinstance(metadata, dict):
         report_id = metadata.get("report_id")
@@ -793,6 +803,7 @@ def _handle_live_produced_report(
 
 
 def _raw_file_count_from_state(report_state: dict[str, object]) -> int:
+    """Return the number of raw_file ids attached to a per-report state entry."""
     raw_file_ids = report_state.get("raw_file_ids")
     if isinstance(raw_file_ids, list):
         return len(raw_file_ids)
@@ -812,6 +823,7 @@ def _record_live_report_failure(
     per_report_failures: list[tuple[str, str]],
     per_report_failure_details: list[tuple[str, str, str | None]],
 ) -> None:
+    """Persist a bucket-B per-report failure into ``connector_run_reports`` mid-run."""
     error_class = type(exc).__name__
     per_report_failures.append((report_type, error_class))
     per_report_failure_details.append(
@@ -840,6 +852,7 @@ def _record_live_report_failure(
 
 
 def _raw_file_ids_from_state(report_state: dict[str, object]) -> list[UUID]:
+    """Return the list of attached raw_file UUIDs from a per-report state entry."""
     raw_file_ids = report_state.get("raw_file_ids")
     if isinstance(raw_file_ids, list):
         return [raw_file_id for raw_file_id in raw_file_ids if isinstance(raw_file_id, UUID)]
@@ -857,6 +870,7 @@ def _finish_failed_live_run(
     counts: dict[str, int],
     exc: Exception,
 ) -> ConnectorRunEntry:
+    """Close a live run as FAILED (bucket-A short-circuit) with the supplied error class."""
     session.rollback()
     finished_run = finish_run(
         session,
@@ -878,6 +892,7 @@ def _finish_aggregate_live_run(
     counts: dict[str, int],
     per_report_failure_details: list[tuple[str, str, str | None]],
 ) -> ConnectorRunEntry:
+    """Close a live run as SUCCEEDED/PARTIAL based on the aggregated per-report counts."""
     status = _derive_terminal_status(counts)
     finished_run = finish_run(
         session,
@@ -898,6 +913,7 @@ def _sweep_unfinished_live_run(
     run_entry: ConnectorRunEntry,
     counts: dict[str, int],
 ) -> None:
+    """Best-effort sweep for the no-credentials early-out — finish any still-open ``run_entry``."""
     session.rollback()
     try:
         finish_run(
@@ -1371,6 +1387,7 @@ def _prepare_and_link_raw_reports(
     triggered_by_user_id: UUID | None,
     report_state: dict[str, object],
 ) -> list[RawReportFileORM]:
+    """Upload each ``raw_report`` and link the resulting raw_file rows to the active produced report."""
     raw_files: list[RawReportFileORM] = []
     seen_raw_file_ids: set[UUID] = set()
     report_state["raw_file_ids"] = []
@@ -1437,6 +1454,7 @@ def _prepare_raw_report_file(
     bucket: str,
     triggered_by_user_id: UUID | None,
 ) -> RawReportFileORM:
+    """Compute checksum, upload, and create/reopen the raw_file row for one CSV download."""
     # 1. Checksum + deterministic URI: same bytes always map to the same path
     # so a retry overwrites or hits the existing object instead of creating a
     # second copy with the same content.
@@ -1512,6 +1530,7 @@ def _find_existing_raw_file(
     report_month: str,
     checksum: str,
 ) -> RawReportFileORM | None:
+    """Look up an existing raw_file row for an idempotent retry under the same scope+checksum."""
     return session.scalar(
         sa.select(RawReportFileORM).where(
             RawReportFileORM.tenant_id == tenant_id,
@@ -1551,6 +1570,7 @@ def _get_or_create_raw_file(
     storage_uri: str,
     downloaded_by: UUID | None,
 ) -> RawReportFileORM:
+    """Insert a fresh raw_file row, racing on the unique constraint and retrying on collision."""
     raw_file = _find_existing_raw_file(
         session,
         tenant_id=tenant_id,
@@ -1625,6 +1645,7 @@ class YouTubeReportingRunner:
         report_month: str,
         account_id: str,
     ) -> Iterator[ProducedReport]:
+        """Drive the YouTube Reporting jobs path: discover jobs, fetch CSVs, yield per-job results."""
         # ``run`` is ``None`` on the T29 dry-run path; the runner body
         # never references it (the connector_runs lifecycle is owned by
         # ``run_one`` itself), so the widening is a pure type contract
@@ -1646,6 +1667,7 @@ def _produce_youtube_reports(
     report_month: str,
     account_id: str,
 ) -> Iterator[ProducedReport]:
+    """Iterate YouTube Reporting jobs, fetch each report's CSVs, and yield bucket-B successes/failures."""
     http = GoogleHttpClient(credentials=credentials)
     try:
         client = client_type(http=http)
@@ -1691,6 +1713,7 @@ def _produce_youtube_reports(
 def _deduplicate_youtube_jobs_by_report_type(
     jobs: Iterable[dict[str, object]],
 ) -> list[dict[str, object]]:
+    """Collapse multiple jobs publishing the same report_type to the first occurrence."""
     seen_report_types: set[str] = set()
     unique_jobs: list[dict[str, object]] = []
     for job in jobs:
@@ -1709,6 +1732,7 @@ def _produce_youtube_job_report(
     report_month: str,
     account_id: str,
 ) -> ProducedReportSuccess | ProducedReportFailure | None:
+    """Drive one YouTube Reporting job: list its reports for the month then download+aggregate them."""
     report_type = _require_text(job, "reportTypeId")
     job_id = _require_text(job, "id")
     reports = _list_youtube_reports_for_job(
@@ -1737,6 +1761,7 @@ def _list_youtube_reports_for_job(
     report_type: str,
     report_month: str,
 ) -> list[dict[str, object]] | ProducedReportFailure:
+    """Fetch the report metadata list for a single job in a single ``report_month``."""
     try:
         return client.list_reports_for_month(
             account_id=account_id,
@@ -1757,6 +1782,7 @@ def _build_youtube_report_success(
     report_month: str,
     account_id: str,
 ) -> ProducedReportSuccess | ProducedReportFailure | None:
+    """Aggregate downloaded CSVs into a parser payload + raw-reports tuple for one job/month."""
     csv_reports: dict[str, _CsvReportDownload] = {}
     seen_checksums: set[str] = set()
     totals: dict[tuple[str, str | None, str], Decimal] = {}
@@ -1817,6 +1843,7 @@ def _download_youtube_csv_reports(
     seen_checksums: set[str],
     totals: dict[tuple[str, str | None, str], Decimal],
 ) -> ProducedReportFailure | None:
+    """Download every CSV referenced by ``reports`` and return them as ``_CsvReportDownload`` entries."""
     for report in reports:
         failure = _download_youtube_csv_report(
             client=client,
@@ -1844,6 +1871,7 @@ def _download_youtube_csv_report(
     seen_checksums: set[str],
     totals: dict[tuple[str, str | None, str], Decimal],
 ) -> ProducedReportFailure | None:
+    """Download a single YouTube Reporting CSV blob, spooling to disk if it exceeds the in-memory cap."""
     csv_report: _CsvReportDownload | None = None
     try:
         download_url = _require_text(report, "downloadUrl")
@@ -1986,6 +2014,7 @@ def _accumulate_csv_report_bytes(
     report_month: str,
     default_content_owner: str | None,
 ) -> None:
+    """Parse one CSV blob and fold its per-(channel, video, metric) totals into ``totals``."""
     import csv
     import io
 
@@ -2028,6 +2057,7 @@ def _accumulate_csv_report_bytes(
 def _validate_csv_headers(
     fieldnames: list[str] | None, *, report_id: str, report_type: str
 ) -> str | None:
+    """Confirm the CSV header set contains the metric column expected for ``report_type``."""
     if not fieldnames:
         raise _parser_payload_error(
             report_id=report_id,
@@ -2067,6 +2097,7 @@ def _parser_payload_from_csv_totals(
     report_type: str,
     report_month: str,
 ) -> dict[str, object]:
+    """Render the aggregated ``totals`` map into the parser payload shape used downstream."""
     report_id = _combined_report_id(report_ids)
     month_start, month_end = _month_bounds(
         report_month=report_month, report_id=report_id
@@ -2112,6 +2143,7 @@ def _accumulate_csv_row(
     default_content_owner: str | None,
     default_currency: str | None,
 ) -> None:
+    """Fold one CSV row's metric into the running ``totals`` map (validates non-negative decimals)."""
     # Normalize the date column. YouTube Reporting CSV uses ``date`` or
     # ``day``. The row is daily, but the parser payload is monthly, so this
     # date is used only to ensure the row belongs to report_month.
@@ -2195,12 +2227,14 @@ def _accumulate_csv_row(
 
 
 def _combined_report_id(report_ids: list[str]) -> str:
+    """Return the report_id to record on disk: a single id or a ``combined:`` aggregate label."""
     if len(report_ids) == 1:
         return report_ids[0]
     return f"combined:{','.join(report_ids)}"
 
 
 def _spool_csv_report(*, report_id: str, raw_bytes: bytes) -> _CsvReportDownload:
+    """Persist a downloaded CSV either in memory or to a managed temp file based on size."""
     raw_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -2224,11 +2258,13 @@ def _spool_csv_report(*, report_id: str, raw_bytes: bytes) -> _CsvReportDownload
 def _cleanup_csv_report_downloads(
     raw_reports: tuple[_CsvReportDownload, ...],
 ) -> None:
+    """Best-effort unlink every temp file backing the supplied CSV downloads."""
     for raw_report in raw_reports:
         raw_report.cleanup()
 
 
 def _month_bounds(*, report_month: str, report_id: str) -> tuple[date_cls, date_cls]:
+    """Return the (first_day, last_day) calendar bounds for ``report_month`` (validates format)."""
     expected_month = report_month.strip()
     try:
         validate_report_month(expected_month)
@@ -2270,6 +2306,7 @@ def _first_present(row: dict[str, str | None], *keys: str) -> str | None:
 
 
 def _row_has_any_column(row: dict[str, str | None], *keys: str) -> bool:
+    """True iff the CSV row carries any of the supplied column names (case-insensitive)."""
     lower_keys = {k.lower() for k in row if isinstance(k, str)}
     return any(key.lower() in lower_keys for key in keys)
 
@@ -2332,6 +2369,7 @@ _CREDENTIAL_KEY_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def _credential_key_candidates(connector_key: str) -> tuple[str, ...]:
+    """Return the connector_key plus its hyphen/underscore aliases for credential lookup."""
     candidates = [connector_key]
     # FIX: Credential lookup must be symmetric across public hyphen keys and
     # stored source-system underscore keys; operators can dispatch either alias.
