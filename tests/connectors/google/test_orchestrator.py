@@ -65,6 +65,7 @@ from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.db.report_models import RawReportFileORM, ReportBase
 from ums_smart_revenue.db.security_models import (
     ApiConnectorCredentialORM,
+    AuditLogORM,
     SecurityBase,
     UserORM,
 )
@@ -78,6 +79,28 @@ TENANT_ID = UUID("00000000-0000-0000-0000-000000827001")
 ACCOUNT_ID = "content-owner-1"
 CONNECTOR_KEY = "youtube-reporting"
 DEFAULT_RESOLVER_REF = "local-secret://yt-creds"
+# Stable service-actor UUID used by orchestrator live-path tests so the
+# T36 connector audit emitters can build a service principal (the live
+# path's Bucket A fail-closed check requires UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID).
+# Tests that exercise the fail-closed path delenv this value explicitly.
+_SERVICE_ACTOR_ID = "ddddeeee-ffff-0000-1111-222222222222"
+
+
+@pytest.fixture(autouse=True)
+def _service_actor_env(monkeypatch: pytest.MonkeyPatch) -> str:
+    """Set UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID for orchestrator live-path tests.
+
+    The autouse on this fixture lets the existing test suite continue to call
+    ``run_one(..., dry_run=False)`` without each test wiring the env itself.
+    Tests that explicitly verify fail-closed-on-missing-env can use
+    ``monkeypatch.delenv(...)`` to override this default.
+    """
+    from ums_smart_revenue.config.settings import (
+        GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
+    )
+
+    monkeypatch.setenv(GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV, _SERVICE_ACTOR_ID)
+    return _SERVICE_ACTOR_ID
 
 
 @pytest.fixture(name="session")
@@ -4170,3 +4193,328 @@ def test_run_one_with_youtube_analytics_preserves_rows_for_deactivated_channels(
     assert b_row_keys_after == b_row_keys_before, (
         "B's historical row keys must be identical after a deactivation rerun"
     )
+
+
+# ---------------------------------------------------------------------------
+# T37: audit emitters wired into run_one orchestrator (spec B2.6 §8.4).
+#
+# These tests assert the connector audit lifecycle:
+#   STARTED -> DOWNLOADED -> PARSED -> (DOWNLOADED -> FAILED)? -> FINISHED.
+# Transaction semantics: STARTED commits with start_run, FINISHED commits
+# with finish_run, and per-raw-file edges stage inside the main per-report
+# transaction. Dry-run emits zero audit rows. The orchestrator fails closed
+# in Bucket A when ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID`` is unset.
+# ---------------------------------------------------------------------------
+
+
+def _connector_audit_events(session: Session) -> list[AuditLogORM]:
+    """Return audit rows tied to the connector audit lifecycle in insertion order."""
+    return list(
+        session.scalars(
+            select(AuditLogORM)
+            .where(AuditLogORM.tenant_id == TENANT_ID)
+            .where(AuditLogORM.event_type.in_(["CONNECTOR_JOB_RUN", "REPORT_IMPORTED"]))
+            .order_by(AuditLogORM.created_at, AuditLogORM.id)
+        )
+    )
+
+
+def _audit_lifecycles(events: list[AuditLogORM]) -> list[str]:
+    """Extract the ordered ``details["lifecycle"]`` discriminator chain."""
+    return [event.details["lifecycle"] for event in events]
+
+
+def test_run_one_emits_audit_started_finished_for_clean_run(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """A clean 1-report SUCCEEDED run emits STARTED -> DOWNLOADED -> PARSED -> FINISHED."""
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes = _csv_for_one_row()
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r1", "downloadUrl": "https://yt/r1"}
+        ]
+        client.fetch_report.return_value = csv_bytes
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "SUCCEEDED"
+
+    events = _connector_audit_events(session)
+    # Lifecycle ordering: STARTED -> DOWNLOADED -> PARSED -> FINISHED.
+    assert _audit_lifecycles(events) == [
+        "STARTED",
+        "DOWNLOADED",
+        "PARSED",
+        "FINISHED",
+    ]
+    # Event type discriminator: run-lifecycle vs raw-file-lifecycle.
+    event_types = [event.event_type for event in events]
+    assert event_types == [
+        "CONNECTOR_JOB_RUN",
+        "REPORT_IMPORTED",
+        "REPORT_IMPORTED",
+        "CONNECTOR_JOB_RUN",
+    ]
+    # FINISHED carries the terminal status + counts payload.
+    finished = events[-1]
+    assert finished.details["status"] == "SUCCEEDED"
+    assert finished.details["counts"]["reports_succeeded"] == 1
+    assert finished.details["counts"]["reports_failed"] == 0
+    # PARSED carries the upsert count from the source-row repository.
+    parsed = events[2]
+    assert parsed.details["count_upserted"] == outcome.counts["rows_upserted_total"]
+
+
+def test_run_one_emits_audit_event_sequence_for_partial_run(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """A 2-report run with 1 success + 1 parse failure emits 6 lifecycle audit rows."""
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes_a = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-01,UC_audit_alpha,cms-orch-1,10.000000,USD\n"
+    )
+    csv_bytes_b = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-02,UC_audit_beta,cms-orch-1,20.000000,USD\n"
+    )
+
+    from ums_smart_revenue.connectors.google_source_parsers import (
+        YouTubeReportingParser as RealParser,
+    )
+
+    real_parser = RealParser()
+    call_state = {"n": 0}
+
+    class FlakyParser:
+        """Parser that succeeds on the first parse and raises ParserError on the second."""
+
+        @staticmethod
+        def parse(payload, *, tenant_id):
+            """Pass the first call through and raise on the second."""
+            call_state["n"] += 1
+            if call_state["n"] == 2:
+                raise ParserError("simulated parser failure for audit ordering test")
+            return list(real_parser.parse(payload, tenant_id=tenant_id))
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator._parser_for_connector",
+        return_value=FlakyParser(),
+    ):
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"},
+            {"id": "job-2", "reportTypeId": "content_owner_basic_a3"},
+        ]
+        reports_by_job = {
+            "job-1": [{"id": "r1", "downloadUrl": "https://yt/r1"}],
+            "job-2": [{"id": "r2", "downloadUrl": "https://yt/r2"}],
+        }
+        client.list_reports_for_month.side_effect = (
+            lambda *, account_id, job_id, report_month: reports_by_job[job_id]
+        )
+        bytes_by_url = {"https://yt/r1": csv_bytes_a, "https://yt/r2": csv_bytes_b}
+        client.fetch_report.side_effect = (
+            lambda *, download_url: bytes_by_url[download_url]
+        )
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "PARTIAL"
+
+    events = _connector_audit_events(session)
+    # Lifecycle ordering: STARTED -> DOWNLOADED (r1) -> PARSED (r1) ->
+    # DOWNLOADED (r2) -> FAILED (r2) -> FINISHED.
+    assert _audit_lifecycles(events) == [
+        "STARTED",
+        "DOWNLOADED",
+        "PARSED",
+        "DOWNLOADED",
+        "FAILED",
+        "FINISHED",
+    ]
+    # The FAILED audit row carries the exception class only -- the
+    # exception MESSAGE is the source-of-truth ``error_summary`` and is not
+    # copied into the audit details.
+    failed = events[4]
+    assert failed.event_type == "REPORT_IMPORTED"
+    assert failed.details["error_class"] == "ParserError"
+    # FINISHED reflects the partial outcome.
+    finished = events[-1]
+    assert finished.event_type == "CONNECTOR_JOB_RUN"
+    assert finished.details["status"] == "PARTIAL"
+    assert finished.details["counts"]["reports_succeeded"] == 1
+    assert finished.details["counts"]["reports_failed"] == 1
+    assert finished.details["error_summary_present"] is True
+
+
+def test_run_one_dry_run_emits_zero_audit_events(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """``dry_run=True`` writes no audit rows -- the dry-run path skips emitters entirely."""
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes = _csv_for_one_row()
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r1", "downloadUrl": "https://yt/r1"}
+        ]
+        client.fetch_report.return_value = csv_bytes
+
+        backend = local_cls.return_value
+        backend.upload.side_effect = AssertionError(
+            "blob upload must not be called in dry-run"
+        )
+        backend.get_bytes.side_effect = AssertionError(
+            "blob get_bytes must not be called in dry-run"
+        )
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+            dry_run=True,
+        )
+
+    assert outcome.run is None
+    assert _connector_audit_events(session) == []
+
+
+def test_run_one_fail_closed_when_service_actor_id_missing(
+    session: Session,
+    _stub_secret_resolver,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live run raises ValueError in Bucket A when the service-actor env is unset.
+
+    The orchestrator constructs the connector service principal before
+    ``start_run``, so a missing UUID fails CLOSED with no half-created
+    RUNNING row and no audit emissions.
+    """
+    from ums_smart_revenue.config.settings import (
+        GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
+        load_app_settings,
+    )
+
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    monkeypatch.delenv(GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV, raising=False)
+    load_app_settings.cache_clear()
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ), patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ), patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials",
+        return_value=None,
+    ), patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ):
+        with pytest.raises(ValueError) as excinfo:
+            run_one(
+                session,
+                tenant_id=TENANT_ID,
+                connector_key=CONNECTOR_KEY,
+                account_id=ACCOUNT_ID,
+                report_month="2026-05",
+            )
+
+    # Error mentions the env name so an operator can act on the message.
+    assert GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV in str(excinfo.value)
+    # Bucket A semantics: no connector_runs row, no raw_file row, no audit row.
+    assert session.query(ConnectorRunORM).count() == 0
+    assert session.query(RawReportFileORM).count() == 0
+    assert _connector_audit_events(session) == []

@@ -65,6 +65,17 @@ import sqlalchemy as sa
 from google.oauth2.credentials import Credentials
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.auth.audit_service import AuditSink
+from ums_smart_revenue.auth.models import UserPrincipal
+from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.connectors.google.audit import (
+    build_connector_service_principal,
+    emit_raw_file_downloaded,
+    emit_raw_file_failed,
+    emit_raw_file_parsed,
+    emit_run_finished,
+    emit_run_started,
+)
 from ums_smart_revenue.connectors.google.errors import (
     BlobStorageConfigurationError,
     CredentialNotFoundError,
@@ -538,6 +549,21 @@ def _run_live(
     triggered_by_user_id: UUID | None,
 ) -> ConnectorRunOutcome:
     """Open the live ``connector_runs`` row and drive the produce/parse/upsert loop end-to-end."""
+    # ============================================================================
+    # Purpose: Build the connector service principal BEFORE ``start_run`` so a
+    #          missing ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID`` fails closed in
+    #          Bucket A (no half-created RUNNING row). The sink is built after
+    #          ``start_run`` because it needs the same session that owns the run
+    #          row and audit writes; both share one transaction for the STARTED
+    #          edge per spec §8.4.
+    # Database/ORM: None for the principal; ``SqlAlchemyAuditSink`` writes to
+    #               ``AuditLogORM`` via the session below.
+    # Standards: Fail-closed in Bucket A on missing env (ValueError bubbles to
+    #            the caller before any connector_runs row is created).
+    # Blast Radius: Audit log only.
+    # ============================================================================
+    audit_actor = build_connector_service_principal(tenant_id=tenant_id)
+
     run_entry = start_run(
         session,
         tenant_id=tenant_id,
@@ -545,6 +571,14 @@ def _run_live(
         account_id=account_id,
         report_month=report_month,
         triggered_by_user_id=triggered_by_user_id,
+    )
+    audit_sink: AuditSink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+    # Spec §8.4: CONNECTOR_JOB_RUN/STARTED is committed with start_run -- the
+    # STARTED row and the run row share one transaction, so a process crash
+    # between the two writes cannot leave a RUNNING run without its STARTED
+    # audit edge.
+    emit_run_started(
+        sink=audit_sink, actor=audit_actor, run=run_entry, dry_run=False,
     )
     session.commit()
 
@@ -566,6 +600,8 @@ def _run_live(
                 counts=counts,
                 per_report_failures=per_report_failures,
                 per_report_failure_details=per_report_failure_details,
+                audit_sink=audit_sink,
+                audit_actor=audit_actor,
             )
         except Exception as exc:
             finished_run = _finish_failed_live_run(
@@ -574,6 +610,8 @@ def _run_live(
                 run_entry=run_entry,
                 counts=counts,
                 exc=exc,
+                audit_sink=audit_sink,
+                audit_actor=audit_actor,
             )
             finished = True
             return ConnectorRunOutcome(
@@ -588,6 +626,8 @@ def _run_live(
             run_entry=run_entry,
             counts=counts,
             per_report_failure_details=per_report_failure_details,
+            audit_sink=audit_sink,
+            audit_actor=audit_actor,
         )
         finished = True
         return ConnectorRunOutcome(
@@ -602,6 +642,8 @@ def _run_live(
                 tenant_id=tenant_id,
                 run_entry=run_entry,
                 counts=counts,
+                audit_sink=audit_sink,
+                audit_actor=audit_actor,
             )
 
 
@@ -618,6 +660,8 @@ def _process_live_reports(
     counts: dict[str, int],
     per_report_failures: list[tuple[str, str]],
     per_report_failure_details: list[tuple[str, str, str | None]],
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> None:
     """Drive the live run end-to-end: produce, parse, upsert, and aggregate counts."""
     runner = dispatch_connector(key=connector_key)
@@ -656,6 +700,8 @@ def _process_live_reports(
             per_report_failures=per_report_failures,
             per_report_failure_details=per_report_failure_details,
             deferred_analytics_cleanup=deferred_analytics_cleanup,
+            audit_sink=audit_sink,
+            audit_actor=audit_actor,
         )
         ordering_index += max(raw_file_count, 1)
     if deferred_analytics_cleanup is not None:
@@ -726,6 +772,8 @@ def _handle_live_produced_report(
     per_report_failures: list[tuple[str, str]],
     per_report_failure_details: list[tuple[str, str, str | None]],
     deferred_analytics_cleanup: _DeferredAnalyticsStaleCleanupState | None,
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> int:
     """Persist one produced report (raw upload, parse, upsert) and update counts."""
     report_type, parser_payload, raw_reports, produced_error = _unpack_produced_report(
@@ -751,6 +799,8 @@ def _handle_live_produced_report(
                     ordering_index=ordering_index,
                     triggered_by_user_id=triggered_by_user_id,
                     report_state=report_state,
+                    audit_sink=audit_sink,
+                    audit_actor=audit_actor,
                 )
             raise produced_error
         if parser_payload is None or raw_reports is None or not raw_reports:
@@ -773,6 +823,8 @@ def _handle_live_produced_report(
             ordering_index=ordering_index,
             triggered_by_user_id=triggered_by_user_id,
             report_state=report_state,
+            audit_sink=audit_sink,
+            audit_actor=audit_actor,
         )
         session.commit()
         if deferred_analytics_cleanup is not None:
@@ -798,6 +850,9 @@ def _handle_live_produced_report(
             counts=counts,
             per_report_failures=per_report_failures,
             per_report_failure_details=per_report_failure_details,
+            run_entry=run_entry,
+            audit_sink=audit_sink,
+            audit_actor=audit_actor,
         )
         return _raw_file_count_from_state(report_state)
 
@@ -822,6 +877,9 @@ def _record_live_report_failure(
     counts: dict[str, int],
     per_report_failures: list[tuple[str, str]],
     per_report_failure_details: list[tuple[str, str, str | None]],
+    run_entry: ConnectorRunEntry,
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> None:
     """Persist a bucket-B per-report failure into ``connector_run_reports`` mid-run."""
     error_class = type(exc).__name__
@@ -846,6 +904,17 @@ def _record_live_report_failure(
                 raw_file_id=raw_file_id,
                 tenant_id=tenant_id,
             )
+            # Spec §8.4: each per-raw-file FAILED edge is staged in the same
+            # transaction as the lifecycle write. The audit row commits with
+            # the mark_failed row below so a process crash between the two
+            # cannot leave a FAILED raw_file without its audit row.
+            emit_raw_file_failed(
+                sink=audit_sink,
+                actor=audit_actor,
+                run=run_entry,
+                raw_file=raw_file,
+                error_class=error_class,
+            )
         session.commit()
     except Exception:
         session.rollback()
@@ -869,6 +938,8 @@ def _finish_failed_live_run(
     run_entry: ConnectorRunEntry,
     counts: dict[str, int],
     exc: Exception,
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> ConnectorRunEntry:
     """Close a live run as FAILED (bucket-A short-circuit) with the supplied error class."""
     session.rollback()
@@ -880,6 +951,9 @@ def _finish_failed_live_run(
         counts=counts,
         error_summary=f"{type(exc).__name__}: {exc!s}",
     )
+    # Spec §8.4: CONNECTOR_JOB_RUN/FINISHED is committed with finish_run so
+    # the terminal state and its audit row share one transaction.
+    emit_run_finished(sink=audit_sink, actor=audit_actor, run=finished_run)
     session.commit()
     return finished_run
 
@@ -891,6 +965,8 @@ def _finish_aggregate_live_run(
     run_entry: ConnectorRunEntry,
     counts: dict[str, int],
     per_report_failure_details: list[tuple[str, str, str | None]],
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> ConnectorRunEntry:
     """Close a live run as SUCCEEDED/PARTIAL based on the aggregated per-report counts."""
     status = _derive_terminal_status(counts)
@@ -902,6 +978,8 @@ def _finish_aggregate_live_run(
         counts=counts,
         error_summary=_summarize_failures(per_report_failure_details),
     )
+    # Spec §8.4: CONNECTOR_JOB_RUN/FINISHED commits with finish_run.
+    emit_run_finished(sink=audit_sink, actor=audit_actor, run=finished_run)
     session.commit()
     return finished_run
 
@@ -912,11 +990,13 @@ def _sweep_unfinished_live_run(
     tenant_id: UUID,
     run_entry: ConnectorRunEntry,
     counts: dict[str, int],
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> None:
     """Best-effort sweep for the no-credentials early-out — finish any still-open ``run_entry``."""
     session.rollback()
     try:
-        finish_run(
+        finished_run = finish_run(
             session,
             tenant_id=tenant_id,
             connector_run_id=UUID(run_entry.id),
@@ -924,6 +1004,10 @@ def _sweep_unfinished_live_run(
             counts=counts,
             error_summary="orchestrator aborted unexpectedly",
         )
+        # Best-effort: even the fail-safe sweep emits FINISHED so the audit
+        # trail records the lifecycle terminus. A sink error here is
+        # swallowed by the outer except so the sweep stays best-effort.
+        emit_run_finished(sink=audit_sink, actor=audit_actor, run=finished_run)
         session.commit()
     except Exception:
         session.rollback()
@@ -953,6 +1037,8 @@ def _process_one_report(
     ordering_index: int,
     triggered_by_user_id: UUID | None,
     report_state: dict[str, object],
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> tuple[int, int, tuple[_DeferredStaleCleanupPlan, ...]]:
     """Run one report through blob -> raw_file -> parse -> upsert -> mark_parsed.
 
@@ -985,6 +1071,8 @@ def _process_one_report(
         ordering_index=ordering_index,
         triggered_by_user_id=triggered_by_user_id,
         report_state=report_state,
+        audit_sink=audit_sink,
+        audit_actor=audit_actor,
     )
 
     # 5-7. Parse, upsert, and mark_parsed inside a SAVEPOINT. The raw_file
@@ -1049,9 +1137,22 @@ def _process_one_report(
         # Lifecycle transition: DOWNLOADED -> PARSED. Raises
         # ``RawFileAlreadyParsedError`` if called twice on the same file, which
         # would only happen on a re-entrant orchestrator bug.
+        # Spec §8.4: each per-raw-file PARSED audit row is staged inside the
+        # main transaction so the audit edge commits with the mark_parsed
+        # write (and the upserted source rows) via the outer commit in
+        # ``_handle_live_produced_report``. The audit row is only emitted
+        # when the raw_file actually transitions on this run, mirroring the
+        # idempotent-rerun guard above.
         for raw_file in raw_files:
             if raw_file.parse_status != "PARSED":
                 mark_parsed(session, raw_file_id=raw_file.id, tenant_id=tenant_id)
+                emit_raw_file_parsed(
+                    sink=audit_sink,
+                    actor=audit_actor,
+                    run=run_entry,
+                    raw_file=raw_file,
+                    count_upserted=len(written),
+                )
 
     # Future work (no current task): accurate created/updated/unchanged
     # split via a pre-read of existing source_row_keys. Until then, the
@@ -1386,14 +1487,17 @@ def _prepare_and_link_raw_reports(
     ordering_index: int,
     triggered_by_user_id: UUID | None,
     report_state: dict[str, object],
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> list[RawReportFileORM]:
     """Upload each ``raw_report`` and link the resulting raw_file rows to the active produced report."""
     raw_files: list[RawReportFileORM] = []
     seen_raw_file_ids: set[UUID] = set()
+    newly_downloaded_raw_file_ids: set[UUID] = set()
     report_state["raw_file_ids"] = []
 
     for raw_report in raw_reports:
-        raw_file = _prepare_raw_report_file(
+        raw_file, newly_downloaded = _prepare_raw_report_file(
             session=session,
             tenant_id=tenant_id,
             connector_key=connector_key,
@@ -1409,6 +1513,8 @@ def _prepare_and_link_raw_reports(
         if raw_file.id in seen_raw_file_ids:
             continue
         seen_raw_file_ids.add(raw_file.id)
+        if newly_downloaded:
+            newly_downloaded_raw_file_ids.add(raw_file.id)
         raw_files.append(raw_file)
         report_state["raw_file_ids"].append(raw_file.id)
         report_state.setdefault("raw_file_id", raw_file.id)
@@ -1424,6 +1530,18 @@ def _prepare_and_link_raw_reports(
             raw_report_file_id=raw_file.id,
             ordering_index=ordering_index + offset,
         )
+        # Spec §8.4: stage the DOWNLOADED audit edge in the main transaction
+        # alongside the link join, so the audit row commits with its evidence.
+        # Only fresh inserts / FAILED-reopened rows emit DOWNLOADED -- an
+        # idempotent reuse of a still-DOWNLOADED or already-PARSED raw_file
+        # is not a new download lifecycle edge.
+        if raw_file.id in newly_downloaded_raw_file_ids:
+            emit_raw_file_downloaded(
+                sink=audit_sink,
+                actor=audit_actor,
+                run=run_entry,
+                raw_file=raw_file,
+            )
     return raw_files
 
 
@@ -1453,8 +1571,16 @@ def _prepare_raw_report_file(
     scheme: str,
     bucket: str,
     triggered_by_user_id: UUID | None,
-) -> RawReportFileORM:
-    """Compute checksum, upload, and create/reopen the raw_file row for one CSV download."""
+) -> tuple[RawReportFileORM, bool]:
+    """Compute checksum, upload, and create/reopen the raw_file row for one CSV download.
+
+    Returns ``(raw_file, newly_downloaded)``. ``newly_downloaded`` is True when
+    the raw_file row was freshly inserted by this call or transitioned from
+    FAILED -> DOWNLOADED (a retried payload), which are the two cases that
+    represent a new DOWNLOADED lifecycle edge for the audit log. A reused
+    PARSED or still-DOWNLOADED row is NOT a new edge and returns False so the
+    caller skips the DOWNLOADED audit emit.
+    """
     # 1. Checksum + deterministic URI: same bytes always map to the same path
     # so a retry overwrites or hits the existing object instead of creating a
     # second copy with the same content.
@@ -1483,6 +1609,14 @@ def _prepare_raw_report_file(
     # unique key over source/report_type/month/checksum, so a re-run of the
     # same Google payload must reuse that evidence row instead of trying a
     # second insert.
+    pre_existing_raw_file = _find_existing_raw_file(
+        session,
+        tenant_id=tenant_id,
+        source=source_system,
+        report_type=report_type,
+        report_month=report_month,
+        checksum=checksum,
+    )
     raw_file = _get_or_create_raw_file(
         session,
         tenant_id=tenant_id,
@@ -1499,14 +1633,20 @@ def _prepare_raw_report_file(
             current=raw_file.parse_status,
             target="PARSED",
         )
-    if raw_file.parse_status == "FAILED":
+    failed_reopen = raw_file.parse_status == "FAILED"
+    if failed_reopen:
         # FIX: a retry of the same Google payload must reopen the evidence
         # row before parsing and point it at the blob uploaded by this run.
         raw_file.parse_status = "DOWNLOADED"
         raw_file.file_url = storage_uri
         raw_file.downloaded_by = triggered_by_user_id
         session.flush()
-    return raw_file
+    # Audit lifecycle: a NEW DOWNLOADED edge exists when the row was just
+    # inserted (no pre-existing match) or when a previously-FAILED retry was
+    # reopened. Reuse of a still-DOWNLOADED or already-PARSED row is not a
+    # new download edge for audit purposes.
+    newly_downloaded = pre_existing_raw_file is None or failed_reopen
+    return raw_file, newly_downloaded
 
 
 # ============================================================================
