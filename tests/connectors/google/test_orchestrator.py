@@ -2414,9 +2414,8 @@ def test_dry_run_writes_nothing_returns_outcome_with_run_none(
     - outcome.run is None (no connector_runs row was started)
     - counts["reports_attempted"] == 2 (both reports were enumerated)
     - counts["reports_succeeded"] == 2 (both parsed cleanly)
-    - counts["rows_upserted_total"] >= 2 (the dry-run counter reports what
-      WOULD have been written; the per-category created/updated/unchanged
-      split stays 0 because no upsert ran)
+    - counts["rows_upserted_total"] == 0 (dry-run validates parser output but
+      performs no source-row upsert, so every upsert counter stays zero)
     - zero rows in connector_runs and raw_report_files (defence-in-depth:
       the SAVEPOINT-rollback in the dry-run branch reverts any writes a
       future runner might accidentally make)
@@ -2499,9 +2498,9 @@ def test_dry_run_writes_nothing_returns_outcome_with_run_none(
     assert counts["reports_attempted"] == 2
     assert counts["reports_succeeded"] == 2
     assert counts["reports_failed"] == 0
-    # Each CSV has one data row -> at least 2 rows total. The per-category
-    # split stays 0 in dry-run because no upsert is performed.
-    assert counts["rows_upserted_total"] >= 2
+    # Dry-run validates parser output but performs no source-row upsert, so all
+    # source-row upsert counters stay zero.
+    assert counts["rows_upserted_total"] == 0
     assert counts["rows_upserted_created"] == 0
     assert counts["rows_upserted_updated"] == 0
     assert counts["rows_upserted_unchanged"] == 0
@@ -3848,9 +3847,9 @@ def test_run_one_with_youtube_analytics_dry_run_succeeds_for_cms_channels_only(
     assert counts["reports_attempted"] == 1
     assert counts["reports_succeeded"] == 1
     assert counts["reports_failed"] == 0
-    # The single CMS payload has one data row with all locked monetary metrics.
-    # Per-category split stays 0: no upsert runs on dry-run path.
-    assert counts["rows_upserted_total"] == expected_row_count
+    # The parser sees the single CMS payload, but dry-run performs no upsert.
+    assert expected_row_count > 0
+    assert counts["rows_upserted_total"] == 0
     assert counts["rows_upserted_created"] == 0
     assert counts["rows_upserted_updated"] == 0
     assert counts["rows_upserted_unchanged"] == 0
@@ -5008,8 +5007,9 @@ def test_run_one_with_adsense_management_full_resource_cleanup_uses_parser_scope
     }
 
 
+@pytest.mark.usefixtures("_stub_secret_resolver")
 def test_run_one_per_category_row_counts_plumb_to_connector_run_counts_json(
-    session: Session, _stub_secret_resolver
+    session: Session,
 ) -> None:
     """rows_upserted_created/updated/unchanged reach connector_runs.counts_json.
 
@@ -5079,8 +5079,23 @@ def test_run_one_per_category_row_counts_plumb_to_connector_run_counts_json(
     persisted = session.scalars(
         select(ConnectorRunORM)
         .where(ConnectorRunORM.tenant_id == TENANT_ID)
-        .order_by(ConnectorRunORM.started_at)
+        .order_by(ConnectorRunORM.started_at, ConnectorRunORM.id)
     ).all()
     assert len(persisted) == 3
-    assert persisted[-1].counts_json["rows_upserted_updated"] == 1
-    assert persisted[-1].counts_json["rows_upserted_unchanged"] == 1
+    persisted_counts = [run.counts_json for run in persisted]
+    assert [counts["rows_upserted_total"] for counts in persisted_counts] == [2, 2, 2]
+    assert [counts["rows_upserted_created"] for counts in persisted_counts] == [
+        2,
+        0,
+        0,
+    ]
+    assert [counts["rows_upserted_updated"] for counts in persisted_counts] == [
+        0,
+        0,
+        1,
+    ]
+    assert [counts["rows_upserted_unchanged"] for counts in persisted_counts] == [
+        0,
+        2,
+        1,
+    ]

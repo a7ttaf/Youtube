@@ -84,8 +84,7 @@ class GoogleRevenueSourceRowEntry:
 
 @dataclass(frozen=True)
 class SourceRowUpsertResult:
-    """Result container for upsert_many operation, including persisted entries and
-    counts of created, updated, and unchanged rows."""
+    """Persisted source rows plus the created/updated/unchanged split."""
 
     # ============================================================================
     # Purpose: Return shape of SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many

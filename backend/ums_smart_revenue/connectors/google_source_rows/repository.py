@@ -8,6 +8,7 @@ channel/month list, exact source-key lookup. No conversion, no provider
 chain.
 """
 
+import hashlib
 import json
 import re
 from collections.abc import Iterable
@@ -246,16 +247,15 @@ def _content_matches_existing(
     when the row already exists). Decimal equality is numeric (so 100 == 100.0),
     and dict equality is deep (so raw_payload differences are detected).
     """
-    return all(getattr(row, field) == getattr(existing, field) for field in _CONTENT_COMPARISON_FIELDS)
+    return all(
+        getattr(row, field) == getattr(existing, field)
+        for field in _CONTENT_COMPARISON_FIELDS
+    )
 
 
 def _validate_report_period(row: ParsedSourceRow) -> None:
-    """Validate report_month and period_start/period_end alignment and ordering.
+    """Validate report_month and period_start/period_end alignment and ordering."""
 
-    Ensures report_month matches YYYY-MM, period_start and period_end are date-only,
-    period_end is not before period_start, and the month fields align to a single
-    calendar month period.
-    """
     if not _REPORT_MONTH_RE.match(row.report_month):
         raise GoogleRevenueSourceRowValidationError(
             f"report_month must be YYYY-MM with month 01-12, got {row.report_month!r}"
@@ -375,19 +375,10 @@ class SqlAlchemyCurrenciesRepository:
 #     -> dialect-insert helper pattern reference (_dialect_insert).
 # ============================================================================
 class SqlAlchemyGoogleRevenueSourceRowRepository:
+    """Tenant-scoped storage primitive for Google revenue source rows."""
 
-
-    class SqlAlchemyGoogleRevenueSourceRowRepository:
-        """
-        Repository for managing Google revenue source rows using SQLAlchemy.
-
-        Provides methods to interact with the database through a given
-        SQLAlchemy session.
-        """
-
-        def __init__(self, session: Session) -> None:
-            """Initialize the repository with a SQLAlchemy session."""
-            self._session = session
+    def __init__(self, session: Session) -> None:
+        self._session = session
 
     def upsert_many(
         self,
@@ -444,21 +435,28 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         self._require_raw_file(raw_file_id, tenant_id)
 
         # ============================================================================
-        # Purpose: Pre-fetch existing source rows that overlap the input batch keys
-        #          so the upsert can classify each input as created / updated /
-        #          unchanged before mutating state. Replaces the prior placeholder
-        #          where rows_upserted_created/updated/unchanged were always 0.
-        # Database/ORM: SELECT-only read against google_revenue_source_rows scoped
-        #               to this tenant and the (source_system, source_row_key)
-        #               tuples that appear in the input batch.
-        # Standards: Read happens BEFORE any write, against a single tenant filter
-        #            plus the batch's source_system/source_row_key sets, so the
-        #            query plan stays bounded by the input size and respects
-        #            tenant isolation.
+        # Purpose: Serialize classification per source-row key, then pre-fetch
+        #          existing rows that overlap the input batch so the upsert can
+        #          classify each input as created / updated / unchanged before
+        #          mutating state. Replaces the prior placeholder where
+        #          rows_upserted_created/updated/unchanged were always 0.
+        # Database/ORM: PostgreSQL transaction-scoped advisory locks per
+        #               (tenant_id, source_system, source_row_key), then a
+        #               SELECT-only read against google_revenue_source_rows scoped
+        #               to this tenant and the batch keys.
+        # Standards: The lock is acquired BEFORE the classification read and is
+        #            held until transaction end, so overlapping production runs
+        #            cannot both classify the same absent key as created. The read
+        #            remains tenant-explicit and bounded by batch size.
         # Blast Radius: connector_runs.counts_json accuracy only; the upsert path
-        #               itself is unchanged.
+        #               itself remains the source-of-truth ON CONFLICT write. No
+        #               graph projection impact detected.
         # ============================================================================
         batch_keys = {(r.source_system, r.source_row_key) for r in validated}
+        self._acquire_classification_locks(
+            tenant_id=tenant_id,
+            batch_keys=batch_keys,
+        )
         existing_by_key = self._fetch_existing_for_classification(
             tenant_id=tenant_id, batch_keys=batch_keys
         )
@@ -542,9 +540,17 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
                     ),
                 },
             ).returning(GoogleRevenueSourceRowORM)
-            orm_row = self._session.execute(statement).scalar_one()
+            orm_row = self._session.execute(
+                statement.execution_options(populate_existing=True)
+            ).scalar_one()
             written.append(self._to_entry(orm_row))
         self._session.flush()
+        classified_total = created_count + updated_count + unchanged_count
+        if len(written) != classified_total:
+            raise GoogleRevenueSourceRowError(
+                "source-row upsert classification invariant violated: "
+                f"entries={len(written)} classified={classified_total}"
+            )
         return SourceRowUpsertResult(
             entries=written,
             created=created_count,
@@ -556,12 +562,8 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
     def _require_no_duplicate_keys(
         validated: list[ParsedSourceRow],
     ) -> None:
-        """Reject duplicate rows in the validated batch for the same (source_system, source_row_key).
+        """Reject duplicate upsert keys inside one parser batch."""
 
-        Raises:
-            GoogleRevenueSourceRowValidationError: If duplicate key pairs are
-                found, listing each duplicate.
-        """
         # ====================================================================
         # Purpose: Reject a batch that carries more than one row per
         #          (source_system, source_row_key) — the upsert conflict target.
@@ -593,6 +595,59 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
             f"batch: {named}"
         )
 
+    @staticmethod
+    def _classification_lock_key(
+        tenant_id: UUID,
+        source_system: str,
+        source_row_key: str,
+    ) -> int:
+        """Return a stable PostgreSQL advisory-lock bigint for one source row."""
+
+        payload = (
+            f"google_revenue_source_rows\0{tenant_id}\0"
+            f"{source_system}\0{source_row_key}"
+        ).encode()
+        digest = hashlib.blake2b(payload, digest_size=8).digest()
+        return int.from_bytes(digest, "big") >> 1
+
+    # ========================================================================
+    # Purpose: In PostgreSQL, serialize the classification read + subsequent
+    #          ON CONFLICT write for every source key in this batch. Without
+    #          this, two overlapping workers can both pre-read an absent key,
+    #          then both upsert it, and both report "created" even though only
+    #          one row is newly created.
+    # Database/ORM: pg_advisory_xact_lock(bigint) only on PostgreSQL; SQLite
+    #               test runs no-op because it has no comparable transaction
+    #               advisory-lock primitive.
+    # Standards: Locks are sorted for deterministic acquisition order and are
+    #            scoped to tenant_id + source_system + source_row_key. The lock
+    #            key is derived from a stable hash and never includes row
+    #            payload, amounts, credentials, or private user data.
+    # Blast Radius: connector_runs.counts_json accuracy for concurrent live
+    #               ingestion. Source-row values still persist through the same
+    #               unique constraint and ON CONFLICT write. No graph projection
+    #               impact detected.
+    # ========================================================================
+    def _acquire_classification_locks(
+        self,
+        *,
+        tenant_id: UUID,
+        batch_keys: set[tuple[str, str]],
+    ) -> None:
+        """Acquire PostgreSQL transaction locks for source-row classification."""
+
+        if not batch_keys:
+            return
+        if self._session.get_bind().dialect.name != "postgresql":
+            return
+        for source_system, source_row_key in sorted(batch_keys):
+            lock_key = self._classification_lock_key(
+                tenant_id,
+                source_system,
+                source_row_key,
+            )
+            self._session.execute(select(func.pg_advisory_xact_lock(lock_key)))
+
     # ========================================================================
     # Purpose: Load the existing rows whose (source_system, source_row_key) pairs
     #          appear in the input upsert batch so the caller can classify each
@@ -611,11 +666,8 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         tenant_id: UUID,
         batch_keys: set[tuple[str, str]],
     ) -> dict[tuple[str, str], GoogleRevenueSourceRowORM]:
-        """Load existing rows for classification based on batch keys.
+        """Fetch existing rows for the current batch's source keys."""
 
-        Returns a dictionary mapping each (source_system, source_row_key) tuple
-        to its ORM row object.
-        """
         if not batch_keys:
             return {}
         source_systems = {system for system, _ in batch_keys}

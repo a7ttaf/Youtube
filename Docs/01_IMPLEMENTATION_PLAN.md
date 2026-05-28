@@ -239,8 +239,9 @@ running on the operator's workstation.
       AdSense row skipped as SkipReason.MISSING_CHANNEL_ID, and the
       12-event STARTED->DOWNLOADED->PARSED->FINISHED audit sequence per
       run with the connector service principal.
-    - ⏳ PR #TBD — Concern C: connector_runs.counts_json source-row
-      created/updated/unchanged split (B2.6 carry-forward). Replaces the
+    - ⏳ PR #50 — remaining: awaiting merge — Concern C:
+      connector_runs.counts_json source-row created/updated/unchanged split
+      (B2.6 carry-forward). Replaces the
       placeholder where rows_upserted_created/updated/unchanged were
       always 0 with a real classification:
       SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many now
@@ -255,9 +256,10 @@ running on the operator's workstation.
       _handle_live_produced_report sums them into the run-level counts
       dict that finish_run writes to connector_runs.counts_json. Sum
       invariant: created + updated + unchanged == total. Dry-run keeps
-      the placeholder zeros for the per-category fields (no upsert runs).
-      4 new repo-level tests cover create/unchanged/updated/mixed-rerun
-      and 1 new end-to-end orchestrator test asserts the counts plumb
+      every source-row upsert counter at 0 (no upsert runs).
+      6 new repo-level tests cover create/unchanged/updated/mixed-rerun,
+      provenance-only rerun, and refreshed RETURNING payloads; 1 new
+      end-to-end orchestrator test asserts the counts plumb
       into connector_runs.counts_json across 3 consecutive runs (fresh
       insert, identical rerun, mutated rerun). _require_no_duplicate_keys
       fails closed (typed GoogleRevenueSourceRowValidationError, nothing

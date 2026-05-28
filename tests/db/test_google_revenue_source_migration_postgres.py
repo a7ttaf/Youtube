@@ -4,10 +4,6 @@ upgrade head (20260521_0001) -> upgrade 20260523_0001 -> downgrade -1
 -> upgrade head again. Verifies idempotency and that downgrade truly
 reverses the upgrade.
 """
-Module for testing Google revenue source migration on PostgreSQL.
-Provides fixtures for database setup and tests verifying Alembic migrations,
-table existence, indexes, downgrade behavior, and repository upsert functionality.
-"""
 
 from datetime import date
 from decimal import Decimal
@@ -15,7 +11,7 @@ from pathlib import Path
 from uuid import UUID, uuid4
 
 import pytest
-from _postgres_helpers import require_postgres_url  # sibling module (pytest's prepend mode puts tests/db on sys.path)
+from _postgres_helpers import require_postgres_url
 from alembic import command
 from alembic.config import Config
 from sqlalchemy import Connection, create_engine, inspect, text
@@ -226,12 +222,8 @@ def test_raw_payload_object_check_rejects_non_object(
     command.upgrade(alembic_config, "20260523_0001")
     inspector = inspect(fresh_engine)
     checks = {
-        c["name"] for c in inspector.get_check_constraints("google_revenue_source_rows")
-"""
-Test module for google_revenue_source_migration_postgres migrations. Contains helper functions
-and tests for inserting google_revenue_source_rows and verifying database constraint
-behavior on amount values.
-"""
+        c["name"]
+        for c in inspector.get_check_constraints("google_revenue_source_rows")
     }
     assert "ck_google_revenue_source_rows_raw_payload_object" in checks
 
@@ -247,7 +239,7 @@ behavior on amount values.
                 "INSERT INTO google_revenue_source_rows "
                 "(tenant_id, source_system, source_row_key, source_account_id, "
                 " report_type, report_month, period_start, period_end, metric_key, "
-                " value_kind, amount_native, currency_code, raw_payload) VALUES "
+                " value_kind, amount_native, currency_code, raw_payload) VALUES ("
                 ":tenant_id, 'youtube_reporting', :key, 'acct', 'rt', '2026-04', "
                 " '2026-04-01', '2026-04-30', 'estimatedRevenue', 'estimated', "
                 " 1.0, 'USD', '[]')"
@@ -269,13 +261,12 @@ def _insert_amount_sql(conn: Connection, tenant_id: UUID, key: str, amount: str)
             "INSERT INTO google_revenue_source_rows "
             "(tenant_id, source_system, source_row_key, source_account_id, "
             " report_type, report_month, period_start, period_end, metric_key, "
-            " value_kind, amount_native, currency_code, raw_payload) VALUES "
+            " value_kind, amount_native, currency_code, raw_payload) VALUES ("
             ":tenant_id, 'youtube_reporting', :key, 'acct', 'rt', '2026-04', "
             " '2026-04-01', '2026-04-30', 'estimatedRevenue', 'estimated', "
-            " CAST(:amt AS numeric), 'USD', '{}'"
+            " CAST(:amt AS numeric), 'USD', '{}')"
         ),
         {"tenant_id": tenant_id, "key": key, "amt": amount},
-    )
     )
 
 
@@ -290,8 +281,6 @@ def test_amount_finite_check_rejects_nan_and_infinity(
         sorts above every finite value), so the ck_..._amount_finite CHECK is
         what rejects it -> IntegrityError.
       - +Infinity is rejected even earlier by the NUMERIC(20,6) column type
-    """
-    # test implementation continues...
         itself ("cannot hold an infinite value") -> DataError.
     """
     command.upgrade(alembic_config, "20260523_0001")

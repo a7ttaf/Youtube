@@ -523,9 +523,8 @@ def _run_dry_run(
                     parser_payload = produced.parser_payload
                 else:
                     _report_type, parser_payload, _raw_bytes = produced
-                rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
+                list(parser.parse(parser_payload, tenant_id=tenant_id))
                 counts["reports_succeeded"] += 1
-                counts["rows_upserted_total"] += len(rows)
             except Exception:
                 counts["reports_failed"] += 1
     finally:
@@ -1036,12 +1035,7 @@ def _sweep_unfinished_live_run(
 
 @dataclass(frozen=True)
 class _ProcessedReportResult:
-    """
-    Carry per-report row-write outcomes from `_process_one_report` back to
-    `_handle_live_produced_report`. Encapsulates counts of total, created,
-    updated, and unchanged rows, along with raw file count and deferred
-    cleanup plans.
-    """
+    """Per-report source-row counts and raw-file side effects."""
 
     # ============================================================================
     # Purpose: Carry per-report row-write outcomes from ``_process_one_report``

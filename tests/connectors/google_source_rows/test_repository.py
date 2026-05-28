@@ -17,10 +17,6 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import uuid4
-"""
-Module for testing the SqlAlchemyGoogleRevenueSourceRowRepository by providing session fixtures
-and validating repository behaviors.
-"""
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -60,49 +56,49 @@ def session() -> Iterator[Session]:
                 [
                     TenantORM(id=TENANT_A, slug="tenant-a", display_name="Tenant A"),
                     TenantORM(id=TENANT_B, slug="tenant-b", display_name="Tenant B"),
-                # Raw evidence files are tenant-scoped; seed one per tenant
-                # so upsert_many's tenant-scoped raw_file_id pre-check passes
-                # for same-tenant links and rejects cross-tenant ones.
-                RawReportFileORM(
-                    id=RAW_FILE_ID,
-                    tenant_id=TENANT_A,
-                    source="youtube_reporting",
-                    report_type="channel_monthly_estimated_revenue",
-                    report_month="2026-04",
-                    file_url="memory://tenant-a/raw.json",
-                    checksum="a" * 64,
-                ),
-                RawReportFileORM(
-                    id=RAW_FILE_ID_B,
-                    tenant_id=TENANT_B,
-                    source="youtube_reporting",
-                    report_type="channel_monthly_estimated_revenue",
-                    report_month="2026-04",
-                    file_url="memory://tenant-b/raw.json",
-                    checksum="b" * 64,
-                ),
-                CurrencyORM(
-                    code="USD",
-                    numeric_code="840",
-                    name="US Dollar",
-                    minor_unit=2,
-                    is_supported=True,
-                    activated_at=datetime.now(UTC),
-                ),
-                CurrencyORM(
-                    code="EGP",
-                    numeric_code="818",
-                    name="Egyptian Pound",
-                    minor_unit=2,
-                    is_supported=True,
-                    activated_at=datetime.now(UTC),
-                ),
-            ]
-        )
-        s.flush()
-        yield s
-finally:
-    engine.dispose()
+                    # Raw evidence files are tenant-scoped; seed one per tenant
+                    # so upsert_many's tenant-scoped raw_file_id pre-check passes
+                    # for same-tenant links and rejects cross-tenant ones.
+                    RawReportFileORM(
+                        id=RAW_FILE_ID,
+                        tenant_id=TENANT_A,
+                        source="youtube_reporting",
+                        report_type="channel_monthly_estimated_revenue",
+                        report_month="2026-04",
+                        file_url="memory://tenant-a/raw.json",
+                        checksum="a" * 64,
+                    ),
+                    RawReportFileORM(
+                        id=RAW_FILE_ID_B,
+                        tenant_id=TENANT_B,
+                        source="youtube_reporting",
+                        report_type="channel_monthly_estimated_revenue",
+                        report_month="2026-04",
+                        file_url="memory://tenant-b/raw.json",
+                        checksum="b" * 64,
+                    ),
+                    CurrencyORM(
+                        code="USD",
+                        numeric_code="840",
+                        name="US Dollar",
+                        minor_unit=2,
+                        is_supported=True,
+                        activated_at=datetime.now(UTC),
+                    ),
+                    CurrencyORM(
+                        code="EGP",
+                        numeric_code="818",
+                        name="Egyptian Pound",
+                        minor_unit=2,
+                        is_supported=True,
+                        activated_at=datetime.now(UTC),
+                    ),
+                ]
+            )
+            s.flush()
+            yield s
+    finally:
+        engine.dispose()
 
 
 def _row(
@@ -138,10 +134,7 @@ def _row(
 
 
 def test_upsert_many_inserts_new_rows(session: Session) -> None:
-    """Test that upsert_many inserts new rows when none exist.
-
-    Verifies that distinct rows are inserted and persisted correctly.
-    """
+    """New source keys are inserted and returned as created entries."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     rows = [_row(source_row_key="a" * 64), _row(source_row_key="b" * 64)]
     result = repo.upsert_many(
@@ -196,7 +189,7 @@ def test_upsert_many_preserves_id_on_conflict(session: Session) -> None:
 
 
 def test_upsert_many_updates_mutable_fields_on_conflict(session: Session) -> None:
-    """Test that on conflict, mutable fields are updated by upsert_many."""
+    """A source-key conflict updates parser-owned mutable content fields."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     key = "d" * 64
     repo.upsert_many(
@@ -217,6 +210,32 @@ def test_upsert_many_updates_mutable_fields_on_conflict(session: Session) -> Non
         )
     ).one()
     assert reloaded.amount_native == Decimal("150.000000")
+
+
+def test_upsert_many_returns_refreshed_entry_after_conflict_update(
+    session: Session,
+) -> None:
+    """Conflict updates return refreshed persisted content, not stale identity data."""
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    key = "r" * 64
+    repo.upsert_many(
+        TENANT_A,
+        [_row(source_row_key=key, amount="100.000000")],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=None,
+    )
+    updated_row = replace(
+        _row(source_row_key=key, amount="150.000000"),
+        raw_payload={"sample": "updated"},
+    )
+    result = repo.upsert_many(
+        TENANT_A,
+        [updated_row],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=None,
+    )
+    assert result.entries[0].amount_native == Decimal("150.000000")
+    assert result.entries[0].raw_payload == {"sample": "updated"}
 
 
 def test_tenant_isolation(session: Session) -> None:
@@ -283,7 +302,7 @@ def test_allows_none_raw_file(session: Session) -> None:
 
 
 def test_rejects_invalid_source_system(session: Session) -> None:
-    """Test that upsert_many rejects invalid source_system values."""
+    """Unknown source systems fail at the typed repository boundary."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     bad = _row(source_row_key="f" * 64, source_system="not_a_real_source")
     with pytest.raises(GoogleRevenueSourceRowValidationError):
@@ -669,9 +688,6 @@ def test_upsert_preserves_provenance_when_reimport_omits_it(session: Session) ->
     # Phase 3: a genuinely new file/importer (non-None) does replace. file_2 is
     # a real TENANT_A-owned raw file so it passes the tenant-scoped FK pre-check.
     session.add(
-"""Module tests for SqlAlchemyGoogleRevenueSourceRowRepository:
-Ensure correct behavior of upsert, clear, and delete operations for GoogleRevenueSourceRowORM."""
-
         RawReportFileORM(
             id=file_2,
             tenant_id=TENANT_A,
@@ -729,7 +745,7 @@ def test_upsert_can_clear_stale_raw_file_id_for_aggregate_replacement(
 
 
 def test_delete_stale_for_scope_preserves_other_scopes(session: Session) -> None:
-    """Test that delete_stale_for_scope removes stale rows for the given scope while preserving rows from other scopes."""
+    """Delete stale scoped rows while preserving rows from other scopes."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     keep_key = "dk" * 32
     stale_key = "ds" * 32
@@ -865,7 +881,7 @@ def test_non_usd_source_rows_visible_at_repository_layer(session: Session) -> No
 
 
 def test_upsert_many_classifies_all_new_rows_as_created(session: Session) -> None:
-    """Ensure upsert_many classifies all provided new rows as created."""
+    """Rows without existing source keys are classified as created."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     rows = [
         _row(source_row_key="A" * 64),
@@ -882,7 +898,7 @@ def test_upsert_many_classifies_all_new_rows_as_created(session: Session) -> Non
 
 
 def test_upsert_many_classifies_existing_unchanged_rerun(session: Session) -> None:
-    """Ensure upsert_many classifies rerun of unchanged rows as unchanged."""
+    """An identical rerun is classified as unchanged content."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     row = _row(source_row_key="U" * 64)
     repo.upsert_many(TENANT_A, [row], raw_file_id=RAW_FILE_ID, imported_by=None)
@@ -895,10 +911,45 @@ def test_upsert_many_classifies_existing_unchanged_rerun(session: Session) -> No
     assert result.unchanged == 1
 
 
+def test_upsert_many_classifies_provenance_only_rerun_as_unchanged(
+    session: Session,
+) -> None:
+    """Fresh raw-file provenance with identical content does not count as updated."""
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    replacement_raw_file_id = uuid4()
+    importer = uuid4()
+    session.add(
+        RawReportFileORM(
+            id=replacement_raw_file_id,
+            tenant_id=TENANT_A,
+            source="youtube_reporting",
+            report_type="channel_monthly_estimated_revenue",
+            report_month="2026-04",
+            file_url="memory://tenant-a/replacement.json",
+            checksum="c" * 64,
+        )
+    )
+    session.flush()
+
+    row = _row(source_row_key="P" * 64)
+    repo.upsert_many(TENANT_A, [row], raw_file_id=RAW_FILE_ID, imported_by=None)
+    result = repo.upsert_many(
+        TENANT_A,
+        [row],
+        raw_file_id=replacement_raw_file_id,
+        imported_by=importer,
+    )
+    assert result.created == 0
+    assert result.updated == 0
+    assert result.unchanged == 1
+    assert result.entries[0].raw_file_id == str(replacement_raw_file_id)
+    assert result.entries[0].imported_by == str(importer)
+
+
 def test_upsert_many_classifies_existing_with_value_change_as_updated(
     session: Session,
 ) -> None:
-    """Ensure upsert_many classifies existing rows with changed values as updated."""
+    """A parser-owned value change on an existing key is classified as updated."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     key = "V" * 64
     repo.upsert_many(
@@ -920,7 +971,7 @@ def test_upsert_many_classifies_existing_with_value_change_as_updated(
 
 
 def test_upsert_many_classifies_mixed_rerun(session: Session) -> None:
-    """Ensure upsert_many classifies mixed rerun rows correctly into created, updated, and unchanged."""
+    """A mixed rerun reports created, updated, and unchanged rows together."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     seeded_unchanged_1 = _row(source_row_key="M1" * 32, amount="10.000000")
     seeded_unchanged_2 = _row(source_row_key="M2" * 32, amount="20.000000")
