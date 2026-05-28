@@ -255,7 +255,6 @@ def _content_matches_existing(
 
 def _validate_report_period(row: ParsedSourceRow) -> None:
     """Validate report_month and period_start/period_end alignment and ordering."""
-
     if not _REPORT_MONTH_RE.match(row.report_month):
         raise GoogleRevenueSourceRowValidationError(
             f"report_month must be YYYY-MM with month 01-12, got {row.report_month!r}"
@@ -563,7 +562,6 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         validated: list[ParsedSourceRow],
     ) -> None:
         """Reject duplicate upsert keys inside one parser batch."""
-
         # ====================================================================
         # Purpose: Reject a batch that carries more than one row per
         #          (source_system, source_row_key) — the upsert conflict target.
@@ -602,7 +600,6 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         source_row_key: str,
     ) -> int:
         """Return a stable PostgreSQL advisory-lock bigint for one source row."""
-
         payload = (
             f"google_revenue_source_rows\0{tenant_id}\0"
             f"{source_system}\0{source_row_key}"
@@ -635,7 +632,6 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         batch_keys: set[tuple[str, str]],
     ) -> None:
         """Acquire PostgreSQL transaction locks for source-row classification."""
-
         if not batch_keys:
             return
         if self._session.get_bind().dialect.name != "postgresql":
@@ -667,7 +663,6 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         batch_keys: set[tuple[str, str]],
     ) -> dict[tuple[str, str], GoogleRevenueSourceRowORM]:
         """Fetch existing rows for the current batch's source keys."""
-
         if not batch_keys:
             return {}
         source_systems = {system for system, _ in batch_keys}

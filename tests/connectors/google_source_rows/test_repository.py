@@ -43,9 +43,7 @@ RAW_FILE_ID_B = uuid4()  # owned by TENANT_B
 
 @pytest.fixture
 def session() -> Iterator[Session]:
-    """
-    Provide an in-memory SQLite session with seeded tenant and report file data for tests.
-    """
+    """Provide an in-memory SQLite session with seeded tenant and report file data."""
     engine = create_engine("sqlite:///:memory:")
     FinanceBase.metadata.create_all(engine)
     TenantBase.metadata.create_all(engine)
@@ -422,6 +420,7 @@ def test_list_for_channel_returns_only_matches(session: Session) -> None:
     )
     assert len(alpha) == 2
     assert {r.youtube_channel_id for r in alpha} == {"UC_alpha"}
+
 
 def test_upsert_many_does_not_alias_caller_raw_payload(session: Session) -> None:
     """Mutating the caller's raw_payload dict after upsert must not affect persisted state.
@@ -849,12 +848,6 @@ def test_rejects_non_finite_float_in_raw_payload(session: Session) -> None:
     with pytest.raises(GoogleRevenueSourceRowValidationError, match=r"finite numbers"):
         repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
 
-"""Tests for the SqlAlchemyGoogleRevenueSourceRowRepository upsert_many behavior.
-
-This module contains tests verifying that upsert_many classifies new rows as created,
-existing unchanged rows as unchanged, existing rows with value changes as updated,
-and mixed sets of rows correctly as created, updated, or unchanged.
-"""
 
 def test_non_usd_source_rows_visible_at_repository_layer(session: Session) -> None:
     """B1 makes non-USD source rows queryable at the repository layer.
@@ -995,6 +988,7 @@ def test_upsert_many_classifies_mixed_rerun(session: Session) -> None:
     assert result.created == 1
     assert result.updated == 1
     assert result.unchanged == 2
+
 
 def test_upsert_many_rejects_duplicate_source_row_key_in_batch(
     session: Session,

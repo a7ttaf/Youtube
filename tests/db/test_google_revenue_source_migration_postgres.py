@@ -165,7 +165,8 @@ def test_repository_upsert_round_trip_on_postgres(
     alembic_config: Config, fresh_engine: object
 ) -> None:
     """Exercise the production upsert path on real PostgreSQL, covering insert,
-    conflict-update, and id preservation across the conflict."""
+    conflict-update, and id preservation across the conflict.
+    """
     command.upgrade(alembic_config, "20260523_0001")
     tenant_id = uuid4()
 
