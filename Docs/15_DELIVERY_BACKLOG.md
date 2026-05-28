@@ -43,7 +43,8 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
       LocalFileStoreBackend end-to-end through run_one. B2.5 (YouTube
       Analytics) + B2.6 (operator console) stack on top in follow-up
       PRs.
-    - ⏳ PR #48 (B2.5) — YouTube Analytics targeted CMS-channel
+    - ✅ PR #48 (B2.5, merged 2026-05-28 as commit 68ac62e) — YouTube
+      Analytics targeted CMS-channel
       ingestion; registers youtube-analytics (and the youtube_analytics
       alias) in the B2.4 connector registry; queries
       `ids=contentOwner==<account>` with `filters=channel==<id>` and
