@@ -30,7 +30,10 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.connectors.google.errors import MalformedReportMonthError
+from ums_smart_revenue.connectors.google.errors import (
+    MalformedAnalyticsSelectorError,
+    MalformedReportMonthError,
+)
 from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
 
@@ -75,6 +78,23 @@ def _build_query_request(
     *, account_id: str, channel_id: str, report_month: str,
 ) -> dict[str, str]:
     """Return the canonical reports.query parameters for one channel-month slice."""
+    # FIX: fail closed on empty/whitespace account_id or channel_id before
+    # constructing the selector strings. Without this guard the request would
+    # serialize to `ids=contentOwner==` / `filters=channel==`, which the
+    # YouTube Analytics API rejects opaquely and which (if it ever persisted)
+    # would write a source_account_id with no owner/channel identity. Both
+    # values are operator/registry-controlled, so this is a typed boundary
+    # check, not user input sanitisation.
+    if not isinstance(account_id, str) or not account_id.strip():
+        raise MalformedAnalyticsSelectorError(
+            field_name="account_id", value=account_id,
+        )
+    if not isinstance(channel_id, str) or not channel_id.strip():
+        raise MalformedAnalyticsSelectorError(
+            field_name="channel_id", value=channel_id,
+        )
+    account_id = account_id.strip()
+    channel_id = channel_id.strip()
     if not _REPORT_MONTH_PATTERN.fullmatch(report_month):
         raise MalformedReportMonthError(report_month=report_month)
     year, month = report_month.split("-")

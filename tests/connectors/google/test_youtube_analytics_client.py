@@ -9,7 +9,10 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.connectors.google.errors import MalformedReportMonthError
+from ums_smart_revenue.connectors.google.errors import (
+    MalformedAnalyticsSelectorError,
+    MalformedReportMonthError,
+)
 from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
 from ums_smart_revenue.connectors.google.youtube_analytics_client import (
     YouTubeAnalyticsClient,
@@ -169,3 +172,41 @@ def test_fetch_channel_report_rejects_malformed_report_month(
             channel_id="UC-xyz",
             report_month=bad_month,
         )
+
+
+@pytest.mark.parametrize("bad_account", ["", "   ", "\t\n"])
+def test_fetch_channel_report_rejects_empty_account_id(
+    mock_credentials, bad_account: str,
+) -> None:
+    """Empty/whitespace account_id must fail closed before any HTTP traffic."""
+    http = GoogleHttpClient(
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200)),
+    )
+    client = YouTubeAnalyticsClient(http=http)
+    with pytest.raises(MalformedAnalyticsSelectorError) as exc_info:
+        client.fetch_channel_report(
+            account_id=bad_account,
+            channel_id="UC-xyz",
+            report_month="2026-05",
+        )
+    assert exc_info.value.field_name == "account_id"
+
+
+@pytest.mark.parametrize("bad_channel", ["", "   ", "\t\n"])
+def test_fetch_channel_report_rejects_empty_channel_id(
+    mock_credentials, bad_channel: str,
+) -> None:
+    """Empty/whitespace channel_id must fail closed before any HTTP traffic."""
+    http = GoogleHttpClient(
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(lambda _r: httpx.Response(200)),
+    )
+    client = YouTubeAnalyticsClient(http=http)
+    with pytest.raises(MalformedAnalyticsSelectorError) as exc_info:
+        client.fetch_channel_report(
+            account_id="owner-a",
+            channel_id=bad_channel,
+            report_month="2026-05",
+        )
+    assert exc_info.value.field_name == "channel_id"

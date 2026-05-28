@@ -185,3 +185,21 @@ class MalformedReportMonthError(GoogleConnectorError):
             f"report_month {report_month!r} must be YYYY-MM with a calendar month 01-12"
         )
         self.report_month = report_month
+
+
+class MalformedAnalyticsSelectorError(GoogleConnectorError):
+    """Raised when an analytics selector id is empty / whitespace-only.
+
+    Lets ``_build_query_request`` fail closed before constructing an invalid
+    ``ids=contentOwner==`` / ``filters=channel==`` string that the YouTube
+    Analytics API would otherwise reject with an opaque 400 (or worse, silently
+    persist a row whose ``source_account_id`` cannot be tied back to a real
+    owner or channel).
+    """
+
+    def __init__(self, *, field_name: str, value: str) -> None:
+        super().__init__(
+            f"{field_name} must be a non-empty string, got {value!r}"
+        )
+        self.field_name = field_name
+        self.value = value

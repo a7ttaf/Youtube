@@ -2638,6 +2638,15 @@ class YouTubeAnalyticsRunner:
         report_month: str,
         account_id: str,
     ) -> Iterator[ProducedReport]:
+        """Yield one parser-ready payload per eligible CMS channel for ``report_month``.
+
+        Each iteration issues one ``reports.query`` GET via
+        ``YouTubeAnalyticsClient`` for the next ``channel_id`` returned by
+        ``list_target_channels``. A per-channel ``GoogleConnectorError`` (other
+        than ``OAuthRefreshError``, which still escapes for run-level handling)
+        is yielded as a ``ProducedReportFailure`` so the orchestrator marks the
+        run PARTIAL and continues with the remaining channels.
+        """
         # ``run`` carries the tenant_id we need for list_target_channels.
         # On the T29 dry-run path run is None; the orchestrator still passes
         # a ConnectorRunEntry-compatible object for dry-runs so tenant_id is
