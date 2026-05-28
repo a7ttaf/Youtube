@@ -14,6 +14,11 @@ from ums_smart_revenue.connectors.google.errors import ConnectorAlreadyRegistere
 _RunnerFn = Callable[..., Any]
 _REGISTRY: dict[str, _RunnerFn] = {}
 
+# Canonical operator-facing key for the AdSense Management connector slice.
+# Shared by the live payment-sync service and the run orchestrator so the
+# credential row is resolved under a single source-of-truth string.
+ADSENSE_MANAGEMENT_CONNECTOR_KEY = "adsense-management"
+
 
 # ============================================================================
 # Purpose: Register a connector runner behind its operator-facing key.

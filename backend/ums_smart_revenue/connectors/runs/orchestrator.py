@@ -439,7 +439,7 @@ def _run_one_with_credentials(
     )
 
 
-def _credentials_for_run(
+def resolve_connector_credentials(
     *,
     session: Session,
     tenant_id: UUID,
@@ -470,6 +470,10 @@ def _credentials_for_run(
     credentials = build_credentials_from_payload(payload)
     refresh_credentials(credentials)
     return credentials
+
+
+# Backwards-compatible internal alias (existing call sites unchanged).
+_credentials_for_run = resolve_connector_credentials
 
 
 # ============================================================================
