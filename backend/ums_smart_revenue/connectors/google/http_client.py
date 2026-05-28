@@ -37,15 +37,6 @@ from ums_smart_revenue.connectors.google.errors import (
     OAuthRefreshError,
 )
 
-"""
-HTTP client module for Google API requests with detailed retry logic.
-
-This module provides functions and classes to perform HTTP requests
-with exponential backoff, handling of retryable status codes,
-timeouts, and transport errors. It also manages authentication
-headers and terminal response processing.
-"""
-
 _CLIENT_STATUSES = frozenset({400, 404, 422})
 _AUTH_STATUSES = frozenset({401, 403})
 _RETRY_SERVER_STATUSES = frozenset({500, 502, 503, 504})
@@ -106,7 +97,7 @@ def _sleep_for_retryable_status(
 ) -> bool:
     """
     Handle retry delays for retryable HTTP status codes, sleeping based on
-    status code and attempt count, and raise errors when maximum attempts are reached.
+    status code and attempt count, and raise when maximum attempts are reached.
     """
     status = response.status_code
     if status == 429:
@@ -307,14 +298,6 @@ def _send_with_retry_response(
     # Kept as a belt-and-suspenders no-return so type checkers don't flag a
     # fall-through path off the while loop.
     raise GoogleApiServerError(
-"""
-HTTP client module for Google APIs with retry support.
-
-This module provides the GoogleHttpClient class for making authenticated
-HTTP requests to Google APIs with built-in retry policies. It supports
-JSON-based requests, raw byte fetching, and graceful shutdown.
-"""
-
         method=method,
         url=url,
         status=state.last_status,
@@ -323,7 +306,6 @@ JSON-based requests, raw byte fetching, and graceful shutdown.
 
 
 class GoogleHttpClient:
-    """HTTP client for Google APIs that manages authentication with provided credentials, handles retries, and uses httpx.Client for HTTP communication."""
     """Authenticated HTTP wrapper for Google API JSON and byte downloads."""
 
     def __init__(
@@ -338,7 +320,12 @@ class GoogleHttpClient:
         self._auth_request = Request()
         self._client = httpx.Client(
             transport=transport,
-            timeout=httpx.Timeout(connect=timeout_connect, read=timeout_read, write=None, pool=None),
+            timeout=httpx.Timeout(
+                connect=timeout_connect,
+                read=timeout_read,
+                write=None,
+                pool=None,
+            ),
         )
 
     # DeepSource keeps this historical complexity issue anchored here after the
@@ -349,13 +336,9 @@ class GoogleHttpClient:
         method: str,
         url: str,
         params: _QueryParams | None = None,
-        """
-        Execute a Google API call with retry policy and translate
-        HTTP/transport failures into typed errors. Returns the httpx.Response
-        on success or raises a GoogleConnectorError subclass on failure.
-        """
         json_body: Mapping[str, object] | None = None,
     ) -> httpx.Response:
+        """Execute a Google API request with retry and typed transport errors."""
         # ====================================================================
         # Purpose: Execute one Google API call with the spec §7 retry policy
         #   and translate HTTP / transport failures into the typed error
@@ -401,11 +384,6 @@ class GoogleHttpClient:
         params: _QueryParams | None = None,
         json_body: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
-        """
-        Execute a Google JSON API call and return the decoded object body.
-        Validates that the response is JSON and a dict, raising
-        GoogleApiResponseError on parse errors or unexpected shapes.
-        """
         """Execute a Google JSON API request and return an object body."""
         # ====================================================================
         # Purpose: Execute one Google JSON-API call and return the decoded
@@ -432,18 +410,18 @@ class GoogleHttpClient:
         try:
             body = response.json()
         except ValueError as exc:
-            raise GoogleApiResponseError(url=url, reason=f"not valid json: {exc}") from exc
+            raise GoogleApiResponseError(
+                url=url, reason=f"not valid json: {exc}"
+            ) from exc
         if not isinstance(body, dict):
-            raise GoogleApiResponseError(url=url, reason=f"expected object, got {type(body).__name__}")
+            raise GoogleApiResponseError(
+                url=url, reason=f"expected object, got {type(body).__name__}"
+            )
         return body
 
     def fetch_bytes(self, *, url: str) -> bytes:
         """GET a Google URL and return the raw response body bytes."""
-        """
-        GET a URL and return the raw response body bytes. Uses the shared
-        retry helper and bearer authentication without JSON parsing.
-        """
-        # ==================================================
+        # ====================================================================
         # Purpose: GET a URL and return the raw response body bytes. Used for
         #   binary/CSV downloads (e.g. YouTube Reporting downloadUrl) where
         #   the response is not JSON and request()'s body-validation would
@@ -461,13 +439,10 @@ class GoogleHttpClient:
         #   - File: backend/ums_smart_revenue/connectors/google/
         #     youtube_reporting_client.py -> fetch_report uses this for the
         #     reports.downloadUrl CSV fetch.
-        # ==================================================
+        # ====================================================================
         response = self._send_with_retry(method="GET", url=url)
         return response.content
 
     def close(self) -> None:
-        """
-        Close the underlying HTTP client and release any held resources.
-        """
         """Close the underlying HTTP client and release connection resources."""
         self._client.close()
