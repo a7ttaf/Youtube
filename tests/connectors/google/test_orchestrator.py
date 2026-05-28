@@ -2850,11 +2850,11 @@ def test_run_one_with_youtube_analytics_succeeds_for_cms_channels_only(
         id=uuid4(),
         tenant_id=TENANT_ID,
         youtube_channel_id="UC_orch_ext",
-        channel_name="Outside-CMS Channel",
-        content_owner_id=None,
+        channel_name="OUTSIDE_CMS-tagged Channel (same owner, excluded by cms_status)",
+        content_owner_id=_ANALYTICS_ACCOUNT_ID,
         active=True,
         revenue_required=True,
-        cms_status="INSIDE_CMS",
+        cms_status="OUTSIDE_CMS",
     )
     session.add_all([ch_cms, ch_ext])
     session.flush()
@@ -3471,11 +3471,11 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
         id=uuid4(),
         tenant_id=TENANT_ID,
         youtube_channel_id="UC_fs_ext",
-        channel_name="Outside-CMS FS Channel",
-        content_owner_id=None,
+        channel_name="OUTSIDE_CMS-tagged FS Channel",
+        content_owner_id=_ANALYTICS_ACCOUNT_ID,
         active=True,
         revenue_required=True,
-        cms_status="INSIDE_CMS",
+        cms_status="OUTSIDE_CMS",
     )
     session.add_all([ch_cms, ch_ext])
     session.flush()
@@ -3685,11 +3685,11 @@ def test_run_one_with_youtube_analytics_dry_run_succeeds_for_cms_channels_only(
         id=uuid4(),
         tenant_id=TENANT_ID,
         youtube_channel_id="UC_dry_ana_ext",
-        channel_name="Outside-CMS Channel (dry)",
-        content_owner_id=None,
+        channel_name="OUTSIDE_CMS-tagged Channel (dry)",
+        content_owner_id=_ANALYTICS_ACCOUNT_ID,
         active=True,
         revenue_required=True,
-        cms_status="INSIDE_CMS",
+        cms_status="OUTSIDE_CMS",
     )
     session.add_all([ch_cms, ch_ext])
     session.flush()
@@ -3817,6 +3817,14 @@ def test_run_one_with_youtube_analytics_no_eligible_channels(
     other_tenant_id = uuid4()
     session.add_all(
         [
+            # FIX: seed the parent TenantORM for the cross-tenant negative case so
+            # the fixture works under strict FK enforcement, not just SQLite's
+            # permissive default.
+            TenantORM(
+                id=other_tenant_id,
+                slug="tenant-orch-other",
+                display_name="Other Tenant",
+            ),
             YouTubeChannelORM(
                 id=uuid4(),
                 tenant_id=TENANT_ID,
