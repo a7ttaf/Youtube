@@ -1877,6 +1877,7 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
 
     class FlakyParser:
         """Parser that fails the first call and succeeds on retry; exercises parser retry semantics."""
+
         @staticmethod
         def parse(payload, *, tenant_id):
             """Raise once, then return the captured payload (mirrors the parser retry contract)."""
@@ -2570,6 +2571,7 @@ def test_dry_run_savepoint_reverts_runner_side_writes(
     # then commits ``reports_succeeded`` for that single yielded report.
     class WritingRunner:
         """Runner that emits one canned success payload; used to exercise non-YouTube branches."""
+
         last_marker_id: UUID | None = None
 
         @staticmethod
@@ -2705,6 +2707,7 @@ def test_dry_run_parser_failure_increments_reports_failed_and_keeps_per_report_f
 
     class FlakyParser:
         """Parser that fails on the first call and returns a parsed payload on the second."""
+
         @staticmethod
         def parse(payload, *, tenant_id):
             """Raise once, then return the canned parsed payload (mirrors retry semantics)."""
