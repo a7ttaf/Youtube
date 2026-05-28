@@ -117,7 +117,14 @@ def test_list_target_channels_excludes_inactive_and_no_revenue(
 
 
 def test_fetch_channel_report(mock_credentials) -> None:
-    """The client must send content-owner IDs and per-channel filters."""
+    """The client must send content-owner IDs, per-channel filter, and month-only dimension.
+
+    Single-channel content-owner reports do not accept `channel` as a dimension
+    (the dimension is reserved for multi-value channel filters), so the wire
+    request uses `dimensions=month`. The orchestrator runner re-injects the
+    `channel` dimension into the parser payload from the known filter, keeping
+    YouTubeAnalyticsParser's (channel, month) row-key contract intact.
+    """
 
     def handler(request: httpx.Request) -> httpx.Response:
         params = dict(request.url.params)
@@ -126,9 +133,9 @@ def test_fetch_channel_report(mock_credentials) -> None:
         assert params["startDate"] == "2026-05-01"
         assert params["endDate"] == "2026-05-01"
         assert params["metrics"] == "estimatedRevenue,estimatedAdRevenue,grossRevenue"
-        assert params["dimensions"] == "channel,month"
+        assert params["dimensions"] == "month"
         body = json.dumps(
-            {"rows": [["UC-xyz", "2026-05", 1.23, 0.45, 1.68]]}
+            {"rows": [["2026-05", 1.23, 0.45, 1.68]]}
         ).encode()
         return httpx.Response(200, content=body)
 
@@ -142,7 +149,7 @@ def test_fetch_channel_report(mock_credentials) -> None:
         channel_id="UC-xyz",
         report_month="2026-05",
     )
-    assert body == {"rows": [["UC-xyz", "2026-05", 1.23, 0.45, 1.68]]}
+    assert body == {"rows": [["2026-05", 1.23, 0.45, 1.68]]}
 
 
 @pytest.mark.parametrize("bad_month", ["2026-5", "2026", "abcd-ef", "2026-13"])

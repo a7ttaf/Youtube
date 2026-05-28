@@ -7,7 +7,15 @@ Query params:
   startDate=<YYYY-MM-01>
   endDate=<YYYY-MM-01>
   metrics=estimatedRevenue,...   <- locked per parser requirements
-  dimensions=channel,month
+  dimensions=month
+
+The wire-level dimension set is intentionally ``month`` only: Google's
+content-owner report contract requires the `channel` dimension to be paired
+with a multi-value channel filter, while B2.5 issues one request per channel
+with `filters=channel==<id>` (a single value). YouTubeAnalyticsParser still
+keys rows on (channel, month); the orchestrator's YouTubeAnalyticsRunner
+synthesises the `channel` dimension into the parser payload from the known
+filter value before yielding the report.
 
 Channels are sourced from the youtube_channels registry (PR #25) filtered
 by tenant + active + revenue_required + content_owner match only. Outside-CMS
@@ -30,7 +38,11 @@ _REPORT_MONTH_PATTERN = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
 _BASE = "https://youtubeanalytics.googleapis.com/v2/reports"
 # Locked metric set; matches what YouTubeAnalyticsParser consumes.
 _METRICS = "estimatedRevenue,estimatedAdRevenue,grossRevenue"
-_DIMENSIONS = "channel,month"
+# Single-channel content-owner reports use the time dimension only (see module
+# docstring). The orchestrator runner re-introduces the `channel` dimension into
+# the parser payload from the known filter so YouTubeAnalyticsParser keeps its
+# (channel, month) row-key contract without a parser change.
+_DIMENSIONS = "month"
 
 
 # ============================================================================

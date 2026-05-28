@@ -2466,6 +2466,66 @@ def _parser_for_connector(
 #   - File: Docs/superpowers/plans/2026-05-26-spec-b2-google-live-connector.md
 #     §B2.5 Task 33 -> runner contract and per-channel yield shape.
 # ============================================================================
+# ============================================================================
+# Purpose: Inject the `channel` dimension into a single-channel content-owner
+#          response so YouTubeAnalyticsParser keeps its (channel, month)
+#          row-key contract without seeing the wire-level `dimensions=month`
+#          projection. The channel identity is known from the request's
+#          `filters=channel==<id>` value, so the synthesised dimension is
+#          deterministic per channel and matches what Google would have
+#          returned had we been able to add `channel` to the dimension set.
+# Database/ORM: None.
+# Standards: Idempotent — a response that already carries a `channel` header
+#            (e.g. fixture-style payloads) passes through unchanged so existing
+#            mocks remain valid. Malformed shapes are forwarded unchanged so
+#            the parser's typed ParserError continues to fire.
+# Blast Radius: Finance ingestion shape for YouTube Analytics rows. A drift
+#               here would mis-attribute revenue or trip a parser ParserError
+#               on a valid Google response.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/
+#     youtube_analytics_client.py -> request shape uses dimensions=month.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> requires `channel` in dim_values for source row
+#     keys.
+# ============================================================================
+def _synthesise_analytics_channel_dimension(
+    *, response: dict[str, object], channel_id: str,
+) -> dict[str, object]:
+    """Prepend the `channel` DIMENSION header and value to a month-only response."""
+    column_headers = response.get("columnHeaders")
+    if not isinstance(column_headers, list):
+        # Let the parser raise a typed ParserError on the malformed payload.
+        return response
+    if any(
+        isinstance(h, dict) and h.get("name") == "channel"
+        for h in column_headers
+    ):
+        # Already carries the dimension (mocked fixtures); pass through.
+        return response
+    rows = response.get("rows")
+    if rows is not None and not isinstance(rows, list):
+        # Let the parser raise a typed ParserError on the malformed payload.
+        return response
+    new_headers: list[object] = [
+        {"columnType": "DIMENSION", "name": "channel"},
+        *column_headers,
+    ]
+    new_rows: list[object] = []
+    if isinstance(rows, list):
+        for row in rows:
+            if isinstance(row, list):
+                new_rows.append([channel_id, *row])
+            else:
+                # Preserve the malformed entry so the parser can fail closed.
+                new_rows.append(row)
+    return {
+        **response,
+        "columnHeaders": new_headers,
+        "rows": new_rows if isinstance(rows, list) else rows,
+    }
+
+
 class YouTubeAnalyticsRunner:
     """B2.5 adapter that fetches YouTube Analytics per-channel reports.
 
@@ -2529,12 +2589,25 @@ class YouTubeAnalyticsRunner:
                         report_type="youtube_analytics", error=exc,
                     )
                     continue
+                # Synthesise the `channel` dimension into the response. The
+                # wire request uses `dimensions=month` only because Google's
+                # content-owner reports require a multi-value channel filter to
+                # add `channel` as a dimension, and B2.5 issues one request per
+                # channel (single-value filter). YouTubeAnalyticsParser still
+                # keys rows on (channel, month), so we inject the known
+                # channel_id from the filter back into columnHeaders / rows
+                # here. Idempotent: a response that already carries a `channel`
+                # header is passed through unchanged, which keeps mocked tests
+                # that return a `channel,month` payload working.
+                augmented_response = _synthesise_analytics_channel_dimension(
+                    response=response, channel_id=channel_id,
+                )
                 # Augment the raw response with the query_request metadata the
                 # parser needs to build row keys and validate the range. Reuse
                 # the exact request dict the client sent so replay and stale-row
                 # cleanup see the canonical contentOwner/channel scope.
                 parser_payload: dict[str, object] = {
-                    **response,
+                    **augmented_response,
                     "query_request": dict(query_request),
                 }
                 # Stored blob is the AUGMENTED parser_payload (includes injected

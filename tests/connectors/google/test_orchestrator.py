@@ -2758,16 +2758,21 @@ def _make_analytics_parser_payload(
     report_month: str,
     account_id: str = _ANALYTICS_ACCOUNT_ID,
 ) -> dict[str, object]:
-    """Minimal valid payload for YouTubeAnalyticsParser.parse().
+    """Minimal wire-shape payload for what YouTubeAnalyticsClient returns.
 
-    Mirrors the reports.query response shape the client returns:
+    Mirrors the reports.query response shape the client returns BEFORE the
+    orchestrator's `_synthesise_analytics_channel_dimension()` injects the
+    `channel` dimension into columnHeaders / rows:
+
     - query_request carries the request parameters (ids, dates, metrics,
       dimensions) so the parser can build row keys and validate the range.
-    - columnHeaders declares DIMENSION(channel) + DIMENSION(month) plus the
-      full locked analytics metric set. The parser requires dim_values["channel"]
-      to be a non-empty string (per youtube_analytics.py line ~260), so
-      ``channel`` must appear as a DIMENSION header.
-    - rows carries one data row: [<channel_id>, "<YYYY-MM>", <metric>...].
+      dimensions == ``_ANALYTICS_DIMENSIONS`` (currently ``"month"``) — the
+      wire-level shape for a single-channel content-owner query.
+    - columnHeaders declares the time DIMENSION(s) from _ANALYTICS_DIMENSIONS
+      followed by the full locked analytics metric set. ``channel`` is NOT in
+      this list; the runner synthesises it from filters=channel==<id>.
+    - rows carries one data row: [<YYYY-MM>, <metric>, <metric>, <metric>].
+      The runner prepends the channel_id before passing to the parser.
     """
     year, month = report_month.split("-")
     first_day = f"{year}-{month}-01"
@@ -2778,6 +2783,11 @@ def _make_analytics_parser_payload(
         "estimatedAdRevenue": 8.0,
         "grossRevenue": 20.5,
     }
+    # The wire response carries only the dimensions actually requested. For
+    # `dimensions=month` (the B2.5 default), columnHeaders has one DIMENSION
+    # header and each row contains [<month>, <metrics...>]. The runner
+    # synthesises the `channel` dimension after this returns.
+    dimension_cells: dict[str, str] = {"month": f"{year}-{month}"}
     return {
         "query_request": {
             "ids": f"contentOwner=={account_id}",
@@ -2796,8 +2806,7 @@ def _make_analytics_parser_payload(
         ),
         "rows": [
             [
-                channel_id,
-                f"{year}-{month}",
+                *[dimension_cells[name] for name in dimension_names],
                 *[metric_values[name] for name in metric_names],
             ],
         ],
@@ -3476,10 +3485,12 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
         report_month=report_month,
     )
     # Pre-compute the raw_bytes the runner will produce so we can assert
-    # the exact bytes on disk. The runner spreads the stub response then
-    # OVERWRITES query_request with a freshly constructed dict (using the
-    # canonical _ANALYTICS_METRICS/_ANALYTICS_DIMENSIONS constants). Mirror
-    # that logic here so the expected bytes match what lands on disk.
+    # the exact bytes on disk. The runner spreads the stub response,
+    # synthesises the `channel` DIMENSION header / row prefix (since the wire
+    # request uses `dimensions=month` only), then OVERWRITES query_request
+    # with a freshly constructed dict using the canonical
+    # _ANALYTICS_METRICS/_ANALYTICS_DIMENSIONS constants. Mirror that logic
+    # here so the expected bytes match what lands on disk.
     _year, _month = report_month.split("-")
     _first_day = f"{_year}-{_month}-01"
 
@@ -3493,8 +3504,28 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
             "dimensions": _ANALYTICS_DIMENSIONS,
         }
 
+    def _synthesise_channel(payload: dict, channel_id: str) -> dict:
+        column_headers = payload.get("columnHeaders") or []
+        rows = payload.get("rows") or []
+        if any(
+            isinstance(h, dict) and h.get("name") == "channel"
+            for h in column_headers
+        ):
+            return payload
+        return {
+            **payload,
+            "columnHeaders": [
+                {"columnType": "DIMENSION", "name": "channel"},
+                *column_headers,
+            ],
+            "rows": [
+                [channel_id, *row] if isinstance(row, list) else row
+                for row in rows
+            ],
+        }
+
     augmented_cms = {
-        **payload_cms,
+        **_synthesise_channel(payload_cms, "UC_fs_cms"),
         "query_request": _runner_query_request("UC_fs_cms"),
     }
     raw_bytes_cms = json.dumps(augmented_cms, sort_keys=True).encode("utf-8")
