@@ -255,8 +255,10 @@ running on the operator's workstation.
       counts up via a new _ProcessedReportResult dataclass and
       _handle_live_produced_report sums them into the run-level counts
       dict that finish_run writes to connector_runs.counts_json. Sum
-      invariant: created + updated + unchanged == total. Dry-run keeps
-      every source-row upsert counter at 0 (no upsert runs).
+      invariant: created + updated + unchanged == total for live upserts.
+      Dry-run reports the parsed would-upsert total while keeping
+      created/updated/unchanged at 0 because no source-row write or
+      classification runs.
       6 new repo-level tests cover create/unchanged/updated/mixed-rerun,
       provenance-only rerun, and refreshed RETURNING payloads; 1 new
       end-to-end orchestrator test asserts the counts plumb

@@ -66,11 +66,8 @@ _NULLABLE_TEXT_FIELDS = (
     "youtube_channel_id",
     "source_report_id",
 )
-"""Module for validating and comparing parsed Google source rows.
-
-Provides helper functions to enforce correct types, formats, and ranges
-for various fields of ParsedSourceRow before insertion into the database.
-"""
+# Validation helpers below enforce typed, finite, JSON-safe ParsedSourceRow
+# inputs before any source-row insert/update reaches the database.
 
 _AMOUNT_NATIVE_SCALE = 6
 _AMOUNT_NATIVE_INTEGER_DIGITS = 14
@@ -350,8 +347,6 @@ class SqlAlchemyCurrenciesRepository:
 #            validation runs BEFORE any write so the typed error contract
 #            (GoogleRevenueSourceRowValidationError) replaces opaque DB
 #            CHECK / FK violations. Validation covers: required + nullable
-#            This module implements the SqlAlchemy repository for Google revenue source rows,
-#            providing methods to upsert parsed rows into the database.
 #            string column types, source_row_key length (== 64),
 #            source_system membership, value_kind membership, finite
 #            non-negative amount within Numeric(20, 6) scale, report_month
