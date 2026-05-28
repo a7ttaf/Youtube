@@ -189,7 +189,8 @@ running on the operator's workstation.
       LocalFileStoreBackend end-to-end through run_one. B2.5 (YouTube
       Analytics) + B2.6 (operator console) stack on top in follow-up
       PRs.
-    - ⏳ PR #48 (B2.5) — YouTube Analytics targeted CMS-channel
+    - ✅ PR #48 (B2.5, merged 2026-05-28 as commit 68ac62e) — YouTube
+      Analytics targeted CMS-channel
       ingestion; registers youtube-analytics (and the youtube_analytics
       alias) in the B2.4 connector registry; queries
       `ids=contentOwner==<account>` with `filters=channel==<id>` and
@@ -205,6 +206,39 @@ running on the operator's workstation.
       from run.tenant_id (no cross-tenant credential lookup); locked
       metrics/dimensions constants shared between client and runner so
       the wire shape cannot silently drift.
+    - ✅ PR #49 (B2.6) — AdSense Management client + connector audit
+      emitters + adsense-management runner + mock end-to-end ingestion
+      gate. AdSenseManagementClient issues one GET reports.generate per
+      (account, month) with locked params (dateRange=CUSTOM,
+      dimensions=MONTH, metrics[]=ESTIMATED_EARNINGS,
+      metrics[]=TOTAL_EARNINGS,
+      currencyCode=USD); the adapter stamps a deterministic SHA-256
+      report_id so AdSenseManagementParser's report_id contract survives
+      the API not returning one. Audit emitters reuse
+      AuditEventType.CONNECTOR_JOB_RUN (STARTED|FINISHED) +
+      REPORT_IMPORTED (DOWNLOADED|PARSED|FAILED) with a `lifecycle`
+      payload discriminator — no new enum or permission values. The
+      orchestrator threads a SqlAlchemyAuditSink and a tenant-scoped
+      connector service principal (Permission.RUN_CONNECTOR_JOBS via a
+      new UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID env) through every
+      finish_run path including the fail-safe sweep; STARTED commits
+      with start_run, FINISHED commits with finish_run, per-raw-file
+      edges stage in the main transaction; dry-run emits zero events
+      and a missing service-actor env fails closed in Bucket A before
+      any RUNNING row is created. DOWNLOADED fires only on fresh
+      inserts and FAILED->DOWNLOADED retries, not on idempotent reuse.
+      AdSenseManagementRunner registers under both adsense-management
+      and adsense_management keys, fetches once per (account, month)
+      (account-scoped — no channel loop), and forwards the T35 parser-
+      ready payload verbatim. A new mock end-to-end ingestion gate at
+      tests/connectors/runs/test_ingestion_gate.py runs all three
+      connectors (YT Reporting + YT Analytics + AdSense) through
+      run_one + C1 GoogleSourceNormalizer.normalize_month and asserts:
+      6 source rows across all three source_systems, exactly 2
+      MonthlyChannelRevenueFactORM rows from the YT paths, every
+      AdSense row skipped as SkipReason.MISSING_CHANNEL_ID, and the
+      12-event STARTED->DOWNLOADED->PARSED->FINISHED audit sequence per
+      run with the connector service principal.
 - ⏳ Channel inventory file format — remaining: tenant-scoped channel
   registry exists (PR #25); bulk inventory load format not yet defined.
 - ⏳ Finance month-close input format — remaining: close-gate enforced

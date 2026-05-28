@@ -20,7 +20,7 @@ fetch_bytes() (raw download bodies):
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -46,9 +46,13 @@ _MAX_TIMEOUT_ATTEMPTS = 4
 _MAX_CONNECT_ATTEMPTS = 3
 _BACKOFF_CAP_SECONDS = 64.0
 
+_QueryParams = Mapping[str, str] | Sequence[tuple[str, str]]
+
 
 @dataclass
 class _RetryState:
+    """Mutable retry counters and schedules for one Google HTTP request."""
+
     status_backoff: list[float]
     timeout_backoff: list[float]
     connect_backoff: list[float]
@@ -59,6 +63,10 @@ class _RetryState:
 
 
 def _backoff_schedule(max_attempts: int) -> list[float]:
+    """
+    Generate an exponential backoff schedule capped at BACKOFF_CAP_SECONDS
+    for a specified maximum number of attempts.
+    """
     # 1, 2, 4, 8, ... capped at 64s; one entry per attempt, indexed by
     # (attempt - 1). Used identically by 429, 5xx, timeouts, and connect
     # errors; each retry budget consumes its own slot in the schedule.
@@ -87,6 +95,10 @@ def _sleep_for_retryable_status(
     url: str,
     status_backoff: list[float],
 ) -> bool:
+    """
+    Handle retry delays for retryable HTTP status codes, sleeping based on
+    status code and attempt count, and raise when maximum attempts are reached.
+    """
     status = response.status_code
     if status == 429:
         if attempt == _MAX_STATUS_ATTEMPTS:
@@ -121,6 +133,10 @@ def _auth_headers(
     method: str,
     url: str,
 ) -> dict[str, str]:
+    """
+    Retrieve authorization headers from credentials, handling refresh errors
+    and converting them to OAuthRefreshError for consistent retry behavior.
+    """
     headers: dict[str, str] = {}
     try:
         credentials.before_request(auth_request, method, url, headers)
@@ -135,6 +151,10 @@ def _auth_headers(
 def _retry_after_timeout(
     state: _RetryState, *, method: str, url: str
 ) -> None:
+    """
+    Increment timeout retry counter, adjust status attempts, and sleep based
+    on the timeout backoff schedule, raising an error if retry limit is exceeded.
+    """
     state.timeout_attempts += 1
     state.status_attempt -= 1
     if state.timeout_attempts >= _MAX_TIMEOUT_ATTEMPTS:
@@ -150,6 +170,10 @@ def _retry_after_timeout(
 def _retry_after_connect_error(
     state: _RetryState, *, method: str, url: str
 ) -> None:
+    """
+    Increment transport connection retry counter, adjust status attempts, and
+    sleep based on the connect backoff schedule, raising an error if retry limit is exceeded.
+    """
     state.connect_attempts += 1
     state.status_attempt -= 1
     if state.connect_attempts >= _MAX_CONNECT_ATTEMPTS:
@@ -168,15 +192,19 @@ def _request_or_retry_transport(
     *,
     method: str,
     url: str,
-    params: Mapping[str, str] | None,
+    params: _QueryParams | None,
     json_body: Mapping[str, object] | None,
     headers: dict[str, str],
 ) -> httpx.Response | None:
+    """
+    Execute an HTTP request using the client, catching timeout and transport errors
+    to trigger retries by returning None and adjusting the retry state.
+    """
     try:
         return client.request(
             method=method,
             url=url,
-            params=dict(params or {}),
+            params=params,
             json=json_body,
             headers=headers,
         )
@@ -196,6 +224,10 @@ def _request_or_retry_transport(
 def _terminal_response_or_raise(
     response: httpx.Response, *, method: str, url: str
 ) -> httpx.Response | None:
+    """
+    Determine if the HTTP response is terminal: return on success, raise for client or
+    auth errors, or return None for retryable server statuses.
+    """
     status = response.status_code
     if status == 200:
         return response
@@ -211,10 +243,14 @@ def _send_with_retry_response(
     *,
     method: str,
     url: str,
-    params: Mapping[str, str] | None,
+    params: _QueryParams | None,
     json_body: Mapping[str, object] | None,
     headers: dict[str, str],
 ) -> httpx.Response:
+    """
+    Send an HTTP request with comprehensive retry handling for statuses, timeouts,
+    and transport errors, returning a successful response or raising an error after retries.
+    """
     state = _RetryState(
         status_backoff=_backoff_schedule(_MAX_STATUS_ATTEMPTS),
         timeout_backoff=_backoff_schedule(_MAX_TIMEOUT_ATTEMPTS),
@@ -270,6 +306,8 @@ def _send_with_retry_response(
 
 
 class GoogleHttpClient:
+    """Authenticated HTTP wrapper for Google API JSON and byte downloads."""
+
     def __init__(
         self,
         *,
@@ -282,7 +320,12 @@ class GoogleHttpClient:
         self._auth_request = Request()
         self._client = httpx.Client(
             transport=transport,
-            timeout=httpx.Timeout(connect=timeout_connect, read=timeout_read, write=None, pool=None),
+            timeout=httpx.Timeout(
+                connect=timeout_connect,
+                read=timeout_read,
+                write=None,
+                pool=None,
+            ),
         )
 
     # DeepSource keeps this historical complexity issue anchored here after the
@@ -292,9 +335,10 @@ class GoogleHttpClient:
         *,
         method: str,
         url: str,
-        params: Mapping[str, str] | None = None,
+        params: _QueryParams | None = None,
         json_body: Mapping[str, object] | None = None,
     ) -> httpx.Response:
+        """Execute a Google API request with retry and typed transport errors."""
         # ====================================================================
         # Purpose: Execute one Google API call with the spec §7 retry policy
         #   and translate HTTP / transport failures into the typed error
@@ -313,7 +357,6 @@ class GoogleHttpClient:
         #     _GoogleApiHttpError subclasses for the HTTP-status branches.
         #   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-
         #     connector-design.md §7 -> retry table this loop implements
-        #     (statuses, budgets, backoff, Retry-After clamp).
         # ====================================================================
         # Build auth headers once per overall request; google-auth's own
         # staleness state decides whether to refresh, and the same headers
@@ -338,9 +381,10 @@ class GoogleHttpClient:
         *,
         method: str,
         url: str,
-        params: Mapping[str, str] | None = None,
+        params: _QueryParams | None = None,
         json_body: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
+        """Execute a Google JSON API request and return an object body."""
         # ====================================================================
         # Purpose: Execute one Google JSON-API call and return the decoded
         #   object body. Retry policy + status taxonomy delegated to
@@ -366,12 +410,20 @@ class GoogleHttpClient:
         try:
             body = response.json()
         except ValueError as exc:
-            raise GoogleApiResponseError(url=url, reason=f"not valid json: {exc}") from exc
+            raise GoogleApiResponseError(
+                url=url, reason=f"not valid json: {exc}"
+            ) from exc
         if not isinstance(body, dict):
-            raise GoogleApiResponseError(url=url, reason=f"expected object, got {type(body).__name__}")
+            raise GoogleApiResponseError(
+                url=url, reason=f"expected object, got {type(body).__name__}"
+            )
         return body
 
     def fetch_bytes(self, *, url: str) -> bytes:
+        """
+        GET a Google URL and return raw response bytes using bearer auth and
+        the shared retry helper.
+        """
         # ====================================================================
         # Purpose: GET a URL and return the raw response body bytes. Used for
         #   binary/CSV downloads (e.g. YouTube Reporting downloadUrl) where
@@ -395,4 +447,5 @@ class GoogleHttpClient:
         return response.content
 
     def close(self) -> None:
+        """Close the underlying HTTP client and release connection resources."""
         self._client.close()

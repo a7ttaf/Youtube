@@ -65,6 +65,20 @@ import sqlalchemy as sa
 from google.oauth2.credentials import Credentials
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.auth.audit_service import AuditSink
+from ums_smart_revenue.auth.models import UserPrincipal
+from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.connectors.google.adsense_management_client import (
+    AdSenseManagementClient,
+)
+from ums_smart_revenue.connectors.google.audit import (
+    build_connector_service_principal,
+    emit_raw_file_downloaded,
+    emit_raw_file_failed,
+    emit_raw_file_parsed,
+    emit_run_finished,
+    emit_run_started,
+)
 from ums_smart_revenue.connectors.google.errors import (
     BlobStorageConfigurationError,
     CredentialNotFoundError,
@@ -98,6 +112,7 @@ from ums_smart_revenue.connectors.google.youtube_reporting_client import (
     YouTubeReportingClient,
 )
 from ums_smart_revenue.connectors.google_source_parsers import (
+    AdSenseManagementParser,
     YouTubeAnalyticsParser,
     YouTubeReportingParser,
 )
@@ -130,6 +145,7 @@ from ums_smart_revenue.db.report_models import RawReportFileORM
 from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM
 
 __all__ = [
+    "AdSenseManagementRunner",
     "ConnectorRunOutcome",
     "ConnectorRunner",
     "ProducedReportSuccess",
@@ -200,6 +216,7 @@ class ProducedReportFailure:
 @dataclass(frozen=True)
 class _CsvReportDownload:
     """Spool entry pairing a CSV ``report_id`` with its in-memory bytes or temp-file path."""
+
     report_id: str
     raw_bytes: bytes | None = None
     raw_path: Path | None = None
@@ -225,6 +242,7 @@ class _CsvReportDownload:
 @dataclass(frozen=True)
 class ProducedReportSuccess:
     """Successful producer result bundling the parser payload with its raw CSV downloads."""
+
     report_type: str
     parser_payload: dict[str, object]
     raw_reports: tuple[_CsvReportDownload, ...]
@@ -538,6 +556,21 @@ def _run_live(
     triggered_by_user_id: UUID | None,
 ) -> ConnectorRunOutcome:
     """Open the live ``connector_runs`` row and drive the produce/parse/upsert loop end-to-end."""
+    # ============================================================================
+    # Purpose: Build the connector service principal BEFORE ``start_run`` so a
+    #          missing ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID`` fails closed in
+    #          Bucket A (no half-created RUNNING row). The sink is built after
+    #          ``start_run`` because it needs the same session that owns the run
+    #          row and audit writes; both share one transaction for the STARTED
+    #          edge per spec §8.4.
+    # Database/ORM: None for the principal; ``SqlAlchemyAuditSink`` writes to
+    #               ``AuditLogORM`` via the session below.
+    # Standards: Fail-closed in Bucket A on missing env (ValueError bubbles to
+    #            the caller before any connector_runs row is created).
+    # Blast Radius: Audit log only.
+    # ============================================================================
+    audit_actor = build_connector_service_principal(tenant_id=tenant_id)
+
     run_entry = start_run(
         session,
         tenant_id=tenant_id,
@@ -545,6 +578,14 @@ def _run_live(
         account_id=account_id,
         report_month=report_month,
         triggered_by_user_id=triggered_by_user_id,
+    )
+    audit_sink: AuditSink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+    # Spec §8.4: CONNECTOR_JOB_RUN/STARTED is committed with start_run -- the
+    # STARTED row and the run row share one transaction, so a process crash
+    # between the two writes cannot leave a RUNNING run without its STARTED
+    # audit edge.
+    emit_run_started(
+        sink=audit_sink, actor=audit_actor, run=run_entry, dry_run=False,
     )
     session.commit()
 
@@ -566,6 +607,8 @@ def _run_live(
                 counts=counts,
                 per_report_failures=per_report_failures,
                 per_report_failure_details=per_report_failure_details,
+                audit_sink=audit_sink,
+                audit_actor=audit_actor,
             )
         except Exception as exc:
             finished_run = _finish_failed_live_run(
@@ -574,6 +617,8 @@ def _run_live(
                 run_entry=run_entry,
                 counts=counts,
                 exc=exc,
+                audit_sink=audit_sink,
+                audit_actor=audit_actor,
             )
             finished = True
             return ConnectorRunOutcome(
@@ -588,6 +633,8 @@ def _run_live(
             run_entry=run_entry,
             counts=counts,
             per_report_failure_details=per_report_failure_details,
+            audit_sink=audit_sink,
+            audit_actor=audit_actor,
         )
         finished = True
         return ConnectorRunOutcome(
@@ -602,6 +649,8 @@ def _run_live(
                 tenant_id=tenant_id,
                 run_entry=run_entry,
                 counts=counts,
+                audit_sink=audit_sink,
+                audit_actor=audit_actor,
             )
 
 
@@ -618,6 +667,8 @@ def _process_live_reports(
     counts: dict[str, int],
     per_report_failures: list[tuple[str, str]],
     per_report_failure_details: list[tuple[str, str, str | None]],
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> None:
     """Drive the live run end-to-end: produce, parse, upsert, and aggregate counts."""
     runner = dispatch_connector(key=connector_key)
@@ -656,6 +707,8 @@ def _process_live_reports(
             per_report_failures=per_report_failures,
             per_report_failure_details=per_report_failure_details,
             deferred_analytics_cleanup=deferred_analytics_cleanup,
+            audit_sink=audit_sink,
+            audit_actor=audit_actor,
         )
         ordering_index += max(raw_file_count, 1)
     if deferred_analytics_cleanup is not None:
@@ -674,7 +727,10 @@ def _unpack_produced_report(
     tuple[_CsvReportDownload, ...] | None,
     Exception | None,
 ]:
-    """Normalise a ``ProducedReport`` into its (report_type, parser_payload, raw_reports, failure)."""
+    """
+    Normalise a ``ProducedReport`` into its
+    (report_type, parser_payload, raw_reports, failure).
+    """
     if isinstance(produced, ProducedReportFailure):
         return (
             produced.report_type,
@@ -697,7 +753,10 @@ def _unpack_produced_report(
 def _legacy_report_id(
     *, parser_payload: dict[str, object], report_type: str
 ) -> str:
-    """Recover the connector's legacy report_id from ``parser_payload.report_metadata`` if present."""
+    """
+    Recover the connector's legacy report_id from
+    ``parser_payload.report_metadata`` if present.
+    """
     metadata = parser_payload.get("report_metadata")
     if isinstance(metadata, dict):
         report_id = metadata.get("report_id")
@@ -718,7 +777,7 @@ def _handle_live_produced_report(
     backend: BlobStorageBackend,
     scheme: str,
     bucket: str,
-    parser: YouTubeReportingParser | YouTubeAnalyticsParser,
+    parser: YouTubeReportingParser | YouTubeAnalyticsParser | AdSenseManagementParser,
     repo: SqlAlchemyGoogleRevenueSourceRowRepository,
     produced: ProducedReport,
     ordering_index: int,
@@ -726,6 +785,8 @@ def _handle_live_produced_report(
     per_report_failures: list[tuple[str, str]],
     per_report_failure_details: list[tuple[str, str, str | None]],
     deferred_analytics_cleanup: _DeferredAnalyticsStaleCleanupState | None,
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> int:
     """Persist one produced report (raw upload, parse, upsert) and update counts."""
     report_type, parser_payload, raw_reports, produced_error = _unpack_produced_report(
@@ -751,6 +812,8 @@ def _handle_live_produced_report(
                     ordering_index=ordering_index,
                     triggered_by_user_id=triggered_by_user_id,
                     report_state=report_state,
+                    audit_sink=audit_sink,
+                    audit_actor=audit_actor,
                 )
             raise produced_error
         if parser_payload is None or raw_reports is None or not raw_reports:
@@ -773,6 +836,8 @@ def _handle_live_produced_report(
             ordering_index=ordering_index,
             triggered_by_user_id=triggered_by_user_id,
             report_state=report_state,
+            audit_sink=audit_sink,
+            audit_actor=audit_actor,
         )
         session.commit()
         if deferred_analytics_cleanup is not None:
@@ -798,6 +863,9 @@ def _handle_live_produced_report(
             counts=counts,
             per_report_failures=per_report_failures,
             per_report_failure_details=per_report_failure_details,
+            run_entry=run_entry,
+            audit_sink=audit_sink,
+            audit_actor=audit_actor,
         )
         return _raw_file_count_from_state(report_state)
 
@@ -822,6 +890,9 @@ def _record_live_report_failure(
     counts: dict[str, int],
     per_report_failures: list[tuple[str, str]],
     per_report_failure_details: list[tuple[str, str, str | None]],
+    run_entry: ConnectorRunEntry,
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> None:
     """Persist a bucket-B per-report failure into ``connector_run_reports`` mid-run."""
     error_class = type(exc).__name__
@@ -846,6 +917,17 @@ def _record_live_report_failure(
                 raw_file_id=raw_file_id,
                 tenant_id=tenant_id,
             )
+            # Spec §8.4: each per-raw-file FAILED edge is staged in the same
+            # transaction as the lifecycle write. The audit row commits with
+            # the mark_failed row below so a process crash between the two
+            # cannot leave a FAILED raw_file without its audit row.
+            emit_raw_file_failed(
+                sink=audit_sink,
+                actor=audit_actor,
+                run=run_entry,
+                raw_file=raw_file,
+                error_class=error_class,
+            )
         session.commit()
     except Exception:
         session.rollback()
@@ -869,6 +951,8 @@ def _finish_failed_live_run(
     run_entry: ConnectorRunEntry,
     counts: dict[str, int],
     exc: Exception,
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> ConnectorRunEntry:
     """Close a live run as FAILED (bucket-A short-circuit) with the supplied error class."""
     session.rollback()
@@ -880,6 +964,9 @@ def _finish_failed_live_run(
         counts=counts,
         error_summary=f"{type(exc).__name__}: {exc!s}",
     )
+    # Spec §8.4: CONNECTOR_JOB_RUN/FINISHED is committed with finish_run so
+    # the terminal state and its audit row share one transaction.
+    emit_run_finished(sink=audit_sink, actor=audit_actor, run=finished_run)
     session.commit()
     return finished_run
 
@@ -891,6 +978,8 @@ def _finish_aggregate_live_run(
     run_entry: ConnectorRunEntry,
     counts: dict[str, int],
     per_report_failure_details: list[tuple[str, str, str | None]],
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> ConnectorRunEntry:
     """Close a live run as SUCCEEDED/PARTIAL based on the aggregated per-report counts."""
     status = _derive_terminal_status(counts)
@@ -902,6 +991,8 @@ def _finish_aggregate_live_run(
         counts=counts,
         error_summary=_summarize_failures(per_report_failure_details),
     )
+    # Spec §8.4: CONNECTOR_JOB_RUN/FINISHED commits with finish_run.
+    emit_run_finished(sink=audit_sink, actor=audit_actor, run=finished_run)
     session.commit()
     return finished_run
 
@@ -912,11 +1003,13 @@ def _sweep_unfinished_live_run(
     tenant_id: UUID,
     run_entry: ConnectorRunEntry,
     counts: dict[str, int],
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> None:
     """Best-effort sweep for the no-credentials early-out — finish any still-open ``run_entry``."""
     session.rollback()
     try:
-        finish_run(
+        finished_run = finish_run(
             session,
             tenant_id=tenant_id,
             connector_run_id=UUID(run_entry.id),
@@ -924,6 +1017,10 @@ def _sweep_unfinished_live_run(
             counts=counts,
             error_summary="orchestrator aborted unexpectedly",
         )
+        # Best-effort: even the fail-safe sweep emits FINISHED so the audit
+        # trail records the lifecycle terminus. A sink error here is
+        # swallowed by the outer except so the sweep stays best-effort.
+        emit_run_finished(sink=audit_sink, actor=audit_actor, run=finished_run)
         session.commit()
     except Exception:
         session.rollback()
@@ -943,7 +1040,7 @@ def _process_one_report(
     backend: BlobStorageBackend,
     scheme: str,
     bucket: str,
-    parser: YouTubeReportingParser | YouTubeAnalyticsParser,
+    parser: YouTubeReportingParser | YouTubeAnalyticsParser | AdSenseManagementParser,
     repo: SqlAlchemyGoogleRevenueSourceRowRepository,
     report_type: str,
     report_month: str,
@@ -953,6 +1050,8 @@ def _process_one_report(
     ordering_index: int,
     triggered_by_user_id: UUID | None,
     report_state: dict[str, object],
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> tuple[int, int, tuple[_DeferredStaleCleanupPlan, ...]]:
     """Run one report through blob -> raw_file -> parse -> upsert -> mark_parsed.
 
@@ -985,6 +1084,8 @@ def _process_one_report(
         ordering_index=ordering_index,
         triggered_by_user_id=triggered_by_user_id,
         report_state=report_state,
+        audit_sink=audit_sink,
+        audit_actor=audit_actor,
     )
 
     # 5-7. Parse, upsert, and mark_parsed inside a SAVEPOINT. The raw_file
@@ -1012,7 +1113,7 @@ def _process_one_report(
             imported_by=triggered_by_user_id,
             replace_raw_file_id=source_row_raw_file_id is None,
         )
-        source_report_type = _fallback_source_report_type(
+        source_report_types = _fallback_source_report_types(
             parser=parser,
             default_report_type=report_type,
         )
@@ -1030,7 +1131,7 @@ def _process_one_report(
             # succeeded.
             deferred_cleanup_plans = _build_deferred_stale_cleanup_plans(
                 source_system=source_system,
-                report_type=source_report_type,
+                report_types=source_report_types,
                 report_month=report_month,
                 parsed_rows=parsed_rows,
                 fallback_source_account_id=fallback_source_account_id,
@@ -1040,7 +1141,7 @@ def _process_one_report(
                 repo=repo,
                 tenant_id=tenant_id,
                 source_system=source_system,
-                report_type=source_report_type,
+                report_types=source_report_types,
                 report_month=report_month,
                 parsed_rows=parsed_rows,
                 fallback_source_account_id=fallback_source_account_id,
@@ -1049,9 +1150,24 @@ def _process_one_report(
         # Lifecycle transition: DOWNLOADED -> PARSED. Raises
         # ``RawFileAlreadyParsedError`` if called twice on the same file, which
         # would only happen on a re-entrant orchestrator bug.
+        # Spec §8.4: each per-raw-file PARSED audit row is staged inside the
+        # main transaction so the audit edge commits with the mark_parsed
+        # write (and the upserted source rows) via the outer commit in
+        # ``_handle_live_produced_report``. The audit row is only emitted
+        # when the raw_file actually transitions on this run, mirroring the
+        # idempotent-rerun guard above.
         for raw_file in raw_files:
             if raw_file.parse_status != "PARSED":
                 mark_parsed(session, raw_file_id=raw_file.id, tenant_id=tenant_id)
+                emit_raw_file_parsed(
+                    sink=audit_sink,
+                    actor=audit_actor,
+                    run=run_entry,
+                    raw_file=raw_file,
+                    # Report-level total; see emit_raw_file_parsed docstring re:
+                    # multi-raw-file aggregation contract.
+                    count_upserted=len(written),
+                )
 
     # Future work (no current task): accurate created/updated/unchanged
     # split via a pre-read of existing source_row_keys. Until then, the
@@ -1091,7 +1207,8 @@ def _source_row_raw_file_id(raw_files: list[RawReportFileORM]) -> UUID | None:
 # Database/ORM: None directly; the returned plans scope later repository
 #               deletes.
 # Standards: Groups by parser-owned report_type + source_account_id and keeps
-#            empty-success cleanup aligned with the persisted analytics scope.
+#            empty/partial replacement cleanup aligned with the persisted
+#            analytics scope.
 # Blast Radius: Source-of-truth source-row cleanup only.
 # Connections:
 #   - Function: _process_one_report -> defers analytics cleanup until the owner
@@ -1101,7 +1218,7 @@ def _source_row_raw_file_id(raw_files: list[RawReportFileORM]) -> UUID | None:
 # ============================================================================
 def _stale_source_row_keys_by_scope(
     *,
-    report_type: str,
+    report_types: Iterable[str],
     parsed_rows: Iterable[ParsedSourceRow],
     fallback_source_account_id: str,
 ) -> dict[tuple[str, str], set[str]]:
@@ -1111,13 +1228,18 @@ def _stale_source_row_keys_by_scope(
         keys_by_scope.setdefault((row.report_type, row.source_account_id), set()).add(
             row.source_row_key
         )
-    if not keys_by_scope and fallback_source_account_id.strip():
-        # FIX: empty successful replacements still need the PARSER-LEVEL
-        # report_type/account scope. Using the outer produced report label
-        # (`youtube_analytics`) misses persisted analytics rows, whose parser
-        # writes `report_type="reports.query"`, and leaves stale finance rows
-        # behind on rerun.
-        keys_by_scope[(report_type.strip(), fallback_source_account_id.strip())] = set()
+    normalized_report_types = tuple(
+        report_type.strip() for report_type in report_types if report_type.strip()
+    )
+    source_account_id = fallback_source_account_id.strip()
+    if source_account_id and (not keys_by_scope or len(normalized_report_types) > 1):
+        # FIX: successful replacements need every PARSER-LEVEL report_type/account
+        # scope, not only the scopes represented by newly parsed rows. AdSense
+        # can replace a prior payment_report with an earnings-only payload; if
+        # payment_report is not seeded with an empty keep-set, stale settled rows
+        # survive the rerun.
+        for normalized_report_type in normalized_report_types:
+            keys_by_scope.setdefault((normalized_report_type, source_account_id), set())
     return keys_by_scope
 
 
@@ -1135,7 +1257,7 @@ def _stale_source_row_keys_by_scope(
 def _build_deferred_stale_cleanup_plans(
     *,
     source_system: str,
-    report_type: str,
+    report_types: tuple[str, ...],
     report_month: str,
     parsed_rows: Iterable[ParsedSourceRow],
     fallback_source_account_id: str,
@@ -1150,7 +1272,7 @@ def _build_deferred_stale_cleanup_plans(
             keep_source_row_keys=frozenset(keys),
         )
         for (row_report_type, source_account_id), keys in _stale_source_row_keys_by_scope(
-            report_type=report_type,
+            report_types=report_types,
             parsed_rows=parsed_rows,
             fallback_source_account_id=fallback_source_account_id,
         ).items()
@@ -1235,7 +1357,7 @@ def _flush_deferred_stale_cleanup_plans(
 
 
 # ============================================================================
-# Purpose: Map the outer produced-report label to the source-row report_type
+# Purpose: Map the outer produced-report label to source-row report_type values
 #          used for stale-row cleanup when a successful replacement yields no
 #          parsed rows.
 # Database/ORM: None directly; the returned value scopes repository deletes.
@@ -1243,34 +1365,26 @@ def _flush_deferred_stale_cleanup_plans(
 #            normalization without hardcoding row writes here.
 # Blast Radius: Source-of-truth stale-row deletion scope only.
 # Connections:
-#   - Function: _process_one_report -> provides the fallback report_type for
+#   - Function: _process_one_report -> provides fallback report_type scopes for
 #     _delete_stale_source_rows.
 #   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
 #     youtube_analytics.py -> emits ParsedSourceRow.report_type="reports.query".
-# ============================================================================
-def _fallback_source_report_type(
-    *, parser: YouTubeReportingParser | YouTubeAnalyticsParser, default_report_type: str,
-) -> str:
-    """Return the persisted report_type label for empty-success stale cleanup."""
-    if isinstance(parser, YouTubeAnalyticsParser):
-        return "reports.query"
-    return default_report_type
-
-
-# ============================================================================
-# Purpose: Reuse the parsed payload's canonical account selector for stale-row
-#          cleanup when a successful replacement report yields zero rows.
-# Database/ORM: None directly; the returned value scopes repository deletes.
-# Standards: Fail closed to the persisted query_request.ids when present, else
-#            preserve legacy callers by falling back to account_id.
-# Blast Radius: Source-of-truth stale-row deletion scope only. A mismatch here
-#               can leave obsolete finance rows behind after an empty rerun.
-# Connections:
-#   - Function: _process_one_report -> passes the result to
-#     _delete_stale_source_rows after parser success.
 #   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
-#     youtube_analytics.py -> source_account_id matches query_request.ids.
+#     adsense_management.py -> emits earnings_report and payment_report rows.
 # ============================================================================
+def _fallback_source_report_types(
+    *,
+    parser: YouTubeReportingParser | YouTubeAnalyticsParser | AdSenseManagementParser,
+    default_report_type: str,
+) -> tuple[str, ...]:
+    """Return persisted report_type labels for empty-success stale cleanup."""
+    if isinstance(parser, YouTubeAnalyticsParser):
+        return ("reports.query",)
+    if isinstance(parser, AdSenseManagementParser):
+        return ("earnings_report", "payment_report")
+    return (default_report_type,)
+
+
 # ============================================================================
 # Purpose: Extract the targeted youtube_channel_id from a parser payload's
 #          query_request.filters string (``channel==<id>``). Used by the
@@ -1308,6 +1422,24 @@ def _youtube_channel_id_from_parser_payload(
     return None
 
 
+# ============================================================================
+# Purpose: Reuse the parsed payload's canonical account selector for stale-row
+#          cleanup when a successful replacement report omits one or more
+#          parser-level scopes.
+# Database/ORM: None directly; the returned value scopes repository deletes.
+# Standards: Prefer parser-owned canonical ids over external run selectors so
+#            cleanup targets persisted source_row dimensions.
+# Blast Radius: Source-of-truth stale-row deletion scope only. A mismatch here
+#               can leave obsolete finance rows behind after a replacement run.
+# Connections:
+#   - Function: _process_one_report -> passes the result to
+#     _delete_stale_source_rows after parser success.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> source_account_id matches query_request.ids.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     adsense_management.py -> source_account_id strips request.accountId's
+#     accounts/ prefix.
+# ============================================================================
 def _fallback_source_account_id(
     *, parser_payload: dict[str, object], default_account_id: str,
 ) -> str:
@@ -1317,6 +1449,21 @@ def _fallback_source_account_id(
         ids = query_request.get("ids")
         if isinstance(ids, str) and ids.strip():
             return ids.strip()
+    request = parser_payload.get("request")
+    if isinstance(request, dict):
+        request_account_id = request.get("accountId")
+        if isinstance(request_account_id, str):
+            adsense_account_id = request_account_id.strip()
+            if adsense_account_id.startswith("accounts/"):
+                adsense_account_id = adsense_account_id.removeprefix(
+                    "accounts/"
+                ).strip()
+                if adsense_account_id:
+                    # FIX: AdSense can be invoked with a full
+                    # ``accounts/<id>`` run selector, while the parser persists
+                    # the stripped suffix. Cleanup must use the persisted axis
+                    # or stale payment/earnings evidence survives reruns.
+                    return adsense_account_id
     return default_account_id
 
 
@@ -1337,14 +1484,14 @@ def _delete_stale_source_rows(
     repo: SqlAlchemyGoogleRevenueSourceRowRepository,
     tenant_id: UUID,
     source_system: str,
-    report_type: str,
+    report_types: tuple[str, ...],
     report_month: str,
     parsed_rows: Iterable[ParsedSourceRow],
     fallback_source_account_id: str,
 ) -> None:
     """Delete source rows in each scope whose keys are absent from the new parse."""
     for (row_report_type, source_account_id), keys in _stale_source_row_keys_by_scope(
-        report_type=report_type,
+        report_types=report_types,
         parsed_rows=parsed_rows,
         fallback_source_account_id=fallback_source_account_id,
     ).items():
@@ -1386,14 +1533,17 @@ def _prepare_and_link_raw_reports(
     ordering_index: int,
     triggered_by_user_id: UUID | None,
     report_state: dict[str, object],
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> list[RawReportFileORM]:
-    """Upload each ``raw_report`` and link the resulting raw_file rows to the active produced report."""
+    """Upload each ``raw_report`` and link raw_file rows to the active report."""
     raw_files: list[RawReportFileORM] = []
     seen_raw_file_ids: set[UUID] = set()
+    newly_downloaded_raw_file_ids: set[UUID] = set()
     report_state["raw_file_ids"] = []
 
     for raw_report in raw_reports:
-        raw_file = _prepare_raw_report_file(
+        raw_file, newly_downloaded = _prepare_raw_report_file(
             session=session,
             tenant_id=tenant_id,
             connector_key=connector_key,
@@ -1409,6 +1559,8 @@ def _prepare_and_link_raw_reports(
         if raw_file.id in seen_raw_file_ids:
             continue
         seen_raw_file_ids.add(raw_file.id)
+        if newly_downloaded:
+            newly_downloaded_raw_file_ids.add(raw_file.id)
         raw_files.append(raw_file)
         report_state["raw_file_ids"].append(raw_file.id)
         report_state.setdefault("raw_file_id", raw_file.id)
@@ -1424,6 +1576,26 @@ def _prepare_and_link_raw_reports(
             raw_report_file_id=raw_file.id,
             ordering_index=ordering_index + offset,
         )
+        # Spec §8.4: stage the DOWNLOADED audit edge in the main transaction
+        # alongside the link join, so the audit row commits with its evidence.
+        # Only fresh inserts / FAILED-reopened rows emit DOWNLOADED -- an
+        # idempotent reuse of a still-DOWNLOADED or already-PARSED raw_file
+        # is not a new download lifecycle edge.
+        #
+        # Important: this emit happens OUTSIDE the per-report begin_nested()
+        # savepoint (see _process_one_report below). When a per-report parse
+        # raises, the savepoint rollback drops the upsert+mark_parsed work but
+        # the DOWNLOADED audit row stays staged in the outer transaction, where
+        # _record_live_report_failure then commits it alongside FAILED. This
+        # is intentional: the audit trail must record "we landed bytes" even
+        # if parsing fails afterward.
+        if raw_file.id in newly_downloaded_raw_file_ids:
+            emit_raw_file_downloaded(
+                sink=audit_sink,
+                actor=audit_actor,
+                run=run_entry,
+                raw_file=raw_file,
+            )
     return raw_files
 
 
@@ -1453,8 +1625,16 @@ def _prepare_raw_report_file(
     scheme: str,
     bucket: str,
     triggered_by_user_id: UUID | None,
-) -> RawReportFileORM:
-    """Compute checksum, upload, and create/reopen the raw_file row for one CSV download."""
+) -> tuple[RawReportFileORM, bool]:
+    """Compute checksum, upload, and create/reopen the raw_file row for one CSV download.
+
+    Returns ``(raw_file, newly_downloaded)``. ``newly_downloaded`` is True when
+    the raw_file row was freshly inserted by this call or transitioned from
+    FAILED -> DOWNLOADED (a retried payload), which are the two cases that
+    represent a new DOWNLOADED lifecycle edge for the audit log. A reused
+    PARSED or still-DOWNLOADED row is NOT a new edge and returns False so the
+    caller skips the DOWNLOADED audit emit.
+    """
     # 1. Checksum + deterministic URI: same bytes always map to the same path
     # so a retry overwrites or hits the existing object instead of creating a
     # second copy with the same content.
@@ -1479,11 +1659,10 @@ def _prepare_raw_report_file(
     # mirrors the B1 parser convention (youtube_reporting /
     # youtube_analytics / adsense_management); flush populates the id
     # without committing so the link join can use it within the same
-    # transaction. The lookup is load-bearing for retries: the table has a
-    # unique key over source/report_type/month/checksum, so a re-run of the
-    # same Google payload must reuse that evidence row instead of trying a
-    # second insert.
-    raw_file = _get_or_create_raw_file(
+    # transaction. ``created_now`` is returned by the insert helper so the
+    # audit lifecycle does not mistake a unique-key race winner for a fresh
+    # download owned by this run.
+    raw_file, created_now = _get_or_create_raw_file(
         session,
         tenant_id=tenant_id,
         source=source_system,
@@ -1499,14 +1678,20 @@ def _prepare_raw_report_file(
             current=raw_file.parse_status,
             target="PARSED",
         )
-    if raw_file.parse_status == "FAILED":
+    failed_reopen = raw_file.parse_status == "FAILED"
+    if failed_reopen:
         # FIX: a retry of the same Google payload must reopen the evidence
         # row before parsing and point it at the blob uploaded by this run.
         raw_file.parse_status = "DOWNLOADED"
         raw_file.file_url = storage_uri
         raw_file.downloaded_by = triggered_by_user_id
         session.flush()
-    return raw_file
+    # Audit lifecycle: a NEW DOWNLOADED edge exists when the row was just
+    # inserted (no pre-existing match) or when a previously-FAILED retry was
+    # reopened. Reuse of a still-DOWNLOADED or already-PARSED row is not a
+    # new download edge for audit purposes.
+    newly_downloaded = created_now or failed_reopen
+    return raw_file, newly_downloaded
 
 
 # ============================================================================
@@ -1543,14 +1728,16 @@ def _find_existing_raw_file(
 
 
 # ============================================================================
-# Purpose: Create the raw report evidence row idempotently, including the
-#          lookup/insert race where another worker commits the same
-#          tenant/source/report/month/checksum after our pre-insert lookup.
+# Purpose: Create or reuse the raw report evidence row idempotently, returning
+#          whether this call inserted the row. This includes the lookup/insert
+#          race where another worker commits the same tenant/source/report/
+#          month/checksum after our pre-insert lookup.
 # Database/ORM: RawReportFileORM insert/read; uniqueness enforced by
 #               uq_raw_report_files_source_type_month_checksum.
 # Standards: SQLAlchemy savepoint contains the duplicate insert failure; no
 #            broad rollback so the surrounding connector_runs transaction
-#            remains usable. Typed lifecycle checks stay in the caller.
+#            remains usable. The returned bool drives DOWNLOADED audit
+#            emission; typed lifecycle checks stay in the caller.
 # Blast Radius: Raw evidence creation only. Finance rows are written later
 #               through the source-row repository; no graph projection impact
 #               detected.
@@ -1569,8 +1756,8 @@ def _get_or_create_raw_file(
     checksum: str,
     storage_uri: str,
     downloaded_by: UUID | None,
-) -> RawReportFileORM:
-    """Insert a fresh raw_file row, racing on the unique constraint and retrying on collision."""
+) -> tuple[RawReportFileORM, bool]:
+    """Return ``(raw_file, created_now)`` while tolerating unique-key races."""
     raw_file = _find_existing_raw_file(
         session,
         tenant_id=tenant_id,
@@ -1580,7 +1767,7 @@ def _get_or_create_raw_file(
         checksum=checksum,
     )
     if raw_file is not None:
-        return raw_file
+        return raw_file, False
 
     try:
         # FIX: the pre-insert lookup is not a lock. If another worker inserts
@@ -1600,7 +1787,7 @@ def _get_or_create_raw_file(
             )
             session.add(raw_file)
             session.flush()
-            return raw_file
+            return raw_file, True
     except sa.exc.IntegrityError:
         raw_file = _find_existing_raw_file(
             session,
@@ -1612,7 +1799,7 @@ def _get_or_create_raw_file(
         )
         if raw_file is None:
             raise
-        return raw_file
+        return raw_file, False
 
 
 # ----------------------------------------------------------------------------
@@ -1645,7 +1832,10 @@ class YouTubeReportingRunner:
         report_month: str,
         account_id: str,
     ) -> Iterator[ProducedReport]:
-        """Drive the YouTube Reporting jobs path: discover jobs, fetch CSVs, yield per-job results."""
+        """
+        Drive the YouTube Reporting jobs path: discover jobs, fetch CSVs,
+        yield per-job results.
+        """
         # ``run`` is ``None`` on the T29 dry-run path; the runner body
         # never references it (the connector_runs lifecycle is owned by
         # ``run_one`` itself), so the widening is a pure type contract
@@ -1667,7 +1857,10 @@ def _produce_youtube_reports(
     report_month: str,
     account_id: str,
 ) -> Iterator[ProducedReport]:
-    """Iterate YouTube Reporting jobs, fetch each report's CSVs, and yield bucket-B successes/failures."""
+    """
+    Iterate YouTube Reporting jobs, fetch each report's CSVs, and yield
+    bucket-B successes/failures.
+    """
     http = GoogleHttpClient(credentials=credentials)
     try:
         client = client_type(http=http)
@@ -1732,7 +1925,10 @@ def _produce_youtube_job_report(
     report_month: str,
     account_id: str,
 ) -> ProducedReportSuccess | ProducedReportFailure | None:
-    """Drive one YouTube Reporting job: list its reports for the month then download+aggregate them."""
+    """
+    Drive one YouTube Reporting job: list its reports for the month
+    then download+aggregate them.
+    """
     report_type = _require_text(job, "reportTypeId")
     job_id = _require_text(job, "id")
     reports = _list_youtube_reports_for_job(
@@ -1843,7 +2039,10 @@ def _download_youtube_csv_reports(
     seen_checksums: set[str],
     totals: dict[tuple[str, str | None, str], Decimal],
 ) -> ProducedReportFailure | None:
-    """Download every CSV referenced by ``reports`` and return them as ``_CsvReportDownload`` entries."""
+    """
+    Download every CSV referenced by ``reports`` and return them as
+    ``_CsvReportDownload`` entries.
+    """
     for report in reports:
         failure = _download_youtube_csv_report(
             client=client,
@@ -1871,7 +2070,10 @@ def _download_youtube_csv_report(
     seen_checksums: set[str],
     totals: dict[tuple[str, str | None, str], Decimal],
 ) -> ProducedReportFailure | None:
-    """Download a single YouTube Reporting CSV blob, spooling to disk if it exceeds the in-memory cap."""
+    """
+    Download a single YouTube Reporting CSV blob, spooling to disk if it
+    exceeds the in-memory cap.
+    """
     csv_report: _CsvReportDownload | None = None
     try:
         download_url = _require_text(report, "downloadUrl")
@@ -2143,7 +2345,10 @@ def _accumulate_csv_row(
     default_content_owner: str | None,
     default_currency: str | None,
 ) -> None:
-    """Fold one CSV row's metric into the running ``totals`` map (validates non-negative decimals)."""
+    """
+    Fold one CSV row's metric into the running ``totals`` map (validates
+    non-negative decimals).
+    """
     # Normalize the date column. YouTube Reporting CSV uses ``date`` or
     # ``day``. The row is daily, but the parser payload is monthly, so this
     # date is used only to ensure the row belongs to report_month.
@@ -2555,10 +2760,10 @@ def _extension_for_connector(connector_key: str) -> str:
 
 def _parser_for_connector(
     connector_key: str,
-) -> YouTubeReportingParser | YouTubeAnalyticsParser:
+) -> YouTubeReportingParser | YouTubeAnalyticsParser | AdSenseManagementParser:
     """Return the source-row parser bound to a given connector key.
 
-    B2.5 adds YouTubeAnalyticsParser; B2.6 will add AdSenseManagementParser.
+    B2.5 added YouTubeAnalyticsParser; B2.6 (T38) wires AdSenseManagementParser.
     The helper isolates connector-to-parser routing from ``run_one`` so future
     registrations only touch this mapping rather than the orchestrator body.
     """
@@ -2566,6 +2771,8 @@ def _parser_for_connector(
         return YouTubeReportingParser()
     if connector_key in {"youtube-analytics", "youtube_analytics"}:
         return YouTubeAnalyticsParser()
+    if connector_key in {"adsense-management", "adsense_management"}:
+        return AdSenseManagementParser()
     raise ValueError(f"no parser bound for connector_key: {connector_key!r}")
 
 
@@ -2782,6 +2989,99 @@ class YouTubeAnalyticsRunner:
             http.close()
 
 
+# ============================================================================
+# Purpose: B2.6 adapter that fetches the AdSense Management v2 monthly
+#          account-earnings report. AdSense is account-scoped (one report per
+#          account per month), so each ``produce_reports`` call yields exactly
+#          one parser-ready payload — no per-channel iteration, no dimension
+#          synthesis (the T35 adapter wraps the wire response in the parser-
+#          ready shape with a deterministic ``report_id`` already stamped).
+# Database/ORM: None directly — orchestrator owns the blob/raw_file/source-row
+#               writes. AdSense rows persist to GoogleRevenueSourceRowORM with
+#               source_system == "adsense_management" and youtube_channel_id
+#               NULL.
+# Standards: Typed keyword-only contract matching ``ConnectorRunner``; the
+#            class references ``AdSenseManagementClient`` by bare name so
+#            tests can patch
+#            ``ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient``
+#            and replace what the runner actually uses. ``OAuthRefreshError``
+#            still escapes for run-level handling; any other
+#            ``GoogleConnectorError`` is yielded as a ``ProducedReportFailure``
+#            so the orchestrator's Bucket B handler marks the run FAILED
+#            (one-report run -> no PARTIAL semantics; no sibling reports
+#            survive).
+# Blast Radius: AdSense ingestion is audit/evidence only in B2 — C1 skips
+#               AdSense rows as SkipReason.MISSING_CHANNEL_ID until a future
+#               allocation/mapping spec, so finance totals do not move on this
+#               connector. The runner still owes a clean source_report_id
+#               provenance trail for the audit pipeline.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/adsense_management_client.py
+#     -> AdSenseManagementClient.fetch_monthly_report returns the parser-ready
+#     payload (request/headers/rows/report_id) this runner yields verbatim.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/adsense_management.py
+#     -> AdSenseManagementParser consumes ``("adsense_management", payload, bytes)``.
+#   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
+#     §5.6 -> AdSense ingestion contract.
+# ============================================================================
+class AdSenseManagementRunner:
+    """B2.6 adapter that fetches the AdSense monthly account-earnings report.
+
+    AdSense is account-scoped (one report per account per month), so each run
+    yields exactly one parser-ready payload. The class references
+    ``AdSenseManagementClient`` by bare name so tests can patch
+    ``ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient``
+    and replace what the runner actually instantiates.
+
+    AdSense rows are ingestion / audit evidence only in B2; C1 skips them as
+    ``SkipReason.MISSING_CHANNEL_ID`` until a future allocation/mapping spec.
+    """
+
+    def produce_reports(  # skipcq: PYL-R0201
+        self,
+        *,
+        session: Session,
+        run: ConnectorRunEntry | None,
+        credentials: Credentials,
+        report_month: str,
+        account_id: str,
+    ) -> Iterator[ProducedReport]:
+        """Yield the single AdSense monthly report for the supplied (account, month).
+
+        ``AdSenseManagementClient.fetch_monthly_report`` already wraps the wire
+        response in the parser-ready shape (request/headers/rows/report_id), so
+        the runner forwards it verbatim. ``OAuthRefreshError`` escapes for the
+        orchestrator's run-level handling; any other ``GoogleConnectorError``
+        is yielded as a ``ProducedReportFailure`` so the existing Bucket B
+        handler counts the failure consistently with the other connector
+        runners — this run has only one report, so a failure here marks the
+        whole run FAILED (no sibling reports to keep PARTIAL).
+        """
+        http = GoogleHttpClient(credentials=credentials)
+        try:
+            client = AdSenseManagementClient(http=http)
+            try:
+                parser_payload = client.fetch_monthly_report(
+                    account_id=account_id,
+                    report_month=report_month,
+                )
+            except OAuthRefreshError:
+                raise
+            except GoogleConnectorError as exc:
+                yield ProducedReportFailure(
+                    report_type="adsense_management", error=exc,
+                )
+                return
+            # Stored blob is the parser-ready payload JSON: the adapter already
+            # stamped a deterministic report_id on it, so a full replay through
+            # AdSenseManagementParser needs no runner state. ``sort_keys`` keeps
+            # the on-disk bytes byte-stable across reruns for the same inputs.
+            raw_bytes = json.dumps(parser_payload, sort_keys=True).encode("utf-8")
+            yield ("adsense_management", parser_payload, raw_bytes)
+        finally:
+            http.close()
+
+
 # ----------------------------------------------------------------------------
 # Module-load registration
 # ----------------------------------------------------------------------------
@@ -2793,3 +3093,5 @@ register_connector(key="youtube-reporting", runner=YouTubeReportingRunner())
 register_connector(key="youtube_reporting", runner=YouTubeReportingRunner())
 register_connector(key="youtube-analytics", runner=YouTubeAnalyticsRunner())
 register_connector(key="youtube_analytics", runner=YouTubeAnalyticsRunner())
+register_connector(key="adsense-management", runner=AdSenseManagementRunner())
+register_connector(key="adsense_management", runner=AdSenseManagementRunner())

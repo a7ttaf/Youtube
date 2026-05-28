@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path as _Path
@@ -65,6 +66,7 @@ from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.db.report_models import RawReportFileORM, ReportBase
 from ums_smart_revenue.db.security_models import (
     ApiConnectorCredentialORM,
+    AuditLogORM,
     SecurityBase,
     UserORM,
 )
@@ -78,6 +80,37 @@ TENANT_ID = UUID("00000000-0000-0000-0000-000000827001")
 ACCOUNT_ID = "content-owner-1"
 CONNECTOR_KEY = "youtube-reporting"
 DEFAULT_RESOLVER_REF = "local-secret://yt-creds"
+# Stable service-actor UUID used by orchestrator live-path tests so the
+# T36 connector audit emitters can build a service principal (the live
+# path's Bucket A fail-closed check requires UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID).
+# Tests that exercise the fail-closed path delenv this value explicitly.
+_SERVICE_ACTOR_ID = "ddddeeee-ffff-0000-1111-222222222222"
+
+
+@pytest.fixture(autouse=True)
+def _service_actor_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
+    """Set UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID for orchestrator live-path tests.
+
+    The autouse on this fixture lets the existing test suite continue to call
+    ``run_one(..., dry_run=False)`` without each test wiring the env itself.
+    Tests that explicitly verify fail-closed-on-missing-env can use
+    ``monkeypatch.delenv(...)`` to override this default.
+
+    Calls load_app_settings.cache_clear() so a cached settings object from
+    an earlier-running test (different module, different env state) cannot
+    poison the actor lookup.
+    """
+    from ums_smart_revenue.config.settings import (
+        GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
+        load_app_settings,
+    )
+
+    monkeypatch.setenv(GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV, _SERVICE_ACTOR_ID)
+    load_app_settings.cache_clear()
+    try:
+        yield _SERVICE_ACTOR_ID
+    finally:
+        load_app_settings.cache_clear()
 
 
 @pytest.fixture(name="session")
@@ -744,6 +777,11 @@ def test_run_one_reuses_raw_file_inserted_by_racing_worker(
         )
     ).one()
     assert link.raw_report_file_id == race_winner_id
+    assert _audit_lifecycles(_connector_audit_events(session)) == [
+        "STARTED",
+        "PARSED",
+        "FINISHED",
+    ]
 
 
 def test_run_one_real_local_file_store_backend_round_trips(
@@ -1848,6 +1886,7 @@ def test_bucket_b_parser_error_on_second_report_marks_raw_file_failed_and_status
 
     class FlakyParser:
         """Parser that fails the first call and succeeds on retry; exercises parser retry semantics."""
+
         @staticmethod
         def parse(payload, *, tenant_id):
             """Raise once, then return the captured payload (mirrors the parser retry contract)."""
@@ -2541,6 +2580,7 @@ def test_dry_run_savepoint_reverts_runner_side_writes(
     # then commits ``reports_succeeded`` for that single yielded report.
     class WritingRunner:
         """Runner that emits one canned success payload; used to exercise non-YouTube branches."""
+
         last_marker_id: UUID | None = None
 
         @staticmethod
@@ -2676,6 +2716,7 @@ def test_dry_run_parser_failure_increments_reports_failed_and_keeps_per_report_f
 
     class FlakyParser:
         """Parser that fails on the first call and returns a parsed payload on the second."""
+
         @staticmethod
         def parse(payload, *, tenant_id):
             """Raise once, then return the canned parsed payload (mirrors retry semantics)."""
@@ -4170,3 +4211,797 @@ def test_run_one_with_youtube_analytics_preserves_rows_for_deactivated_channels(
     assert b_row_keys_after == b_row_keys_before, (
         "B's historical row keys must be identical after a deactivation rerun"
     )
+
+
+# ---------------------------------------------------------------------------
+# T37: audit emitters wired into run_one orchestrator (spec B2.6 §8.4).
+#
+# These tests assert the connector audit lifecycle:
+#   STARTED -> DOWNLOADED -> PARSED -> (DOWNLOADED -> FAILED)? -> FINISHED.
+# Transaction semantics: STARTED commits with start_run, FINISHED commits
+# with finish_run, and per-raw-file edges stage inside the main per-report
+# transaction. Dry-run emits zero audit rows. The orchestrator fails closed
+# in Bucket A when ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID`` is unset.
+# ---------------------------------------------------------------------------
+
+
+def _connector_audit_events(session: Session) -> list[AuditLogORM]:
+    """Return audit rows tied to the connector audit lifecycle in insertion order."""
+    return list(
+        session.scalars(
+            select(AuditLogORM)
+            .where(AuditLogORM.tenant_id == TENANT_ID)
+            .where(AuditLogORM.event_type.in_(["CONNECTOR_JOB_RUN", "REPORT_IMPORTED"]))
+            .order_by(AuditLogORM.created_at, AuditLogORM.id)
+        )
+    )
+
+
+def _audit_lifecycles(events: list[AuditLogORM]) -> list[str]:
+    """Extract the ordered ``details["lifecycle"]`` discriminator chain."""
+    return [event.details["lifecycle"] for event in events]
+
+
+def test_run_one_emits_audit_started_finished_for_clean_run(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """A clean 1-report SUCCEEDED run emits STARTED -> DOWNLOADED -> PARSED -> FINISHED."""
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes = _csv_for_one_row()
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r1", "downloadUrl": "https://yt/r1"}
+        ]
+        client.fetch_report.return_value = csv_bytes
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "SUCCEEDED"
+
+    events = _connector_audit_events(session)
+    # Lifecycle ordering: STARTED -> DOWNLOADED -> PARSED -> FINISHED.
+    assert _audit_lifecycles(events) == [
+        "STARTED",
+        "DOWNLOADED",
+        "PARSED",
+        "FINISHED",
+    ]
+    # Event type discriminator: run-lifecycle vs raw-file-lifecycle.
+    event_types = [event.event_type for event in events]
+    assert event_types == [
+        "CONNECTOR_JOB_RUN",
+        "REPORT_IMPORTED",
+        "REPORT_IMPORTED",
+        "CONNECTOR_JOB_RUN",
+    ]
+    # FINISHED carries the terminal status + counts payload.
+    finished = events[-1]
+    assert finished.details["status"] == "SUCCEEDED"
+    assert finished.details["counts"]["reports_succeeded"] == 1
+    assert finished.details["counts"]["reports_failed"] == 0
+    # PARSED carries the upsert count from the source-row repository.
+    parsed = events[2]
+    assert parsed.details["count_upserted"] == outcome.counts["rows_upserted_total"]
+
+
+def test_run_one_emits_audit_event_sequence_for_partial_run(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """A 2-report run with 1 success + 1 parse failure emits 6 lifecycle audit rows."""
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes_a = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-01,UC_audit_alpha,cms-orch-1,10.000000,USD\n"
+    )
+    csv_bytes_b = (
+        b"date,channel,content_owner,estimatedRevenue,currencyCode\n"
+        b"2026-05-02,UC_audit_beta,cms-orch-1,20.000000,USD\n"
+    )
+
+    from ums_smart_revenue.connectors.google_source_parsers import (
+        YouTubeReportingParser as RealParser,
+    )
+
+    real_parser = RealParser()
+    call_state = {"n": 0}
+
+    class FlakyParser:
+        """Parser that succeeds on the first parse and raises ParserError on the second."""
+
+        @staticmethod
+        def parse(payload, *, tenant_id):
+            """Pass the first call through and raise on the second."""
+            call_state["n"] += 1
+            if call_state["n"] == 2:
+                raise ParserError("simulated parser failure for audit ordering test")
+            return list(real_parser.parse(payload, tenant_id=tenant_id))
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator._parser_for_connector",
+        return_value=FlakyParser(),
+    ):
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"},
+            {"id": "job-2", "reportTypeId": "content_owner_basic_a3"},
+        ]
+        reports_by_job = {
+            "job-1": [{"id": "r1", "downloadUrl": "https://yt/r1"}],
+            "job-2": [{"id": "r2", "downloadUrl": "https://yt/r2"}],
+        }
+        client.list_reports_for_month.side_effect = (
+            lambda *, account_id, job_id, report_month: reports_by_job[job_id]
+        )
+        bytes_by_url = {"https://yt/r1": csv_bytes_a, "https://yt/r2": csv_bytes_b}
+        client.fetch_report.side_effect = (
+            lambda *, download_url: bytes_by_url[download_url]
+        )
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome.run is not None
+    assert outcome.run.status == "PARTIAL"
+
+    events = _connector_audit_events(session)
+    # Lifecycle ordering: STARTED -> DOWNLOADED (r1) -> PARSED (r1) ->
+    # DOWNLOADED (r2) -> FAILED (r2) -> FINISHED.
+    assert _audit_lifecycles(events) == [
+        "STARTED",
+        "DOWNLOADED",
+        "PARSED",
+        "DOWNLOADED",
+        "FAILED",
+        "FINISHED",
+    ]
+    # The FAILED audit row carries the exception class only -- the
+    # exception MESSAGE is the source-of-truth ``error_summary`` and is not
+    # copied into the audit details.
+    failed = events[4]
+    assert failed.event_type == "REPORT_IMPORTED"
+    assert failed.details["error_class"] == "ParserError"
+    # FINISHED reflects the partial outcome.
+    finished = events[-1]
+    assert finished.event_type == "CONNECTOR_JOB_RUN"
+    assert finished.details["status"] == "PARTIAL"
+    assert finished.details["counts"]["reports_succeeded"] == 1
+    assert finished.details["counts"]["reports_failed"] == 1
+    assert finished.details["error_summary_present"] is True
+
+
+def test_run_one_dry_run_emits_zero_audit_events(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """``dry_run=True`` writes no audit rows -- the dry-run path skips emitters entirely."""
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    csv_bytes = _csv_for_one_row()
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+    ) as yt_client_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        client = yt_client_cls.return_value
+        client.list_supported_jobs.return_value = [
+            {"id": "job-1", "reportTypeId": "channel_basic_a2"}
+        ]
+        client.list_reports_for_month.return_value = [
+            {"id": "r1", "downloadUrl": "https://yt/r1"}
+        ]
+        client.fetch_report.return_value = csv_bytes
+
+        backend = local_cls.return_value
+        backend.upload.side_effect = AssertionError(
+            "blob upload must not be called in dry-run"
+        )
+        backend.get_bytes.side_effect = AssertionError(
+            "blob get_bytes must not be called in dry-run"
+        )
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+            dry_run=True,
+        )
+
+    assert outcome.run is None
+    assert _connector_audit_events(session) == []
+
+
+def test_run_one_fail_closed_when_service_actor_id_missing(
+    session: Session,
+    _stub_secret_resolver,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live run raises ValueError in Bucket A when the service-actor env is unset.
+
+    The orchestrator constructs the connector service principal before
+    ``start_run``, so a missing UUID fails CLOSED with no half-created
+    RUNNING row and no audit emissions.
+    """
+    from ums_smart_revenue.config.settings import (
+        GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
+        load_app_settings,
+    )
+
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=CONNECTOR_KEY,
+        account_id=ACCOUNT_ID,
+    )
+    monkeypatch.delenv(GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV, raising=False)
+    load_app_settings.cache_clear()
+
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ),
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+        ),
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials",
+            return_value=None,
+        ),
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"),
+        pytest.raises(ValueError) as excinfo,
+    ):
+        run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    # Error mentions the env name so an operator can act on the message.
+    assert GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV in str(excinfo.value)
+    # Bucket A semantics: no connector_runs row, no raw_file row, no audit row.
+    assert session.query(ConnectorRunORM).count() == 0
+    assert session.query(RawReportFileORM).count() == 0
+    assert _connector_audit_events(session) == []
+
+
+# ============================================================================
+# B2.6 Task 38: AdSenseManagementRunner orchestrator integration test.
+# AdSense is account-scoped (one report per account per month), so the runner
+# yields exactly one parser-ready payload per run and the orchestrator should
+# SUCCEED with one DOWNLOADED -> PARSED raw_file. AdSense rows skip in C1 as
+# MISSING_CHANNEL_ID, but that gate lives in T39's end-to-end test, not here.
+# ============================================================================
+
+_ADSENSE_CONNECTOR_KEY = "adsense-management"
+_ADSENSE_ACCOUNT_ID = "pub-orch-1"
+
+
+def _make_adsense_parser_payload(
+    *,
+    account_id: str = _ADSENSE_ACCOUNT_ID,
+    report_month: str = "2026-05",
+) -> dict[str, object]:
+    """Build the parser-ready AdSense payload the mock client returns.
+
+    Mirrors the shape ``adsense_response_to_parser_payload`` stamps onto the
+    wire response: a ``request`` dict carrying ``accountId`` (prefixed with
+    ``accounts/``), the ``dateRange``, and the ``currencyCode``; a ``headers``
+    list whose entries declare ``type`` (DIMENSION or METRIC_CURRENCY) and
+    ``name``; a ``rows`` list of ``{"cells": [...]}`` entries; and the
+    deterministic ``report_id`` string.
+
+    One MONTH dimension + the locked ESTIMATED_EARNINGS + TOTAL_EARNINGS
+    metric pair produces two ParsedSourceRow rows on the same input row.
+    """
+    year_s, month_s = report_month.split("-")
+    year_i, month_i = int(year_s), int(month_s)
+    from calendar import monthrange as _monthrange
+
+    last_day = _monthrange(year_i, month_i)[1]
+    return {
+        "request": {
+            "accountId": f"accounts/{account_id}",
+            "dateRange": {
+                "startDate": {"year": year_i, "month": month_i, "day": 1},
+                "endDate": {"year": year_i, "month": month_i, "day": last_day},
+            },
+            "currencyCode": "USD",
+        },
+        "headers": [
+            {"type": "DIMENSION", "name": "MONTH"},
+            {
+                "type": "METRIC_CURRENCY",
+                "name": "ESTIMATED_EARNINGS",
+                "currencyCode": "USD",
+            },
+            {
+                "type": "METRIC_CURRENCY",
+                "name": "TOTAL_EARNINGS",
+                "currencyCode": "USD",
+            },
+        ],
+        "rows": [
+            {
+                "cells": [
+                    {"value": f"{year_s}{month_s}"},
+                    {"value": "123.450000"},
+                    {"value": "67.890000"},
+                ],
+            },
+        ],
+        "report_id": f"deterministic-stub-{account_id}-{report_month}",
+    }
+
+
+def _make_adsense_payment_parser_payload(
+    *,
+    account_id: str = _ADSENSE_ACCOUNT_ID,
+    report_month: str = "2026-05",
+) -> dict[str, object]:
+    """Build an AdSense payload that emits a payment_report row."""
+    year_s, month_s = report_month.split("-")
+    payload = _make_adsense_parser_payload(
+        account_id=account_id, report_month=report_month,
+    )
+    payload["headers"] = [
+        {"type": "DIMENSION", "name": "MONTH"},
+        {"type": "METRIC_CURRENCY", "name": "PAID_AMOUNT", "currencyCode": "USD"},
+    ]
+    payload["rows"] = [
+        {
+            "cells": [
+                {"value": f"{year_s}{month_s}"},
+                {"value": "9.990000"},
+            ],
+        },
+    ]
+    payload["report_id"] = f"deterministic-stub-payment-{account_id}-{report_month}"
+    return payload
+
+
+def _run_adsense_orchestrator_with_payload(
+    session: Session,
+    *,
+    account_id: str,
+    report_month: str,
+    payload: dict[str, object],
+) -> ConnectorRunOutcome:
+    """Drive one AdSense run with a parser-ready payload and no network."""
+    expected_account_id = account_id
+    expected_report_month = report_month
+
+    def fake_fetch_monthly_report(*, account_id: str, report_month: str) -> dict:
+        """Return the closure-captured payload for the account/month slice."""
+        assert account_id == expected_account_id
+        assert report_month == expected_report_month
+        return payload
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient"
+    ) as adsense_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+        adsense_cls.return_value.fetch_monthly_report.side_effect = (
+            fake_fetch_monthly_report
+        )
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        return run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=_ADSENSE_CONNECTOR_KEY,
+            account_id=expected_account_id,
+            report_month=expected_report_month,
+        )
+
+
+def test_run_one_with_adsense_management_succeeds_for_account_scoped_run(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """Drive run_one end-to-end with the adsense-management connector.
+
+    AdSenseManagementClient.fetch_monthly_report is patched at orchestrator
+    module scope to return a parser-ready payload (no network). AdSense is
+    account-scoped, so exactly one report is produced per run regardless of
+    channels.
+
+    Asserts:
+    - outcome.run.status == "SUCCEEDED"
+    - outcome.counts["reports_attempted"] == 1
+    - outcome.counts["reports_succeeded"] == 1
+    - outcome.counts["reports_failed"] == 0
+    - Exactly one RawReportFileORM row exists with source == "adsense_management"
+      and parse_status == "PARSED"
+    - GoogleRevenueSourceRowORM rows are present in tenant scope, all carry
+      source_system == "adsense_management", and youtube_channel_id is None
+      (AdSense reports are account-scoped, not channel-scoped).
+    - Audit lifecycle is STARTED -> DOWNLOADED -> PARSED -> FINISHED.
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ADSENSE_CONNECTOR_KEY,
+        account_id=_ADSENSE_ACCOUNT_ID,
+    )
+    report_month = "2026-05"
+    payload = _make_adsense_parser_payload(
+        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+    )
+
+    def fake_fetch_monthly_report(*, account_id: str, report_month: str) -> dict:
+        """Return the parser-ready stub payload; assert the (account, month) slice."""
+        assert account_id == _ADSENSE_ACCOUNT_ID
+        assert report_month == "2026-05"
+        return payload
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient"
+    ) as adsense_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        adsense_client = adsense_cls.return_value
+        adsense_client.fetch_monthly_report.side_effect = fake_fetch_monthly_report
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+
+        def fake_upload(*, storage_uri, content):
+            """Stash uploaded bytes in the in-memory blob store."""
+            store[storage_uri] = content
+
+        def fake_get(*, storage_uri):
+            """Read bytes back from the in-memory blob store."""
+            return store[storage_uri]
+
+        backend.upload.side_effect = fake_upload
+        backend.get_bytes.side_effect = fake_get
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=_ADSENSE_CONNECTOR_KEY,
+            account_id=_ADSENSE_ACCOUNT_ID,
+            report_month=report_month,
+        )
+
+    # ----- outcome shape -----
+    assert isinstance(outcome, ConnectorRunOutcome)
+    assert outcome.run is not None
+    assert outcome.run.status == "SUCCEEDED"
+    assert outcome.per_report_failures == []
+
+    # ----- counts: AdSense yields exactly one report per (account, month) -----
+    counts = outcome.counts
+    assert counts["reports_attempted"] == 1
+    assert counts["reports_succeeded"] == 1
+    assert counts["reports_failed"] == 0
+    # The fixture row carries both ESTIMATED_EARNINGS and TOTAL_EARNINGS metrics,
+    # so the parser emits two ParsedSourceRow rows from the same input cells.
+    assert counts["rows_upserted_total"] == 2
+
+    # ----- durable side effects: raw_report_files -----
+    raw_files = session.scalars(
+        select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
+    ).all()
+    assert len(raw_files) == 1
+    raw_file = raw_files[0]
+    assert raw_file.parse_status == "PARSED"
+    assert raw_file.source == "adsense_management"
+    assert raw_file.report_month == report_month
+
+    # The runner serialises the parser_payload as JSON; the blob bytes the
+    # backend received should decode back into the same payload dict.
+    stored_bytes = store[raw_file.file_url]
+    assert json.loads(stored_bytes.decode("utf-8")) == payload
+
+    # ----- durable side effects: connector_run_raw_files join rows -----
+    links = session.scalars(
+        select(ConnectorRunRawFileORM).where(
+            ConnectorRunRawFileORM.tenant_id == TENANT_ID
+        )
+    ).all()
+    assert len(links) == 1
+
+    # ----- durable side effects: google_revenue_source_rows -----
+    source_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
+        )
+    ).all()
+    assert len(source_rows) == 2
+    assert all(r.source_system == "adsense_management" for r in source_rows)
+    # AdSense is account-scoped; the parser leaves youtube_channel_id NULL.
+    assert all(r.youtube_channel_id is None for r in source_rows)
+    assert all(r.source_account_id == _ADSENSE_ACCOUNT_ID for r in source_rows)
+    assert {r.metric_key for r in source_rows} == {
+        "ESTIMATED_EARNINGS",
+        "TOTAL_EARNINGS",
+    }
+    assert {r.report_type for r in source_rows} == {"earnings_report"}
+    assert {r.value_kind for r in source_rows} == {"estimated"}
+
+    # ----- audit lifecycle -----
+    events = _connector_audit_events(session)
+    assert _audit_lifecycles(events) == [
+        "STARTED",
+        "DOWNLOADED",
+        "PARSED",
+        "FINISHED",
+    ]
+
+
+def test_run_one_with_adsense_management_empty_success_replaces_existing_rows(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """An empty AdSense replacement must delete both account-scoped metric types."""
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ADSENSE_CONNECTOR_KEY,
+        account_id=_ADSENSE_ACCOUNT_ID,
+    )
+    report_month = "2026-05"
+    payload_with_rows = _make_adsense_parser_payload(
+        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+    )
+    payload_empty = {**payload_with_rows, "rows": []}
+
+    first_outcome = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
+        payload=payload_with_rows,
+    )
+    assert first_outcome.run is not None
+    assert first_outcome.run.status == "SUCCEEDED"
+    assert first_outcome.counts["rows_upserted_total"] == 2
+
+    initial_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "adsense_management",
+            GoogleRevenueSourceRowORM.report_month == report_month,
+            GoogleRevenueSourceRowORM.source_account_id == _ADSENSE_ACCOUNT_ID,
+        )
+    ).all()
+    assert {row.metric_key for row in initial_rows} == {
+        "ESTIMATED_EARNINGS",
+        "TOTAL_EARNINGS",
+    }
+    assert {row.report_type for row in initial_rows} == {"earnings_report"}
+
+    second_outcome = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
+        payload=payload_empty,
+    )
+    assert second_outcome.run is not None
+    assert second_outcome.run.status == "SUCCEEDED"
+    assert second_outcome.counts["reports_attempted"] == 1
+    assert second_outcome.counts["reports_succeeded"] == 1
+    assert second_outcome.counts["rows_upserted_total"] == 0
+
+    final_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "adsense_management",
+            GoogleRevenueSourceRowORM.report_month == report_month,
+            GoogleRevenueSourceRowORM.source_account_id == _ADSENSE_ACCOUNT_ID,
+        )
+    ).all()
+    assert final_rows == []
+
+
+def test_run_one_with_adsense_management_nonempty_success_deletes_missing_scope(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """A nonempty AdSense replacement must delete metric types it no longer emits."""
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ADSENSE_CONNECTOR_KEY,
+        account_id=_ADSENSE_ACCOUNT_ID,
+    )
+    report_month = "2026-05"
+    payload_payment = _make_adsense_payment_parser_payload(
+        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+    )
+    payload_earnings = _make_adsense_parser_payload(
+        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+    )
+
+    first_outcome = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
+        payload=payload_payment,
+    )
+    assert first_outcome.run is not None
+    assert first_outcome.run.status == "SUCCEEDED"
+    assert first_outcome.counts["rows_upserted_total"] == 1
+
+    initial_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "adsense_management",
+            GoogleRevenueSourceRowORM.report_month == report_month,
+            GoogleRevenueSourceRowORM.source_account_id == _ADSENSE_ACCOUNT_ID,
+        )
+    ).all()
+    assert {row.report_type for row in initial_rows} == {"payment_report"}
+    assert {row.metric_key for row in initial_rows} == {"PAID_AMOUNT"}
+
+    second_outcome = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
+        payload=payload_earnings,
+    )
+    assert second_outcome.run is not None
+    assert second_outcome.run.status == "SUCCEEDED"
+    assert second_outcome.counts["rows_upserted_total"] == 2
+
+    final_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "adsense_management",
+            GoogleRevenueSourceRowORM.report_month == report_month,
+            GoogleRevenueSourceRowORM.source_account_id == _ADSENSE_ACCOUNT_ID,
+        )
+    ).all()
+    assert {row.report_type for row in final_rows} == {"earnings_report"}
+    assert {row.metric_key for row in final_rows} == {
+        "ESTIMATED_EARNINGS",
+        "TOTAL_EARNINGS",
+    }
+
+
+def test_run_one_with_adsense_management_full_resource_cleanup_uses_parser_scope(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """AdSense stale cleanup must use the parser-normalized account scope."""
+    account_selector = f"accounts/{_ADSENSE_ACCOUNT_ID}"
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ADSENSE_CONNECTOR_KEY,
+        account_id=account_selector,
+    )
+    report_month = "2026-05"
+    payload_payment = _make_adsense_payment_parser_payload(
+        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+    )
+    payload_earnings = _make_adsense_parser_payload(
+        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+    )
+
+    first_outcome = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=account_selector,
+        report_month=report_month,
+        payload=payload_payment,
+    )
+    assert first_outcome.run is not None
+    assert first_outcome.run.status == "SUCCEEDED"
+    assert first_outcome.counts["rows_upserted_total"] == 1
+
+    second_outcome = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=account_selector,
+        report_month=report_month,
+        payload=payload_earnings,
+    )
+    assert second_outcome.run is not None
+    assert second_outcome.run.status == "SUCCEEDED"
+    assert second_outcome.counts["rows_upserted_total"] == 2
+
+    final_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "adsense_management",
+            GoogleRevenueSourceRowORM.report_month == report_month,
+        )
+    ).all()
+    assert {row.source_account_id for row in final_rows} == {_ADSENSE_ACCOUNT_ID}
+    assert {row.report_type for row in final_rows} == {"earnings_report"}
+    assert {row.metric_key for row in final_rows} == {
+        "ESTIMATED_EARNINGS",
+        "TOTAL_EARNINGS",
+    }

@@ -18,6 +18,7 @@ from ums_smart_revenue.connectors.google.errors import (
     GoogleApiServerError,
     GoogleConnectorError,
     InactiveCredentialError,
+    MalformedAdsenseAccountIdError,
     MalformedAnalyticsSelectorError,
     MalformedReportMonthError,
     MalformedSecretPayloadError,
@@ -54,6 +55,7 @@ def test_all_b2_errors_subclass_google_connector_error() -> None:
         GoogleApiResponseError,
         UnsupportedReportTypeError,
         MalformedReportMonthError,
+        MalformedAdsenseAccountIdError,
         MalformedAnalyticsSelectorError,
     ):
         assert issubclass(cls, GoogleConnectorError), cls.__name__
