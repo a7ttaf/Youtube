@@ -64,6 +64,7 @@ def payment_payload(amount: str = "930.00") -> dict[str, object]:
         "reason": "Sync official AdSense payment record for March close",
         "payments": [
             {
+                "source_account_id": "pub-1",
                 "month": "2026-03",
                 "payment_name": "AdSense payment March 2026",
                 "payment_date": "2026-04-21",
@@ -336,3 +337,62 @@ def test_sync_rejects_locked_finance_month(tmp_path):
         response.json()["detail"] == "Finance month is locked for AdSense payment sync"
     )
     assert payment_count == 0
+
+
+def test_manual_sync_requires_source_account_id(tmp_path) -> None:
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    body = payment_payload()
+    del body["payments"][0]["source_account_id"]
+    response = client.post(
+        "/adsense/sync-payments",
+        headers=auth_headers("system_integration_user", "connector", "adsense"),
+        json=body,
+    )
+    assert response.status_code == 422  # Pydantic rejects before any DB write
+
+
+def test_manual_sync_rejects_blank_source_account_id(tmp_path) -> None:
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    body = payment_payload()
+    body["payments"][0]["source_account_id"] = "   "
+    response = client.post(
+        "/adsense/sync-payments",
+        headers=auth_headers("system_integration_user", "connector", "adsense"),
+        json=body,
+    )
+    assert response.status_code == 422
+
+
+def test_manual_sync_canonicalizes_accounts_prefix(tmp_path) -> None:
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    body = payment_payload()
+    body["payments"][0]["source_account_id"] = "accounts/pub-1"
+    response = client.post(
+        "/adsense/sync-payments",
+        headers=auth_headers("system_integration_user", "connector", "adsense"),
+        json=body,
+    )
+    assert response.status_code == 200
+    # The `accounts/` prefix is stripped by the shared normalizer, so the
+    # persisted/returned identity is the canonical bare publisher id.
+    assert response.json()["items"][0]["source_account_id"] == "pub-1"
+
+
+def test_manual_sync_rejects_malformed_account_path_chars(tmp_path) -> None:
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    body = payment_payload()
+    body["payments"][0]["source_account_id"] = "pub/../etc"  # reserved '/'
+    response = client.post(
+        "/adsense/sync-payments",
+        headers=auth_headers("system_integration_user", "connector", "adsense"),
+        json=body,
+    )
+    assert response.status_code == 422  # MalformedAdsenseAccountIdError -> 422

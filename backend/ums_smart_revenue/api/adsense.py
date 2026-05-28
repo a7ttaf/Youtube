@@ -18,6 +18,12 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
+from ums_smart_revenue.connectors.google.adsense_management_client import (
+    _validated_account_id,
+)
+from ums_smart_revenue.connectors.google.errors import (
+    MalformedAdsenseAccountIdError,
+)
 from ums_smart_revenue.finance.adsense_payments import (
     MAX_ADSENSE_PAYMENT_PAGE_SIZE,
     AdSensePaymentInput,
@@ -32,6 +38,7 @@ ADSENSE_MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
 class AdSensePaymentRequest(BaseModel):
+    source_account_id: str = Field(min_length=1)
     month: str
     payment_name: str = Field(min_length=1)
     payment_date: date
@@ -50,6 +57,36 @@ class AdSensePaymentRequest(BaseModel):
     @classmethod
     def strip_required_strings(cls, value):
         return _strip_required_string(value)
+
+    # ========================================================================
+    # Purpose: Canonicalize the externally supplied AdSense publisher id at the
+    #   API boundary so it matches the live pull / Google source-row convention
+    #   before it reaches any finance source-of-truth write.
+    # Database/ORM: Feeds AdSensePaymentInput.source_account_id -> AdSensePaymentORM.
+    # Standards: Typed boundary validation; malformed ids fail closed as a
+    #   Pydantic ValueError (FastAPI renders 422) prior to any DB access.
+    # Blast Radius: Finance (payment identity), audit (entity id). No Neo4j.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/google/adsense_management_client.py
+    #       -> shared `_validated_account_id` normalizer (strip `accounts/`,
+    #          reject blank/whitespace-padded/reserved-char ids).
+    #   - File: backend/ums_smart_revenue/finance/adsense_payments.py
+    #       -> AdSensePaymentInput requires a canonical source_account_id.
+    # ========================================================================
+    @field_validator("source_account_id", mode="before")
+    @classmethod
+    def canonicalize_source_account_id(cls, value):
+        if not isinstance(value, str):
+            return value
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("source_account_id must not be blank")
+        try:
+            # Same canonical convention as the live pull and Google source rows:
+            # strip `accounts/`, reject blank/whitespace-padded/reserved chars.
+            return _validated_account_id(stripped)
+        except MalformedAdsenseAccountIdError as exc:
+            raise ValueError(str(exc)) from exc
 
 
 class AdSensePaymentSyncRequest(BaseModel):
@@ -102,6 +139,7 @@ def sync_adsense_payments(
         payments = repository.sync_payments(
             payments=[
                 AdSensePaymentInput(
+                    source_account_id=payment.source_account_id,
                     month=payment.month,
                     payment_name=payment.payment_name,
                     payment_date=payment.payment_date,
