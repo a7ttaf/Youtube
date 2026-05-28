@@ -239,6 +239,37 @@ running on the operator's workstation.
       AdSense row skipped as SkipReason.MISSING_CHANNEL_ID, and the
       12-event STARTED->DOWNLOADED->PARSED->FINISHED audit sequence per
       run with the connector service principal.
+    - ⏳ PR #TBD — Concern C: connector_runs.counts_json source-row
+      created/updated/unchanged split (B2.6 carry-forward). Replaces the
+      placeholder where rows_upserted_created/updated/unchanged were
+      always 0 with a real classification:
+      SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many now
+      pre-fetches existing rows by
+      (tenant_id, source_system, source_row_key) and returns a
+      SourceRowUpsertResult carrying entries plus per-row classification
+      counts. _content_matches_existing compares the parser-owned content
+      fields (excludes provenance: raw_file_id / imported_by — a fresh
+      raw file carrying identical values is "unchanged content, refreshed
+      evidence", not a value update). _process_one_report bubbles the
+      counts up via a new _ProcessedReportResult dataclass and
+      _handle_live_produced_report sums them into the run-level counts
+      dict that finish_run writes to connector_runs.counts_json. Sum
+      invariant: created + updated + unchanged == total. Dry-run keeps
+      the placeholder zeros for the per-category fields (no upsert runs).
+      4 new repo-level tests cover create/unchanged/updated/mixed-rerun
+      and 1 new end-to-end orchestrator test asserts the counts plumb
+      into connector_runs.counts_json across 3 consecutive runs (fresh
+      insert, identical rerun, mutated rerun). _require_no_duplicate_keys
+      fails closed (typed GoogleRevenueSourceRowValidationError, nothing
+      persisted) when one batch carries two rows on the same
+      (source_system, source_row_key) — ambiguous source evidence that
+      would otherwise silently last-write-wins and skew the split; the
+      error names the key only (no raw_payload leak), capped at 10 with a
+      "(+N more)" suffix. 4 added repo tests: duplicate-in-batch rejected
+      (fail closed, nothing persisted); same key under a different
+      source_system still allowed (the guard keys on the full tuple);
+      error-message cap formatting; guard runs before the FK/currency
+      existence pre-checks.
 - ⏳ Channel inventory file format — remaining: tenant-scoped channel
   registry exists (PR #25); bulk inventory load format not yet defined.
 - ⏳ Finance month-close input format — remaining: close-gate enforced

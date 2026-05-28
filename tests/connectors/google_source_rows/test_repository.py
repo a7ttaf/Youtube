@@ -129,10 +129,10 @@ def _row(
 def test_upsert_many_inserts_new_rows(session: Session) -> None:
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     rows = [_row(source_row_key="a" * 64), _row(source_row_key="b" * 64)]
-    written = repo.upsert_many(
+    result = repo.upsert_many(
         TENANT_A, rows, raw_file_id=RAW_FILE_ID, imported_by=None
     )
-    assert len(written) == 2
+    assert len(result.entries) == 2
 
     reloaded = session.scalars(
         select(GoogleRevenueSourceRowORM).where(
@@ -171,7 +171,9 @@ def test_upsert_many_preserves_id_on_conflict(session: Session) -> None:
         TENANT_A, [_row(source_row_key=key, amount="150.000000")],
         raw_file_id=RAW_FILE_ID, imported_by=None,
     )
-    assert first[0].id == second[0].id, "id must be preserved on conflict update"
+    assert first.entries[0].id == second.entries[0].id, (
+        "id must be preserved on conflict update"
+    )
 
 
 def test_upsert_many_updates_mutable_fields_on_conflict(session: Session) -> None:
@@ -248,8 +250,8 @@ def test_allows_none_raw_file(session: Session) -> None:
     # Provenance is optional: a None raw_file_id skips the FK pre-check.
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     ok = _row(source_row_key="w" * 64)
-    written = repo.upsert_many(TENANT_A, [ok], raw_file_id=None, imported_by=None)
-    assert len(written) == 1
+    result = repo.upsert_many(TENANT_A, [ok], raw_file_id=None, imported_by=None)
+    assert len(result.entries) == 1
 
 
 def test_rejects_invalid_source_system(session: Session) -> None:
@@ -579,8 +581,8 @@ def test_accepts_amount_at_six_fractional_digits(session: Session) -> None:
     """
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     ok = _row(source_row_key="s6" * 32, amount="1.123456")
-    written = repo.upsert_many(TENANT_A, [ok], raw_file_id=RAW_FILE_ID, imported_by=None)
-    assert written[0].amount_native == Decimal("1.123456")
+    result = repo.upsert_many(TENANT_A, [ok], raw_file_id=RAW_FILE_ID, imported_by=None)
+    assert result.entries[0].amount_native == Decimal("1.123456")
 
 
 def test_rejects_non_json_serialisable_raw_payload(session: Session) -> None:
@@ -812,3 +814,181 @@ def test_non_usd_source_rows_visible_at_repository_layer(session: Session) -> No
     rows = repo.list(TENANT_A, report_month="2026-04")
     currencies = {r.currency_code for r in rows}
     assert currencies == {"USD", "EGP"}
+
+
+def test_upsert_many_classifies_all_new_rows_as_created(session: Session) -> None:
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    rows = [
+        _row(source_row_key="A" * 64),
+        _row(source_row_key="B" * 64),
+        _row(source_row_key="C" * 64),
+    ]
+    result = repo.upsert_many(
+        TENANT_A, rows, raw_file_id=RAW_FILE_ID, imported_by=None
+    )
+    assert len(result.entries) == 3
+    assert result.created == 3
+    assert result.updated == 0
+    assert result.unchanged == 0
+
+
+def test_upsert_many_classifies_existing_unchanged_rerun(session: Session) -> None:
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    row = _row(source_row_key="U" * 64)
+    repo.upsert_many(TENANT_A, [row], raw_file_id=RAW_FILE_ID, imported_by=None)
+    result = repo.upsert_many(
+        TENANT_A, [row], raw_file_id=RAW_FILE_ID, imported_by=None
+    )
+    assert len(result.entries) == 1
+    assert result.created == 0
+    assert result.updated == 0
+    assert result.unchanged == 1
+
+
+def test_upsert_many_classifies_existing_with_value_change_as_updated(
+    session: Session,
+) -> None:
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    key = "V" * 64
+    repo.upsert_many(
+        TENANT_A,
+        [_row(source_row_key=key, amount="100.000000")],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=None,
+    )
+    result = repo.upsert_many(
+        TENANT_A,
+        [_row(source_row_key=key, amount="150.000000")],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=None,
+    )
+    assert len(result.entries) == 1
+    assert result.created == 0
+    assert result.updated == 1
+    assert result.unchanged == 0
+
+
+def test_upsert_many_classifies_mixed_rerun(session: Session) -> None:
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    seeded_unchanged_1 = _row(source_row_key="M1" * 32, amount="10.000000")
+    seeded_unchanged_2 = _row(source_row_key="M2" * 32, amount="20.000000")
+    seeded_to_be_updated = _row(source_row_key="M3" * 32, amount="30.000000")
+    repo.upsert_many(
+        TENANT_A,
+        [seeded_unchanged_1, seeded_unchanged_2, seeded_to_be_updated],
+        raw_file_id=RAW_FILE_ID,
+        imported_by=None,
+    )
+    rerun_rows = [
+        seeded_unchanged_1,
+        seeded_unchanged_2,
+        replace(seeded_to_be_updated, amount_native=Decimal("33.000000")),
+        _row(source_row_key="M4" * 32, amount="40.000000"),
+    ]
+    result = repo.upsert_many(
+        TENANT_A, rerun_rows, raw_file_id=RAW_FILE_ID, imported_by=None
+    )
+    assert len(result.entries) == 4
+    assert result.created == 1
+    assert result.updated == 1
+    assert result.unchanged == 2
+
+
+def test_upsert_many_rejects_duplicate_source_row_key_in_batch(
+    session: Session,
+) -> None:
+    """Two rows sharing the same (source_system, source_row_key) in ONE batch are
+    ambiguous source evidence. Without a guard the upsert silently last-write-wins
+    (the second row's values overwrite the first via ON CONFLICT DO UPDATE) while
+    the create/updated/unchanged split double-counts the collapsed key — the
+    persisted total and the reported counts disagree. The repository must fail
+    closed with the typed validation error, naming the offending key, before any
+    classification read or write — and persist nothing.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    shared_key = "D" * 64
+    rows = [
+        _row(source_row_key=shared_key, amount="100.000000"),
+        _row(source_row_key=shared_key, amount="200.000000"),
+    ]
+    with pytest.raises(
+        GoogleRevenueSourceRowValidationError,
+        match=r"duplicate \(source_system, source_row_key\)",
+    ) as exc_info:
+        repo.upsert_many(TENANT_A, rows, raw_file_id=RAW_FILE_ID, imported_by=None)
+    # The message names the duplicate key (source evidence) but must not leak the
+    # raw_payload contents of either colliding row.
+    message = str(exc_info.value)
+    assert shared_key in message
+    assert "payload" not in message
+    # Fail closed: the whole batch is rejected before any write, so nothing lands.
+    assert (
+        session.query(GoogleRevenueSourceRowORM)
+        .filter_by(tenant_id=TENANT_A)
+        .count()
+        == 0
+    )
+
+
+def test_upsert_many_allows_same_key_different_source_system_in_batch(
+    session: Session,
+) -> None:
+    """The conflict target is (source_system, source_row_key): the same
+    source_row_key under two DIFFERENT source_systems is NOT a collision and must
+    be accepted. The duplicate guard keys on the full tuple, mirroring the
+    google_revenue_source_rows unique index, so this distinct pair is allowed.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    shared_key = "E" * 64
+    rows = [
+        _row(source_row_key=shared_key, source_system="youtube_reporting"),
+        _row(source_row_key=shared_key, source_system="adsense_management"),
+    ]
+    result = repo.upsert_many(
+        TENANT_A, rows, raw_file_id=RAW_FILE_ID, imported_by=None
+    )
+    assert len(result.entries) == 2
+    assert result.created == 2
+
+
+def test_duplicate_key_error_caps_named_keys(session: Session) -> None:
+    """A pathological batch with many distinct duplicated keys must not dump an
+    unbounded list into the error/log line: the message names at most
+    _MAX_DUPLICATE_KEYS_IN_ERROR keys and appends a "(+N more)" suffix for the
+    rest. 11 unique duplicated keys -> 10 named + "(+1 more)".
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    rows = []
+    for i in range(11):
+        key = f"{i:02d}" + "k" * 62  # 64 chars, 11 distinct keys
+        rows.append(_row(source_row_key=key))
+        rows.append(_row(source_row_key=key))  # each duplicated within the batch
+    with pytest.raises(GoogleRevenueSourceRowValidationError) as exc_info:
+        repo.upsert_many(TENANT_A, rows, raw_file_id=RAW_FILE_ID, imported_by=None)
+    message = str(exc_info.value)
+    assert "(+1 more)" in message
+    # Exactly 10 keys are named before the suffix (one "system:key" token each).
+    named_segment = message.split("batch: ", 1)[1]
+    assert named_segment.count("youtube_reporting:") == 10
+
+
+def test_duplicate_key_guard_runs_before_currency_existence_check(
+    session: Session,
+) -> None:
+    """The duplicate guard fails closed BEFORE the FK/currency existence
+    pre-checks. A batch that is both duplicated AND carries an unknown currency
+    must surface the duplicate error (the structural batch defect) — pinning the
+    ordering so a future refactor cannot move the guard after the FK checks and
+    silently change which error a caller sees.
+    """
+    repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
+    shared_key = "F" * 64
+    rows = [
+        _row(source_row_key=shared_key, currency="ZZZ"),  # ZZZ is not seeded
+        _row(source_row_key=shared_key, currency="ZZZ"),
+    ]
+    with pytest.raises(
+        GoogleRevenueSourceRowValidationError,
+        match=r"duplicate \(source_system, source_row_key\)",
+    ):
+        repo.upsert_many(TENANT_A, rows, raw_file_id=RAW_FILE_ID, imported_by=None)

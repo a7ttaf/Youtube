@@ -73,6 +73,28 @@ class GoogleRevenueSourceRowEntry:
     ingested_at: datetime
 
 
+@dataclass(frozen=True)
+class SourceRowUpsertResult:
+    # ============================================================================
+    # Purpose: Return shape of SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many
+    #          carrying the persisted entries alongside the per-row classification
+    #          counts the orchestrator copies into connector_runs.counts_json.
+    # Database/ORM: None directly; populated from a pre-fetch of existing
+    #               google_revenue_source_rows compared to the input ParsedSourceRow
+    #               batch.
+    # Standards: Sum invariant — len(entries) == created + updated + unchanged.
+    #            "Unchanged" means every parser-owned content field matches the
+    #            existing row; raw_file_id / imported_by are provenance, not
+    #            content, and their refresh is not counted as a value update.
+    # Blast Radius: connector_runs.counts_json accuracy; finance source rows
+    #               themselves are unaffected by this dataclass.
+    # ============================================================================
+    entries: list[GoogleRevenueSourceRowEntry]
+    created: int
+    updated: int
+    unchanged: int
+
+
 class GoogleRevenueSourceRowError(ValueError):
     """Base class for source-row repository errors."""
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterator
+from copy import deepcopy
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path as _Path
@@ -5005,3 +5006,81 @@ def test_run_one_with_adsense_management_full_resource_cleanup_uses_parser_scope
         "ESTIMATED_EARNINGS",
         "TOTAL_EARNINGS",
     }
+
+
+def test_run_one_per_category_row_counts_plumb_to_connector_run_counts_json(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """rows_upserted_created/updated/unchanged reach connector_runs.counts_json.
+
+    Drives three consecutive AdSense runs against the same (account, month)
+    and asserts that every classification branch — fresh-insert (CREATED),
+    identical rerun (UNCHANGED), and value-change rerun (UPDATED, mixed with
+    UNCHANGED) — flows from the repository through ``_process_one_report``
+    into the run-level ``counts`` dict written to ``connector_runs.counts_json``
+    by ``finish_run``. Sum invariant: created + updated + unchanged == total.
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ADSENSE_CONNECTOR_KEY,
+        account_id=_ADSENSE_ACCOUNT_ID,
+    )
+    report_month = "2026-05"
+    base_payload = _make_adsense_parser_payload(
+        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+    )
+
+    # Run 1: both AdSense source rows are new → CREATED=2.
+    first = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
+        payload=base_payload,
+    )
+    assert first.run is not None and first.run.status == "SUCCEEDED"
+    assert first.counts["rows_upserted_total"] == 2
+    assert first.counts["rows_upserted_created"] == 2
+    assert first.counts["rows_upserted_updated"] == 0
+    assert first.counts["rows_upserted_unchanged"] == 0
+
+    # Run 2: identical payload → both rows UNCHANGED.
+    second = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
+        payload=base_payload,
+    )
+    assert second.run is not None and second.run.status == "SUCCEEDED"
+    assert second.counts["rows_upserted_total"] == 2
+    assert second.counts["rows_upserted_created"] == 0
+    assert second.counts["rows_upserted_updated"] == 0
+    assert second.counts["rows_upserted_unchanged"] == 2
+
+    # Run 3: only ESTIMATED_EARNINGS amount changes → 1 UPDATED + 1 UNCHANGED
+    # (the TOTAL_EARNINGS row's cells are identical, so its content matches).
+    mutated_payload = deepcopy(base_payload)
+    mutated_payload["rows"][0]["cells"][1]["value"] = "200.000000"
+    third = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
+        payload=mutated_payload,
+    )
+    assert third.run is not None and third.run.status == "SUCCEEDED"
+    assert third.counts["rows_upserted_total"] == 2
+    assert third.counts["rows_upserted_created"] == 0
+    assert third.counts["rows_upserted_updated"] == 1
+    assert third.counts["rows_upserted_unchanged"] == 1
+
+    # Defence in depth: read the persisted counts_json directly to confirm
+    # the run-level write picked up the per-category split (not just the
+    # finish_run return value).
+    persisted = session.scalars(
+        select(ConnectorRunORM)
+        .where(ConnectorRunORM.tenant_id == TENANT_ID)
+        .order_by(ConnectorRunORM.started_at)
+    ).all()
+    assert len(persisted) == 3
+    assert persisted[-1].counts_json["rows_upserted_updated"] == 1
+    assert persisted[-1].counts_json["rows_upserted_unchanged"] == 1

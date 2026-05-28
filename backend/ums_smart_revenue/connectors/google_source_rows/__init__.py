@@ -15,6 +15,7 @@ from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
     GoogleRevenueSourceRowValidationError,
     IsoCurrency,
     ParsedSourceRow,
+    SourceRowUpsertResult,
 )
 from ums_smart_revenue.connectors.google_source_rows.repository import (
     SqlAlchemyCurrenciesRepository,
@@ -31,6 +32,7 @@ __all__ = [
     "GoogleRevenueSourceRowValidationError",
     "IsoCurrency",
     "ParsedSourceRow",
+    "SourceRowUpsertResult",
     "SqlAlchemyCurrenciesRepository",
     "SqlAlchemyGoogleRevenueSourceRowRepository",
 ]

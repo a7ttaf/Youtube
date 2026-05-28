@@ -15,7 +15,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal
-from typing import List  # noqa: UP035
+from typing import Final, List  # noqa: UP035
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, select
@@ -32,6 +32,7 @@ from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
     GoogleRevenueSourceRowValidationError,
     IsoCurrency,
     ParsedSourceRow,
+    SourceRowUpsertResult,
 )
 from ums_smart_revenue.db.report_models import RawReportFileORM
 from ums_smart_revenue.db.source_models import (
@@ -175,6 +176,50 @@ def _is_date_only(value: object) -> bool:
     return isinstance(value, date) and not isinstance(value, datetime)
 
 
+# Content fields that the upsert SET clause writes from the parser-owned input.
+# Provenance (raw_file_id, imported_by) is intentionally excluded: a re-import
+# from a fresh raw file that carries the same values is "unchanged content,
+# refreshed evidence" — not a value update. Conflict keys (source_system,
+# source_row_key) are excluded because the existing row was matched on them.
+_CONTENT_COMPARISON_FIELDS = (
+    "source_account_id",
+    "content_owner_id",
+    "youtube_channel_id",
+    "report_type",
+    "report_month",
+    "period_start",
+    "period_end",
+    "metric_key",
+    "value_kind",
+    "amount_native",
+    "currency_code",
+    "source_report_id",
+    "raw_payload",
+)
+
+# Upper bound on how many duplicate keys are named in the batch-duplicate
+# error. Keeps the message (and any log line carrying it) bounded for a
+# pathological batch while still naming the offenders; a real parser batch
+# for one (account, month, report_type) holds at most a handful of dupes.
+_MAX_DUPLICATE_KEYS_IN_ERROR: Final[int] = 10
+
+
+def _content_matches_existing(
+    row: ParsedSourceRow, existing: GoogleRevenueSourceRowORM
+) -> bool:
+    """Return True when every parser-owned content field matches the persisted row.
+
+    Used by SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many to classify
+    an input row as ``unchanged`` (this returns True) versus ``updated`` (False
+    when the row already exists). Decimal equality is numeric (so 100 == 100.0),
+    and dict equality is deep (so raw_payload differences are detected).
+    """
+    for field in _CONTENT_COMPARISON_FIELDS:
+        if getattr(row, field) != getattr(existing, field):
+            return False
+    return True
+
+
 def _validate_report_period(row: ParsedSourceRow) -> None:
     if not _REPORT_MONTH_RE.match(row.report_month):
         raise GoogleRevenueSourceRowValidationError(
@@ -292,14 +337,38 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         raw_file_id: UUID | None,
         imported_by: UUID | None,
         replace_raw_file_id: bool = False,
-    ) -> List[GoogleRevenueSourceRowEntry]:  # noqa: UP006
+    ) -> SourceRowUpsertResult:
         materialised = list(rows)
         if not materialised:
-            return []
+            return SourceRowUpsertResult(
+                entries=[], created=0, updated=0, unchanged=0
+            )
         # Defensive copy of raw_payload via _validate prevents caller mutation
         # from racing the pending flush; the reference exchange_rates.py pipeline
         # follows the same pattern in _normalize_rate_input.
         validated = [self._validate(r) for r in materialised]
+        # ====================================================================
+        # Purpose: Fail closed on a duplicate (source_system, source_row_key)
+        #          within a single batch. Two rows that collide on the upsert
+        #          conflict target are ambiguous source evidence — letting
+        #          ON CONFLICT DO UPDATE silently last-write-wins would persist
+        #          one row while the created/updated/unchanged split counts the
+        #          collapsed key twice, so the persisted total and the reported
+        #          counts disagree. A single parser batch must carry at most one
+        #          row per (source_system, source_row_key).
+        # Database/ORM: None — in-memory check on the validated batch; mirrors
+        #               the google_revenue_source_rows unique index
+        #               (tenant_id, source_system, source_row_key).
+        # Standards: Typed GoogleRevenueSourceRowValidationError raised BEFORE
+        #            any classification read or write (nothing is persisted). The
+        #            message names only the offending (source_system,
+        #            source_row_key) pairs — never raw_payload or other row
+        #            contents — so it cannot leak source evidence into logs, and
+        #            the count of named keys is bounded.
+        # Blast Radius: connector_runs.counts_json accuracy + finance source-row
+        #               integrity; rejects the whole batch (fail closed).
+        # ====================================================================
+        self._require_no_duplicate_keys(validated)
         # Pre-check FK references at the typed-validation boundary so a bad
         # tenant, currency, or raw file surfaces as the repository's typed
         # GoogleRevenueSourceRowValidationError instead of the opaque DB FK
@@ -309,6 +378,37 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         self._require_tenant(tenant_id)
         self._require_currencies({r.currency_code for r in validated})
         self._require_raw_file(raw_file_id, tenant_id)
+
+        # ============================================================================
+        # Purpose: Pre-fetch existing source rows that overlap the input batch keys
+        #          so the upsert can classify each input as created / updated /
+        #          unchanged before mutating state. Replaces the prior placeholder
+        #          where rows_upserted_created/updated/unchanged were always 0.
+        # Database/ORM: SELECT-only read against google_revenue_source_rows scoped
+        #               to this tenant and the (source_system, source_row_key)
+        #               tuples that appear in the input batch.
+        # Standards: Read happens BEFORE any write, against a single tenant filter
+        #            plus the batch's source_system/source_row_key sets, so the
+        #            query plan stays bounded by the input size and respects
+        #            tenant isolation.
+        # Blast Radius: connector_runs.counts_json accuracy only; the upsert path
+        #               itself is unchanged.
+        # ============================================================================
+        batch_keys = {(r.source_system, r.source_row_key) for r in validated}
+        existing_by_key = self._fetch_existing_for_classification(
+            tenant_id=tenant_id, batch_keys=batch_keys
+        )
+        created_count = 0
+        updated_count = 0
+        unchanged_count = 0
+        for row in validated:
+            existing = existing_by_key.get((row.source_system, row.source_row_key))
+            if existing is None:
+                created_count += 1
+            elif _content_matches_existing(row, existing):
+                unchanged_count += 1
+            else:
+                updated_count += 1
 
         written: list[GoogleRevenueSourceRowEntry] = []
         dialect_insert = self._dialect_insert(
@@ -381,7 +481,82 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
             orm_row = self._session.execute(statement).scalar_one()
             written.append(self._to_entry(orm_row))
         self._session.flush()
-        return written
+        return SourceRowUpsertResult(
+            entries=written,
+            created=created_count,
+            updated=updated_count,
+            unchanged=unchanged_count,
+        )
+
+    @staticmethod
+    def _require_no_duplicate_keys(
+        validated: list[ParsedSourceRow],
+    ) -> None:
+        # ====================================================================
+        # Purpose: Reject a batch that carries more than one row per
+        #          (source_system, source_row_key) — the upsert conflict target.
+        #          See the caller's contract block for why this fails closed.
+        # Database/ORM: None — operates on the in-memory validated batch.
+        # Standards: Raises GoogleRevenueSourceRowValidationError naming only the
+        #            duplicate (source_system, source_row_key) pairs, capped at
+        #            _MAX_DUPLICATE_KEYS_IN_ERROR with a "(+N more)" suffix; never
+        #            includes raw_payload or other row contents.
+        # Blast Radius: finance source-row integrity; no writes.
+        # ====================================================================
+        seen: set[tuple[str, str]] = set()
+        duplicates: set[tuple[str, str]] = set()
+        for row in validated:
+            key = (row.source_system, row.source_row_key)
+            if key in seen:
+                duplicates.add(key)
+            else:
+                seen.add(key)
+        if not duplicates:
+            return
+        ordered = sorted(duplicates)
+        shown = ordered[:_MAX_DUPLICATE_KEYS_IN_ERROR]
+        named = ", ".join(f"{system}:{row_key}" for system, row_key in shown)
+        if len(ordered) > len(shown):
+            named += f", (+{len(ordered) - len(shown)} more)"
+        raise GoogleRevenueSourceRowValidationError(
+            "duplicate (source_system, source_row_key) within a single upsert "
+            f"batch: {named}"
+        )
+
+    # ========================================================================
+    # Purpose: Load the existing rows whose (source_system, source_row_key) pairs
+    #          appear in the input upsert batch so the caller can classify each
+    #          input as created / updated / unchanged before the upsert runs.
+    # Database/ORM: google_revenue_source_rows read-only SELECT scoped to one
+    #               tenant + the batch's source_systems + the batch's row keys.
+    # Standards: Tenant-explicit; bounded by batch size; one round-trip per
+    #            upsert call. Returns the ORM rows directly so the comparison
+    #            helper can read fields (including raw_payload) without an
+    #            extra _to_entry copy.
+    # Blast Radius: connector_runs.counts_json accuracy; no writes.
+    # ========================================================================
+    def _fetch_existing_for_classification(
+        self,
+        *,
+        tenant_id: UUID,
+        batch_keys: set[tuple[str, str]],
+    ) -> dict[tuple[str, str], GoogleRevenueSourceRowORM]:
+        if not batch_keys:
+            return {}
+        source_systems = {system for system, _ in batch_keys}
+        source_row_keys = {key for _, key in batch_keys}
+        rows = self._session.scalars(
+            select(GoogleRevenueSourceRowORM).where(
+                GoogleRevenueSourceRowORM.tenant_id == tenant_id,
+                GoogleRevenueSourceRowORM.source_system.in_(source_systems),
+                GoogleRevenueSourceRowORM.source_row_key.in_(source_row_keys),
+            )
+        ).all()
+        return {
+            (row.source_system, row.source_row_key): row
+            for row in rows
+            if (row.source_system, row.source_row_key) in batch_keys
+        }
 
     # ========================================================================
     # Purpose: Remove source rows that disappeared from a replacement report

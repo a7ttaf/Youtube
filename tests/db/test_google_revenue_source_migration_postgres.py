@@ -195,7 +195,9 @@ def test_repository_upsert_round_trip_on_postgres(
         )
         session.commit()
 
-        assert first[0].id == second[0].id, "id must be preserved across the on-conflict update"
+        assert first.entries[0].id == second.entries[0].id, (
+            "id must be preserved across the on-conflict update"
+        )
         rows = repo.list(tenant_id, report_month="2026-04")
         assert len(rows) == 1, "conflict must update in place, not insert a duplicate"
         assert rows[0].amount_native == Decimal("150.000000")
