@@ -3494,12 +3494,20 @@ def test_run_one_with_youtube_analytics_real_local_file_store_backend_round_trip
     _year, _month = report_month.split("-")
     _first_day = f"{_year}-{_month}-01"
 
+    # The parser-payload's endDate is the calendar month end, not the wire
+    # first-of-month, so persisted period_end records the actual coverage.
+    from calendar import monthrange as _monthrange  # local import to avoid test churn  # noqa: PLC0415
+    _last_day = (
+        f"{int(_year):04d}-{int(_month):02d}-"
+        f"{_monthrange(int(_year), int(_month))[1]:02d}"
+    )
+
     def _runner_query_request(channel_id: str) -> dict:
         return {
             "ids": f"contentOwner=={_ANALYTICS_ACCOUNT_ID}",
             "filters": f"channel=={channel_id}",
             "startDate": _first_day,
-            "endDate": _first_day,
+            "endDate": _last_day,
             "metrics": _ANALYTICS_METRICS,
             "dimensions": _ANALYTICS_DIMENSIONS,
         }
@@ -3908,4 +3916,187 @@ def test_run_one_with_youtube_analytics_no_eligible_channels(
         .filter(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
         .count()
         == 0
+    )
+
+
+def test_run_one_with_youtube_analytics_preserves_rows_for_deactivated_channels(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """A channel that falls out of the target set keeps its historical rows.
+
+    Scenario: tenant has channels A and B, both active and revenue-required.
+    Run 1 ingests both. Then B is deactivated (active=False). Run 2 only
+    fetches A. The deferred stale-row cleanup scopes by
+    (tenant, source, source_account_id, report_type, report_month) which is
+    content-owner-wide, so a naive "delete except keep_keys" would erase B's
+    historical rows because B contributes no keep keys in run 2. The fix
+    preserves rows whose youtube_channel_id is not in the run's attempted set.
+
+    Asserts (after run 2):
+    - A's rows are fully replaced (current run's keys, expected metric count)
+    - B's rows from run 1 are still present (preserved historical revenue)
+    - outcome.run.status == 'SUCCEEDED'
+    """
+    ch_a = YouTubeChannelORM(
+        id=uuid4(),
+        tenant_id=TENANT_ID,
+        youtube_channel_id="UC_preserve_a",
+        channel_name="Channel A",
+        content_owner_id=_ANALYTICS_ACCOUNT_ID,
+        active=True,
+        revenue_required=True,
+    )
+    ch_b = YouTubeChannelORM(
+        id=uuid4(),
+        tenant_id=TENANT_ID,
+        youtube_channel_id="UC_preserve_b",
+        channel_name="Channel B (will be deactivated)",
+        content_owner_id=_ANALYTICS_ACCOUNT_ID,
+        active=True,
+        revenue_required=True,
+    )
+    session.add_all([ch_a, ch_b])
+    session.flush()
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ANALYTICS_CONNECTOR_KEY,
+        account_id=_ANALYTICS_ACCOUNT_ID,
+    )
+
+    payload_by_channel_run1 = {
+        "UC_preserve_a": _make_analytics_parser_payload(
+            channel_id="UC_preserve_a",
+            report_month="2026-05",
+        ),
+        "UC_preserve_b": _make_analytics_parser_payload(
+            channel_id="UC_preserve_b",
+            report_month="2026-05",
+        ),
+    }
+
+    def fake_fetch_run1(*, account_id: str, channel_id: str, report_month: str) -> dict:
+        assert account_id == _ANALYTICS_ACCOUNT_ID
+        assert report_month == "2026-05"
+        return payload_by_channel_run1[channel_id]
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+    ) as yt_analytics_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+        yt_analytics_cls.return_value.fetch_channel_report.side_effect = fake_fetch_run1
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome_1 = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=_ANALYTICS_CONNECTOR_KEY,
+            account_id=_ANALYTICS_ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome_1.run is not None
+    assert outcome_1.run.status == "SUCCEEDED"
+    expected_metric_count = len(_ANALYTICS_METRICS.split(","))
+
+    run1_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "youtube_analytics",
+        )
+    ).all()
+    assert {row.youtube_channel_id for row in run1_rows} == {
+        "UC_preserve_a",
+        "UC_preserve_b",
+    }
+    b_row_keys_before = sorted(
+        row.source_row_key
+        for row in run1_rows
+        if row.youtube_channel_id == "UC_preserve_b"
+    )
+    assert len(b_row_keys_before) == expected_metric_count
+
+    ch_b.active = False
+    session.flush()
+
+    payload_by_channel_run2 = {
+        "UC_preserve_a": _make_analytics_parser_payload(
+            channel_id="UC_preserve_a",
+            report_month="2026-05",
+        ),
+    }
+
+    def fake_fetch_run2(*, account_id: str, channel_id: str, report_month: str) -> dict:
+        assert account_id == _ANALYTICS_ACCOUNT_ID
+        assert report_month == "2026-05"
+        if channel_id not in payload_by_channel_run2:
+            raise AssertionError(
+                f"run 2 fetched unexpected channel: {channel_id!r}"
+            )
+        return payload_by_channel_run2[channel_id]
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+    ) as yt_analytics_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+        yt_analytics_cls.return_value.fetch_channel_report.side_effect = fake_fetch_run2
+        backend = local_cls.return_value
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        outcome_2 = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=_ANALYTICS_CONNECTOR_KEY,
+            account_id=_ANALYTICS_ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+    assert outcome_2.run is not None
+    assert outcome_2.run.status == "SUCCEEDED"
+    assert outcome_2.counts["reports_attempted"] == 1
+    assert outcome_2.counts["reports_succeeded"] == 1
+
+    final_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "youtube_analytics",
+        )
+    ).all()
+    assert {row.youtube_channel_id for row in final_rows} == {
+        "UC_preserve_a",
+        "UC_preserve_b",
+    }
+    a_count = sum(row.youtube_channel_id == "UC_preserve_a" for row in final_rows)
+    b_count = sum(row.youtube_channel_id == "UC_preserve_b" for row in final_rows)
+    assert a_count == expected_metric_count
+    assert b_count == expected_metric_count
+    b_row_keys_after = sorted(
+        row.source_row_key
+        for row in final_rows
+        if row.youtube_channel_id == "UC_preserve_b"
+    )
+    assert b_row_keys_after == b_row_keys_before, (
+        "B's historical row keys must be identical after a deactivation rerun"
     )

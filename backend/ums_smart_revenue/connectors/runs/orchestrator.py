@@ -88,6 +88,7 @@ from ums_smart_revenue.connectors.google.secret_resolver import (
 )
 from ums_smart_revenue.connectors.google.youtube_analytics_client import (
     YouTubeAnalyticsClient,
+    calendar_month_end_iso,
     list_target_channels,
 )
 from ums_smart_revenue.connectors.google.youtube_analytics_client import (
@@ -250,12 +251,20 @@ class _DeferredAnalyticsStaleCleanupState:
     ``blocked`` is set to True when any sibling channel in the run failed so the
     cleanup is skipped and previously-persisted rows for that scope are not
     deleted on a partial run.
+
+    ``attempted_channel_ids`` records the youtube_channel_id of every channel
+    that successfully produced a parsed payload in this run. Flush reads this
+    set to preserve historical rows belonging to channels that were NOT part
+    of the current target set (e.g. previously-active channels that were
+    deactivated or removed from the revenue-required scope) — without this
+    guard a content-owner/month cleanup would silently erase those rows.
     """
 
     blocked: bool = False
     keep_source_row_keys_by_scope: dict[tuple[str, str, str, str], set[str]] = field(
         default_factory=dict
     )
+    attempted_channel_ids: set[str] = field(default_factory=set)
 
 
 class ConnectorRunner(Protocol):
@@ -757,6 +766,9 @@ def _handle_live_produced_report(
             _merge_deferred_stale_cleanup_plans(
                 deferred_cleanup=deferred_analytics_cleanup,
                 plans=deferred_cleanup_plans,
+                attempted_channel_id=_youtube_channel_id_from_parser_payload(
+                    parser_payload
+                ),
             )
         counts["reports_succeeded"] += 1
         counts["rows_upserted_total"] += rows_upserted
@@ -1129,8 +1141,14 @@ def _merge_deferred_stale_cleanup_plans(
     *,
     deferred_cleanup: _DeferredAnalyticsStaleCleanupState,
     plans: tuple[_DeferredStaleCleanupPlan, ...],
+    attempted_channel_id: str | None = None,
 ) -> None:
-    """Aggregate one channel's plans into the run-level deferred-cleanup state."""
+    """Aggregate one channel's plans into the run-level deferred-cleanup state.
+
+    ``attempted_channel_id`` is the youtube_channel_id whose parser payload
+    contributed these plans; flush uses this set to avoid deleting historical
+    rows for channels outside the current target set.
+    """
     for plan in plans:
         deferred_cleanup.keep_source_row_keys_by_scope.setdefault(
             (
@@ -1141,6 +1159,8 @@ def _merge_deferred_stale_cleanup_plans(
             ),
             set(),
         ).update(plan.keep_source_row_keys)
+    if attempted_channel_id is not None and attempted_channel_id.strip():
+        deferred_cleanup.attempted_channel_ids.add(attempted_channel_id.strip())
 
 
 def _flush_deferred_stale_cleanup_plans(
@@ -1149,19 +1169,41 @@ def _flush_deferred_stale_cleanup_plans(
     tenant_id: UUID,
     deferred_cleanup: _DeferredAnalyticsStaleCleanupState,
 ) -> None:
-    """Execute the merged keep-key plans once the analytics run completes cleanly."""
+    """Execute the merged keep-key plans once the analytics run completes cleanly.
+
+    Rows whose ``youtube_channel_id`` is NOT in ``attempted_channel_ids`` are
+    preserved by augmenting ``keep_source_row_keys`` with their persisted
+    ``source_row_key``. This prevents a channel that fell out of the target
+    set (deactivated, ``revenue_required=False``, etc.) from losing its
+    historical revenue when sibling channels are successfully replaced.
+    """
     if deferred_cleanup.blocked:
         return
+    attempted = deferred_cleanup.attempted_channel_ids
     for (source_system, report_type, report_month, source_account_id), keys in (
         deferred_cleanup.keep_source_row_keys_by_scope.items()
     ):
+        preserved_keys = set(keys)
+        existing_rows = repo.list(
+            tenant_id,
+            report_month=report_month,
+            source_system=source_system,
+        )
+        for row in existing_rows:
+            if (
+                row.source_account_id == source_account_id
+                and row.report_type == report_type
+                and row.youtube_channel_id is not None
+                and row.youtube_channel_id not in attempted
+            ):
+                preserved_keys.add(row.source_row_key)
         repo.delete_stale_for_scope(
             tenant_id,
             source_system=source_system,
             source_account_id=source_account_id,
             report_type=report_type,
             report_month=report_month,
-            keep_source_row_keys=keys,
+            keep_source_row_keys=preserved_keys,
         )
 
 
@@ -1202,6 +1244,43 @@ def _fallback_source_report_type(
 #   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
 #     youtube_analytics.py -> source_account_id matches query_request.ids.
 # ============================================================================
+# ============================================================================
+# Purpose: Extract the targeted youtube_channel_id from a parser payload's
+#          query_request.filters string (``channel==<id>``). Used by the
+#          analytics deferred-cleanup flush to record which channels were
+#          attempted in this run so historical rows for non-attempted channels
+#          can be preserved on flush.
+# Database/ORM: None.
+# Standards: Returns None when the filter is missing, non-string, malformed,
+#            or the channel value is empty/whitespace so callers can ignore
+#            unattributable payloads instead of polluting the attempted-set
+#            with bad data.
+# Blast Radius: Source-of-truth source-row cleanup only. A drift would either
+#               erase rows for previously-active channels or leak stale rows.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/
+#     youtube_analytics_client.py -> the canonical filters shape this helper
+#     parses.
+# ============================================================================
+def _youtube_channel_id_from_parser_payload(
+    parser_payload: dict[str, object],
+) -> str | None:
+    """Return the channel_id from a parser payload's ``filters=channel==<id>``."""
+    query_request = parser_payload.get("query_request")
+    if not isinstance(query_request, dict):
+        return None
+    filters = query_request.get("filters")
+    if not isinstance(filters, str):
+        return None
+    for clause in filters.split(";"):
+        key, sep, value = clause.partition("==")
+        if sep != "==" or key.strip() != "channel":
+            continue
+        channel_id = value.strip()
+        return channel_id if channel_id else None
+    return None
+
+
 def _fallback_source_account_id(
     *, parser_payload: dict[str, object], default_account_id: str,
 ) -> str:
@@ -2602,13 +2681,25 @@ class YouTubeAnalyticsRunner:
                 augmented_response = _synthesise_analytics_channel_dimension(
                     response=response, channel_id=channel_id,
                 )
+                # FIX: stamp the parser-payload query_request with the calendar
+                # month's last day as endDate. The wire request keeps the
+                # first-of-month endDate (Google requires both ends to be the
+                # first day when `dimensions=month`), but YouTubeAnalyticsParser
+                # persists `endDate` directly as each source row's period_end.
+                # Without this override every monthly-aggregate row would record
+                # period_end = first-of-month, mis-recording the coverage window
+                # for downstream auditing and revenue-fact normalisation.
+                parser_query_request = {
+                    **query_request,
+                    "endDate": calendar_month_end_iso(report_month),
+                }
                 # Augment the raw response with the query_request metadata the
                 # parser needs to build row keys and validate the range. Reuse
-                # the exact request dict the client sent so replay and stale-row
-                # cleanup see the canonical contentOwner/channel scope.
+                # the canonical contentOwner/channel scope so replay and
+                # stale-row cleanup remain consistent.
                 parser_payload: dict[str, object] = {
                     **augmented_response,
-                    "query_request": dict(query_request),
+                    "query_request": parser_query_request,
                 }
                 # Stored blob is the AUGMENTED parser_payload (includes injected
                 # query_request metadata), not the raw API response — this is a

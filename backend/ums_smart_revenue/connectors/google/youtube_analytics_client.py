@@ -24,6 +24,7 @@ revenue sourcing remains unresolved and is not ingested here.
 from __future__ import annotations
 
 import re
+from calendar import monthrange
 from uuid import UUID
 
 from sqlalchemy import select
@@ -78,6 +79,38 @@ def _build_query_request(
         "metrics": _METRICS,
         "dimensions": _DIMENSIONS,
     }
+
+
+# ============================================================================
+# Purpose: Return the calendar-month-end ISO date for a YYYY-MM report_month.
+#   The wire request constrains startDate/endDate to the first-of-month (Google
+#   requires both ends to be the first day when `dimensions=month`), but the
+#   parser persists `endDate` as each source row's period_end. Without an
+#   override the row would record period_end = first-of-month for what is a
+#   whole-month aggregate. The orchestrator runner uses this helper to stamp
+#   the parser payload's `query_request.endDate` with the actual coverage end
+#   so persisted source rows record the correct period range.
+# Database/ORM: None.
+# Standards: Validates report_month identically to `_build_query_request`;
+#   raises MalformedReportMonthError on malformed input.
+# Blast Radius: Source-of-truth `period_end` on persisted analytics rows. A
+#   drift here would mis-record the coverage window for downstream auditing
+#   and revenue-fact normalisation.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     YouTubeAnalyticsRunner overrides parser-payload `endDate` with this
+#     return value while keeping the wire request first-of-month.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> parser persists `endDate` as period_end.
+# ============================================================================
+def calendar_month_end_iso(report_month: str) -> str:
+    """Return ``YYYY-MM-DD`` for the last day of the report_month."""
+    if not _REPORT_MONTH_PATTERN.fullmatch(report_month):
+        raise MalformedReportMonthError(report_month=report_month)
+    year_s, month_s = report_month.split("-")
+    year, month = int(year_s), int(month_s)
+    last_day = monthrange(year, month)[1]
+    return f"{year:04d}-{month:02d}-{last_day:02d}"
 
 
 # ============================================================================
