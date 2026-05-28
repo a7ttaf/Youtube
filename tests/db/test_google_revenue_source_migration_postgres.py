@@ -218,8 +218,8 @@ def test_raw_payload_object_check_rejects_non_object(
     alembic_config: Config, fresh_engine: object
 ) -> None:
     """PostgreSQL (source of truth) enforces raw_payload is a JSON object. A
-    direct-SQL insert of a JSON array — a write path that bypasses the
-    repository's dict validation — must be rejected by the
+    direct-SQL insert of a JSON array - a write path that bypasses the
+    repository's dict validation - must be rejected by the
     ck_..._raw_payload_object CHECK, proving the integrity guard holds for
     non-repository writers (direct SQL, future services, backfills).
     """

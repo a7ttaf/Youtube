@@ -60,54 +60,49 @@ def session() -> Iterator[Session]:
                 [
                     TenantORM(id=TENANT_A, slug="tenant-a", display_name="Tenant A"),
                     TenantORM(id=TENANT_B, slug="tenant-b", display_name="Tenant B"),
-                    # Raw evidence files are tenant-scoped; seed one per tenant
-                    # so upsert_many's tenant-scoped raw_file_id pre-check passes
-                    # for same-tenant links and rejects cross-tenant ones.
-                    RawReportFileORM(
-                        id=RAW_FILE_ID,
-                        tenant_id=TENANT_A,
-                        source="youtube_reporting",
-                        report_type="channel_monthly_estimated_revenue",
-                        report_month="2026-04",
-                        file_url="memory://tenant-a/raw.json",
-                        checksum="a" * 64,
-                    ),
-                    RawReportFileORM(
-                        id=RAW_FILE_ID_B,
-                        tenant_id=TENANT_B,
-                        source="youtube_reporting",
-                        report_type="channel_monthly_estimated_revenue",
-                        report_month="2026-04",
-                        file_url="memory://tenant-b/raw.json",
-                        checksum="b" * 64,
-"""Tests for GoogleRevenueSourceRowRepository.
-
-This module contains helper functions and pytest tests for verifying the behavior of the 
-SqlAlchemyGoogleRevenueSourceRowRepository, ensuring correct upsert, list, and validation logic.
-"""
-                    ),
-                    CurrencyORM(
-                        code="USD",
-                        numeric_code="840",
-                        name="US Dollar",
-                        minor_unit=2,
-                        is_supported=True,
-                        activated_at=datetime.now(UTC),
-                    ),
-                    CurrencyORM(
-                        code="EGP",
-                        numeric_code="818",
-                        name="Egyptian Pound",
-                        minor_unit=2,
-                        is_supported=True,
-                        activated_at=datetime.now(UTC),
-                    ),
-                ]
-            )
-            s.flush()
-            yield s
-    finally:
-        engine.dispose()
+                # Raw evidence files are tenant-scoped; seed one per tenant
+                # so upsert_many's tenant-scoped raw_file_id pre-check passes
+                # for same-tenant links and rejects cross-tenant ones.
+                RawReportFileORM(
+                    id=RAW_FILE_ID,
+                    tenant_id=TENANT_A,
+                    source="youtube_reporting",
+                    report_type="channel_monthly_estimated_revenue",
+                    report_month="2026-04",
+                    file_url="memory://tenant-a/raw.json",
+                    checksum="a" * 64,
+                ),
+                RawReportFileORM(
+                    id=RAW_FILE_ID_B,
+                    tenant_id=TENANT_B,
+                    source="youtube_reporting",
+                    report_type="channel_monthly_estimated_revenue",
+                    report_month="2026-04",
+                    file_url="memory://tenant-b/raw.json",
+                    checksum="b" * 64,
+                ),
+                CurrencyORM(
+                    code="USD",
+                    numeric_code="840",
+                    name="US Dollar",
+                    minor_unit=2,
+                    is_supported=True,
+                    activated_at=datetime.now(UTC),
+                ),
+                CurrencyORM(
+                    code="EGP",
+                    numeric_code="818",
+                    name="Egyptian Pound",
+                    minor_unit=2,
+                    is_supported=True,
+                    activated_at=datetime.now(UTC),
+                ),
+            ]
+        )
+        s.flush()
+        yield s
+finally:
+    engine.dispose()
 
 
 def _row(

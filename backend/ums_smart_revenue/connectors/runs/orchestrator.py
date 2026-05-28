@@ -1042,6 +1042,7 @@ class _ProcessedReportResult:
     updated, and unchanged rows, along with raw file count and deferred
     cleanup plans.
     """
+
     # ============================================================================
     # Purpose: Carry per-report row-write outcomes from ``_process_one_report``
     #          back to ``_handle_live_produced_report`` so the caller can update
