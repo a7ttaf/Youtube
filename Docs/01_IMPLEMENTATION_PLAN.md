@@ -192,14 +192,19 @@ running on the operator's workstation.
     - ⏳ PR #48 (B2.5) — YouTube Analytics targeted CMS-channel
       ingestion; registers youtube-analytics (and the youtube_analytics
       alias) in the B2.4 connector registry; queries
-      `ids=contentOwner==<account>` with `filters=channel==<id>` so the
-      revenue metrics stay on a supported YouTube Analytics contract;
-      scopes channel selection to `active + revenue_required +
+      `ids=contentOwner==<account>` with `filters=channel==<id>` and
+      wire-level `dimensions=month` only so the revenue metrics stay on
+      a supported YouTube Analytics contract (the channel dimension
+      requires a multi-value channel filter for content-owner reports);
+      the orchestrator runner synthesises the `channel` dimension into
+      the parser payload from the filter so `YouTubeAnalyticsParser`
+      keeps its `(channel, month)` row-key contract without a parser
+      change; scopes channel selection to `active + revenue_required +
       content_owner_id matches account`; real LocalFileStoreBackend
       round-trip + dry-run regression tests included; tenant_id derived
       from run.tenant_id (no cross-tenant credential lookup); locked
       metrics/dimensions constants shared between client and runner so
-      the parser-required `channel` dimension cannot silently drift.
+      the wire shape cannot silently drift.
 - ⏳ Channel inventory file format — remaining: tenant-scoped channel
   registry exists (PR #25); bulk inventory load format not yet defined.
 - ⏳ Finance month-close input format — remaining: close-gate enforced

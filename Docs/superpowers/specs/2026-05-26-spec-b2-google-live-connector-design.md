@@ -609,6 +609,14 @@ def list_target_channels(
 - The Google request is content-owner scoped (`ids=contentOwner==...`)
   and channel-filtered (`filters=channel==...`) so revenue metrics stay
   on the supported Analytics contract.
+- The wire request uses `dimensions=month` only. Google's content-owner
+  reports require the `channel` dimension to be paired with a multi-value
+  channel filter, while B2.5 issues one request per channel (single-value
+  filter). `YouTubeAnalyticsParser` still keys rows on `(channel, month)`;
+  the orchestrator's `YouTubeAnalyticsRunner` synthesises the `channel`
+  dimension into the parser payload from the known
+  `filters=channel==<id>` value before yielding the report so the parser
+  contract is preserved with no parser change.
 - Per-channel HTTP failures are bucket-B per-report failures (the
   orchestrator continues to the next channel and may finish as PARTIAL).
 
