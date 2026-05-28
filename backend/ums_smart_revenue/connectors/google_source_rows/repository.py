@@ -837,7 +837,8 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
 
     def _require_currencies(self, codes: set[str]) -> None:
         """Ensure that the given currency codes exist in the database,
-        raising an error for unknown codes."""
+        raising an error for unknown codes.
+        """
         if not codes:
             return
         present = set(
@@ -887,7 +888,8 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
     # ========================================================================
     def _require_raw_file(self, raw_file_id: UUID | None, tenant_id: UUID) -> None:
         """Ensure that the raw report file exists for the given tenant,
-        or allow None if not provided."""
+        or allow None if not provided.
+        """
         # FIX: upsert_many wrote any provided raw_file_id directly; the schema
         # only checks the file exists, not that it belongs to tenant_id, so a
         # caller could link one tenant's rows to another tenant's raw file
@@ -922,7 +924,8 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         row: GoogleRevenueSourceRowORM,
     ) -> GoogleRevenueSourceRowEntry:
         """Convert an ORM row to a GoogleRevenueSourceRowEntry domain object,
-        deep-copying payloads."""
+        deep-copying payloads.
+        """
         return GoogleRevenueSourceRowEntry(
             id=str(row.id),
             tenant_id=str(row.tenant_id),
