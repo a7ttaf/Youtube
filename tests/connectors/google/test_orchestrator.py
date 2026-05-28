@@ -18,6 +18,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterator
+from copy import deepcopy
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path as _Path
@@ -2413,9 +2414,8 @@ def test_dry_run_writes_nothing_returns_outcome_with_run_none(
     - outcome.run is None (no connector_runs row was started)
     - counts["reports_attempted"] == 2 (both reports were enumerated)
     - counts["reports_succeeded"] == 2 (both parsed cleanly)
-    - counts["rows_upserted_total"] >= 2 (the dry-run counter reports what
-      WOULD have been written; the per-category created/updated/unchanged
-      split stays 0 because no upsert ran)
+    - counts["rows_upserted_total"] == 2 (dry-run validates parser output and
+      returns the would-upsert row count, but writes no source rows)
     - zero rows in connector_runs and raw_report_files (defence-in-depth:
       the SAVEPOINT-rollback in the dry-run branch reverts any writes a
       future runner might accidentally make)
@@ -2498,9 +2498,9 @@ def test_dry_run_writes_nothing_returns_outcome_with_run_none(
     assert counts["reports_attempted"] == 2
     assert counts["reports_succeeded"] == 2
     assert counts["reports_failed"] == 0
-    # Each CSV has one data row -> at least 2 rows total. The per-category
-    # split stays 0 in dry-run because no upsert is performed.
-    assert counts["rows_upserted_total"] >= 2
+    # Dry-run returns the would-upsert total while leaving the split at zero
+    # because no source-row write/classification occurs.
+    assert counts["rows_upserted_total"] == 2
     assert counts["rows_upserted_created"] == 0
     assert counts["rows_upserted_updated"] == 0
     assert counts["rows_upserted_unchanged"] == 0
@@ -3847,8 +3847,9 @@ def test_run_one_with_youtube_analytics_dry_run_succeeds_for_cms_channels_only(
     assert counts["reports_attempted"] == 1
     assert counts["reports_succeeded"] == 1
     assert counts["reports_failed"] == 0
-    # The single CMS payload has one data row with all locked monetary metrics.
-    # Per-category split stays 0: no upsert runs on dry-run path.
+    # The parser sees the single CMS payload; dry-run reports the would-upsert
+    # total but performs no source-row write/classification.
+    assert expected_row_count > 0
     assert counts["rows_upserted_total"] == expected_row_count
     assert counts["rows_upserted_created"] == 0
     assert counts["rows_upserted_updated"] == 0
@@ -5005,3 +5006,97 @@ def test_run_one_with_adsense_management_full_resource_cleanup_uses_parser_scope
         "ESTIMATED_EARNINGS",
         "TOTAL_EARNINGS",
     }
+
+
+@pytest.mark.usefixtures("_stub_secret_resolver")
+def test_run_one_per_category_row_counts_plumb_to_connector_run_counts_json(
+    session: Session,
+) -> None:
+    """rows_upserted_created/updated/unchanged reach connector_runs.counts_json.
+
+    Drives three consecutive AdSense runs against the same (account, month)
+    and asserts that every classification branch — fresh-insert (CREATED),
+    identical rerun (UNCHANGED), and value-change rerun (UPDATED, mixed with
+    UNCHANGED) — flows from the repository through ``_process_one_report``
+    into the run-level ``counts`` dict written to ``connector_runs.counts_json``
+    by ``finish_run``. Sum invariant: created + updated + unchanged == total.
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ADSENSE_CONNECTOR_KEY,
+        account_id=_ADSENSE_ACCOUNT_ID,
+    )
+    report_month = "2026-05"
+    base_payload = _make_adsense_parser_payload(
+        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+    )
+
+    # Run 1: both AdSense source rows are new → CREATED=2.
+    first = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
+        payload=base_payload,
+    )
+    assert first.run is not None and first.run.status == "SUCCEEDED"
+    assert first.counts["rows_upserted_total"] == 2
+    assert first.counts["rows_upserted_created"] == 2
+    assert first.counts["rows_upserted_updated"] == 0
+    assert first.counts["rows_upserted_unchanged"] == 0
+
+    # Run 2: identical payload → both rows UNCHANGED.
+    second = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
+        payload=base_payload,
+    )
+    assert second.run is not None and second.run.status == "SUCCEEDED"
+    assert second.counts["rows_upserted_total"] == 2
+    assert second.counts["rows_upserted_created"] == 0
+    assert second.counts["rows_upserted_updated"] == 0
+    assert second.counts["rows_upserted_unchanged"] == 2
+
+    # Run 3: only ESTIMATED_EARNINGS amount changes → 1 UPDATED + 1 UNCHANGED
+    # (the TOTAL_EARNINGS row's cells are identical, so its content matches).
+    mutated_payload = deepcopy(base_payload)
+    mutated_payload["rows"][0]["cells"][1]["value"] = "200.000000"
+    third = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
+        payload=mutated_payload,
+    )
+    assert third.run is not None and third.run.status == "SUCCEEDED"
+    assert third.counts["rows_upserted_total"] == 2
+    assert third.counts["rows_upserted_created"] == 0
+    assert third.counts["rows_upserted_updated"] == 1
+    assert third.counts["rows_upserted_unchanged"] == 1
+
+    # Defence in depth: read the persisted counts_json directly to confirm
+    # the run-level write picked up the per-category split (not just the
+    # finish_run return value).
+    persisted = session.scalars(
+        select(ConnectorRunORM)
+        .where(ConnectorRunORM.tenant_id == TENANT_ID)
+        .order_by(ConnectorRunORM.started_at, ConnectorRunORM.id)
+    ).all()
+    assert len(persisted) == 3
+    persisted_counts = [run.counts_json for run in persisted]
+    assert [counts["rows_upserted_total"] for counts in persisted_counts] == [2, 2, 2]
+    assert [counts["rows_upserted_created"] for counts in persisted_counts] == [
+        2,
+        0,
+        0,
+    ]
+    assert [counts["rows_upserted_updated"] for counts in persisted_counts] == [
+        0,
+        0,
+        1,
+    ]
+    assert [counts["rows_upserted_unchanged"] for counts in persisted_counts] == [
+        0,
+        2,
+        1,
+    ]

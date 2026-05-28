@@ -93,6 +93,41 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
       AdSense row skipped as SkipReason.MISSING_CHANNEL_ID, and the
       12-event STARTED->DOWNLOADED->PARSED->FINISHED audit sequence per
       run with the connector service principal.
+    - ⏳ PR #50 — remaining: awaiting merge — Concern C:
+      connector_runs.counts_json source-row created/updated/unchanged split
+      (B2.6 carry-forward). Replaces the
+      placeholder where rows_upserted_created/updated/unchanged were
+      always 0 with a real classification:
+      SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many now
+      pre-fetches existing rows by
+      (tenant_id, source_system, source_row_key) and returns a
+      SourceRowUpsertResult carrying entries plus per-row classification
+      counts. _content_matches_existing compares the parser-owned content
+      fields (excludes provenance: raw_file_id / imported_by — a fresh
+      raw file carrying identical values is "unchanged content, refreshed
+      evidence", not a value update). _process_one_report bubbles the
+      counts up via a new _ProcessedReportResult dataclass and
+      _handle_live_produced_report sums them into the run-level counts
+      dict that finish_run writes to connector_runs.counts_json. Sum
+      invariant: created + updated + unchanged == total for live upserts.
+      Dry-run reports the parsed would-upsert total while keeping
+      created/updated/unchanged at 0 because no source-row write or
+      classification runs.
+      6 new repo-level tests cover create/unchanged/updated/mixed-rerun,
+      provenance-only rerun, and refreshed RETURNING payloads; 1 new
+      end-to-end orchestrator test asserts the counts plumb
+      into connector_runs.counts_json across 3 consecutive runs (fresh
+      insert, identical rerun, mutated rerun). _require_no_duplicate_keys
+      fails closed (typed GoogleRevenueSourceRowValidationError, nothing
+      persisted) when one batch carries two rows on the same
+      (source_system, source_row_key) — ambiguous source evidence that
+      would otherwise silently last-write-wins and skew the split; the
+      error names the key only (no raw_payload leak), capped at 10 with a
+      "(+N more)" suffix. 4 added repo tests: duplicate-in-batch rejected
+      (fail closed, nothing persisted); same key under a different
+      source_system still allowed (the guard keys on the full tuple);
+      error-message cap formatting; guard runs before the FK/currency
+      existence pre-checks.
 - ⏳ Monthly revenue normalization — remaining: B2 live ingestion wiring
   (revenue facts foundation in PR #2; normalization bridge from
   google_revenue_source_rows shipped in PR #44).

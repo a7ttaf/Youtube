@@ -11,7 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Root governance: `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `CODEOWNERS`, `CODE_OF_CONDUCT.md`, `.gitignore`.
 
 ### Changed
-- *(none yet)*
+- `SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many(...)` now returns
+  `SourceRowUpsertResult` instead of a bare list of rows. Callers that need the
+  persisted rows should read `.entries`; connector-run accounting should use
+  `.created`, `.updated`, and `.unchanged` for source-row classification.
 
 ### Removed
 - *(planned)* Neo4j component dropped entirely — `backend/ums_smart_revenue/graph/`, `tests/graph/`, `neo4j==6.2.0` dependency, related auth permissions, retired specs archived to `Docs/_archived/`.

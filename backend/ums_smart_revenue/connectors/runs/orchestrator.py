@@ -523,9 +523,9 @@ def _run_dry_run(
                     parser_payload = produced.parser_payload
                 else:
                     _report_type, parser_payload, _raw_bytes = produced
-                rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
+                parsed_rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
+                counts["rows_upserted_total"] += len(parsed_rows)
                 counts["reports_succeeded"] += 1
-                counts["rows_upserted_total"] += len(rows)
             except Exception:
                 counts["reports_failed"] += 1
     finally:
@@ -818,7 +818,7 @@ def _handle_live_produced_report(
             raise produced_error
         if parser_payload is None or raw_reports is None or not raw_reports:
             raise RuntimeError("connector runner yielded incomplete report")
-        rows_upserted, raw_file_count, deferred_cleanup_plans = _process_one_report(
+        processed = _process_one_report(
             session=session,
             tenant_id=tenant_id,
             connector_key=connector_key,
@@ -843,14 +843,17 @@ def _handle_live_produced_report(
         if deferred_analytics_cleanup is not None:
             _merge_deferred_stale_cleanup_plans(
                 deferred_cleanup=deferred_analytics_cleanup,
-                plans=deferred_cleanup_plans,
+                plans=processed.deferred_cleanup_plans,
                 attempted_channel_id=_youtube_channel_id_from_parser_payload(
                     parser_payload
                 ),
             )
         counts["reports_succeeded"] += 1
-        counts["rows_upserted_total"] += rows_upserted
-        return raw_file_count
+        counts["rows_upserted_total"] += processed.rows_total
+        counts["rows_upserted_created"] += processed.rows_created
+        counts["rows_upserted_updated"] += processed.rows_updated
+        counts["rows_upserted_unchanged"] += processed.rows_unchanged
+        return processed.raw_file_count
     except Exception as exc:
         if deferred_analytics_cleanup is not None:
             deferred_analytics_cleanup.blocked = True
@@ -1031,6 +1034,30 @@ def _sweep_unfinished_live_run(
 # ----------------------------------------------------------------------------
 
 
+@dataclass(frozen=True)
+class _ProcessedReportResult:
+    """Per-report source-row counts and raw-file side effects."""
+
+    # ============================================================================
+    # Purpose: Carry per-report row-write outcomes from ``_process_one_report``
+    #          back to ``_handle_live_produced_report`` so the caller can update
+    #          every key in ``connector_runs.counts_json`` without unpacking a
+    #          long anonymous tuple. The four ``rows_*`` ints feed
+    #          ``rows_upserted_total / _created / _updated / _unchanged``.
+    # Database/ORM: None directly; sourced from the repository's
+    #               ``SourceRowUpsertResult`` for this report.
+    # Standards: Sum invariant — rows_total == rows_created + rows_updated +
+    #            rows_unchanged.
+    # Blast Radius: connector_runs.counts_json accuracy only.
+    # ============================================================================
+    rows_total: int
+    rows_created: int
+    rows_updated: int
+    rows_unchanged: int
+    raw_file_count: int
+    deferred_cleanup_plans: tuple[_DeferredStaleCleanupPlan, ...]
+
+
 def _process_one_report(
     *,
     session: Session,
@@ -1052,7 +1079,7 @@ def _process_one_report(
     report_state: dict[str, object],
     audit_sink: AuditSink,
     audit_actor: UserPrincipal,
-) -> tuple[int, int, tuple[_DeferredStaleCleanupPlan, ...]]:
+) -> _ProcessedReportResult:
     """Run one report through blob -> raw_file -> parse -> upsert -> mark_parsed.
 
     Raises any ``GoogleConnectorError`` / ``ParserError`` / other exception
@@ -1100,13 +1127,10 @@ def _process_one_report(
         parsed_rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
         source_row_raw_file_id = _source_row_raw_file_id(raw_files)
 
-        # Upsert. Returns the persisted entries (one per ParsedSourceRow); the
-        # precise created-vs-updated split needs a pre-read of existing
-        # source_row_keys, which the happy-path test doesn't exercise. Future
-        # work (no current task) can wire that count if downstream consumers
-        # need it; the run-level ``rows_upserted_total`` (sum of writes across
-        # successful reports) is what the tests assert on.
-        written = repo.upsert_many(
+        # Upsert. Returns a SourceRowUpsertResult with the persisted entries
+        # plus the per-row classification counts (created / updated /
+        # unchanged) the caller copies into ``connector_runs.counts_json``.
+        upsert_result = repo.upsert_many(
             tenant_id,
             parsed_rows,
             raw_file_id=source_row_raw_file_id,
@@ -1166,19 +1190,21 @@ def _process_one_report(
                     raw_file=raw_file,
                     # Report-level total; see emit_raw_file_parsed docstring re:
                     # multi-raw-file aggregation contract.
-                    count_upserted=len(written),
+                    count_upserted=len(upsert_result.entries),
                 )
 
-    # Future work (no current task): accurate created/updated/unchanged
-    # split via a pre-read of existing source_row_keys. Until then, the
-    # per-category split fields stay at 0 rather than over-claiming
-    # everything as 'created' (which would lie on the second ingest of an
-    # already-seen month).
     # ``counts["reports_succeeded"] += 1`` lives in ``run_one``'s outer
     # loop AFTER ``session.commit()`` so a commit failure (e.g. DB
     # disconnect on the per-report flush) is recorded as a failure once,
     # not double-counted as both succeeded and failed.
-    return len(written), len(raw_files), deferred_cleanup_plans
+    return _ProcessedReportResult(
+        rows_total=len(upsert_result.entries),
+        rows_created=upsert_result.created,
+        rows_updated=upsert_result.updated,
+        rows_unchanged=upsert_result.unchanged,
+        raw_file_count=len(raw_files),
+        deferred_cleanup_plans=deferred_cleanup_plans,
+    )
 
 
 # ============================================================================

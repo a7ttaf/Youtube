@@ -22,6 +22,10 @@ SOURCE_ROW_KEY_LENGTH: Final[int] = 64  # SHA-256 hex digest length
 
 @dataclass(frozen=True)
 class IsoCurrency:
+    """Represents an ISO currency with code, numeric code, name, minor unit,
+    support flag, and activation time.
+    """
+
     code: str
     numeric_code: str
     name: str
@@ -32,6 +36,10 @@ class IsoCurrency:
 
 @dataclass(frozen=True)
 class ParsedSourceRow:
+    """Immutable parsed source row boundary type containing metadata fields
+    and raw payload from the data source.
+    """
+
     source_system: str
     source_row_key: str
     source_account_id: str
@@ -51,6 +59,10 @@ class ParsedSourceRow:
 
 @dataclass(frozen=True)
 class GoogleRevenueSourceRowEntry:
+    """Immutable representation of a Google revenue source row entry
+    with metadata, amounts, and provenance fields.
+    """
+
     id: str
     tenant_id: str
     source_system: str
@@ -71,6 +83,30 @@ class GoogleRevenueSourceRowEntry:
     raw_payload: dict[str, object]
     imported_by: str | None
     ingested_at: datetime
+
+
+@dataclass(frozen=True)
+class SourceRowUpsertResult:
+    """Persisted source rows plus the created/updated/unchanged split."""
+
+    # ============================================================================
+    # Purpose: Return shape of SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many
+    #          carrying the persisted entries alongside the per-row classification
+    #          counts the orchestrator copies into connector_runs.counts_json.
+    # Database/ORM: None directly; populated from a pre-fetch of existing
+    #               google_revenue_source_rows compared to the input ParsedSourceRow
+    #               batch.
+    # Standards: Sum invariant — len(entries) == created + updated + unchanged.
+    #            "Unchanged" means every parser-owned content field matches the
+    #            existing row; raw_file_id / imported_by are provenance, not
+    #            content, and their refresh is not counted as a value update.
+    # Blast Radius: connector_runs.counts_json accuracy; finance source rows
+    #               themselves are unaffected by this dataclass.
+    # ============================================================================
+    entries: list[GoogleRevenueSourceRowEntry]
+    created: int
+    updated: int
+    unchanged: int
 
 
 class GoogleRevenueSourceRowError(ValueError):
