@@ -23,6 +23,7 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 @dataclass(frozen=True)
 class AdSensePaymentInput:
+    source_account_id: str
     month: str
     payment_name: str
     payment_date: date
@@ -35,6 +36,7 @@ class AdSensePaymentInput:
 @dataclass(frozen=True)
 class AdSensePaymentEntry:
     id: str
+    source_account_id: str
     month: str
     payment_name: str
     payment_date: date
@@ -47,11 +49,12 @@ class AdSensePaymentEntry:
 
     @property
     def audit_entity_id(self) -> str:
-        return f"{self.month}:{self.payment_name}"
+        return f"{self.source_account_id}:{self.month}:{self.payment_name}"
 
     def to_api(self) -> dict[str, object]:
         return {
             "id": self.id,
+            "source_account_id": self.source_account_id,
             "month": self.month,
             "payment_name": self.payment_name,
             "payment_date": self.payment_date.isoformat(),
@@ -104,16 +107,18 @@ class SqlAlchemyAdSensePaymentRepository:
         normalized_source_report_id = _normalize_optional_string(source_report_id)
 
         normalized_payments: list[AdSensePaymentInput] = []
-        seen_payment_keys: set[tuple[str, str]] = set()
+        seen_payment_keys: set[tuple[str, str, str]] = set()
         for payment in payments:
             normalized_payment = _normalize_payment(payment)
             payment_key = (
+                normalized_payment.source_account_id,
                 normalized_payment.month,
                 normalized_payment.payment_name,
             )
             if payment_key in seen_payment_keys:
                 raise AdSensePaymentValidationError(
                     "duplicate AdSense payment in batch: "
+                    f"{normalized_payment.source_account_id}:"
                     f"{normalized_payment.month}:{normalized_payment.payment_name}"
                 )
             seen_payment_keys.add(payment_key)
@@ -130,6 +135,7 @@ class SqlAlchemyAdSensePaymentRepository:
                 tenant_id=self._tenant_id,
                 month=normalized_payment.month,
                 payment_name=normalized_payment.payment_name,
+                source_account_id=normalized_payment.source_account_id,
                 payment_date=normalized_payment.payment_date,
                 payment_amount=normalized_payment.payment_amount,
                 payment_currency=normalized_payment.payment_currency,
@@ -156,6 +162,7 @@ class SqlAlchemyAdSensePaymentRepository:
             statement = insert_statement.on_conflict_do_update(
                 index_elements=[
                     AdSensePaymentORM.tenant_id,
+                    AdSensePaymentORM.source_account_id,
                     AdSensePaymentORM.month,
                     AdSensePaymentORM.payment_name,
                 ],
@@ -237,6 +244,7 @@ class SqlAlchemyAdSensePaymentRepository:
     def _to_entry(row: AdSensePaymentORM) -> AdSensePaymentEntry:
         return AdSensePaymentEntry(
             id=str(row.id),
+            source_account_id=row.source_account_id,
             month=row.month,
             payment_name=row.payment_name,
             payment_date=row.payment_date,
@@ -251,6 +259,9 @@ class SqlAlchemyAdSensePaymentRepository:
 
 def _normalize_payment(payment: AdSensePaymentInput) -> AdSensePaymentInput:
     _validate_month(payment.month)
+    source_account_id = _normalize_required_string(
+        payment.source_account_id, "source_account_id"
+    )
     payment_name = _normalize_required_string(payment.payment_name, "payment_name")
     payment_currency = _normalize_currency(payment.payment_currency)
     payment_status = _normalize_payment_status(payment.payment_status)
@@ -258,6 +269,7 @@ def _normalize_payment(payment: AdSensePaymentInput) -> AdSensePaymentInput:
     if not isinstance(payment.raw_payload, dict):
         raise AdSensePaymentValidationError("raw_payload must be an object")
     return AdSensePaymentInput(
+        source_account_id=source_account_id,
         month=payment.month,
         payment_name=payment_name,
         payment_date=payment.payment_date,

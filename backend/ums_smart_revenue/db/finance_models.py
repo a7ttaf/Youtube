@@ -379,6 +379,7 @@ class AdSensePaymentORM(FinanceBase):
     )
     month: Mapped[str] = mapped_column(Text, nullable=False)
     payment_name: Mapped[str] = mapped_column(Text, nullable=False)
+    source_account_id: Mapped[str] = mapped_column(Text, nullable=False)
     payment_date: Mapped[date] = mapped_column(Date, nullable=False)
     payment_amount: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
     payment_currency: Mapped[str] = mapped_column(Text, nullable=False)
@@ -415,10 +416,12 @@ class AdSensePaymentORM(FinanceBase):
 
     __table_args__ = (
         UniqueConstraint(
-            "tenant_id",
-            "month",
-            "payment_name",
-            name="uq_adsense_payments_month_name",
+            "tenant_id", "source_account_id", "month", "payment_name",
+            name="uq_adsense_payments_account_month_name",
+        ),
+        CheckConstraint(
+            "length(source_account_id) >= 1",
+            name="ck_adsense_payments_source_account_id_nonempty",
         ),
         CheckConstraint(
             "length(month) = 7 AND substr(month, 5, 1) = '-' "

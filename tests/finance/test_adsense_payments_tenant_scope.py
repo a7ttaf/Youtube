@@ -48,6 +48,7 @@ def _payment_input(
     *, payment_name: str, amount: str = "1234.56"
 ) -> AdSensePaymentInput:
     return AdSensePaymentInput(
+        source_account_id="pub-1",
         month="2026-03",
         payment_name=payment_name,
         payment_date=date(2026, 4, 15),
@@ -87,6 +88,7 @@ def _seed_payment(
             tenant_id=tenant_id,
             month=month,
             payment_name=payment_name,
+            source_account_id="pub-1",
             payment_date=date(2026, 4, 15),
             payment_amount=Decimal("100.00"),
             payment_currency="USD",
@@ -473,3 +475,90 @@ def test_adsense_repository_rejects_invalid_tenant_id_string() -> None:
         AdSensePaymentValidationError, match="tenant_id must be a valid UUID"
     ):
         SqlAlchemyAdSensePaymentRepository(session, tenant_id="not-a-uuid")
+
+
+# ---------------------------------------------------------------------------
+# source_account_id keying (account-scoped upsert + dedupe)
+# ---------------------------------------------------------------------------
+
+
+def _payment(**overrides) -> AdSensePaymentInput:
+    base = dict(
+        source_account_id="pub-1",
+        month="2026-04",
+        payment_name="2026-04-21",
+        payment_date=date(2026, 4, 21),
+        payment_amount=Decimal("930.000000"),
+        payment_currency="USD",
+        payment_status="PAID",
+        raw_payload={"name": "accounts/pub-1/payments/2026-04-21"},
+    )
+    base.update(overrides)
+    return AdSensePaymentInput(**base)
+
+
+def test_sync_allows_same_month_payment_name_across_accounts() -> None:
+    session = build_session()
+    repo = SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID)
+    repo.sync_payments(
+        payments=[_payment(source_account_id="pub-1")],
+        actor_user_id=ACTOR_USER_ID, source_report_id=None,
+    )
+    repo.sync_payments(
+        payments=[_payment(source_account_id="pub-2")],
+        actor_user_id=ACTOR_USER_ID, source_report_id=None,
+    )
+    session.commit()
+    rows = session.scalars(
+        select(AdSensePaymentORM).where(
+            AdSensePaymentORM.tenant_id == DEFAULT_TENANT_ID,
+            AdSensePaymentORM.month == "2026-04",
+            AdSensePaymentORM.payment_name == "2026-04-21",
+        )
+    ).all()
+    assert {r.source_account_id for r in rows} == {"pub-1", "pub-2"}
+    assert len(rows) == 2  # different accounts are NOT a conflict
+
+
+def test_sync_is_idempotent_per_account_month_name() -> None:
+    session = build_session()
+    repo = SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID)
+    first = repo.sync_payments(
+        payments=[_payment(payment_amount=Decimal("930.000000"))],
+        actor_user_id=ACTOR_USER_ID, source_report_id=None,
+    )
+    second = repo.sync_payments(
+        payments=[_payment(payment_amount=Decimal("931.000000"))],
+        actor_user_id=ACTOR_USER_ID, source_report_id=None,
+    )
+    session.commit()
+    assert first[0].id == second[0].id  # same row updated in place
+    assert second[0].source_account_id == "pub-1"
+
+
+def test_within_batch_duplicate_keys_on_account_month_name() -> None:
+    session = build_session()
+    repo = SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID)
+    with pytest.raises(AdSensePaymentValidationError, match="duplicate"):
+        repo.sync_payments(
+            payments=[_payment(source_account_id="pub-1"),
+                      _payment(source_account_id="pub-1")],
+            actor_user_id=ACTOR_USER_ID, source_report_id=None,
+        )
+    # Same month+name but different accounts in one batch is allowed:
+    repo.sync_payments(
+        payments=[_payment(source_account_id="pub-1"),
+                  _payment(source_account_id="pub-2")],
+        actor_user_id=ACTOR_USER_ID, source_report_id=None,
+    )
+
+
+def test_sync_rejects_blank_source_account_id() -> None:
+    session = build_session()
+    repo = SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID)
+    with pytest.raises(AdSensePaymentValidationError, match="source_account_id"):
+        repo.sync_payments(
+            payments=[_payment(source_account_id="   ")],
+            actor_user_id=ACTOR_USER_ID, source_report_id=None,
+        )
+    assert session.scalars(select(AdSensePaymentORM)).all() == []  # fail closed
