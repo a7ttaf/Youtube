@@ -37,6 +37,15 @@ from ums_smart_revenue.connectors.google.errors import (
     OAuthRefreshError,
 )
 
+"""
+HTTP client module for Google API requests with detailed retry logic.
+
+This module provides functions and classes to perform HTTP requests
+with exponential backoff, handling of retryable status codes,
+timeouts, and transport errors. It also manages authentication
+headers and terminal response processing.
+"""
+
 _CLIENT_STATUSES = frozenset({400, 404, 422})
 _AUTH_STATUSES = frozenset({401, 403})
 _RETRY_SERVER_STATUSES = frozenset({500, 502, 503, 504})
@@ -63,6 +72,10 @@ class _RetryState:
 
 
 def _backoff_schedule(max_attempts: int) -> list[float]:
+    """
+    Generate an exponential backoff schedule capped at BACKOFF_CAP_SECONDS
+    for a specified maximum number of attempts.
+    """
     # 1, 2, 4, 8, ... capped at 64s; one entry per attempt, indexed by
     # (attempt - 1). Used identically by 429, 5xx, timeouts, and connect
     # errors; each retry budget consumes its own slot in the schedule.
@@ -91,6 +104,10 @@ def _sleep_for_retryable_status(
     url: str,
     status_backoff: list[float],
 ) -> bool:
+    """
+    Handle retry delays for retryable HTTP status codes, sleeping based on
+    status code and attempt count, and raise errors when maximum attempts are reached.
+    """
     status = response.status_code
     if status == 429:
         if attempt == _MAX_STATUS_ATTEMPTS:
@@ -125,6 +142,10 @@ def _auth_headers(
     method: str,
     url: str,
 ) -> dict[str, str]:
+    """
+    Retrieve authorization headers from credentials, handling refresh errors
+    and converting them to OAuthRefreshError for consistent retry behavior.
+    """
     headers: dict[str, str] = {}
     try:
         credentials.before_request(auth_request, method, url, headers)
@@ -139,6 +160,10 @@ def _auth_headers(
 def _retry_after_timeout(
     state: _RetryState, *, method: str, url: str
 ) -> None:
+    """
+    Increment timeout retry counter, adjust status attempts, and sleep based
+    on the timeout backoff schedule, raising an error if retry limit is exceeded.
+    """
     state.timeout_attempts += 1
     state.status_attempt -= 1
     if state.timeout_attempts >= _MAX_TIMEOUT_ATTEMPTS:
@@ -154,6 +179,10 @@ def _retry_after_timeout(
 def _retry_after_connect_error(
     state: _RetryState, *, method: str, url: str
 ) -> None:
+    """
+    Increment transport connection retry counter, adjust status attempts, and
+    sleep based on the connect backoff schedule, raising an error if retry limit is exceeded.
+    """
     state.connect_attempts += 1
     state.status_attempt -= 1
     if state.connect_attempts >= _MAX_CONNECT_ATTEMPTS:
@@ -176,6 +205,10 @@ def _request_or_retry_transport(
     json_body: Mapping[str, object] | None,
     headers: dict[str, str],
 ) -> httpx.Response | None:
+    """
+    Execute an HTTP request using the client, catching timeout and transport errors
+    to trigger retries by returning None and adjusting the retry state.
+    """
     try:
         return client.request(
             method=method,
@@ -200,6 +233,10 @@ def _request_or_retry_transport(
 def _terminal_response_or_raise(
     response: httpx.Response, *, method: str, url: str
 ) -> httpx.Response | None:
+    """
+    Determine if the HTTP response is terminal: return on success, raise for client or
+    auth errors, or return None for retryable server statuses.
+    """
     status = response.status_code
     if status == 200:
         return response
@@ -219,6 +256,10 @@ def _send_with_retry_response(
     json_body: Mapping[str, object] | None,
     headers: dict[str, str],
 ) -> httpx.Response:
+    """
+    Send an HTTP request with comprehensive retry handling for statuses, timeouts,
+    and transport errors, returning a successful response or raising an error after retries.
+    """
     state = _RetryState(
         status_backoff=_backoff_schedule(_MAX_STATUS_ATTEMPTS),
         timeout_backoff=_backoff_schedule(_MAX_TIMEOUT_ATTEMPTS),
@@ -266,6 +307,14 @@ def _send_with_retry_response(
     # Kept as a belt-and-suspenders no-return so type checkers don't flag a
     # fall-through path off the while loop.
     raise GoogleApiServerError(
+"""
+HTTP client module for Google APIs with retry support.
+
+This module provides the GoogleHttpClient class for making authenticated
+HTTP requests to Google APIs with built-in retry policies. It supports
+JSON-based requests, raw byte fetching, and graceful shutdown.
+"""
+
         method=method,
         url=url,
         status=state.last_status,
@@ -274,6 +323,7 @@ def _send_with_retry_response(
 
 
 class GoogleHttpClient:
+    """HTTP client for Google APIs that manages authentication with provided credentials, handles retries, and uses httpx.Client for HTTP communication."""
     """Authenticated HTTP wrapper for Google API JSON and byte downloads."""
 
     def __init__(
@@ -299,6 +349,11 @@ class GoogleHttpClient:
         method: str,
         url: str,
         params: _QueryParams | None = None,
+        """
+        Execute a Google API call with retry policy and translate
+        HTTP/transport failures into typed errors. Returns the httpx.Response
+        on success or raises a GoogleConnectorError subclass on failure.
+        """
         json_body: Mapping[str, object] | None = None,
     ) -> httpx.Response:
         # ====================================================================
@@ -319,7 +374,6 @@ class GoogleHttpClient:
         #     _GoogleApiHttpError subclasses for the HTTP-status branches.
         #   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-
         #     connector-design.md §7 -> retry table this loop implements
-        #     (statuses, budgets, backoff, Retry-After clamp).
         # ====================================================================
         # Build auth headers once per overall request; google-auth's own
         # staleness state decides whether to refresh, and the same headers
@@ -347,6 +401,11 @@ class GoogleHttpClient:
         params: _QueryParams | None = None,
         json_body: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
+        """
+        Execute a Google JSON API call and return the decoded object body.
+        Validates that the response is JSON and a dict, raising
+        GoogleApiResponseError on parse errors or unexpected shapes.
+        """
         """Execute a Google JSON API request and return an object body."""
         # ====================================================================
         # Purpose: Execute one Google JSON-API call and return the decoded
@@ -380,7 +439,11 @@ class GoogleHttpClient:
 
     def fetch_bytes(self, *, url: str) -> bytes:
         """GET a Google URL and return the raw response body bytes."""
-        # ====================================================================
+        """
+        GET a URL and return the raw response body bytes. Uses the shared
+        retry helper and bearer authentication without JSON parsing.
+        """
+        # ==================================================
         # Purpose: GET a URL and return the raw response body bytes. Used for
         #   binary/CSV downloads (e.g. YouTube Reporting downloadUrl) where
         #   the response is not JSON and request()'s body-validation would
@@ -398,10 +461,13 @@ class GoogleHttpClient:
         #   - File: backend/ums_smart_revenue/connectors/google/
         #     youtube_reporting_client.py -> fetch_report uses this for the
         #     reports.downloadUrl CSV fetch.
-        # ====================================================================
+        # ==================================================
         response = self._send_with_retry(method="GET", url=url)
         return response.content
 
     def close(self) -> None:
+        """
+        Close the underlying HTTP client and release any held resources.
+        """
         """Close the underlying HTTP client and release connection resources."""
         self._client.close()
