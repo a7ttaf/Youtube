@@ -1386,20 +1386,6 @@ def _fallback_source_report_types(
 
 
 # ============================================================================
-# Purpose: Reuse the parsed payload's canonical account selector for stale-row
-#          cleanup when a successful replacement report yields zero rows.
-# Database/ORM: None directly; the returned value scopes repository deletes.
-# Standards: Fail closed to the persisted query_request.ids when present, else
-#            preserve legacy callers by falling back to account_id.
-# Blast Radius: Source-of-truth stale-row deletion scope only. A mismatch here
-#               can leave obsolete finance rows behind after an empty rerun.
-# Connections:
-#   - Function: _process_one_report -> passes the result to
-#     _delete_stale_source_rows after parser success.
-#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
-#     youtube_analytics.py -> source_account_id matches query_request.ids.
-# ============================================================================
-# ============================================================================
 # Purpose: Extract the targeted youtube_channel_id from a parser payload's
 #          query_request.filters string (``channel==<id>``). Used by the
 #          analytics deferred-cleanup flush to record which channels were
@@ -1436,6 +1422,24 @@ def _youtube_channel_id_from_parser_payload(
     return None
 
 
+# ============================================================================
+# Purpose: Reuse the parsed payload's canonical account selector for stale-row
+#          cleanup when a successful replacement report omits one or more
+#          parser-level scopes.
+# Database/ORM: None directly; the returned value scopes repository deletes.
+# Standards: Prefer parser-owned canonical ids over external run selectors so
+#            cleanup targets persisted source_row dimensions.
+# Blast Radius: Source-of-truth stale-row deletion scope only. A mismatch here
+#               can leave obsolete finance rows behind after a replacement run.
+# Connections:
+#   - Function: _process_one_report -> passes the result to
+#     _delete_stale_source_rows after parser success.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> source_account_id matches query_request.ids.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     adsense_management.py -> source_account_id strips request.accountId's
+#     accounts/ prefix.
+# ============================================================================
 def _fallback_source_account_id(
     *, parser_payload: dict[str, object], default_account_id: str,
 ) -> str:
@@ -1445,6 +1449,21 @@ def _fallback_source_account_id(
         ids = query_request.get("ids")
         if isinstance(ids, str) and ids.strip():
             return ids.strip()
+    request = parser_payload.get("request")
+    if isinstance(request, dict):
+        request_account_id = request.get("accountId")
+        if isinstance(request_account_id, str):
+            adsense_account_id = request_account_id.strip()
+            if adsense_account_id.startswith("accounts/"):
+                adsense_account_id = adsense_account_id.removeprefix(
+                    "accounts/"
+                ).strip()
+                if adsense_account_id:
+                    # FIX: AdSense can be invoked with a full
+                    # ``accounts/<id>`` run selector, while the parser persists
+                    # the stripped suffix. Cleanup must use the persisted axis
+                    # or stale payment/earnings evidence survives reruns.
+                    return adsense_account_id
     return default_account_id
 
 

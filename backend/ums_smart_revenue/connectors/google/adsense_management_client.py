@@ -225,7 +225,12 @@ def adsense_response_to_parser_payload(
     account_id: str,
     report_month: str,
 ) -> dict[str, object]:
-    """Wrap a reports.generate body with a deterministic report_id stamp."""
+    """Wrap a reports.generate body with a deterministic report_id stamp.
+
+    Raises:
+        MalformedAdsenseAccountIdError: If ``account_id`` is blank or unsafe.
+        MalformedReportMonthError: If ``report_month`` is not ``YYYY-MM``.
+    """
     account_id = _validated_account_id(account_id)
     report_id = hashlib.sha256(
         f"{account_id}|{report_month}|{_REPORT_KEY}".encode()

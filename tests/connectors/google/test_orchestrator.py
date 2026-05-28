@@ -4951,3 +4951,57 @@ def test_run_one_with_adsense_management_nonempty_success_deletes_missing_scope(
         "ESTIMATED_EARNINGS",
         "TOTAL_EARNINGS",
     }
+
+
+def test_run_one_with_adsense_management_full_resource_cleanup_uses_parser_scope(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """AdSense stale cleanup must use the parser-normalized account scope."""
+    account_selector = f"accounts/{_ADSENSE_ACCOUNT_ID}"
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ADSENSE_CONNECTOR_KEY,
+        account_id=account_selector,
+    )
+    report_month = "2026-05"
+    payload_payment = _make_adsense_payment_parser_payload(
+        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+    )
+    payload_earnings = _make_adsense_parser_payload(
+        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+    )
+
+    first_outcome = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=account_selector,
+        report_month=report_month,
+        payload=payload_payment,
+    )
+    assert first_outcome.run is not None
+    assert first_outcome.run.status == "SUCCEEDED"
+    assert first_outcome.counts["rows_upserted_total"] == 1
+
+    second_outcome = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=account_selector,
+        report_month=report_month,
+        payload=payload_earnings,
+    )
+    assert second_outcome.run is not None
+    assert second_outcome.run.status == "SUCCEEDED"
+    assert second_outcome.counts["rows_upserted_total"] == 2
+
+    final_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "adsense_management",
+            GoogleRevenueSourceRowORM.report_month == report_month,
+        )
+    ).all()
+    assert {row.source_account_id for row in final_rows} == {_ADSENSE_ACCOUNT_ID}
+    assert {row.report_type for row in final_rows} == {"earnings_report"}
+    assert {row.metric_key for row in final_rows} == {
+        "ESTIMATED_EARNINGS",
+        "TOTAL_EARNINGS",
+    }
