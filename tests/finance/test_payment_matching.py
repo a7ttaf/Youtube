@@ -45,6 +45,7 @@ def adsense_payment(
         payment_status=status,
         raw_payload={"paymentId": f"{status}-{amount}"},
         source_report_id="adsense-payment-2026-03",
+        source_account_id="pub-1",
         imported_by=None,
     )
 

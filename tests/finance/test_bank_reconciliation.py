@@ -35,6 +35,7 @@ def adsense_payment(**overrides):
         "payment_status": "PAID",
         "raw_payload": {"paymentId": "pay_2026_03"},
         "source_report_id": "adsense-payment-2026-03",
+        "source_account_id": "pub-1",
         "imported_by": None,
     }
     values.update(overrides)

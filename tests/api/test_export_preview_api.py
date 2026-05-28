@@ -165,6 +165,7 @@ def seed_database(
                 payment_currency="USD",
                 payment_status="PAID",
                 raw_payload={"source": "pytest"},
+                source_account_id="pub-1",
                 imported_by=USER_ID,
             ),
             BankReconciliationEntryORM(

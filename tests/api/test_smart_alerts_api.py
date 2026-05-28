@@ -101,6 +101,7 @@ def seed_database(database_url: str) -> None:
                     payment_status="PAID",
                     raw_payload={"paymentId": "pay_2026_03"},
                     source_report_id="adsense-payment-2026-03",
+                    source_account_id="pub-1",
                     imported_by=USER_ID,
                 ),
                 RevenueManualOverrideORM(
