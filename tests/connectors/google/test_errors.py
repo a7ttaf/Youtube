@@ -18,6 +18,8 @@ from ums_smart_revenue.connectors.google.errors import (
     GoogleApiServerError,
     GoogleConnectorError,
     InactiveCredentialError,
+    MalformedAnalyticsSelectorError,
+    MalformedReportMonthError,
     MalformedSecretPayloadError,
     MalformedSecretUriError,
     OAuthRefreshError,
@@ -31,6 +33,7 @@ from ums_smart_revenue.connectors.google.errors import (
 
 
 def test_all_b2_errors_subclass_google_connector_error() -> None:
+    """Every typed B2 connector error must descend from ``GoogleConnectorError``."""
     for cls in (
         UnsupportedSecretSchemeError,
         MalformedSecretUriError,
@@ -50,17 +53,21 @@ def test_all_b2_errors_subclass_google_connector_error() -> None:
         GoogleApiServerError,
         GoogleApiResponseError,
         UnsupportedReportTypeError,
+        MalformedReportMonthError,
+        MalformedAnalyticsSelectorError,
     ):
         assert issubclass(cls, GoogleConnectorError), cls.__name__
 
 
 def test_unsupported_secret_scheme_carries_scheme() -> None:
+    """The error exposes the offending scheme as both attribute and message text."""
     err = UnsupportedSecretSchemeError(scheme="aws-secretsmanager")
     assert err.scheme == "aws-secretsmanager"
     assert "aws-secretsmanager" in str(err)
 
 
 def test_secret_not_found_carries_ref() -> None:
+    """The error keeps the full ``ref`` but redacts the resource name in ``str(...)``."""
     ref = "gcp-secret-manager://projects/x/secrets/y/versions/latest"
     err = SecretNotFoundError(ref=ref)
     assert err.ref == ref
@@ -70,6 +77,7 @@ def test_secret_not_found_carries_ref() -> None:
 
 
 def test_malformed_secret_uri_redacts_secret_resource_name() -> None:
+    """``MalformedSecretUriError`` redacts the resource name in ``str(...)``."""
     ref = "gcp-secret-manager://projects/x/secrets/y/versions/latest"
     err = MalformedSecretUriError(ref=ref)
     assert err.ref == ref
@@ -79,6 +87,7 @@ def test_malformed_secret_uri_redacts_secret_resource_name() -> None:
 
 
 def test_secret_fetch_error_redacts_secret_resource_name() -> None:
+    """``SecretFetchError`` exposes the inner exception class but redacts the resource name."""
     ref = "gcp-secret-manager://projects/x/secrets/y/versions/latest"
     inner = RuntimeError("permission denied for projects/x/secrets/y")
 
@@ -93,6 +102,7 @@ def test_secret_fetch_error_redacts_secret_resource_name() -> None:
 
 
 def test_oauth_refresh_carries_inner_class_name() -> None:
+    """``OAuthRefreshError`` keeps the inner exception and surfaces its class name."""
     inner = RuntimeError("token revoked")
     err = OAuthRefreshError(inner=inner)
     assert "RuntimeError" in str(err)

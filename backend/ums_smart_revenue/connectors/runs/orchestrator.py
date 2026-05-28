@@ -48,11 +48,13 @@ parser/repo (PR #43) are *not* touched here — T27 is additive.
 """
 from __future__ import annotations
 
+import json
 import os
 import tempfile
+import types as _types  # SimpleNamespace used for dry-run tenant_id proxy
 from calendar import monthrange
 from collections.abc import Iterable, Iterator
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date as date_cls
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -84,10 +86,19 @@ from ums_smart_revenue.connectors.google.secret_resolver import (
     ensure_default_resolvers,
     resolve_secret,
 )
+from ums_smart_revenue.connectors.google.youtube_analytics_client import (
+    YouTubeAnalyticsClient,
+    calendar_month_end_iso,
+    list_target_channels,
+)
+from ums_smart_revenue.connectors.google.youtube_analytics_client import (
+    _build_query_request as _build_analytics_query_request,
+)
 from ums_smart_revenue.connectors.google.youtube_reporting_client import (
     YouTubeReportingClient,
 )
 from ums_smart_revenue.connectors.google_source_parsers import (
+    YouTubeAnalyticsParser,
     YouTubeReportingParser,
 )
 from ums_smart_revenue.connectors.google_source_rows import (
@@ -122,6 +133,7 @@ __all__ = [
     "ConnectorRunOutcome",
     "ConnectorRunner",
     "ProducedReportSuccess",
+    "YouTubeAnalyticsRunner",
     "YouTubeReportingRunner",
     "run_one",
 ]
@@ -187,11 +199,13 @@ class ProducedReportFailure:
 
 @dataclass(frozen=True)
 class _CsvReportDownload:
+    """Spool entry pairing a CSV ``report_id`` with its in-memory bytes or temp-file path."""
     report_id: str
     raw_bytes: bytes | None = None
     raw_path: Path | None = None
 
     def read_bytes(self) -> bytes:
+        """Return the spooled CSV bytes, reading the temp file lazily if needed."""
         if self.raw_bytes is not None:
             return self.raw_bytes
         if self.raw_path is None:
@@ -199,6 +213,7 @@ class _CsvReportDownload:
         return self.raw_path.read_bytes()
 
     def cleanup(self) -> None:
+        """Best-effort unlink the temp file backing this download, ignoring missing-file errors."""
         if self.raw_path is None:
             return
         try:
@@ -209,6 +224,7 @@ class _CsvReportDownload:
 
 @dataclass(frozen=True)
 class ProducedReportSuccess:
+    """Successful producer result bundling the parser payload with its raw CSV downloads."""
     report_type: str
     parser_payload: dict[str, object]
     raw_reports: tuple[_CsvReportDownload, ...]
@@ -219,6 +235,40 @@ ProducedReport = (
     | tuple[str, dict[str, object], bytes]
     | ProducedReportFailure
 )
+
+
+@dataclass(frozen=True)
+class _DeferredStaleCleanupPlan:
+    """One per-scope stale-row cleanup plan deferred for analytics aggregation."""
+
+    source_system: str
+    report_type: str
+    report_month: str
+    source_account_id: str
+    keep_source_row_keys: frozenset[str]
+
+
+@dataclass
+class _DeferredAnalyticsStaleCleanupState:
+    """Accumulates per-channel keep-keys for one owner/month until flush time.
+
+    ``blocked`` is set to True when any sibling channel in the run failed so the
+    cleanup is skipped and previously-persisted rows for that scope are not
+    deleted on a partial run.
+
+    ``attempted_channel_ids`` records the youtube_channel_id of every channel
+    that successfully produced a parsed payload in this run. Flush reads this
+    set to preserve historical rows belonging to channels that were NOT part
+    of the current target set (e.g. previously-active channels that were
+    deactivated or removed from the revenue-required scope) — without this
+    guard a content-owner/month cleanup would silently erase those rows.
+    """
+
+    blocked: bool = False
+    keep_source_row_keys_by_scope: dict[tuple[str, str, str, str], set[str]] = field(
+        default_factory=dict
+    )
+    attempted_channel_ids: set[str] = field(default_factory=set)
 
 
 class ConnectorRunner(Protocol):
@@ -241,6 +291,7 @@ class ConnectorRunner(Protocol):
         report_month: str,
         account_id: str,
     ) -> Iterator[ProducedReport]:
+        """Yield each successful or failed produced report (per-report bucket-B contract)."""
         ...
 
 
@@ -349,6 +400,7 @@ def _run_one_with_credentials(
     triggered_by_user_id: UUID | None,
     credentials: Credentials,
 ) -> ConnectorRunOutcome:
+    """Run one connector slice once credentials are resolved (dispatches dry-run vs live)."""
     if dry_run:
         return _run_dry_run(
             session=session,
@@ -376,6 +428,7 @@ def _credentials_for_run(
     connector_key: str,
     account_id: str,
 ) -> Credentials:
+    """Resolve and validate the credential row for a given tenant/connector/account."""
     credential = _load_credential(
         session,
         tenant_id=tenant_id,
@@ -424,14 +477,22 @@ def _run_dry_run(
     report_month: str,
     credentials: Credentials,
 ) -> ConnectorRunOutcome:
+    """Execute the connector's produce/parse path inside a rolled-back savepoint."""
     counts = _zero_counts()
     runner = dispatch_connector(key=connector_key)
     parser = _parser_for_connector(connector_key)
     savepoint = session.begin_nested()
     try:
+        # Pass a lightweight proxy that carries tenant_id so runners that
+        # need it (e.g. YouTubeAnalyticsRunner) can read run.tenant_id
+        # without requiring a live ConnectorRunEntry on the dry-run path.
+        # FIX: str()-wrap tenant_id to mirror ConnectorRunEntry.tenant_id: str.
+        # UUID(uuid_object) raises AttributeError on Python 3.14 because
+        # UUID.__init__ expects a hex string, not a UUID instance.
+        _dry_run_proxy = _types.SimpleNamespace(tenant_id=str(tenant_id))
         for produced in runner.produce_reports(
             session=session,
-            run=None,
+            run=_dry_run_proxy,  # type: ignore[arg-type]
             credentials=credentials,
             report_month=report_month,
             account_id=account_id,
@@ -476,6 +537,7 @@ def _run_live(
     credentials: Credentials,
     triggered_by_user_id: UUID | None,
 ) -> ConnectorRunOutcome:
+    """Open the live ``connector_runs`` row and drive the produce/parse/upsert loop end-to-end."""
     run_entry = start_run(
         session,
         tenant_id=tenant_id,
@@ -557,10 +619,16 @@ def _process_live_reports(
     per_report_failures: list[tuple[str, str]],
     per_report_failure_details: list[tuple[str, str, str | None]],
 ) -> None:
+    """Drive the live run end-to-end: produce, parse, upsert, and aggregate counts."""
     runner = dispatch_connector(key=connector_key)
     backend, scheme, bucket = _build_blob_backend()
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     parser = _parser_for_connector(connector_key)
+    deferred_analytics_cleanup = (
+        _DeferredAnalyticsStaleCleanupState()
+        if isinstance(parser, YouTubeAnalyticsParser)
+        else None
+    )
     ordering_index = 0
     for produced in runner.produce_reports(
         session=session,
@@ -587,8 +655,15 @@ def _process_live_reports(
             counts=counts,
             per_report_failures=per_report_failures,
             per_report_failure_details=per_report_failure_details,
+            deferred_analytics_cleanup=deferred_analytics_cleanup,
         )
         ordering_index += max(raw_file_count, 1)
+    if deferred_analytics_cleanup is not None:
+        _flush_deferred_stale_cleanup_plans(
+            repo=repo,
+            tenant_id=tenant_id,
+            deferred_cleanup=deferred_analytics_cleanup,
+        )
 
 
 def _unpack_produced_report(
@@ -599,6 +674,7 @@ def _unpack_produced_report(
     tuple[_CsvReportDownload, ...] | None,
     Exception | None,
 ]:
+    """Normalise a ``ProducedReport`` into its (report_type, parser_payload, raw_reports, failure)."""
     if isinstance(produced, ProducedReportFailure):
         return (
             produced.report_type,
@@ -621,6 +697,7 @@ def _unpack_produced_report(
 def _legacy_report_id(
     *, parser_payload: dict[str, object], report_type: str
 ) -> str:
+    """Recover the connector's legacy report_id from ``parser_payload.report_metadata`` if present."""
     metadata = parser_payload.get("report_metadata")
     if isinstance(metadata, dict):
         report_id = metadata.get("report_id")
@@ -641,14 +718,16 @@ def _handle_live_produced_report(
     backend: BlobStorageBackend,
     scheme: str,
     bucket: str,
-    parser: YouTubeReportingParser,
+    parser: YouTubeReportingParser | YouTubeAnalyticsParser,
     repo: SqlAlchemyGoogleRevenueSourceRowRepository,
     produced: ProducedReport,
     ordering_index: int,
     counts: dict[str, int],
     per_report_failures: list[tuple[str, str]],
     per_report_failure_details: list[tuple[str, str, str | None]],
+    deferred_analytics_cleanup: _DeferredAnalyticsStaleCleanupState | None,
 ) -> int:
+    """Persist one produced report (raw upload, parse, upsert) and update counts."""
     report_type, parser_payload, raw_reports, produced_error = _unpack_produced_report(
         produced
     )
@@ -676,7 +755,7 @@ def _handle_live_produced_report(
             raise produced_error
         if parser_payload is None or raw_reports is None or not raw_reports:
             raise RuntimeError("connector runner yielded incomplete report")
-        rows_upserted, raw_file_count = _process_one_report(
+        rows_upserted, raw_file_count, deferred_cleanup_plans = _process_one_report(
             session=session,
             tenant_id=tenant_id,
             connector_key=connector_key,
@@ -696,10 +775,20 @@ def _handle_live_produced_report(
             report_state=report_state,
         )
         session.commit()
+        if deferred_analytics_cleanup is not None:
+            _merge_deferred_stale_cleanup_plans(
+                deferred_cleanup=deferred_analytics_cleanup,
+                plans=deferred_cleanup_plans,
+                attempted_channel_id=_youtube_channel_id_from_parser_payload(
+                    parser_payload
+                ),
+            )
         counts["reports_succeeded"] += 1
         counts["rows_upserted_total"] += rows_upserted
         return raw_file_count
     except Exception as exc:
+        if deferred_analytics_cleanup is not None:
+            deferred_analytics_cleanup.blocked = True
         _record_live_report_failure(
             session=session,
             tenant_id=tenant_id,
@@ -714,6 +803,7 @@ def _handle_live_produced_report(
 
 
 def _raw_file_count_from_state(report_state: dict[str, object]) -> int:
+    """Return the number of raw_file ids attached to a per-report state entry."""
     raw_file_ids = report_state.get("raw_file_ids")
     if isinstance(raw_file_ids, list):
         return len(raw_file_ids)
@@ -733,6 +823,7 @@ def _record_live_report_failure(
     per_report_failures: list[tuple[str, str]],
     per_report_failure_details: list[tuple[str, str, str | None]],
 ) -> None:
+    """Persist a bucket-B per-report failure into ``connector_run_reports`` mid-run."""
     error_class = type(exc).__name__
     per_report_failures.append((report_type, error_class))
     per_report_failure_details.append(
@@ -761,6 +852,7 @@ def _record_live_report_failure(
 
 
 def _raw_file_ids_from_state(report_state: dict[str, object]) -> list[UUID]:
+    """Return the list of attached raw_file UUIDs from a per-report state entry."""
     raw_file_ids = report_state.get("raw_file_ids")
     if isinstance(raw_file_ids, list):
         return [raw_file_id for raw_file_id in raw_file_ids if isinstance(raw_file_id, UUID)]
@@ -778,6 +870,7 @@ def _finish_failed_live_run(
     counts: dict[str, int],
     exc: Exception,
 ) -> ConnectorRunEntry:
+    """Close a live run as FAILED (bucket-A short-circuit) with the supplied error class."""
     session.rollback()
     finished_run = finish_run(
         session,
@@ -799,6 +892,7 @@ def _finish_aggregate_live_run(
     counts: dict[str, int],
     per_report_failure_details: list[tuple[str, str, str | None]],
 ) -> ConnectorRunEntry:
+    """Close a live run as SUCCEEDED/PARTIAL based on the aggregated per-report counts."""
     status = _derive_terminal_status(counts)
     finished_run = finish_run(
         session,
@@ -819,6 +913,7 @@ def _sweep_unfinished_live_run(
     run_entry: ConnectorRunEntry,
     counts: dict[str, int],
 ) -> None:
+    """Best-effort sweep for the no-credentials early-out — finish any still-open ``run_entry``."""
     session.rollback()
     try:
         finish_run(
@@ -848,7 +943,7 @@ def _process_one_report(
     backend: BlobStorageBackend,
     scheme: str,
     bucket: str,
-    parser: YouTubeReportingParser,
+    parser: YouTubeReportingParser | YouTubeAnalyticsParser,
     repo: SqlAlchemyGoogleRevenueSourceRowRepository,
     report_type: str,
     report_month: str,
@@ -858,7 +953,7 @@ def _process_one_report(
     ordering_index: int,
     triggered_by_user_id: UUID | None,
     report_state: dict[str, object],
-) -> tuple[int, int]:
+) -> tuple[int, int, tuple[_DeferredStaleCleanupPlan, ...]]:
     """Run one report through blob -> raw_file -> parse -> upsert -> mark_parsed.
 
     Raises any ``GoogleConnectorError`` / ``ParserError`` / other exception
@@ -874,6 +969,7 @@ def _process_one_report(
     raw_file in flight to mark FAILED".
     """
     source_system = _source_system_for_connector(connector_key)
+    deferred_cleanup_plans: tuple[_DeferredStaleCleanupPlan, ...] = ()
     raw_files = _prepare_and_link_raw_reports(
         session=session,
         tenant_id=tenant_id,
@@ -916,15 +1012,39 @@ def _process_one_report(
             imported_by=triggered_by_user_id,
             replace_raw_file_id=source_row_raw_file_id is None,
         )
-        _delete_stale_source_rows(
-            repo=repo,
-            tenant_id=tenant_id,
-            source_system=source_system,
-            report_type=report_type,
-            report_month=report_month,
-            parsed_rows=parsed_rows,
-            fallback_source_account_id=account_id,
+        source_report_type = _fallback_source_report_type(
+            parser=parser,
+            default_report_type=report_type,
         )
+        fallback_source_account_id = _fallback_source_account_id(
+            parser_payload=parser_payload,
+            default_account_id=account_id,
+        )
+        if isinstance(parser, YouTubeAnalyticsParser):
+            # FIX: targeted analytics replaces ONE content-owner/month scope
+            # across many per-channel payloads. Deleting stale rows here, one
+            # channel at a time, lets later successes (or empty responses) erase
+            # sibling channels and lets partial runs drop rows for failed
+            # channels. Defer cleanup until the full owner-month key set is
+            # known and only flush it when every channel payload in the run
+            # succeeded.
+            deferred_cleanup_plans = _build_deferred_stale_cleanup_plans(
+                source_system=source_system,
+                report_type=source_report_type,
+                report_month=report_month,
+                parsed_rows=parsed_rows,
+                fallback_source_account_id=fallback_source_account_id,
+            )
+        else:
+            _delete_stale_source_rows(
+                repo=repo,
+                tenant_id=tenant_id,
+                source_system=source_system,
+                report_type=source_report_type,
+                report_month=report_month,
+                parsed_rows=parsed_rows,
+                fallback_source_account_id=fallback_source_account_id,
+            )
 
         # Lifecycle transition: DOWNLOADED -> PARSED. Raises
         # ``RawFileAlreadyParsedError`` if called twice on the same file, which
@@ -942,7 +1062,7 @@ def _process_one_report(
     # loop AFTER ``session.commit()`` so a commit failure (e.g. DB
     # disconnect on the per-report flush) is recorded as a failure once,
     # not double-counted as both succeeded and failed.
-    return len(written), len(raw_files)
+    return len(written), len(raw_files), deferred_cleanup_plans
 
 
 # ============================================================================
@@ -959,9 +1079,245 @@ def _process_one_report(
 #     -> optionally clears stale raw_file_id on aggregate replacement.
 # ============================================================================
 def _source_row_raw_file_id(raw_files: list[RawReportFileORM]) -> UUID | None:
+    """Return the single raw-file id when a row aggregates exactly one raw payload."""
     if len(raw_files) == 1:
         return raw_files[0].id
     return None
+
+
+# ============================================================================
+# Purpose: Build the stale-row cleanup scopes implied by one successful parsed
+#          replacement payload.
+# Database/ORM: None directly; the returned plans scope later repository
+#               deletes.
+# Standards: Groups by parser-owned report_type + source_account_id and keeps
+#            empty-success cleanup aligned with the persisted analytics scope.
+# Blast Radius: Source-of-truth source-row cleanup only.
+# Connections:
+#   - Function: _process_one_report -> defers analytics cleanup until the owner
+#     scope is complete.
+#   - Function: _delete_stale_source_rows -> reuses the same scope grouping for
+#     immediate cleanup paths.
+# ============================================================================
+def _stale_source_row_keys_by_scope(
+    *,
+    report_type: str,
+    parsed_rows: Iterable[ParsedSourceRow],
+    fallback_source_account_id: str,
+) -> dict[tuple[str, str], set[str]]:
+    """Group keep-keys by (report_type, source_account_id) for stale-row cleanup."""
+    keys_by_scope: dict[tuple[str, str], set[str]] = {}
+    for row in parsed_rows:
+        keys_by_scope.setdefault((row.report_type, row.source_account_id), set()).add(
+            row.source_row_key
+        )
+    if not keys_by_scope and fallback_source_account_id.strip():
+        # FIX: empty successful replacements still need the PARSER-LEVEL
+        # report_type/account scope. Using the outer produced report label
+        # (`youtube_analytics`) misses persisted analytics rows, whose parser
+        # writes `report_type="reports.query"`, and leaves stale finance rows
+        # behind on rerun.
+        keys_by_scope[(report_type.strip(), fallback_source_account_id.strip())] = set()
+    return keys_by_scope
+
+
+# ============================================================================
+# Purpose: Convert one report's stale-row cleanup scopes into deferred plans the
+#          analytics run can merge across sibling channels.
+# Database/ORM: None directly; plans are flushed later through the repository.
+# Standards: Keeps per-scope keys additive so the final delete runs once per
+#            owner/month after all successful channel payloads have contributed.
+# Blast Radius: Source-of-truth source-row cleanup only.
+# Connections:
+#   - Function: _process_one_report -> uses for YouTubeAnalyticsParser only.
+#   - Function: _flush_deferred_stale_cleanup_plans -> executes the merged plans.
+# ============================================================================
+def _build_deferred_stale_cleanup_plans(
+    *,
+    source_system: str,
+    report_type: str,
+    report_month: str,
+    parsed_rows: Iterable[ParsedSourceRow],
+    fallback_source_account_id: str,
+) -> tuple[_DeferredStaleCleanupPlan, ...]:
+    """Convert one channel's keep-keys into deferred plans for the analytics flush."""
+    return tuple(
+        _DeferredStaleCleanupPlan(
+            source_system=source_system,
+            report_type=row_report_type,
+            report_month=report_month,
+            source_account_id=source_account_id,
+            keep_source_row_keys=frozenset(keys),
+        )
+        for (row_report_type, source_account_id), keys in _stale_source_row_keys_by_scope(
+            report_type=report_type,
+            parsed_rows=parsed_rows,
+            fallback_source_account_id=fallback_source_account_id,
+        ).items()
+    )
+
+
+def _merge_deferred_stale_cleanup_plans(
+    *,
+    deferred_cleanup: _DeferredAnalyticsStaleCleanupState,
+    plans: tuple[_DeferredStaleCleanupPlan, ...],
+    attempted_channel_id: str | None = None,
+) -> None:
+    """Aggregate one channel's plans into the run-level deferred-cleanup state.
+
+    ``attempted_channel_id`` is the youtube_channel_id whose parser payload
+    contributed these plans; flush uses this set to avoid deleting historical
+    rows for channels outside the current target set.
+    """
+    for plan in plans:
+        deferred_cleanup.keep_source_row_keys_by_scope.setdefault(
+            (
+                plan.source_system,
+                plan.report_type,
+                plan.report_month,
+                plan.source_account_id,
+            ),
+            set(),
+        ).update(plan.keep_source_row_keys)
+    if attempted_channel_id is not None and attempted_channel_id.strip():
+        deferred_cleanup.attempted_channel_ids.add(attempted_channel_id.strip())
+
+
+def _flush_deferred_stale_cleanup_plans(
+    *,
+    repo: SqlAlchemyGoogleRevenueSourceRowRepository,
+    tenant_id: UUID,
+    deferred_cleanup: _DeferredAnalyticsStaleCleanupState,
+) -> None:
+    """Execute the merged keep-key plans once the analytics run completes cleanly.
+
+    Rows whose ``youtube_channel_id`` is NOT in ``attempted_channel_ids`` are
+    preserved by augmenting ``keep_source_row_keys`` with their persisted
+    ``source_row_key``. This prevents a channel that fell out of the target
+    set (deactivated, ``revenue_required=False``, etc.) from losing its
+    historical revenue when sibling channels are successfully replaced.
+    """
+    if deferred_cleanup.blocked:
+        return
+    attempted = deferred_cleanup.attempted_channel_ids
+    # FIX: cache repo.list() per (source_system, report_month). Multiple scopes
+    # in a single run can share the same (source_system, report_month) but
+    # different source_account_id, so hoisting the fetch keeps the flush at one
+    # query per source/month even on multi-owner batches.
+    existing_rows_cache: dict[tuple[str, str], list] = {}
+    for (source_system, report_type, report_month, source_account_id), keys in (
+        deferred_cleanup.keep_source_row_keys_by_scope.items()
+    ):
+        preserved_keys = set(keys)
+        cache_key = (source_system, report_month)
+        if cache_key not in existing_rows_cache:
+            existing_rows_cache[cache_key] = repo.list(
+                tenant_id,
+                report_month=report_month,
+                source_system=source_system,
+            )
+        for row in existing_rows_cache[cache_key]:
+            if (
+                row.source_account_id == source_account_id
+                and row.report_type == report_type
+                and row.youtube_channel_id is not None
+                and row.youtube_channel_id not in attempted
+            ):
+                preserved_keys.add(row.source_row_key)
+        repo.delete_stale_for_scope(
+            tenant_id,
+            source_system=source_system,
+            source_account_id=source_account_id,
+            report_type=report_type,
+            report_month=report_month,
+            keep_source_row_keys=preserved_keys,
+        )
+
+
+# ============================================================================
+# Purpose: Map the outer produced-report label to the source-row report_type
+#          used for stale-row cleanup when a successful replacement yields no
+#          parsed rows.
+# Database/ORM: None directly; the returned value scopes repository deletes.
+# Standards: Keeps the generic orchestrator aware of parser-owned report_type
+#            normalization without hardcoding row writes here.
+# Blast Radius: Source-of-truth stale-row deletion scope only.
+# Connections:
+#   - Function: _process_one_report -> provides the fallback report_type for
+#     _delete_stale_source_rows.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> emits ParsedSourceRow.report_type="reports.query".
+# ============================================================================
+def _fallback_source_report_type(
+    *, parser: YouTubeReportingParser | YouTubeAnalyticsParser, default_report_type: str,
+) -> str:
+    """Return the persisted report_type label for empty-success stale cleanup."""
+    if isinstance(parser, YouTubeAnalyticsParser):
+        return "reports.query"
+    return default_report_type
+
+
+# ============================================================================
+# Purpose: Reuse the parsed payload's canonical account selector for stale-row
+#          cleanup when a successful replacement report yields zero rows.
+# Database/ORM: None directly; the returned value scopes repository deletes.
+# Standards: Fail closed to the persisted query_request.ids when present, else
+#            preserve legacy callers by falling back to account_id.
+# Blast Radius: Source-of-truth stale-row deletion scope only. A mismatch here
+#               can leave obsolete finance rows behind after an empty rerun.
+# Connections:
+#   - Function: _process_one_report -> passes the result to
+#     _delete_stale_source_rows after parser success.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> source_account_id matches query_request.ids.
+# ============================================================================
+# ============================================================================
+# Purpose: Extract the targeted youtube_channel_id from a parser payload's
+#          query_request.filters string (``channel==<id>``). Used by the
+#          analytics deferred-cleanup flush to record which channels were
+#          attempted in this run so historical rows for non-attempted channels
+#          can be preserved on flush.
+# Database/ORM: None.
+# Standards: Returns None when the filter is missing, non-string, malformed,
+#            or the channel value is empty/whitespace so callers can ignore
+#            unattributable payloads instead of polluting the attempted-set
+#            with bad data.
+# Blast Radius: Source-of-truth source-row cleanup only. A drift would either
+#               erase rows for previously-active channels or leak stale rows.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/
+#     youtube_analytics_client.py -> the canonical filters shape this helper
+#     parses.
+# ============================================================================
+def _youtube_channel_id_from_parser_payload(
+    parser_payload: dict[str, object],
+) -> str | None:
+    """Return the channel_id from a parser payload's ``filters=channel==<id>``."""
+    query_request = parser_payload.get("query_request")
+    if not isinstance(query_request, dict):
+        return None
+    filters = query_request.get("filters")
+    if not isinstance(filters, str):
+        return None
+    for clause in filters.split(";"):
+        key, sep, value = clause.partition("==")
+        if sep != "==" or key.strip() != "channel":
+            continue
+        channel_id = value.strip()
+        return channel_id if channel_id else None
+    return None
+
+
+def _fallback_source_account_id(
+    *, parser_payload: dict[str, object], default_account_id: str,
+) -> str:
+    """Return the canonical source_account_id used by the parser for cleanup scope."""
+    query_request = parser_payload.get("query_request")
+    if isinstance(query_request, dict):
+        ids = query_request.get("ids")
+        if isinstance(ids, str) and ids.strip():
+            return ids.strip()
+    return default_account_id
 
 
 # ============================================================================
@@ -986,19 +1342,17 @@ def _delete_stale_source_rows(
     parsed_rows: Iterable[ParsedSourceRow],
     fallback_source_account_id: str,
 ) -> None:
-    keys_by_account: dict[str, set[str]] = {}
-    for row in parsed_rows:
-        keys_by_account.setdefault(row.source_account_id, set()).add(
-            row.source_row_key
-        )
-    if not keys_by_account and fallback_source_account_id.strip():
-        keys_by_account[fallback_source_account_id.strip()] = set()
-    for source_account_id, keys in keys_by_account.items():
+    """Delete source rows in each scope whose keys are absent from the new parse."""
+    for (row_report_type, source_account_id), keys in _stale_source_row_keys_by_scope(
+        report_type=report_type,
+        parsed_rows=parsed_rows,
+        fallback_source_account_id=fallback_source_account_id,
+    ).items():
         repo.delete_stale_for_scope(
             tenant_id,
             source_system=source_system,
             source_account_id=source_account_id,
-            report_type=report_type,
+            report_type=row_report_type,
             report_month=report_month,
             keep_source_row_keys=keys,
         )
@@ -1033,6 +1387,7 @@ def _prepare_and_link_raw_reports(
     triggered_by_user_id: UUID | None,
     report_state: dict[str, object],
 ) -> list[RawReportFileORM]:
+    """Upload each ``raw_report`` and link the resulting raw_file rows to the active produced report."""
     raw_files: list[RawReportFileORM] = []
     seen_raw_file_ids: set[UUID] = set()
     report_state["raw_file_ids"] = []
@@ -1099,6 +1454,7 @@ def _prepare_raw_report_file(
     bucket: str,
     triggered_by_user_id: UUID | None,
 ) -> RawReportFileORM:
+    """Compute checksum, upload, and create/reopen the raw_file row for one CSV download."""
     # 1. Checksum + deterministic URI: same bytes always map to the same path
     # so a retry overwrites or hits the existing object instead of creating a
     # second copy with the same content.
@@ -1174,6 +1530,7 @@ def _find_existing_raw_file(
     report_month: str,
     checksum: str,
 ) -> RawReportFileORM | None:
+    """Look up an existing raw_file row for an idempotent retry under the same scope+checksum."""
     return session.scalar(
         sa.select(RawReportFileORM).where(
             RawReportFileORM.tenant_id == tenant_id,
@@ -1213,6 +1570,7 @@ def _get_or_create_raw_file(
     storage_uri: str,
     downloaded_by: UUID | None,
 ) -> RawReportFileORM:
+    """Insert a fresh raw_file row, racing on the unique constraint and retrying on collision."""
     raw_file = _find_existing_raw_file(
         session,
         tenant_id=tenant_id,
@@ -1287,6 +1645,7 @@ class YouTubeReportingRunner:
         report_month: str,
         account_id: str,
     ) -> Iterator[ProducedReport]:
+        """Drive the YouTube Reporting jobs path: discover jobs, fetch CSVs, yield per-job results."""
         # ``run`` is ``None`` on the T29 dry-run path; the runner body
         # never references it (the connector_runs lifecycle is owned by
         # ``run_one`` itself), so the widening is a pure type contract
@@ -1308,6 +1667,7 @@ def _produce_youtube_reports(
     report_month: str,
     account_id: str,
 ) -> Iterator[ProducedReport]:
+    """Iterate YouTube Reporting jobs, fetch each report's CSVs, and yield bucket-B successes/failures."""
     http = GoogleHttpClient(credentials=credentials)
     try:
         client = client_type(http=http)
@@ -1353,6 +1713,7 @@ def _produce_youtube_reports(
 def _deduplicate_youtube_jobs_by_report_type(
     jobs: Iterable[dict[str, object]],
 ) -> list[dict[str, object]]:
+    """Collapse multiple jobs publishing the same report_type to the first occurrence."""
     seen_report_types: set[str] = set()
     unique_jobs: list[dict[str, object]] = []
     for job in jobs:
@@ -1371,6 +1732,7 @@ def _produce_youtube_job_report(
     report_month: str,
     account_id: str,
 ) -> ProducedReportSuccess | ProducedReportFailure | None:
+    """Drive one YouTube Reporting job: list its reports for the month then download+aggregate them."""
     report_type = _require_text(job, "reportTypeId")
     job_id = _require_text(job, "id")
     reports = _list_youtube_reports_for_job(
@@ -1399,6 +1761,7 @@ def _list_youtube_reports_for_job(
     report_type: str,
     report_month: str,
 ) -> list[dict[str, object]] | ProducedReportFailure:
+    """Fetch the report metadata list for a single job in a single ``report_month``."""
     try:
         return client.list_reports_for_month(
             account_id=account_id,
@@ -1419,6 +1782,7 @@ def _build_youtube_report_success(
     report_month: str,
     account_id: str,
 ) -> ProducedReportSuccess | ProducedReportFailure | None:
+    """Aggregate downloaded CSVs into a parser payload + raw-reports tuple for one job/month."""
     csv_reports: dict[str, _CsvReportDownload] = {}
     seen_checksums: set[str] = set()
     totals: dict[tuple[str, str | None, str], Decimal] = {}
@@ -1479,6 +1843,7 @@ def _download_youtube_csv_reports(
     seen_checksums: set[str],
     totals: dict[tuple[str, str | None, str], Decimal],
 ) -> ProducedReportFailure | None:
+    """Download every CSV referenced by ``reports`` and return them as ``_CsvReportDownload`` entries."""
     for report in reports:
         failure = _download_youtube_csv_report(
             client=client,
@@ -1506,6 +1871,7 @@ def _download_youtube_csv_report(
     seen_checksums: set[str],
     totals: dict[tuple[str, str | None, str], Decimal],
 ) -> ProducedReportFailure | None:
+    """Download a single YouTube Reporting CSV blob, spooling to disk if it exceeds the in-memory cap."""
     csv_report: _CsvReportDownload | None = None
     try:
         download_url = _require_text(report, "downloadUrl")
@@ -1544,6 +1910,7 @@ def _failure_with_downloaded_csv_reports(
     csv_reports: dict[str, _CsvReportDownload],
     failure: ProducedReportFailure,
 ) -> ProducedReportFailure:
+    """Re-emit a per-report failure with already-downloaded CSV evidence attached."""
     raw_reports = list(csv_reports.values())
     seen_report_ids = {raw_report.report_id for raw_report in raw_reports}
     for raw_report in failure.raw_reports:
@@ -1558,7 +1925,7 @@ def _failure_with_downloaded_csv_reports(
     )
 
 
-def _require_text(mapping: dict[str, object], field: str) -> str:
+def _require_text(mapping: dict[str, object], field_name: str) -> str:
     """Pull a non-blank string field from a Google API descriptor or fail.
 
     Google's REST envelopes are well-typed in practice, but a missing /
@@ -1569,10 +1936,10 @@ def _require_text(mapping: dict[str, object], field: str) -> str:
     """
     from ums_smart_revenue.connectors.google.errors import GoogleApiResponseError
 
-    value = mapping.get(field)
+    value = mapping.get(field_name)
     if not isinstance(value, str) or not value.strip():
         raise GoogleApiResponseError(
-            url="<descriptor>", reason=f"missing or non-string {field!r}"
+            url="<descriptor>", reason=f"missing or non-string {field_name!r}"
         )
     return value.strip()
 
@@ -1647,6 +2014,7 @@ def _accumulate_csv_report_bytes(
     report_month: str,
     default_content_owner: str | None,
 ) -> None:
+    """Parse one CSV blob and fold its per-(channel, video, metric) totals into ``totals``."""
     import csv
     import io
 
@@ -1689,6 +2057,7 @@ def _accumulate_csv_report_bytes(
 def _validate_csv_headers(
     fieldnames: list[str] | None, *, report_id: str, report_type: str
 ) -> str | None:
+    """Confirm the CSV header set contains the metric column expected for ``report_type``."""
     if not fieldnames:
         raise _parser_payload_error(
             report_id=report_id,
@@ -1728,6 +2097,7 @@ def _parser_payload_from_csv_totals(
     report_type: str,
     report_month: str,
 ) -> dict[str, object]:
+    """Render the aggregated ``totals`` map into the parser payload shape used downstream."""
     report_id = _combined_report_id(report_ids)
     month_start, month_end = _month_bounds(
         report_month=report_month, report_id=report_id
@@ -1773,6 +2143,7 @@ def _accumulate_csv_row(
     default_content_owner: str | None,
     default_currency: str | None,
 ) -> None:
+    """Fold one CSV row's metric into the running ``totals`` map (validates non-negative decimals)."""
     # Normalize the date column. YouTube Reporting CSV uses ``date`` or
     # ``day``. The row is daily, but the parser payload is monthly, so this
     # date is used only to ensure the row belongs to report_month.
@@ -1856,12 +2227,14 @@ def _accumulate_csv_row(
 
 
 def _combined_report_id(report_ids: list[str]) -> str:
+    """Return the report_id to record on disk: a single id or a ``combined:`` aggregate label."""
     if len(report_ids) == 1:
         return report_ids[0]
     return f"combined:{','.join(report_ids)}"
 
 
 def _spool_csv_report(*, report_id: str, raw_bytes: bytes) -> _CsvReportDownload:
+    """Persist a downloaded CSV either in memory or to a managed temp file based on size."""
     raw_path: Path | None = None
     try:
         with tempfile.NamedTemporaryFile(
@@ -1885,11 +2258,13 @@ def _spool_csv_report(*, report_id: str, raw_bytes: bytes) -> _CsvReportDownload
 def _cleanup_csv_report_downloads(
     raw_reports: tuple[_CsvReportDownload, ...],
 ) -> None:
+    """Best-effort unlink every temp file backing the supplied CSV downloads."""
     for raw_report in raw_reports:
         raw_report.cleanup()
 
 
 def _month_bounds(*, report_month: str, report_id: str) -> tuple[date_cls, date_cls]:
+    """Return the (first_day, last_day) calendar bounds for ``report_month`` (validates format)."""
     expected_month = report_month.strip()
     try:
         validate_report_month(expected_month)
@@ -1931,6 +2306,7 @@ def _first_present(row: dict[str, str | None], *keys: str) -> str | None:
 
 
 def _row_has_any_column(row: dict[str, str | None], *keys: str) -> bool:
+    """True iff the CSV row carries any of the supplied column names (case-insensitive)."""
     lower_keys = {k.lower() for k in row if isinstance(k, str)}
     return any(key.lower() in lower_keys for key in keys)
 
@@ -1993,6 +2369,7 @@ _CREDENTIAL_KEY_ALIASES: dict[str, tuple[str, ...]] = {
 
 
 def _credential_key_candidates(connector_key: str) -> tuple[str, ...]:
+    """Return the connector_key plus its hyphen/underscore aliases for credential lookup."""
     candidates = [connector_key]
     # FIX: Credential lookup must be symmetric across public hyphen keys and
     # stored source-system underscore keys; operators can dispatch either alias.
@@ -2176,17 +2553,233 @@ def _extension_for_connector(connector_key: str) -> str:
         ) from exc
 
 
-def _parser_for_connector(connector_key: str) -> YouTubeReportingParser:
+def _parser_for_connector(
+    connector_key: str,
+) -> YouTubeReportingParser | YouTubeAnalyticsParser:
     """Return the source-row parser bound to a given connector key.
 
-    B2.5/B2.6 will widen this beyond YouTubeReportingParser; the helper
-    isolates that future change from ``run_one`` itself. For now any non-
-    YouTube-Reporting key would not reach this point because the runner
-    isn't registered.
+    B2.5 adds YouTubeAnalyticsParser; B2.6 will add AdSenseManagementParser.
+    The helper isolates connector-to-parser routing from ``run_one`` so future
+    registrations only touch this mapping rather than the orchestrator body.
     """
     if connector_key in {"youtube-reporting", "youtube_reporting"}:
         return YouTubeReportingParser()
+    if connector_key in {"youtube-analytics", "youtube_analytics"}:
+        return YouTubeAnalyticsParser()
     raise ValueError(f"no parser bound for connector_key: {connector_key!r}")
+
+
+# ============================================================================
+# Purpose: ConnectorRunner adapter for the YouTube Analytics v2 reports.query
+#   endpoint (spec §5.5). Iterates the tenant's active+revenue_required
+#   channels (via list_target_channels), issues one fetch_channel_report call
+#   per channel, wraps each JSON response as a parser-ready payload, and
+#   yields one (report_type, parser_payload, raw_bytes) tuple per channel so
+#   the orchestrator can store, parse, and upsert each channel independently.
+#   The orchestrator's existing per-report bucket-B handler catches any
+#   exception that escapes produce_reports; this class does NOT swallow errors
+#   inside the generator body so the run can be marked PARTIAL per channel.
+# Database/ORM: YouTubeChannelORM (read via list_target_channels). No write.
+# Standards: Implements ConnectorRunner Protocol; typed keyword-only args;
+#   raw_bytes serialized as sorted-key JSON for deterministic blob checksums
+#   across reruns; no bare except; fail-open exceptions propagate to the
+#   orchestrator's bucket-B exception catch.
+# Blast Radius: Finance ingestion scope — only channels returned by
+#   list_target_channels are fetched. A per-channel fetch failure surfaces as
+#   a FAILED report entry (bucket B) and continues the run for other channels
+#   rather than aborting the entire connector run.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/youtube_analytics_client.py
+#     -> YouTubeAnalyticsClient.fetch_channel_report + list_target_channels.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/youtube_analytics.py
+#     -> YouTubeAnalyticsParser consumes the parser_payload yielded here.
+#   - File: Docs/superpowers/plans/2026-05-26-spec-b2-google-live-connector.md
+#     §B2.5 Task 33 -> runner contract and per-channel yield shape.
+# ============================================================================
+# ============================================================================
+# Purpose: Inject the `channel` dimension into a single-channel content-owner
+#          response so YouTubeAnalyticsParser keeps its (channel, month)
+#          row-key contract without seeing the wire-level `dimensions=month`
+#          projection. The channel identity is known from the request's
+#          `filters=channel==<id>` value, so the synthesised dimension is
+#          deterministic per channel and matches what Google would have
+#          returned had we been able to add `channel` to the dimension set.
+# Database/ORM: None.
+# Standards: Idempotent — a response that already carries a `channel` header
+#            (e.g. fixture-style payloads) passes through unchanged so existing
+#            mocks remain valid. Malformed shapes are forwarded unchanged so
+#            the parser's typed ParserError continues to fire.
+# Blast Radius: Finance ingestion shape for YouTube Analytics rows. A drift
+#               here would mis-attribute revenue or trip a parser ParserError
+#               on a valid Google response.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/
+#     youtube_analytics_client.py -> request shape uses dimensions=month.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     youtube_analytics.py -> requires `channel` in dim_values for source row
+#     keys.
+# ============================================================================
+def _synthesise_analytics_channel_dimension(
+    *, response: dict[str, object], channel_id: str,
+) -> dict[str, object]:
+    """Prepend the `channel` DIMENSION header and value to a month-only response."""
+    column_headers = response.get("columnHeaders")
+    if not isinstance(column_headers, list):
+        # Let the parser raise a typed ParserError on the malformed payload.
+        return response
+    if any(
+        isinstance(h, dict) and h.get("name") == "channel"
+        for h in column_headers
+    ):
+        # Already carries the dimension (mocked fixtures); pass through.
+        return response
+    rows = response.get("rows")
+    if rows is not None and not isinstance(rows, list):
+        # Let the parser raise a typed ParserError on the malformed payload.
+        return response
+    new_headers: list[object] = [
+        {"columnType": "DIMENSION", "name": "channel"},
+        *column_headers,
+    ]
+    new_rows: list[object] = []
+    if isinstance(rows, list):
+        for row in rows:
+            if isinstance(row, list):
+                new_rows.append([channel_id, *row])
+            else:
+                # Preserve the malformed entry so the parser can fail closed.
+                new_rows.append(row)
+    return {
+        **response,
+        "columnHeaders": new_headers,
+        "rows": new_rows if isinstance(rows, list) else rows,
+    }
+
+
+class YouTubeAnalyticsRunner:
+    """B2.5 adapter that fetches YouTube Analytics per-channel reports.
+
+    Each yielded success carries the ``"youtube_analytics"`` report type, a
+    parser-friendly payload dict (the raw ``reports.query`` JSON body augmented
+    with the ``query_request`` key the parser needs), and the raw JSON bytes
+    for blob storage and replay. The orchestrator stores each channel's blob
+    separately; it never synthesises a cross-channel bundle. Only channels
+    attached to the current CMS account are fetched here; outside-CMS channels
+    remain out of scope for B2.5.
+
+    The class references ``YouTubeAnalyticsClient`` and ``list_target_channels``
+    by bare name so tests that patch
+    ``ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient``
+    replace what the runner actually uses.
+    """
+
+    def produce_reports(  # skipcq: PYL-R0201
+        self,
+        *,
+        session: Session,
+        run: ConnectorRunEntry | None,
+        credentials: Credentials,
+        report_month: str,
+        account_id: str,
+    ) -> Iterator[ProducedReport]:
+        """Yield one parser-ready payload per eligible CMS channel for ``report_month``.
+
+        Each iteration issues one ``reports.query`` GET via
+        ``YouTubeAnalyticsClient`` for the next ``channel_id`` returned by
+        ``list_target_channels``. A per-channel ``GoogleConnectorError`` (other
+        than ``OAuthRefreshError``, which still escapes for run-level handling)
+        is yielded as a ``ProducedReportFailure`` so the orchestrator marks the
+        run PARTIAL and continues with the remaining channels.
+        """
+        # ``run`` carries the tenant_id we need for list_target_channels.
+        # On the T29 dry-run path run is None; the orchestrator still passes
+        # a ConnectorRunEntry-compatible object for dry-runs so tenant_id is
+        # always present. The connector_runs lifecycle is owned by run_one
+        # itself, consistent with YouTubeReportingRunner's widened contract.
+        # ConnectorRunEntry.tenant_id is a str; UUID() converts it for
+        # list_target_channels which requires a typed UUID boundary.
+        tenant_id: UUID = UUID(str(run.tenant_id))  # type: ignore[union-attr]
+        http = GoogleHttpClient(credentials=credentials)
+        try:
+            client = YouTubeAnalyticsClient(http=http)
+            channel_ids = list_target_channels(
+                session, tenant_id=tenant_id, account_id=account_id,
+            )
+            for channel_id in channel_ids:
+                try:
+                    # FIX: Build the query_request INSIDE the per-channel try so
+                    # a MalformedAnalyticsSelectorError (or any other typed
+                    # GoogleConnectorError raised by the validation in
+                    # _build_query_request) is caught as a per-channel Bucket B
+                    # failure and the run continues with sibling channels,
+                    # matching the produce_reports docstring contract. Calling
+                    # this BEFORE the try would abort the whole generator on a
+                    # single bad registry row and skip later valid channels.
+                    query_request = _build_analytics_query_request(
+                        account_id=account_id,
+                        channel_id=channel_id,
+                        report_month=report_month,
+                    )
+                    response: dict[str, object] = client.fetch_channel_report(
+                        account_id=account_id,
+                        channel_id=channel_id,
+                        report_month=report_month,
+                    )
+                except OAuthRefreshError:
+                    raise
+                except GoogleConnectorError as exc:
+                    # FIX: A single targeted-channel fetch failure (or validation
+                    # rejection) is a report-scoped problem, not a run-scoped
+                    # abort. Yield a Bucket B failure so the orchestrator can
+                    # mark the run PARTIAL and continue with the remaining
+                    # channels.
+                    yield ProducedReportFailure(
+                        report_type="youtube_analytics", error=exc,
+                    )
+                    continue
+                # Synthesise the `channel` dimension into the response. The
+                # wire request uses `dimensions=month` only because Google's
+                # content-owner reports require a multi-value channel filter to
+                # add `channel` as a dimension, and B2.5 issues one request per
+                # channel (single-value filter). YouTubeAnalyticsParser still
+                # keys rows on (channel, month), so we inject the known
+                # channel_id from the filter back into columnHeaders / rows
+                # here. Idempotent: a response that already carries a `channel`
+                # header is passed through unchanged, which keeps mocked tests
+                # that return a `channel,month` payload working.
+                augmented_response = _synthesise_analytics_channel_dimension(
+                    response=response, channel_id=channel_id,
+                )
+                # FIX: stamp the parser-payload query_request with the calendar
+                # month's last day as endDate. The wire request keeps the
+                # first-of-month endDate (Google requires both ends to be the
+                # first day when `dimensions=month`), but YouTubeAnalyticsParser
+                # persists `endDate` directly as each source row's period_end.
+                # Without this override every monthly-aggregate row would record
+                # period_end = first-of-month, mis-recording the coverage window
+                # for downstream auditing and revenue-fact normalisation.
+                parser_query_request = {
+                    **query_request,
+                    "endDate": calendar_month_end_iso(report_month),
+                }
+                # Augment the raw response with the query_request metadata the
+                # parser needs to build row keys and validate the range. Reuse
+                # the canonical contentOwner/channel scope so replay and
+                # stale-row cleanup remain consistent.
+                parser_payload: dict[str, object] = {
+                    **augmented_response,
+                    "query_request": parser_query_request,
+                }
+                # Stored blob is the AUGMENTED parser_payload (includes injected
+                # query_request metadata), not the raw API response — this is a
+                # deliberate divergence from YouTubeReportingRunner where raw_bytes
+                # is the literal CSV from Google. Rationale: a single JSON blob can
+                # be fully replayed through YouTubeAnalyticsParser with no runner
+                # state.
+                raw_bytes = json.dumps(parser_payload, sort_keys=True).encode("utf-8")
+                yield ("youtube_analytics", parser_payload, raw_bytes)
+        finally:
+            http.close()
 
 
 # ----------------------------------------------------------------------------
@@ -2198,3 +2791,5 @@ def _parser_for_connector(connector_key: str) -> YouTubeReportingParser:
 # returns the registered value directly to the orchestrator.
 register_connector(key="youtube-reporting", runner=YouTubeReportingRunner())
 register_connector(key="youtube_reporting", runner=YouTubeReportingRunner())
+register_connector(key="youtube-analytics", runner=YouTubeAnalyticsRunner())
+register_connector(key="youtube_analytics", runner=YouTubeAnalyticsRunner())

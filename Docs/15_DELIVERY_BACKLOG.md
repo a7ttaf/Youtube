@@ -24,8 +24,8 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   in PR #30).
 - ⏳ YouTube report ingestion — remaining: credentials repo (PRs #33,
   #34); real ingestion not built.
-    - ⏳ PR #47 — Google live connector foundation (B2.1-B2.4 in one
-      stack): credential foundation (secret resolver dispatch +
+    - ✅ PR #47 — Google live connector foundation (B2.1-B2.4 in one
+      stack, merged 2026-05-27 as commit 52734a3): credential foundation (secret resolver dispatch +
       gcp-secret-manager:// + local-secret:// + OAuth refresh wrapper);
       blob storage backends (GCS + file-store) + raw_file lifecycle
       helpers (mark_parsed accepts FAILED -> PARSED retry recovery;
@@ -43,6 +43,22 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
       LocalFileStoreBackend end-to-end through run_one. B2.5 (YouTube
       Analytics) + B2.6 (operator console) stack on top in follow-up
       PRs.
+    - ⏳ PR #48 (B2.5) — YouTube Analytics targeted CMS-channel
+      ingestion; registers youtube-analytics (and the youtube_analytics
+      alias) in the B2.4 connector registry; queries
+      `ids=contentOwner==<account>` with `filters=channel==<id>` and
+      wire-level `dimensions=month` only so the revenue metrics stay on
+      a supported YouTube Analytics contract (the channel dimension
+      requires a multi-value channel filter for content-owner reports);
+      the orchestrator runner synthesises the `channel` dimension into
+      the parser payload from the filter so `YouTubeAnalyticsParser`
+      keeps its `(channel, month)` row-key contract without a parser
+      change; scopes channel selection to `active + revenue_required +
+      content_owner_id matches account`; real LocalFileStoreBackend
+      round-trip + dry-run regression tests included; tenant_id derived
+      from run.tenant_id (no cross-tenant credential lookup); locked
+      metrics/dimensions constants shared between client and runner so
+      the wire shape cannot silently drift.
 - ⏳ Monthly revenue normalization — remaining: B2 live ingestion wiring
   (revenue facts foundation in PR #2; normalization bridge from
   google_revenue_source_rows shipped in PR #44).

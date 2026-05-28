@@ -149,7 +149,7 @@ slicing lets each layer be reviewed against the layer it actually changes.
 | **B2.2** | Blob storage backends + `raw_report_files` lifecycle helpers (`mark_parsed`, `mark_failed`) | Pure storage layer; reuses existing `RawReportFileORM` (PR #32) without schema change. Reviewable with a `file-store://` backend test. |
 | **B2.3** | `connector_runs` + `connector_run_raw_files` ORM + repo + Alembic; **additive** `UNIQUE (tenant_id, id)` constraint on `raw_report_files` (required for the composite FK from `connector_run_raw_files`); operational indexes on both new tables | Pure run-tracking ORM + repo. Adds two new tables on `ReportBase.metadata` and one additive unique constraint on the existing `raw_report_files`. Reviewable with a SQLite repo test + PostgreSQL migration round-trip + cross-tenant FK rejection assertion. |
 | **B2.4** | `google-auth` + `httpx` base client + YouTube Reporting client + report_type whitelist + `run_one()` orchestrator + CLI | First end-to-end slice: fetches a YT Reporting report, registers it as a DOWNLOADED raw file, calls the parser, upserts source rows, marks PARSED. All glue lives here. CLI is extensible via a `--connector` registry so later slices add clients without new CLI code. |
-| **B2.5** | YouTube Analytics client (targeted channel ingestion incl. outside-CMS); extends CLI `--connector` registry | Targeted YouTube Analytics channel ingestion; reuses the B2.4 orchestrator and CLI. Reviewable as a client-only diff that targets channels from the `youtube_channels` registry (including outside-CMS channels). |
+| **B2.5** | YouTube Analytics client (targeted CMS-channel ingestion); extends CLI `--connector` registry | Targeted YouTube Analytics channel ingestion; reuses the B2.4 orchestrator and CLI. Reviewable as a client-only diff that targets CMS-owned channels from the `youtube_channels` registry while outside-CMS revenue sourcing remains unresolved. |
 | **B2.6** | AdSense Management client (ingestion/audit evidence only); extends CLI `--connector` registry; AdSense ingestion validation gate; audit wiring | Final slice that wires audit events for run lifecycle and raw-file lifecycle, then runs the mock end-to-end ingestion gate. AdSense is the third source for ingestion; it does **not** produce revenue facts (C1 skips its rows as `MISSING_CHANNEL_ID`). |
 
 Every slice ships compilable, mergeable, individually-testable code with a
@@ -562,10 +562,11 @@ scripts/run_google_connector.py
 
 ### 5.5 B2.5 - YouTube Analytics (targeted channel ingestion)
 
-**Scope:** add the YouTube Analytics client for targeted channel
+**Scope:** add the YouTube Analytics client for targeted CMS-channel
 ingestion. Channels are sourced from the `youtube_channels` registry
-(PR #25), which already includes outside-CMS channels - this is how B2 ingests
-revenue for channels that are not under CMS.
+(PR #25), but B2.5 only ingests channels whose `content_owner_id`
+matches the current CMS account. Outside-CMS revenue sourcing remains a
+separate unresolved problem.
 
 **New files:**
 - `connectors/google/youtube_analytics_client.py`
@@ -583,10 +584,12 @@ class YouTubeAnalyticsClient:
     def __init__(self, *, http: GoogleHttpClient) -> None: ...
 
     def fetch_channel_report(
-        self, *, channel_id: str, report_month: str,
+        self, *, account_id: str, channel_id: str, report_month: str,
     ) -> dict[str, object]:
-        """Fetch a single channel's monthly report. Returns the parser-ready
-        payload dict (the existing YouTubeAnalyticsParser.parse() input shape)."""
+        """Fetch a single CMS-owned channel's monthly report via
+        ids=contentOwner==<account_id> + filters=channel==<channel_id>.
+        Returns the parser-ready payload dict (the existing
+        YouTubeAnalyticsParser.parse() input shape)."""
 
 def list_target_channels(
     session: Session, *, tenant_id: UUID, account_id: str,
@@ -595,8 +598,7 @@ def list_target_channels(
     where:
       - active = true
       - revenue_required = true
-      - content_owner_id = account_id  OR  content_owner_id IS NULL
-        (outside-CMS channels are always included for the tenant)
+      - content_owner_id = account_id
     Order is deterministic (youtube_channel_id ascending)."""
 ```
 
@@ -604,6 +606,17 @@ def list_target_channels(
 - B2.5 does not add a new CLI; it extends the B2.4 CLI's `--connector`
   registry with `youtube-analytics`.
 - The channel list is sourced from the registry, never hardcoded.
+- The Google request is content-owner scoped (`ids=contentOwner==...`)
+  and channel-filtered (`filters=channel==...`) so revenue metrics stay
+  on the supported Analytics contract.
+- The wire request uses `dimensions=month` only. Google's content-owner
+  reports require the `channel` dimension to be paired with a multi-value
+  channel filter, while B2.5 issues one request per channel (single-value
+  filter). `YouTubeAnalyticsParser` still keys rows on `(channel, month)`;
+  the orchestrator's `YouTubeAnalyticsRunner` synthesises the `channel`
+  dimension into the parser payload from the known
+  `filters=channel==<id>` value before yielding the report so the parser
+  contract is preserved with no parser change.
 - Per-channel HTTP failures are bucket-B per-report failures (the
   orchestrator continues to the next channel and may finish as PARTIAL).
 
@@ -968,12 +981,12 @@ SQLite default has no suffix, Postgres companion uses `_postgres.py` (e.g.
 
 **B2.5** (`test_youtube_analytics_client.py`,
 `test_orchestrator.py` extensions):
-- `list_target_channels` returns only the registered channels (incl.
-  outside-CMS); deterministic order.
+- `list_target_channels` returns only the registered CMS-owned channels;
+  deterministic order.
 - Per-channel fetch with mocked transport.
 - Orchestrator with `connector_key='youtube-analytics'` reuses the same
   three-bucket failure model; produces source rows for every active
-  channel.
+  CMS-owned channel.
 - Coverage extension: a fixture with N active channels + 1 non-USD channel
   proves the per-channel partial-failure path is exercised end-to-end.
 
@@ -1036,9 +1049,9 @@ the existing service principal.
 - Revenue-facts chain (B2.4 + B2.5 only): YouTube Reporting and YouTube
   Analytics flow into `MonthlyChannelRevenueFactORM` via the existing
   PR #43 -> PR #44 chain because both YT parsers emit a real
-  `youtube_channel_id`. B2.5 targets the channels registered in
-  `youtube_channels`, including outside-CMS channels, so the
-  YT-Analytics path expands coverage beyond the YT-Reporting CMS slice.
+  `youtube_channel_id`. B2.5 targets the CMS-owned channels registered
+  in `youtube_channels`; outside-CMS revenue sourcing stays outside this
+  slice until a supported source is defined.
 - B2.6 (AdSense) is ingestion/audit evidence only: AdSense rows land in
   `google_revenue_source_rows` (PR #43 substrate) but do **not** produce
   revenue facts in this phase. C1 skips them as
