@@ -246,6 +246,18 @@ class MalformedReportMonthError(GoogleConnectorError):
         self.report_month = report_month
 
 
+class MalformedAdsenseAccountIdError(GoogleConnectorError):
+    """Raised when an AdSense account id is empty or whitespace-padded."""
+
+    def __init__(self, *, account_id: str) -> None:
+        """Carry the offending ``account_id`` for downstream diagnostics."""
+        super().__init__(
+            f"adsense account_id must be a non-empty string without surrounding "
+            f"whitespace, got {account_id!r}"
+        )
+        self.account_id = account_id
+
+
 class MalformedAnalyticsSelectorError(GoogleConnectorError):
     """Raised when an analytics selector id is empty / whitespace-only.
 

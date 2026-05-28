@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Iterator
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path as _Path
@@ -87,7 +88,7 @@ _SERVICE_ACTOR_ID = "ddddeeee-ffff-0000-1111-222222222222"
 
 
 @pytest.fixture(autouse=True)
-def _service_actor_env(monkeypatch: pytest.MonkeyPatch) -> str:
+def _service_actor_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """Set UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID for orchestrator live-path tests.
 
     The autouse on this fixture lets the existing test suite continue to call
@@ -106,7 +107,10 @@ def _service_actor_env(monkeypatch: pytest.MonkeyPatch) -> str:
 
     monkeypatch.setenv(GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV, _SERVICE_ACTOR_ID)
     load_app_settings.cache_clear()
-    return _SERVICE_ACTOR_ID
+    try:
+        yield _SERVICE_ACTOR_ID
+    finally:
+        load_app_settings.cache_clear()
 
 
 @pytest.fixture(name="session")
@@ -773,6 +777,11 @@ def test_run_one_reuses_raw_file_inserted_by_racing_worker(
         )
     ).one()
     assert link.raw_report_file_id == race_winner_id
+    assert _audit_lifecycles(_connector_audit_events(session)) == [
+        "STARTED",
+        "PARSED",
+        "FINISHED",
+    ]
 
 
 def test_run_one_real_local_file_store_backend_round_trips(
@@ -4554,10 +4563,8 @@ def _make_adsense_parser_payload(
     ``name``; a ``rows`` list of ``{"cells": [...]}`` entries; and the
     deterministic ``report_id`` string.
 
-    One MONTH dimension + the locked ESTIMATED_EARNINGS + PAID_AMOUNT metric
-    pair produces two ParsedSourceRow rows on the same input row (the parser
-    splits per-metric: ESTIMATED_EARNINGS -> earnings_report/estimated, and
-    PAID_AMOUNT -> payment_report/settled).
+    One MONTH dimension + the locked ESTIMATED_EARNINGS + TOTAL_EARNINGS
+    metric pair produces two ParsedSourceRow rows on the same input row.
     """
     year_s, month_s = report_month.split("-")
     year_i, month_i = int(year_s), int(month_s)
@@ -4582,7 +4589,7 @@ def _make_adsense_parser_payload(
             },
             {
                 "type": "METRIC_CURRENCY",
-                "name": "PAID_AMOUNT",
+                "name": "TOTAL_EARNINGS",
                 "currencyCode": "USD",
             },
         ],
@@ -4686,7 +4693,7 @@ def test_run_one_with_adsense_management_succeeds_for_account_scoped_run(
     assert counts["reports_attempted"] == 1
     assert counts["reports_succeeded"] == 1
     assert counts["reports_failed"] == 0
-    # The fixture row carries both ESTIMATED_EARNINGS and PAID_AMOUNT metrics,
+    # The fixture row carries both ESTIMATED_EARNINGS and TOTAL_EARNINGS metrics,
     # so the parser emits two ParsedSourceRow rows from the same input cells.
     assert counts["rows_upserted_total"] == 2
 
@@ -4725,15 +4732,11 @@ def test_run_one_with_adsense_management_succeeds_for_account_scoped_run(
     assert all(r.youtube_channel_id is None for r in source_rows)
     assert all(r.source_account_id == _ADSENSE_ACCOUNT_ID for r in source_rows)
     assert {r.metric_key for r in source_rows} == {
-        "ESTIMATED_EARNINGS", "PAID_AMOUNT",
+        "ESTIMATED_EARNINGS",
+        "TOTAL_EARNINGS",
     }
-    # Per-metric report_type / value_kind split: PAID_AMOUNT is settled cash,
-    # ESTIMATED_EARNINGS is the unsettled estimate.
-    by_metric = {r.metric_key: r for r in source_rows}
-    assert by_metric["ESTIMATED_EARNINGS"].report_type == "earnings_report"
-    assert by_metric["ESTIMATED_EARNINGS"].value_kind == "estimated"
-    assert by_metric["PAID_AMOUNT"].report_type == "payment_report"
-    assert by_metric["PAID_AMOUNT"].value_kind == "settled"
+    assert {r.report_type for r in source_rows} == {"earnings_report"}
+    assert {r.value_kind for r in source_rows} == {"estimated"}
 
     # ----- audit lifecycle -----
     events = _connector_audit_events(session)
@@ -4812,10 +4815,11 @@ def test_run_one_with_adsense_management_empty_success_replaces_existing_rows(
             GoogleRevenueSourceRowORM.source_account_id == _ADSENSE_ACCOUNT_ID,
         )
     ).all()
-    assert {row.report_type for row in initial_rows} == {
-        "earnings_report",
-        "payment_report",
+    assert {row.metric_key for row in initial_rows} == {
+        "ESTIMATED_EARNINGS",
+        "TOTAL_EARNINGS",
     }
+    assert {row.report_type for row in initial_rows} == {"earnings_report"}
 
     second_outcome = _run_with_payload(payload_empty)
     assert second_outcome.run is not None

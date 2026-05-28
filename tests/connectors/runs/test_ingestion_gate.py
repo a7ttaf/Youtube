@@ -34,6 +34,7 @@ Assertions:
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from datetime import UTC, datetime
 from unittest.mock import patch
 from uuid import UUID, uuid4
@@ -91,7 +92,7 @@ RESOLVER_REF = "local-secret://yt-creds"
 
 
 @pytest.fixture(autouse=True)
-def _service_actor_env(monkeypatch: pytest.MonkeyPatch) -> str:
+def _service_actor_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[str]:
     """Set ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID`` for the live-path run_one.
 
     Mirrors the autouse fixture in ``tests/connectors/google/test_orchestrator.py``
@@ -108,7 +109,10 @@ def _service_actor_env(monkeypatch: pytest.MonkeyPatch) -> str:
 
     monkeypatch.setenv(GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV, SERVICE_ACTOR_ID)
     load_app_settings.cache_clear()
-    return SERVICE_ACTOR_ID
+    try:
+        yield SERVICE_ACTOR_ID
+    finally:
+        load_app_settings.cache_clear()
 
 
 @pytest.fixture(name="session")
@@ -313,13 +317,12 @@ def _yt_analytics_payload(*, channel_id: str, account_id: str) -> dict[str, obje
 
 
 def _adsense_payload(*, account_id: str) -> dict[str, object]:
-    """Parser-ready AdSense payload with ESTIMATED_EARNINGS + PAID_AMOUNT.
+    """Parser-ready AdSense payload with ESTIMATED_EARNINGS + TOTAL_EARNINGS.
 
     AdSense is account-scoped, so the runner yields exactly one report per
     run. One MONTH dimension + both canonical-metric columns produces two
     ParsedSourceRow entries per input row (the parser splits per-metric:
-    ESTIMATED_EARNINGS -> earnings_report/estimated, PAID_AMOUNT ->
-    payment_report/settled).
+    both metrics become earnings_report/estimated rows).
     """
     from calendar import monthrange as _monthrange
 
@@ -344,7 +347,7 @@ def _adsense_payload(*, account_id: str) -> dict[str, object]:
             },
             {
                 "type": "METRIC_CURRENCY",
-                "name": "PAID_AMOUNT",
+                "name": "TOTAL_EARNINGS",
                 "currencyCode": "USD",
             },
         ],
@@ -600,7 +603,7 @@ def test_three_connectors_end_to_end_on_mocks(
     # + 3 (YT Analytics: 1 data row x 3 monetary metrics in _MONETARY_METRICS
     # -- estimatedRevenue, estimatedAdRevenue, grossRevenue)
     # + 2 (AdSense: 1 input row x 2 METRIC_CURRENCY columns --
-    # ESTIMATED_EARNINGS, PAID_AMOUNT) = 6.
+    # ESTIMATED_EARNINGS, TOTAL_EARNINGS) = 6.
     assert len(source_rows) == 6, (
         f"expected exactly 6 source rows across the three connectors "
         f"(YT Reporting=1, YT Analytics=3, AdSense=2); got {len(source_rows)}"

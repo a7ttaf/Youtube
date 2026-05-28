@@ -20,7 +20,7 @@ fetch_bytes() (raw download bodies):
 from __future__ import annotations
 
 import time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -45,6 +45,8 @@ _MAX_STATUS_ATTEMPTS = 4
 _MAX_TIMEOUT_ATTEMPTS = 4
 _MAX_CONNECT_ATTEMPTS = 3
 _BACKOFF_CAP_SECONDS = 64.0
+
+_QueryParams = Mapping[str, str] | Sequence[tuple[str, str]]
 
 
 @dataclass
@@ -168,7 +170,7 @@ def _request_or_retry_transport(
     *,
     method: str,
     url: str,
-    params: Mapping[str, str] | None,
+    params: _QueryParams | None,
     json_body: Mapping[str, object] | None,
     headers: dict[str, str],
 ) -> httpx.Response | None:
@@ -176,7 +178,7 @@ def _request_or_retry_transport(
         return client.request(
             method=method,
             url=url,
-            params=dict(params or {}),
+            params=params,
             json=json_body,
             headers=headers,
         )
@@ -211,7 +213,7 @@ def _send_with_retry_response(
     *,
     method: str,
     url: str,
-    params: Mapping[str, str] | None,
+    params: _QueryParams | None,
     json_body: Mapping[str, object] | None,
     headers: dict[str, str],
 ) -> httpx.Response:
@@ -292,7 +294,7 @@ class GoogleHttpClient:
         *,
         method: str,
         url: str,
-        params: Mapping[str, str] | None = None,
+        params: _QueryParams | None = None,
         json_body: Mapping[str, object] | None = None,
     ) -> httpx.Response:
         # ====================================================================
@@ -338,7 +340,7 @@ class GoogleHttpClient:
         *,
         method: str,
         url: str,
-        params: Mapping[str, str] | None = None,
+        params: _QueryParams | None = None,
         json_body: Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         # ====================================================================

@@ -60,11 +60,12 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
       from run.tenant_id (no cross-tenant credential lookup); locked
       metrics/dimensions constants shared between client and runner so
       the wire shape cannot silently drift.
-    - ⏳ PR #TBD (B2.6) — AdSense Management client + connector audit
+    - ⏳ PR #49 (B2.6) — AdSense Management client + connector audit
       emitters + adsense-management runner + mock end-to-end ingestion
       gate. AdSenseManagementClient issues one GET reports.generate per
       (account, month) with locked params (dateRange=CUSTOM,
-      dimensions=MONTH, metrics=ESTIMATED_EARNINGS,PAID_AMOUNT,
+      dimensions=MONTH, metrics[]=ESTIMATED_EARNINGS,
+      metrics[]=TOTAL_EARNINGS,
       currencyCode=USD); the adapter stamps a deterministic SHA-256
       report_id so AdSenseManagementParser's report_id contract survives
       the API not returning one. Audit emitters reuse

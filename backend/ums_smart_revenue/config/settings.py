@@ -95,6 +95,10 @@ def _load_google_connector_service_actor_id() -> str | None:
     Missing/blank env -> ``None`` (lazy; deferred fail-closed lives in
     ``build_connector_service_principal``). Present-but-malformed env ->
     ``ValueError`` so misconfigured deployments fail fast at boot.
+
+    Raises:
+        ValueError: If ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID`` is present
+            but not a valid UUID.
     """
     raw = environ.get(GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV)
     if raw is None:

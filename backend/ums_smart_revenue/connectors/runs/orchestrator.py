@@ -1510,8 +1510,7 @@ def _prepare_and_link_raw_reports(
     audit_sink: AuditSink,
     audit_actor: UserPrincipal,
 ) -> list[RawReportFileORM]:
-    """Upload each ``raw_report`` and link the resulting raw_file rows to
-    the active produced report."""
+    """Upload each ``raw_report`` and link raw_file rows to the active report."""
     raw_files: list[RawReportFileORM] = []
     seen_raw_file_ids: set[UUID] = set()
     newly_downloaded_raw_file_ids: set[UUID] = set()
@@ -1634,19 +1633,10 @@ def _prepare_raw_report_file(
     # mirrors the B1 parser convention (youtube_reporting /
     # youtube_analytics / adsense_management); flush populates the id
     # without committing so the link join can use it within the same
-    # transaction. The lookup is load-bearing for retries: the table has a
-    # unique key over source/report_type/month/checksum, so a re-run of the
-    # same Google payload must reuse that evidence row instead of trying a
-    # second insert.
-    pre_existing_raw_file = _find_existing_raw_file(
-        session,
-        tenant_id=tenant_id,
-        source=source_system,
-        report_type=report_type,
-        report_month=report_month,
-        checksum=checksum,
-    )
-    raw_file = _get_or_create_raw_file(
+    # transaction. ``created_now`` is returned by the insert helper so the
+    # audit lifecycle does not mistake a unique-key race winner for a fresh
+    # download owned by this run.
+    raw_file, created_now = _get_or_create_raw_file(
         session,
         tenant_id=tenant_id,
         source=source_system,
@@ -1674,7 +1664,7 @@ def _prepare_raw_report_file(
     # inserted (no pre-existing match) or when a previously-FAILED retry was
     # reopened. Reuse of a still-DOWNLOADED or already-PARSED row is not a
     # new download edge for audit purposes.
-    newly_downloaded = pre_existing_raw_file is None or failed_reopen
+    newly_downloaded = created_now or failed_reopen
     return raw_file, newly_downloaded
 
 
@@ -1712,14 +1702,16 @@ def _find_existing_raw_file(
 
 
 # ============================================================================
-# Purpose: Create the raw report evidence row idempotently, including the
-#          lookup/insert race where another worker commits the same
-#          tenant/source/report/month/checksum after our pre-insert lookup.
+# Purpose: Create or reuse the raw report evidence row idempotently, returning
+#          whether this call inserted the row. This includes the lookup/insert
+#          race where another worker commits the same tenant/source/report/
+#          month/checksum after our pre-insert lookup.
 # Database/ORM: RawReportFileORM insert/read; uniqueness enforced by
 #               uq_raw_report_files_source_type_month_checksum.
 # Standards: SQLAlchemy savepoint contains the duplicate insert failure; no
 #            broad rollback so the surrounding connector_runs transaction
-#            remains usable. Typed lifecycle checks stay in the caller.
+#            remains usable. The returned bool drives DOWNLOADED audit
+#            emission; typed lifecycle checks stay in the caller.
 # Blast Radius: Raw evidence creation only. Finance rows are written later
 #               through the source-row repository; no graph projection impact
 #               detected.
@@ -1738,8 +1730,8 @@ def _get_or_create_raw_file(
     checksum: str,
     storage_uri: str,
     downloaded_by: UUID | None,
-) -> RawReportFileORM:
-    """Insert a fresh raw_file row, racing on the unique constraint and retrying on collision."""
+) -> tuple[RawReportFileORM, bool]:
+    """Return ``(raw_file, created_now)`` while tolerating unique-key races."""
     raw_file = _find_existing_raw_file(
         session,
         tenant_id=tenant_id,
@@ -1749,7 +1741,7 @@ def _get_or_create_raw_file(
         checksum=checksum,
     )
     if raw_file is not None:
-        return raw_file
+        return raw_file, False
 
     try:
         # FIX: the pre-insert lookup is not a lock. If another worker inserts
@@ -1769,7 +1761,7 @@ def _get_or_create_raw_file(
             )
             session.add(raw_file)
             session.flush()
-            return raw_file
+            return raw_file, True
     except sa.exc.IntegrityError:
         raw_file = _find_existing_raw_file(
             session,
@@ -1781,7 +1773,7 @@ def _get_or_create_raw_file(
         )
         if raw_file is None:
             raise
-        return raw_file
+        return raw_file, False
 
 
 # ----------------------------------------------------------------------------

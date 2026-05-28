@@ -196,6 +196,53 @@ def emit_run_finished(*, sink: AuditSink, actor: UserPrincipal, run: Any) -> Non
 
 
 # ============================================================================
+# Purpose: Record one ``REPORT_IMPORTED`` raw-file lifecycle row with shared
+#          run/raw-file metadata, then merge lifecycle-specific details.
+# Database/ORM: AuditLogORM (via the sink wired by T37); raw_file persistence
+#               and lifecycle transitions are owned by the orchestrator.
+# Standards: Reads only explicit attributes from run/raw_file, avoids
+#            serializing ORM objects wholesale, and keeps sensitive exception
+#            messages out of audit details.
+# Blast Radius: Audit log only. No finance, authorization, export, or Neo4j
+#               projection impact detected.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     calls the public raw-file lifecycle emitters below.
+#   - File: tests/connectors/google/test_audit_wiring.py -> locks the emitted
+#     lifecycle payload shape for the operator console.
+# ============================================================================
+def _emit_raw_file_lifecycle(
+    *,
+    sink: AuditSink,
+    actor: UserPrincipal,
+    run: Any,
+    raw_file: Any,
+    lifecycle: str,
+    extra_details: dict[str, object] | None = None,
+) -> None:
+    """Emit one REPORT_IMPORTED row for a raw_file lifecycle edge."""
+    details: dict[str, object] = {
+        "lifecycle": lifecycle,
+        "run_id": str(run.id),
+        "raw_file_id": str(raw_file.id),
+        "source": raw_file.source,
+        "report_type": raw_file.report_type,
+        "report_month": raw_file.report_month,
+    }
+    if extra_details:
+        details.update(extra_details)
+    record_audit_event(
+        sink=sink,
+        actor=actor,
+        event_type=AuditEventType.REPORT_IMPORTED,
+        entity_type="raw_report_file",
+        entity_id=str(raw_file.id),
+        scope=AccessScope.connector(run.connector_key),
+        details=details,
+    )
+
+
+# ============================================================================
 # Purpose: Record one ``REPORT_IMPORTED`` row when the orchestrator persists
 #          a raw report file and links it to the active run.
 # Database/ORM: AuditLogORM (via the sink wired by T37); the raw_file row
@@ -218,20 +265,13 @@ def emit_raw_file_downloaded(
     raw_file: Any,
 ) -> None:
     """Emit one REPORT_IMPORTED audit row with lifecycle=DOWNLOADED."""
-    record_audit_event(
+    _emit_raw_file_lifecycle(
         sink=sink,
         actor=actor,
-        event_type=AuditEventType.REPORT_IMPORTED,
-        entity_type="raw_report_file",
-        entity_id=str(raw_file.id),
-        scope=AccessScope.connector(run.connector_key),
-        details={
-            "lifecycle": "DOWNLOADED",
-            "run_id": str(run.id),
-            "raw_file_id": str(raw_file.id),
-            "source": raw_file.source,
-            "report_type": raw_file.report_type,
-            "report_month": raw_file.report_month,
+        run=run,
+        raw_file=raw_file,
+        lifecycle="DOWNLOADED",
+        extra_details={
             "checksum": raw_file.checksum,
             "storage_uri": raw_file.file_url,
         },
@@ -270,20 +310,13 @@ def emit_raw_file_parsed(
     # see emit_run_finished above for the rationale -- these keys let the
     # operator console render a raw_report_file lifecycle row without
     # joining back to ``connector_run_raw_files`` / ``raw_report_files``.
-    record_audit_event(
+    _emit_raw_file_lifecycle(
         sink=sink,
         actor=actor,
-        event_type=AuditEventType.REPORT_IMPORTED,
-        entity_type="raw_report_file",
-        entity_id=str(raw_file.id),
-        scope=AccessScope.connector(run.connector_key),
-        details={
-            "lifecycle": "PARSED",
-            "run_id": str(run.id),
-            "raw_file_id": str(raw_file.id),
-            "source": raw_file.source,
-            "report_type": raw_file.report_type,
-            "report_month": raw_file.report_month,
+        run=run,
+        raw_file=raw_file,
+        lifecycle="PARSED",
+        extra_details={
             "count_upserted": int(count_upserted),
         },
     )
@@ -317,20 +350,13 @@ def emit_raw_file_failed(
     # see emit_run_finished above for the rationale -- these keys let the
     # operator console render a raw_report_file lifecycle row without
     # joining back to ``connector_run_raw_files`` / ``raw_report_files``.
-    record_audit_event(
+    _emit_raw_file_lifecycle(
         sink=sink,
         actor=actor,
-        event_type=AuditEventType.REPORT_IMPORTED,
-        entity_type="raw_report_file",
-        entity_id=str(raw_file.id),
-        scope=AccessScope.connector(run.connector_key),
-        details={
-            "lifecycle": "FAILED",
-            "run_id": str(run.id),
-            "raw_file_id": str(raw_file.id),
-            "source": raw_file.source,
-            "report_type": raw_file.report_type,
-            "report_month": raw_file.report_month,
+        run=run,
+        raw_file=raw_file,
+        lifecycle="FAILED",
+        extra_details={
             "error_class": error_class,
         },
     )

@@ -10,7 +10,10 @@ from ums_smart_revenue.connectors.google.adsense_management_client import (
     AdSenseManagementClient,
     adsense_response_to_parser_payload,
 )
-from ums_smart_revenue.connectors.google.errors import MalformedReportMonthError
+from ums_smart_revenue.connectors.google.errors import (
+    MalformedAdsenseAccountIdError,
+    MalformedReportMonthError,
+)
 from ums_smart_revenue.connectors.google.http_client import GoogleHttpClient
 
 
@@ -18,7 +21,7 @@ def test_fetch_monthly_report_pins_currency_usd_and_date_bounds(
     mock_credentials,
 ) -> None:
     """The client must lock dateRange=CUSTOM, MONTH dimension, USD currency, and
-    the AdSense earnings + paid metric pair on every wire request.
+    the AdSense earnings metric pair on every wire request.
 
     The first-day/last-day bounds are derived from the calendar (monthrange) so
     a 28/29/30/31-day month is covered without per-month branching.
@@ -29,9 +32,10 @@ def test_fetch_monthly_report_pins_currency_usd_and_date_bounds(
         """Capture the AdSense reports.generate query for boundary assertion."""
         captured["url"] = str(request.url)
         captured["q"] = dict(request.url.params)
+        captured["q_items"] = list(request.url.params.multi_items())
         body = json.dumps(
             {
-                "request": {"accountId": "accounts/pub-1"},
+                "request": {"accountId": "accounts/should-not-be-trusted"},
                 "headers": [],
                 "rows": [],
             }
@@ -53,10 +57,23 @@ def test_fetch_monthly_report_pins_currency_usd_and_date_bounds(
     assert q["endDate.year"] == "2026"
     assert q["endDate.month"] == "5"
     assert q["endDate.day"] == "31"
-    assert q["metrics"] == "ESTIMATED_EARNINGS,PAID_AMOUNT"
+    q_items = captured["q_items"]
+    assert [
+        value for key, value in q_items if key == "metrics"
+    ] == ["ESTIMATED_EARNINGS", "TOTAL_EARNINGS"]
     assert q["dimensions"] == "MONTH"
     assert q["currencyCode"] == "USD"
     assert "report_id" in out
+    assert out["request"] == {
+        "accountId": "accounts/pub-1",
+        "dateRange": {
+            "startDate": {"year": 2026, "month": 5, "day": 1},
+            "endDate": {"year": 2026, "month": 5, "day": 31},
+        },
+        "dimensions": ["MONTH"],
+        "metrics": ["ESTIMATED_EARNINGS", "TOTAL_EARNINGS"],
+        "currencyCode": "USD",
+    }
     # Wire-to-payload preservation at the HTTP boundary: the empty `headers`
     # and `rows` from the mock response must survive the adapter wrap so the
     # parser sees the same shape the API returned. Guards against a future
@@ -71,7 +88,7 @@ def test_adapter_wraps_response_with_deterministic_report_id() -> None:
     not return a stable report id and AdSenseManagementParser requires one.
     """
     response = {
-        "request": {"accountId": "accounts/pub-1", "currencyCode": "USD"},
+        "request": {"accountId": "accounts/should-not-be-trusted"},
         "headers": [{"type": "DIMENSION", "name": "MONTH"}],
         "rows": [],
     }
@@ -83,18 +100,25 @@ def test_adapter_wraps_response_with_deterministic_report_id() -> None:
         response_json=response, account_id="pub-1", report_month="2026-05",
     )
     assert payload["report_id"] == payload2["report_id"]
-    # Pass-through assertions: the adapter must preserve request, headers, and
-    # rows from the response_json byte-for-byte. A future key rename or stray
-    # default override would otherwise only fail downstream in the parser at
-    # run time, not here at the unit boundary.
-    assert payload["request"] == response["request"]
+    # Request is synthesized from the locked client inputs because AdSense v2
+    # ReportResult does not echo a request block.
+    assert payload["request"] == {
+        "accountId": "accounts/pub-1",
+        "dateRange": {
+            "startDate": {"year": 2026, "month": 5, "day": 1},
+            "endDate": {"year": 2026, "month": 5, "day": 31},
+        },
+        "dimensions": ["MONTH"],
+        "metrics": ["ESTIMATED_EARNINGS", "TOTAL_EARNINGS"],
+        "currencyCode": "USD",
+    }
     assert payload["headers"] == response["headers"]
     assert payload["rows"] == response["rows"]
 
 
 def test_adapter_defaults_when_response_fields_missing() -> None:
-    """When the wire response omits request/headers/rows, the adapter must
-    stamp the documented defaults: request={}, headers=[], rows=None.
+    """When the wire response omits headers/rows, the adapter must synthesize
+    request and stamp the documented defaults: headers=[], rows=None.
 
     The rows default is intentionally None (NOT []) because
     AdSenseManagementParser already maps missing/None rows to a clean
@@ -105,7 +129,16 @@ def test_adapter_defaults_when_response_fields_missing() -> None:
     payload = adsense_response_to_parser_payload(
         response_json={}, account_id="pub-1", report_month="2026-05",
     )
-    assert payload["request"] == {}
+    assert payload["request"] == {
+        "accountId": "accounts/pub-1",
+        "dateRange": {
+            "startDate": {"year": 2026, "month": 5, "day": 1},
+            "endDate": {"year": 2026, "month": 5, "day": 31},
+        },
+        "dimensions": ["MONTH"],
+        "metrics": ["ESTIMATED_EARNINGS", "TOTAL_EARNINGS"],
+        "currencyCode": "USD",
+    }
     assert payload["headers"] == []
     assert payload["rows"] is None
     # report_id still stamped even when the response is empty: provenance
@@ -140,10 +173,44 @@ def test_fetch_monthly_report_rejects_malformed_report_month(
     HTTP request is issued, matching YouTube Analytics' typed-boundary pattern
     so the orchestrator's GoogleConnectorError handler can record FAILED runs.
     """
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        """Count any unexpected HTTP call for the malformed-month branch."""
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={})
+
     http = GoogleHttpClient(
         credentials=mock_credentials,
-        transport=httpx.MockTransport(lambda _r: httpx.Response(200)),
+        transport=httpx.MockTransport(handler),
     )
     client = AdSenseManagementClient(http=http)
     with pytest.raises(MalformedReportMonthError):
         client.fetch_monthly_report(account_id="pub-1", report_month=bad_month)
+    assert calls == 0
+
+
+@pytest.mark.parametrize("bad_account_id", ["", " ", "\t\n"])
+def test_fetch_monthly_report_rejects_empty_account_id_before_http(
+    mock_credentials, bad_account_id: str,
+) -> None:
+    """Empty/blank account ids must fail closed before URL construction."""
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        """Count any unexpected HTTP call for the malformed-account branch."""
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={})
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
+    )
+    client = AdSenseManagementClient(http=http)
+    with pytest.raises(MalformedAdsenseAccountIdError):
+        client.fetch_monthly_report(
+            account_id=bad_account_id, report_month="2026-05",
+        )
+    assert calls == 0
