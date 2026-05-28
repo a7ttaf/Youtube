@@ -189,6 +189,31 @@ def get_or_create_month_close_row(
     return row
 
 
+# ============================================================================
+# Purpose: Read-only finance month-close status lookup for the AdSense live
+#   payment prefilter. Returns the close status or None for an absent row.
+# Database/ORM: FinanceMonthCloseORM (SELECT only).
+# Standards: Pure SELECT — no row creation, no advisory/FOR UPDATE lock, so the
+#   prefilter never mutates close state or contends with month writers.
+# Blast Radius: Finance month locks (read-only). The authoritative locked-month
+#   write guard remains _require_month_open(..., for_update=True) in the repo.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/adsense_payment_sync.py
+#     -> step-2 prefilter classifies OPEN vs LOCKED settlement months.
+# ============================================================================
+def get_month_close_status(
+    session: Session, month: str, *, tenant_id: UUID | str | None = None
+) -> str | None:
+    """Return the finance close status for ``month`` (``"OPEN"``/``"LOCKED"``) or None."""
+    resolved_tenant_id = _resolve_tenant_id(tenant_id)
+    return session.scalar(
+        select(FinanceMonthCloseORM.status).where(
+            FinanceMonthCloseORM.tenant_id == resolved_tenant_id,
+            FinanceMonthCloseORM.month == month,
+        )
+    )
+
+
 def acquire_finance_month_advisory_lock(
     session: Session,
     month: str,
