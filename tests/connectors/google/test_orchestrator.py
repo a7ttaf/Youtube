@@ -2414,8 +2414,8 @@ def test_dry_run_writes_nothing_returns_outcome_with_run_none(
     - outcome.run is None (no connector_runs row was started)
     - counts["reports_attempted"] == 2 (both reports were enumerated)
     - counts["reports_succeeded"] == 2 (both parsed cleanly)
-    - counts["rows_upserted_total"] == 0 (dry-run validates parser output but
-      performs no source-row upsert, so every upsert counter stays zero)
+    - counts["rows_upserted_total"] == 2 (dry-run validates parser output and
+      returns the would-upsert row count, but writes no source rows)
     - zero rows in connector_runs and raw_report_files (defence-in-depth:
       the SAVEPOINT-rollback in the dry-run branch reverts any writes a
       future runner might accidentally make)
@@ -2498,9 +2498,9 @@ def test_dry_run_writes_nothing_returns_outcome_with_run_none(
     assert counts["reports_attempted"] == 2
     assert counts["reports_succeeded"] == 2
     assert counts["reports_failed"] == 0
-    # Dry-run validates parser output but performs no source-row upsert, so all
-    # source-row upsert counters stay zero.
-    assert counts["rows_upserted_total"] == 0
+    # Dry-run returns the would-upsert total while leaving the split at zero
+    # because no source-row write/classification occurs.
+    assert counts["rows_upserted_total"] == 2
     assert counts["rows_upserted_created"] == 0
     assert counts["rows_upserted_updated"] == 0
     assert counts["rows_upserted_unchanged"] == 0
@@ -3847,9 +3847,10 @@ def test_run_one_with_youtube_analytics_dry_run_succeeds_for_cms_channels_only(
     assert counts["reports_attempted"] == 1
     assert counts["reports_succeeded"] == 1
     assert counts["reports_failed"] == 0
-    # The parser sees the single CMS payload, but dry-run performs no upsert.
+    # The parser sees the single CMS payload; dry-run reports the would-upsert
+    # total but performs no source-row write/classification.
     assert expected_row_count > 0
-    assert counts["rows_upserted_total"] == 0
+    assert counts["rows_upserted_total"] == expected_row_count
     assert counts["rows_upserted_created"] == 0
     assert counts["rows_upserted_updated"] == 0
     assert counts["rows_upserted_unchanged"] == 0

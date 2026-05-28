@@ -523,7 +523,8 @@ def _run_dry_run(
                     parser_payload = produced.parser_payload
                 else:
                     _report_type, parser_payload, _raw_bytes = produced
-                list(parser.parse(parser_payload, tenant_id=tenant_id))
+                parsed_rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
+                counts["rows_upserted_total"] += len(parsed_rows)
                 counts["reports_succeeded"] += 1
             except Exception:
                 counts["reports_failed"] += 1
