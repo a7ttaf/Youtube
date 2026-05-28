@@ -247,6 +247,7 @@ class ProducedReportSuccess:
     parser_payload: dict[str, object]
     raw_reports: tuple[_CsvReportDownload, ...]
 
+
 ProducedReport = (
     ProducedReportSuccess
     | tuple[str, dict[str, object], bytes]
@@ -726,8 +727,10 @@ def _unpack_produced_report(
     tuple[_CsvReportDownload, ...] | None,
     Exception | None,
 ]:
-    """Normalise a ``ProducedReport`` into its
-    (report_type, parser_payload, raw_reports, failure)."""
+    """
+    Normalise a ``ProducedReport`` into its
+    (report_type, parser_payload, raw_reports, failure).
+    """
     if isinstance(produced, ProducedReportFailure):
         return (
             produced.report_type,
@@ -750,8 +753,10 @@ def _unpack_produced_report(
 def _legacy_report_id(
     *, parser_payload: dict[str, object], report_type: str
 ) -> str:
-    """Recover the connector's legacy report_id from
-    ``parser_payload.report_metadata`` if present."""
+    """
+    Recover the connector's legacy report_id from
+    ``parser_payload.report_metadata`` if present.
+    """
     metadata = parser_payload.get("report_metadata")
     if isinstance(metadata, dict):
         report_id = metadata.get("report_id")
@@ -1831,8 +1836,10 @@ def _produce_youtube_reports(
     report_month: str,
     account_id: str,
 ) -> Iterator[ProducedReport]:
-    """Iterate YouTube Reporting jobs, fetch each report's CSVs, and yield
-    bucket-B successes/failures."""
+    """
+    Iterate YouTube Reporting jobs, fetch each report's CSVs, and yield
+    bucket-B successes/failures.
+    """
     http = GoogleHttpClient(credentials=credentials)
     try:
         client = client_type(http=http)
@@ -1897,8 +1904,10 @@ def _produce_youtube_job_report(
     report_month: str,
     account_id: str,
 ) -> ProducedReportSuccess | ProducedReportFailure | None:
-    """Drive one YouTube Reporting job: list its reports for the month
-    then download+aggregate them."""
+    """
+    Drive one YouTube Reporting job: list its reports for the month
+    then download+aggregate them.
+    """
     report_type = _require_text(job, "reportTypeId")
     job_id = _require_text(job, "id")
     reports = _list_youtube_reports_for_job(
@@ -2040,8 +2049,10 @@ def _download_youtube_csv_report(
     seen_checksums: set[str],
     totals: dict[tuple[str, str | None, str], Decimal],
 ) -> ProducedReportFailure | None:
-    """Download a single YouTube Reporting CSV blob, spooling to disk if it
-    exceeds the in-memory cap."""
+    """
+    Download a single YouTube Reporting CSV blob, spooling to disk if it
+    exceeds the in-memory cap.
+    """
     csv_report: _CsvReportDownload | None = None
     try:
         download_url = _require_text(report, "downloadUrl")
@@ -2313,8 +2324,10 @@ def _accumulate_csv_row(
     default_content_owner: str | None,
     default_currency: str | None,
 ) -> None:
-    """Fold one CSV row's metric into the running ``totals`` map (validates
-    non-negative decimals)."""
+    """
+    Fold one CSV row's metric into the running ``totals`` map (validates
+    non-negative decimals).
+    """
     # Normalize the date column. YouTube Reporting CSV uses ``date`` or
     # ``day``. The row is daily, but the parser payload is monthly, so this
     # date is used only to ensure the row belongs to report_month.

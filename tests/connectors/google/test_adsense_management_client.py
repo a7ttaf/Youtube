@@ -11,6 +11,7 @@ from ums_smart_revenue.connectors.google.adsense_management_client import (
     adsense_response_to_parser_payload,
 )
 from ums_smart_revenue.connectors.google.errors import (
+    GoogleApiResponseError,
     MalformedAdsenseAccountIdError,
     MalformedReportMonthError,
 )
@@ -163,6 +164,33 @@ def test_adapter_report_id_differs_per_account_or_month() -> None:
     )
     assert base["report_id"] != other_account["report_id"]
     assert base["report_id"] != other_month["report_id"]
+
+
+def test_fetch_monthly_report_rejects_truncated_report_result(mock_credentials) -> None:
+    """A ReportResult with more matched rows than returned rows must fail closed."""
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        """Return a truncated AdSense ReportResult shape from the mock transport."""
+        nonlocal calls
+        calls += 1
+        return httpx.Response(
+            200,
+            json={
+                "headers": [],
+                "rows": [{"cells": [{"value": "2026-05"}]}],
+                "totalMatchedRows": "2",
+            },
+        )
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
+    )
+    client = AdSenseManagementClient(http=http)
+    with pytest.raises(GoogleApiResponseError, match="truncated"):
+        client.fetch_monthly_report(account_id="pub-1", report_month="2026-05")
+    assert calls == 1
 
 
 @pytest.mark.parametrize("bad_month", ["2026-5", "2026", "abcd-ef", "2026-13", ""])

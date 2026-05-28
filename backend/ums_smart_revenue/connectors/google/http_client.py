@@ -51,6 +51,8 @@ _QueryParams = Mapping[str, str] | Sequence[tuple[str, str]]
 
 @dataclass
 class _RetryState:
+    """Mutable retry counters and schedules for one Google HTTP request."""
+
     status_backoff: list[float]
     timeout_backoff: list[float]
     connect_backoff: list[float]

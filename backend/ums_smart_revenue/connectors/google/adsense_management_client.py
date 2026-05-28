@@ -29,6 +29,7 @@ import re
 from calendar import monthrange
 
 from ums_smart_revenue.connectors.google.errors import (
+    GoogleApiResponseError,
     MalformedAdsenseAccountIdError,
     MalformedReportMonthError,
 )
@@ -52,9 +53,11 @@ _CURRENCY = "USD"
 # contract update and a new adapter branch.
 SUPPORTED_ADSENSE_REPORTS: frozenset[str] = frozenset({"monthly_account_earnings"})
 _REPORT_KEY = "monthly_account_earnings"
+_MAX_REPORT_RESULT_ROWS = 100_000
 
 
 def _report_month_date_range(report_month: str) -> tuple[int, int, int]:
+    """Return parsed year/month/last-day bounds for a validated report_month."""
     if not _REPORT_MONTH_PATTERN.fullmatch(report_month):
         # Fail closed before computing date bounds: `split("-")` on a
         # malformed value would raise a bare ValueError and escape the
@@ -66,6 +69,7 @@ def _report_month_date_range(report_month: str) -> tuple[int, int, int]:
 
 
 def _validated_account_id(account_id: str) -> str:
+    """Return an account id only when it is non-empty and already normalized."""
     candidate = account_id.strip()
     if not candidate or candidate != account_id:
         # Fail closed before URL construction so a blank or whitespace-padded
@@ -77,6 +81,7 @@ def _validated_account_id(account_id: str) -> str:
 def _synthesized_request(
     *, account_id: str, report_month: str,
 ) -> dict[str, object]:
+    """Build parser-visible request metadata from trusted client inputs."""
     year_i, month_i, last_day = _report_month_date_range(report_month)
     return {
         "accountId": f"accounts/{account_id}",
@@ -88,6 +93,101 @@ def _synthesized_request(
         "metrics": list(_METRICS),
         "currencyCode": _CURRENCY,
     }
+
+
+def _result_rows(*, response_json: dict[str, object], url: str) -> list[object] | None:
+    """Return the optional ReportResult rows list after shape validation."""
+    rows = response_json.get("rows")
+    if rows is None:
+        return None
+    if isinstance(rows, list):
+        return rows
+    raise GoogleApiResponseError(
+        url=url, reason=f"expected rows list or null, got {type(rows).__name__}"
+    )
+
+
+def _total_matched_rows(
+    *, response_json: dict[str, object], url: str,
+) -> int | None:
+    """Return totalMatchedRows as an int when Google includes the count."""
+    total = response_json.get("totalMatchedRows")
+    if total is None:
+        return None
+    if isinstance(total, bool):
+        raise GoogleApiResponseError(
+            url=url, reason="expected totalMatchedRows integer, got bool"
+        )
+    if isinstance(total, int):
+        if total < 0:
+            raise GoogleApiResponseError(
+                url=url, reason="totalMatchedRows must not be negative"
+            )
+        return total
+    if isinstance(total, str) and total.isdecimal():
+        return int(total)
+    raise GoogleApiResponseError(
+        url=url,
+        reason=f"expected totalMatchedRows integer string, got {type(total).__name__}",
+    )
+
+
+# ============================================================================
+# Purpose: Fail closed when AdSense reports.generate returns a partial
+#   ReportResult. Google exposes totalMatchedRows separately from the returned
+#   rows array; when the count is larger than returned rows, ingesting the body
+#   would silently drop source evidence.
+# Database/ORM: None (pure API response validation before parser shaping).
+# Standards: Typed GoogleApiResponseError with safe aggregate counts only; no
+#   raw row cells or secrets are included in diagnostics.
+# Blast Radius: Connector ingestion evidence. Prevents partial AdSense source
+#   rows from entering raw-file storage, audit lifecycle, or downstream skips.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/http_client.py ->
+#     supplies the decoded Google response object.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     adsense_management.py -> must only receive complete ReportResult rows.
+# ============================================================================
+def _reject_truncated_report_result(
+    *, response_json: dict[str, object], url: str,
+) -> None:
+    """Raise when the AdSense ReportResult row counts prove truncation."""
+    rows = _result_rows(response_json=response_json, url=url)
+    returned_count = len(rows) if rows is not None else 0
+    total = _total_matched_rows(response_json=response_json, url=url)
+
+    if returned_count > _MAX_REPORT_RESULT_ROWS:
+        raise GoogleApiResponseError(
+            url=url,
+            reason=(
+                "ReportResult returned more rows than the AdSense row cap "
+                f"({returned_count}>{_MAX_REPORT_RESULT_ROWS})"
+            ),
+        )
+    if total is not None and total < returned_count:
+        raise GoogleApiResponseError(
+            url=url,
+            reason=(
+                "totalMatchedRows is smaller than returned rows "
+                f"({total}<{returned_count})"
+            ),
+        )
+    if total is not None and total > returned_count:
+        raise GoogleApiResponseError(
+            url=url,
+            reason=(
+                "truncated ReportResult "
+                f"(totalMatchedRows={total}, returnedRows={returned_count})"
+            ),
+        )
+    if total is None and returned_count >= _MAX_REPORT_RESULT_ROWS:
+        raise GoogleApiResponseError(
+            url=url,
+            reason=(
+                "possible truncated ReportResult at AdSense row cap without "
+                "totalMatchedRows"
+            ),
+        )
 
 
 # ============================================================================
@@ -182,6 +282,7 @@ class AdSenseManagementClient:
             ("currencyCode", _CURRENCY),
         ]
         response = self._http.request(method="GET", url=url, params=params)
+        _reject_truncated_report_result(response_json=response, url=url)
         return adsense_response_to_parser_payload(
             response_json=response,
             account_id=account_id,

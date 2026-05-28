@@ -4511,16 +4511,20 @@ def test_run_one_fail_closed_when_service_actor_id_missing(
     monkeypatch.delenv(GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV, raising=False)
     load_app_settings.cache_clear()
 
-    with patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
-    ), patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-    ), patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials",
-        return_value=None,
-    ), patch(
-        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-    ), pytest.raises(ValueError) as excinfo:
+    with (
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.YouTubeReportingClient"
+        ),
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+        ),
+        patch(
+            "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials",
+            return_value=None,
+        ),
+        patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"),
+        pytest.raises(ValueError) as excinfo,
+    ):
         run_one(
             session,
             tenant_id=TENANT_ID,
