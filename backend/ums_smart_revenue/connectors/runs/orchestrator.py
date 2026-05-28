@@ -1790,7 +1790,7 @@ def _failure_with_downloaded_csv_reports(
     )
 
 
-def _require_text(mapping: dict[str, object], field: str) -> str:
+def _require_text(mapping: dict[str, object], field_name: str) -> str:
     """Pull a non-blank string field from a Google API descriptor or fail.
 
     Google's REST envelopes are well-typed in practice, but a missing /
@@ -1801,10 +1801,10 @@ def _require_text(mapping: dict[str, object], field: str) -> str:
     """
     from ums_smart_revenue.connectors.google.errors import GoogleApiResponseError
 
-    value = mapping.get(field)
+    value = mapping.get(field_name)
     if not isinstance(value, str) or not value.strip():
         raise GoogleApiResponseError(
-            url="<descriptor>", reason=f"missing or non-string {field!r}"
+            url="<descriptor>", reason=f"missing or non-string {field_name!r}"
         )
     return value.strip()
 
