@@ -43,6 +43,14 @@ _METRICS = "estimatedRevenue,estimatedAdRevenue,grossRevenue"
 # docstring). The orchestrator runner re-introduces the `channel` dimension into
 # the parser payload from the known filter so YouTubeAnalyticsParser keeps its
 # (channel, month) row-key contract without a parser change.
+# FIX: Switch _DIMENSIONS from "channel,month" to "month" only. Google's
+# content-owner reports require the `channel` dimension to be paired with a
+# multi-value channel filter; B2.5 issues one request per channel (single-value
+# filter), so adding `channel` to the wire dimensions can be rejected in live
+# runs even though mocked tests accept it. The channel dimension is re-
+# synthesized downstream from the known filter value by
+# YouTubeAnalyticsRunner._synthesise_analytics_channel_dimension so the parser
+# contract is preserved.
 _DIMENSIONS = "month"
 
 

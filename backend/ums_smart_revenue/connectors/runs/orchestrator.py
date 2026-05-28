@@ -1180,16 +1180,23 @@ def _flush_deferred_stale_cleanup_plans(
     if deferred_cleanup.blocked:
         return
     attempted = deferred_cleanup.attempted_channel_ids
+    # FIX: cache repo.list() per (source_system, report_month). Multiple scopes
+    # in a single run can share the same (source_system, report_month) but
+    # different source_account_id, so hoisting the fetch keeps the flush at one
+    # query per source/month even on multi-owner batches.
+    existing_rows_cache: dict[tuple[str, str], list] = {}
     for (source_system, report_type, report_month, source_account_id), keys in (
         deferred_cleanup.keep_source_row_keys_by_scope.items()
     ):
         preserved_keys = set(keys)
-        existing_rows = repo.list(
-            tenant_id,
-            report_month=report_month,
-            source_system=source_system,
-        )
-        for row in existing_rows:
+        cache_key = (source_system, report_month)
+        if cache_key not in existing_rows_cache:
+            existing_rows_cache[cache_key] = repo.list(
+                tenant_id,
+                report_month=report_month,
+                source_system=source_system,
+            )
+        for row in existing_rows_cache[cache_key]:
             if (
                 row.source_account_id == source_account_id
                 and row.report_type == report_type
