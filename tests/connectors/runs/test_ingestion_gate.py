@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime
-from pathlib import Path
 from unittest.mock import patch
 from uuid import UUID, uuid4
 
@@ -89,8 +88,6 @@ REPORT_MONTH = "2026-04"
 SERVICE_ACTOR_ID = "ddddeeee-ffff-0000-1111-222222222222"
 ACTOR_USER_ID = "00000000-0000-0000-0000-000000839900"
 RESOLVER_REF = "local-secret://yt-creds"
-
-_FIXTURE_ROOT = Path(__file__).resolve().parent.parent / "_fixtures"
 
 
 @pytest.fixture(autouse=True)
@@ -596,6 +593,18 @@ def test_three_connectors_end_to_end_on_mocks(
         "expected source rows from all three mock connectors; "
         f"got source_systems={source_systems!r}"
     )
+    # FIX: strict row-count pin so a double-write regression (e.g., upsert ON
+    # CONFLICT regression, or a per-report dedup skip that stops firing) is
+    # caught by this gate -- set-equality alone would silently absorb
+    # duplicates. Expected = 1 (YT Reporting CSV: 1 row x 1 channel)
+    # + 3 (YT Analytics: 1 data row x 3 monetary metrics in _MONETARY_METRICS
+    # -- estimatedRevenue, estimatedAdRevenue, grossRevenue)
+    # + 2 (AdSense: 1 input row x 2 METRIC_CURRENCY columns --
+    # ESTIMATED_EARNINGS, PAID_AMOUNT) = 6.
+    assert len(source_rows) == 6, (
+        f"expected exactly 6 source rows across the three connectors "
+        f"(YT Reporting=1, YT Analytics=3, AdSense=2); got {len(source_rows)}"
+    )
 
     # AdSense rows must carry NULL youtube_channel_id (account-scoped).
     adsense_source_rows = [
@@ -627,6 +636,14 @@ def test_three_connectors_end_to_end_on_mocks(
     # member form (see backend/ums_smart_revenue/finance/revenue_facts.py).
     assert fact_source_kinds == {"YOUTUBE_CMS", "YOUTUBE_ANALYTICS"}, (
         f"expected YT-only fact source_kinds; got {fact_source_kinds!r}"
+    )
+    # FIX: strict count pin so a per-(channel, source_kind) double-write
+    # regression cannot pass under the set-equality check above. One CMS
+    # channel x two YT source_kinds = exactly 2 facts; AdSense is skipped
+    # as MISSING_CHANNEL_ID (asserted below) and emits no facts.
+    assert len(facts) == 2, (
+        f"expected exactly 2 MonthlyChannelRevenueFactORM rows from YT-only "
+        f"(1 channel x {{YOUTUBE_CMS, YOUTUBE_ANALYTICS}}); got {len(facts)}"
     )
     assert {fact.youtube_channel_id for fact in facts} == {channel_id}
     # The C1 normalizer flags the AdSense rows as MISSING_CHANNEL_ID because
