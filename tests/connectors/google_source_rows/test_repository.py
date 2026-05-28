@@ -17,6 +17,10 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import uuid4
+"""
+Module for testing the SqlAlchemyGoogleRevenueSourceRowRepository by providing session fixtures
+and validating repository behaviors.
+"""
 
 import pytest
 from sqlalchemy import create_engine, select
@@ -43,6 +47,9 @@ RAW_FILE_ID_B = uuid4()  # owned by TENANT_B
 
 @pytest.fixture
 def session() -> Iterator[Session]:
+    """
+    Provide an in-memory SQLite session with seeded tenant and report file data for tests.
+    """
     engine = create_engine("sqlite:///:memory:")
     FinanceBase.metadata.create_all(engine)
     TenantBase.metadata.create_all(engine)
@@ -73,6 +80,11 @@ def session() -> Iterator[Session]:
                         report_month="2026-04",
                         file_url="memory://tenant-b/raw.json",
                         checksum="b" * 64,
+"""Tests for GoogleRevenueSourceRowRepository.
+
+This module contains helper functions and pytest tests for verifying the behavior of the 
+SqlAlchemyGoogleRevenueSourceRowRepository, ensuring correct upsert, list, and validation logic.
+"""
                     ),
                     CurrencyORM(
                         code="USD",
@@ -107,6 +119,10 @@ def _row(
     source_account_id: str = "acct-001",
     report_type: str = "channel_monthly_estimated_revenue",
 ) -> ParsedSourceRow:
+    """Create a ParsedSourceRow for testing with default values and overrides.
+
+    Returns a ParsedSourceRow dataclass instance populated with given or default parameters.
+    """
     return ParsedSourceRow(
         source_system=source_system,
         source_row_key=source_row_key,
@@ -127,6 +143,10 @@ def _row(
 
 
 def test_upsert_many_inserts_new_rows(session: Session) -> None:
+    """Test that upsert_many inserts new rows when none exist.
+
+    Verifies that distinct rows are inserted and persisted correctly.
+    """
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     rows = [_row(source_row_key="a" * 64), _row(source_row_key="b" * 64)]
     result = repo.upsert_many(
@@ -143,6 +163,10 @@ def test_upsert_many_inserts_new_rows(session: Session) -> None:
 
 
 def test_upsert_many_is_idempotent_on_rerun(session: Session) -> None:
+    """Test that upsert_many is idempotent on rerun.
+
+    Ensures that running upsert_many twice does not create duplicate rows.
+    """
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     rows = [_row(source_row_key="c" * 64)]
     repo.upsert_many(TENANT_A, rows, raw_file_id=RAW_FILE_ID, imported_by=None)
@@ -177,6 +201,7 @@ def test_upsert_many_preserves_id_on_conflict(session: Session) -> None:
 
 
 def test_upsert_many_updates_mutable_fields_on_conflict(session: Session) -> None:
+    """Test that on conflict, mutable fields are updated by upsert_many."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     key = "d" * 64
     repo.upsert_many(
@@ -200,6 +225,10 @@ def test_upsert_many_updates_mutable_fields_on_conflict(session: Session) -> Non
 
 
 def test_tenant_isolation(session: Session) -> None:
+    """Test that repository enforces tenant isolation.
+
+    Verifies that rows for different tenants do not overlap or interfere.
+    """
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     shared_key = "e" * 64
     repo.upsert_many(
@@ -222,6 +251,7 @@ def test_tenant_isolation(session: Session) -> None:
 
 
 def test_rejects_unknown_tenant(session: Session) -> None:
+    """Test that upsert_many rejects unknown tenant_id with validation error."""
     # An unseeded tenant_id must fail with the typed error, not a raw FK error.
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     ok = _row(source_row_key="t" * 64)
@@ -230,6 +260,7 @@ def test_rejects_unknown_tenant(session: Session) -> None:
 
 
 def test_rejects_unknown_raw_file(session: Session) -> None:
+    """Test that upsert_many rejects unknown raw_file_id for the tenant."""
     # A raw_file_id with no backing row must fail with the typed error.
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     ok = _row(source_row_key="u" * 64)
@@ -238,6 +269,7 @@ def test_rejects_unknown_raw_file(session: Session) -> None:
 
 
 def test_rejects_cross_tenant_raw_file(session: Session) -> None:
+    """Test that upsert_many rejects raw_file_id from another tenant."""
     # TENANT_A rows must not link to TENANT_B's raw evidence file: a row can
     # never be attributed to another tenant's provenance (tenant isolation).
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
@@ -247,6 +279,7 @@ def test_rejects_cross_tenant_raw_file(session: Session) -> None:
 
 
 def test_allows_none_raw_file(session: Session) -> None:
+    """Test that upsert_many allows None raw_file_id without error."""
     # Provenance is optional: a None raw_file_id skips the FK pre-check.
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     ok = _row(source_row_key="w" * 64)
@@ -255,6 +288,7 @@ def test_allows_none_raw_file(session: Session) -> None:
 
 
 def test_rejects_invalid_source_system(session: Session) -> None:
+    """Test that upsert_many rejects invalid source_system values."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     bad = _row(source_row_key="f" * 64, source_system="not_a_real_source")
     with pytest.raises(GoogleRevenueSourceRowValidationError):
@@ -262,6 +296,7 @@ def test_rejects_invalid_source_system(session: Session) -> None:
 
 
 def test_rejects_short_source_row_key(session: Session) -> None:
+    """Test that upsert_many rejects source_row_key shorter than required."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     bad = _row(source_row_key="too-short")
     with pytest.raises(GoogleRevenueSourceRowValidationError):
@@ -269,6 +304,7 @@ def test_rejects_short_source_row_key(session: Session) -> None:
 
 
 def test_rejects_negative_amount(session: Session) -> None:
+    """Test that upsert_many rejects negative amount values."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     bad = _row(source_row_key="g" * 64, amount="-1.000000")
     with pytest.raises(GoogleRevenueSourceRowValidationError):
@@ -276,6 +312,7 @@ def test_rejects_negative_amount(session: Session) -> None:
 
 
 def test_rejects_unknown_currency(session: Session) -> None:
+    """Test that upsert_many rejects unknown currency codes."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     bad = _row(source_row_key="h" * 64, currency="ZZZ")
     with pytest.raises(GoogleRevenueSourceRowValidationError):
@@ -283,6 +320,7 @@ def test_rejects_unknown_currency(session: Session) -> None:
 
 
 def test_list_by_tenant_and_month(session: Session) -> None:
+    """Test that list returns rows filtered by tenant and report month."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     repo.upsert_many(
         TENANT_A,
@@ -298,6 +336,7 @@ def test_list_by_tenant_and_month(session: Session) -> None:
 
 
 def test_get_exact_returns_match(session: Session) -> None:
+    """Test that get_exact returns the matching row when it exists."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     key = "k" * 64
     repo.upsert_many(
@@ -314,6 +353,7 @@ def test_get_exact_returns_match(session: Session) -> None:
 
 
 def test_get_exact_returns_none_for_missing(session: Session) -> None:
+    """Test that get_exact returns None when no matching row is found."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     entry = repo.get_exact(
         TENANT_A, source_system="youtube_reporting", source_row_key="m" * 64
@@ -322,6 +362,7 @@ def test_get_exact_returns_none_for_missing(session: Session) -> None:
 
 
 def test_list_filters_combine(session: Session) -> None:
+    """Test that list applies combined filters correctly."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     repo.upsert_many(
         TENANT_A,
@@ -342,9 +383,11 @@ def test_list_filters_combine(session: Session) -> None:
 
 
 def test_list_for_channel_returns_only_matches(session: Session) -> None:
+    """Test that list_for_channel returns only rows matching the specified channel."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
 
     def _channel_row(key: str, channel: str) -> ParsedSourceRow:
+        """Helper to create a ParsedSourceRow with an overridden youtube_channel_id."""
         # dataclasses.replace produces a new frozen ParsedSourceRow with
         # only the youtube_channel_id overridden — clearer than rebuilding
         # every field by hand for each variant.
@@ -365,7 +408,6 @@ def test_list_for_channel_returns_only_matches(session: Session) -> None:
     )
     assert len(alpha) == 2
     assert {r.youtube_channel_id for r in alpha} == {"UC_alpha"}
-
 
 def test_upsert_many_does_not_alias_caller_raw_payload(session: Session) -> None:
     """Mutating the caller's raw_payload dict after upsert must not affect persisted state.
@@ -632,6 +674,9 @@ def test_upsert_preserves_provenance_when_reimport_omits_it(session: Session) ->
     # Phase 3: a genuinely new file/importer (non-None) does replace. file_2 is
     # a real TENANT_A-owned raw file so it passes the tenant-scoped FK pre-check.
     session.add(
+"""Module tests for SqlAlchemyGoogleRevenueSourceRowRepository:
+Ensure correct behavior of upsert, clear, and delete operations for GoogleRevenueSourceRowORM."""
+
         RawReportFileORM(
             id=file_2,
             tenant_id=TENANT_A,
@@ -660,6 +705,7 @@ def test_upsert_preserves_provenance_when_reimport_omits_it(session: Session) ->
 def test_upsert_can_clear_stale_raw_file_id_for_aggregate_replacement(
     session: Session,
 ) -> None:
+    """Test that upsert_many can clear a stale raw_file_id when replacing aggregate data."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     key = "ag" * 32
     repo.upsert_many(
@@ -688,6 +734,7 @@ def test_upsert_can_clear_stale_raw_file_id_for_aggregate_replacement(
 
 
 def test_delete_stale_for_scope_preserves_other_scopes(session: Session) -> None:
+    """Test that delete_stale_for_scope removes stale rows for the given scope while preserving rows from other scopes."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     keep_key = "dk" * 32
     stale_key = "ds" * 32
@@ -791,6 +838,12 @@ def test_rejects_non_finite_float_in_raw_payload(session: Session) -> None:
     with pytest.raises(GoogleRevenueSourceRowValidationError, match=r"finite numbers"):
         repo.upsert_many(TENANT_A, [bad], raw_file_id=RAW_FILE_ID, imported_by=None)
 
+"""Tests for the SqlAlchemyGoogleRevenueSourceRowRepository upsert_many behavior.
+
+This module contains tests verifying that upsert_many classifies new rows as created,
+existing unchanged rows as unchanged, existing rows with value changes as updated,
+and mixed sets of rows correctly as created, updated, or unchanged.
+"""
 
 def test_non_usd_source_rows_visible_at_repository_layer(session: Session) -> None:
     """B1 makes non-USD source rows queryable at the repository layer.
@@ -817,6 +870,7 @@ def test_non_usd_source_rows_visible_at_repository_layer(session: Session) -> No
 
 
 def test_upsert_many_classifies_all_new_rows_as_created(session: Session) -> None:
+    """Ensure upsert_many classifies all provided new rows as created."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     rows = [
         _row(source_row_key="A" * 64),
@@ -833,6 +887,7 @@ def test_upsert_many_classifies_all_new_rows_as_created(session: Session) -> Non
 
 
 def test_upsert_many_classifies_existing_unchanged_rerun(session: Session) -> None:
+    """Ensure upsert_many classifies rerun of unchanged rows as unchanged."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     row = _row(source_row_key="U" * 64)
     repo.upsert_many(TENANT_A, [row], raw_file_id=RAW_FILE_ID, imported_by=None)
@@ -848,6 +903,7 @@ def test_upsert_many_classifies_existing_unchanged_rerun(session: Session) -> No
 def test_upsert_many_classifies_existing_with_value_change_as_updated(
     session: Session,
 ) -> None:
+    """Ensure upsert_many classifies existing rows with changed values as updated."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     key = "V" * 64
     repo.upsert_many(
@@ -869,6 +925,7 @@ def test_upsert_many_classifies_existing_with_value_change_as_updated(
 
 
 def test_upsert_many_classifies_mixed_rerun(session: Session) -> None:
+    """Ensure upsert_many classifies mixed rerun rows correctly into created, updated, and unchanged."""
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
     seeded_unchanged_1 = _row(source_row_key="M1" * 32, amount="10.000000")
     seeded_unchanged_2 = _row(source_row_key="M2" * 32, amount="20.000000")
@@ -892,7 +949,6 @@ def test_upsert_many_classifies_mixed_rerun(session: Session) -> None:
     assert result.created == 1
     assert result.updated == 1
     assert result.unchanged == 2
-
 
 def test_upsert_many_rejects_duplicate_source_row_key_in_batch(
     session: Session,

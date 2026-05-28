@@ -65,6 +65,12 @@ _NULLABLE_TEXT_FIELDS = (
     "youtube_channel_id",
     "source_report_id",
 )
+"""Module for validating and comparing parsed Google source rows.
+
+Provides helper functions to enforce correct types, formats, and ranges
+for various fields of ParsedSourceRow before insertion into the database.
+"""
+
 _AMOUNT_NATIVE_SCALE = 6
 _AMOUNT_NATIVE_INTEGER_DIGITS = 14
 
@@ -91,6 +97,11 @@ def _require_str_keys(value: object) -> None:
 
 
 def _validate_text_fields(row: ParsedSourceRow) -> None:
+    """Ensure required and nullable text fields are of correct types.
+
+    Required text fields must be non-null strings. Nullable text fields may
+    be None or a string, but no other types are allowed.
+    """
     # Guard text columns before membership checks, len(), set construction, or
     # INSERT binding can leak raw TypeError/driver errors for loose callers.
     for field_name in _REQUIRED_TEXT_FIELDS:
@@ -110,6 +121,11 @@ def _validate_text_fields(row: ParsedSourceRow) -> None:
 
 
 def _validate_source_identity(row: ParsedSourceRow) -> None:
+    """Validate the source_system, value_kind, and source_row_key attributes.
+
+    Ensures that source_system and value_kind are allowed constants, and that
+    source_row_key has the expected fixed length.
+    """
     if row.source_system not in ALLOWED_SOURCE_SYSTEMS:
         raise GoogleRevenueSourceRowValidationError(
             f"unknown source_system: {row.source_system!r}"
@@ -126,6 +142,12 @@ def _validate_source_identity(row: ParsedSourceRow) -> None:
 
 
 def _validate_amount_native(row: ParsedSourceRow) -> None:
+    """Validate that amount_native is a non-negative finite Decimal within scale and precision limits.
+
+    Ensures amount_native is a Decimal, is finite and >= 0, does not exceed
+    the _AMOUNT_NATIVE_SCALE fractional digits, and fits within
+    _AMOUNT_NATIVE_INTEGER_DIGITS integer digits.
+    """
     if not isinstance(row.amount_native, Decimal):
         raise GoogleRevenueSourceRowValidationError(
             "amount_native must be a Decimal"
@@ -157,6 +179,11 @@ def _validate_amount_native(row: ParsedSourceRow) -> None:
 
 
 def _validate_raw_payload(row: ParsedSourceRow) -> None:
+    """Validate raw_payload is a dict with string keys and JSON-serialisable finite values.
+
+    Ensures raw_payload is a dict, all keys are strings, and the structure
+    can be serialized to JSON without NaN or infinite numbers.
+    """
     if not isinstance(row.raw_payload, dict):
         raise GoogleRevenueSourceRowValidationError(
             "raw_payload must be a dict"
@@ -173,8 +200,11 @@ def _validate_raw_payload(row: ParsedSourceRow) -> None:
 
 
 def _is_date_only(value: object) -> bool:
-    return isinstance(value, date) and not isinstance(value, datetime)
+    """Return True if the value is a date instance without a time component.
 
+    Distinguishes plain date objects from datetime instances with time data.
+    """
+    return isinstance(value, date) and not isinstance(value, datetime)
 
 # Content fields that the upsert SET clause writes from the parser-owned input.
 # Provenance (raw_file_id, imported_by) is intentionally excluded: a re-import
@@ -221,6 +251,12 @@ def _content_matches_existing(
 
 
 def _validate_report_period(row: ParsedSourceRow) -> None:
+    """Validate report_month and period_start/period_end alignment and ordering.
+
+    Ensures report_month matches YYYY-MM, period_start and period_end are date-only,
+    period_end is not before period_start, and the month fields align to a single
+    calendar month period.
+    """
     if not _REPORT_MONTH_RE.match(row.report_month):
         raise GoogleRevenueSourceRowValidationError(
             f"report_month must be YYYY-MM with month 01-12, got {row.report_month!r}"
@@ -260,17 +296,25 @@ def _validate_report_period(row: ParsedSourceRow) -> None:
 #   - Spec: Docs/superpowers/specs/2026-05-23-spec-b1-google-revenue-source-ingestion-design.md
 #     -> read-only contract rationale (section 6).
 # ============================================================================
+"""This module provides a repository implementation for ISO currencies using SQLAlchemy."""
 class SqlAlchemyCurrenciesRepository:
+    """Read-only repository for ISO 4217 currency reference data using SQLAlchemy.
+
+    Provides methods to list all currencies, list supported currencies,
+    and retrieve a currency by its ISO code.
+    """
     def __init__(self, session: Session) -> None:
         self._session = session
 
     def list_all(self) -> list[IsoCurrency]:
+        """Return all ISO currency entries from the database, ordered by code."""
         rows = self._session.scalars(
             select(CurrencyORM).order_by(CurrencyORM.code)
         ).all()
         return [self._to_entry(row) for row in rows]
 
     def list_supported(self) -> list[IsoCurrency]:
+        """Return only supported ISO currency entries from the database, ordered by code."""
         rows = self._session.scalars(
             select(CurrencyORM)
             .where(CurrencyORM.is_supported.is_(True))
@@ -279,11 +323,13 @@ class SqlAlchemyCurrenciesRepository:
         return [self._to_entry(row) for row in rows]
 
     def get(self, code: str) -> IsoCurrency | None:
+        """Retrieve a single ISO currency entry by code, or None if not found."""
         row = self._session.get(CurrencyORM, code)
         return self._to_entry(row) if row is not None else None
 
     @staticmethod
     def _to_entry(row: CurrencyORM) -> IsoCurrency:
+        """Convert a CurrencyORM row into an IsoCurrency domain object."""
         return IsoCurrency(
             code=row.code,
             numeric_code=row.numeric_code,
@@ -304,6 +350,10 @@ class SqlAlchemyCurrenciesRepository:
 #            validation runs BEFORE any write so the typed error contract
 #            (GoogleRevenueSourceRowValidationError) replaces opaque DB
 #            CHECK / FK violations. Validation covers: required + nullable
+"""
+This module implements the SqlAlchemy repository for Google revenue source rows,
+providing methods to upsert parsed rows into the database.
+"""
 #            string column types, source_row_key length (== 64),
 #            source_system membership, value_kind membership, finite
 #            non-negative amount within Numeric(20, 6) scale, report_month
@@ -326,8 +376,14 @@ class SqlAlchemyCurrenciesRepository:
 #     -> dialect-insert helper pattern reference (_dialect_insert).
 # ============================================================================
 class SqlAlchemyGoogleRevenueSourceRowRepository:
-    def __init__(self, session: Session) -> None:
-        self._session = session
+    class SqlAlchemyGoogleRevenueSourceRowRepository:
+        """Repository for managing Google revenue source rows using SQLAlchemy.
+
+        Provides methods to interact with the database through a given
+        SQLAlchemy session."""
+        def __init__(self, session: Session) -> None:
+            """Initialize the repository with a SQLAlchemy session."""
+            self._session = session
 
     def upsert_many(
         self,
@@ -338,6 +394,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         imported_by: UUID | None,
         replace_raw_file_id: bool = False,
     ) -> SourceRowUpsertResult:
+        """Upsert multiple parsed source rows for a tenant, handling conflict resolution and audit lineage."""
         materialised = list(rows)
         if not materialised:
             return SourceRowUpsertResult(
@@ -492,6 +549,11 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
     def _require_no_duplicate_keys(
         validated: list[ParsedSourceRow],
     ) -> None:
+        """Reject duplicate rows in the validated batch for the same (source_system, source_row_key).
+
+        Raises:
+            GoogleRevenueSourceRowValidationError: If duplicate key pairs are found, listing each duplicate.
+        """
         # ====================================================================
         # Purpose: Reject a batch that carries more than one row per
         #          (source_system, source_row_key) — the upsert conflict target.
@@ -541,6 +603,10 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         tenant_id: UUID,
         batch_keys: set[tuple[str, str]],
     ) -> dict[tuple[str, str], GoogleRevenueSourceRowORM]:
+        """Load existing rows for classification based on batch keys.
+
+        Returns a dictionary mapping each (source_system, source_row_key) tuple to its ORM row object.
+        """
         if not batch_keys:
             return {}
         source_systems = {system for system, _ in batch_keys}
@@ -580,6 +646,11 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         report_month: str,
         keep_source_row_keys: Iterable[str],
     ) -> int:
+        """Delete source rows that are no longer present for a given report scope.
+
+        Validates inputs and removes rows not in keep_source_row_keys for the specified tenant, source system, account, report type, and month.
+        Returns the number of rows deleted.
+        """
         self._require_tenant(tenant_id)
         for field_name, value in (
             ("source_system", source_system),
@@ -629,6 +700,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         report_month: str | None = None,
         source_system: str | None = None,
     ) -> List[GoogleRevenueSourceRowEntry]:  # noqa: UP006
+        """Retrieve list of Google revenue source rows for a tenant, optionally filtering by report month and source system."""
         stmt = select(GoogleRevenueSourceRowORM).where(
             GoogleRevenueSourceRowORM.tenant_id == tenant_id
         )
@@ -652,6 +724,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         youtube_channel_id: str,
         report_month: str,
     ) -> List[GoogleRevenueSourceRowEntry]:  # noqa: UP006
+        """Retrieve list of entries for a specific YouTube channel and report month."""
         rows = self._session.scalars(
             select(GoogleRevenueSourceRowORM)
             .where(
@@ -671,6 +744,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         source_system: str,
         source_row_key: str,
     ) -> GoogleRevenueSourceRowEntry | None:
+        """Retrieve a single Google revenue source row entry by exact source system and row key, or None if not found."""
         row = self._session.scalar(
             select(GoogleRevenueSourceRowORM).where(
                 GoogleRevenueSourceRowORM.tenant_id == tenant_id,
@@ -682,6 +756,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
 
     @staticmethod
     def _validate(row: ParsedSourceRow) -> ParsedSourceRow:
+        """Validate and deep-copy a parsed source row to ensure data integrity before insertion."""
         _validate_text_fields(row)
         _validate_source_identity(row)
         _validate_amount_native(row)
@@ -693,6 +768,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
         return replace(row, raw_payload=deepcopy(row.raw_payload))
 
     def _require_currencies(self, codes: set[str]) -> None:
+        """Ensure that the given currency codes exist in the database, raising an error for unknown codes."""
         if not codes:
             return
         present = set(
@@ -716,6 +792,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
     # Blast Radius: Tenant isolation / audit; source-of-truth write gate.
     # ========================================================================
     def _require_tenant(self, tenant_id: UUID) -> None:
+        """Ensure that the tenant exists before proceeding, raising a validation error if not."""
         # FIX: tenant_id was written straight into the INSERT with no pre-check,
         # so an unknown tenant failed later as a raw FK IntegrityError rather
         # than this repository's typed validation contract.
@@ -740,6 +817,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
     #            link to another tenant's raw evidence file).
     # ========================================================================
     def _require_raw_file(self, raw_file_id: UUID | None, tenant_id: UUID) -> None:
+        """Ensure that the raw report file exists for the given tenant, or allow None if not provided."""
         # FIX: upsert_many wrote any provided raw_file_id directly; the schema
         # only checks the file exists, not that it belongs to tenant_id, so a
         # caller could link one tenant's rows to another tenant's raw file
@@ -760,6 +838,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
 
     @staticmethod
     def _dialect_insert(dialect_name: str):
+        """Return the appropriate SQLAlchemy insert function for the given SQL dialect."""
         if dialect_name == "sqlite":
             return sqlite_insert
         if dialect_name == "postgresql":
@@ -772,6 +851,7 @@ class SqlAlchemyGoogleRevenueSourceRowRepository:
     def _to_entry(
         row: GoogleRevenueSourceRowORM,
     ) -> GoogleRevenueSourceRowEntry:
+        """Convert an ORM row to a GoogleRevenueSourceRowEntry domain object, deep-copying payloads."""
         return GoogleRevenueSourceRowEntry(
             id=str(row.id),
             tenant_id=str(row.tenant_id),

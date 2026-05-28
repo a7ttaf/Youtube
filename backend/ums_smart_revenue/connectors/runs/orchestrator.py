@@ -1036,6 +1036,12 @@ def _sweep_unfinished_live_run(
 
 @dataclass(frozen=True)
 class _ProcessedReportResult:
+    """
+    Carry per-report row-write outcomes from `_process_one_report` back to
+    `_handle_live_produced_report`. Encapsulates counts of total, created,
+    updated, and unchanged rows, along with raw file count and deferred
+    cleanup plans.
+    """
     # ============================================================================
     # Purpose: Carry per-report row-write outcomes from ``_process_one_report``
     #          back to ``_handle_live_produced_report`` so the caller can update

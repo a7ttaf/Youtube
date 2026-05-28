@@ -22,6 +22,7 @@ SOURCE_ROW_KEY_LENGTH: Final[int] = 64  # SHA-256 hex digest length
 
 @dataclass(frozen=True)
 class IsoCurrency:
+    """Represents an ISO currency with code, numeric code, name, minor unit, support flag, and activation time."""
     code: str
     numeric_code: str
     name: str
@@ -32,6 +33,7 @@ class IsoCurrency:
 
 @dataclass(frozen=True)
 class ParsedSourceRow:
+    """Immutable parsed source row boundary type containing metadata fields and raw payload from the data source."""
     source_system: str
     source_row_key: str
     source_account_id: str
@@ -51,6 +53,7 @@ class ParsedSourceRow:
 
 @dataclass(frozen=True)
 class GoogleRevenueSourceRowEntry:
+    """Immutable representation of a Google revenue source row entry with metadata, amounts, and provenance fields."""
     id: str
     tenant_id: str
     source_system: str
@@ -75,6 +78,7 @@ class GoogleRevenueSourceRowEntry:
 
 @dataclass(frozen=True)
 class SourceRowUpsertResult:
+    """Result container for upsert_many operation, including persisted entries and counts of created, updated, and unchanged rows."""
     # ============================================================================
     # Purpose: Return shape of SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many
     #          carrying the persisted entries alongside the per-row classification

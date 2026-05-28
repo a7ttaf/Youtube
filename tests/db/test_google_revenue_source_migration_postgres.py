@@ -4,6 +4,10 @@ upgrade head (20260521_0001) -> upgrade 20260523_0001 -> downgrade -1
 -> upgrade head again. Verifies idempotency and that downgrade truly
 reverses the upgrade.
 """
+Module for testing Google revenue source migration on PostgreSQL.
+Provides fixtures for database setup and tests verifying Alembic migrations,
+table existence, indexes, downgrade behavior, and repository upsert functionality.
+"""
 
 from datetime import date
 from decimal import Decimal
@@ -29,6 +33,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture
 def postgres_url() -> str:
+    """Fixture to provide the PostgreSQL database URL for testing."""
     # FIX: resolve UMS_TEST_DATABASE_URL inside a fixture, not at module import.
     # pytest imports every test module during collection, so doing the lookup at
     # import time turned a missing optional Postgres dependency into a *collection*
@@ -41,6 +46,7 @@ def postgres_url() -> str:
 
 @pytest.fixture
 def alembic_config(postgres_url: str) -> Config:
+    """Fixture to build an Alembic Config pointing to the test database and migrations."""
     # Build Config WITHOUT passing the alembic.ini path. env.py only calls
     # `logging.config.fileConfig()` when `config.config_file_name is not None`.
     # `fileConfig` defaults to `disable_existing_loggers=True`, which silences
@@ -59,6 +65,7 @@ def alembic_config(postgres_url: str) -> Config:
 
 @pytest.fixture
 def fresh_engine(postgres_url: str) -> object:
+    """Fixture to create a fresh database engine by resetting the public schema."""
     engine = create_engine(postgres_url)
     with engine.begin() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE"))
@@ -68,6 +75,7 @@ def fresh_engine(postgres_url: str) -> object:
 
 
 def test_pre_state_at_prior_head(alembic_config: Config, fresh_engine: object) -> None:
+    """Test that legacy tables exist and new tables are absent at prior migration head."""
     command.upgrade(alembic_config, "20260521_0001")
     inspector = inspect(fresh_engine)
     tables = set(inspector.get_table_names())
@@ -81,6 +89,7 @@ def test_pre_state_at_prior_head(alembic_config: Config, fresh_engine: object) -
 def test_upgrade_creates_currencies_and_source_rows(
     alembic_config: Config, fresh_engine: object
 ) -> None:
+    """Test that upgrading creates currencies, source rows, and preserves legacy tables."""
     command.upgrade(alembic_config, "20260523_0001")
     inspector = inspect(fresh_engine)
     tables = set(inspector.get_table_names())
@@ -107,6 +116,7 @@ def test_upgrade_creates_currencies_and_source_rows(
 def test_indexes_present_on_google_revenue_source_rows(
     alembic_config: Config, fresh_engine: object
 ) -> None:
+    """Test that indexes exist on the google_revenue_source_rows table."""
     command.upgrade(alembic_config, "20260523_0001")
     inspector = inspect(fresh_engine)
     indexes = {i["name"] for i in inspector.get_indexes("google_revenue_source_rows")}
@@ -117,6 +127,7 @@ def test_indexes_present_on_google_revenue_source_rows(
 def test_partial_channel_month_index_has_where_clause(
     alembic_config: Config, fresh_engine: object
 ) -> None:
+    """Test that the partial index includes a WHERE clause on youtube_channel_id."""
     command.upgrade(alembic_config, "20260523_0001")
     with fresh_engine.begin() as conn:
         row = conn.execute(
@@ -132,6 +143,7 @@ def test_partial_channel_month_index_has_where_clause(
 def test_downgrade_drops_only_b1_tables(
     alembic_config: Config, fresh_engine: object
 ) -> None:
+    """Test that downgrading removes new tables but preserves legacy tables."""
     command.upgrade(alembic_config, "20260523_0001")
     command.downgrade(alembic_config, "-1")
     inspector = inspect(fresh_engine)
@@ -144,6 +156,7 @@ def test_downgrade_drops_only_b1_tables(
 def test_round_trip_idempotency(
     alembic_config: Config, fresh_engine: object
 ) -> None:
+    """Test that upgrading, downgrading, and upgrading again is idempotent."""
     command.upgrade(alembic_config, "20260523_0001")
     command.downgrade(alembic_config, "-1")
     command.upgrade(alembic_config, "20260523_0001")
@@ -155,15 +168,13 @@ def test_round_trip_idempotency(
 def test_repository_upsert_round_trip_on_postgres(
     alembic_config: Config, fresh_engine: object
 ) -> None:
-    """Exercise the production upsert path on real PostgreSQL —
-    `postgresql.insert(...).on_conflict_do_update(...)` — which the SQLite
-    repository suite cannot reach. Covers insert, conflict-update of a mutable
-    field, and id preservation across the conflict.
-    """
+    """Exercise the production upsert path on real PostgreSQL, covering insert,
+    conflict-update, and id preservation across the conflict."""
     command.upgrade(alembic_config, "20260523_0001")
     tenant_id = uuid4()
 
     def _row(amount: str) -> ParsedSourceRow:
+        """Helper to create a ParsedSourceRow with the specified amount."""
         return ParsedSourceRow(
             source_system="youtube_reporting",
             source_row_key="p" * 64,
@@ -216,6 +227,11 @@ def test_raw_payload_object_check_rejects_non_object(
     inspector = inspect(fresh_engine)
     checks = {
         c["name"] for c in inspector.get_check_constraints("google_revenue_source_rows")
+"""
+Test module for google_revenue_source_migration_postgres migrations. Contains helper functions
+and tests for inserting google_revenue_source_rows and verifying database constraint
+behavior on amount values.
+"""
     }
     assert "ck_google_revenue_source_rows_raw_payload_object" in checks
 
@@ -225,34 +241,41 @@ def test_raw_payload_object_check_rejects_non_object(
         session.commit()
 
     # '[]' coerces to a jsonb array (jsonb_typeof = 'array'), violating the CHECK.
-    with pytest.raises(IntegrityError):  # noqa: PT012 - multi-statement raises block
-        with fresh_engine.begin() as conn:
-            conn.execute(
-                text(
-                    "INSERT INTO google_revenue_source_rows "
-                    "(tenant_id, source_system, source_row_key, source_account_id, "
-                    " report_type, report_month, period_start, period_end, metric_key, "
-                    " value_kind, amount_native, currency_code, raw_payload) VALUES "
-                    "(:tenant_id, 'youtube_reporting', :key, 'acct', 'rt', '2026-04', "
-                    " '2026-04-01', '2026-04-30', 'estimatedRevenue', 'estimated', "
-                    " 1.0, 'USD', '[]')"
-                ),
-                {"tenant_id": tenant_id, "key": "q" * 64},
-            )
+    with pytest.raises(IntegrityError), fresh_engine.begin() as conn:  # noqa: PT012 - multi-statement raises block
+        conn.execute(
+            text(
+                "INSERT INTO google_revenue_source_rows "
+                "(tenant_id, source_system, source_row_key, source_account_id, "
+                " report_type, report_month, period_start, period_end, metric_key, "
+                " value_kind, amount_native, currency_code, raw_payload) VALUES "
+                ":tenant_id, 'youtube_reporting', :key, 'acct', 'rt', '2026-04', "
+                " '2026-04-01', '2026-04-30', 'estimatedRevenue', 'estimated', "
+                " 1.0, 'USD', '[]')"
+            ),
+            {"tenant_id": tenant_id, "key": "q" * 64},
+        )
 
 
 def _insert_amount_sql(conn: Connection, tenant_id: UUID, key: str, amount: str) -> None:
+    """
+    Insert a revenue source row using raw SQL with the specified amount.
+
+    This helper executes a direct SQL INSERT into google_revenue_source_rows for a given
+    tenant and row key, casting the provided amount string to a numeric value. It is used
+    to test database constraints on the amount_native column.
+    """
     conn.execute(
         text(
             "INSERT INTO google_revenue_source_rows "
             "(tenant_id, source_system, source_row_key, source_account_id, "
             " report_type, report_month, period_start, period_end, metric_key, "
             " value_kind, amount_native, currency_code, raw_payload) VALUES "
-            "(:tenant_id, 'youtube_reporting', :key, 'acct', 'rt', '2026-04', "
+            ":tenant_id, 'youtube_reporting', :key, 'acct', 'rt', '2026-04', "
             " '2026-04-01', '2026-04-30', 'estimatedRevenue', 'estimated', "
-            " CAST(:amt AS numeric), 'USD', '{}')"
+            " CAST(:amt AS numeric), 'USD', '{}'"
         ),
         {"tenant_id": tenant_id, "key": key, "amt": amount},
+    )
     )
 
 
@@ -267,6 +290,8 @@ def test_amount_finite_check_rejects_nan_and_infinity(
         sorts above every finite value), so the ck_..._amount_finite CHECK is
         what rejects it -> IntegrityError.
       - +Infinity is rejected even earlier by the NUMERIC(20,6) column type
+    """
+    # test implementation continues...
         itself ("cannot hold an infinite value") -> DataError.
     """
     command.upgrade(alembic_config, "20260523_0001")
@@ -282,11 +307,9 @@ def test_amount_finite_check_rejects_nan_and_infinity(
         session.commit()
 
     # NaN: stored by the type, rejected by our CHECK constraint.
-    with pytest.raises(IntegrityError):  # noqa: PT012 - multi-statement raises block
-        with fresh_engine.begin() as conn:
-            _insert_amount_sql(conn, tenant_id, "0" + "f" * 63, "NaN")
+    with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
+        _insert_amount_sql(conn, tenant_id, "0" + "f" * 63, "NaN")
 
     # +Infinity: rejected by the NUMERIC(20,6) column type before the CHECK.
-    with pytest.raises(DataError):  # noqa: PT012 - multi-statement raises block
-        with fresh_engine.begin() as conn:
-            _insert_amount_sql(conn, tenant_id, "1" + "f" * 63, "Infinity")
+    with pytest.raises(DataError), fresh_engine.begin() as conn:
+        _insert_amount_sql(conn, tenant_id, "1" + "f" * 63, "Infinity")
