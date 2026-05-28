@@ -57,6 +57,12 @@ def test_fetch_monthly_report_pins_currency_usd_and_date_bounds(
     assert q["dimensions"] == "MONTH"
     assert q["currencyCode"] == "USD"
     assert "report_id" in out
+    # Wire-to-payload preservation at the HTTP boundary: the empty `headers`
+    # and `rows` from the mock response must survive the adapter wrap so the
+    # parser sees the same shape the API returned. Guards against a future
+    # default-shift (e.g. silently coercing None -> []) at the wire seam.
+    assert out["headers"] == []
+    assert out["rows"] == []
 
 
 def test_adapter_wraps_response_with_deterministic_report_id() -> None:
@@ -77,6 +83,34 @@ def test_adapter_wraps_response_with_deterministic_report_id() -> None:
         response_json=response, account_id="pub-1", report_month="2026-05",
     )
     assert payload["report_id"] == payload2["report_id"]
+    # Pass-through assertions: the adapter must preserve request, headers, and
+    # rows from the response_json byte-for-byte. A future key rename or stray
+    # default override would otherwise only fail downstream in the parser at
+    # run time, not here at the unit boundary.
+    assert payload["request"] == response["request"]
+    assert payload["headers"] == response["headers"]
+    assert payload["rows"] == response["rows"]
+
+
+def test_adapter_defaults_when_response_fields_missing() -> None:
+    """When the wire response omits request/headers/rows, the adapter must
+    stamp the documented defaults: request={}, headers=[], rows=None.
+
+    The rows default is intentionally None (NOT []) because
+    AdSenseManagementParser already maps missing/None rows to a clean
+    zero-result, and re-defaulting to [] here would mask a future drift in
+    that contract. Locking the defaults in a unit test closes a regression
+    vector where a refactor could silently flip them.
+    """
+    payload = adsense_response_to_parser_payload(
+        response_json={}, account_id="pub-1", report_month="2026-05",
+    )
+    assert payload["request"] == {}
+    assert payload["headers"] == []
+    assert payload["rows"] is None
+    # report_id still stamped even when the response is empty: provenance
+    # must not depend on the body shape.
+    assert payload["report_id"]
 
 
 def test_adapter_report_id_differs_per_account_or_month() -> None:
