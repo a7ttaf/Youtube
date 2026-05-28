@@ -1105,7 +1105,7 @@ def _process_one_report(
             imported_by=triggered_by_user_id,
             replace_raw_file_id=source_row_raw_file_id is None,
         )
-        source_report_type = _fallback_source_report_type(
+        source_report_types = _fallback_source_report_types(
             parser=parser,
             default_report_type=report_type,
         )
@@ -1123,7 +1123,7 @@ def _process_one_report(
             # succeeded.
             deferred_cleanup_plans = _build_deferred_stale_cleanup_plans(
                 source_system=source_system,
-                report_type=source_report_type,
+                report_types=source_report_types,
                 report_month=report_month,
                 parsed_rows=parsed_rows,
                 fallback_source_account_id=fallback_source_account_id,
@@ -1133,7 +1133,7 @@ def _process_one_report(
                 repo=repo,
                 tenant_id=tenant_id,
                 source_system=source_system,
-                report_type=source_report_type,
+                report_types=source_report_types,
                 report_month=report_month,
                 parsed_rows=parsed_rows,
                 fallback_source_account_id=fallback_source_account_id,
@@ -1209,7 +1209,7 @@ def _source_row_raw_file_id(raw_files: list[RawReportFileORM]) -> UUID | None:
 # ============================================================================
 def _stale_source_row_keys_by_scope(
     *,
-    report_type: str,
+    report_types: Iterable[str],
     parsed_rows: Iterable[ParsedSourceRow],
     fallback_source_account_id: str,
 ) -> dict[tuple[str, str], set[str]]:
@@ -1221,11 +1221,15 @@ def _stale_source_row_keys_by_scope(
         )
     if not keys_by_scope and fallback_source_account_id.strip():
         # FIX: empty successful replacements still need the PARSER-LEVEL
-        # report_type/account scope. Using the outer produced report label
-        # (`youtube_analytics`) misses persisted analytics rows, whose parser
-        # writes `report_type="reports.query"`, and leaves stale finance rows
-        # behind on rerun.
-        keys_by_scope[(report_type.strip(), fallback_source_account_id.strip())] = set()
+        # report_type/account scopes. Using the outer produced report label
+        # misses persisted analytics rows (`reports.query`) and account-scoped
+        # AdSense rows (`earnings_report` / `payment_report`), leaving stale
+        # finance rows behind on rerun.
+        source_account_id = fallback_source_account_id.strip()
+        for report_type in report_types:
+            normalized_report_type = report_type.strip()
+            if normalized_report_type:
+                keys_by_scope[(normalized_report_type, source_account_id)] = set()
     return keys_by_scope
 
 
@@ -1243,7 +1247,7 @@ def _stale_source_row_keys_by_scope(
 def _build_deferred_stale_cleanup_plans(
     *,
     source_system: str,
-    report_type: str,
+    report_types: tuple[str, ...],
     report_month: str,
     parsed_rows: Iterable[ParsedSourceRow],
     fallback_source_account_id: str,
@@ -1258,7 +1262,7 @@ def _build_deferred_stale_cleanup_plans(
             keep_source_row_keys=frozenset(keys),
         )
         for (row_report_type, source_account_id), keys in _stale_source_row_keys_by_scope(
-            report_type=report_type,
+            report_types=report_types,
             parsed_rows=parsed_rows,
             fallback_source_account_id=fallback_source_account_id,
         ).items()
@@ -1343,7 +1347,7 @@ def _flush_deferred_stale_cleanup_plans(
 
 
 # ============================================================================
-# Purpose: Map the outer produced-report label to the source-row report_type
+# Purpose: Map the outer produced-report label to source-row report_type values
 #          used for stale-row cleanup when a successful replacement yields no
 #          parsed rows.
 # Database/ORM: None directly; the returned value scopes repository deletes.
@@ -1351,20 +1355,24 @@ def _flush_deferred_stale_cleanup_plans(
 #            normalization without hardcoding row writes here.
 # Blast Radius: Source-of-truth stale-row deletion scope only.
 # Connections:
-#   - Function: _process_one_report -> provides the fallback report_type for
+#   - Function: _process_one_report -> provides fallback report_type scopes for
 #     _delete_stale_source_rows.
 #   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
 #     youtube_analytics.py -> emits ParsedSourceRow.report_type="reports.query".
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/
+#     adsense_management.py -> emits earnings_report and payment_report rows.
 # ============================================================================
-def _fallback_source_report_type(
+def _fallback_source_report_types(
     *,
     parser: YouTubeReportingParser | YouTubeAnalyticsParser | AdSenseManagementParser,
     default_report_type: str,
-) -> str:
-    """Return the persisted report_type label for empty-success stale cleanup."""
+) -> tuple[str, ...]:
+    """Return persisted report_type labels for empty-success stale cleanup."""
     if isinstance(parser, YouTubeAnalyticsParser):
-        return "reports.query"
-    return default_report_type
+        return ("reports.query",)
+    if isinstance(parser, AdSenseManagementParser):
+        return ("earnings_report", "payment_report")
+    return (default_report_type,)
 
 
 # ============================================================================
@@ -1447,14 +1455,14 @@ def _delete_stale_source_rows(
     repo: SqlAlchemyGoogleRevenueSourceRowRepository,
     tenant_id: UUID,
     source_system: str,
-    report_type: str,
+    report_types: tuple[str, ...],
     report_month: str,
     parsed_rows: Iterable[ParsedSourceRow],
     fallback_source_account_id: str,
 ) -> None:
     """Delete source rows in each scope whose keys are absent from the new parse."""
     for (row_report_type, source_account_id), keys in _stale_source_row_keys_by_scope(
-        report_type=report_type,
+        report_types=report_types,
         parsed_rows=parsed_rows,
         fallback_source_account_id=fallback_source_account_id,
     ).items():
