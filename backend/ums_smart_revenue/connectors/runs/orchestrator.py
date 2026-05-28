@@ -68,6 +68,9 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.auth.audit_service import AuditSink
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.connectors.google.adsense_management_client import (
+    AdSenseManagementClient,
+)
 from ums_smart_revenue.connectors.google.audit import (
     build_connector_service_principal,
     emit_raw_file_downloaded,
@@ -109,6 +112,7 @@ from ums_smart_revenue.connectors.google.youtube_reporting_client import (
     YouTubeReportingClient,
 )
 from ums_smart_revenue.connectors.google_source_parsers import (
+    AdSenseManagementParser,
     YouTubeAnalyticsParser,
     YouTubeReportingParser,
 )
@@ -141,6 +145,7 @@ from ums_smart_revenue.db.report_models import RawReportFileORM
 from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM
 
 __all__ = [
+    "AdSenseManagementRunner",
     "ConnectorRunOutcome",
     "ConnectorRunner",
     "ProducedReportSuccess",
@@ -764,7 +769,7 @@ def _handle_live_produced_report(
     backend: BlobStorageBackend,
     scheme: str,
     bucket: str,
-    parser: YouTubeReportingParser | YouTubeAnalyticsParser,
+    parser: YouTubeReportingParser | YouTubeAnalyticsParser | AdSenseManagementParser,
     repo: SqlAlchemyGoogleRevenueSourceRowRepository,
     produced: ProducedReport,
     ordering_index: int,
@@ -1027,7 +1032,7 @@ def _process_one_report(
     backend: BlobStorageBackend,
     scheme: str,
     bucket: str,
-    parser: YouTubeReportingParser | YouTubeAnalyticsParser,
+    parser: YouTubeReportingParser | YouTubeAnalyticsParser | AdSenseManagementParser,
     repo: SqlAlchemyGoogleRevenueSourceRowRepository,
     report_type: str,
     report_month: str,
@@ -1352,7 +1357,9 @@ def _flush_deferred_stale_cleanup_plans(
 #     youtube_analytics.py -> emits ParsedSourceRow.report_type="reports.query".
 # ============================================================================
 def _fallback_source_report_type(
-    *, parser: YouTubeReportingParser | YouTubeAnalyticsParser, default_report_type: str,
+    *,
+    parser: YouTubeReportingParser | YouTubeAnalyticsParser | AdSenseManagementParser,
+    default_report_type: str,
 ) -> str:
     """Return the persisted report_type label for empty-success stale cleanup."""
     if isinstance(parser, YouTubeAnalyticsParser):
@@ -2705,10 +2712,10 @@ def _extension_for_connector(connector_key: str) -> str:
 
 def _parser_for_connector(
     connector_key: str,
-) -> YouTubeReportingParser | YouTubeAnalyticsParser:
+) -> YouTubeReportingParser | YouTubeAnalyticsParser | AdSenseManagementParser:
     """Return the source-row parser bound to a given connector key.
 
-    B2.5 adds YouTubeAnalyticsParser; B2.6 will add AdSenseManagementParser.
+    B2.5 added YouTubeAnalyticsParser; B2.6 (T38) wires AdSenseManagementParser.
     The helper isolates connector-to-parser routing from ``run_one`` so future
     registrations only touch this mapping rather than the orchestrator body.
     """
@@ -2716,6 +2723,8 @@ def _parser_for_connector(
         return YouTubeReportingParser()
     if connector_key in {"youtube-analytics", "youtube_analytics"}:
         return YouTubeAnalyticsParser()
+    if connector_key in {"adsense-management", "adsense_management"}:
+        return AdSenseManagementParser()
     raise ValueError(f"no parser bound for connector_key: {connector_key!r}")
 
 
@@ -2932,6 +2941,99 @@ class YouTubeAnalyticsRunner:
             http.close()
 
 
+# ============================================================================
+# Purpose: B2.6 adapter that fetches the AdSense Management v2 monthly
+#          account-earnings report. AdSense is account-scoped (one report per
+#          account per month), so each ``produce_reports`` call yields exactly
+#          one parser-ready payload — no per-channel iteration, no dimension
+#          synthesis (the T35 adapter wraps the wire response in the parser-
+#          ready shape with a deterministic ``report_id`` already stamped).
+# Database/ORM: None directly — orchestrator owns the blob/raw_file/source-row
+#               writes. AdSense rows persist to GoogleRevenueSourceRowORM with
+#               source_system == "adsense_management" and youtube_channel_id
+#               NULL.
+# Standards: Typed keyword-only contract matching ``ConnectorRunner``; the
+#            class references ``AdSenseManagementClient`` by bare name so
+#            tests can patch
+#            ``ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient``
+#            and replace what the runner actually uses. ``OAuthRefreshError``
+#            still escapes for run-level handling; any other
+#            ``GoogleConnectorError`` is yielded as a ``ProducedReportFailure``
+#            so the orchestrator's Bucket B handler marks the run FAILED
+#            (one-report run -> no PARTIAL semantics; no sibling reports
+#            survive).
+# Blast Radius: AdSense ingestion is audit/evidence only in B2 — C1 skips
+#               AdSense rows as SkipReason.MISSING_CHANNEL_ID until a future
+#               allocation/mapping spec, so finance totals do not move on this
+#               connector. The runner still owes a clean source_report_id
+#               provenance trail for the audit pipeline.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/google/adsense_management_client.py
+#     -> AdSenseManagementClient.fetch_monthly_report returns the parser-ready
+#     payload (request/headers/rows/report_id) this runner yields verbatim.
+#   - File: backend/ums_smart_revenue/connectors/google_source_parsers/adsense_management.py
+#     -> AdSenseManagementParser consumes ``("adsense_management", payload, bytes)``.
+#   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md
+#     §5.6 -> AdSense ingestion contract.
+# ============================================================================
+class AdSenseManagementRunner:
+    """B2.6 adapter that fetches the AdSense monthly account-earnings report.
+
+    AdSense is account-scoped (one report per account per month), so each run
+    yields exactly one parser-ready payload. The class references
+    ``AdSenseManagementClient`` by bare name so tests can patch
+    ``ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient``
+    and replace what the runner actually instantiates.
+
+    AdSense rows are ingestion / audit evidence only in B2; C1 skips them as
+    ``SkipReason.MISSING_CHANNEL_ID`` until a future allocation/mapping spec.
+    """
+
+    def produce_reports(  # skipcq: PYL-R0201
+        self,
+        *,
+        session: Session,
+        run: ConnectorRunEntry | None,
+        credentials: Credentials,
+        report_month: str,
+        account_id: str,
+    ) -> Iterator[ProducedReport]:
+        """Yield the single AdSense monthly report for the supplied (account, month).
+
+        ``AdSenseManagementClient.fetch_monthly_report`` already wraps the wire
+        response in the parser-ready shape (request/headers/rows/report_id), so
+        the runner forwards it verbatim. ``OAuthRefreshError`` escapes for the
+        orchestrator's run-level handling; any other ``GoogleConnectorError``
+        is yielded as a ``ProducedReportFailure`` so the existing Bucket B
+        handler counts the failure consistently with the other connector
+        runners — this run has only one report, so a failure here marks the
+        whole run FAILED (no sibling reports to keep PARTIAL).
+        """
+        http = GoogleHttpClient(credentials=credentials)
+        try:
+            client = AdSenseManagementClient(http=http)
+            try:
+                parser_payload = client.fetch_monthly_report(
+                    account_id=account_id,
+                    report_month=report_month,
+                )
+            except OAuthRefreshError:
+                raise
+            except GoogleConnectorError as exc:
+                yield ProducedReportFailure(
+                    report_type="adsense_management", error=exc,
+                )
+                return
+            # Stored blob is the parser-ready payload JSON: the adapter already
+            # stamped a deterministic report_id on it, so a full replay through
+            # AdSenseManagementParser needs no runner state. ``sort_keys`` keeps
+            # the on-disk bytes byte-stable across reruns for the same inputs.
+            raw_bytes = json.dumps(parser_payload, sort_keys=True).encode("utf-8")
+            yield ("adsense_management", parser_payload, raw_bytes)
+        finally:
+            http.close()
+
+
 # ----------------------------------------------------------------------------
 # Module-load registration
 # ----------------------------------------------------------------------------
@@ -2943,3 +3045,5 @@ register_connector(key="youtube-reporting", runner=YouTubeReportingRunner())
 register_connector(key="youtube_reporting", runner=YouTubeReportingRunner())
 register_connector(key="youtube-analytics", runner=YouTubeAnalyticsRunner())
 register_connector(key="youtube_analytics", runner=YouTubeAnalyticsRunner())
+register_connector(key="adsense-management", runner=AdSenseManagementRunner())
+register_connector(key="adsense_management", runner=AdSenseManagementRunner())

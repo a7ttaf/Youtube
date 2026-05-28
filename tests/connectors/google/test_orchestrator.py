@@ -4524,3 +4524,220 @@ def test_run_one_fail_closed_when_service_actor_id_missing(
     assert session.query(ConnectorRunORM).count() == 0
     assert session.query(RawReportFileORM).count() == 0
     assert _connector_audit_events(session) == []
+
+
+# ============================================================================
+# B2.6 Task 38: AdSenseManagementRunner orchestrator integration test.
+# AdSense is account-scoped (one report per account per month), so the runner
+# yields exactly one parser-ready payload per run and the orchestrator should
+# SUCCEED with one DOWNLOADED -> PARSED raw_file. AdSense rows skip in C1 as
+# MISSING_CHANNEL_ID, but that gate lives in T39's end-to-end test, not here.
+# ============================================================================
+
+_ADSENSE_CONNECTOR_KEY = "adsense-management"
+_ADSENSE_ACCOUNT_ID = "pub-orch-1"
+
+
+def _make_adsense_parser_payload(
+    *,
+    account_id: str = _ADSENSE_ACCOUNT_ID,
+    report_month: str = "2026-05",
+) -> dict[str, object]:
+    """Build the parser-ready AdSense payload the mock client returns.
+
+    Mirrors the shape ``adsense_response_to_parser_payload`` stamps onto the
+    wire response: a ``request`` dict carrying ``accountId`` (prefixed with
+    ``accounts/``), the ``dateRange``, and the ``currencyCode``; a ``headers``
+    list whose entries declare ``type`` (DIMENSION or METRIC_CURRENCY) and
+    ``name``; a ``rows`` list of ``{"cells": [...]}`` entries; and the
+    deterministic ``report_id`` string.
+
+    One MONTH dimension + the locked ESTIMATED_EARNINGS + PAID_AMOUNT metric
+    pair produces two ParsedSourceRow rows on the same input row (the parser
+    splits per-metric: ESTIMATED_EARNINGS -> earnings_report/estimated, and
+    PAID_AMOUNT -> payment_report/settled).
+    """
+    year_s, month_s = report_month.split("-")
+    year_i, month_i = int(year_s), int(month_s)
+    from calendar import monthrange as _monthrange
+
+    last_day = _monthrange(year_i, month_i)[1]
+    return {
+        "request": {
+            "accountId": f"accounts/{account_id}",
+            "dateRange": {
+                "startDate": {"year": year_i, "month": month_i, "day": 1},
+                "endDate": {"year": year_i, "month": month_i, "day": last_day},
+            },
+            "currencyCode": "USD",
+        },
+        "headers": [
+            {"type": "DIMENSION", "name": "MONTH"},
+            {
+                "type": "METRIC_CURRENCY",
+                "name": "ESTIMATED_EARNINGS",
+                "currencyCode": "USD",
+            },
+            {
+                "type": "METRIC_CURRENCY",
+                "name": "PAID_AMOUNT",
+                "currencyCode": "USD",
+            },
+        ],
+        "rows": [
+            {
+                "cells": [
+                    {"value": f"{year_s}{month_s}"},
+                    {"value": "123.450000"},
+                    {"value": "67.890000"},
+                ],
+            },
+        ],
+        "report_id": f"deterministic-stub-{account_id}-{report_month}",
+    }
+
+
+def test_run_one_with_adsense_management_succeeds_for_account_scoped_run(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """Drive run_one end-to-end with the adsense-management connector.
+
+    AdSenseManagementClient.fetch_monthly_report is patched at orchestrator
+    module scope to return a parser-ready payload (no network). AdSense is
+    account-scoped, so exactly one report is produced per run regardless of
+    channels.
+
+    Asserts:
+    - outcome.run.status == "SUCCEEDED"
+    - outcome.counts["reports_attempted"] == 1
+    - outcome.counts["reports_succeeded"] == 1
+    - outcome.counts["reports_failed"] == 0
+    - Exactly one RawReportFileORM row exists with source == "adsense_management"
+      and parse_status == "PARSED"
+    - GoogleRevenueSourceRowORM rows are present in tenant scope, all carry
+      source_system == "adsense_management", and youtube_channel_id is None
+      (AdSense reports are account-scoped, not channel-scoped).
+    - Audit lifecycle is STARTED -> DOWNLOADED -> PARSED -> FINISHED.
+    """
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ADSENSE_CONNECTOR_KEY,
+        account_id=_ADSENSE_ACCOUNT_ID,
+    )
+    report_month = "2026-05"
+    payload = _make_adsense_parser_payload(
+        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+    )
+
+    def fake_fetch_monthly_report(*, account_id: str, report_month: str) -> dict:
+        """Return the parser-ready stub payload; assert the (account, month) slice."""
+        assert account_id == _ADSENSE_ACCOUNT_ID
+        assert report_month == "2026-05"
+        return payload
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient"
+    ) as adsense_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        adsense_client = adsense_cls.return_value
+        adsense_client.fetch_monthly_report.side_effect = fake_fetch_monthly_report
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+
+        def fake_upload(*, storage_uri, content):
+            """Stash uploaded bytes in the in-memory blob store."""
+            store[storage_uri] = content
+
+        def fake_get(*, storage_uri):
+            """Read bytes back from the in-memory blob store."""
+            return store[storage_uri]
+
+        backend.upload.side_effect = fake_upload
+        backend.get_bytes.side_effect = fake_get
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=_ADSENSE_CONNECTOR_KEY,
+            account_id=_ADSENSE_ACCOUNT_ID,
+            report_month=report_month,
+        )
+
+    # ----- outcome shape -----
+    assert isinstance(outcome, ConnectorRunOutcome)
+    assert outcome.run is not None
+    assert outcome.run.status == "SUCCEEDED"
+    assert outcome.per_report_failures == []
+
+    # ----- counts: AdSense yields exactly one report per (account, month) -----
+    counts = outcome.counts
+    assert counts["reports_attempted"] == 1
+    assert counts["reports_succeeded"] == 1
+    assert counts["reports_failed"] == 0
+    # The fixture row carries both ESTIMATED_EARNINGS and PAID_AMOUNT metrics,
+    # so the parser emits two ParsedSourceRow rows from the same input cells.
+    assert counts["rows_upserted_total"] == 2
+
+    # ----- durable side effects: raw_report_files -----
+    raw_files = session.scalars(
+        select(RawReportFileORM).where(RawReportFileORM.tenant_id == TENANT_ID)
+    ).all()
+    assert len(raw_files) == 1
+    raw_file = raw_files[0]
+    assert raw_file.parse_status == "PARSED"
+    assert raw_file.source == "adsense_management"
+    assert raw_file.report_month == report_month
+
+    # The runner serialises the parser_payload as JSON; the blob bytes the
+    # backend received should decode back into the same payload dict.
+    stored_bytes = store[raw_file.file_url]
+    assert json.loads(stored_bytes.decode("utf-8")) == payload
+
+    # ----- durable side effects: connector_run_raw_files join rows -----
+    links = session.scalars(
+        select(ConnectorRunRawFileORM).where(
+            ConnectorRunRawFileORM.tenant_id == TENANT_ID
+        )
+    ).all()
+    assert len(links) == 1
+
+    # ----- durable side effects: google_revenue_source_rows -----
+    source_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID
+        )
+    ).all()
+    assert len(source_rows) == 2
+    assert all(r.source_system == "adsense_management" for r in source_rows)
+    # AdSense is account-scoped; the parser leaves youtube_channel_id NULL.
+    assert all(r.youtube_channel_id is None for r in source_rows)
+    assert all(r.source_account_id == _ADSENSE_ACCOUNT_ID for r in source_rows)
+    assert {r.metric_key for r in source_rows} == {
+        "ESTIMATED_EARNINGS", "PAID_AMOUNT",
+    }
+    # Per-metric report_type / value_kind split: PAID_AMOUNT is settled cash,
+    # ESTIMATED_EARNINGS is the unsettled estimate.
+    by_metric = {r.metric_key: r for r in source_rows}
+    assert by_metric["ESTIMATED_EARNINGS"].report_type == "earnings_report"
+    assert by_metric["ESTIMATED_EARNINGS"].value_kind == "estimated"
+    assert by_metric["PAID_AMOUNT"].report_type == "payment_report"
+    assert by_metric["PAID_AMOUNT"].value_kind == "settled"
+
+    # ----- audit lifecycle -----
+    events = _connector_audit_events(session)
+    assert _audit_lifecycles(events) == [
+        "STARTED",
+        "DOWNLOADED",
+        "PARSED",
+        "FINISHED",
+    ]
