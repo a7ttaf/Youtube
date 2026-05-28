@@ -3735,3 +3735,146 @@ def test_run_one_with_youtube_analytics_dry_run_succeeds_for_cms_channels_only(
         .count()
         == 0
     )
+
+
+def test_run_one_with_youtube_analytics_no_eligible_channels(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """Zero-eligible-channels path must terminate FAILED with reports_attempted=0.
+
+    Seeds four channels, none of which match the (tenant_id + active +
+    revenue_required + content_owner_id == account_id) eligibility filter:
+      - UC_no_active: inactive (active=False)
+      - UC_no_rev: revenue_required=False
+      - UC_other_owner: content_owner_id != account_id
+      - UC_other_tenant: belongs to a different tenant
+
+    list_target_channels() returns [] and YouTubeAnalyticsRunner yields no
+    reports. The orchestrator's _derive_terminal_status maps reports_attempted=0
+    to status='FAILED' so the operator console flags the run, rather than
+    leaving it RUNNING or marking SUCCEEDED with zero data.
+
+    Asserts:
+    - fetch_channel_report is never invoked
+    - outcome.run.status == 'FAILED'
+    - counts['reports_attempted'] == 0
+    - counts['reports_succeeded'] == 0
+    - counts['reports_failed'] == 0
+    - No raw_report_files / connector_run_raw_files / source_rows persisted
+    """
+    other_tenant_id = uuid4()
+    session.add_all(
+        [
+            YouTubeChannelORM(
+                id=uuid4(),
+                tenant_id=TENANT_ID,
+                youtube_channel_id="UC_no_active",
+                channel_name="Inactive CMS",
+                content_owner_id=_ANALYTICS_ACCOUNT_ID,
+                active=False,
+                revenue_required=True,
+            ),
+            YouTubeChannelORM(
+                id=uuid4(),
+                tenant_id=TENANT_ID,
+                youtube_channel_id="UC_no_rev",
+                channel_name="No-revenue CMS",
+                content_owner_id=_ANALYTICS_ACCOUNT_ID,
+                active=True,
+                revenue_required=False,
+            ),
+            YouTubeChannelORM(
+                id=uuid4(),
+                tenant_id=TENANT_ID,
+                youtube_channel_id="UC_other_owner",
+                channel_name="Different content owner",
+                content_owner_id="some-other-cms-owner",
+                active=True,
+                revenue_required=True,
+            ),
+            YouTubeChannelORM(
+                id=uuid4(),
+                tenant_id=other_tenant_id,
+                youtube_channel_id="UC_other_tenant",
+                channel_name="Different tenant, same owner",
+                content_owner_id=_ANALYTICS_ACCOUNT_ID,
+                active=True,
+                revenue_required=True,
+            ),
+        ]
+    )
+    session.flush()
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ANALYTICS_CONNECTOR_KEY,
+        account_id=_ANALYTICS_ACCOUNT_ID,
+    )
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.YouTubeAnalyticsClient"
+    ) as yt_analytics_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+
+        analytics_client = yt_analytics_cls.return_value
+        analytics_client.fetch_channel_report.side_effect = AssertionError(
+            "fetch_channel_report must not be called when no channels are eligible"
+        )
+
+        backend = local_cls.return_value
+        backend.upload.side_effect = AssertionError(
+            "blob upload must not run when no reports are produced"
+        )
+        backend.get_bytes.side_effect = AssertionError(
+            "blob get_bytes must not run when no reports are produced"
+        )
+
+        outcome = run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=_ANALYTICS_CONNECTOR_KEY,
+            account_id=_ANALYTICS_ACCOUNT_ID,
+            report_month="2026-05",
+        )
+
+        assert analytics_client.fetch_channel_report.call_count == 0
+
+    assert isinstance(outcome, ConnectorRunOutcome)
+    assert outcome.run is not None
+    assert outcome.run.status == "FAILED"
+    assert outcome.per_report_failures == []
+
+    counts = outcome.counts
+    assert counts["reports_attempted"] == 0
+    assert counts["reports_succeeded"] == 0
+    assert counts["reports_failed"] == 0
+    assert counts["rows_upserted_total"] == 0
+    assert counts["rows_upserted_created"] == 0
+    assert counts["rows_upserted_updated"] == 0
+    assert counts["rows_upserted_unchanged"] == 0
+
+    assert (
+        session.query(RawReportFileORM)
+        .filter(RawReportFileORM.tenant_id == TENANT_ID)
+        .count()
+        == 0
+    )
+    assert (
+        session.query(ConnectorRunRawFileORM)
+        .filter(ConnectorRunRawFileORM.tenant_id == TENANT_ID)
+        .count()
+        == 0
+    )
+    assert (
+        session.query(GoogleRevenueSourceRowORM)
+        .filter(GoogleRevenueSourceRowORM.tenant_id == TENANT_ID)
+        .count()
+        == 0
+    )
