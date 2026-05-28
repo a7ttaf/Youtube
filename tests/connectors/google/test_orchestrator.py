@@ -4610,6 +4610,80 @@ def _make_adsense_parser_payload(
     }
 
 
+def _make_adsense_payment_parser_payload(
+    *,
+    account_id: str = _ADSENSE_ACCOUNT_ID,
+    report_month: str = "2026-05",
+) -> dict[str, object]:
+    """Build an AdSense payload that emits a payment_report row."""
+    year_s, month_s = report_month.split("-")
+    payload = _make_adsense_parser_payload(
+        account_id=account_id, report_month=report_month,
+    )
+    payload["headers"] = [
+        {"type": "DIMENSION", "name": "MONTH"},
+        {"type": "METRIC_CURRENCY", "name": "PAID_AMOUNT", "currencyCode": "USD"},
+    ]
+    payload["rows"] = [
+        {
+            "cells": [
+                {"value": f"{year_s}{month_s}"},
+                {"value": "9.990000"},
+            ],
+        },
+    ]
+    payload["report_id"] = f"deterministic-stub-payment-{account_id}-{report_month}"
+    return payload
+
+
+def _run_adsense_orchestrator_with_payload(
+    session: Session,
+    *,
+    account_id: str,
+    report_month: str,
+    payload: dict[str, object],
+) -> ConnectorRunOutcome:
+    """Drive one AdSense run with a parser-ready payload and no network."""
+    expected_account_id = account_id
+    expected_report_month = report_month
+
+    def fake_fetch_monthly_report(*, account_id: str, report_month: str) -> dict:
+        """Return the closure-captured payload for the account/month slice."""
+        assert account_id == expected_account_id
+        assert report_month == expected_report_month
+        return payload
+
+    with patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient"
+    ) as adsense_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
+    ) as local_cls, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
+    ) as refresh, patch(
+        "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
+    ) as http_cls:
+        http_cls.return_value.close.return_value = None
+        refresh.return_value = None
+        adsense_cls.return_value.fetch_monthly_report.side_effect = (
+            fake_fetch_monthly_report
+        )
+
+        backend = local_cls.return_value
+        store: dict[str, bytes] = {}
+        backend.upload.side_effect = (
+            lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
+        )
+        backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
+
+        return run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=_ADSENSE_CONNECTOR_KEY,
+            account_id=expected_account_id,
+            report_month=expected_report_month,
+        )
+
+
 def test_run_one_with_adsense_management_succeeds_for_account_scoped_run(
     session: Session, _stub_secret_resolver
 ) -> None:
@@ -4768,45 +4842,12 @@ def test_run_one_with_adsense_management_empty_success_replaces_existing_rows(
     )
     payload_empty = {**payload_with_rows, "rows": []}
 
-    def _run_with_payload(payload: dict[str, object]) -> ConnectorRunOutcome:
-        """Drive one AdSense run with a parser-ready payload and no network."""
-        def fake_fetch_monthly_report(*, account_id: str, report_month: str) -> dict:
-            """Return the closure-captured payload for the account/month slice."""
-            assert account_id == _ADSENSE_ACCOUNT_ID
-            assert report_month == "2026-05"
-            return payload
-
-        with patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.AdSenseManagementClient"
-        ) as adsense_cls, patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.LocalFileStoreBackend"
-        ) as local_cls, patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.refresh_credentials"
-        ) as refresh, patch(
-            "ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"
-        ) as http_cls:
-            http_cls.return_value.close.return_value = None
-            refresh.return_value = None
-            adsense_cls.return_value.fetch_monthly_report.side_effect = (
-                fake_fetch_monthly_report
-            )
-
-            backend = local_cls.return_value
-            store: dict[str, bytes] = {}
-            backend.upload.side_effect = (
-                lambda *, storage_uri, content: store.__setitem__(storage_uri, content)
-            )
-            backend.get_bytes.side_effect = lambda *, storage_uri: store[storage_uri]
-
-            return run_one(
-                session,
-                tenant_id=TENANT_ID,
-                connector_key=_ADSENSE_CONNECTOR_KEY,
-                account_id=_ADSENSE_ACCOUNT_ID,
-                report_month=report_month,
-            )
-
-    first_outcome = _run_with_payload(payload_with_rows)
+    first_outcome = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
+        payload=payload_with_rows,
+    )
     assert first_outcome.run is not None
     assert first_outcome.run.status == "SUCCEEDED"
     assert first_outcome.counts["rows_upserted_total"] == 2
@@ -4825,7 +4866,12 @@ def test_run_one_with_adsense_management_empty_success_replaces_existing_rows(
     }
     assert {row.report_type for row in initial_rows} == {"earnings_report"}
 
-    second_outcome = _run_with_payload(payload_empty)
+    second_outcome = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
+        payload=payload_empty,
+    )
     assert second_outcome.run is not None
     assert second_outcome.run.status == "SUCCEEDED"
     assert second_outcome.counts["reports_attempted"] == 1
@@ -4841,3 +4887,67 @@ def test_run_one_with_adsense_management_empty_success_replaces_existing_rows(
         )
     ).all()
     assert final_rows == []
+
+
+def test_run_one_with_adsense_management_nonempty_success_deletes_missing_scope(
+    session: Session, _stub_secret_resolver
+) -> None:
+    """A nonempty AdSense replacement must delete metric types it no longer emits."""
+    _make_credential_row(
+        session,
+        tenant_id=TENANT_ID,
+        connector_key=_ADSENSE_CONNECTOR_KEY,
+        account_id=_ADSENSE_ACCOUNT_ID,
+    )
+    report_month = "2026-05"
+    payload_payment = _make_adsense_payment_parser_payload(
+        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+    )
+    payload_earnings = _make_adsense_parser_payload(
+        account_id=_ADSENSE_ACCOUNT_ID, report_month=report_month,
+    )
+
+    first_outcome = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
+        payload=payload_payment,
+    )
+    assert first_outcome.run is not None
+    assert first_outcome.run.status == "SUCCEEDED"
+    assert first_outcome.counts["rows_upserted_total"] == 1
+
+    initial_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "adsense_management",
+            GoogleRevenueSourceRowORM.report_month == report_month,
+            GoogleRevenueSourceRowORM.source_account_id == _ADSENSE_ACCOUNT_ID,
+        )
+    ).all()
+    assert {row.report_type for row in initial_rows} == {"payment_report"}
+    assert {row.metric_key for row in initial_rows} == {"PAID_AMOUNT"}
+
+    second_outcome = _run_adsense_orchestrator_with_payload(
+        session,
+        account_id=_ADSENSE_ACCOUNT_ID,
+        report_month=report_month,
+        payload=payload_earnings,
+    )
+    assert second_outcome.run is not None
+    assert second_outcome.run.status == "SUCCEEDED"
+    assert second_outcome.counts["rows_upserted_total"] == 2
+
+    final_rows = session.scalars(
+        select(GoogleRevenueSourceRowORM).where(
+            GoogleRevenueSourceRowORM.tenant_id == TENANT_ID,
+            GoogleRevenueSourceRowORM.source_system == "adsense_management",
+            GoogleRevenueSourceRowORM.report_month == report_month,
+            GoogleRevenueSourceRowORM.source_account_id == _ADSENSE_ACCOUNT_ID,
+        )
+    ).all()
+    assert {row.report_type for row in final_rows} == {"earnings_report"}
+    assert {row.metric_key for row in final_rows} == {
+        "ESTIMATED_EARNINGS",
+        "TOTAL_EARNINGS",
+    }

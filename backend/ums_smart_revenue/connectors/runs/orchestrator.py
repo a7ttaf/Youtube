@@ -1207,7 +1207,8 @@ def _source_row_raw_file_id(raw_files: list[RawReportFileORM]) -> UUID | None:
 # Database/ORM: None directly; the returned plans scope later repository
 #               deletes.
 # Standards: Groups by parser-owned report_type + source_account_id and keeps
-#            empty-success cleanup aligned with the persisted analytics scope.
+#            empty/partial replacement cleanup aligned with the persisted
+#            analytics scope.
 # Blast Radius: Source-of-truth source-row cleanup only.
 # Connections:
 #   - Function: _process_one_report -> defers analytics cleanup until the owner
@@ -1227,17 +1228,18 @@ def _stale_source_row_keys_by_scope(
         keys_by_scope.setdefault((row.report_type, row.source_account_id), set()).add(
             row.source_row_key
         )
-    if not keys_by_scope and fallback_source_account_id.strip():
-        # FIX: empty successful replacements still need the PARSER-LEVEL
-        # report_type/account scopes. Using the outer produced report label
-        # misses persisted analytics rows (`reports.query`) and account-scoped
-        # AdSense rows (`earnings_report` / `payment_report`), leaving stale
-        # finance rows behind on rerun.
-        source_account_id = fallback_source_account_id.strip()
-        for report_type in report_types:
-            normalized_report_type = report_type.strip()
-            if normalized_report_type:
-                keys_by_scope[(normalized_report_type, source_account_id)] = set()
+    normalized_report_types = tuple(
+        report_type.strip() for report_type in report_types if report_type.strip()
+    )
+    source_account_id = fallback_source_account_id.strip()
+    if source_account_id and (not keys_by_scope or len(normalized_report_types) > 1):
+        # FIX: successful replacements need every PARSER-LEVEL report_type/account
+        # scope, not only the scopes represented by newly parsed rows. AdSense
+        # can replace a prior payment_report with an earnings-only payload; if
+        # payment_report is not seeded with an empty keep-set, stale settled rows
+        # survive the rerun.
+        for normalized_report_type in normalized_report_types:
+            keys_by_scope.setdefault((normalized_report_type, source_account_id), set())
     return keys_by_scope
 
 

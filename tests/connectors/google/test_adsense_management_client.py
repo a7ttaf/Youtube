@@ -83,6 +83,30 @@ def test_fetch_monthly_report_pins_currency_usd_and_date_bounds(
     assert out["rows"] == []
 
 
+def test_fetch_monthly_report_accepts_full_account_resource_name(
+    mock_credentials,
+) -> None:
+    """Stored AdSense account resources must not double-prefix the URL path."""
+    captured: dict[str, str] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        """Capture the normalized AdSense report URL."""
+        captured["path"] = request.url.path
+        return httpx.Response(200, json={"headers": [], "rows": []})
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
+    )
+    client = AdSenseManagementClient(http=http)
+    out = client.fetch_monthly_report(
+        account_id="accounts/pub-1", report_month="2026-05",
+    )
+
+    assert captured["path"] == "/v2/accounts/pub-1/reports:generate"
+    assert out["request"]["accountId"] == "accounts/pub-1"
+
+
 def test_adapter_wraps_response_with_deterministic_report_id() -> None:
     """Two identical (account_id, report_month) inputs must produce the same
     deterministic SHA-256 report_id stamp, since AdSense reports.generate does
@@ -115,6 +139,33 @@ def test_adapter_wraps_response_with_deterministic_report_id() -> None:
     }
     assert payload["headers"] == response["headers"]
     assert payload["rows"] == response["rows"]
+
+
+def test_adapter_preserves_google_report_result_metadata() -> None:
+    """Raw AdSense evidence must retain Google metadata outside parser fields."""
+    response = {
+        "request": {"accountId": "accounts/should-not-be-trusted"},
+        "headers": [{"type": "DIMENSION", "name": "MONTH"}],
+        "rows": [],
+        "totalMatchedRows": "0",
+        "totals": [{"cells": [{"value": "0.000000"}]}],
+        "averages": [{"cells": [{"value": "0.000000"}]}],
+        "warnings": ["LOW_DATA"],
+        "startDate": {"year": 2026, "month": 5, "day": 1},
+        "endDate": {"year": 2026, "month": 5, "day": 31},
+    }
+
+    payload = adsense_response_to_parser_payload(
+        response_json=response, account_id="pub-1", report_month="2026-05",
+    )
+
+    assert payload["request"]["accountId"] == "accounts/pub-1"
+    assert payload["totalMatchedRows"] == response["totalMatchedRows"]
+    assert payload["totals"] == response["totals"]
+    assert payload["averages"] == response["averages"]
+    assert payload["warnings"] == response["warnings"]
+    assert payload["startDate"] == response["startDate"]
+    assert payload["endDate"] == response["endDate"]
 
 
 def test_adapter_defaults_when_response_fields_missing() -> None:
@@ -191,6 +242,34 @@ def test_fetch_monthly_report_rejects_truncated_report_result(mock_credentials) 
     with pytest.raises(GoogleApiResponseError, match="truncated"):
         client.fetch_monthly_report(account_id="pub-1", report_month="2026-05")
     assert calls == 1
+
+
+@pytest.mark.parametrize(
+    "bad_account_id",
+    ["pub/1", "pub?x=1", "pub#frag", "pub%2F1", "accounts/pub/1", "accounts/"],
+)
+def test_fetch_monthly_report_rejects_reserved_account_id_delimiters_before_http(
+    mock_credentials, bad_account_id: str,
+) -> None:
+    """Reserved path/query delimiters must fail before URL construction."""
+    calls = 0
+
+    def handler(_request: httpx.Request) -> httpx.Response:
+        """Count any unexpected HTTP call for the malformed-account branch."""
+        nonlocal calls
+        calls += 1
+        return httpx.Response(200, json={})
+
+    http = GoogleHttpClient(
+        credentials=mock_credentials,
+        transport=httpx.MockTransport(handler),
+    )
+    client = AdSenseManagementClient(http=http)
+    with pytest.raises(MalformedAdsenseAccountIdError):
+        client.fetch_monthly_report(
+            account_id=bad_account_id, report_month="2026-05",
+        )
+    assert calls == 0
 
 
 @pytest.mark.parametrize("bad_month", ["2026-5", "2026", "abcd-ef", "2026-13", ""])

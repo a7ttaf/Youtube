@@ -54,6 +54,8 @@ _CURRENCY = "USD"
 SUPPORTED_ADSENSE_REPORTS: frozenset[str] = frozenset({"monthly_account_earnings"})
 _REPORT_KEY = "monthly_account_earnings"
 _MAX_REPORT_RESULT_ROWS = 100_000
+_ACCOUNT_RESOURCE_PREFIX = "accounts/"
+_ACCOUNT_ID_RESERVED_CHARS = frozenset("/?#%")
 
 
 def _report_month_date_range(report_month: str) -> tuple[int, int, int]:
@@ -69,11 +71,18 @@ def _report_month_date_range(report_month: str) -> tuple[int, int, int]:
 
 
 def _validated_account_id(account_id: str) -> str:
-    """Return an account id only when it is non-empty and already normalized."""
+    """Return a normalized account id after fail-closed path validation."""
     candidate = account_id.strip()
     if not candidate or candidate != account_id:
         # Fail closed before URL construction so a blank or whitespace-padded
         # external account identifier cannot produce an ambiguous Google path.
+        raise MalformedAdsenseAccountIdError(account_id=account_id)
+    if candidate.startswith(_ACCOUNT_RESOURCE_PREFIX):
+        candidate = candidate.removeprefix(_ACCOUNT_RESOURCE_PREFIX)
+    if not candidate or any(ch in candidate for ch in _ACCOUNT_ID_RESERVED_CHARS):
+        # Accept persisted full resource names ("accounts/<id>") by stripping
+        # the trusted prefix, then reject every remaining path/query delimiter
+        # before interpolating into the Google endpoint path.
         raise MalformedAdsenseAccountIdError(account_id=account_id)
     return candidate
 
@@ -198,8 +207,9 @@ def _reject_truncated_report_result(
 #   is the connector's source_report_id provenance for idempotent reruns.
 # Database/ORM: None (pure response shaping; no DB or secret access).
 # Standards: Typed dict[str, object] boundary; raises MalformedReportMonthError
-#   for invalid date bounds; missing rows tolerated as None (parser already
-#   maps None -> empty list).
+#   for invalid date bounds and MalformedAdsenseAccountIdError for unsafe
+#   account paths; missing rows tolerated as None (parser already maps None ->
+#   empty list).
 # Blast Radius: Connector parser-payload only — no finance/audit/Neo4j write
 #   here. A drift in the stamped key would change provenance across reruns
 #   and break source_report_id-based audit traceability for the same slice.
@@ -216,19 +226,20 @@ def adsense_response_to_parser_payload(
     report_month: str,
 ) -> dict[str, object]:
     """Wrap a reports.generate body with a deterministic report_id stamp."""
+    account_id = _validated_account_id(account_id)
     report_id = hashlib.sha256(
         f"{account_id}|{report_month}|{_REPORT_KEY}".encode()
     ).hexdigest()
-    return {
-        "request": _synthesized_request(
-            account_id=account_id, report_month=report_month,
-        ),
-        "headers": response_json.get("headers", []),
-        # Parser tolerates a missing/None `rows` as a clean zero-result; passing
-        # the raw .get() result preserves that contract without re-defaulting.
-        "rows": response_json.get("rows"),
-        "report_id": report_id,
-    }
+    payload = dict(response_json)
+    payload["request"] = _synthesized_request(
+        account_id=account_id, report_month=report_month,
+    )
+    payload["headers"] = response_json.get("headers", [])
+    # Parser tolerates a missing/None `rows` as a clean zero-result; passing
+    # the raw .get() result preserves that contract without re-defaulting.
+    payload["rows"] = response_json.get("rows")
+    payload["report_id"] = report_id
+    return payload
 
 
 # ============================================================================
