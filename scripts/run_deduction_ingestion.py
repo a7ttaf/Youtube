@@ -16,12 +16,6 @@
 #     build_connector_service_principal (RUN_CONNECTOR_JOBS service actor).
 # ============================================================================
 """
-"""
-CLI for running deduction-component ingestion.
-
-This module parses command-line arguments and orchestrates
-the deduction ingestion process for a specified tenant and month.
-"""
 
 from __future__ import annotations
 
