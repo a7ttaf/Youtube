@@ -78,13 +78,14 @@ class AdSensePaymentRequest(BaseModel):
     def canonicalize_source_account_id(cls, value):
         if not isinstance(value, str):
             return value
-        stripped = value.strip()
-        if not stripped:
-            raise ValueError("source_account_id must not be blank")
         try:
-            # Same canonical convention as the live pull and Google source rows:
-            # strip `accounts/`, reject blank/whitespace-padded/reserved chars.
-            return _validated_account_id(stripped)
+            # FIX: defer ALL normalization to the shared canonical normalizer and
+            # do NOT pre-strip. _validated_account_id strips the trusted
+            # `accounts/` prefix and rejects reserved chars, AND fail-closes on a
+            # blank or whitespace-padded external id (its `candidate != account_id`
+            # guard). A prior value.strip() here defeated that whitespace-padding
+            # rejection, silently accepting " accounts/pub-1 " as "pub-1".
+            return _validated_account_id(value)
         except MalformedAdsenseAccountIdError as exc:
             raise ValueError(str(exc)) from exc
 

@@ -6,7 +6,11 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
-from ums_smart_revenue.db.finance_models import FinanceBase, FinanceMonthCloseORM
+from ums_smart_revenue.db.finance_models import (
+    AdSensePaymentORM,
+    FinanceBase,
+    FinanceMonthCloseORM,
+)
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
 USER_ID = UUID("00000000-0000-0000-0000-000000009001")
@@ -396,3 +400,26 @@ def test_manual_sync_rejects_malformed_account_path_chars(tmp_path) -> None:
         json=body,
     )
     assert response.status_code == 422  # MalformedAdsenseAccountIdError -> 422
+
+
+def test_manual_sync_rejects_whitespace_padded_source_account_id(tmp_path) -> None:
+    # Regression: a whitespace-padded external account id must be REJECTED
+    # fail-closed by the shared _validated_account_id normalizer (its
+    # `candidate != account_id` guard), not silently trimmed-and-accepted. The
+    # API validator must NOT pre-strip before calling the normalizer; if it did,
+    # " accounts/pub-1 " would canonicalize to "pub-1" and persist.
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    body = payment_payload()
+    body["payments"][0]["source_account_id"] = " accounts/pub-1 "  # padded
+    response = client.post(
+        "/adsense/sync-payments",
+        headers=auth_headers("system_integration_user", "connector", "adsense"),
+        json=body,
+    )
+    assert response.status_code == 422  # rejected at request validation
+    # ...and rejected BEFORE any DB write: no payment row was persisted.
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        assert session.scalars(select(AdSensePaymentORM)).all() == []
