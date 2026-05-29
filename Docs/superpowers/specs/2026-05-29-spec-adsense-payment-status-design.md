@@ -309,13 +309,13 @@ Per the per-PR plan-status rule, this PR also corrects the stale Phase 3 markers
 
 ## 9. Validation gate (before push/PR)
 
-- `python -m ruff check backend tests`
-- `pytest -q` (full suite; targeted `tests/finance/test_payment_status.py` and
+- `python -m ruff check backend tests scripts`
+- `python -m pytest -q` (full suite; the targeted
+  `tests/finance/test_payment_status.py` and
   `tests/api/test_adsense_payment_status_api.py` must pass)
 - `git diff --check`
-- Postgres-backed run is **not required** — no migration or schema change; the
-  feature is pure aggregation over an existing read path. (If the local Postgres
-  URL is available it will be run anyway for parity.)
+- No migration-specific Postgres round-trip required; run with
+  `UMS_TEST_DATABASE_URL` if available for full-gate parity.
 
 ---
 
