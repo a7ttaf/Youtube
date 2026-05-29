@@ -85,8 +85,10 @@ class SqlAlchemyUserRoleAssignmentRepository:
     # Blast Radius: Authorization and audit-adjacent role grants; no finance or
     # Neo4j projection impact detected.
     # Connections:
-    #   - File: backend/ums_smart_revenue/auth/roles.py -> Role definitions and scope compatibility.
-    #   - File: backend/ums_smart_revenue/db/security_models.py -> User, role assignment, and access scope ORM rows.
+    #   - File: backend/ums_smart_revenue/auth/roles.py -> Role and scope
+    #     compatibility rules.
+    #   - File: backend/ums_smart_revenue/db/security_models.py -> User,
+    #     role assignment, and access scope ORM rows.
     # ============================================================================
     def assign_role(
         self,
@@ -98,7 +100,15 @@ class SqlAlchemyUserRoleAssignmentRepository:
         assigned_by: str,
         reason: str,
     ) -> UserRoleAssignmentEntry:
-        """Assign a role to a user within a validated tenant scope."""
+        """Assign a role to a user within a validated tenant scope.
+
+        :raises UserRoleAssignmentConflictError: If an active assignment
+            already exists for the user and scope.
+        :raises UserRoleAssignmentValidationError: If UUID, role, scope, or
+            service-account validation fails.
+        :raises UserRoleAssignmentNotFoundError: If the target or actor user
+            does not exist in the tenant.
+        """
         target_user_id = _parse_uuid(user_id, field_name="user_id")
         actor_user_id = _parse_uuid(assigned_by, field_name="assigned_by")
         role = _parse_role(role_key)
