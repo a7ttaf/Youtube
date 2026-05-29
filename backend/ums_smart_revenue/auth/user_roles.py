@@ -22,6 +22,7 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 @dataclass(frozen=True)
 class UserRoleAssignmentEntry:
     """Data class representing the details of a user role assignment."""
+
     id: str
     user_id: str
     role_key: str
@@ -58,22 +59,19 @@ class UserRoleAssignmentError(ValueError):
 
 
 class UserRoleAssignmentConflictError(UserRoleAssignmentError):
-    """Error raised when attempting to assign a role that conflicts with existing assignments."""
-    pass
+    """Error raised when attempting to assign a role that conflicts
+    with existing assignments."""
 
 
 class UserRoleAssignmentNotFoundError(UserRoleAssignmentError):
     """Error raised when a requested user role assignment is not found."""
-    pass
-
-
 class UserRoleAssignmentValidationError(UserRoleAssignmentError):
     """Error raised for invalid data during user role assignment."""
-    pass
-
 
 class SqlAlchemyUserRoleAssignmentRepository:
-    """Repository handling user role assignment operations using SQLAlchemy within a specified tenant context."""
+    """Repository handling user role assignment operations using SQLAlchemy
+    within a specified tenant context."""
+
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind role assignment operations to an explicit or request tenant."""
         self._session = session

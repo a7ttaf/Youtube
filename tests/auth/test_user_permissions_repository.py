@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-"""Tests for user permissions repository, verifying behavior under tenant context and handling foreign key race conditions."""
-
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import Never
@@ -13,12 +11,6 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.user_permissions import SqlAlchemyUserPermissionGrantRepository
-from sqlalchemy import create_engine, select
-from uuid import UUID, uuid4
-import pytest
-from sqlalchemy.exc import IntegrityError
-from sqlalchemy.orm import Session
-from ums_smart_revenue.db.repository import SqlAlchemyUserPermissionGrantRepository
 from ums_smart_revenue.db.exceptions import (
     UserPermissionGrantNotFoundError,
 )
@@ -40,6 +32,7 @@ OTHER_TENANT_ID = UUID("00000000-0000-0000-0000-000000015999")
 
 class _ScalarResult:
     """Wrapper for a scalar result from a query, providing one_or_none() behavior."""
+
     def __init__(self, value: object | None) -> None:
         self._value = value
 
@@ -50,6 +43,7 @@ class _ScalarResult:
 
 class _NestedTransaction:
     """Context manager stub for nested transactions, always returns False to indicate exceptions are not suppressed."""
+
     def __enter__(self) -> _NestedTransaction:
         return self
 
@@ -64,6 +58,7 @@ class _NestedTransaction:
 
 class _FkRaceSession:
     """Test session stub simulating foreign key race conditions, returning preset scalar and user existence results along with a default AccessScopeORM."""
+
     def __init__(
         self, *, scalars_results: list[object | None], user_exists_results: list[object]
     ) -> None:
@@ -106,7 +101,6 @@ class _FkRaceSession:
     @staticmethod
     def add(_row: object) -> None:
         """Add a row to the session stub (no-op)."""
-        pass  # intentionally no-op for session stub
 
     @staticmethod
     def flush() -> Never:
