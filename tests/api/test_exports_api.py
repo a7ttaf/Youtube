@@ -41,6 +41,7 @@ def auth_headers(
     scope_id: str | None = None,
     user_id: str | UUID = USER_ID,
 ) -> dict[str, str]:
+    """Build trusted-gateway headers for export API permission scenarios."""
     headers = {
         "x-user-id": str(user_id),
         "x-user-email": f"{role}@example.com",
@@ -54,10 +55,12 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """Return an isolated SQLite database URL for export API tests."""
     return f"sqlite+pysqlite:///{(tmp_path / 'exports.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
+    """Seed export tests with authorization, org, finance, and report rows."""
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
     OrgBase.metadata.create_all(engine)
@@ -98,6 +101,7 @@ def seed_database(database_url: str) -> None:
 
 
 def test_finance_admin_requests_finance_export_with_audit_and_lock_snapshot(tmp_path):
+    """Verify finance export requests persist audit and lock snapshot metadata."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -137,6 +141,7 @@ def test_finance_admin_requests_finance_export_with_audit_and_lock_snapshot(tmp_
 
 
 def test_channel_export_request_rejects_unknown_channel_scope(tmp_path):
+    """Verify unknown channel export scopes fail before job or audit creation."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -166,6 +171,7 @@ def test_channel_export_request_rejects_unknown_channel_scope(tmp_path):
 
 
 def test_export_request_denies_missing_export_permission_before_scope_lookup(tmp_path):
+    """Verify missing export permission fails before group scope lookup side effects."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))

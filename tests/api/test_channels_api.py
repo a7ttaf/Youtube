@@ -234,11 +234,13 @@ def test_global_outside_cms_monitor_keeps_official_manual_import_visible():
         "revenue_required_count": 2,
         "missing_official_revenue_count": 1,
     }
-    manual_import_item = next(
+    manual_import_items = [
         item
         for item in payload["items"]
         if item["youtube_channel_id"] == "channel-news-a"
-    )
+    ]
+    assert len(manual_import_items) == 1
+    manual_import_item = manual_import_items[0]
     assert manual_import_item["missing_official_revenue"] is False
     assert manual_import_item["recommended_action"] == (
         "Keep manual official revenue import current; CMS linking remains recommended."
