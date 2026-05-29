@@ -82,7 +82,6 @@ class _FakeServiceOK:
 
     def __init__(self, session, *, audit_sink, **kwargs):
         """No initialization required for fake service stub."""
-        pass
 
     @staticmethod
     def sync(**kwargs):
@@ -162,6 +161,27 @@ def test_cli_missing_db_config_returns_2(monkeypatch, capsys):
     assert session.commits == 0
 
 
+def test_cli_malformed_settings_returns_2_before_db_session(monkeypatch, capsys):
+    """Treat settings validation failures as operator input errors."""
+    module = _load_cli()
+
+    def _bad_settings():
+        """Raise the same ValueError shape used by malformed UUID settings."""
+        raise ValueError("UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID must be a valid UUID")
+
+    def _unexpected_session_factory(_url):
+        """Fail the test if settings errors still allow DB setup to continue."""
+        raise AssertionError("database setup must not run after settings validation")
+
+    monkeypatch.setattr(module, "load_app_settings", _bad_settings)
+    monkeypatch.setattr(module, "build_session_factory", _unexpected_session_factory)
+    rc = module.main(BASE_ARGV)
+    err = capsys.readouterr().err
+    assert rc == 2
+    assert "ValueError" in err
+    assert "UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID" in err
+
+
 @pytest.mark.parametrize("error", [
     GoogleConnectorError("boom"),
     AdSensePaymentValidationError("bad batch"),
@@ -188,7 +208,6 @@ def test_cli_typed_failure_returns_2(monkeypatch, capsys, error):
                 audit_sink: The audit sink parameter.
                 **kwargs: Additional keyword arguments.
             """
-            pass  # No initialization needed for stub service actor.
 
         @staticmethod
         def sync(**kwargs):
@@ -243,16 +262,11 @@ def test_cli_untyped_error_propagates(monkeypatch):
     module = _load_cli()
     session = _SpySession()
 
-    """
-    Module providing a stub service that always raises a non-typed runtime error.
-    """
-
     class _Boom:
         """Service stub that raises an untyped runtime error."""
 
         def __init__(self, session, *, audit_sink, **kwargs):
             """Initialize the stub service actor with session and audit sink parameters."""
-            pass  # No initialization needed for stub service actor.
 
         @staticmethod
         def sync(**kwargs):

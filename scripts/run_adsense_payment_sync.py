@@ -110,7 +110,13 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """Return the CLI exit code; ``__main__`` wraps this in ``SystemExit``."""
     args = _parse_args(argv if argv is not None else sys.argv[1:])
-    settings = load_app_settings()
+    try:
+        settings = load_app_settings()
+    except ValueError as exc:
+        # FIX: Malformed operator settings are input/configuration errors, not
+        # untyped runtime failures, and must be reported before DB setup.
+        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        return 2
     if not settings.database_url:
         print(
             "UMS_DATABASE_URL is required to run the AdSense payment sync",

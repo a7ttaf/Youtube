@@ -99,6 +99,7 @@ def test_parse_amount_accepts(raw, expected) -> None:
     # Regression: in the ISO-code branch, embedded junk inside the number must
     # NOT be silently stripped into a fabricated amount — it must fail closed.
     "1e3 GBP", "100x50 GBP", "1 234 GBP", "1#2#3 GBP", "abc 100 GBP",
+    "x100 GBP",
 ])
 def test_parse_amount_fails_closed(raw) -> None:
     """Ambiguous, negative, malformed, or junked amounts fail closed."""

@@ -64,9 +64,7 @@ def build_monthly_payment_match_summary(*, month, facts, payments):
 
 
 def test_monthly_payment_match_summary_matches_youtube_total_to_paid_adsense_payment():
-    """
-    Test that the summary matches YouTube total revenue to paid AdSense payments.
-    """
+    """Match YouTube total revenue to paid AdSense payments."""
     summary = build_monthly_payment_match_summary(
         month="2026-03",
         facts=[
@@ -105,9 +103,7 @@ def test_monthly_payment_match_summary_detects_payment_gap():
 
 
 def test_monthly_payment_match_summary_ignores_non_paid_adsense_payments_for_match():
-    """
-    Test that non-paid AdSense payments are ignored when matching to YouTube revenue.
-    """
+    """Ignore non-paid AdSense payments when matching revenue."""
     summary = build_monthly_payment_match_summary(
         month="2026-03",
         facts=[revenue_fact(channel_id="channel-tv-a", amount="930.00")],
@@ -145,9 +141,7 @@ def test_monthly_payment_match_summary_excludes_non_usd_adsense_payments():
 
 
 def test_monthly_payment_match_summary_requires_youtube_revenue_sources():
-    """
-    Test that the summary requires YouTube revenue sources and reports when none are present.
-    """
+    """Report when no YouTube revenue sources are present."""
     summary = build_monthly_payment_match_summary(
         month="2026-03",
         facts=[
@@ -168,9 +162,7 @@ def test_monthly_payment_match_summary_requires_youtube_revenue_sources():
 
 
 def test_monthly_payment_match_summary_rejects_negative_tolerance():
-    """
-    Test that providing a negative tolerance raises a PaymentMatchValidationError.
-    """
+    """Reject negative matching tolerance."""
     module = import_module("ums_smart_revenue.finance.payment_matching")
 
     with pytest.raises(module.PaymentMatchValidationError) as exc_info:

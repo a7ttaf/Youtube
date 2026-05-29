@@ -9,6 +9,7 @@ for OPEN-month settlements only, never inside ``classify_payments``.
 from __future__ import annotations
 
 import re
+import unicodedata
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
@@ -78,7 +79,12 @@ class ClassifiedPayments:
 def classify_payments(
     response: dict[str, object], *, account_id: str
 ) -> ClassifiedPayments:
-    """Split payments into paid settlements vs retained balances (fail-closed)."""
+    """Split payments into paid settlements vs retained balances.
+
+    Raises:
+        AdSensePaymentMappingError: If the Google response shape, account
+            ownership, resource suffix, or date contract is unsafe.
+    """
     if not isinstance(response, dict):
         raise AdSensePaymentMappingError("payments response must be an object")
     raw_payments = response.get("payments")
@@ -165,15 +171,12 @@ def parse_amount(raw_amount: str) -> tuple[Decimal, str]:
     if iso is not None:
         currency = iso.group(1)
         remainder = (text[: iso.start()] + text[iso.end():]).strip()
-        # FIX: The explicit ISO code is authoritative. Strip at most ONE leading
-        # currency symbol (e.g. the "¥" in "¥1,235 JPY") plus surrounding
-        # whitespace -- do NOT delete embedded characters. The previous
-        # re.sub(r"[^0-9.,]", "", remainder) deleted every non-numeric char, so
-        # junk inside the number was silently dropped and a fabricated amount
-        # was returned ("1e3 GBP" -> 13, "100x50 GBP" -> 10050, "1 234 GBP" ->
-        # 1234). Leaving the junk in place forces it through _NUMBER_RE below,
-        # which fails closed on anything that is not a clean decimal token.
-        number = re.sub(r"^[^\d.,\s]?\s*", "", remainder)
+        # FIX: The explicit ISO code is authoritative, but only a real leading
+        # currency symbol may be ignored (for example, "¥1,235 JPY"). Unknown
+        # prefixes such as "x100 GBP" must remain and fail _NUMBER_RE below.
+        if remainder and unicodedata.category(remainder[0]) == "Sc":
+            remainder = remainder[1:].strip()
+        number = remainder
     else:
         currency = ""
         number = ""

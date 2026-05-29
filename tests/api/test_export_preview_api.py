@@ -676,11 +676,11 @@ def test_finance_workbook_download_returns_503_when_persisted_artifact_missing(
 def test_persist_generated_export_artifact_cleans_up_when_completion_fails(tmp_path):
     """Verify that artifacts are cleaned up when artifact completion fails."""
     class FailingCompleteRepository:
-        """Repository that simulates failure when completing artifacts by raising a validation error."""
+        """Repository that raises when artifact completion fails."""
 
         @staticmethod
         def complete_artifact(**_kwargs: object) -> NoReturn:
-            """Attempt to complete the export artifact and raise validation errors on failure."""
+            """Raise validation error during artifact completion."""
             raise ExportJobValidationError("completion failed")
 
     artifact_dir = tmp_path / "artifacts"
@@ -709,9 +709,9 @@ def test_persist_generated_export_artifact_cleans_up_when_completion_fails(tmp_p
             content=b"generated workbook",
             filename="finance.xlsx",
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-       )
+        )
 
-   assert not (artifact_dir / "exports" / str(EXPORT_ID) / "finance.xlsx").exists()
+    assert not (artifact_dir / "exports" / str(EXPORT_ID) / "finance.xlsx").exists()
 
 
 def test_persist_generated_export_artifact_rejects_stale_failed_terminal_row(tmp_path):
@@ -740,9 +740,10 @@ def test_persist_generated_export_artifact_rejects_stale_failed_terminal_row(tmp
         Simulates interactions for an export job that has already failed,
         rejecting completion attempts and allowing retrieval of the failed job entry.
         """
+
         @staticmethod
         def complete_artifact(**_kwargs: object) -> NoReturn:
-            """Attempt to complete the export artifact and raise terminal state errors if job is already finalized."""
+            """Raise terminal state errors when a job is finalized."""
             raise ExportJobTerminalStateError(
                 f"Export job {EXPORT_ID} is already in terminal status FAILED"
             )

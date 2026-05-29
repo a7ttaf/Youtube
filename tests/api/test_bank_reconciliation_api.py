@@ -90,9 +90,7 @@ def seed_database(database_url: str, *, locked_month: bool = False) -> None:
 
 
 def bank_payload(amount_usd: str = "928.50") -> dict[str, object]:
-    """
-    Return a sample bank reconciliation payload dictionary with the specified USD amount.
-    """
+    """Return a sample bank reconciliation payload."""
     return {
         "bank_reference": "bank-transfer-2026-04-22",
         "bank_received_date": "2026-04-22",
@@ -303,9 +301,7 @@ def test_finance_viewer_cannot_record_bank_reconciliation(tmp_path):
 
 
 def test_locked_finance_month_rejects_bank_reconciliation_writes(tmp_path):
-    """
-    Test that writes to a locked finance month are rejected for bank reconciliation entries.
-    """
+    """Reject bank reconciliation writes to locked finance months."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url, locked_month=True)
     client = TestClient(create_app(database_url=database_url))

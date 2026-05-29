@@ -290,6 +290,7 @@ def test_company_scoped_finance_viewer_cannot_read_holding_payment_match(tmp_pat
 
 class _EmptyRevenueRepository:
     """Repository stub that returns no revenue data for testing scenarios."""
+
     @staticmethod
     def list_month_facts(*, month: str):
         """Return an empty list of monthly facts for testing scenarios."""
