@@ -147,27 +147,46 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   CANCELLED shown for evidence; no FX, per Docs/18.
 - ⏳ Finance month-close screen — remaining: close-gate backend (PR #8);
   UI not built.
-- ⏳ Net revenue calculation — remaining: revenue facts (PR #2);
-  allocation pass not built.
-- ⏳ Confidence labels — remaining: column scaffolding in revenue facts;
-  UI surfacing not built.
-- ⏳ Explain-number API — remaining: number explanation entry + repo +
-  factory (PR #31); explain endpoint not built.
-- ⏳ Smart issue panel — remaining: not started.
-- ⏳ Excel export — remaining: export artifacts foundation (PR #9) +
-  tenant-scoped export jobs (PR #36); format/template not finalized.
+- ✅ Net revenue calculation — shipped: GET /revenue/months/{month}/net-revenue
+  (build_month_net_revenue_summary; per-channel gross/net/deduction roll-up,
+  scope-filtered, USD-only). Tax/deduction ingestion + allocation-rule
+  application remain unbuilt (Phase 4).
+- ⏳ Confidence labels — remaining: labels ARE computed in services
+  (net-revenue B_RECONCILED/D_ESTIMATED/E_MISSING; explain confidence label)
+  and returned by the net-revenue/explain APIs; dashboard UI surfacing not
+  built.
+- ✅ Explain-number API — shipped: POST
+  /revenue/channels/{channel_id}/months/{month}/explain
+  (build_channel_month_revenue_explanation; per-metric source/formula/
+  confidence/warnings, persisted to number_explanations). Explain-number
+  drawer UI remains unbuilt (Phase 5).
+- ⏳ Smart issue panel — remaining: smart-alerts BACKEND ships (GET
+  /revenue/months/{month}/smart-alerts, build_monthly_smart_alert_summary);
+  panel UI not built.
+- ✅ Excel export — shipped: GET /exports/{export_id}/finance-workbook.xlsx
+  (+ preview) via build_finance_workbook_xlsx; tenant-scoped export jobs,
+  persisted + audited. Final column template/branding may iterate.
 
 ## P1 — Strong beta features
 
-- ⏳ PDF export — remaining: not started.
-- ⏳ Branded slide export — remaining: not started.
+- ✅ PDF export — shipped: GET /exports/{export_id}/executive.pdf
+  (build_executive_pdf_bytes; executive summary, gross/net, rankings, problem
+  sections, persisted + audited). Layout polish may iterate.
+- ✅ Branded slide export — shipped: GET
+  /exports/{export_id}/branded-slide-pack.pptx (build_branded_slide_pack_pptx;
+  cover + content slides with brand bar/footer, persisted + audited). Final
+  theming may iterate.
 - ⏳ Outside-CMS monitor — remaining: not started.
-- ⏳ Recalculation by allocation method dry-run foundation — remaining:
-  not started.
-- ⏳ Month lock/unlock — remaining: close-gate (PR #8); explicit
-  lock/unlock workflow not built.
-- ⏳ Manual override approval — remaining: number explanation substrate
-  (PR #31); approval workflow not built.
+- ✅ Recalculation by allocation method dry-run foundation — shipped: POST
+  /revenue/recalculate (build_recalculation_preview; dry-run-only
+  allocation-method preview with blocking-issue detection; committed writes
+  intentionally rejected as not-yet-implemented).
+- ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
+  (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed
+  permissions). Month-close status UI remains unbuilt (Phase 5).
+- ✅ Manual override approval — shipped: POST /revenue/manual-overrides +
+  /manual-overrides/{id}/approve (create + approve flow, locked-month guard,
+  APPROVE_MANUAL_OVERRIDE scope, audited).
 - ⏳ Audit dashboard — remaining: tenant-scoped audit log backend
   (PR #22); dashboard UI not built.
 
@@ -276,14 +295,17 @@ single P-tier above.
 2. ⏳ System-managed report availability and retention — remaining: raw
    report file ORM + repo (PR #32); ingestion + retention policy not
    built.
-3. ⏳ Payment gap explanation — remaining: bank reconciliation repo
-   (PR #29) is the substrate; comparison + explanation pass not built.
+3. ⏳ Payment gap explanation — remaining: gap value + comparison ARE computed
+   (payment_gap_usd via /revenue/months/{month}/payment-match, bank variance
+   via /bank-reconciliation, high-gap smart alerts); remaining is a dedicated
+   reconciling explanation/narrative pass tying gaps to receipts/fees/currency
+   effects.
 4. ⏳ Bank/transfer/local-currency variance evidence — remaining: bank recon
    repo (PR #29) is the substrate; variance explanations must reconcile
    Google/AdSense reported money, bank receipts, transfer fees, and bank-side
    currency effects without treating public FX rates as official revenue.
-5. ⏳ Confidence labels that finance trusts — remaining: column
-   scaffolding in revenue facts; computation rules + UI surfacing not
-   built.
+5. ⏳ Confidence labels that finance trusts — remaining: computation rules
+   exist (net-revenue B_RECONCILED/D_ESTIMATED/E_MISSING + explain confidence
+   label); remaining is finance-trusted surfacing in the dashboard UI.
 6. ✅ Flexible grouping without hardcoded UMS structure — channel group
    registry (PR #25 + tests in PR #30).

@@ -434,26 +434,36 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   input UI not built.
 - ⏳ Tax/deduction ingestion — remaining: not started.
 - ⏳ Allocation rules — remaining: not started.
-- ⏳ Net revenue by channel/company/sector — remaining: revenue facts
-  (PR #2); allocation pass not built.
-- ⏳ Manual override rules — remaining: number explanation entry + repo +
-  factory (PR #31) is the substrate; override approval flow not built.
+- ✅ Net revenue by channel/company/sector — shipped: GET
+  /revenue/months/{month}/net-revenue (build_month_net_revenue_summary;
+  per-channel gross/net/deduction roll-up with channel/company/sector/global
+  scoping, USD-only). Tax/deduction ingestion + allocation-rule application
+  remain unbuilt.
+- ✅ Manual override rules — shipped: create + approve flow (POST
+  /revenue/manual-overrides, /manual-overrides/{id}/approve) with locked-month
+  guard and APPROVE_MANUAL_OVERRIDE scope. Override-rules dashboard UI remains
+  unbuilt (Phase 5).
 
 ### Outputs
 
 - ⏳ Gross revenue / Deductions / Net revenue / Deduction percentage /
-  Unresolved gap / Confidence rating — none of these aggregations are
-  produced yet; foundations exist.
+  Unresolved gap / Confidence rating — gross, net, unresolved payment gap, and
+  confidence labels ARE produced (net-revenue + payment-match + explain APIs);
+  remaining is tax/deduction ingestion + allocation rules to complete the
+  deduction figures.
 
 ### Acceptance gate
 
 - ⏳ Finance can generate a channel-level net revenue table for a selected
-  month — not yet met (depends on allocation engine).
+  month — partially met: GET /revenue/months/{month}/net-revenue produces the
+  per-channel table today; full reconciled net awaits the allocation engine +
+  tax/deduction ingestion.
 
-### Status (2026-05-22)
+### Status (2026-05-29)
 
-Foundations present; the allocation engine and tax/deduction ingestion are
-the largest blockers.
+Net-revenue roll-up, manual overrides, payment-match, and confidence labels
+ship at the API layer; the allocation engine and tax/deduction ingestion
+remain the largest blockers to a fully reconciled net figure.
 
 ---
 
@@ -465,7 +475,9 @@ the largest blockers.
   (PR #10); pages not built; no API client.
 - ⏳ Explain-number drawer — remaining: number explanation backend
   (PR #31); drawer not built.
-- ⏳ Smart problem panel — remaining: not started.
+- ⏳ Smart problem panel — remaining: smart-alerts BACKEND ships (GET
+  /revenue/months/{month}/smart-alerts, build_monthly_smart_alert_summary);
+  problem-panel UI not built.
 - ⏳ Company/sector/channel ranking — remaining: not started.
 - ⏳ Outside-CMS issue monitor — remaining: not started.
 - ⏳ Month-close status — remaining: close-gate backend (PR #8); UI not
@@ -495,27 +507,39 @@ allocation engine (Phase 4) producing real numbers to render.
 
 ### Build
 
-- ⏳ Excel export — remaining: export artifacts foundation (PR #9) +
-  tenant-scoped export jobs (PR #36); format and template not finalized.
-- ⏳ PDF report — remaining: not started.
-- ⏳ Branded slide export — remaining: not started.
-- ⏳ Export templates — remaining: not started.
+- ✅ Excel export — shipped: GET /exports/{export_id}/finance-workbook.xlsx
+  (+ preview) via build_finance_workbook_xlsx; tenant-scoped export jobs,
+  persisted + audited. Final column template/branding may iterate.
+- ✅ PDF report — shipped: GET /exports/{export_id}/executive.pdf
+  (build_executive_pdf_report + build_executive_pdf_bytes; executive summary,
+  gross/net, rankings, problem sections, persisted + audited). Layout polish
+  may iterate.
+- ✅ Branded slide export — shipped: GET
+  /exports/{export_id}/branded-slide-pack.pptx (build_branded_slide_pack_pptx;
+  cover + content slides with brand bar/footer, persisted + audited). Final
+  theming may iterate.
+- ⏳ Configurable export templates — remaining: not started.
 - ✅ Export audit log (tenant-scoped audit log infrastructure via PR #22).
 
 ### Outputs
 
-- ⏳ Monthly finance workbook / Executive PDF / Management slide pack —
-  not shipped.
+- ✅ Monthly finance workbook / Executive PDF / Management slide pack — all
+  three generate end-to-end (xlsx/pdf/pptx under /exports/{id}/..., persisted
+  + audited). Brand/template polish may iterate.
 
 ### Acceptance gate
 
 - ⏳ Finance can generate a locked monthly report by company, sector, or
-  all UMS — not yet met (depends on templates + allocation).
+  all UMS — partially met: scoped xlsx/pdf/pptx generation ships; remaining is
+  full reconciled-net content (tax/deduction ingestion + allocation-rule
+  application) feeding the report bodies.
 
-### Status (2026-05-22)
+### Status (2026-05-29)
 
-Tenant-scoped export-job persistence exists. The actual document templates
-(Excel format, PDF layout, slide brand) are not yet defined.
+Tenant-scoped export-job persistence exists, and all three document types
+generate end-to-end (Excel workbook, executive PDF, branded slide pack) with
+real bytes and audit. Remaining polish is final column/layout/brand templating
+and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
 
 ---
 
@@ -530,8 +554,8 @@ Tenant-scoped export-job persistence exists. The actual document templates
 - ⏳ Backup/export retention — remaining: not started.
 - ⏳ OAuth token monitoring — remaining: credentials repo (PRs #33, #34);
   monitoring not built.
-- ⏳ Month locking — remaining: close-gate (PR #8); explicit lock/unlock
-  workflow not built.
+- ✅ Month locking — shipped: explicit POST /finance-close/{month}/lock +
+  /unlock workflow (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED).
 
 ### Acceptance gate
 
