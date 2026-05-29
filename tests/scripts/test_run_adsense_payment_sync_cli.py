@@ -97,6 +97,16 @@ class _FakeServiceOK:
         return _FakeResult()
 
 
+def _build_fake_actor(*, tenant_id):
+    """Return a fake connector actor while preserving the production signature."""
+    return object()
+
+
+def _build_fake_audit_sink(_session, *, tenant_id=None):
+    """Return a fake audit sink while preserving the production signature."""
+    return object()
+
+
 def _patch_common(monkeypatch, module, *, session, service, settings=None):
     """
     Monkeypatch common dependencies in the CLI module.
@@ -110,8 +120,8 @@ def _patch_common(monkeypatch, module, *, session, service, settings=None):
         lambda: settings if settings is not None else _FakeSettings(),
     )
     monkeypatch.setattr(module, "build_session_factory", lambda _url: (lambda: session))
-    monkeypatch.setattr(module, "build_connector_service_principal", object)
-    monkeypatch.setattr(module, "SqlAlchemyAuditSink", object)
+    monkeypatch.setattr(module, "build_connector_service_principal", _build_fake_actor)
+    monkeypatch.setattr(module, "SqlAlchemyAuditSink", _build_fake_audit_sink)
     monkeypatch.setattr(module, "AdSensePaymentSyncService", service)
 
 
