@@ -53,7 +53,6 @@ class UserRoleAssignmentEntry:
 
 class UserRoleAssignmentError(ValueError):
     """Base exception for user role assignment processing errors."""
-"""Module for managing user role assignments, including repository and related exceptions."""
 
     pass
 

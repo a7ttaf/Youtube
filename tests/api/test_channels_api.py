@@ -16,19 +16,16 @@ from ums_smart_revenue.org.channel_registry import (
     bootstrap_channel_registry,
 )
 
-
-"""
-This module contains tests and utilities for channel management API endpoints.
-It defines stub registries, helper functions for creating test applications and
-authentication headers, and test cases for channel listing behaviors.
-"""
-
+# This module contains tests and utilities for channel management API endpoints.
+# It defines stub registries, helper functions for creating test applications and
+# authentication headers, and test cases for channel listing behaviors.
 
 class StaleUpdateRegistry:
     """
     Stub registry for handling stale channel updates in tests.
     Provides default channel entries or exceptions for update operations.
     """
+
     @staticmethod
     def list_channels() -> list[ChannelRegistryEntry]:
         """Return an empty list of channel registry entries for stale updates."""
@@ -45,8 +42,8 @@ class StaleUpdateRegistry:
             revenue_required=True,
         )
 
+    @staticmethod
     def create_channel(
-        self,
         *,
         youtube_channel_id: str,
         channel_name: str,
@@ -57,8 +54,9 @@ class StaleUpdateRegistry:
         """Stub for channel creation; not implemented in stale update registry."""
         raise NotImplementedError
 
+    @staticmethod
     def update_mapping(
-        self, *, youtube_channel_id: str, primary_company_id: str | None  # noqa: ARG002
+        *, youtube_channel_id: str, primary_company_id: str | None  # noqa: ARG002
     ) -> ChannelRegistryEntry:
         """Attempt to update the mapping for a channel, raising KeyError for stale entries."""
         raise KeyError(youtube_channel_id)
@@ -69,6 +67,7 @@ class ScopedListRegistry:
     Registry for scoped channel listings by identifiers.
     Disallows unscoped listings and returns entries only for specified channel IDs.
     """
+
     @staticmethod
     def list_channels() -> list[ChannelRegistryEntry]:
         """Disallow unscoped listings for scoped callers by raising an assertion."""
@@ -206,7 +205,8 @@ def test_company_manager_reads_scoped_outside_cms_monitor():
 
 def test_global_outside_cms_monitor_keeps_official_manual_import_visible():
     """Test that official manual revenue imports remain visible when monitoring
-    channels outside CMS with global permissions."""
+    channels outside CMS with global permissions.
+    """
     app = create_bootstrap_app()
     app.dependency_overrides[current_channel_registry] = lambda: ChannelRegistry(
         [
@@ -258,7 +258,8 @@ def test_global_outside_cms_monitor_keeps_official_manual_import_visible():
 
 def test_company_manager_reads_scoped_channel_issues_without_cross_company_leak():
     """Test that a company manager only sees channel issues for their own company
-    and cannot view cross-company channel issues."""
+    and cannot view cross-company channel issues.
+    """
     app = create_bootstrap_app()
     app.dependency_overrides[current_channel_registry] = lambda: ChannelRegistry(
         [
@@ -305,7 +306,8 @@ def test_company_manager_reads_scoped_channel_issues_without_cross_company_leak(
 
 def test_global_channel_issues_include_registry_health_summary():
     """Test that global channel issues endpoint includes registry health summary
-    information along with channel issue details."""
+    information along with channel issue details.
+    """
     missing_sector_company_id = "00000000-0000-0000-0000-000000009999"
     app = create_bootstrap_app()
     app.dependency_overrides[current_channel_registry] = lambda: ChannelRegistry(

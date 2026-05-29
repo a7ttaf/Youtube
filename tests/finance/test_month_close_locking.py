@@ -19,8 +19,6 @@ from ums_smart_revenue.finance.adsense_payments import (
 )
 from ums_smart_revenue.finance.bank_reconciliation import (
     BankReconciliationValidationError,
-"""Unit tests for finance month advisory lock using a dialect session stub and tenant fixtures."""
-
     SqlAlchemyBankReconciliationRepository,
 )
 from ums_smart_revenue.finance.manual_overrides import ManualOverrideValidationError

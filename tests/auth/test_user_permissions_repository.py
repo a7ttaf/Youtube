@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+"""Tests for user permissions repository, verifying behavior under tenant context and handling foreign key race conditions."""
+
 from datetime import UTC, datetime
 from types import TracebackType
 from typing import Never
@@ -10,9 +12,7 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.auth.user_permissions import (
-    SqlAlchemyUserPermissionGrantRepository,
-"""Tests for user permissions repository, verifying behavior under tenant context and handling foreign key race conditions."""
+from ums_smart_revenue.auth.user_permissions import SqlAlchemyUserPermissionGrantRepository
 from sqlalchemy import create_engine, select
 from uuid import UUID, uuid4
 import pytest
