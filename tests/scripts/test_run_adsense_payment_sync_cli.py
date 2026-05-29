@@ -110,12 +110,8 @@ def _patch_common(monkeypatch, module, *, session, service, settings=None):
         lambda: settings if settings is not None else _FakeSettings(),
     )
     monkeypatch.setattr(module, "build_session_factory", lambda _url: (lambda: session))
-    monkeypatch.setattr(
-        module, "build_connector_service_principal", lambda *, tenant_id: object()
-    )
-    monkeypatch.setattr(
-        module, "SqlAlchemyAuditSink", lambda _session, *, tenant_id=None: object()
-    )
+    monkeypatch.setattr(module, "build_connector_service_principal", object)
+    monkeypatch.setattr(module, "SqlAlchemyAuditSink", object)
     monkeypatch.setattr(module, "AdSensePaymentSyncService", service)
 
 
