@@ -158,7 +158,13 @@ def classify_payments(
 # Blast Radius: Determines the stored amount/currency of a real payment.
 # ============================================================================
 def parse_amount(raw_amount: str) -> tuple[Decimal, str]:
-    """Return ``(Decimal amount, ISO currency)`` or raise (fail-closed)."""
+    """Return ``(Decimal amount, ISO currency)`` or raise (fail-closed).
+
+    Raises:
+        AdSensePaymentMappingError: If the amount string is not a string, is
+            empty, negative, has an unsupported/ambiguous currency, or has an
+            unparseable numeric portion.
+    """
     if not isinstance(raw_amount, str):
         raise AdSensePaymentMappingError(
             f"amount must be a string, got {type(raw_amount).__name__}"
