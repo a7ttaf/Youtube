@@ -84,13 +84,16 @@ class _FkRaceSession:
     def scalar(self, _stmt: object) -> object:
         return self._user_exists_results.pop(0)
 
-    def begin_nested(self) -> _NestedTransaction:
+    @staticmethod
+    def begin_nested() -> _NestedTransaction:
         return _NestedTransaction()
 
-    def add(self, _row: object) -> None:
+    @staticmethod
+    def add(_row: object) -> None:
         pass
 
-    def flush(self) -> Never:
+    @staticmethod
+    def flush() -> Never:
         raise IntegrityError("flush", {}, Exception("FOREIGN KEY constraint failed"))
 
 

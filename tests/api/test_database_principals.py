@@ -93,7 +93,8 @@ class FailingSession:
         """Return a minimal bind with the dialect name used by the loader."""
         return SimpleNamespace(dialect=SimpleNamespace(name=self.dialect_name))
 
-    def begin(self) -> nullcontext:
+    @staticmethod
+    def begin() -> nullcontext:
         """Return a no-op context manager for the loader transaction scope."""
         return nullcontext()
 

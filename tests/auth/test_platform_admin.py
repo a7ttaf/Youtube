@@ -51,7 +51,8 @@ class FailingPlatformAdminSession:
         self.get_count = 0
         self.recording_connection = RecordingConnection()
 
-    def in_transaction(self) -> bool:
+    @staticmethod
+    def in_transaction() -> bool:
         """Report no active transaction so the loader prepares isolation."""
         return False
 
@@ -59,7 +60,8 @@ class FailingPlatformAdminSession:
         """Return a minimal bind with the dialect name used by the loader."""
         return SimpleNamespace(dialect=SimpleNamespace(name=self.dialect_name))
 
-    def begin(self) -> nullcontext:
+    @staticmethod
+    def begin() -> nullcontext:
         """Return a no-op context manager for the loader transaction scope."""
         return nullcontext()
 

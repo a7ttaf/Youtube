@@ -484,10 +484,12 @@ def test_export_list_scan_limit_marks_has_more_and_logs_metric(caplog):
             )
 
     class EmptyGroupRegistry:
-        def list_groups(self) -> list[object]:
+        @staticmethod
+        def list_groups() -> list[object]:
             return []
 
-        def get_group(self, group_id: str) -> None:
+        @staticmethod
+        def get_group(group_id: str) -> None:
             assert group_id
 
     repository = PagedRepository()

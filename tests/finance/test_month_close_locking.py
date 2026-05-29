@@ -112,12 +112,14 @@ def test_get_or_create_month_close_row_acquires_guard_before_row_lock(
     calls: list[tuple[str, object]] = []
 
     class ScalarRows:
-        def one_or_none(self) -> SimpleNamespace:
+        @staticmethod
+        def one_or_none() -> SimpleNamespace:
             calls.append(("fetch", None))
             return SimpleNamespace(month="2026-03", status="OPEN")
 
     class Session:
-        def scalars(self, statement: object) -> ScalarRows:
+        @staticmethod
+        def scalars(statement: object) -> ScalarRows:
             calls.append(("select", statement))
             return ScalarRows()
 

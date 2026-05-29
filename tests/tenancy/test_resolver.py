@@ -656,7 +656,8 @@ class _ScalarResult:
 class _CorruptTenantSession:
     """Session fake that returns a malformed tenant registry row."""
 
-    def scalars(self, _statement: object) -> _ScalarResult:
+    @staticmethod
+    def scalars(_statement: object) -> _ScalarResult:
         """Return a row that fails repository domain validation."""
         return _ScalarResult(_make_tenant_row(primary_currency="usd"))
 
@@ -671,7 +672,8 @@ class _BrokenDatabaseSession:
         """Track whether middleware still closes failed sessions."""
         self._closed = closed
 
-    def scalars(self, _statement: object) -> object:
+    @staticmethod
+    def scalars(_statement: object) -> object:
         """Raise a representative database error from the lookup path."""
         raise OperationalError("SELECT tenants", {}, DatabaseOfflineError())
 
@@ -683,11 +685,13 @@ class _BrokenDatabaseSession:
 class _CloseRaisesSession:
     """Session fake whose cleanup fails after lookup validation fails."""
 
-    def scalars(self, _statement: object) -> object:
+    @staticmethod
+    def scalars(_statement: object) -> object:
         """Raise a representative database error from the lookup path."""
         raise OperationalError("SELECT tenants", {}, DatabaseOfflineError())
 
-    def close(self) -> None:
+    @staticmethod
+    def close() -> None:
         """Raise a close failure that must not mask the lookup error."""
         raise SessionCloseUnavailableError
 

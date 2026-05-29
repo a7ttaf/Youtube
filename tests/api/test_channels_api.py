@@ -18,10 +18,12 @@ from ums_smart_revenue.org.channel_registry import (
 
 
 class StaleUpdateRegistry:
-    def list_channels(self) -> list[ChannelRegistryEntry]:
+    @staticmethod
+    def list_channels() -> list[ChannelRegistryEntry]:
         return []
 
-    def get_channel(self, youtube_channel_id: str) -> ChannelRegistryEntry | None:
+    @staticmethod
+    def get_channel(youtube_channel_id: str) -> ChannelRegistryEntry | None:
         return ChannelRegistryEntry(
             youtube_channel_id=youtube_channel_id,
             channel_name="TV A",
@@ -48,13 +50,15 @@ class StaleUpdateRegistry:
 
 
 class ScopedListRegistry:
-    def list_channels(self) -> list[ChannelRegistryEntry]:
+    @staticmethod
+    def list_channels() -> list[ChannelRegistryEntry]:
         raise AssertionError(
             "unscoped channel listing should not be used for scoped callers"
         )
 
+    @staticmethod
     def list_channels_by_ids(
-        self, youtube_channel_ids: set[str]
+        youtube_channel_ids: set[str]
     ) -> list[ChannelRegistryEntry]:
         assert youtube_channel_ids == {"channel-tv-a"}
         return [

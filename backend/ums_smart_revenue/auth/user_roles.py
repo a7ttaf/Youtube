@@ -221,7 +221,8 @@ class SqlAlchemyUserRoleAssignmentRepository:
         if exists is None:
             raise UserRoleAssignmentNotFoundError("Actor user not found")
 
-    def _require_assignable_role(self, target_user: UserORM, role: RoleKey) -> None:
+    @staticmethod
+    def _require_assignable_role(target_user: UserORM, role: RoleKey) -> None:
         definition = ROLE_DEFINITIONS[role]
         if definition.service_only and not target_user.is_service_account:
             raise UserRoleAssignmentValidationError(
