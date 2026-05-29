@@ -2,7 +2,7 @@
 
 ## Status (2026-05-29)
 
-Reconciled through PR #36 (S2 multi-tenant integration). Marker conventions
+Reconciled through PR #50 (B2.6 connector row-count classification). Marker conventions
 match `01_IMPLEMENTATION_PLAN.md`:
 
 - `✅ PR #N` — shipped end-to-end at the layer being marked.
