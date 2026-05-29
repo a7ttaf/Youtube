@@ -399,12 +399,16 @@ currencies as source evidence before any finance facts consume them.
   source report identity.
 - ✅ Payment match status — driven by the payment-match endpoint plus the
   paid/unpaid status breakdown (`GET /adsense/payments/status`).
-- ⏳ Payment gap value — not computed.
+- ✅ Payment gap value — computed and tested as `payment_gap_usd` by
+  `build_monthly_payment_match_summary`, exposed via
+  `GET /revenue/months/{month}/payment-match`.
 
 ### Acceptance gate
 
-- ⏳ System can show whether YouTube revenue total matches the AdSense
-  payment amount — not yet met.
+- ✅ System can show whether YouTube revenue total matches the AdSense
+  payment amount — met via `build_monthly_payment_match_summary` +
+  `GET /revenue/months/{month}/payment-match` (PAYMENT_MATCHED / PAYMENT_VARIANCE
+  with `payment_gap_usd`).
 
 ### Status (2026-05-29)
 
