@@ -959,8 +959,9 @@ Immediately after the AdSense payment sync entry (the block ending with the
   matcher (`GET /revenue/months/{month}/payment-match`, verified pre-existing)
   and per-account/per-currency settlement-status breakdown
   (`GET /adsense/payments/status`, `finance/payment_status.py`, this PR).
-  Outstanding = PENDING + UNPAID; CANCELLED shown for evidence; USD-only amounts
-  with non-USD grouped (no FX, per Docs/18).
+  Payment-match remains USD-only; the paid/unpaid status view groups
+  AdSense-reported amounts by currency. Outstanding = PENDING + UNPAID;
+  CANCELLED shown for evidence; no FX, per Docs/18.
 ```
 
 - [ ] **Step 4: Verify doc hygiene**
