@@ -1,3 +1,5 @@
+"""Tests for export preview API artifacts, downloads, and audit behavior."""
+
 import hashlib
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -30,7 +32,6 @@ from ums_smart_revenue.db.finance_models import (
     RevenueManualOverrideORM,
 )
 from ums_smart_revenue.db.org_models import (
-"""Module providing utility functions to generate test data and authentication headers for export preview API tests."""
     ChannelGroupMemberORM,
     ChannelGroupORM,
     OrgBase,
@@ -75,7 +76,7 @@ def auth_headers(role: str, scope_type: str = "global") -> dict[str, str]:
 
 
 def build_database_url(tmp_path) -> str:
-    """Build a SQLAlchemy database URL for a temporary SQLite database at the given path."""
+    """Build a SQLAlchemy URL for a temporary SQLite database."""
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
@@ -89,7 +90,7 @@ def seed_database(
     include_group: bool = False,
     include_previous_fact: bool = False,
 ) -> None:
-    """Seed the database with initial data for export preview tests, including users, organizations, optional group data, and previous fact entries if requested."""
+    """Seed export preview data, including optional group or prior facts."""
     resolved_scope_id = scope_id
     if resolved_scope_id is None and scope_type == "company":
         resolved_scope_id = str(COMPANY_ID)
@@ -209,9 +210,6 @@ def seed_database(
                     source_report_id="cms-report-2026-02",
                     gross_revenue_usd=Decimal("100.00"),
                     net_revenue_usd=Decimal("88.00"),
-"""
-Tests for the export preview API, covering finance workbook previews, audit logging, and metadata validation.
-"""
                     views=200000,
                     watch_time_minutes=Decimal("6200.50"),
                     confidence_score=Decimal("0.9800"),
@@ -532,7 +530,7 @@ def test_finance_workbook_download_persists_artifact_and_completes_job(
     tmp_path,
     monkeypatch,
 ):
-    """Test that downloading a finance workbook persists the artifact correctly and marks the export job as completed."""
+    """Persist the workbook artifact and complete the export job."""
     artifact_dir = tmp_path / "export-artifacts"
     monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
     database_url = build_database_url(tmp_path)
@@ -573,7 +571,7 @@ def test_finance_workbook_storage_failure_leaves_export_retryable_without_downlo
     tmp_path,
     monkeypatch,
 ):
-    """Ensure that storage failures during finance workbook download do not mark the job as failed and return HTTP 503."""
+    """Leave the export retryable when workbook artifact storage fails."""
     # Transient artifact-store outages (here: the configured artifact
     # directory is actually a regular file) must leave the export in its
     # pre-failure status so the caller can retry once storage recovers. The
@@ -768,10 +766,6 @@ def test_persist_generated_export_artifact_rejects_stale_failed_terminal_row(tmp
     )
 
     persisted_job, response = _persist_generated_export_artifact(
-"""
-This module contains tests for the export preview API, including tests for artifact persistence and race conditions.
-"""
-
         repository=FailedTerminalRepository(),
         artifact_store=FileSystemExportArtifactStore(artifact_dir),
         export_job=export_job,
@@ -852,10 +846,11 @@ def test_persisted_artifact_bytes_win_after_terminal_race(
     )
 
     class CompletedRaceRepository:
-        '''Provides methods to complete artifacts and retrieve a completed export job in tests.'''
+        """Repository stub that surfaces a terminal race."""
+
         @staticmethod
         def complete_artifact(**_kwargs: object) -> NoReturn:
-            """Complete the artifact by marking the export job as completed. Raises ExportJobTerminalStateError if it's already in a completed state."""
+            """Raise when another writer has already completed the job."""
             raise ExportJobTerminalStateError(
                 f"Export job {EXPORT_ID} is already in terminal status COMPLETED"
             )
@@ -865,10 +860,6 @@ def test_persisted_artifact_bytes_win_after_terminal_race(
             """Retrieve the completed export job entry for the given export_id."""
             assert export_id == str(EXPORT_ID)
             return completed_job
-"""
-Module for testing export preview API endpoints, including permissions and audit logging
-of different export types like finance workbooks, executive PDFs, and branded slide packs.
-"""
 
     export_job, response = _persist_generated_export_artifact(
         repository=CompletedRaceRepository(),
@@ -987,7 +978,7 @@ def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(
     tmp_path,
     monkeypatch,
 ):
-    """Test that finance admin can download generated branded slide pack PPTX, triggers audit events, and verifies content type and filename."""
+    """Download a branded slide pack and record sensitive audit events."""
     artifact_dir = tmp_path / "export-artifacts"
     monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
     database_url = build_database_url(tmp_path)
@@ -1011,9 +1002,6 @@ def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(
     )
     assert "ums-branded-2026-03-global.pptx" in response.headers["content-disposition"]
     presentation = Presentation(BytesIO(response.content))
-"""
-Module containing tests for export preview API, including utilities for extracting text from PDFs and PowerPoint slides, and asserting persisted export artifacts.
-"""
     slide_text = "\n".join(_slide_texts(presentation))
     assert len(presentation.slides) == 10
     assert "UMS Branded Finance Report" in slide_text
@@ -1040,7 +1028,7 @@ Module containing tests for export preview API, including utilities for extracti
 
 
 def test_export_operator_cannot_download_branded_slide_pack(tmp_path):
-    """Test that an export operator without proper permissions cannot download a branded slide pack and no audit events are logged."""
+    """Deny branded slide-pack downloads for export operators."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url, export_type="BRANDED_SLIDE_PACK")
     client = TestClient(create_app(database_url=database_url))
@@ -1081,7 +1069,7 @@ def _assert_persisted_export_artifact(
     content_type: str,
     content: bytes,
 ) -> None:
-    """Verify that an export artifact has been persisted correctly in storage and database records."""
+    """Verify persisted export artifact storage and metadata."""
     expected_uri = f"file-store://exports/{EXPORT_ID}/{filename}"
     persisted_file = artifact_dir / "exports" / str(EXPORT_ID) / filename
     engine = create_engine(database_url)

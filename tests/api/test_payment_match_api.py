@@ -1,3 +1,5 @@
+"""Test payment match API helpers, auth boundaries, and failure handling."""
+
 from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -8,12 +10,6 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-"""
-Test payment match API helpers and database seeding module.
-
-This module provides functions to generate authentication headers, construct
-a temporary database URL, and seed the database with initial test data.
-"""
 from ums_smart_revenue.api.revenue import get_month_payment_match
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
@@ -133,9 +129,6 @@ def seed_database(database_url: str, *, payment_amount: str = "930.00") -> None:
                     views=250000,
                     watch_time_minutes=Decimal("7200.50"),
                     confidence_score=Decimal("0.9825"),
-"""
-Test module for payment match API endpoints with various scenarios and user roles.
-"""
                     imported_by=USER_ID,
                 ),
                 AdSensePaymentORM(
@@ -303,7 +296,8 @@ class _EmptyRevenueRepository:
 
 
 class _FailingPaymentRepository:
-    """Simulates a failing payment repository by raising validation errors for any payment queries."""
+    """Payment repository stub that raises validation errors."""
+
     @staticmethod
     def list_month_payments(*, month: str):
         """Raise an AdSensePaymentValidationError to simulate payment validation failures."""

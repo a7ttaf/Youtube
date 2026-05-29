@@ -1,6 +1,4 @@
-"""
-Module containing tests for the monthly payment match summary between YouTube revenue facts and AdSense payments.
-"""
+"""Tests for monthly payment matching between revenue facts and AdSense."""
 from datetime import date
 from decimal import Decimal
 from importlib import import_module
@@ -10,15 +8,14 @@ import pytest
 from ums_smart_revenue.finance.adsense_payments import AdSensePaymentEntry
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 
+
 def revenue_fact(
     *,
     channel_id: str,
     amount: str,
     source_kind: str = "YOUTUBE_CMS",
 ) -> RevenueFactEntry:
-    """
-    Create a RevenueFactEntry for a given YouTube channel and month with the specified amount and source kind.
-    """
+    """Create a revenue fact for the fixed test month."""
     return RevenueFactEntry(
         id=f"{channel_id}-{source_kind}",
         month="2026-03",
@@ -33,15 +30,14 @@ def revenue_fact(
         imported_by=None,
     )
 
+
 def adsense_payment(
     *,
     amount: str,
     status: str = "PAID",
     currency: str = "USD",
 ) -> AdSensePaymentEntry:
-    """
-    Create an AdSensePaymentEntry for a given amount, status, and currency for a fixed month.
-    """
+    """Create an AdSense payment for the fixed test month."""
     return AdSensePaymentEntry(
         id=f"payment-{status}-{amount}",
         month="2026-03",
@@ -56,16 +52,16 @@ def adsense_payment(
         imported_by=None,
     )
 
+
 def build_monthly_payment_match_summary(*, month, facts, payments):
-    """
-    Build a summary of payment matching for a given month by delegating to the payment_matching module.
-    """
+    """Build a monthly payment match summary."""
     module = import_module("ums_smart_revenue.finance.payment_matching")
     return module.build_monthly_payment_match_summary(
         month=month,
         facts=facts,
         payments=payments,
     )
+
 
 def test_monthly_payment_match_summary_matches_youtube_total_to_paid_adsense_payment():
     """
@@ -88,6 +84,7 @@ def test_monthly_payment_match_summary_matches_youtube_total_to_paid_adsense_pay
     assert summary.paid_payment_count == 1
     assert summary.issues == []
 
+
 def test_monthly_payment_match_summary_detects_payment_gap():
     """
     Test that the summary detects a payment gap when YouTube revenue exceeds paid AdSense payments.
@@ -105,6 +102,7 @@ def test_monthly_payment_match_summary_detects_payment_gap():
         "YouTube revenue and paid AdSense payments differ by 70"
         in summary.issues[0].message
     )
+
 
 def test_monthly_payment_match_summary_ignores_non_paid_adsense_payments_for_match():
     """
@@ -127,6 +125,7 @@ def test_monthly_payment_match_summary_ignores_non_paid_adsense_payments_for_mat
         "NON_PAID_ADSENSE_PAYMENTS",
     ]
 
+
 def test_monthly_payment_match_summary_excludes_non_usd_adsense_payments():
     """
     Test that AdSense payments in non-USD currencies are excluded and counted as unsupported.
@@ -145,6 +144,7 @@ def test_monthly_payment_match_summary_excludes_non_usd_adsense_payments():
         "MISSING_ADSENSE_PAYMENT",
         "UNSUPPORTED_PAYMENT_CURRENCY",
     ]
+
 
 def test_monthly_payment_match_summary_requires_youtube_revenue_sources():
     """
@@ -167,6 +167,7 @@ def test_monthly_payment_match_summary_requires_youtube_revenue_sources():
     assert summary.payment_gap_usd is None
     assert summary.missing_youtube_source_channel_count == 1
     assert summary.issues[0].issue_type == "NO_YOUTUBE_REVENUE_FACTS"
+
 
 def test_monthly_payment_match_summary_rejects_negative_tolerance():
     """

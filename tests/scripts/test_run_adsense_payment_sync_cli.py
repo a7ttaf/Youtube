@@ -41,11 +41,15 @@ def _load_cli():
 
 
 class _FakeSettings:
+    """Settings stub exposing only the CLI database URL."""
+
     def __init__(self, database_url="sqlite+pysqlite:///:memory:"):
         self.database_url = database_url
 
 
 class _SpySession:
+    """Session stub that records commit attempts."""
+
     def __init__(self):
         self.commits = 0
 
@@ -65,6 +69,8 @@ class _SpySession:
 
 
 class _FakeResult:
+    """Successful sync result stub."""
+
     synced_count = 1
     skipped_balance_count = 0
     skipped_locked_count = 0
@@ -72,6 +78,8 @@ class _FakeResult:
 
 
 class _FakeServiceOK:
+    """Sync service stub that returns a successful result."""
+
     def __init__(self, session, *, audit_sink, **kwargs):
         pass
 
@@ -124,12 +132,7 @@ def test_cli_live_success_commits_and_returns_0(monkeypatch, capsys):
 
 
 def test_cli_dry_run_does_not_commit(monkeypatch, capsys):
-    """
-    Test that dry-run mode does not commit and returns exit code 0.
-
-    """
-    Verifies output indicates dry-run mode.
-    """
+    """Dry-run mode returns 0, prints DRY-RUN, and never commits."""
     module = _load_cli()
     session = _SpySession()
     _patch_common(monkeypatch, module, session=session, service=_FakeServiceOK)
@@ -173,7 +176,8 @@ def test_cli_typed_failure_returns_2(monkeypatch, capsys, error):
     session = _SpySession()
 
     class _Raises:
-        """Stub service actor that always raises the provided error during sync, for testing error handling."""
+        """Service stub that raises the parametrized typed error."""
+
         def __init__(self, session, *, audit_sink, **kwargs):
             pass  # No initialization needed for stub service actor.
 
@@ -222,7 +226,8 @@ def test_cli_untyped_error_propagates(monkeypatch):
     session = _SpySession()
 
     class _Boom:
-        """Stub service actor that raises a RuntimeError during sync to test untyped error propagation."""
+        """Service stub that raises an untyped runtime error."""
+
         def __init__(self, session, *, audit_sink, **kwargs):
             pass  # No initialization needed for stub service actor.
 
@@ -232,3 +237,21 @@ def test_cli_untyped_error_propagates(monkeypatch):
     _patch_common(monkeypatch, module, session=session, service=_Boom)
     with pytest.raises(RuntimeError):
         module.main(BASE_ARGV)
+
+
+def test_cli_bad_tenant_uuid_is_argparse_error():
+    """Reject malformed tenant UUID values before runtime setup."""
+    module = _load_cli()
+    with pytest.raises(SystemExit) as excinfo:
+        module.main(
+            ["--tenant", "not-a-uuid", "--account", "pub-1", "--reason", "r"]
+        )
+    assert excinfo.value.code != 0
+
+
+def test_cli_blank_reason_is_argparse_error():
+    """Reject blank audit reasons before runtime setup."""
+    module = _load_cli()
+    with pytest.raises(SystemExit) as excinfo:
+        module.main(["--tenant", TENANT, "--account", "pub-1", "--reason", "   "])
+    assert excinfo.value.code != 0

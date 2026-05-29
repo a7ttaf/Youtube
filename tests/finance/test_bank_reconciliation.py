@@ -1,4 +1,4 @@
-"""Module containing tests and helper functions for bank reconciliation summary in UMS Smart Revenue. It includes factories for bank entries and AdSense payments, a summary builder, and tests for matching, variance, and exclusion scenarios."""
+"""Tests for monthly bank reconciliation summary behavior."""
 from datetime import date
 from decimal import Decimal
 from importlib import import_module

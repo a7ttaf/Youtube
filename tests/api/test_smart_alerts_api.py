@@ -1,10 +1,8 @@
+"""Tests for the Smart Alerts API authorization and database behavior."""
+
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
-"""
-This module contains tests for the Smart Alerts API, providing helper functions for
-authentication headers, database URL creation, and seeding the database for testing.
-"""
 
 import pytest
 from fastapi.testclient import TestClient

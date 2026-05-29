@@ -233,14 +233,14 @@ def acquire_finance_month_advisory_lock(
 def _month_close_key(
     month: str, *, tenant_id: UUID | str | None = None
 ) -> tuple[UUID, str]:
-    """Generate a tuple key consisting of the resolved tenant UUID and the month identifier."""
+    """Return the resolved tenant/month close key."""
     return (_resolve_tenant_id(tenant_id), month)
 
 
 def _resolve_tenant_id(
     tenant_id: UUID | str | None, *, use_context: bool = True
 ) -> UUID:
-    """Resolve the tenant identifier from the provided value or from context, defaulting to a global tenant if none is set."""
+    """Resolve tenant id from an explicit value, context, or default."""
     if tenant_id is not None:
         return _parse_tenant_uuid(tenant_id)
     if use_context:
@@ -251,7 +251,7 @@ def _resolve_tenant_id(
 
 
 def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
-    """Parse and validate the provided tenant_id, converting it to a UUID or raising ValueError if invalid."""
+    """Parse a tenant UUID value or raise ValueError."""
     if isinstance(tenant_id, UUID):
         return tenant_id
     try:

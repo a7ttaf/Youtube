@@ -8,11 +8,6 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
-"""Registry for connector runners.
-
-This module provides functions to register connector runner functions,
-dispatch a connector runner by key, and retrieve the known connector keys.
-"""
 
 from ums_smart_revenue.connectors.google.errors import ConnectorAlreadyRegisteredError
 
