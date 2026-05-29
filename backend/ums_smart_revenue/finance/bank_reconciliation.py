@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.finance_models import BankReconciliationEntryORM
 from ums_smart_revenue.finance.adsense_payments import AdSensePaymentEntry
+from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 from ums_smart_revenue.finance.reconciliation import ReconciliationIssue
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
@@ -435,15 +436,6 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
 
 def _quantize_money(value: Decimal) -> Decimal:
     return value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
-
-
-def _decimal_to_api(value: Decimal | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.normalize()
-    if normalized == normalized.to_integral():
-        return format(normalized, "f")
-    return format(normalized, "f").rstrip("0").rstrip(".")
 
 
 def _dialect_insert(dialect_name: str):

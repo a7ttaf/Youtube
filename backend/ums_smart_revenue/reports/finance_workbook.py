@@ -10,6 +10,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from ums_smart_revenue.finance.bank_reconciliation import (
     MonthBankReconciliationSummary,
 )
+from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.net_revenue import MonthNetRevenueSummary
 from ums_smart_revenue.finance.payment_matching import MonthlyPaymentMatchSummary
 from ums_smart_revenue.finance.smart_alerts import MonthlySmartAlertSummary
@@ -415,12 +416,3 @@ def _cell_value(value: object) -> object:
     if isinstance(value, (dict, list)):
         return json.dumps(value, sort_keys=True)
     return value
-
-
-def _decimal_to_api(value: Decimal | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.normalize()
-    if normalized == normalized.to_integral():
-        return format(normalized, "f")
-    return format(normalized, "f").rstrip("0").rstrip(".")

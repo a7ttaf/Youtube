@@ -1,5 +1,5 @@
 #!/usr/bin/env python
-"""CLI entrypoint for deduction-component ingestion.
+"""CLI entrypoint for deduction-component ingestion."""
 
 # ============================================================================
 # Purpose: Operator CLI driving one deduction-component ingestion run for a
@@ -15,8 +15,6 @@
 #   - File: backend/ums_smart_revenue/connectors/google/audit.py ->
 #     build_connector_service_principal (RUN_CONNECTOR_JOBS service actor).
 # ============================================================================
-"""
-
 from __future__ import annotations
 
 import argparse

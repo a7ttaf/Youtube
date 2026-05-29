@@ -2,6 +2,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
+from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntry
 from ums_smart_revenue.finance.reconciliation import SOURCE_PRIORITY
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
@@ -105,11 +106,6 @@ def build_adjusted_revenue_summary(
     )
 
 
-def _decimal_to_api(value: Decimal) -> str:
-    normalized = value.normalize()
-    if normalized == normalized.to_integral():
-        return format(normalized, "f")
-    return format(normalized, "f").rstrip("0").rstrip(".")
 
 
 def _validate_same_period_and_channel(

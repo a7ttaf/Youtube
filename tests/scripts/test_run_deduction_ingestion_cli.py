@@ -193,14 +193,14 @@ def test_cli_untyped_error_propagates(monkeypatch):
 
     class _Boom:
         """Service stub that always raises errors to test error propagation."""
-        
+
         def __init__(self, session, *, audit_sink, tenant_id=None):
-            """Initialize the stub with session, audit sink, and optional tenant ID. Always raises NotImplementedError to indicate unimplemented functionality."""
+            """Fail during service construction."""
             raise NotImplementedError()
 
         @staticmethod
         def ingest(**kwargs):
-            """Attempt to ingest data with provided keyword arguments. Always raises a runtime error to simulate ingestion failures."""
+            """Fail during ingestion."""
             raise RuntimeError("unexpected non-typed error")
 
     _patch_common(monkeypatch, module, session=session, service=_Boom)

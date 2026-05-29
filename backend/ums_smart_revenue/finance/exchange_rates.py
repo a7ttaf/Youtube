@@ -10,6 +10,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import CurrencyExchangeRateORM
+from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 
 CURRENCY_PATTERN = re.compile(r"^[A-Z]{3}$")
 MAX_EXCHANGE_RATE_BATCH_SIZE = 100
@@ -266,13 +267,6 @@ def _quantize_rate(value: Decimal) -> Decimal:
             f"rate rounds to zero after quantization: {value}"
         )
     return quantized
-
-
-def _decimal_to_api(value: Decimal) -> str:
-    normalized = value.normalize()
-    if normalized == normalized.to_integral():
-        return format(normalized, "f")
-    return format(normalized, "f").rstrip("0").rstrip(".")
 
 
 def _dialect_insert(dialect_name: str):

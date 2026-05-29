@@ -7,6 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.explanation_models import NumberExplanationORM
+from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntry
 from ums_smart_revenue.finance.reconciliation import SOURCE_PRIORITY
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
@@ -221,10 +222,3 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
         raise NumberExplanationValidationError(
             "tenant_id must be a valid UUID"
         ) from exc
-
-
-def _decimal_to_api(value: Decimal) -> str:
-    normalized = value.normalize()
-    if normalized == normalized.to_integral():
-        return format(normalized, "f")
-    return format(normalized, "f").rstrip("0").rstrip(".")

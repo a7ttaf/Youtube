@@ -1,11 +1,4 @@
-"""Repository + service tests for deduction-component ingestion (SQLite).
-
-Test suite for deduction ingestion.
-
-This module sets up fixtures to import the deduction ingestion module,
-create a UserPrincipal actor, initialize a SQLite engine, and seed test data
-for finance-related tests.
-"""
+"""Repository + service tests for deduction-component ingestion (SQLite)."""
 from datetime import date
 from decimal import Decimal
 from importlib import import_module
@@ -32,12 +25,12 @@ ACTOR_ID = UUID("00000000-0000-0000-0000-0000000c0001")
 
 
 def _mod():
-    """Import and return the deduction_ingestion module from ums_smart_revenue.finance."""
+    """Import the deduction ingestion module."""
     return import_module("ums_smart_revenue.finance.deduction_ingestion")
 
 
 def _actor() -> UserPrincipal:
-    """Create and return a UserPrincipal representing the finance viewer actor."""
+    """Create the finance viewer actor used by service tests."""
     return UserPrincipal(
         user_id=str(ACTOR_ID),
         email="ingest@example.com",
@@ -48,9 +41,7 @@ def _actor() -> UserPrincipal:
 
 
 def _engine(tmp_path):
-    """
-    Create a SQLite engine in a temporary file path, initialize finance tables, and return the engine.
-    """
+    """Create a temporary SQLite finance schema."""
     engine = create_engine(
         f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
     )
@@ -60,9 +51,7 @@ def _engine(tmp_path):
 
 def _seed(session: Session, *, settled="1000.00", paid="930.00", tax_currency="USD",
           locked=False):
-    """
-    Seed the database session with test data: BankReconciliationEntry, AdSensePayment, and GoogleRevenueSourceRow entries.
-    """
+    """Seed source rows, bank entries, payments, and optional month lock."""
     session.add(
         BankReconciliationEntryORM(
             id=uuid4(), month=MONTH, bank_reference="BANK-1",

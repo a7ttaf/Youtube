@@ -2,10 +2,8 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
-from ums_smart_revenue.finance.adsense_payments import (
-    AdSensePaymentEntry,
-    _decimal_to_api,
-)
+from ums_smart_revenue.finance.adsense_payments import AdSensePaymentEntry
+from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 
 # Fixed display + iteration order for the four write-validated statuses
 # (see ALLOWED_PAYMENT_STATUSES in finance/adsense_payments.py).

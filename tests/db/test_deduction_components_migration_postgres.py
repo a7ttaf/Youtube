@@ -94,7 +94,7 @@ def test_duplicate_component_key_rejected_by_unique(alembic_config, fresh_engine
         "INSERT INTO deduction_components "
         "(tenant_id, month, component_kind, scope_kind, scope_id, amount_usd, "
         "currency_code, source_system, source_table, component_key) VALUES "
-        ":tenant: '2026-04', 'TRANSFER_FEE', 'PAYMENT', 'BANK-1', 3.50, 'USD', "
+        "(:tenant, '2026-04', 'TRANSFER_FEE', 'PAYMENT', 'BANK-1', 3.50, 'USD', "
         "'bank_reconciliation', 'bank_reconciliation_entries', "
         "'bank:2026-04:BANK-1:transfer_fee')"
     )

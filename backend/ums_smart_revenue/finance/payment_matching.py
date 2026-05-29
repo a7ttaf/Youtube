@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
 from ums_smart_revenue.finance.adsense_payments import AdSensePaymentEntry
+from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.reconciliation import ReconciliationIssue
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 
@@ -220,12 +221,3 @@ def normalize_payment_match_currency(value: str) -> str:
             "currency must be USD until exchange-rate support is implemented"
         )
     return normalized
-
-
-def _decimal_to_api(value: Decimal | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.normalize()
-    if normalized == normalized.to_integral():
-        return format(normalized, "f")
-    return format(normalized, "f").rstrip("0").rstrip(".")
