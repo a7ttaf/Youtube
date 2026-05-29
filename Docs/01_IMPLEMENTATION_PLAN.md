@@ -372,8 +372,10 @@ currencies as source evidence before any finance facts consume them.
 
 ### Build
 
-- ⏳ AdSense account connector — remaining: credentials repository
-  (PRs #33, #34); real OAuth + pull not built.
+- ⏳ AdSense account connector — remaining: automated multi-account
+  discovery/onboarding via the credentials repository (PRs #33, #34). OAuth
+  refresh and the live `accounts.payments.list` pull already ship; today an
+  operator supplies each account id to the sync CLI.
 - ✅ Monthly payment pull — shipped: live AdSense `accounts.payments.list` pull
   (GoogleAdSensePaymentClient + pure fail-closed mapping/parse +
   AdSensePaymentSyncService with read-only locked-month skip + audit + operator
