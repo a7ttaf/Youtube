@@ -1765,6 +1765,59 @@ def test_cli_typed_failure_returns_2(monkeypatch, capsys, error):
     assert session.commits == 0
 
 
+def test_cli_malformed_settings_returns_2_before_db_session(monkeypatch, capsys):
+    # Settings validation failures are operator input errors -> exit 2 before any
+    # DB setup. build_session_factory must NOT run after a settings ValueError.
+    module = _load_cli()
+
+    def _bad_settings():
+        raise ValueError("malformed operator settings")
+
+    def _unexpected_session_factory(_url):
+        raise AssertionError("database setup must not run after settings validation")
+
+    monkeypatch.setattr(module, "load_app_settings", _bad_settings)
+    monkeypatch.setattr(module, "build_session_factory", _unexpected_session_factory)
+    rc = module.main(BASE_ARGV)
+    assert rc == 2
+    assert "ValueError" in capsys.readouterr().err
+
+
+def test_cli_missing_service_actor_returns_2(monkeypatch, capsys):
+    # A missing/blank service-actor id raises ValueError before any write -> exit 2.
+    module = _load_cli()
+    session = _SpySession()
+    _patch_common(monkeypatch, module, session=session, service=_FakeServiceOK)
+
+    def _no_actor(*, tenant_id):
+        raise ValueError("service actor id is required")
+
+    monkeypatch.setattr(module, "build_connector_service_principal", _no_actor)
+    rc = module.main(BASE_ARGV)
+    assert rc == 2
+    assert "ValueError" in capsys.readouterr().err
+    assert session.commits == 0
+
+
+def test_cli_untyped_error_propagates(monkeypatch):
+    # Non-typed errors are NOT caught (no exit-2 swallow); they propagate with a
+    # traceback, matching the AdSense sync CLI contract.
+    module = _load_cli()
+    session = _SpySession()
+
+    class _Boom:
+        def __init__(self, session, *, audit_sink, tenant_id=None):
+            pass
+
+        @staticmethod
+        def ingest(**kwargs):
+            raise RuntimeError("unexpected non-typed error")
+
+    _patch_common(monkeypatch, module, session=session, service=_Boom)
+    with pytest.raises(RuntimeError):
+        module.main(BASE_ARGV)
+
+
 def test_cli_bad_tenant_uuid_is_argparse_error():
     module = _load_cli()
     with pytest.raises(SystemExit) as excinfo:
@@ -1923,7 +1976,7 @@ if __name__ == "__main__":
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `python -m pytest tests/scripts/test_run_deduction_ingestion_cli.py -q`
-Expected: PASS — 7 passed (5 named + 2 parametrized).
+Expected: PASS — 10 passed (8 named + 2 parametrized).
 
 - [ ] **Step 5: Lint + commit**
 
@@ -1948,7 +2001,7 @@ Expected: `All checks passed!`
 - [ ] **Step 2: Full test suite**
 
 Run: `python -m pytest -q`
-Expected: PASS — prior count + the new tests (2 audit + 4 Postgres migration [pass only when `UMS_TEST_DATABASE_URL` is set; otherwise they are the pre-existing environment-gated `*_postgres.py` errors, unchanged] + 15 pure-mapper + 7 ingestion + 7 CLI). 0 failed.
+Expected: PASS — prior count + the new tests (2 audit + 4 Postgres migration [pass only when `UMS_TEST_DATABASE_URL` is set; otherwise they are the pre-existing environment-gated `*_postgres.py` errors, unchanged] + 15 pure-mapper + 7 ingestion + 10 CLI). 0 failed.
 
 - [ ] **Step 3: Whitespace/diff hygiene**
 
