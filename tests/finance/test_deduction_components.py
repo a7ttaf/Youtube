@@ -56,12 +56,6 @@ def bank_entry(*, reference, fee="0.00", fx="0.00"):
         bank_received_amount_usd=Decimal("1000.00"),
         transfer_fee_usd=Decimal(fee),
         fx_difference_usd=Decimal(fx),
-"""Test module for DeductionComponent mapping.
-
-Contains tests for mapping source rows, bank entries, and AdSense payment gaps
-to DeductionComponent domain objects.
-"""
-
         notes=None,
         source_report_id=None,
         recorded_by="user",

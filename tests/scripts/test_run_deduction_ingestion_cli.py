@@ -25,6 +25,7 @@ def _load_cli():
 
 
 class _FakeSettings:
+    """Dummy settings object for tests, providing a database_url attribute."""
     def __init__(self, database_url="sqlite+pysqlite:///:memory:"):
         self.database_url = database_url
 
@@ -33,6 +34,7 @@ class _SpySession:
     """
     Dummy session used for testing that tracks the number of commit operations.
     """
+
     def __init__(self):
         self.commits = 0
 
@@ -56,7 +58,9 @@ def _fake_result():
 
 
 class _FakeServiceOK:
+    """Fake service that simulates successful ingestion operations for testing."""
     def __init__(self, session, *, audit_sink, tenant_id=None):
+        """No initialization needed for FakeServiceOK."""
         pass
 
     @staticmethod
@@ -124,6 +128,11 @@ def test_cli_typed_failure_returns_2(monkeypatch, capsys, error):
     module = _load_cli()
     session = _SpySession()
 
+    """
+    Module providing tests for the run deduction ingestion CLI,
+    including a mock service that simulates ingestion failures.
+    """
+
     class _Raises:
         """Mock service class that always raises the specified error during ingestion."""
 
@@ -133,6 +142,7 @@ def test_cli_typed_failure_returns_2(monkeypatch, capsys, error):
 
         @staticmethod
         def ingest(**kwargs):
+            """Attempt to ingest data and always raise an error to simulate failure."""
             raise error
 
     _patch_common(monkeypatch, module, session=session, service=_Raises)
@@ -188,12 +198,17 @@ def test_cli_untyped_error_propagates(monkeypatch):
     module = _load_cli()
     session = _SpySession()
 
+    """Module providing a stub service to test error propagation during ingestion processes."""
+
     class _Boom:
+        """Service stub that always raises errors to test error propagation."""
         def __init__(self, session, *, audit_sink, tenant_id=None):
+            """Initialize the stub with session, audit sink, and optional tenant ID. Always raises NotImplementedError to indicate unimplemented functionality."""
             raise NotImplementedError()
 
         @staticmethod
         def ingest(**kwargs):
+            """Attempt to ingest data with provided keyword arguments. Always raises a runtime error to simulate ingestion failures."""
             raise RuntimeError("unexpected non-typed error")
 
     _patch_common(monkeypatch, module, session=session, service=_Boom)

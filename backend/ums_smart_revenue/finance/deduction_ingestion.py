@@ -60,7 +60,8 @@ class DeductionIngestionResult:
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
-    """Convert the given tenant_id to a UUID, using the default if None or validating string input."""
+    """Convert the given tenant_id to a UUID, using the default if None
+    or validating string input."""
     if tenant_id is None:
         return UUID(UMS_TENANT_ID)
     if isinstance(tenant_id, UUID):
@@ -107,7 +108,8 @@ class SqlAlchemyDeductionComponentRepository:
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def _require_month_open(self, month: str) -> None:
-        """Check if the given month is open for ingestion and raise an error if it is locked."""
+        """Check if the given month is open for ingestion and raise an
+           error if it is locked."""
         close = get_or_create_month_close_row(
             self._session, month, tenant_id=self._tenant_id, for_update=True
         )
@@ -119,7 +121,9 @@ class SqlAlchemyDeductionComponentRepository:
     def upsert_components(
         self, *, month: str, components: list[DeductionComponentInput]
     ) -> list[DeductionComponent]:
-        """Insert or update deduction components for a given month, validating inputs, enforcing month locks, and returning the list of processed components."""
+        """Insert or update deduction components for a given month,
+           validating inputs, enforcing month locks, and returning the list
+           of processed components."""
         _validate_month(month)
         # FIX: refuse LOCKED months even for a zero-component run. Live ingestion
         # must fail closed BEFORE the empty-return (and before the service's audit
@@ -180,7 +184,8 @@ class SqlAlchemyDeductionComponentRepository:
         return entries
 
     def list_month_components(self, *, month: str) -> list[DeductionComponent]:
-        """Return a list of DeductionComponent entries for the specified month by querying the database."""
+        """Return a list of DeductionComponent entries for the specified month
+        by querying the database."""
         _validate_month(month)
         rows = self._session.scalars(
             select(DeductionComponentORM)
@@ -246,7 +251,11 @@ class DeductionIngestionService:
         self, *, month: str, actor: UserPrincipal, reason: str,
         source: str | None = None, dry_run: bool = False,
     ) -> DeductionIngestionResult:
-        """Ingest deduction components for a given month by fetching source rows, bank entries, and AdSense payments, mapping them to components, upserting in the repository, and recording an audit summary event."""
+        """
+        Ingest deduction components for a given month by fetching source rows,
+        bank entries, and AdSense payments, mapping them to components, upserting
+        in the repository, and recording an audit summary event.
+        """
         _validate_month(month)
         if source is not None and source not in INGESTION_SOURCES:
             raise DeductionComponentValidationError(

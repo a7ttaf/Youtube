@@ -40,11 +40,6 @@ class DeductionComponentInput:
 
 
 @dataclass(frozen=True)
-"""
-Module for mapping revenue source rows, bank reconciliation entries, and AdSense payment data
-into DeductionComponentInput models for downstream API consumption.
-"""
-
 class DeductionComponent:
     """Persisted deduction-component read model."""
 

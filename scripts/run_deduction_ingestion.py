@@ -1,17 +1,6 @@
 #!/usr/bin/env python
 """CLI entrypoint for deduction-component ingestion.
 
-Usage:
-    python scripts/run_deduction_ingestion.py \
-        --tenant <UUID> --month <YYYY-MM> --reason "<audit reason>" \
-        [--source source_rows|bank|gap] [--dry-run]
-
-Exit codes:
-    0   -- success (including a clean dry-run).
-    2   -- typed/config failure (missing UMS_DATABASE_URL, missing service actor,
-           or DeductionComponentError). No commit happened.
-    !=0 -- argparse rejection (bad --tenant UUID, blank --reason).
-"""
 # ============================================================================
 # Purpose: Operator CLI driving one deduction-component ingestion run for a
 #   single (tenant, month). Translates argparse/config/typed errors into stable
@@ -26,22 +15,20 @@ Exit codes:
 #   - File: backend/ums_smart_revenue/connectors/google/audit.py ->
 #     build_connector_service_principal (RUN_CONNECTOR_JOBS service actor).
 # ============================================================================
+"""
+
+from __future__ import annotations
+
 """Module to run deduction-component ingestion for tenants and finance months.
 
 This script parses command-line arguments and orchestrates the deduction ingestion
 process, including audit logging and database interactions.
 """
-from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
 from uuid import UUID
-
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_BACKEND_PATH = str(_PROJECT_ROOT / "backend")
-if _BACKEND_PATH not in sys.path:
-    sys.path.insert(0, _BACKEND_PATH)
 
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink  # noqa: E402
 from ums_smart_revenue.config.settings import load_app_settings  # noqa: E402
@@ -55,8 +42,13 @@ from ums_smart_revenue.finance.deduction_ingestion import (  # noqa: E402
     DeductionIngestionService,
 )
 
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_BACKEND_PATH = str(_PROJECT_ROOT / "backend")
+if _BACKEND_PATH not in sys.path:
+    sys.path.insert(0, _BACKEND_PATH)
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
+    ...
     """Parse command-line arguments for deduction ingestion.
 
     Args:

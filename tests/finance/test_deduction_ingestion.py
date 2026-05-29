@@ -1,5 +1,5 @@
-"""Repository + service tests for deduction-component ingestion (SQLite)."""
-"""
+"""Repository + service tests for deduction-component ingestion (SQLite).
+
 Test suite for deduction ingestion.
 
 This module sets up fixtures to import the deduction ingestion module,
@@ -32,16 +32,12 @@ ACTOR_ID = UUID("00000000-0000-0000-0000-0000000c0001")
 
 
 def _mod():
-    """
-    Import and return the deduction_ingestion module from ums_smart_revenue.finance.
-    """
+    """Import and return the deduction_ingestion module from ums_smart_revenue.finance."""
     return import_module("ums_smart_revenue.finance.deduction_ingestion")
 
 
 def _actor() -> UserPrincipal:
-    """
-    Create and return a UserPrincipal representing the finance viewer actor.
-    """
+    """Create and return a UserPrincipal representing the finance viewer actor."""
     return UserPrincipal(
         user_id=str(ACTOR_ID),
         email="ingest@example.com",

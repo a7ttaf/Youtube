@@ -8,6 +8,7 @@ class AuditEventType(StrEnum):
     """
     Enumeration of audit event types used for logging and tracking system actions.
     """
+
     LOGIN = "LOGIN"
     LOGOUT = "LOGOUT"
     CHANNEL_CREATED = "CHANNEL_CREATED"
@@ -47,6 +48,7 @@ class AuditEventDefinition:
     Defines an audit event configuration, specifying its type,
     whether a reason is required, and associated permission.
     """
+
     event_type: AuditEventType
     reason_required: bool = False
     permission: Permission | None = None
