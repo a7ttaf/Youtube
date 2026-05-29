@@ -755,10 +755,10 @@ def test_fetch_payments_rejects_non_object_response() -> None:
         GoogleAdSensePaymentClient(http=http).fetch_payments(account_id="pub-1")
 
 
-def test_fetch_payments_rejects_missing_payments_field() -> None:
+def test_fetch_payments_treats_missing_payments_as_empty_list() -> None:
     http = _FakeHttp({"notpayments": []})  # object, but no payments list
-    with pytest.raises(GoogleApiResponseError):
-        GoogleAdSensePaymentClient(http=http).fetch_payments(account_id="pub-1")
+    result = GoogleAdSensePaymentClient(http=http).fetch_payments(account_id="pub-1")
+    assert result["payments"] == []
 
 
 def test_fetch_payments_rejects_non_list_payments() -> None:
@@ -805,10 +805,9 @@ class GoogleAdSensePaymentClient:
             raise GoogleApiResponseError(
                 url=url, reason="payments response is not an object"
             )
-        # accounts.payments.list wraps the full (unpaginated) list in
-        # `payments`. A missing or non-list field is a schema gap, not an
-        # empty account, so fail closed rather than ingest a partial shape.
-        payments = response.get("payments")
+        # Google may omit repeated fields when empty; normalize that omission
+        # to [] while still rejecting a present field with the wrong type.
+        payments = response.get("payments", [])
         if not isinstance(payments, list):
             raise GoogleApiResponseError(
                 url=url,
@@ -817,7 +816,12 @@ class GoogleAdSensePaymentClient:
         report_id = hashlib.sha256(
             f"{account}|{_REPORT_KEY}".encode()
         ).hexdigest()
-        return {**response, "account_id": account, "report_id": report_id}
+        return {
+            **response,
+            "payments": payments,
+            "account_id": account,
+            "report_id": report_id,
+        }
 ```
 
 - [ ] **Step 4 — Run, expect PASS**, then `python -m ruff check backend tests`.
