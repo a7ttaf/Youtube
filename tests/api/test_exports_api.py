@@ -453,6 +453,7 @@ def test_export_list_scan_limit_marks_has_more_and_logs_metric(caplog):
 
     class PagedRepository:
         """Provides paginated retrieval of export jobs via the list_jobs method."""
+
         def __init__(self) -> None:
             self.offsets: list[int] = []
 
