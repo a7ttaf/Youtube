@@ -3,7 +3,7 @@ from ums_smart_revenue.auth.audit import (
     AUDIT_EVENT_DEFINITIONS,
     AuditEventType,
 )
-from ums_smart_revenue.auth.permissions import SENSITIVE_PERMISSIONS
+from ums_smart_revenue.auth.permissions import SENSITIVE_PERMISSIONS, Permission
 
 
 def test_deduction_components_ingested_event_exists():
@@ -12,5 +12,5 @@ def test_deduction_components_ingested_event_exists():
 
 def test_deduction_components_ingested_is_sensitive_via_run_connector_jobs():
     definition = AUDIT_EVENT_DEFINITIONS[AuditEventType.DEDUCTION_COMPONENTS_INGESTED]
-    assert definition.permission is not None
+    assert definition.permission == Permission.RUN_CONNECTOR_JOBS
     assert definition.permission in SENSITIVE_PERMISSIONS
