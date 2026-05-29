@@ -3,8 +3,6 @@ from datetime import date
 from decimal import Decimal
 from importlib import import_module
 
-import pytest
-
 from ums_smart_revenue.finance.adsense_payments import AdSensePaymentEntry
 
 MONTH = "2026-04"
@@ -45,8 +43,8 @@ def _bucket(summary, status):
     """Return the month-rollup bucket for a status."""
     try:
         return next(b for b in summary.status_totals if b.status == status)
-    except StopIteration:
-        pytest.fail(f"missing {status} status bucket")
+    except StopIteration as exc:
+        raise AssertionError(f"missing {status} status bucket") from exc
 
 
 def test_month_rollup_lists_all_four_statuses_in_canonical_order():
