@@ -138,6 +138,13 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   (migration 20260529_0001). Follow-up: bare ambiguous-symbol amounts ($, ¥, kr)
   fail closed by design (no $→USD guess), so $-denominated settlements need an
   explicit-currency resolution before they can sync.
+- ✅ AdSense payment matching + paid/unpaid status — month-total YouTube↔AdSense
+  matcher (`GET /revenue/months/{month}/payment-match`, verified pre-existing)
+  and per-account/per-currency settlement-status breakdown
+  (`GET /adsense/payments/status`, `finance/payment_status.py`, this PR).
+  Payment-match remains USD-only; the paid/unpaid status view groups
+  AdSense-reported amounts by currency. Outstanding = PENDING + UNPAID;
+  CANCELLED shown for evidence; no FX, per Docs/18.
 - ⏳ Finance month-close screen — remaining: close-gate backend (PR #8);
   UI not built.
 - ⏳ Net revenue calculation — remaining: revenue facts (PR #2);
