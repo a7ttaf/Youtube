@@ -46,6 +46,7 @@ class FinanceMonthCloseReadinessError(ValueError):
     """Raised when a lock attempt finds unresolved close blockers."""
 
     def __init__(self, readiness):
+        """Store readiness details for route-safe error translation."""
         self.readiness = readiness
         super().__init__("Finance month has unresolved close blockers")
 
@@ -54,6 +55,7 @@ class SqlAlchemyFinanceMonthCloseRepository:
     """Persist and mutate finance month close control rows with month locks."""
 
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        """Bind the SQLAlchemy session and tenant scope for close operations."""
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 

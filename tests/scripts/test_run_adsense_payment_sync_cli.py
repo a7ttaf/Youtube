@@ -44,6 +44,7 @@ class _FakeSettings:
     """Settings stub exposing only the CLI database URL."""
 
     def __init__(self, database_url="sqlite+pysqlite:///:memory:"):
+        """Store the fake database URL returned by settings loading."""
         self.database_url = database_url
 
 
@@ -51,6 +52,7 @@ class _SpySession:
     """Session stub that records commit attempts."""
 
     def __init__(self):
+        """Initialize commit tracking for the fake session."""
         self.commits = 0
 
     def commit(self):
@@ -62,9 +64,11 @@ class _SpySession:
         self.commits += 1
 
     def __enter__(self):
+        """Return the fake session for context-manager use."""
         return self
 
     def __exit__(self, *exc):
+        """Propagate exceptions raised inside the fake session context."""
         return False  # never suppress; untyped errors propagate
 
 
