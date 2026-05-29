@@ -14,6 +14,8 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation
 
+from ums_smart_revenue.db.iso_4217_2026_05 import ISO_4217_CURRENCIES_2026_05
+
 # accounts/{account}/payments/{suffix}; the suffix carries the type/status.
 _RESOURCE_NAME_RE = re.compile(
     r"^accounts/(?P<account>[^/]+)/payments/(?P<suffix>.+)$"
@@ -24,6 +26,9 @@ _DATE_SUFFIX_RE = re.compile(r"^(?:youtube-)?(?P<date>\d{4}-\d{2}-\d{2})$")
 _BALANCE_SUFFIX_RE = re.compile(r"^(?:youtube-)?unpaid$")
 # An explicit ISO 4217 code anywhere in the string wins over symbols.
 _ISO_CODE_RE = re.compile(r"\b([A-Z]{3})\b")
+_ISO_4217_CODES = frozenset(
+    str(entry["code"]) for entry in ISO_4217_CURRENCIES_2026_05
+)
 # Only unambiguous symbols are accepted; $, ¥, kr, etc. are intentionally absent.
 _SYMBOL_CURRENCIES: dict[str, str] = {"£": "GBP", "€": "EUR"}
 # Plain decimal: optional 3-digit thousands groups, optional fractional part.
@@ -170,6 +175,12 @@ def parse_amount(raw_amount: str) -> tuple[Decimal, str]:
     iso = _ISO_CODE_RE.search(text)
     if iso is not None:
         currency = iso.group(1)
+        # FIX: Only the immutable ISO 4217 snapshot may make a three-letter
+        # token authoritative; unknown tokens like "ABC" must fail closed.
+        if currency not in _ISO_4217_CODES:
+            raise AdSensePaymentMappingError(
+                f"unsupported ISO currency in amount: {raw_amount!r}"
+            )
         remainder = (text[: iso.start()] + text[iso.end():]).strip()
         # FIX: The explicit ISO code is authoritative, but only a real leading
         # currency symbol may be ignored (for example, "¥1,235 JPY"). Unknown
