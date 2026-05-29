@@ -61,7 +61,8 @@ class DeductionComponent:
 
     def to_api(self) -> dict[str, object]:
         """Convert the DeductionComponent instance into a dictionary compatible
-        with the external API, excluding raw_payload for provenance."""
+        with the external API, excluding raw_payload for provenance.
+        """
         # raw_payload is intentionally omitted (provenance only; see PR-B endpoint).
         return {
             "id": self.id,
