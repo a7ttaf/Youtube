@@ -550,3 +550,128 @@ class CurrencyExchangeRateORM(FinanceBase):
         Index("ix_currency_exchange_rates_provider", "provider_key"),
         Index("ix_currency_exchange_rates_source_report", "source_report_id"),
     )
+
+
+class DeductionComponentORM(FinanceBase):
+    """Source-reported, strictly-labeled deduction-evidence component."""
+
+    # ========================================================================
+    # Purpose: One typed, source-labeled deduction-evidence row (TAX, DEDUCTION,
+    #   TRANSFER_FEE, signed FX_VARIANCE, or UNRESOLVED_PAYMENT_GAP) at CHANNEL,
+    #   ACCOUNT, or PAYMENT scope. Substrate only — no allocation, no net math.
+    # Database/ORM: deduction_components (FinanceBase). Tenant-scoped; idempotent
+    #   on (tenant_id, component_key).
+    # Standards: signed finite amounts (Postgres NaN-guarded via ddl_if);
+    #   object-only NOT NULL raw_payload; USD-only amounts (non-USD skipped at
+    #   ingestion, never converted).
+    # Blast Radius: Finance source-of-truth (new table; additive). No auth/Neo4j.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/finance/deduction_ingestion.py -> writer.
+    #   - File: Docs/superpowers/specs/2026-05-29-spec-deduction-components-design.md
+    # ========================================================================
+    __tablename__ = "deduction_components"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        primary_key=True,
+        server_default=text("gen_random_uuid()"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True),
+        nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE,
+        server_default=_TENANT_ID_DEFAULT,
+    )
+    month: Mapped[str] = mapped_column(Text, nullable=False)
+    component_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    scope_id: Mapped[str] = mapped_column(Text, nullable=False)
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    amount_native: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
+    currency_code: Mapped[str] = mapped_column(Text, nullable=False)
+    source_system: Mapped[str] = mapped_column(Text, nullable=False)
+    source_table: Mapped[str] = mapped_column(Text, nullable=False)
+    source_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_key: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_report_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    raw_payload: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=False,
+        server_default=text("'{}'"),
+    )
+    component_key: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+        onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "tenant_id", "component_key", name="uq_deduction_components_key"
+        ),
+        CheckConstraint(
+            "length(month) = 7 AND substr(month, 5, 1) = '-' "
+            "AND substr(month, 1, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 2, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 3, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 4, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
+            name="ck_deduction_components_month_format",
+        ),
+        CheckConstraint(
+            "component_kind IN ('TAX', 'DEDUCTION', 'TRANSFER_FEE', "
+            "'FX_VARIANCE', 'UNRESOLVED_PAYMENT_GAP')",
+            name="ck_deduction_components_kind",
+        ),
+        CheckConstraint(
+            "scope_kind IN ('CHANNEL', 'ACCOUNT', 'PAYMENT')",
+            name="ck_deduction_components_scope_kind",
+        ),
+        CheckConstraint(
+            "length(currency_code) = 3 "
+            "AND currency_code = upper(currency_code) "
+            "AND substr(currency_code, 1, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(currency_code, 2, 1) BETWEEN 'A' AND 'Z' "
+            "AND substr(currency_code, 3, 1) BETWEEN 'A' AND 'Z'",
+            name="ck_deduction_components_currency_code",
+        ),
+        CheckConstraint(
+            "length(scope_id) >= 1", name="ck_deduction_components_scope_id_nonempty"
+        ),
+        CheckConstraint(
+            "length(component_key) >= 1",
+            name="ck_deduction_components_component_key_nonempty",
+        ),
+        # Postgres NUMERIC can store NaN (and `>= 0` would admit it); these
+        # finite bounds reject NaN + ±Infinity for the signed amounts. Postgres-
+        # only: the 'Infinity'::numeric cast is invalid SQLite (create_all path).
+        CheckConstraint(
+            "amount_usd > '-Infinity'::numeric AND amount_usd < 'Infinity'::numeric",
+            name="ck_deduction_components_amount_usd_finite",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "amount_native IS NULL OR (amount_native > '-Infinity'::numeric "
+            "AND amount_native < 'Infinity'::numeric)",
+            name="ck_deduction_components_amount_native_finite",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "jsonb_typeof(raw_payload) = 'object'",
+            name="ck_deduction_components_raw_payload_object",
+        ).ddl_if(dialect="postgresql"),
+        Index("ix_deduction_components_tenant_month", "tenant_id", "month"),
+        Index(
+            "ix_deduction_components_tenant_scope",
+            "tenant_id", "scope_kind", "scope_id",
+        ),
+        Index(
+            "ix_deduction_components_tenant_month_kind",
+            "tenant_id", "month", "component_kind",
+        ),
+    )
