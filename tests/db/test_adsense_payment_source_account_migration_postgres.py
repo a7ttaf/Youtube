@@ -62,6 +62,7 @@ def fresh_engine(postgres_url: str) -> object:
 def test_source_account_migration_rekeys_uniqueness(
     alembic_config, fresh_engine
 ) -> None:
+    """Upgrading creates the account-scoped key and tenant-month read index."""
     command.upgrade(alembic_config, "head")
     inspector = inspect(fresh_engine)
     cols = {c["name"]: c for c in inspector.get_columns("adsense_payments")}
@@ -74,6 +75,13 @@ def test_source_account_migration_rekeys_uniqueness(
         "tenant_id", "source_account_id", "month", "payment_name",
     )
     assert "uq_adsense_payments_month_name" not in uniques
+    indexes = {
+        c["name"]: tuple(c["column_names"])
+        for c in inspector.get_indexes("adsense_payments")
+    }
+    assert indexes["ix_adsense_payments_tenant_month_payment_date"] == (
+        "tenant_id", "month", "payment_date",
+    )
     checks = {c["name"] for c in inspector.get_check_constraints("adsense_payments")}
     assert "ck_adsense_payments_source_account_id_nonempty" in checks
 
@@ -97,6 +105,7 @@ def test_source_account_migration_rekeys_uniqueness(
 def test_source_account_migration_backfills_legacy_null_rows(
     alembic_config, fresh_engine
 ) -> None:
+    """Backfills existing pre-live-pull rows with the legacy account sentinel."""
     # 1. Step to the PRIOR head: adsense_payments exists WITHOUT
     #    source_account_id and with the old (tenant_id, month, payment_name) key.
     command.upgrade(alembic_config, "20260527_0001")
@@ -152,8 +161,9 @@ def test_source_account_migration_backfills_legacy_null_rows(
 def test_source_account_migration_downgrade_reverses(
     alembic_config, fresh_engine
 ) -> None:
+    """Downgrading to the prior revision removes source-account schema changes."""
     command.upgrade(alembic_config, "head")
-    command.downgrade(alembic_config, "-1")
+    command.downgrade(alembic_config, "20260527_0001")
     inspector = inspect(fresh_engine)
     cols = {c["name"] for c in inspector.get_columns("adsense_payments")}
     assert "source_account_id" not in cols
@@ -164,3 +174,37 @@ def test_source_account_migration_downgrade_reverses(
     assert "uq_adsense_payments_account_month_name" not in uniques
     checks = {c["name"] for c in inspector.get_check_constraints("adsense_payments")}
     assert "ck_adsense_payments_source_account_id_nonempty" not in checks
+
+
+def test_source_account_migration_downgrade_fails_on_account_collisions(
+    alembic_config, fresh_engine
+) -> None:
+    """Downgrade reports account-scoped duplicates before restoring old key."""
+    command.upgrade(alembic_config, "head")
+    with fresh_engine.begin() as conn:
+        for source_account_id in ("pub-1", "pub-2"):
+            conn.execute(
+                text(
+                    "INSERT INTO adsense_payments "
+                    "(tenant_id, source_account_id, month, payment_name, "
+                    "payment_date, payment_amount, payment_currency, "
+                    "payment_status, raw_payload) "
+                    "VALUES (:tenant_id, :source_account_id, :month, "
+                    ":payment_name, :payment_date, :payment_amount, "
+                    ":payment_currency, :payment_status, CAST(:raw_payload AS jsonb))"
+                ),
+                {
+                    "tenant_id": "00000000-0000-0000-0000-000000000001",
+                    "source_account_id": source_account_id,
+                    "month": "2026-04",
+                    "payment_name": "accounts-collide-on-old-key",
+                    "payment_date": "2026-04-30",
+                    "payment_amount": "1234.560000",
+                    "payment_currency": "USD",
+                    "payment_status": "PAID",
+                    "raw_payload": "{}",
+                },
+            )
+
+    with pytest.raises(Exception, match="account-scoped duplicate AdSense payments"):
+        command.downgrade(alembic_config, "20260527_0001")

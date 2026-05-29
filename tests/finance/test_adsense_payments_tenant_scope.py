@@ -47,6 +47,7 @@ def build_session() -> Session:
 def _payment_input(
     *, payment_name: str, amount: str = "1234.56"
 ) -> AdSensePaymentInput:
+    """Build a default AdSense payment input for tenant-scope write tests."""
     return AdSensePaymentInput(
         source_account_id="pub-1",
         month="2026-03",
@@ -79,16 +80,18 @@ def _seed_payment(
     tenant_id: UUID,
     payment_name: str,
     month: str = "2026-03",
+    source_account_id: str = "pub-1",
+    payment_id: UUID | None = None,
 ) -> UUID:
     """Insert a paid payment for a specific tenant and return the row id."""
-    payment_id = uuid4()
+    payment_id = payment_id or uuid4()
     session.add(
         AdSensePaymentORM(
             id=payment_id,
             tenant_id=tenant_id,
             month=month,
             payment_name=payment_name,
-            source_account_id="pub-1",
+            source_account_id=source_account_id,
             payment_date=date(2026, 4, 15),
             payment_amount=Decimal("100.00"),
             payment_currency="USD",
@@ -269,6 +272,36 @@ def test_list_payments_filters_to_explicit_tenant_id() -> None:
 
     assert [entry.payment_name for entry in page.items] == ["Second Tenant Row"]
     assert page.has_more is False
+
+
+def test_list_payments_orders_account_scoped_duplicates_deterministically() -> None:
+    """Account-scoped duplicate names paginate in a stable total order."""
+    session = build_session()
+    _seed_payment(
+        session,
+        tenant_id=DEFAULT_TENANT_ID,
+        payment_name="Shared Payment Name",
+        month="2026-04",
+        source_account_id="pub-b",
+        payment_id=UUID("00000000-0000-0000-0000-0000000000b2"),
+    )
+    _seed_payment(
+        session,
+        tenant_id=DEFAULT_TENANT_ID,
+        payment_name="Shared Payment Name",
+        month="2026-04",
+        source_account_id="pub-a",
+        payment_id=UUID("00000000-0000-0000-0000-0000000000a1"),
+    )
+
+    page = SqlAlchemyAdSensePaymentRepository(
+        session, tenant_id=DEFAULT_TENANT_ID
+    ).list_payments(limit=10)
+
+    assert [(entry.source_account_id, entry.id) for entry in page.items] == [
+        ("pub-a", "00000000-0000-0000-0000-0000000000a1"),
+        ("pub-b", "00000000-0000-0000-0000-0000000000b2"),
+    ]
 
 
 def test_list_payments_uses_default_tenant_without_context() -> None:
@@ -483,6 +516,7 @@ def test_adsense_repository_rejects_invalid_tenant_id_string() -> None:
 
 
 def _payment(**overrides) -> AdSensePaymentInput:
+    """Build an account-scoped AdSense payment input for repository writes."""
     base = dict(
         source_account_id="pub-1",
         month="2026-04",
@@ -498,6 +532,7 @@ def _payment(**overrides) -> AdSensePaymentInput:
 
 
 def test_sync_allows_same_month_payment_name_across_accounts() -> None:
+    """The same payment suffix can be stored for different AdSense accounts."""
     session = build_session()
     repo = SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID)
     repo.sync_payments(
@@ -521,6 +556,7 @@ def test_sync_allows_same_month_payment_name_across_accounts() -> None:
 
 
 def test_sync_is_idempotent_per_account_month_name() -> None:
+    """The new uniqueness key remains idempotent for one account/month/name."""
     session = build_session()
     repo = SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID)
     first = repo.sync_payments(
@@ -537,6 +573,7 @@ def test_sync_is_idempotent_per_account_month_name() -> None:
 
 
 def test_within_batch_duplicate_keys_on_account_month_name() -> None:
+    """Reject duplicate account/month/name rows inside a single sync batch."""
     session = build_session()
     repo = SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID)
     with pytest.raises(AdSensePaymentValidationError, match="duplicate"):
@@ -554,6 +591,7 @@ def test_within_batch_duplicate_keys_on_account_month_name() -> None:
 
 
 def test_sync_rejects_blank_source_account_id() -> None:
+    """Repository validation rejects blank source account ids fail-closed."""
     session = build_session()
     repo = SqlAlchemyAdSensePaymentRepository(session, tenant_id=DEFAULT_TENANT_ID)
     with pytest.raises(AdSensePaymentValidationError, match="source_account_id"):

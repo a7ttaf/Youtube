@@ -389,8 +389,9 @@ currencies as source evidence before any finance facts consume them.
 
 ### Outputs
 
-- ⏳ Monthly AdSense payment table — schema only; real pulls must preserve
-  Google's reported payment currency and source report identity.
+- ✅ Monthly AdSense payment table — live pull shipped; real pulls preserve
+  Google's reported payment currency, source account identity, and deterministic
+  source report identity.
 - ⏳ Payment match status — not driven.
 - ⏳ Payment gap value — not computed.
 
@@ -399,11 +400,12 @@ currencies as source evidence before any finance facts consume them.
 - ⏳ System can show whether YouTube revenue total matches the AdSense
   payment amount — not yet met.
 
-### Status (2026-05-22)
+### Status (2026-05-29)
 
-Same shape as Phase 2: schema and tenant-scoped repos exist; no real pull
-or matching pass runs. Matching must start from AdSense-reported payment
-amounts/currencies, not market FX-derived amounts.
+Live AdSense payment pull now runs through the dedicated operator CLI and
+persists account-scoped settlements into the PostgreSQL `adsense_payments`
+source-of-truth table. Matching remains outstanding and must start from
+AdSense-reported payment amounts/currencies, not market FX-derived amounts.
 
 ---
 

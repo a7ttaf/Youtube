@@ -35,6 +35,8 @@ class AdSensePaymentMappingError(ValueError):
 
 @dataclass(frozen=True)
 class SkippedBalance:
+    """Unpaid AdSense balance entry skipped because it has no settlement date."""
+
     resource_name: str
     raw_amount: str
     reason: str  # "no_payment_date" for unpaid / youtube-unpaid balances
@@ -42,6 +44,8 @@ class SkippedBalance:
 
 @dataclass(frozen=True)
 class PaidSettlement:
+    """Paid AdSense settlement classified for strict amount parsing and sync."""
+
     source_account_id: str
     month: str          # YYYY-MM derived from Payment.date
     payment_name: str   # raw resource-name suffix, e.g. "2026-04-21"
@@ -52,6 +56,8 @@ class PaidSettlement:
 
 @dataclass(frozen=True)
 class ClassifiedPayments:
+    """Classification result split into paid rows and skipped balances."""
+
     paid: list[PaidSettlement]
     skipped_balances: list[SkippedBalance]
 

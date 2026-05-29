@@ -11,10 +11,12 @@ from ums_smart_revenue.connectors.google.adsense_payment_mapping import (
 
 
 def _resp(*payments, account="pub-1"):
+    """Build a payment-list response for pure mapping tests."""
     return {"payments": list(payments), "account_id": account}
 
 
 def _p(name, date_obj, amount):
+    """Build one Google Payment-shaped mapping fixture."""
     d = {"name": name, "amount": amount}
     if date_obj is not None:
         d["date"] = {
@@ -24,6 +26,7 @@ def _p(name, date_obj, amount):
 
 
 def test_classify_skips_unpaid_balances() -> None:
+    """Unpaid balance resources are skipped with safe evidence."""
     resp = _resp(
         _p("accounts/pub-1/payments/unpaid", None, "$10.00"),
         _p("accounts/pub-1/payments/youtube-unpaid", None, "$5.00"),
@@ -35,6 +38,7 @@ def test_classify_skips_unpaid_balances() -> None:
 
 
 def test_classify_accepts_paid_and_youtube_paid() -> None:
+    """Dated paid resources become paid settlements for the account."""
     resp = _resp(
         _p("accounts/pub-1/payments/2026-04-21", date(2026, 4, 21), "£100.00"),
         _p("accounts/pub-1/payments/youtube-2026-04-21", date(2026, 4, 21), "£5.00"),
@@ -46,30 +50,35 @@ def test_classify_accepts_paid_and_youtube_paid() -> None:
 
 
 def test_classify_fails_when_suffix_date_disagrees_with_payment_date() -> None:
+    """Resource-name dates must agree with the Google Payment.date payload."""
     resp = _resp(_p("accounts/pub-1/payments/2026-04-21", date(2026, 4, 22), "£1.00"))
     with pytest.raises(AdSensePaymentMappingError, match="disagrees"):
         classify_payments(resp, account_id="pub-1")
 
 
 def test_classify_fails_when_dated_settlement_has_no_date() -> None:
+    """Dated settlements without Payment.date fail closed."""
     resp = _resp(_p("accounts/pub-1/payments/2026-04-21", None, "£1.00"))
     with pytest.raises(AdSensePaymentMappingError, match="missing Payment.date"):
         classify_payments(resp, account_id="pub-1")
 
 
 def test_classify_fails_on_account_mismatch() -> None:
+    """Payment resource accounts must match the requested source account."""
     resp = _resp(_p("accounts/pub-OTHER/payments/unpaid", None, "$1.00"))
     with pytest.raises(AdSensePaymentMappingError, match="account"):
         classify_payments(resp, account_id="pub-1")
 
 
 def test_classify_fails_on_unrecognized_name_form() -> None:
+    """Unexpected payment resource suffixes fail closed."""
     resp = _resp(_p("accounts/pub-1/payments/weird-suffix", None, "$1.00"))
     with pytest.raises(AdSensePaymentMappingError, match="unrecognized"):
         classify_payments(resp, account_id="pub-1")
 
 
 def test_classify_rejects_non_list_payments() -> None:
+    """The payments field must be a list before classification."""
     with pytest.raises(AdSensePaymentMappingError, match="list"):
         classify_payments({"payments": {"oops": 1}}, account_id="pub-1")
 
@@ -81,6 +90,7 @@ def test_classify_rejects_non_list_payments() -> None:
     ("1,234.57 USD", (Decimal("1234.57"), "USD")),
 ])
 def test_parse_amount_accepts(raw, expected) -> None:
+    """Supported explicit ISO and allowlisted-symbol amounts parse exactly."""
     assert parse_amount(raw) == expected
 
 
@@ -91,5 +101,6 @@ def test_parse_amount_accepts(raw, expected) -> None:
     "1e3 GBP", "100x50 GBP", "1 234 GBP", "1#2#3 GBP", "abc 100 GBP",
 ])
 def test_parse_amount_fails_closed(raw) -> None:
+    """Ambiguous, negative, malformed, or junked amounts fail closed."""
     with pytest.raises(AdSensePaymentMappingError):
         parse_amount(raw)

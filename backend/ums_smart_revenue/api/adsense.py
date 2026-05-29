@@ -38,6 +38,8 @@ ADSENSE_MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 
 class AdSensePaymentRequest(BaseModel):
+    """Request model for one manually supplied AdSense payment row."""
+
     source_account_id: str = Field(min_length=1)
     month: str
     payment_name: str = Field(min_length=1)
@@ -56,6 +58,7 @@ class AdSensePaymentRequest(BaseModel):
     )
     @classmethod
     def strip_required_strings(cls, value):
+        """Trim required string fields and reject blank values."""
         return _strip_required_string(value)
 
     # ========================================================================
@@ -76,6 +79,7 @@ class AdSensePaymentRequest(BaseModel):
     @field_validator("source_account_id", mode="before")
     @classmethod
     def canonicalize_source_account_id(cls, value):
+        """Canonicalize source account ids with the shared Google validator."""
         if not isinstance(value, str):
             return value
         try:
@@ -91,6 +95,8 @@ class AdSensePaymentRequest(BaseModel):
 
 
 class AdSensePaymentSyncRequest(BaseModel):
+    """Request model for a manual AdSense payment-sync batch."""
+
     connector_key: str = Field(default="adsense", min_length=1)
     source_report_id: str | None = None
     reason: str = Field(min_length=1)
@@ -99,11 +105,13 @@ class AdSensePaymentSyncRequest(BaseModel):
     @field_validator("connector_key", "reason", mode="before")
     @classmethod
     def strip_required_strings(cls, value):
+        """Trim required batch strings and reject blank values."""
         return _strip_required_string(value)
 
     @field_validator("source_report_id", mode="before")
     @classmethod
     def strip_optional_string(cls, value):
+        """Trim optional source report ids and collapse blanks to None."""
         if value is None:
             return None
         if isinstance(value, str):
@@ -115,6 +123,7 @@ class AdSensePaymentSyncRequest(BaseModel):
 def current_adsense_payment_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyAdSensePaymentRepository:
+    """Build the tenant-aware AdSense payment repository for a request."""
     return SqlAlchemyAdSensePaymentRepository(session)
 
 
@@ -128,6 +137,7 @@ def sync_adsense_payments(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Sync a manually supplied AdSense payment batch after permission checks."""
     connector_scope = AccessScope.connector(payload.connector_key)
     _require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
     if payload.connector_key != "adsense":
@@ -200,6 +210,7 @@ def list_adsense_payments(
     limit: Annotated[int, Query(ge=1, le=MAX_ADSENSE_PAYMENT_PAGE_SIZE)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, object]:
+    """List AdSense payments for an authorized finance viewer."""
     normalized_month: str | None
     if month is None:
         normalized_month = None
@@ -255,6 +266,7 @@ def _require_permission(
     permission: Permission,
     scope: AccessScope,
 ) -> None:
+    """Raise HTTP 403 when the user lacks the required scoped permission."""
     if not has_permission(user, permission, scope):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -263,6 +275,7 @@ def _require_permission(
 
 
 def _strip_required_string(value):
+    """Trim required strings for Pydantic validators."""
     if isinstance(value, str):
         stripped = value.strip()
         if not stripped:

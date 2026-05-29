@@ -26,6 +26,8 @@ from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 
 class FinanceBase(DeclarativeBase):
+    """Declarative base for finance tables sharing organization metadata."""
+
     metadata = OrgBase.metadata
 
 
@@ -37,6 +39,8 @@ _TENANT_ID_DEFAULT_VALUE = UUID(UMS_TENANT_ID)
 
 
 class FinanceMonthCloseORM(FinanceBase):
+    """Finance month lock state for tenant-scoped close workflows."""
+
     __tablename__ = "finance_month_close"
 
     month: Mapped[str] = mapped_column(Text, nullable=False)
@@ -82,6 +86,8 @@ class FinanceMonthCloseORM(FinanceBase):
 
 
 class MonthlyChannelRevenueFactORM(FinanceBase):
+    """Tenant-scoped monthly channel revenue fact from trusted sources."""
+
     __tablename__ = "monthly_channel_revenue_facts"
 
     id: Mapped[UUID] = mapped_column(
@@ -195,6 +201,8 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
 
 
 class RevenueManualOverrideORM(FinanceBase):
+    """Manual revenue adjustment request with approval-state constraints."""
+
     __tablename__ = "revenue_manual_overrides"
 
     id: Mapped[UUID] = mapped_column(
@@ -277,6 +285,8 @@ class RevenueManualOverrideORM(FinanceBase):
 
 
 class BankReconciliationEntryORM(FinanceBase):
+    """Bank receipt evidence used for payment reconciliation."""
+
     __tablename__ = "bank_reconciliation_entries"
 
     id: Mapped[UUID] = mapped_column(
@@ -370,6 +380,8 @@ class BankReconciliationEntryORM(FinanceBase):
 
 
 class AdSensePaymentORM(FinanceBase):
+    """Account-scoped AdSense payment source-of-truth row."""
+
     __tablename__ = "adsense_payments"
 
     id: Mapped[UUID] = mapped_column(
@@ -448,6 +460,12 @@ class AdSensePaymentORM(FinanceBase):
             "payment_status IN ('PAID', 'PENDING', 'UNPAID', 'CANCELLED')",
             name="ck_adsense_payments_payment_status",
         ),
+        Index(
+            "ix_adsense_payments_tenant_month_payment_date",
+            "tenant_id",
+            "month",
+            "payment_date",
+        ),
         Index("ix_adsense_payments_month_date", "month", "payment_date"),
         Index("ix_adsense_payments_source_report", "source_report_id"),
         Index("ix_adsense_payments_tenant_id", "tenant_id"),
@@ -455,6 +473,8 @@ class AdSensePaymentORM(FinanceBase):
 
 
 class CurrencyExchangeRateORM(FinanceBase):
+    """Imported currency rate used as external FX evidence."""
+
     __tablename__ = "currency_exchange_rates"
 
     id: Mapped[UUID] = mapped_column(

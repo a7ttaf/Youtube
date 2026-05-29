@@ -35,6 +35,7 @@ depends_on = None
 #     (tenant_id, month, payment_name) form of uq_adsense_payments_month_name.
 # ============================================================================
 def upgrade() -> None:
+    """Apply source-account identity to AdSense payment rows and indexes."""
     # 1. Add nullable so existing pre-alpha rows can be backfilled.
     with op.batch_alter_table("adsense_payments") as batch:
         batch.add_column(sa.Column("source_account_id", sa.Text(), nullable=True))
@@ -57,9 +58,20 @@ def upgrade() -> None:
             "uq_adsense_payments_account_month_name",
             ["tenant_id", "source_account_id", "month", "payment_name"],
         )
+    op.create_index(
+        "ix_adsense_payments_tenant_month_payment_date",
+        "adsense_payments",
+        ["tenant_id", "month", "payment_date"],
+    )
 
 
 def downgrade() -> None:
+    """Remove source-account schema only when old uniqueness can be restored."""
+    _raise_if_old_key_collisions_exist()
+    op.drop_index(
+        "ix_adsense_payments_tenant_month_payment_date",
+        table_name="adsense_payments",
+    )
     with op.batch_alter_table("adsense_payments") as batch:
         batch.drop_constraint(
             "uq_adsense_payments_account_month_name", type_="unique"
@@ -72,3 +84,26 @@ def downgrade() -> None:
             "ck_adsense_payments_source_account_id_nonempty", type_="check"
         )
         batch.drop_column("source_account_id")
+
+
+def _raise_if_old_key_collisions_exist() -> None:
+    """Fail downgrade before recreating the pre-account uniqueness key."""
+    bind = op.get_bind()
+    row = bind.execute(
+        sa.text(
+            """
+            SELECT tenant_id, month, payment_name, COUNT(*) AS duplicate_count
+            FROM adsense_payments
+            GROUP BY tenant_id, month, payment_name
+            HAVING COUNT(*) > 1
+            LIMIT 1
+            """
+        )
+    ).mappings().first()
+    if row is not None:
+        raise RuntimeError(
+            "Cannot downgrade adsense_payments: account-scoped duplicate "
+            "AdSense payments exist for the old "
+            "(tenant_id, month, payment_name) key; merge or delete duplicates "
+            "before downgrading."
+        )

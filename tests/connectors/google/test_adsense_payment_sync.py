@@ -28,6 +28,7 @@ ACTOR = UserPrincipal(
 
 
 def test_connector_key_constant_is_canonical() -> None:
+    """Documents the connector key used for live AdSense management calls."""
     from ums_smart_revenue.connectors.google.registry import (
         ADSENSE_MANAGEMENT_CONNECTOR_KEY,
     )
@@ -36,6 +37,7 @@ def test_connector_key_constant_is_canonical() -> None:
 
 
 def test_resolve_connector_credentials_is_public() -> None:
+    """Keeps the sync service wired to the shared credential resolver."""
     from ums_smart_revenue.connectors.runs.orchestrator import (
         resolve_connector_credentials,
     )
@@ -44,18 +46,21 @@ def test_resolve_connector_credentials_is_public() -> None:
 
 
 def _build_session() -> Session:
+    """Create an isolated in-memory finance schema for sync-service tests."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     FinanceBase.metadata.create_all(engine)
     return Session(engine)
 
 
 def _resp(*payments, account="pub-1"):
+    """Build the fake payment-client response consumed by the sync service."""
     # Mirrors GoogleAdSensePaymentClient.fetch_payments output (account_id +
     # report_id already stamped) so the fake stands in for the real client.
     return {"payments": list(payments), "account_id": account, "report_id": "rep-abc"}
 
 
 def _p(name, date_obj, amount):
+    """Build one Google Payment-shaped dict for mapping tests."""
     d = {"name": name, "amount": amount}
     if date_obj is not None:
         d["date"] = {
@@ -65,14 +70,21 @@ def _p(name, date_obj, amount):
 
 
 class _FakeClient:
+    """Return a fixed payment response while recording requested accounts."""
+
     def __init__(self, response):
+        """Store the response and initialize the account call log."""
         self._response = response
+        self.account_calls = []
 
     def fetch_payments(self, *, account_id):
+        """Record the account id and return the configured response."""
+        self.account_calls.append(account_id)
         return self._response
 
 
 def _lock_month(session, month):
+    """Mark a finance month LOCKED without invoking the full lock workflow."""
     row = get_or_create_month_close_row(
         session, month, tenant_id=TENANT_ID, for_update=False
     )
@@ -81,6 +93,7 @@ def _lock_month(session, month):
 
 
 def _service(session, client, audit):
+    """Build the sync service with fake credentials and a fake client."""
     return AdSensePaymentSyncService(
         session,
         audit_sink=audit,
@@ -90,6 +103,7 @@ def _service(session, client, audit):
 
 
 def test_sync_upserts_open_month_settlements() -> None:
+    """Persists open paid settlements and audits retained-balance skips."""
     session = _build_session()
     audit = InMemoryAuditSink()
     client = _FakeClient(_resp(
@@ -122,6 +136,7 @@ def test_sync_upserts_open_month_settlements() -> None:
 
 
 def test_sync_is_idempotent() -> None:
+    """Repeating the same live pull updates the existing account-scoped row."""
     session = _build_session()
     audit = InMemoryAuditSink()
     client = _FakeClient(_resp(
@@ -134,7 +149,39 @@ def test_sync_is_idempotent() -> None:
     assert len(session.scalars(select(AdSensePaymentORM)).all()) == 1
 
 
+def test_sync_canonicalizes_account_before_credentials_and_fetch() -> None:
+    """Normalizes accounts/pub-* before credential lookup and Google fetch."""
+    session = _build_session()
+    audit = InMemoryAuditSink()
+    client = _FakeClient(_resp())
+    credential_accounts = []
+
+    def _resolver(**kwargs):
+        """Capture the account id used for credential resolution."""
+        credential_accounts.append(kwargs["account_id"])
+        return object()
+
+    svc = AdSensePaymentSyncService(
+        session,
+        audit_sink=audit,
+        credential_resolver=_resolver,
+        client_factory=lambda _creds: client,
+    )
+
+    svc.sync(
+        tenant_id=TENANT_ID,
+        account_id="accounts/pub-1",
+        actor=ACTOR,
+        reason="canonical account",
+    )
+
+    assert credential_accounts == ["pub-1"]
+    assert client.account_calls == ["pub-1"]
+    assert audit.records[0].details["source_account_id"] == "pub-1"
+
+
 def test_locked_month_is_skipped_not_aborted() -> None:
+    """Skips locked-month settlements before parsing ambiguous currency."""
     session = _build_session()
     audit = InMemoryAuditSink()
     # one paid row in a LOCKED month ('$' ambiguous) + one in an OPEN month (GBP)
@@ -158,6 +205,7 @@ def test_locked_month_is_skipped_not_aborted() -> None:
 
 
 def test_nothing_remains_audits_zero_synced() -> None:
+    """Audits a successful live pull even when only balances are returned."""
     session = _build_session()
     audit = InMemoryAuditSink()
     client = _FakeClient(_resp(
@@ -176,10 +224,12 @@ def test_nothing_remains_audits_zero_synced() -> None:
 
 
 def test_credential_failure_writes_nothing() -> None:
+    """Credential failures abort before payment writes or audit events."""
     session = _build_session()
     audit = InMemoryAuditSink()
 
     def _boom(**_):
+        """Simulate a missing connector credential before any writes."""
         raise CredentialNotFoundError(
             connector_key="adsense-management", account_id="pub-1"
         )
@@ -197,6 +247,7 @@ def test_credential_failure_writes_nothing() -> None:
 
 
 def test_open_month_dollar_amount_aborts_with_zero_writes() -> None:
+    """Open-month ambiguous dollar amounts fail closed with zero writes."""
     session = _build_session()
     audit = InMemoryAuditSink()
     client = _FakeClient(_resp(
@@ -211,6 +262,7 @@ def test_open_month_dollar_amount_aborts_with_zero_writes() -> None:
 
 
 def test_dry_run_writes_no_rows_and_no_audit() -> None:
+    """Dry-run validates and counts would-sync rows without persistence."""
     session = _build_session()
     audit = InMemoryAuditSink()
     client = _FakeClient(_resp(

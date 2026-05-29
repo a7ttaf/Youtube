@@ -14,6 +14,9 @@ from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.scopes import AccessScope
+from ums_smart_revenue.connectors.google.adsense_management_client import (
+    _validated_account_id,
+)
 from ums_smart_revenue.connectors.google.adsense_payment_mapping import (
     PaidSettlement,
     SkippedBalance,
@@ -43,6 +46,8 @@ _MAX_SKIP_EVIDENCE = 50
 
 @dataclass(frozen=True)
 class SkippedLockedSettlement:
+    """Paid settlement skipped because its finance month is already locked."""
+
     resource_name: str
     month: str
     payment_date: str  # ISO date string
@@ -52,6 +57,8 @@ class SkippedLockedSettlement:
 
 @dataclass(frozen=True)
 class AdSensePaymentSyncResult:
+    """Counts and capped evidence returned by one live payment sync run."""
+
     synced_count: int
     skipped_balance_count: int
     skipped_locked_count: int
@@ -76,6 +83,7 @@ class AdSensePaymentSyncService:
         credential_resolver=resolve_connector_credentials,
         client_factory=_default_client_factory,
     ) -> None:
+        """Bind database, audit, credential, and client dependencies."""
         self._session = session
         self._audit_sink = audit_sink
         self._credential_resolver = credential_resolver
@@ -109,17 +117,18 @@ class AdSensePaymentSyncService:
         dry_run: bool = False,
     ) -> AdSensePaymentSyncResult:
         """Run the live payment pull; return counts + capped skip evidence."""
+        canonical_account = _validated_account_id(account_id)
         # Step 1: resolve credentials (typed CredentialNotFoundError /
         # InactiveCredentialError / OAuthRefreshError propagate -> CLI exit 2).
         credentials = self._credential_resolver(
             session=self._session,
             tenant_id=tenant_id,
             connector_key=ADSENSE_MANAGEMENT_CONNECTOR_KEY,
-            account_id=account_id,
+            account_id=canonical_account,
         )
         # Step 2: single GET of the full payments list (no pagination).
         client = self._client_factory(credentials)
-        response = client.fetch_payments(account_id=account_id)
+        response = client.fetch_payments(account_id=canonical_account)
         canonical_account = str(response["account_id"])
         report_id = str(response["report_id"])
 

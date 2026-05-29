@@ -1,7 +1,7 @@
 # AdSense Live Payment Sync — Design Spec
 
-**Status:** Design approved 2026-05-28 (written 2026-05-29). Awaiting operator
-review before implementation planning.
+**Status:** Implemented in PR #51 on 2026-05-29 after operator-approved design
+and implementation planning.
 
 **Goal:** Pull *real* AdSense payments from the Google AdSense Management API
 (`accounts.payments.list`) and land settled payments into the existing

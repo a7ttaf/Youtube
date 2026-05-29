@@ -39,9 +39,9 @@ class GoogleAdSensePaymentClient:
     #   shape, then stamp a deterministic per-account report_id used downstream
     #   as source_report_id.
     # Database/ORM: None (pure API call + response-shape validation).
-    # Standards: Fail-closed shape validation. A non-object response, a missing
-    #   `payments` field, or a non-list `payments` is treated as a schema gap
-    #   (not an empty account) and raises GoogleApiResponseError. Typed
+    # Standards: Fail-closed shape validation. A non-object response or present
+    #   non-list `payments` is treated as a schema gap; an omitted repeated
+    #   `payments` field is normalized to [] per Google API behavior. Typed
     #   keyword-only boundary; MalformedAdsenseAccountIdError on bad account id.
     # Blast Radius: Feeds the live payment sync. A wrong shape accepted here
     #   would ingest a partial or garbage payment set into the sync pipeline,
@@ -58,8 +58,8 @@ class GoogleAdSensePaymentClient:
 
         Raises:
             MalformedAdsenseAccountIdError: If ``account_id`` is blank or unsafe.
-            GoogleApiResponseError: If the response is not an object, is missing
-                the ``payments`` field, or ``payments`` is not a list.
+            GoogleApiResponseError: If the response is not an object or a present
+                ``payments`` field is not a list.
         """
         account = _validated_account_id(account_id)
         url = _PAYMENTS_URL.format(account=account)
@@ -70,10 +70,9 @@ class GoogleAdSensePaymentClient:
             raise GoogleApiResponseError(
                 url=url, reason="payments response is not an object"
             )
-        # accounts.payments.list wraps the full (unpaginated) list in
-        # `payments`. A missing or non-list field is a schema gap, not an
-        # empty account, so fail closed rather than ingest a partial shape.
-        payments = response.get("payments")
+        # Google may omit repeated fields when empty; normalize that omission
+        # to [] while still rejecting a present field with the wrong type.
+        payments = response.get("payments", [])
         if not isinstance(payments, list):
             raise GoogleApiResponseError(
                 url=url,
@@ -82,4 +81,9 @@ class GoogleAdSensePaymentClient:
         report_id = hashlib.sha256(
             f"{account}|{_REPORT_KEY}".encode()
         ).hexdigest()
-        return {**response, "account_id": account, "report_id": report_id}
+        return {
+            **response,
+            "payments": payments,
+            "account_id": account,
+            "report_id": report_id,
+        }
