@@ -299,10 +299,12 @@ def test_upgrade_creates_table_constraints_and_indexes(alembic_config, fresh_eng
     assert "ck_deduction_components_kind" in checks
     assert "ck_deduction_components_scope_kind" in checks
     assert "ck_deduction_components_amount_usd_finite" in checks
+    assert "ck_deduction_components_amount_native_finite" in checks
     assert "ck_deduction_components_raw_payload_object" in checks
     indexes = {c["name"] for c in inspector.get_indexes("deduction_components")}
     assert "ix_deduction_components_tenant_month" in indexes
     assert "ix_deduction_components_tenant_scope" in indexes
+    assert "ix_deduction_components_tenant_month_kind" in indexes
 
 
 def test_downgrade_drops_table(alembic_config, fresh_engine):
@@ -519,8 +521,8 @@ python -m pytest tests/db/test_deduction_components_migration_postgres.py -q
 
 - [ ] **Step 7: Sanity-check the ORM builds on SQLite (no Postgres needed)**
 
-Run: `python -c "from ums_smart_revenue.db.finance_models import DeductionComponentORM; print(DeductionComponentORM.__tablename__)"`
-Expected: prints `deduction_components` (import side-effect builds metadata; `.ddl_if` keeps the Postgres-only CHECKs off the SQLite path).
+Run: `PYTHONPATH=backend python -c "from ums_smart_revenue.db.finance_models import DeductionComponentORM; print(DeductionComponentORM.__tablename__)"`
+Expected: prints `deduction_components` (`PYTHONPATH=backend` is required from the repo root — `ums_smart_revenue` lives under `backend/`; pytest injects this via `pyproject.toml` `pythonpath`, but a bare `python -c` does not). `.ddl_if` keeps the Postgres-only CHECKs off the SQLite path.
 
 - [ ] **Step 8: Lint + commit**
 

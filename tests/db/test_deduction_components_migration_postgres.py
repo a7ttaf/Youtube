@@ -56,10 +56,12 @@ def test_upgrade_creates_table_constraints_and_indexes(alembic_config, fresh_eng
     assert "ck_deduction_components_kind" in checks
     assert "ck_deduction_components_scope_kind" in checks
     assert "ck_deduction_components_amount_usd_finite" in checks
+    assert "ck_deduction_components_amount_native_finite" in checks
     assert "ck_deduction_components_raw_payload_object" in checks
     indexes = {c["name"] for c in inspector.get_indexes("deduction_components")}
     assert "ix_deduction_components_tenant_month" in indexes
     assert "ix_deduction_components_tenant_scope" in indexes
+    assert "ix_deduction_components_tenant_month_kind" in indexes
 
 
 def test_downgrade_drops_table(alembic_config, fresh_engine):
