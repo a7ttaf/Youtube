@@ -16,11 +16,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture
 def postgres_url() -> str:
+    """Return the PostgreSQL database URL for testing."""
     return require_postgres_url()
 
 
 @pytest.fixture
 def alembic_config(postgres_url: str) -> Config:
+    """Create an Alembic Config object configured with the test Postgres URL and script location."""
     cfg = Config()
     cfg.set_main_option("sqlalchemy.url", postgres_url)
     cfg.set_main_option(
@@ -32,6 +34,7 @@ def alembic_config(postgres_url: str) -> Config:
 
 @pytest.fixture
 def fresh_engine(postgres_url: str):
+    """Provide a fresh SQLAlchemy engine with a clean public schema for each test."""
     engine = create_engine(postgres_url)
     with engine.begin() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE"))
@@ -41,6 +44,7 @@ def fresh_engine(postgres_url: str):
 
 
 def test_upgrade_creates_table_constraints_and_indexes(alembic_config, fresh_engine):
+    """Verify upgrade to head creates the deduction_components table, constraints, and indexes."""
     command.upgrade(alembic_config, "head")
     inspector = inspect(fresh_engine)
     cols = {c["name"]: c for c in inspector.get_columns("deduction_components")}
@@ -65,6 +69,7 @@ def test_upgrade_creates_table_constraints_and_indexes(alembic_config, fresh_eng
 
 
 def test_downgrade_drops_table(alembic_config, fresh_engine):
+    """Verify downgrade removes the deduction_components table from the database."""
     command.upgrade(alembic_config, "head")
     command.downgrade(alembic_config, "20260529_0001")
     inspector = inspect(fresh_engine)
@@ -72,6 +77,7 @@ def test_downgrade_drops_table(alembic_config, fresh_engine):
 
 
 def test_round_trip_idempotency(alembic_config, fresh_engine):
+    """Verify upgrade, downgrade, then upgrade again maintains consistency of the schema."""
     command.upgrade(alembic_config, "head")
     command.downgrade(alembic_config, "20260529_0001")
     command.upgrade(alembic_config, "head")
@@ -88,13 +94,12 @@ def test_duplicate_component_key_rejected_by_unique(alembic_config, fresh_engine
         "INSERT INTO deduction_components "
         "(tenant_id, month, component_kind, scope_kind, scope_id, amount_usd, "
         "currency_code, source_system, source_table, component_key) VALUES "
-        "(:tenant, '2026-04', 'TRANSFER_FEE', 'PAYMENT', 'BANK-1', 3.50, 'USD', "
+        ":tenant: '2026-04', 'TRANSFER_FEE', 'PAYMENT', 'BANK-1', 3.50, 'USD', "
         "'bank_reconciliation', 'bank_reconciliation_entries', "
         "'bank:2026-04:BANK-1:transfer_fee')"
     )
     tenant = "00000000-0000-0000-0000-0000000000aa"
     with fresh_engine.begin() as conn:
         conn.execute(insert_sql, {"tenant": tenant})
-    with pytest.raises(IntegrityError):
-        with fresh_engine.begin() as conn:
-            conn.execute(insert_sql, {"tenant": tenant})
+    with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
+        conn.execute(insert_sql, {"tenant": tenant})

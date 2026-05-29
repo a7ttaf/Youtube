@@ -40,6 +40,11 @@ class DeductionComponentInput:
 
 
 @dataclass(frozen=True)
+"""
+Module for mapping revenue source rows, bank reconciliation entries, and AdSense payment data
+into DeductionComponentInput models for downstream API consumption.
+"""
+
 class DeductionComponent:
     """Persisted deduction-component read model."""
 
@@ -60,6 +65,7 @@ class DeductionComponent:
     component_key: str
 
     def to_api(self) -> dict[str, object]:
+        """Convert the DeductionComponent instance into a dictionary compatible with the external API, excluding raw_payload for provenance."""
         # raw_payload is intentionally omitted (provenance only; see PR-B endpoint).
         return {
             "id": self.id,
@@ -92,6 +98,8 @@ class DeductionComponent:
 def map_source_rows_to_components(
     rows: Iterable[GoogleRevenueSourceRowEntry],
 ) -> tuple[list[DeductionComponentInput], int]:
+    """Transform GoogleRevenueSourceRowEntry records into DeductionComponentInput objects,
+    counting and skipping any non-USD entries."""
     components: list[DeductionComponentInput] = []
     skipped_non_usd = 0
     for row in rows:
@@ -141,6 +149,8 @@ def map_bank_entries_to_components(
     *,
     month: str,
 ) -> tuple[list[DeductionComponentInput], int]:
+    """Convert BankReconciliationEntry records into PAYMENT-scoped DeductionComponentInput
+    items for transfer fees and FX variance, keyed by month and bank reference."""
     components: list[DeductionComponentInput] = []
     for entry in entries:
         if entry.transfer_fee_usd > 0:
@@ -167,6 +177,8 @@ def _bank_component(
     amount_usd: Decimal,
     key_suffix: str,
 ) -> DeductionComponentInput:
+    """Create a DeductionComponentInput for a single bank reconciliation entry,
+    scoped by payment and keyed by bank_reference and suffix."""
     return DeductionComponentInput(
         component_kind=kind,
         scope_kind="PAYMENT",
@@ -199,6 +211,8 @@ def map_adsense_gap_to_components(
     source_rows: Iterable[GoogleRevenueSourceRowEntry],
     payments: Iterable[AdSensePaymentEntry],
 ) -> tuple[list[DeductionComponentInput], int]:
+    """Calculate the difference between settled AdSense earnings and paid amounts per account,
+    producing DeductionComponentInput entries for unresolved payment gaps and counting skipped non-USD entries."""
     skipped_non_usd = 0
     settled: dict[str, Decimal] = {}
     for row in source_rows:
@@ -223,6 +237,10 @@ def map_adsense_gap_to_components(
     components: list[DeductionComponentInput] = []
     for account in sorted(set(settled) & set(paid)):
         gap = settled[account] - paid[account]
+"""
+This module provides utilities for constructing deduction components and converting Decimal values
+for API usage in the finance deduction components workflow.
+"""
         if gap == 0:
             continue
         components.append(
@@ -249,6 +267,10 @@ def map_adsense_gap_to_components(
 
 
 def _decimal_to_api(value: Decimal) -> str:
+    """
+    Convert a Decimal value to a string suitable for API responses,
+    removing unnecessary trailing zeros and decimal points when not needed.
+    """
     normalized = value.normalize()
     if normalized == normalized.to_integral():
         return format(normalized, "f")

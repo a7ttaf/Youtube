@@ -31,6 +31,9 @@ from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 INGESTION_SOURCES: tuple[str, ...] = ("source_rows", "bank", "gap")
 _MONTH_LENGTH = 7
+"""
+Module for idempotent, tenant-scoped ingestion of deduction components into the finance system.
+"""
 
 
 class DeductionComponentError(ValueError):
@@ -57,6 +60,7 @@ class DeductionIngestionResult:
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Convert the given tenant_id to a UUID, using the default if None or validating string input."""
     if tenant_id is None:
         return UUID(UMS_TENANT_ID)
     if isinstance(tenant_id, UUID):
@@ -68,6 +72,7 @@ def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
 
 
 def _validate_month(month: str) -> None:
+    """Ensure the month string matches 'YYYY-MM' format and represents a valid calendar month."""
     if len(month) != _MONTH_LENGTH or month[4] != "-":
         raise DeductionComponentValidationError("month must use YYYY-MM")
     year, sep, mm = month[:4], month[4], month[5:]
@@ -76,6 +81,7 @@ def _validate_month(month: str) -> None:
 
 
 def _dialect_insert(dialect_name: str):
+    """Select the appropriate SQLAlchemy insert function based on the database dialect."""
     if dialect_name == "sqlite":
         return sqlite_insert
     if dialect_name == "postgresql":
@@ -101,6 +107,7 @@ class SqlAlchemyDeductionComponentRepository:
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def _require_month_open(self, month: str) -> None:
+        """Check if the given month is open for ingestion and raise an error if it is locked."""
         close = get_or_create_month_close_row(
             self._session, month, tenant_id=self._tenant_id, for_update=True
         )
@@ -112,6 +119,7 @@ class SqlAlchemyDeductionComponentRepository:
     def upsert_components(
         self, *, month: str, components: list[DeductionComponentInput]
     ) -> list[DeductionComponent]:
+        """Insert or update deduction components for a given month, validating inputs, enforcing month locks, and returning the list of processed components."""
         _validate_month(month)
         # FIX: refuse LOCKED months even for a zero-component run. Live ingestion
         # must fail closed BEFORE the empty-return (and before the service's audit
@@ -172,6 +180,7 @@ class SqlAlchemyDeductionComponentRepository:
         return entries
 
     def list_month_components(self, *, month: str) -> list[DeductionComponent]:
+        """Return a list of DeductionComponent entries for the specified month by querying the database."""
         _validate_month(month)
         rows = self._session.scalars(
             select(DeductionComponentORM)
@@ -188,6 +197,7 @@ class SqlAlchemyDeductionComponentRepository:
 
     @staticmethod
     def _to_entry(row: DeductionComponentORM) -> DeductionComponent:
+        """Convert a DeductionComponentORM instance into a DeductionComponent data model."""
         return DeductionComponent(
             id=str(row.id),
             month=row.month,
@@ -236,6 +246,7 @@ class DeductionIngestionService:
         self, *, month: str, actor: UserPrincipal, reason: str,
         source: str | None = None, dry_run: bool = False,
     ) -> DeductionIngestionResult:
+        """Ingest deduction components for a given month by fetching source rows, bank entries, and AdSense payments, mapping them to components, upserting in the repository, and recording an audit summary event."""
         _validate_month(month)
         if source is not None and source not in INGESTION_SOURCES:
             raise DeductionComponentValidationError(

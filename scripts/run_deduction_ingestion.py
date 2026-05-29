@@ -26,6 +26,11 @@ Exit codes:
 #   - File: backend/ums_smart_revenue/connectors/google/audit.py ->
 #     build_connector_service_principal (RUN_CONNECTOR_JOBS service actor).
 # ============================================================================
+"""Module to run deduction-component ingestion for tenants and finance months.
+
+This script parses command-line arguments and orchestrates the deduction ingestion
+process, including audit logging and database interactions.
+"""
 from __future__ import annotations
 
 import argparse
@@ -52,6 +57,14 @@ from ums_smart_revenue.finance.deduction_ingestion import (  # noqa: E402
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
+    """Parse command-line arguments for deduction ingestion.
+
+    Args:
+        argv (list[str]): List of command-line arguments.
+
+    Returns:
+        argparse.Namespace: Parsed arguments including tenant, month, reason, source, and dry-run.
+    """
     parser = argparse.ArgumentParser(
         description="Run deduction-component ingestion for one (tenant, month).",
     )
@@ -73,6 +86,16 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Main entry point for deduction ingestion script.
+
+    Parses arguments, sets up database session and audit sink, and runs the ingestion service.
+
+    Args:
+        argv (list[str] | None): List of command-line arguments or None to use sys.argv[1:].
+
+    Returns:
+        int: Exit code (0 on success, 2 on error).
+    """
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     try:
         settings = load_app_settings()

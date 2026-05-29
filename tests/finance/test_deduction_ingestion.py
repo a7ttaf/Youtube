@@ -1,4 +1,11 @@
 """Repository + service tests for deduction-component ingestion (SQLite)."""
+"""
+Test suite for deduction ingestion.
+
+This module sets up fixtures to import the deduction ingestion module,
+create a UserPrincipal actor, initialize a SQLite engine, and seed test data
+for finance-related tests.
+"""
 from datetime import date
 from decimal import Decimal
 from importlib import import_module
@@ -25,10 +32,16 @@ ACTOR_ID = UUID("00000000-0000-0000-0000-0000000c0001")
 
 
 def _mod():
+    """
+    Import and return the deduction_ingestion module from ums_smart_revenue.finance.
+    """
     return import_module("ums_smart_revenue.finance.deduction_ingestion")
 
 
 def _actor() -> UserPrincipal:
+    """
+    Create and return a UserPrincipal representing the finance viewer actor.
+    """
     return UserPrincipal(
         user_id=str(ACTOR_ID),
         email="ingest@example.com",
@@ -39,6 +52,9 @@ def _actor() -> UserPrincipal:
 
 
 def _engine(tmp_path):
+    """
+    Create a SQLite engine in a temporary file path, initialize finance tables, and return the engine.
+    """
     engine = create_engine(
         f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
     )
@@ -48,6 +64,9 @@ def _engine(tmp_path):
 
 def _seed(session: Session, *, settled="1000.00", paid="930.00", tax_currency="USD",
           locked=False):
+    """
+    Seed the database session with test data: BankReconciliationEntry, AdSensePayment, and GoogleRevenueSourceRow entries.
+    """
     session.add(
         BankReconciliationEntryORM(
             id=uuid4(), month=MONTH, bank_reference="BANK-1",
@@ -99,15 +118,18 @@ def _seed(session: Session, *, settled="1000.00", paid="930.00", tax_currency="U
 
 
 def _ums_tenant() -> UUID:
+    """Return the UUID for the UMS tenant from the tenancy constants."""
     from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
     return UUID(UMS_TENANT_ID)
 
 
 def _service(session):
+    """Initialize and return the DeductionIngestionService with an in-memory audit sink for testing."""
     return _mod().DeductionIngestionService(session, audit_sink=InMemoryAuditSink())
 
 
 def test_ingest_creates_components_from_all_sources(tmp_path):
+    """Test that ingest creates deduction components for all expected source kinds and records an audit event."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)
@@ -124,6 +146,7 @@ def test_ingest_creates_components_from_all_sources(tmp_path):
 
 
 def test_ingest_is_idempotent(tmp_path):
+    """Test that repeated ingestion for the same month does not create duplicate components."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)
@@ -139,6 +162,7 @@ def test_ingest_is_idempotent(tmp_path):
 
 
 def test_ingest_refuses_locked_month(tmp_path):
+    """Test that ingesting a locked month raises DeductionComponentLockedMonthError."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session, locked=True)
@@ -148,6 +172,7 @@ def test_ingest_refuses_locked_month(tmp_path):
 
 
 def test_ingest_refuses_locked_month_even_with_zero_components(tmp_path):
+    """Test that a locked month with no source evidence still raises an error and writes no audit records."""
     # Lock the month but seed NO source evidence -> zero mapped components. Live
     # ingestion must still fail closed (no audit write) — the lock check must
     # precede the empty-component short-circuit in upsert_components.
@@ -169,6 +194,7 @@ def test_ingest_refuses_locked_month_even_with_zero_components(tmp_path):
 
 
 def test_ingest_skips_non_usd_and_counts_it(tmp_path):
+    """Test that non-USD tax rows are skipped and counted in the skipped_non_usd result."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session, tax_currency="EUR")
@@ -182,6 +208,7 @@ def test_ingest_skips_non_usd_and_counts_it(tmp_path):
 
 
 def test_dry_run_writes_nothing_and_records_no_audit(tmp_path):
+    """Test that dry run mode does not persist components or write audit records, but reports potential upserts."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)
@@ -197,6 +224,7 @@ def test_dry_run_writes_nothing_and_records_no_audit(tmp_path):
 
 
 def test_audit_details_carry_only_summary_counts(tmp_path):
+    """Test that the audit details record only summary counts and no sensitive payload data."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)
