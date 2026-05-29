@@ -78,6 +78,77 @@ def test_source_account_migration_rekeys_uniqueness(
     assert "ck_adsense_payments_source_account_id_nonempty" in checks
 
 
+# ============================================================================
+# Purpose: Prove the upgrade()'s data-backfill safety path actually runs — a
+#          legacy adsense_payments row that predates source_account_id (so its
+#          new column is NULL) is rewritten to the '__legacy_manual__' sentinel
+#          and survives the subsequent SET NOT NULL. The other two tests run
+#          against an EMPTY table, where the backfill UPDATE touches zero rows
+#          and SET NOT NULL trivially succeeds — so they would still pass even
+#          if the backfill were deleted. This is the only test that guards it.
+# Database/ORM: adsense_payments / AdSensePaymentORM (finance_models.py).
+# Standards: Raw INSERT at the PRIOR head (20260527_0001) where the column does
+#            not exist yet; every NOT NULL column without a server default is
+#            supplied with a CHECK-satisfying value. No FK on this table, so any
+#            UUID tenant_id is valid (no tenants seed needed). id / imported_at /
+#            updated_at have server defaults and are omitted.
+# Blast Radius: Test-only. Finance source-of-truth backfill correctness.
+# ============================================================================
+def test_source_account_migration_backfills_legacy_null_rows(
+    alembic_config, fresh_engine
+) -> None:
+    # 1. Step to the PRIOR head: adsense_payments exists WITHOUT
+    #    source_account_id and with the old (tenant_id, month, payment_name) key.
+    command.upgrade(alembic_config, "20260527_0001")
+
+    # 2. Insert one legacy row at the prior-head schema. source_account_id does
+    #    not exist yet, so it is omitted — the next migration adds it as NULL on
+    #    this existing row, which is exactly what the backfill must repair.
+    with fresh_engine.begin() as conn:
+        conn.execute(
+            text(
+                "INSERT INTO adsense_payments "
+                "(tenant_id, month, payment_name, payment_date, payment_amount, "
+                "payment_currency, payment_status, raw_payload) "
+                "VALUES (:tenant_id, :month, :payment_name, :payment_date, "
+                ":payment_amount, :payment_currency, :payment_status, "
+                "CAST(:raw_payload AS jsonb))"
+            ),
+            {
+                "tenant_id": "00000000-0000-0000-0000-000000000001",
+                "month": "2026-04",
+                "payment_name": "Legacy Manual Upload",
+                "payment_date": "2026-04-30",
+                "payment_amount": "1234.560000",
+                "payment_currency": "USD",
+                "payment_status": "PAID",
+                "raw_payload": "{}",
+            },
+        )
+
+    # 3. Run 20260529_0001: add column (NULL on the legacy row) -> backfill ->
+    #    SET NOT NULL + CHECK + re-key. The SET NOT NULL can only succeed if the
+    #    backfill populated the legacy row first.
+    command.upgrade(alembic_config, "head")
+
+    # 4a. The backfill populated the legacy NULL with the sentinel.
+    with fresh_engine.begin() as conn:
+        rows = conn.execute(
+            text(
+                "SELECT source_account_id FROM adsense_payments "
+                "WHERE payment_name = :payment_name"
+            ),
+            {"payment_name": "Legacy Manual Upload"},
+        ).fetchall()
+    # Row still exists (backfill did not drop it) and carries the sentinel.
+    assert len(rows) == 1
+    assert rows[0][0] == "__legacy_manual__"
+
+    # 4b. The column ended NOT NULL with data present — SET NOT NULL succeeded.
+    cols = {c["name"]: c for c in inspect(fresh_engine).get_columns("adsense_payments")}
+    assert cols["source_account_id"]["nullable"] is False
+
+
 def test_source_account_migration_downgrade_reverses(
     alembic_config, fresh_engine
 ) -> None:
