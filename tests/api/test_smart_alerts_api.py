@@ -1,6 +1,10 @@
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
+"""
+This module contains tests for the Smart Alerts API, providing helper functions for
+authentication headers, database URL creation, and seeding the database for testing.
+"""
 
 import pytest
 from fastapi.testclient import TestClient
@@ -31,6 +35,17 @@ def auth_headers(
     scope_type: str = "global",
     scope_id: str | None = None,
 ) -> dict[str, str]:
+    """
+    Generate authentication headers for test requests.
+
+    Args:
+        role: The user role to include in the headers.
+        scope_type: The scope type for the headers (default is 'global').
+        scope_id: Optional scope identifier to include.
+
+    Returns:
+        A dictionary of HTTP headers containing user identity, role, scope, and a trusted gateway token.
+    """
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "smart-alerts@example.com",
@@ -44,10 +59,25 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """
+    Construct a temporary SQLite database URL for testing.
+
+    Args:
+        tmp_path: A pathlib Path object pointing to a temporary directory.
+
+    Returns:
+        A database URL string for a new SQLite database file.
+    """
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
+    """
+    Initialize and seed the database with organization, security, and finance models.
+
+    Args:
+        database_url: The database connection URL where tables will be created and seeded.
+    """
     engine = create_engine(database_url)
     OrgBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
@@ -127,6 +157,7 @@ def seed_database(database_url: str) -> None:
 
 
 def test_finance_viewer_reads_month_smart_alerts_with_sensitive_audits(tmp_path):
+    """Test that finance viewers can read month smart alerts and see sensitive audit events."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -165,6 +196,7 @@ def test_finance_viewer_reads_month_smart_alerts_with_sensitive_audits(tmp_path)
 
 
 def test_month_smart_alerts_reject_non_padded_month(tmp_path):
+    """Test that smart alerts endpoint rejects months not zero-padded in the URL path."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -182,6 +214,7 @@ def test_month_smart_alerts_reject_non_padded_month(tmp_path):
 
 
 def test_previous_month_rejects_non_padded_month():
+    """Test that the helper for computing the previous month rejects non-padded month strings."""
     with pytest.raises(
         RevenueFactValidationError,
         match="month must use YYYY-MM with a calendar month from 01 to 12",
@@ -190,6 +223,7 @@ def test_previous_month_rejects_non_padded_month():
 
 
 def test_month_smart_alerts_include_month_over_month_revenue_anomaly(tmp_path):
+    """Test that month smart alerts include anomalies based on month-over-month revenue changes."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -244,6 +278,8 @@ def test_month_smart_alerts_include_month_over_month_revenue_anomaly(tmp_path):
 
 
 def test_assistant_cannot_read_month_smart_alerts(tmp_path):
+    """Test that an assistant_analyst user without finance.view_revenue permission
+    receives a 403 Forbidden response when accessing monthly smart alerts."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))

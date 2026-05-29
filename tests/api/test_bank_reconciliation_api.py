@@ -1,3 +1,10 @@
+"""
+Tests for the bank reconciliation API endpoints.
+
+This module contains helper functions for authentication headers, database setup, and
+sample payloads, as well as unit tests verifying bank reconciliation recording,
+retrieval, permissions, idempotency, and audit logging behaviors.
+"""
 from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -22,6 +29,9 @@ def auth_headers(
     scope_type: str = "global",
     scope_id: str | None = None,
 ) -> dict[str, str]:
+    """
+    Create authentication headers for a user with specified role and scope.
+    """
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "bank-reconciliation@example.com",
@@ -35,10 +45,17 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """
+    Build and return a new SQLite database URL in the provided temporary path.
+    """
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
 def seed_database(database_url: str, *, locked_month: bool = False) -> None:
+    """
+    Seed the database at the given URL with initial user and payment data.
+    Optionally lock a finance month if locked_month is True.
+    """
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
@@ -77,6 +94,9 @@ def seed_database(database_url: str, *, locked_month: bool = False) -> None:
 
 
 def bank_payload(amount_usd: str = "928.50") -> dict[str, object]:
+    """
+    Return a sample bank reconciliation payload dictionary with the specified USD amount.
+    """
     return {
         "bank_reference": "bank-transfer-2026-04-22",
         "bank_received_date": "2026-04-22",
@@ -92,6 +112,9 @@ def bank_payload(amount_usd: str = "928.50") -> dict[str, object]:
 
 
 def test_finance_admin_records_bank_reconciliation_with_audit(tmp_path):
+    """
+    Test that a finance admin can record a bank reconciliation entry and that it is audited correctly.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -124,6 +147,9 @@ def test_finance_admin_records_bank_reconciliation_with_audit(tmp_path):
 
 
 def test_bank_reconciliation_record_is_idempotent_for_same_month_reference(tmp_path):
+    """
+    Test that submitting bank reconciliation for the same month and reference is idempotent and updates correctly.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -156,6 +182,9 @@ def test_bank_reconciliation_record_is_idempotent_for_same_month_reference(tmp_p
 
 
 def test_finance_viewer_reads_bank_reconciliation_summary_with_audit(tmp_path):
+    """
+    Test that a finance viewer can read the bank reconciliation summary and see the related audit events.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -202,6 +231,9 @@ def test_finance_viewer_reads_bank_reconciliation_summary_with_audit(tmp_path):
 
 
 def test_finance_month_scoped_admin_records_matching_month(tmp_path):
+    """
+    Test that a finance-month scoped admin can record bank reconciliation for the matching month only.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -217,6 +249,9 @@ def test_finance_month_scoped_admin_records_matching_month(tmp_path):
 
 
 def test_finance_month_scoped_viewer_cannot_read_another_month(tmp_path):
+    """
+    Test that a finance-month scoped viewer cannot read bank reconciliation for a different month.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -233,6 +268,9 @@ def test_finance_month_scoped_viewer_cannot_read_another_month(tmp_path):
 
 
 def test_assistant_cannot_read_bank_reconciliation(tmp_path):
+    """
+    Test that an assistant analyst cannot read bank reconciliation summary due to missing permission.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -249,6 +287,9 @@ def test_assistant_cannot_read_bank_reconciliation(tmp_path):
 
 
 def test_finance_viewer_cannot_record_bank_reconciliation(tmp_path):
+    """
+    Test that a finance viewer cannot record bank reconciliation due to insufficient permissions.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -266,6 +307,9 @@ def test_finance_viewer_cannot_record_bank_reconciliation(tmp_path):
 
 
 def test_locked_finance_month_rejects_bank_reconciliation_writes(tmp_path):
+    """
+    Test that writes to a locked finance month are rejected for bank reconciliation entries.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url, locked_month=True)
     client = TestClient(create_app(database_url=database_url))

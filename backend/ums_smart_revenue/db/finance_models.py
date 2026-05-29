@@ -55,7 +55,11 @@ class FinanceMonthCloseORM(FinanceBase):
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     unlocked_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     unlocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
     tenant_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
         nullable=False,
@@ -106,8 +110,16 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
     longform_revenue_usd: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     subscription_revenue_usd: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     views: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
-    watch_time_minutes: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, server_default=text("0"))
-    confidence_score: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False, server_default=text("1"))
+    watch_time_minutes: Mapped[Decimal] = mapped_column(
+        Numeric(18, 2),
+        nullable=False,
+        server_default=text("0"),
+    )
+    confidence_score: Mapped[Decimal] = mapped_column(
+        Numeric(5, 4),
+        nullable=False,
+        server_default=text("1"),
+    )
     imported_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     imported_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

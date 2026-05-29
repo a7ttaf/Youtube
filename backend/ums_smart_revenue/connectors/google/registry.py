@@ -8,6 +8,11 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from typing import Any
+"""Registry for connector runners.
+
+This module provides functions to register connector runner functions,
+dispatch a connector runner by key, and retrieve the known connector keys.
+"""
 
 from ums_smart_revenue.connectors.google.errors import ConnectorAlreadyRegisteredError
 
@@ -34,6 +39,11 @@ ADSENSE_MANAGEMENT_CONNECTOR_KEY = "adsense-management"
 #     argparse choices from known_keys().
 # ============================================================================
 def register_connector(*, key: str, runner: _RunnerFn) -> None:
+    """Register a connector runner under the given key.
+
+    Raises:
+        ConnectorAlreadyRegisteredError: If a connector is already registered with the given key.
+    """
     if key in _REGISTRY:
         raise ConnectorAlreadyRegisteredError(key=key)
     _REGISTRY[key] = runner
@@ -52,6 +62,11 @@ def register_connector(*, key: str, runner: _RunnerFn) -> None:
 #     Dispatches live and dry-run paths.
 # ============================================================================
 def dispatch_connector(*, key: str) -> _RunnerFn:
+    """Resolve and return the connector runner associated with the key.
+
+    Raises:
+        ValueError: If the connector key is not registered.
+    """
     try:
         return _REGISTRY[key]
     except KeyError as exc:
@@ -67,4 +82,8 @@ def dispatch_connector(*, key: str) -> _RunnerFn:
 #   - File: scripts/run_google_connector.py -> argparse choices.
 # ============================================================================
 def known_keys() -> tuple[str, ...]:
+    """Return a sorted tuple of all registered connector keys.
+
+    This is used for CLI validation and help text.
+    """
     return tuple(sorted(_REGISTRY))

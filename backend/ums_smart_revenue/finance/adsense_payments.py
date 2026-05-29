@@ -86,19 +86,13 @@ class AdSensePaymentPage:
 class AdSensePaymentError(ValueError):
     """Base exception for AdSense payment repository failures."""
 
-    pass
-
 
 class AdSensePaymentLockedMonthError(AdSensePaymentError):
     """Raised when a write targets a locked finance month."""
 
-    pass
-
 
 class AdSensePaymentValidationError(AdSensePaymentError):
     """Raised when payment repository input fails validation."""
-
-    pass
 
 
 class SqlAlchemyAdSensePaymentRepository:

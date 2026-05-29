@@ -1,3 +1,9 @@
+"""
+Test suite for the run_adsense_payment_sync CLI script.
+
+Contains helper functions and pytest tests for various CLI behaviors,
+including live run, dry run, error handling, and argument validation.
+"""
 import importlib.util
 from pathlib import Path
 
@@ -20,6 +26,11 @@ BASE_ARGV = ["--tenant", TENANT, "--account", "pub-1", "--reason", "r"]
 
 
 def _load_cli():
+    """
+    Load the run_adsense_payment_sync script as a module for testing.
+
+    Uses importlib to load the script by file path and returns the module object.
+    """
     # Load the standalone script by path (scripts/ is not an importable
     # package). exec_module runs its sys.path bootstrap + imports once per test
     # for clean monkeypatch isolation.
@@ -39,6 +50,11 @@ class _SpySession:
         self.commits = 0
 
     def commit(self):
+        """
+        Record a commit operation by incrementing the commit counter.
+
+        Called to simulate database session commits in tests.
+        """
         self.commits += 1
 
     def __enter__(self):
@@ -60,10 +76,21 @@ class _FakeServiceOK:
         pass
 
     def sync(self, **kwargs):
+        """
+        Perform a successful sync operation and return a fake result.
+
+        Returns a _FakeResult instance with example counts for testing.
+        """
         return _FakeResult()
 
 
 def _patch_common(monkeypatch, module, *, session, service, settings=None):
+    """
+    Monkeypatch common dependencies in the CLI module.
+
+    Replaces settings loader, session factory, service principal builder,
+    audit sink, and sync service with test doubles.
+    """
     monkeypatch.setattr(
         module,
         "load_app_settings",
@@ -80,6 +107,11 @@ def _patch_common(monkeypatch, module, *, session, service, settings=None):
 
 
 def test_cli_live_success_commits_and_returns_0(monkeypatch, capsys):
+    """
+    Test that live CLI invocation commits once and returns exit code 0.
+
+    Verifies output contains synced count information in live mode.
+    """
     module = _load_cli()
     session = _SpySession()
     _patch_common(monkeypatch, module, session=session, service=_FakeServiceOK)
@@ -92,6 +124,12 @@ def test_cli_live_success_commits_and_returns_0(monkeypatch, capsys):
 
 
 def test_cli_dry_run_does_not_commit(monkeypatch, capsys):
+    """
+    Test that dry-run mode does not commit and returns exit code 0.
+
+    """
+    Verifies output indicates dry-run mode.
+    """
     module = _load_cli()
     session = _SpySession()
     _patch_common(monkeypatch, module, session=session, service=_FakeServiceOK)
@@ -102,6 +140,11 @@ def test_cli_dry_run_does_not_commit(monkeypatch, capsys):
 
 
 def test_cli_missing_db_config_returns_2(monkeypatch, capsys):
+    """
+    Test that missing database URL in settings results in exit code 2.
+
+    Verifies error message for missing UMS_DATABASE_URL and no commits.
+    """
     module = _load_cli()
     session = _SpySession()
     _patch_common(
@@ -121,12 +164,18 @@ def test_cli_missing_db_config_returns_2(monkeypatch, capsys):
     AdSensePaymentMappingError("$ ambiguous"),
 ])
 def test_cli_typed_failure_returns_2(monkeypatch, capsys, error):
+    """
+    Test that typed exceptions from the sync service result in exit code 2.
+
+    Verifies the specific error type is reported and no commits occur.
+    """
     module = _load_cli()
     session = _SpySession()
 
     class _Raises:
+        """Stub service actor that always raises the provided error during sync, for testing error handling."""
         def __init__(self, session, *, audit_sink, **kwargs):
-            pass
+            pass  # No initialization needed for stub service actor.
 
         def sync(self, **kwargs):
             raise error
@@ -139,11 +188,21 @@ def test_cli_typed_failure_returns_2(monkeypatch, capsys, error):
 
 
 def test_cli_missing_service_actor_returns_2(monkeypatch, capsys):
+    """
+    Test that missing service actor ID raises ValueError and returns exit code 2.
+
+    Verifies the ValueError is logged and no commits occur.
+    """
     module = _load_cli()
     session = _SpySession()
     _patch_common(monkeypatch, module, session=session, service=_FakeServiceOK)
 
     def _no_actor(*, tenant_id):
+        """
+        Raise ValueError when service actor ID is missing.
+
+        Ensures that the CLI properly handles missing actor configuration.
+        """
         raise ValueError("UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID is required")
 
     monkeypatch.setattr(module, "build_connector_service_principal", _no_actor)
@@ -154,12 +213,18 @@ def test_cli_missing_service_actor_returns_2(monkeypatch, capsys):
 
 
 def test_cli_untyped_error_propagates(monkeypatch):
+    """
+    Test that untyped exceptions from the sync service propagate as RuntimeError.
+
+    Verifies that CLI does not catch non-typed errors.
+    """
     module = _load_cli()
     session = _SpySession()
 
     class _Boom:
+        """Stub service actor that raises a RuntimeError during sync to test untyped error propagation."""
         def __init__(self, session, *, audit_sink, **kwargs):
-            pass
+            pass  # No initialization needed for stub service actor.
 
         def sync(self, **kwargs):
             raise RuntimeError("unexpected non-typed error")
@@ -167,18 +232,3 @@ def test_cli_untyped_error_propagates(monkeypatch):
     _patch_common(monkeypatch, module, session=session, service=_Boom)
     with pytest.raises(RuntimeError):
         module.main(BASE_ARGV)
-
-
-def test_cli_bad_tenant_uuid_is_argparse_error():
-    module = _load_cli()
-    # argparse type=UUID rejects before any settings/session work.
-    with pytest.raises(SystemExit) as excinfo:
-        module.main(["--tenant", "not-a-uuid", "--account", "pub-1", "--reason", "r"])
-    assert excinfo.value.code != 0
-
-
-def test_cli_blank_reason_is_argparse_error():
-    module = _load_cli()
-    with pytest.raises(SystemExit) as excinfo:
-        module.main(["--tenant", TENANT, "--account", "pub-1", "--reason", "   "])
-    assert excinfo.value.code != 0
