@@ -2,7 +2,10 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
-from ums_smart_revenue.finance.adsense_payments import AdSensePaymentEntry
+from ums_smart_revenue.finance.adsense_payments import (
+    AdSensePaymentEntry,
+    _decimal_to_api,
+)
 
 # Fixed display + iteration order for the four write-validated statuses
 # (see ALLOWED_PAYMENT_STATUSES in finance/adsense_payments.py).
@@ -11,12 +14,6 @@ OUTSTANDING_STATUSES: frozenset[str] = frozenset({"PENDING", "UNPAID"})
 
 
 @dataclass(frozen=True)
-"""Module for currency amount representation and API conversion.
-
-This module provides the CurrencyAmount class for handling amounts in a single currency
-and converting them to API-friendly dictionary formats.
-"""
-
 class CurrencyAmount:
     """One currency's summed amount (no FX; amounts only added within a currency)."""
 
@@ -29,8 +26,6 @@ class CurrencyAmount:
 
 
 @dataclass(frozen=True)
-"""Module for handling payment status buckets, providing conversion to API format."""
-
 class PaymentStatusBucket:
     """Count + per-currency totals for one payment status."""
 
@@ -39,12 +34,7 @@ class PaymentStatusBucket:
     currency_totals: list[CurrencyAmount]
 
     def to_api(self) -> dict[str, object]:
-        """Convert the payment status bucket into a dictionary for API responses.
-
-        Returns:
-            dict[str, object]: A dictionary containing 'status', 'count', and 'currency_totals',
-                where 'currency_totals' is a list of serialized CurrencyAmount objects.
-        """
+        """Serialize this status bucket into the API response shape."""
         return {
             "status": self.status,
             "count": self.count,
@@ -53,11 +43,6 @@ class PaymentStatusBucket:
 
 
 @dataclass(frozen=True)
-"""
-Module for representing per-source account payment status breakdown and 
-providing conversion to API response format.
-"""
-
 class AccountPaymentStatus:
     """Per-source_account_id status breakdown."""
 
@@ -67,8 +52,7 @@ class AccountPaymentStatus:
     outstanding_totals: list[CurrencyAmount]
 
     def to_api(self) -> dict[str, object]:
-        """Convert the AccountPaymentStatus instance into a dictionary for API response, 
-        including the source account ID, total payment count, status totals, and outstanding totals."""
+        """Serialize this account breakdown into the API response shape."""
         return {
             "source_account_id": self.source_account_id,
             "total_payment_count": self.total_payment_count,
@@ -80,12 +64,6 @@ class AccountPaymentStatus:
 
 
 @dataclass(frozen=True)
-"""
-Module for aggregating AdSense payment entries into monthly status summaries.
-Provides functions to build summaries of payment counts, status buckets,
-outstanding totals, and per-account breakdowns, formatted for API output.
-"""
-
 class MonthlyPaymentStatusSummary:
     """Month-wide rollup plus per-account breakdown of AdSense payment status."""
 
@@ -212,11 +190,3 @@ def _currency_totals(payments: list[AdSensePaymentEntry]) -> list[CurrencyAmount
         CurrencyAmount(currency=currency, amount=sums[currency])
         for currency in sorted(sums)
     ]
-
-
-def _decimal_to_api(value: Decimal) -> str:
-    """Format a Decimal into a string for API output, trimming unnecessary zeros."""
-    normalized = value.normalize()
-    if normalized == normalized.to_integral():
-        return format(normalized, "f")
-    return format(normalized, "f").rstrip("0").rstrip(".")

@@ -3,6 +3,8 @@ from datetime import date
 from decimal import Decimal
 from importlib import import_module
 
+import pytest
+
 from ums_smart_revenue.finance.adsense_payments import AdSensePaymentEntry
 
 MONTH = "2026-04"
@@ -23,13 +25,6 @@ def adsense_payment(
         source_account_id=account,
         month=month,
         payment_name=name,
-"""
-Tests for payment status summary builder.
-
-This module contains tests verifying monthly payment status summaries,
-including rollups, per-account breakdowns, outstanding totals, and
-serialization behavior.
-"""
         payment_date=date(2026, 5, 21),
         payment_amount=Decimal(amount),
         payment_currency=currency,
@@ -49,14 +44,13 @@ def build(payments, *, month=MONTH):
 def _bucket(summary, status):
     """Return the month-rollup bucket for a status."""
     try:
-        b = next(b for b in summary.status_totals if b.status == status)
+        return next(b for b in summary.status_totals if b.status == status)
     except StopIteration:
-        return None
-    return b
+        pytest.fail(f"missing {status} status bucket")
 
 
 def test_month_rollup_lists_all_four_statuses_in_canonical_order():
-    """Test that the monthly rollup includes all four statuses in canonical order and counts payments correctly."""
+    """Report all four statuses in canonical order."""
     summary = build([adsense_payment(name="p1", amount="8400.00")])
     assert [b.status for b in summary.status_totals] == [
         "PAID",
@@ -68,11 +62,15 @@ def test_month_rollup_lists_all_four_statuses_in_canonical_order():
 
 
 def test_status_bucket_groups_amounts_per_currency_alphabetically():
-    """Test that status buckets group amounts per currency in alphabetical order of currency codes."""
+    """Group status amounts by currency in alphabetical order."""
     summary = build(
         [
-            adsense_payment(name="p1", amount="1200.00", status="PENDING", currency="USD"),
-            adsense_payment(name="p2", amount="300.00", status="PENDING", currency="EUR"),
+            adsense_payment(
+                name="p1", amount="1200.00", status="PENDING", currency="USD"
+            ),
+            adsense_payment(
+                name="p2", amount="300.00", status="PENDING", currency="EUR"
+            ),
         ]
     )
     pending = _bucket(summary, "PENDING")
@@ -84,7 +82,7 @@ def test_status_bucket_groups_amounts_per_currency_alphabetically():
 
 
 def test_cancelled_amount_appears_in_cancelled_currency_totals():
-    """Test that cancelled payments' amounts appear in CANCELLED status currency totals."""
+    """Include cancelled payments in the CANCELLED currency totals."""
     # Operator-pinned case 1.
     summary = build(
         [adsense_payment(name="c1", amount="99.00", status="CANCELLED", currency="USD")]
@@ -111,7 +109,7 @@ def test_cancelled_is_excluded_from_outstanding_totals():
 
 
 def test_non_usd_payments_are_accepted_and_grouped_not_errored():
-    """Test that non-USD payments are accepted and correctly grouped in outstanding totals."""
+    """Accept and group non-USD outstanding payments."""
     # Operator-pinned case 3.
     summary = build(
         [
@@ -126,7 +124,7 @@ def test_non_usd_payments_are_accepted_and_grouped_not_errored():
 
 
 def test_outstanding_totals_sum_pending_and_unpaid_only():
-    """Test that outstanding totals sum amounts for PENDING and UNPAID statuses only, excluding PAID and CANCELLED."""
+    """Sum only pending and unpaid payments as outstanding."""
     summary = build(
         [
             adsense_payment(name="paid", amount="8400.00", status="PAID"),
@@ -147,7 +145,7 @@ def test_all_paid_month_has_no_outstanding():
 
 
 def test_empty_month_reports_zeroed_rollup_and_no_accounts():
-    """Test that an empty month reports zero counts for all statuses and no accounts."""
+    """Report zeroed status rollups and no accounts for an empty month."""
     summary = build([])
     assert summary.total_payment_count == 0
     assert [(b.status, b.count, b.currency_totals) for b in summary.status_totals] == [
@@ -161,12 +159,22 @@ def test_empty_month_reports_zeroed_rollup_and_no_accounts():
 
 
 def test_per_account_breakdown_splits_by_source_account_id():
-    """Test that per-account breakdown splits totals by source account ID correctly."""
+    """Split per-account status rollups by source account ID."""
     summary = build(
         [
-            adsense_payment(name="p1", amount="8400.00", status="PAID", account="pub-111"),
-            adsense_payment(name="pend", amount="1200.00", status="PENDING", account="pub-222"),
-            adsense_payment(name="unp", amount="500.00", status="UNPAID", currency="GBP", account="pub-222"),
+            adsense_payment(
+                name="p1", amount="8400.00", status="PAID", account="pub-111"
+            ),
+            adsense_payment(
+                name="pend", amount="1200.00", status="PENDING", account="pub-222"
+            ),
+            adsense_payment(
+                name="unp",
+                amount="500.00",
+                status="UNPAID",
+                currency="GBP",
+                account="pub-222",
+            ),
         ]
     )
     assert [a.source_account_id for a in summary.accounts] == ["pub-111", "pub-222"]
@@ -184,11 +192,21 @@ def test_per_account_breakdown_splits_by_source_account_id():
 
 
 def test_rollup_equals_sum_of_account_breakdowns():
-    """Test that the overall rollup equals the sum of individual account breakdowns."""
+    """Keep the month rollup equal to the sum of account rollups."""
     payments = [
-        adsense_payment(name="p1", amount="8400.00", status="PAID", account="pub-111"),
-        adsense_payment(name="pend", amount="1200.00", status="PENDING", account="pub-222"),
-        adsense_payment(name="unp", amount="500.00", status="UNPAID", currency="GBP", account="pub-222"),
+        adsense_payment(
+            name="p1", amount="8400.00", status="PAID", account="pub-111"
+        ),
+        adsense_payment(
+            name="pend", amount="1200.00", status="PENDING", account="pub-222"
+        ),
+        adsense_payment(
+            name="unp",
+            amount="500.00",
+            status="UNPAID",
+            currency="GBP",
+            account="pub-222",
+        ),
     ]
     summary = build(payments)
     assert summary.total_payment_count == sum(
@@ -201,11 +219,25 @@ def test_rollup_equals_sum_of_account_breakdowns():
 
 
 def test_determinism_independent_of_input_order():
-    """Test that summary generation is deterministic regardless of input payment order."""
+    """Return the same summary regardless of input payment order."""
     payments = [
-        adsense_payment(name="g1", amount="500.00", status="UNPAID", currency="GBP", account="pub-222"),
-        adsense_payment(name="p1", amount="8400.00", status="PAID", account="pub-111"),
-        adsense_payment(name="e1", amount="300.00", status="PENDING", currency="EUR", account="pub-222"),
+        adsense_payment(
+            name="g1",
+            amount="500.00",
+            status="UNPAID",
+            currency="GBP",
+            account="pub-222",
+        ),
+        adsense_payment(
+            name="p1", amount="8400.00", status="PAID", account="pub-111"
+        ),
+        adsense_payment(
+            name="e1",
+            amount="300.00",
+            status="PENDING",
+            currency="EUR",
+            account="pub-222",
+        ),
     ]
     first = build(payments)
     second = build(list(reversed(payments)))
@@ -214,7 +246,7 @@ def test_determinism_independent_of_input_order():
 
 
 def test_amount_serialization_preserves_precision_without_scientific_notation():
-    """Test that serialization to API preserves decimal precision without using scientific notation."""
+    """Serialize decimal precision without scientific notation."""
     summary = build([adsense_payment(name="p1", amount="1234.5678", status="PENDING")])
     assert summary.to_api()["outstanding_totals"] == [
         {"currency": "USD", "amount": "1234.5678"}
@@ -222,11 +254,15 @@ def test_amount_serialization_preserves_precision_without_scientific_notation():
 
 
 def test_payments_from_other_months_are_ignored():
-    """Test that payments from other months are ignored when building summary for a specific month."""
+    """Ignore payments outside the requested month."""
     summary = build(
         [
-            adsense_payment(name="this", amount="100.00", status="PENDING", month="2026-04"),
-            adsense_payment(name="other", amount="999.00", status="PENDING", month="2026-03"),
+            adsense_payment(
+                name="this", amount="100.00", status="PENDING", month="2026-04"
+            ),
+            adsense_payment(
+                name="other", amount="999.00", status="PENDING", month="2026-03"
+            ),
         ],
         month="2026-04",
     )
