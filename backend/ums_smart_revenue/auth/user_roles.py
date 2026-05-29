@@ -76,6 +76,18 @@ class SqlAlchemyUserRoleAssignmentRepository:
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
+    # ============================================================================
+    # Purpose: Assign a tenant-scoped role after validating actor, role, scope,
+    # duplicate active grants, and service-account restrictions.
+    # Database/ORM: UserORM, UserRoleAssignmentORM, AccessScopeORM.
+    # Standards: Repository-owned SQLAlchemy writes, typed domain exceptions, and
+    # fail-closed tenant and authorization validation.
+    # Blast Radius: Authorization and audit-adjacent role grants; no finance or
+    # Neo4j projection impact detected.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/auth/roles.py -> Role definitions and scope compatibility.
+    #   - File: backend/ums_smart_revenue/db/security_models.py -> User, role assignment, and access scope ORM rows.
+    # ============================================================================
     def assign_role(
         self,
         *,
@@ -86,7 +98,7 @@ class SqlAlchemyUserRoleAssignmentRepository:
         assigned_by: str,
         reason: str,
     ) -> UserRoleAssignmentEntry:
-        """Assign a role to a user within a given scope, ensuring validations and tenant context."""
+        """Assign a role to a user within a validated tenant scope."""
         target_user_id = _parse_uuid(user_id, field_name="user_id")
         actor_user_id = _parse_uuid(assigned_by, field_name="assigned_by")
         role = _parse_role(role_key)
