@@ -31,14 +31,19 @@ OTHER_TENANT_ID = UUID("00000000-0000-0000-0000-000000015999")
 
 
 class _ScalarResult:
+    """Wrapper for a scalar result from a query, providing one_or_none() behavior."""
+
     def __init__(self, value: object | None) -> None:
         self._value = value
 
     def one_or_none(self) -> object | None:
+        """Return the scalar value or None."""
         return self._value
 
 
 class _NestedTransaction:
+    """Context manager stub for nested transactions."""
+
     def __enter__(self) -> _NestedTransaction:
         return self
 
@@ -52,6 +57,8 @@ class _NestedTransaction:
 
 
 class _FkRaceSession:
+    """Session stub that simulates FK races during permission grant writes."""
+
     def __init__(
         self, *, scalars_results: list[object | None], user_exists_results: list[object]
     ) -> None:
@@ -79,22 +86,31 @@ class _FkRaceSession:
         return None
 
     def scalars(self, _stmt: object) -> _ScalarResult:
+        """Execute statement and return the next scalar result wrapper."""
         return _ScalarResult(self._scalars_results.pop(0))
 
     def scalar(self, _stmt: object) -> object:
+        """Execute statement and return the next scalar result directly."""
         return self._user_exists_results.pop(0)
 
-    def begin_nested(self) -> _NestedTransaction:
+    @staticmethod
+    def begin_nested() -> _NestedTransaction:
+        """Start a nested transaction context."""
         return _NestedTransaction()
 
-    def add(self, _row: object) -> None:
-        pass
+    @staticmethod
+    def add(_row: object) -> None:
+        """Add a row to the session stub (no-op)."""
+        return None
 
-    def flush(self) -> Never:
+    @staticmethod
+    def flush() -> Never:
+        """Simulate a flush operation raising an IntegrityError for foreign key failures."""
         raise IntegrityError("flush", {}, Exception("FOREIGN KEY constraint failed"))
 
 
 def _tenant(tenant_id: UUID = OTHER_TENANT_ID) -> Tenant:
+    """Create a tenant model for repository tests."""
     now = datetime.now(UTC)
     return Tenant(
         id=tenant_id,
@@ -109,6 +125,7 @@ def _tenant(tenant_id: UUID = OTHER_TENANT_ID) -> Tenant:
 
 
 def _seed_user(session: Session, user_id: UUID, tenant_id: UUID) -> None:
+    """Insert a test user into the database session for the given user and tenant IDs."""
     session.add(
         UserORM(
             id=user_id,
@@ -120,6 +137,7 @@ def _seed_user(session: Session, user_id: UUID, tenant_id: UUID) -> None:
 
 
 def test_grant_permission_uses_ambient_tenant_context(tmp_path):
+    """Ensure that grant_permission uses the ambient tenant context when creating permission grants."""
     engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / 'permissions.db').as_posix()}")
     SecurityBase.metadata.create_all(engine)
     with Session(engine) as setup:
@@ -151,6 +169,7 @@ def test_grant_permission_uses_ambient_tenant_context(tmp_path):
 
 
 def test_grant_permission_translates_target_user_fk_race_with_db_backed_lookup():
+    """Test that grant_permission raises UserPermissionGrantNotFoundError when target user FK race occurs."""
     session = _FkRaceSession(
         scalars_results=[
             AccessScopeORM(
@@ -178,6 +197,7 @@ def test_grant_permission_translates_target_user_fk_race_with_db_backed_lookup()
 
 
 def test_grant_permission_translates_actor_fk_race_with_db_backed_lookup():
+    """Test that grant_permission raises UserPermissionGrantNotFoundError when actor FK race occurs."""
     session = _FkRaceSession(
         scalars_results=[
             AccessScopeORM(
@@ -205,6 +225,7 @@ def test_grant_permission_translates_actor_fk_race_with_db_backed_lookup():
 
 
 def test_revoke_permission_translates_actor_fk_race_with_db_backed_lookup():
+    """Test that revoke_permission raises UserPermissionGrantNotFoundError when actor FK race occurs during revoke."""
     scope_id = uuid4()
     grant = UserPermissionGrantORM(
         id=uuid4(),

@@ -93,7 +93,8 @@ class FailingSession:
         """Return a minimal bind with the dialect name used by the loader."""
         return SimpleNamespace(dialect=SimpleNamespace(name=self.dialect_name))
 
-    def begin(self) -> nullcontext:
+    @staticmethod
+    def begin() -> nullcontext:
         """Return a no-op context manager for the loader transaction scope."""
         return nullcontext()
 
@@ -573,6 +574,9 @@ def test_database_principal_rejects_bad_token_before_opening_session(monkeypatch
     assert response.json()["detail"] == "Invalid trusted gateway token"
     assert counter.opened_sessions == 0
 
+# Test module for database tenant resolver behavior, including the health endpoint.
+# This module ensures that bypass paths are normalized before authentication and that the health
+# endpoint correctly reports the service status.
 
 def test_database_tenant_resolver_normalizes_bypass_paths_before_auth():
     """Database-auth wrapper bypasses normalized paths before gateway checks."""
@@ -586,6 +590,7 @@ def test_database_tenant_resolver_normalizes_bypass_paths_before_auth():
 
     @app.get("/health")
     def health() -> dict[str, str]:
+        """Health endpoint returning the overall service status."""
         return {"status": "ok"}
 
     response = TestClient(app).get("/health")
