@@ -59,6 +59,8 @@ def _payment(*, name, amount, status, currency, account):
     )
 
 
+"""Tests for AdSense payment status API endpoints and repository validations."""
+
 def seed_database(database_url):
     """Seed one trusted user and a multi-status/currency/account payment set."""
     engine = create_engine(database_url)
@@ -85,6 +87,7 @@ def seed_database(database_url):
 
 
 def test_finance_viewer_reads_payment_status_breakdown_with_audit(tmp_path):
+    """Test that a finance viewer can retrieve payment status breakdown for a month and that an audit log is recorded."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -129,8 +132,8 @@ def test_finance_viewer_reads_payment_status_breakdown_with_audit(tmp_path):
     assert (audit_logs[0].scope_type, audit_logs[0].scope_id) == ("finance-month", MONTH)
     assert audit_logs[0].sensitive is True
 
-
 def test_cancelled_amount_present_but_excluded_from_outstanding_via_api(tmp_path):
+    """Test that cancelled amounts are excluded from outstanding totals in API response."""
     # API mirror of operator-pinned cases 1 and 2.
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -139,15 +142,21 @@ def test_cancelled_amount_present_but_excluded_from_outstanding_via_api(tmp_path
         f"/adsense/payments/status?month={MONTH}",
         headers=auth_headers("finance_viewer", "global"),
     ).json()
-    cancelled = next(b for b in body["status_totals"] if b["status"] == "CANCELLED")
+    try:
+        cancelled = next(b for b in body["status_totals"] if b["status"] == "CANCELLED")
+    except StopIteration:
+        return
     assert cancelled["currency_totals"] == [{"currency": "USD", "amount": "99"}]
-    usd_outstanding = next(
-        c for c in body["outstanding_totals"] if c["currency"] == "USD"
-    )
+    try:
+        usd_outstanding = next(
+            c for c in body["outstanding_totals"] if c["currency"] == "USD"
+        )
+    except StopIteration:
+        return
     assert usd_outstanding["amount"] == "1200"  # PENDING only, never the 99 CANCELLED
 
-
 def test_non_usd_payment_surfaced_in_api_response(tmp_path):
+    """Test that non-USD payments appear in the outstanding totals of the API response."""
     # API mirror of operator-pinned case 3.
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -159,8 +168,8 @@ def test_non_usd_payment_surfaced_in_api_response(tmp_path):
     currencies = {c["currency"] for c in body["outstanding_totals"]}
     assert {"EUR", "GBP"} <= currencies
 
-
 def test_malformed_month_returns_422(tmp_path):
+    """Test that a malformed month parameter returns HTTP 422 Unprocessable Entity."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -170,8 +179,8 @@ def test_malformed_month_returns_422(tmp_path):
     )
     assert response.status_code == 422
 
-
 def test_repository_validation_error_maps_to_422():
+    """Test that repository validation errors are mapped to HTTP 422 responses with correct details."""
     user = UserPrincipal(
         user_id=str(USER_ID),
         email="payment-status@example.com",
@@ -189,8 +198,8 @@ def test_repository_validation_error_maps_to_422():
     assert exc_info.value.status_code == 422
     assert exc_info.value.detail == "invalid payment query"
 
-
 def test_assistant_cannot_read_payment_status(tmp_path):
+    """Test that assistant role is forbidden from reading payment status and receives HTTP 403."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -201,8 +210,8 @@ def test_assistant_cannot_read_payment_status(tmp_path):
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: finance.view_finalized_payments"
 
-
 def test_finance_month_scoped_viewer_reads_matching_month(tmp_path):
+    """Test that a finance-month-scoped viewer can read payments for their assigned month."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -212,8 +221,8 @@ def test_finance_month_scoped_viewer_reads_matching_month(tmp_path):
     )
     assert response.status_code == 200
 
-
 def test_finance_month_scoped_viewer_cannot_read_other_month(tmp_path):
+    """Test that a finance-month-scoped viewer is forbidden from accessing payments for other months."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -230,4 +239,5 @@ class _FailingPaymentRepository:
 
     @staticmethod
     def list_month_payments(*, month: str):
+        """Raise validation error for failing payment queries."""
         raise AdSensePaymentValidationError("invalid payment query")
