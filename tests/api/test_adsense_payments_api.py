@@ -6,7 +6,11 @@ from sqlalchemy import create_engine, select, text
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
-from ums_smart_revenue.db.finance_models import FinanceBase, FinanceMonthCloseORM
+from ums_smart_revenue.db.finance_models import (
+    AdSensePaymentORM,
+    FinanceBase,
+    FinanceMonthCloseORM,
+)
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
 USER_ID = UUID("00000000-0000-0000-0000-000000009001")
@@ -18,6 +22,7 @@ def auth_headers(
     scope_id: str | None = None,
     user_id: str | UUID = USER_ID,
 ) -> dict[str, str]:
+    """Build trusted-gateway auth headers for AdSense API tests."""
     headers = {
         "x-user-id": str(user_id),
         "x-user-email": "adsense-payments@example.com",
@@ -31,10 +36,12 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """Return a unique SQLite database URL under pytest's temp path."""
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
 def seed_database(database_url: str, *, locked_month: bool = False) -> None:
+    """Create security and finance tables with one trusted test user."""
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
@@ -58,12 +65,14 @@ def seed_database(database_url: str, *, locked_month: bool = False) -> None:
 
 
 def payment_payload(amount: str = "930.00") -> dict[str, object]:
+    """Build the canonical manual AdSense sync request payload."""
     return {
         "connector_key": "adsense",
         "source_report_id": "raw-adsense-payment-2026-03",
         "reason": "Sync official AdSense payment record for March close",
         "payments": [
             {
+                "source_account_id": "pub-1",
                 "month": "2026-03",
                 "payment_name": "AdSense payment March 2026",
                 "payment_date": "2026-04-21",
@@ -77,6 +86,7 @@ def payment_payload(amount: str = "930.00") -> dict[str, object]:
 
 
 def test_system_integration_user_syncs_adsense_payment_with_audit(tmp_path):
+    """System integration users can sync one payment and emit audit evidence."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -109,6 +119,7 @@ def test_system_integration_user_syncs_adsense_payment_with_audit(tmp_path):
 
 
 def test_system_integration_user_sync_accepts_non_uuid_gateway_actor(tmp_path):
+    """Non-UUID gateway actors sync without imported_by UUID attribution."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -138,6 +149,7 @@ def test_system_integration_user_sync_accepts_non_uuid_gateway_actor(tmp_path):
 
 
 def test_adsense_payment_sync_is_idempotent_for_same_month_payment_name(tmp_path):
+    """Repeated manual sync for one account/month/name updates one row."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -170,6 +182,7 @@ def test_adsense_payment_sync_is_idempotent_for_same_month_payment_name(tmp_path
 
 
 def test_adsense_payment_sync_rejects_duplicate_keys_within_batch(tmp_path):
+    """Duplicate account/month/name rows in one request fail closed."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -200,6 +213,7 @@ def test_adsense_payment_sync_rejects_duplicate_keys_within_batch(tmp_path):
 
 
 def test_finance_viewer_lists_adsense_payments_with_audit(tmp_path):
+    """Global finance viewers can list payments and produce sensitive audit."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -235,6 +249,7 @@ def test_finance_viewer_lists_adsense_payments_with_audit(tmp_path):
 
 
 def test_finance_month_scoped_viewer_lists_matching_adsense_payments(tmp_path):
+    """Month-scoped finance viewers can list their authorized month."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -263,6 +278,7 @@ def test_finance_month_scoped_viewer_lists_matching_adsense_payments(tmp_path):
 
 
 def test_finance_month_scoped_viewer_cannot_list_another_month(tmp_path):
+    """Month-scoped finance viewers cannot list a different month."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -279,6 +295,7 @@ def test_finance_month_scoped_viewer_cannot_list_another_month(tmp_path):
 
 
 def test_assistant_cannot_view_adsense_payments(tmp_path):
+    """Assistant analysts lack finalized-payment view permission."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -296,6 +313,7 @@ def test_assistant_cannot_view_adsense_payments(tmp_path):
 
 
 def test_sync_requires_adsense_connector_scope(tmp_path):
+    """Sync requires connector permission scoped to the AdSense connector."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -315,6 +333,7 @@ def test_sync_requires_adsense_connector_scope(tmp_path):
 
 
 def test_sync_rejects_locked_finance_month(tmp_path):
+    """Manual sync rejects writes to locked finance months."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url, locked_month=True)
     client = TestClient(create_app(database_url=database_url))
@@ -336,3 +355,90 @@ def test_sync_rejects_locked_finance_month(tmp_path):
         response.json()["detail"] == "Finance month is locked for AdSense payment sync"
     )
     assert payment_count == 0
+
+
+def test_manual_sync_requires_source_account_id(tmp_path) -> None:
+    """Manual sync requires a source account id per payment row."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    body = payment_payload()
+    del body["payments"][0]["source_account_id"]
+    response = client.post(
+        "/adsense/sync-payments",
+        headers=auth_headers("system_integration_user", "connector", "adsense"),
+        json=body,
+    )
+    assert response.status_code == 422  # Pydantic rejects before any DB write
+
+
+def test_manual_sync_rejects_blank_source_account_id(tmp_path) -> None:
+    """Manual sync rejects blank source account ids before writing."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    body = payment_payload()
+    body["payments"][0]["source_account_id"] = "   "
+    response = client.post(
+        "/adsense/sync-payments",
+        headers=auth_headers("system_integration_user", "connector", "adsense"),
+        json=body,
+    )
+    assert response.status_code == 422
+
+
+def test_manual_sync_canonicalizes_accounts_prefix(tmp_path) -> None:
+    """Manual sync strips the trusted accounts/ prefix at the API boundary."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    body = payment_payload()
+    body["payments"][0]["source_account_id"] = "accounts/pub-1"
+    response = client.post(
+        "/adsense/sync-payments",
+        headers=auth_headers("system_integration_user", "connector", "adsense"),
+        json=body,
+    )
+    assert response.status_code == 200
+    # The `accounts/` prefix is stripped by the shared normalizer, so the
+    # persisted/returned identity is the canonical bare publisher id.
+    assert response.json()["items"][0]["source_account_id"] == "pub-1"
+
+
+def test_manual_sync_rejects_malformed_account_path_chars(tmp_path) -> None:
+    """Manual sync rejects reserved path characters in source account ids."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    body = payment_payload()
+    body["payments"][0]["source_account_id"] = "pub/../etc"  # reserved '/'
+    response = client.post(
+        "/adsense/sync-payments",
+        headers=auth_headers("system_integration_user", "connector", "adsense"),
+        json=body,
+    )
+    assert response.status_code == 422  # MalformedAdsenseAccountIdError -> 422
+
+
+def test_manual_sync_rejects_whitespace_padded_source_account_id(tmp_path) -> None:
+    """Manual sync rejects whitespace-padded source account ids fail-closed."""
+    # Regression: a whitespace-padded external account id must be REJECTED
+    # fail-closed by the shared _validated_account_id normalizer (its
+    # `candidate != account_id` guard), not silently trimmed-and-accepted. The
+    # API validator must NOT pre-strip before calling the normalizer; if it did,
+    # " accounts/pub-1 " would canonicalize to "pub-1" and persist.
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    body = payment_payload()
+    body["payments"][0]["source_account_id"] = " accounts/pub-1 "  # padded
+    response = client.post(
+        "/adsense/sync-payments",
+        headers=auth_headers("system_integration_user", "connector", "adsense"),
+        json=body,
+    )
+    assert response.status_code == 422  # rejected at request validation
+    # ...and rejected BEFORE any DB write: no payment row was persisted.
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        assert session.scalars(select(AdSensePaymentORM)).all() == []

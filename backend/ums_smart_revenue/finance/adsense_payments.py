@@ -23,6 +23,9 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 @dataclass(frozen=True)
 class AdSensePaymentInput:
+    """Validated repository input for one AdSense payment write."""
+
+    source_account_id: str
     month: str
     payment_name: str
     payment_date: date
@@ -34,7 +37,10 @@ class AdSensePaymentInput:
 
 @dataclass(frozen=True)
 class AdSensePaymentEntry:
+    """Read-model representation of one persisted AdSense payment row."""
+
     id: str
+    source_account_id: str
     month: str
     payment_name: str
     payment_date: date
@@ -47,11 +53,14 @@ class AdSensePaymentEntry:
 
     @property
     def audit_entity_id(self) -> str:
-        return f"{self.month}:{self.payment_name}"
+        """Return a stable account-scoped audit entity identifier."""
+        return f"{self.source_account_id}:{self.month}:{self.payment_name}"
 
     def to_api(self) -> dict[str, object]:
+        """Serialize this payment entry into the public API response shape."""
         return {
             "id": self.id,
+            "source_account_id": self.source_account_id,
             "month": self.month,
             "payment_name": self.payment_name,
             "payment_date": self.payment_date.isoformat(),
@@ -66,6 +75,8 @@ class AdSensePaymentEntry:
 
 @dataclass(frozen=True)
 class AdSensePaymentPage:
+    """Paginated AdSense payment read result."""
+
     items: list[AdSensePaymentEntry]
     limit: int
     offset: int
@@ -73,19 +84,22 @@ class AdSensePaymentPage:
 
 
 class AdSensePaymentError(ValueError):
-    pass
+    """Base exception for AdSense payment repository failures."""
 
 
 class AdSensePaymentLockedMonthError(AdSensePaymentError):
-    pass
+    """Raised when a write targets a locked finance month."""
 
 
 class AdSensePaymentValidationError(AdSensePaymentError):
-    pass
+    """Raised when payment repository input fails validation."""
 
 
 class SqlAlchemyAdSensePaymentRepository:
+    """SQLAlchemy repository for tenant-scoped AdSense payment source rows."""
+
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        """Bind the database session and resolved tenant scope."""
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
@@ -96,6 +110,7 @@ class SqlAlchemyAdSensePaymentRepository:
         actor_user_id: str,
         source_report_id: str | None,
     ) -> list[AdSensePaymentEntry]:
+        """Upsert account-scoped payment rows after validation and lock checks."""
         if not payments:
             raise AdSensePaymentValidationError(
                 "payments must contain at least one payment"
@@ -104,16 +119,18 @@ class SqlAlchemyAdSensePaymentRepository:
         normalized_source_report_id = _normalize_optional_string(source_report_id)
 
         normalized_payments: list[AdSensePaymentInput] = []
-        seen_payment_keys: set[tuple[str, str]] = set()
+        seen_payment_keys: set[tuple[str, str, str]] = set()
         for payment in payments:
             normalized_payment = _normalize_payment(payment)
             payment_key = (
+                normalized_payment.source_account_id,
                 normalized_payment.month,
                 normalized_payment.payment_name,
             )
             if payment_key in seen_payment_keys:
                 raise AdSensePaymentValidationError(
                     "duplicate AdSense payment in batch: "
+                    f"{normalized_payment.source_account_id}:"
                     f"{normalized_payment.month}:{normalized_payment.payment_name}"
                 )
             seen_payment_keys.add(payment_key)
@@ -130,6 +147,7 @@ class SqlAlchemyAdSensePaymentRepository:
                 tenant_id=self._tenant_id,
                 month=normalized_payment.month,
                 payment_name=normalized_payment.payment_name,
+                source_account_id=normalized_payment.source_account_id,
                 payment_date=normalized_payment.payment_date,
                 payment_amount=normalized_payment.payment_amount,
                 payment_currency=normalized_payment.payment_currency,
@@ -156,6 +174,7 @@ class SqlAlchemyAdSensePaymentRepository:
             statement = insert_statement.on_conflict_do_update(
                 index_elements=[
                     AdSensePaymentORM.tenant_id,
+                    AdSensePaymentORM.source_account_id,
                     AdSensePaymentORM.month,
                     AdSensePaymentORM.payment_name,
                 ],
@@ -177,6 +196,7 @@ class SqlAlchemyAdSensePaymentRepository:
         limit: int = 50,
         offset: int = 0,
     ) -> AdSensePaymentPage:
+        """Return a tenant-filtered, total-ordered page of payment rows."""
         if limit < 1 or limit > MAX_ADSENSE_PAYMENT_PAGE_SIZE:
             raise AdSensePaymentValidationError(
                 f"limit must be between 1 and {MAX_ADSENSE_PAYMENT_PAGE_SIZE}"
@@ -195,6 +215,8 @@ class SqlAlchemyAdSensePaymentRepository:
                 AdSensePaymentORM.month.desc(),
                 AdSensePaymentORM.payment_date.desc(),
                 AdSensePaymentORM.payment_name,
+                AdSensePaymentORM.source_account_id,
+                AdSensePaymentORM.id,
             )
         )
         if month is not None:
@@ -209,6 +231,7 @@ class SqlAlchemyAdSensePaymentRepository:
         )
 
     def list_month_payments(self, *, month: str) -> list[AdSensePaymentEntry]:
+        """Return all tenant payment rows for a month in stable display order."""
         _validate_month(month)
         rows = self._session.scalars(
             select(AdSensePaymentORM)
@@ -217,11 +240,14 @@ class SqlAlchemyAdSensePaymentRepository:
             .order_by(
                 AdSensePaymentORM.payment_date.desc(),
                 AdSensePaymentORM.payment_name,
+                AdSensePaymentORM.source_account_id,
+                AdSensePaymentORM.id,
             )
         ).all()
         return [self._to_entry(row) for row in rows]
 
     def _require_month_open(self, month: str) -> None:
+        """Lock and verify the target finance month before writing."""
         close = get_or_create_month_close_row(
             self._session,
             month,
@@ -235,8 +261,10 @@ class SqlAlchemyAdSensePaymentRepository:
 
     @staticmethod
     def _to_entry(row: AdSensePaymentORM) -> AdSensePaymentEntry:
+        """Convert an ORM row into the repository read model."""
         return AdSensePaymentEntry(
             id=str(row.id),
+            source_account_id=row.source_account_id,
             month=row.month,
             payment_name=row.payment_name,
             payment_date=row.payment_date,
@@ -250,7 +278,11 @@ class SqlAlchemyAdSensePaymentRepository:
 
 
 def _normalize_payment(payment: AdSensePaymentInput) -> AdSensePaymentInput:
+    """Normalize and validate one payment input without mutating the caller."""
     _validate_month(payment.month)
+    source_account_id = _normalize_required_string(
+        payment.source_account_id, "source_account_id"
+    )
     payment_name = _normalize_required_string(payment.payment_name, "payment_name")
     payment_currency = _normalize_currency(payment.payment_currency)
     payment_status = _normalize_payment_status(payment.payment_status)
@@ -258,6 +290,7 @@ def _normalize_payment(payment: AdSensePaymentInput) -> AdSensePaymentInput:
     if not isinstance(payment.raw_payload, dict):
         raise AdSensePaymentValidationError("raw_payload must be an object")
     return AdSensePaymentInput(
+        source_account_id=source_account_id,
         month=payment.month,
         payment_name=payment_name,
         payment_date=payment.payment_date,
@@ -269,6 +302,7 @@ def _normalize_payment(payment: AdSensePaymentInput) -> AdSensePaymentInput:
 
 
 def _validate_month(month: str) -> None:
+    """Validate a YYYY-MM finance month string."""
     if not MONTH_PATTERN.fullmatch(month):
         raise AdSensePaymentValidationError(
             "month must use YYYY-MM with a calendar month from 01 to 12"
@@ -276,6 +310,7 @@ def _validate_month(month: str) -> None:
 
 
 def _normalize_required_string(value: str, field_name: str) -> str:
+    """Trim a required string and reject blanks."""
     normalized = value.strip()
     if not normalized:
         raise AdSensePaymentValidationError(f"{field_name} must not be blank")
@@ -283,6 +318,7 @@ def _normalize_required_string(value: str, field_name: str) -> str:
 
 
 def _normalize_optional_string(value: str | None) -> str | None:
+    """Trim an optional string and collapse blanks to None."""
     if value is None:
         return None
     normalized = value.strip()
@@ -290,6 +326,7 @@ def _normalize_optional_string(value: str | None) -> str | None:
 
 
 def _normalize_currency(value: str) -> str:
+    """Normalize an ISO currency code to uppercase."""
     normalized = _normalize_required_string(value, "payment_currency").upper()
     if not CURRENCY_PATTERN.fullmatch(normalized):
         raise AdSensePaymentValidationError(
@@ -299,6 +336,7 @@ def _normalize_currency(value: str) -> str:
 
 
 def _normalize_payment_status(value: str) -> str:
+    """Normalize and validate the stored AdSense payment status."""
     normalized = _normalize_required_string(value, "payment_status").upper()
     if normalized not in ALLOWED_PAYMENT_STATUSES:
         raise AdSensePaymentValidationError(f"Unknown AdSense payment_status: {value}")
@@ -306,6 +344,7 @@ def _normalize_payment_status(value: str) -> str:
 
 
 def _validate_payment_amount(value: Decimal) -> None:
+    """Validate that a payment amount is finite and non-negative."""
     if not value.is_finite() or value < 0:
         raise AdSensePaymentValidationError(
             "payment_amount must be a finite decimal >= 0"
@@ -313,6 +352,7 @@ def _validate_payment_amount(value: Decimal) -> None:
 
 
 def _dialect_insert(dialect_name: str):
+    """Return the upsert-capable insert builder for the active SQL dialect."""
     if dialect_name == "sqlite":
         return sqlite_insert
     if dialect_name == "postgresql":
@@ -323,6 +363,7 @@ def _dialect_insert(dialect_name: str):
 
 
 def _parse_uuid_or_none(value: str) -> UUID | None:
+    """Parse a UUID string, returning None for non-UUID service actors."""
     normalized = _normalize_required_string(value, "actor_user_id")
     try:
         return UUID(normalized)
@@ -331,6 +372,7 @@ def _parse_uuid_or_none(value: str) -> UUID | None:
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Resolve the repository tenant from explicit, context, or default scope."""
     if tenant_id is not None:
         return _parse_tenant_uuid(tenant_id)
     current_tenant = get_current_tenant()
@@ -340,6 +382,7 @@ def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
 
 
 def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    """Parse a tenant UUID value for repository scoping."""
     if isinstance(tenant_id, UUID):
         return tenant_id
     try:
@@ -349,6 +392,7 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
 
 
 def _decimal_to_api(value: Decimal) -> str:
+    """Serialize a Decimal for JSON without losing precision."""
     normalized = value.normalize()
     if normalized == normalized.to_integral():
         return format(normalized, "f")

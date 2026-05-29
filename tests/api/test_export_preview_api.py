@@ -1,3 +1,5 @@
+"""Tests for export preview API artifacts, downloads, and audit behavior."""
+
 import hashlib
 from datetime import UTC, date, datetime
 from decimal import Decimal
@@ -56,12 +58,14 @@ OTHER_USER_ID = UUID("00000000-0000-0000-0000-000000023601")
 
 
 def _utc_timestamp(value: datetime) -> float:
+    """Convert a datetime value to a UTC timestamp (seconds since epoch)."""
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC).timestamp()
     return value.astimezone(UTC).timestamp()
 
 
 def auth_headers(role: str, scope_type: str = "global") -> dict[str, str]:
+    """Generate authentication headers for a user with a given role and scope."""
     return {
         "x-user-id": str(USER_ID),
         "x-user-email": f"{role}@example.com",
@@ -72,6 +76,7 @@ def auth_headers(role: str, scope_type: str = "global") -> dict[str, str]:
 
 
 def build_database_url(tmp_path) -> str:
+    """Build a SQLAlchemy URL for a temporary SQLite database."""
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
@@ -85,6 +90,7 @@ def seed_database(
     include_group: bool = False,
     include_previous_fact: bool = False,
 ) -> None:
+    """Seed export preview data, including optional group or prior facts."""
     resolved_scope_id = scope_id
     if resolved_scope_id is None and scope_type == "company":
         resolved_scope_id = str(COMPANY_ID)
@@ -165,6 +171,7 @@ def seed_database(
                 payment_currency="USD",
                 payment_status="PAID",
                 raw_payload={"source": "pytest"},
+                source_account_id="pub-1",
                 imported_by=USER_ID,
             ),
             BankReconciliationEntryORM(
@@ -229,6 +236,7 @@ def seed_database(
 
 
 def test_finance_admin_previews_finance_workbook_with_sensitive_audit(tmp_path):
+    """Test that finance admins can preview the finance workbook and that the audit logs include sensitive events."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -272,6 +280,7 @@ def test_finance_admin_previews_finance_workbook_with_sensitive_audit(tmp_path):
 
 
 def test_scoped_finance_workbook_omits_month_wide_cash_without_attribution(tmp_path):
+    """Test that scoped finance workbook previews omit month-wide cash without attribution for company scope."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url, scope_type="company")
     client = TestClient(create_app(database_url=database_url))
@@ -300,6 +309,7 @@ def test_scoped_finance_workbook_omits_month_wide_cash_without_attribution(tmp_p
 
 
 def test_finance_export_preview_includes_revenue_trend_alerts(tmp_path):
+    """Test that finance export preview includes revenue trend anomaly alerts when previous month data is present."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url, include_previous_fact=True)
     client = TestClient(create_app(database_url=database_url))
@@ -320,6 +330,7 @@ def test_finance_export_preview_includes_revenue_trend_alerts(tmp_path):
 
 
 def test_artifact_metadata_audit_details_marks_incomplete_metadata():
+    """Test that artifact metadata audit details correctly identify and mark incomplete metadata fields."""
     details = _artifact_metadata_audit_details(
         SimpleNamespace(
             file_url="file-store://exports/export-id/finance.xlsx",
@@ -342,11 +353,13 @@ def test_artifact_metadata_audit_details_marks_incomplete_metadata():
 
 
 def test_export_previous_month_rejects_malformed_month():
+    """Test that previous month computation rejects malformed month strings by raising a validation error."""
     with pytest.raises(RevenueFactValidationError, match="export month"):
         _previous_month("2026-3")
 
 
 def test_group_scoped_finance_workbook_records_channel_revenue_audit(tmp_path):
+    """Test that group-scoped finance workbook preview records channel revenue audit events for group scope."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url, scope_type="group", include_group=True)
     client = TestClient(
@@ -420,6 +433,7 @@ def test_get_export_returns_not_found_for_other_users_export(tmp_path):
 
 
 def test_export_operator_cannot_preview_finance_workbook(tmp_path):
+    """Verify that export operators without finance permission cannot preview finance workbooks."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -436,6 +450,7 @@ def test_export_operator_cannot_preview_finance_workbook(tmp_path):
 def test_export_operator_cannot_probe_artifact_type_through_finance_preview(
     tmp_path,
 ):
+    """Ensure export operators cannot preview finance workbooks for non-finance export types."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url, export_type="ANALYTICS_SUMMARY_CSV")
     client = TestClient(create_app(database_url=database_url))
@@ -450,6 +465,7 @@ def test_export_operator_cannot_probe_artifact_type_through_finance_preview(
 
 
 def test_finance_workbook_preview_rejects_analytics_export_job(tmp_path):
+    """Ensure finance workbook preview returns 422 when export job is not finance Excel."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url, export_type="ANALYTICS_SUMMARY_CSV")
     client = TestClient(create_app(database_url=database_url))
@@ -466,6 +482,7 @@ def test_finance_workbook_preview_rejects_analytics_export_job(tmp_path):
 
 
 def test_finance_admin_downloads_generated_finance_workbook_with_audit(tmp_path):
+    """Verify that finance admins can download generated finance workbooks and that audit events are recorded."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -513,6 +530,7 @@ def test_finance_workbook_download_persists_artifact_and_completes_job(
     tmp_path,
     monkeypatch,
 ):
+    """Persist the workbook artifact and complete the export job."""
     artifact_dir = tmp_path / "export-artifacts"
     monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
     database_url = build_database_url(tmp_path)
@@ -553,6 +571,7 @@ def test_finance_workbook_storage_failure_leaves_export_retryable_without_downlo
     tmp_path,
     monkeypatch,
 ):
+    """Leave the export retryable when workbook artifact storage fails."""
     # Transient artifact-store outages (here: the configured artifact
     # directory is actually a regular file) must leave the export in its
     # pre-failure status so the caller can retry once storage recovers. The
@@ -655,8 +674,13 @@ def test_finance_workbook_download_returns_503_when_persisted_artifact_missing(
 
 
 def test_persist_generated_export_artifact_cleans_up_when_completion_fails(tmp_path):
+    """Verify that artifacts are cleaned up when artifact completion fails."""
     class FailingCompleteRepository:
-        def complete_artifact(self, **_kwargs: object) -> NoReturn:
+        """Repository that raises when artifact completion fails."""
+
+        @staticmethod
+        def complete_artifact(**_kwargs: object) -> NoReturn:
+            """Raise validation error during artifact completion."""
             raise ExportJobValidationError("completion failed")
 
     artifact_dir = tmp_path / "artifacts"
@@ -691,6 +715,7 @@ def test_persist_generated_export_artifact_cleans_up_when_completion_fails(tmp_p
 
 
 def test_persist_generated_export_artifact_rejects_stale_failed_terminal_row(tmp_path):
+    """Verify that stale failed terminal export jobs are rejected when persisting artifacts."""
     failed_job = ExportJobEntry(
         id=str(EXPORT_ID),
         export_type="FINANCE_EXCEL",
@@ -710,12 +735,22 @@ def test_persist_generated_export_artifact_rejects_stale_failed_terminal_row(tmp
     )
 
     class FailedTerminalRepository:
-        def complete_artifact(self, **_kwargs: object) -> NoReturn:
+        """Repository stub for a failed terminal export job.
+
+        Simulates interactions for an export job that has already failed,
+        rejecting completion attempts and allowing retrieval of the failed job entry.
+        """
+
+        @staticmethod
+        def complete_artifact(**_kwargs: object) -> NoReturn:
+            """Raise terminal state errors when a job is finalized."""
             raise ExportJobTerminalStateError(
                 f"Export job {EXPORT_ID} is already in terminal status FAILED"
             )
 
-        def get_job(self, export_id: str) -> ExportJobEntry:
+        @staticmethod
+        def get_job(export_id: str) -> ExportJobEntry:
+            """Fetch the export job entry by its identifier from the repository."""
             assert export_id == str(EXPORT_ID)
             return failed_job
 
@@ -769,6 +804,10 @@ def test_persisted_artifact_bytes_win_after_terminal_race(
     filename: str,
     content_type: str,
 ):
+    """
+    Test that when an artifact already exists, the API handles a terminal-side race
+    and preserves the first persisted bytes without overwriting.
+    """
     artifact_dir = tmp_path / "artifacts"
     persisted_bytes = b"first-writer-persisted-bytes"
     generated_bytes = b"second-writer-generated-bytes"
@@ -814,12 +853,18 @@ def test_persisted_artifact_bytes_win_after_terminal_race(
     )
 
     class CompletedRaceRepository:
-        def complete_artifact(self, **_kwargs: object) -> NoReturn:
+        """Repository stub that surfaces a terminal race."""
+
+        @staticmethod
+        def complete_artifact(**_kwargs: object) -> NoReturn:
+            """Raise when another writer has already completed the job."""
             raise ExportJobTerminalStateError(
                 f"Export job {EXPORT_ID} is already in terminal status COMPLETED"
             )
 
-        def get_job(self, export_id: str) -> ExportJobEntry:
+        @staticmethod
+        def get_job(export_id: str) -> ExportJobEntry:
+            """Retrieve the completed export job entry for the given export_id."""
             assert export_id == str(EXPORT_ID)
             return completed_job
 
@@ -848,6 +893,7 @@ def test_persisted_artifact_bytes_win_after_terminal_race(
 
 
 def test_export_operator_cannot_download_finance_workbook(tmp_path):
+    """Test that export operator cannot download a finance workbook and receives a 403 error with no audit events."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -870,6 +916,7 @@ def test_finance_admin_downloads_generated_executive_pdf_with_audit(
     tmp_path,
     monkeypatch,
 ):
+    """Test that finance admin can download generated executive PDF, triggers audit events, and verifies PDF content."""
     artifact_dir = tmp_path / "export-artifacts"
     monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
     database_url = build_database_url(tmp_path)
@@ -915,6 +962,7 @@ def test_finance_admin_downloads_generated_executive_pdf_with_audit(
 
 
 def test_export_operator_cannot_download_executive_pdf(tmp_path):
+    """Test that export operator cannot download an executive PDF and receives a 403 error with no audit events."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url, export_type="EXECUTIVE_PDF")
     client = TestClient(create_app(database_url=database_url))
@@ -937,6 +985,7 @@ def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(
     tmp_path,
     monkeypatch,
 ):
+    """Download a branded slide pack and record sensitive audit events."""
     artifact_dir = tmp_path / "export-artifacts"
     monkeypatch.setenv("UMS_EXPORT_ARTIFACT_DIR", str(artifact_dir))
     database_url = build_database_url(tmp_path)
@@ -986,6 +1035,7 @@ def test_finance_admin_downloads_generated_branded_slide_pack_with_audit(
 
 
 def test_export_operator_cannot_download_branded_slide_pack(tmp_path):
+    """Deny branded slide-pack downloads for export operators."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url, export_type="BRANDED_SLIDE_PACK")
     client = TestClient(create_app(database_url=database_url))
@@ -1005,11 +1055,13 @@ def test_export_operator_cannot_download_branded_slide_pack(tmp_path):
 
 
 def _extract_pdf_text(content: bytes) -> str:
+    """Extract and return all text from a PDF file given its content as bytes."""
     reader = PdfReader(BytesIO(content))
     return "\n".join(page.extract_text() or "" for page in reader.pages)
 
 
 def _slide_texts(presentation: Presentation) -> list[str]:
+    """Extract and return text from each slide in a PowerPoint presentation."""
     return [
         "\n".join(shape.text for shape in slide.shapes if hasattr(shape, "text"))
         for slide in presentation.slides
@@ -1024,6 +1076,7 @@ def _assert_persisted_export_artifact(
     content_type: str,
     content: bytes,
 ) -> None:
+    """Verify persisted export artifact storage and metadata."""
     expected_uri = f"file-store://exports/{EXPORT_ID}/{filename}"
     persisted_file = artifact_dir / "exports" / str(EXPORT_ID) / filename
     engine = create_engine(database_url)

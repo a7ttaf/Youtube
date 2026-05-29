@@ -239,7 +239,7 @@ running on the operator's workstation.
       AdSense row skipped as SkipReason.MISSING_CHANNEL_ID, and the
       12-event STARTED->DOWNLOADED->PARSED->FINISHED audit sequence per
       run with the connector service principal.
-    - ⏳ PR #50 — remaining: awaiting merge — Concern C:
+    - ✅ PR #50 (merged 2026-05-28 as commit 9c884bd) — Concern C:
       connector_runs.counts_json source-row created/updated/unchanged split
       (B2.6 carry-forward). Replaces the
       placeholder where rows_upserted_created/updated/unchanged were
@@ -374,8 +374,13 @@ currencies as source evidence before any finance facts consume them.
 
 - ⏳ AdSense account connector — remaining: credentials repository
   (PRs #33, #34); real OAuth + pull not built.
-- ⏳ Monthly payment pull — remaining: AdSense payment ORM + repo tests
-  (PR #26); real pull not built.
+- ✅ Monthly payment pull — shipped: live AdSense `accounts.payments.list` pull
+  (GoogleAdSensePaymentClient + pure fail-closed mapping/parse +
+  AdSensePaymentSyncService with read-only locked-month skip + audit + operator
+  CLI `scripts/run_adsense_payment_sync.py`), re-keyed on `source_account_id`
+  (migration 20260529_0001). Follow-up: bare ambiguous-symbol amounts ($, ¥, kr)
+  fail closed by design (no $→USD guess), so $-denominated settlements need an
+  explicit-currency resolution before they can sync.
 - ⏳ Paid/unpaid status — remaining: status field exists in the payment
   ORM; reconciliation pass not driven.
 - ⏳ Payment month matcher — remaining: not started.
@@ -384,8 +389,9 @@ currencies as source evidence before any finance facts consume them.
 
 ### Outputs
 
-- ⏳ Monthly AdSense payment table — schema only; real pulls must preserve
-  Google's reported payment currency and source report identity.
+- ✅ Monthly AdSense payment table — live pull shipped; real pulls preserve
+  Google's reported payment currency, source account identity, and deterministic
+  source report identity.
 - ⏳ Payment match status — not driven.
 - ⏳ Payment gap value — not computed.
 
@@ -394,11 +400,12 @@ currencies as source evidence before any finance facts consume them.
 - ⏳ System can show whether YouTube revenue total matches the AdSense
   payment amount — not yet met.
 
-### Status (2026-05-22)
+### Status (2026-05-29)
 
-Same shape as Phase 2: schema and tenant-scoped repos exist; no real pull
-or matching pass runs. Matching must start from AdSense-reported payment
-amounts/currencies, not market FX-derived amounts.
+Live AdSense payment pull now runs through the dedicated operator CLI and
+persists account-scoped settlements into the PostgreSQL `adsense_payments`
+source-of-truth table. Matching remains outstanding and must start from
+AdSense-reported payment amounts/currencies, not market FX-derived amounts.
 
 ---
 

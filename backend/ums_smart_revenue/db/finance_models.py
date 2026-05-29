@@ -26,6 +26,8 @@ from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 
 class FinanceBase(DeclarativeBase):
+    """Declarative base for finance tables sharing organization metadata."""
+
     metadata = OrgBase.metadata
 
 
@@ -37,6 +39,8 @@ _TENANT_ID_DEFAULT_VALUE = UUID(UMS_TENANT_ID)
 
 
 class FinanceMonthCloseORM(FinanceBase):
+    """Finance month lock state for tenant-scoped close workflows."""
+
     __tablename__ = "finance_month_close"
 
     month: Mapped[str] = mapped_column(Text, nullable=False)
@@ -51,7 +55,11 @@ class FinanceMonthCloseORM(FinanceBase):
     locked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     unlocked_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     unlocked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=func.now(),
+    )
     tenant_id: Mapped[UUID] = mapped_column(
         Uuid(as_uuid=True),
         nullable=False,
@@ -82,6 +90,8 @@ class FinanceMonthCloseORM(FinanceBase):
 
 
 class MonthlyChannelRevenueFactORM(FinanceBase):
+    """Tenant-scoped monthly channel revenue fact from trusted sources."""
+
     __tablename__ = "monthly_channel_revenue_facts"
 
     id: Mapped[UUID] = mapped_column(
@@ -100,8 +110,16 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
     longform_revenue_usd: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     subscription_revenue_usd: Mapped[Decimal | None] = mapped_column(Numeric(18, 6), nullable=True)
     views: Mapped[int] = mapped_column(BigInteger, nullable=False, server_default=text("0"))
-    watch_time_minutes: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False, server_default=text("0"))
-    confidence_score: Mapped[Decimal] = mapped_column(Numeric(5, 4), nullable=False, server_default=text("1"))
+    watch_time_minutes: Mapped[Decimal] = mapped_column(
+        Numeric(18, 2),
+        nullable=False,
+        server_default=text("0"),
+    )
+    confidence_score: Mapped[Decimal] = mapped_column(
+        Numeric(5, 4),
+        nullable=False,
+        server_default=text("1"),
+    )
     imported_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
     imported_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
@@ -195,6 +213,8 @@ class MonthlyChannelRevenueFactORM(FinanceBase):
 
 
 class RevenueManualOverrideORM(FinanceBase):
+    """Manual revenue adjustment request with approval-state constraints."""
+
     __tablename__ = "revenue_manual_overrides"
 
     id: Mapped[UUID] = mapped_column(
@@ -277,6 +297,8 @@ class RevenueManualOverrideORM(FinanceBase):
 
 
 class BankReconciliationEntryORM(FinanceBase):
+    """Bank receipt evidence used for payment reconciliation."""
+
     __tablename__ = "bank_reconciliation_entries"
 
     id: Mapped[UUID] = mapped_column(
@@ -370,6 +392,8 @@ class BankReconciliationEntryORM(FinanceBase):
 
 
 class AdSensePaymentORM(FinanceBase):
+    """Account-scoped AdSense payment source-of-truth row."""
+
     __tablename__ = "adsense_payments"
 
     id: Mapped[UUID] = mapped_column(
@@ -379,6 +403,7 @@ class AdSensePaymentORM(FinanceBase):
     )
     month: Mapped[str] = mapped_column(Text, nullable=False)
     payment_name: Mapped[str] = mapped_column(Text, nullable=False)
+    source_account_id: Mapped[str] = mapped_column(Text, nullable=False)
     payment_date: Mapped[date] = mapped_column(Date, nullable=False)
     payment_amount: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
     payment_currency: Mapped[str] = mapped_column(Text, nullable=False)
@@ -415,10 +440,12 @@ class AdSensePaymentORM(FinanceBase):
 
     __table_args__ = (
         UniqueConstraint(
-            "tenant_id",
-            "month",
-            "payment_name",
-            name="uq_adsense_payments_month_name",
+            "tenant_id", "source_account_id", "month", "payment_name",
+            name="uq_adsense_payments_account_month_name",
+        ),
+        CheckConstraint(
+            "length(source_account_id) >= 1",
+            name="ck_adsense_payments_source_account_id_nonempty",
         ),
         CheckConstraint(
             "length(month) = 7 AND substr(month, 5, 1) = '-' "
@@ -445,6 +472,12 @@ class AdSensePaymentORM(FinanceBase):
             "payment_status IN ('PAID', 'PENDING', 'UNPAID', 'CANCELLED')",
             name="ck_adsense_payments_payment_status",
         ),
+        Index(
+            "ix_adsense_payments_tenant_month_payment_date",
+            "tenant_id",
+            "month",
+            "payment_date",
+        ),
         Index("ix_adsense_payments_month_date", "month", "payment_date"),
         Index("ix_adsense_payments_source_report", "source_report_id"),
         Index("ix_adsense_payments_tenant_id", "tenant_id"),
@@ -452,6 +485,8 @@ class AdSensePaymentORM(FinanceBase):
 
 
 class CurrencyExchangeRateORM(FinanceBase):
+    """Imported currency rate used as external FX evidence."""
+
     __tablename__ = "currency_exchange_rates"
 
     id: Mapped[UUID] = mapped_column(

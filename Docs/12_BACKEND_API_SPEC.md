@@ -268,9 +268,12 @@ GET /adsense/payments?month=2026-03&limit=50&offset=0
 for official AdSense payment metadata that has already been downloaded through
 approved connector storage. It requires `connectors.run_jobs` on connector scope
 `adsense`, requires a non-empty audit reason, and records `ADSENSE_PAYMENT_SYNCED`.
-The endpoint accepts up to 100 payment objects and upserts by `(month,
-payment_name)`, so connector reruns update the existing payment row instead of
-duplicating it. Sync is rejected for locked finance months.
+The endpoint accepts up to 100 payment objects. Every payment must include a
+non-blank `source_account_id`; `accounts/{id}` is canonicalized to `{id}`, while
+blank, whitespace-padded, or malformed account paths are rejected with `422`.
+Rows are upserted by `(source_account_id, month, payment_name)`, so connector
+reruns update the existing account-scoped payment row instead of duplicating it.
+Sync is rejected for locked finance months.
 
 `GET /adsense/payments` requires global `finance.view_finalized_payments` when
 listing all months. When `month` is provided, the same permission on that

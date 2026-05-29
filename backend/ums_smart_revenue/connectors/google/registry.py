@@ -14,6 +14,11 @@ from ums_smart_revenue.connectors.google.errors import ConnectorAlreadyRegistere
 _RunnerFn = Callable[..., Any]
 _REGISTRY: dict[str, _RunnerFn] = {}
 
+# Canonical operator-facing key for the AdSense Management connector slice.
+# Shared by the live payment-sync service and the run orchestrator so the
+# credential row is resolved under a single source-of-truth string.
+ADSENSE_MANAGEMENT_CONNECTOR_KEY = "adsense-management"
+
 
 # ============================================================================
 # Purpose: Register a connector runner behind its operator-facing key.
@@ -29,6 +34,11 @@ _REGISTRY: dict[str, _RunnerFn] = {}
 #     argparse choices from known_keys().
 # ============================================================================
 def register_connector(*, key: str, runner: _RunnerFn) -> None:
+    """Register a connector runner under the given key.
+
+    Raises:
+        ConnectorAlreadyRegisteredError: If a connector is already registered with the given key.
+    """
     if key in _REGISTRY:
         raise ConnectorAlreadyRegisteredError(key=key)
     _REGISTRY[key] = runner
@@ -47,6 +57,11 @@ def register_connector(*, key: str, runner: _RunnerFn) -> None:
 #     Dispatches live and dry-run paths.
 # ============================================================================
 def dispatch_connector(*, key: str) -> _RunnerFn:
+    """Resolve and return the connector runner associated with the key.
+
+    Raises:
+        ValueError: If the connector key is not registered.
+    """
     try:
         return _REGISTRY[key]
     except KeyError as exc:
@@ -62,4 +77,8 @@ def dispatch_connector(*, key: str) -> _RunnerFn:
 #   - File: scripts/run_google_connector.py -> argparse choices.
 # ============================================================================
 def known_keys() -> tuple[str, ...]:
+    """Return a sorted tuple of all registered connector keys.
+
+    This is used for CLI validation and help text.
+    """
     return tuple(sorted(_REGISTRY))

@@ -1,3 +1,5 @@
+"""Tests for the AdSensePaymentORM model to ensure correct persistence and integrity."""
+
 from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -13,6 +15,7 @@ USER_ID = UUID("00000000-0000-0000-0000-000000009101")
 
 
 def test_adsense_payment_model_persists_official_payment_metadata():
+    """Test that AdSensePaymentORM persists official payment metadata correctly."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     FinanceBase.metadata.create_all(engine)
 
@@ -28,6 +31,7 @@ def test_adsense_payment_model_persists_official_payment_metadata():
                 payment_status="PAID",
                 raw_payload={"paymentId": "pay_2026_03"},
                 source_report_id="raw-adsense-payment-2026-03",
+                source_account_id="pub-1",
                 imported_by=USER_ID,
             )
         )
@@ -44,6 +48,7 @@ def test_adsense_payment_model_persists_official_payment_metadata():
 
 
 def test_adsense_payment_model_rejects_non_alpha_currency_code():
+    """Test that AdSensePaymentORM rejects non-alphabetic currency codes with IntegrityError."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     FinanceBase.metadata.create_all(engine)
 
@@ -58,6 +63,7 @@ def test_adsense_payment_model_rejects_non_alpha_currency_code():
                 payment_currency="1$A",
                 payment_status="PAID",
                 raw_payload={"paymentId": "pay_2026_03"},
+                source_account_id="pub-1",
                 imported_by=USER_ID,
             )
         )

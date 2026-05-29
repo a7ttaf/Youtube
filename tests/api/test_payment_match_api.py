@@ -1,3 +1,5 @@
+"""Test payment match API helpers, auth boundaries, and failure handling."""
+
 from datetime import date
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -38,6 +40,17 @@ def auth_headers(
     scope_type: str = "global",
     scope_id: str | None = None,
 ) -> dict[str, str]:
+    """
+    Generate authentication headers for testing requests.
+
+    Args:
+        role: The role to include in the headers.
+        scope_type: The type of access scope (default is "global").
+        scope_id: Optional identifier for the access scope.
+
+    Returns:
+        A dictionary of HTTP headers with authentication information.
+    """
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "payment-match@example.com",
@@ -51,10 +64,30 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """
+    Construct a temporary SQLite database URL using the given path.
+
+    Args:
+        tmp_path: A pathlib Path object pointing to a temporary directory.
+
+    Returns:
+        A database URL string for an SQLite database file in the tmp_path.
+    """
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
 def seed_database(database_url: str, *, payment_amount: str = "930.00") -> None:
+    """
+    Seed the test database with initial organization, security, and finance data.
+
+    This function creates all tables, establishes a session, and inserts
+    default entities such as sectors, companies, YouTube channels, users,
+    and finance records with a specified payment amount.
+
+    Args:
+        database_url: The database URL to connect to.
+        payment_amount: The default payment amount to seed (as a string).
+    """
     engine = create_engine(database_url)
     OrgBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
@@ -108,6 +141,7 @@ def seed_database(database_url: str, *, payment_amount: str = "930.00") -> None:
                     payment_status="PAID",
                     raw_payload={"paymentId": "pay_2026_03"},
                     source_report_id="adsense-payment-2026-03",
+                    source_account_id="pub-1",
                     imported_by=USER_ID,
                 ),
                 UserORM(
@@ -123,6 +157,7 @@ def seed_database(database_url: str, *, payment_amount: str = "930.00") -> None:
 def test_finance_viewer_reads_payment_match_with_revenue_and_payment_audits(
     tmp_path,
 ):
+    """Test that a finance viewer can read the payment match along with revenue and payment audit logs."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -162,6 +197,7 @@ def test_finance_viewer_reads_payment_match_with_revenue_and_payment_audits(
 
 
 def test_payment_match_maps_adsense_payment_validation_to_422():
+    """Test that invalid AdSense payment queries map to a 422 HTTPException."""
     user = UserPrincipal(
         user_id=str(USER_ID),
         email="payment-match@example.com",
@@ -187,6 +223,7 @@ def test_payment_match_maps_adsense_payment_validation_to_422():
 
 
 def test_month_payment_match_reports_payment_variance(tmp_path):
+    """Test that the payment match reports variance between revenue and payment amounts."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url, payment_amount="900.00")
     client = TestClient(create_app(database_url=database_url))
@@ -205,6 +242,7 @@ def test_month_payment_match_reports_payment_variance(tmp_path):
 def test_month_payment_match_rejects_non_usd_currency_until_exchange_rates_exist(
     tmp_path,
 ):
+    """Test that non-USD currency requests are rejected until exchange-rate support is implemented."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -221,6 +259,7 @@ def test_month_payment_match_rejects_non_usd_currency_until_exchange_rates_exist
 
 
 def test_assistant_cannot_read_month_payment_match(tmp_path):
+    """Test that an assistant role cannot read month payment matches due to missing permissions."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -235,6 +274,7 @@ def test_assistant_cannot_read_month_payment_match(tmp_path):
 
 
 def test_company_scoped_finance_viewer_cannot_read_holding_payment_match(tmp_path):
+    """Test that company-scoped finance viewers cannot read holding payment matches outside their scope."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -249,10 +289,18 @@ def test_company_scoped_finance_viewer_cannot_read_holding_payment_match(tmp_pat
 
 
 class _EmptyRevenueRepository:
-    def list_month_facts(self, *, month: str):
+    """Repository stub that returns no revenue data for testing scenarios."""
+
+    @staticmethod
+    def list_month_facts(*, month: str):
+        """Return an empty list of monthly facts for testing scenarios."""
         return []
 
 
 class _FailingPaymentRepository:
-    def list_month_payments(self, *, month: str):
+    """Payment repository stub that raises validation errors."""
+
+    @staticmethod
+    def list_month_payments(*, month: str):
+        """Raise an AdSensePaymentValidationError to simulate payment validation failures."""
         raise AdSensePaymentValidationError("invalid payment query")
