@@ -31,6 +31,9 @@ from ums_smart_revenue.finance.adsense_payments import (
     AdSensePaymentValidationError,
     SqlAlchemyAdSensePaymentRepository,
 )
+from ums_smart_revenue.finance.payment_status import (
+    build_monthly_payment_status_summary,
+)
 
 router = APIRouter(prefix="/adsense", tags=["adsense"])
 
@@ -259,6 +262,67 @@ def list_adsense_payments(
         },
         "audit_event": audit_record_to_api(record),
     }
+
+
+# ============================================================================
+# Purpose: Read-only per-month AdSense payment paid/unpaid status breakdown
+#   (month rollup + per-account, per-currency; outstanding = PENDING+UNPAID).
+# Database/ORM: Reads AdSensePaymentORM via SqlAlchemyAdSensePaymentRepository;
+#   no writes.
+# Standards: Thin route; boundary month validation -> 422; fail-closed
+#   permission check; single reused PAYMENT_VIEWED audit event; no secrets in
+#   audit details.
+# Blast Radius: Finance read (payment status). No finance mutation, no Neo4j.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/payment_status.py -> pure builder.
+#   - File: backend/ums_smart_revenue/auth/permissions.py -> VIEW_FINALIZED_PAYMENTS.
+# ============================================================================
+@router.get("/payments/status")
+def get_adsense_payment_status(
+    month: Annotated[str, Query(min_length=1)],
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[
+        SqlAlchemyAdSensePaymentRepository,
+        Depends(current_adsense_payment_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+) -> dict[str, object]:
+    """Return the paid/unpaid status breakdown for an authorized finance viewer."""
+    normalized_month = month.strip()
+    if not ADSENSE_MONTH_PATTERN.fullmatch(normalized_month):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="month must use YYYY-MM with a calendar month from 01 to 12",
+        )
+    scope = AccessScope.finance_month(normalized_month)
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, scope)
+    try:
+        payments = repository.list_month_payments(month=normalized_month)
+    except AdSensePaymentValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    summary = build_monthly_payment_status_summary(
+        month=normalized_month, payments=payments
+    )
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.PAYMENT_VIEWED,
+        entity_type="adsense_payment_status",
+        entity_id=normalized_month,
+        scope=scope,
+        details={
+            "month": normalized_month,
+            "total_payment_count": summary.total_payment_count,
+            "outstanding_currency_count": len(summary.outstanding_totals),
+        },
+    )
+    result = summary.to_api()
+    result["audit_event"] = audit_record_to_api(record)
+    return result
 
 
 def _require_permission(

@@ -372,8 +372,10 @@ currencies as source evidence before any finance facts consume them.
 
 ### Build
 
-- ⏳ AdSense account connector — remaining: credentials repository
-  (PRs #33, #34); real OAuth + pull not built.
+- ⏳ AdSense account connector — remaining: automated multi-account
+  discovery/onboarding via the credentials repository (PRs #33, #34). OAuth
+  refresh and the live `accounts.payments.list` pull already ship; today an
+  operator supplies each account id to the sync CLI.
 - ✅ Monthly payment pull — shipped: live AdSense `accounts.payments.list` pull
   (GoogleAdSensePaymentClient + pure fail-closed mapping/parse +
   AdSensePaymentSyncService with read-only locked-month skip + audit + operator
@@ -381,31 +383,44 @@ currencies as source evidence before any finance facts consume them.
   (migration 20260529_0001). Follow-up: bare ambiguous-symbol amounts ($, ¥, kr)
   fail closed by design (no $→USD guess), so $-denominated settlements need an
   explicit-currency resolution before they can sync.
-- ⏳ Paid/unpaid status — remaining: status field exists in the payment
-  ORM; reconciliation pass not driven.
-- ⏳ Payment month matcher — remaining: not started.
-- ⏳ Payment-vs-YouTube comparison — remaining: bank reconciliation repo
-  (PR #29) is the substrate; comparison logic not driven.
+- ✅ Paid/unpaid status — shipped (PR #52): per-month, per-account,
+  per-currency settlement-status breakdown (`finance/payment_status.py` +
+  `GET /adsense/payments/status`); outstanding = PENDING + UNPAID; CANCELLED
+  reported for evidence, excluded from outstanding; no FX.
+- ✅ Payment month matcher — shipped earlier and verified live:
+  `build_monthly_payment_match_summary` + `GET /revenue/months/{month}/payment-match`
+  (month-total YouTube↔AdSense match; prior backlog "not started" was stale).
+- ✅ Payment-vs-YouTube comparison — shipped via the payment-match endpoint
+  (YouTube gross USD vs PAID AdSense USD → gap + PAYMENT_MATCHED/PAYMENT_VARIANCE);
+  bank reconciliation (PR #29) remains a separate downstream leg.
 
 ### Outputs
 
 - ✅ Monthly AdSense payment table — live pull shipped; real pulls preserve
   Google's reported payment currency, source account identity, and deterministic
   source report identity.
-- ⏳ Payment match status — not driven.
-- ⏳ Payment gap value — not computed.
+- ✅ Payment match status — driven by the payment-match endpoint plus the
+  paid/unpaid status breakdown (`GET /adsense/payments/status`).
+- ✅ Payment gap value — computed and tested as `payment_gap_usd` by
+  `build_monthly_payment_match_summary`, exposed via
+  `GET /revenue/months/{month}/payment-match`.
 
 ### Acceptance gate
 
-- ⏳ System can show whether YouTube revenue total matches the AdSense
-  payment amount — not yet met.
+- ✅ System can show whether YouTube revenue total matches the AdSense
+  payment amount — met via `build_monthly_payment_match_summary` +
+  `GET /revenue/months/{month}/payment-match` (PAYMENT_MATCHED / PAYMENT_VARIANCE
+  with `payment_gap_usd`).
 
 ### Status (2026-05-29)
 
-Live AdSense payment pull now runs through the dedicated operator CLI and
-persists account-scoped settlements into the PostgreSQL `adsense_payments`
-source-of-truth table. Matching remains outstanding and must start from
-AdSense-reported payment amounts/currencies, not market FX-derived amounts.
+Live AdSense payment pull persists account-scoped settlements into the
+PostgreSQL `adsense_payments` source-of-truth. The month-total YouTube↔AdSense
+matcher already ships (`GET /revenue/months/{month}/payment-match`); PR #52 adds
+the per-account, per-currency paid/unpaid status breakdown
+(`GET /adsense/payments/status`). Both read AdSense-reported amounts/currencies
+only — no market FX. Remaining Phase 3 depth (per-account *matching* needing a
+channel↔account map, and multi-currency FX) stays out per Docs/18.
 
 ---
 
