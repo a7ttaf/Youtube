@@ -774,12 +774,20 @@ def test_gap_zero_difference_produces_nothing():
 
 
 def test_to_api_excludes_raw_payload_and_serializes_decimal():
-    components, _ = _mod().map_bank_entries_to_components(
-        [bank_entry(reference="BANK-5", fee="3.50")], month=MONTH
+    # to_api lives on the persisted read model (DeductionComponent). It omits
+    # raw_payload and serializes amounts with the repo's trailing-zero-trimming
+    # convention ("3.50" -> "3.5"), matching payment_status._decimal_to_api.
+    component = _mod().DeductionComponent(
+        id="row-1", month=MONTH, component_kind="TRANSFER_FEE", scope_kind="PAYMENT",
+        scope_id="BANK-5", amount_usd=Decimal("3.50"), amount_native=None,
+        currency_code="USD", source_system="bank_reconciliation",
+        source_table="bank_reconciliation_entries", source_id=None,
+        source_key="BANK-5", source_report_id=None, raw_payload={"k": "v"},
+        component_key="bank:2026-04:BANK-5:transfer_fee",
     )
-    api = components[0].to_api()
+    api = component.to_api()
     assert "raw_payload" not in api
-    assert api["amount_usd"] == "3.50"
+    assert api["amount_usd"] == "3.5"
     assert api["component_kind"] == "TRANSFER_FEE"
 ```
 
@@ -1053,7 +1061,7 @@ def _decimal_to_api(value: Decimal) -> str:
 - [ ] **Step 4: Run to verify it passes**
 
 Run: `python -m pytest tests/finance/test_deduction_components.py -q`
-Expected: PASS — 16 passed.
+Expected: PASS — 15 passed.
 
 - [ ] **Step 5: Lint + commit**
 
@@ -1940,7 +1948,7 @@ Expected: `All checks passed!`
 - [ ] **Step 2: Full test suite**
 
 Run: `python -m pytest -q`
-Expected: PASS — prior count + the new tests (2 audit + 4 Postgres migration [pass only when `UMS_TEST_DATABASE_URL` is set; otherwise they are the pre-existing environment-gated `*_postgres.py` errors, unchanged] + 16 pure-mapper + 7 ingestion + 7 CLI). 0 failed.
+Expected: PASS — prior count + the new tests (2 audit + 4 Postgres migration [pass only when `UMS_TEST_DATABASE_URL` is set; otherwise they are the pre-existing environment-gated `*_postgres.py` errors, unchanged] + 15 pure-mapper + 7 ingestion + 7 CLI). 0 failed.
 
 - [ ] **Step 3: Whitespace/diff hygiene**
 
