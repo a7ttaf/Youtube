@@ -20,11 +20,12 @@ Relevant existing substrate (verified):
   Today `net = primary fact.net_revenue_usd + Σ(approved overrides)`; deduction reported is the
   source fact's own `gross − net`. If `primary.net_revenue_usd` is missing it returns
   `NET_REVENUE_SOURCE_MISSING` (no derived deduction). USD-only.
-- `db/finance_models.py` — `GoogleRevenueSourceRowORM` (carries `source_account_id` NOT NULL,
+- `db/source_models.py` — `GoogleRevenueSourceRowORM` (carries `source_account_id` NOT NULL,
   nullable `youtube_channel_id`, `value_kind ∈ {estimated,settled,adjustment,tax,deduction}`,
-  `amount_native`, `currency_code`, unique `(tenant_id, source_system, source_row_key)`);
-  `BankReconciliationEntryORM` (keyed `(tenant_id, month, bank_reference)`; `transfer_fee_usd`
-  with `≥0` CHECK; `fx_difference_usd` with **no** sign CHECK → signed-capable);
+  `amount_native`, `currency_code`, unique `(tenant_id, source_system, source_row_key)`; already
+  carries finite-NUMERIC + object-only `raw_payload` CHECKs we mirror below).
+- `db/finance_models.py` — `BankReconciliationEntryORM` (keyed `(tenant_id, month, bank_reference)`;
+  `transfer_fee_usd` with `≥0` CHECK; `fx_difference_usd` with **no** sign CHECK → signed-capable);
   `AdSensePaymentORM` (`source_account_id`, `payment_status`, USD per row).
 - `finance/google_source_normalizer.py` — turns source rows into revenue facts but **drops**
   `value_kind ∈ {tax,deduction,adjustment}` (`_UNSUPPORTED_VALUE_KINDS`). This spec does **not**
@@ -71,6 +72,12 @@ is captured and **left unallocated** here. Distributing it to channels is Spec 2
    month-close visibility and as a stable contract for Spec 2 (§7).
 6. Tests at every layer (§11).
 
+**PR split:** delivered as two PRs. **PR-A** = substrate + migration + repository/service + the
+three ingestion adapters + CLI + idempotency/month-lock/audit tests (deliverables 1–3). **PR-B** =
+`net_revenue` wiring + read endpoint + auth/audit/API tests (deliverables 4–5). PR-A lands the
+migration + ingestion substrate before PR-B touches official finance-number behavior and the public
+API surface. **The implementation plan that follows this spec covers PR-A first.**
+
 ---
 
 ## 3. Non-goals (explicit)
@@ -101,24 +108,35 @@ tables).
 | `component_kind` | text | CHECK ∈ `TAX, DEDUCTION, TRANSFER_FEE, FX_VARIANCE, UNRESOLVED_PAYMENT_GAP` |
 | `scope_kind` | text | CHECK ∈ `CHANNEL, ACCOUNT, PAYMENT` |
 | `scope_id` | text | NOT NULL — `youtube_channel_id` (CHANNEL) / `source_account_id` (ACCOUNT) / `bank_reference` (PAYMENT) |
-| `amount_usd` | Numeric(18,6) | **signed** (FX_VARIANCE / gap may be negative); no sign CHECK |
-| `amount_native` | Numeric(20,6) | nullable |
+| `amount_usd` | Numeric(18,6) | **signed** (FX_VARIANCE / gap may be negative); finite CHECK (below) |
+| `amount_native` | Numeric(20,6) | nullable; finite CHECK when not null |
 | `currency_code` | text | 3-char upper CHECK; the source-reported currency (USD for fee/FX/gap) |
 | `source_system` | text | e.g. `adsense_management`, `youtube_reporting`, `bank_reconciliation`, `adsense_payment_gap` |
 | `source_table` | text | origin table name |
 | `source_id` | text nullable | origin row id (uuid as text) where applicable |
 | `source_key` | text nullable | origin natural key (e.g. `source_row_key`, `bank_reference`) |
 | `source_report_id` | text nullable | provenance |
-| `raw_payload` | JSONB | provenance/audit; **not** returned by the default read response |
+| `raw_payload` | JSONB | **NOT NULL DEFAULT `'{}'`**, object-only CHECK; provenance/audit; **not** in the default read response |
 | `component_key` | text | **stable idempotency key** (see below) |
 | `created_at` / `updated_at` | timestamptz | `now()` / `onupdate now()` |
 
 - **Unique:** `(tenant_id, component_key)` — idempotent upsert target.
 - **Indexes:** `(tenant_id, month)`, `(tenant_id, scope_kind, scope_id)`, `(tenant_id, month, component_kind)`.
+- **Hardening CHECKs** (Postgres `NUMERIC` can store `NaN`, and a direct-SQL/backfill/future-service
+  writer must be fenced — mirror the `google_revenue_source_rows` guards):
+  - `amount_usd` finite: `amount_usd > '-Infinity'::numeric AND amount_usd < 'Infinity'::numeric`
+    (rejects `NaN` and ±`Infinity`; signed so both bounds), Postgres-only via
+    `.ddl_if(dialect="postgresql")`.
+  - `amount_native` finite when present: `amount_native IS NULL OR (amount_native > '-Infinity'::numeric
+    AND amount_native < 'Infinity'::numeric)`, Postgres-only.
+  - `raw_payload` object-only: `jsonb_typeof(raw_payload) = 'object'`, Postgres-only; column is
+    `NOT NULL DEFAULT '{}'`.
+  - `month` `YYYY-MM` format CHECK + `currency_code` 3-char-upper CHECK + `component_kind` /
+    `scope_kind` enum CHECKs (as in the table above).
 - **`component_key` formats** (deterministic, stable across re-runs):
   - source-row tax/deduction → `srcrow:{source_system}:{source_row_key}`
-  - bank fee → `bank:{bank_reference}:transfer_fee`
-  - bank FX → `bank:{bank_reference}:fx_variance`
+  - bank fee → `bank:{month}:{bank_reference}:transfer_fee`
+  - bank FX → `bank:{month}:{bank_reference}:fx_variance`
   - AdSense gap → `adsense_gap:{source_account_id}:{month}`
 - **Migration:** Alembic revision adding the table; a Postgres round-trip test on disposable
   `postgres:18-alpine` (constraints + indexes + idempotent upsert), matching the repo's
@@ -137,8 +155,12 @@ Layering (keeps pure logic separate from I/O, per existing patterns):
   `DeductionIngestionService` that reads the sources, calls the pure mappers, and upserts under
   the month-lock gate. Typed `DeductionIngestionValidationError`.
 - `scripts/run_deduction_ingestion.py` — operator CLI (`--tenant`, `--month`, `--reason`,
-  optional `--source`), mirroring `run_adsense_payment_sync.py`: permission-gated, audited,
-  refuses LOCKED months.
+  optional `--source`), mirroring `run_adsense_payment_sync.py`. **Actor:** a fail-closed
+  `RUN_CONNECTOR_JOBS` service principal via `build_connector_service_principal(tenant_id=...)`
+  (no human-header path). **Audit:** one new `AuditEventType.DEDUCTION_COMPONENTS_INGESTED`
+  event per run (sensitive; finance), scoped to `finance_month(month)`, carrying only summary
+  counts (components upserted per kind, non-USD skipped) — never amounts/payloads. **Month-lock:**
+  refuses `LOCKED` months.
 
 All adapters: **idempotent** (re-run replaces by `component_key`), **USD-only** (non-USD evidence
 skipped + counted in the run summary, never converted), **month-lock-gated** writes (acquire the
@@ -161,7 +183,9 @@ and **audited** per run.
   `amount_usd = transfer_fee_usd` (≥0), `currency_code = USD`.
 - `FX_VARIANCE` when `fx_difference_usd != 0`: scope `PAYMENT`, `amount_usd = fx_difference_usd`
   (**signed**), `currency_code = USD`.
-- Keys: `bank:{bank_reference}:transfer_fee` / `bank:{bank_reference}:fx_variance`.
+- Keys: `bank:{month}:{bank_reference}:transfer_fee` / `bank:{month}:{bank_reference}:fx_variance`
+  (month is included because bank uniqueness is `(tenant_id, month, bank_reference)` — a reference
+  reused in a later month must not collide under `unique (tenant_id, component_key)`).
 
 **5.3 AdSense earnings→payment gap adapter**
 - Earnings: sum `amount_native` of `google_revenue_source_rows` WHERE
@@ -203,7 +227,9 @@ synthetic channel-scoped components — the smallest correct end-to-end deductio
 allocation and no invented tax.
 
 `SOURCE_SYSTEM_TO_SOURCE_KIND` (initial, conservative; refine if a real emitter lands):
-`adsense_management → ADSENSE`, `youtube_reporting → YOUTUBE_CMS`, `youtube_analytics → ANALYTICS`.
+`adsense_management → ADSENSE`, `youtube_reporting → YOUTUBE_CMS`,
+`youtube_analytics → YOUTUBE_ANALYTICS` (exact `RevenueFactSourceKind` values:
+`YOUTUBE_CMS, YOUTUBE_ANALYTICS, ADSENSE, MANUAL_UPLOAD, ALLOCATION`).
 
 ---
 
@@ -218,10 +244,11 @@ allocation, recalculation, or any write.
   provenance but **never `raw_payload`** in the default response.
 - **Filters / pagination:** `scope_kind`, `component_kind`, and a channel/account filter;
   deterministic ordering; bounded page size (mirror the AdSense payments listing conventions).
-- **Auth (conservative; the month endpoint returns all evidence classes):** require **all** of
-  `VIEW_REVENUE` (`finance.view_revenue`), `VIEW_CONFIDENCE` (`analytics.view_confidence`),
-  `VIEW_FINALIZED_PAYMENTS` (`finance.view_finalized_payments`), and `VIEW_BANK_RECONCILIATION`
-  (`finance.view_bank_reconciliation`) on the `finance_month(month)` scope. Fail-closed.
+- **Auth (mirror `/months/{month}/smart-alerts` exactly — scopes differ by permission):**
+  `VIEW_REVENUE` (`finance.view_revenue`) and `VIEW_CONFIDENCE` (`analytics.view_confidence`) on
+  **`AccessScope.global_scope()`**; `VIEW_FINALIZED_PAYMENTS` (`finance.view_finalized_payments`)
+  and `VIEW_BANK_RECONCILIATION` (`finance.view_bank_reconciliation`) on
+  **`AccessScope.finance_month(month)`**. All four required, fail-closed.
 - **Audit (sensitive views):** record `REVENUE_VIEWED`, plus `PAYMENT_VIEWED` when ACCOUNT/gap
   evidence is included and `BANK_RECONCILIATION_VIEWED` when PAYMENT (fee/FX) evidence is included.
 
@@ -265,8 +292,9 @@ allocation, recalculation, or any write.
 - **Authorization:** the read endpoint **reuses** existing permissions (no new permission, no
   weakening); requires all four, fail-closed. Ingestion reuses connector-job/finance write
   permissions + month-lock.
-- **Audit:** reuses existing event types (`REVENUE_VIEWED`, `PAYMENT_VIEWED`,
-  `BANK_RECONCILIATION_VIEWED`, plus an ingestion event); no secrets in details.
+- **Audit:** the read endpoint reuses `REVENUE_VIEWED` / `PAYMENT_VIEWED` /
+  `BANK_RECONCILIATION_VIEWED`; ingestion adds **one new** `AuditEventType.DEDUCTION_COMPONENTS_INGESTED`
+  (sensitive, finance; summary counts only — no secrets). This is the only new AuditEventType.
 - **Month locks / overrides:** ingestion respects the `LOCKED` gate like every other finance
   writer; manual overrides are unaffected.
 
