@@ -239,7 +239,7 @@ running on the operator's workstation.
       AdSense row skipped as SkipReason.MISSING_CHANNEL_ID, and the
       12-event STARTED->DOWNLOADED->PARSED->FINISHED audit sequence per
       run with the connector service principal.
-    - ⏳ PR #50 — remaining: awaiting merge — Concern C:
+    - ✅ PR #50 (merged 2026-05-28 as commit 9c884bd) — Concern C:
       connector_runs.counts_json source-row created/updated/unchanged split
       (B2.6 carry-forward). Replaces the
       placeholder where rows_upserted_created/updated/unchanged were
@@ -374,8 +374,13 @@ currencies as source evidence before any finance facts consume them.
 
 - ⏳ AdSense account connector — remaining: credentials repository
   (PRs #33, #34); real OAuth + pull not built.
-- ⏳ Monthly payment pull — remaining: AdSense payment ORM + repo tests
-  (PR #26); real pull not built.
+- ✅ Monthly payment pull — shipped: live AdSense `accounts.payments.list` pull
+  (GoogleAdSensePaymentClient + pure fail-closed mapping/parse +
+  AdSensePaymentSyncService with read-only locked-month skip + audit + operator
+  CLI `scripts/run_adsense_payment_sync.py`), re-keyed on `source_account_id`
+  (migration 20260529_0001). Follow-up: bare ambiguous-symbol amounts ($, ¥, kr)
+  fail closed by design (no $→USD guess), so $-denominated settlements need an
+  explicit-currency resolution before they can sync.
 - ⏳ Paid/unpaid status — remaining: status field exists in the payment
   ORM; reconciliation pass not driven.
 - ⏳ Payment month matcher — remaining: not started.

@@ -1107,10 +1107,14 @@ def parse_amount(raw_amount: str) -> tuple[Decimal, str]:
     iso = _ISO_CODE_RE.search(text)
     if iso is not None:
         currency = iso.group(1)
-        remainder = text[: iso.start()] + text[iso.end():]
-        # The explicit ISO code is authoritative, so strip any leftover symbol
-        # (e.g. the "¥" in "¥1,235 JPY") before validating the numeric grammar.
-        number = re.sub(r"[^0-9.,]", "", remainder)
+        remainder = (text[: iso.start()] + text[iso.end():]).strip()
+        # The explicit ISO code is authoritative. Strip at most ONE leading
+        # currency symbol (e.g. the "¥" in "¥1,235 JPY") plus surrounding
+        # whitespace -- do NOT delete embedded chars, so junk like "1e3"/"1 234"
+        # reaches _NUMBER_RE below and fails closed. (Corrected during
+        # implementation: an earlier re.sub(r"[^0-9.,]", "", remainder) deleted
+        # all non-numeric chars and silently fabricated amounts.)
+        number = re.sub(r"^[^\d.,\s]?\s*", "", remainder)
     else:
         currency = ""
         number = ""
