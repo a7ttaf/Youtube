@@ -383,7 +383,7 @@ currencies as source evidence before any finance facts consume them.
   (migration 20260529_0001). Follow-up: bare ambiguous-symbol amounts ($, ¥, kr)
   fail closed by design (no $→USD guess), so $-denominated settlements need an
   explicit-currency resolution before they can sync.
-- ✅ Paid/unpaid status — shipped (this PR): per-month, per-account,
+- ✅ Paid/unpaid status — shipped (PR #52): per-month, per-account,
   per-currency settlement-status breakdown (`finance/payment_status.py` +
   `GET /adsense/payments/status`); outstanding = PENDING + UNPAID; CANCELLED
   reported for evidence, excluded from outstanding; no FX.
@@ -416,7 +416,7 @@ currencies as source evidence before any finance facts consume them.
 
 Live AdSense payment pull persists account-scoped settlements into the
 PostgreSQL `adsense_payments` source-of-truth. The month-total YouTube↔AdSense
-matcher already ships (`GET /revenue/months/{month}/payment-match`); this PR adds
+matcher already ships (`GET /revenue/months/{month}/payment-match`); PR #52 adds
 the per-account, per-currency paid/unpaid status breakdown
 (`GET /adsense/payments/status`). Both read AdSense-reported amounts/currencies
 only — no market FX. Remaining Phase 3 depth (per-account *matching* needing a

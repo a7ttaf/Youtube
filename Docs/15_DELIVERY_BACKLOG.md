@@ -141,7 +141,7 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
 - ✅ AdSense payment matching + paid/unpaid status — month-total YouTube↔AdSense
   matcher (`GET /revenue/months/{month}/payment-match`, verified pre-existing)
   and per-account/per-currency settlement-status breakdown
-  (`GET /adsense/payments/status`, `finance/payment_status.py`, this PR).
+  (`GET /adsense/payments/status`, `finance/payment_status.py`, PR #52).
   Payment-match remains USD-only; the paid/unpaid status view groups
   AdSense-reported amounts by currency. Outstanding = PENDING + UNPAID;
   CANCELLED shown for evidence; no FX, per Docs/18.
