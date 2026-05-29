@@ -287,6 +287,7 @@ def get_adsense_payment_status(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Return the paid/unpaid status breakdown for an authorized finance viewer."""
     normalized_month = month.strip()
     if not ADSENSE_MONTH_PATTERN.fullmatch(normalized_month):
         raise HTTPException(
