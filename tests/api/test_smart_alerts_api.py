@@ -277,7 +277,8 @@ def test_month_smart_alerts_include_month_over_month_revenue_anomaly(tmp_path):
 
 def test_assistant_cannot_read_month_smart_alerts(tmp_path):
     """Test that an assistant_analyst user without finance.view_revenue permission
-    receives a 403 Forbidden response when accessing monthly smart alerts."""
+    receives a 403 Forbidden response when accessing monthly smart alerts.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))

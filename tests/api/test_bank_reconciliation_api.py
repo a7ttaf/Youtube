@@ -29,9 +29,7 @@ def auth_headers(
     scope_type: str = "global",
     scope_id: str | None = None,
 ) -> dict[str, str]:
-    """
-    Create authentication headers for a user with specified role and scope.
-    """
+    """Create authentication headers for a user with specified role and scope."""
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "bank-reconciliation@example.com",
@@ -45,9 +43,7 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
-    """
-    Build and return a new SQLite database URL in the provided temporary path.
-    """
+    """Build and return a new SQLite database URL in the provided temporary path."""
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 

@@ -81,9 +81,11 @@ class _FakeServiceOK:
     """Sync service stub that returns a successful result."""
 
     def __init__(self, session, *, audit_sink, **kwargs):
+        """No initialization required for fake service stub."""
         pass
 
-    def sync(self, **kwargs):
+    @staticmethod
+    def sync(**kwargs):
         """
         Perform a successful sync operation and return a fake result.
 
@@ -179,9 +181,25 @@ def test_cli_typed_failure_returns_2(monkeypatch, capsys, error):
         """Service stub that raises the parametrized typed error."""
 
         def __init__(self, session, *, audit_sink, **kwargs):
+            """Initialize the _Raises stub service actor.
+
+            Args:
+                session: The session object to use.
+                audit_sink: The audit sink parameter.
+                **kwargs: Additional keyword arguments.
+            """
             pass  # No initialization needed for stub service actor.
 
-        def sync(self, **kwargs):
+        @staticmethod
+        def sync(**kwargs):
+            """Synchronize the service by raising the configured error.
+
+            Args:
+                **kwargs: Additional keyword arguments.
+
+            Raises:
+                error: Always raises the provided error.
+            """
             raise error
 
     _patch_common(monkeypatch, module, session=session, service=_Raises)
@@ -225,13 +243,20 @@ def test_cli_untyped_error_propagates(monkeypatch):
     module = _load_cli()
     session = _SpySession()
 
+    """
+    Module providing a stub service that always raises a non-typed runtime error.
+    """
+
     class _Boom:
         """Service stub that raises an untyped runtime error."""
 
         def __init__(self, session, *, audit_sink, **kwargs):
+            """Initialize the stub service actor with session and audit sink parameters."""
             pass  # No initialization needed for stub service actor.
 
-        def sync(self, **kwargs):
+        @staticmethod
+        def sync(**kwargs):
+            """Synchronously perform the operation, but always raise a runtime error."""
             raise RuntimeError("unexpected non-typed error")
 
     _patch_common(monkeypatch, module, session=session, service=_Boom)

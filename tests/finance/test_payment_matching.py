@@ -127,9 +127,7 @@ def test_monthly_payment_match_summary_ignores_non_paid_adsense_payments_for_mat
 
 
 def test_monthly_payment_match_summary_excludes_non_usd_adsense_payments():
-    """
-    Test that AdSense payments in non-USD currencies are excluded and counted as unsupported.
-    """
+    """Test that AdSense payments in non-USD currencies are excluded and counted as unsupported."""
     summary = build_monthly_payment_match_summary(
         month="2026-03",
         facts=[revenue_fact(channel_id="channel-tv-a", amount="930.00")],

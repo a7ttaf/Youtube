@@ -677,6 +677,7 @@ def test_persist_generated_export_artifact_cleans_up_when_completion_fails(tmp_p
     """Verify that artifacts are cleaned up when artifact completion fails."""
     class FailingCompleteRepository:
         """Repository that simulates failure when completing artifacts by raising a validation error."""
+
         @staticmethod
         def complete_artifact(**_kwargs: object) -> NoReturn:
             """Attempt to complete the export artifact and raise validation errors on failure."""
@@ -708,9 +709,9 @@ def test_persist_generated_export_artifact_cleans_up_when_completion_fails(tmp_p
             content=b"generated workbook",
             filename="finance.xlsx",
             content_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        )
+       )
 
-    assert not (artifact_dir / "exports" / str(EXPORT_ID) / "finance.xlsx").exists()
+   assert not (artifact_dir / "exports" / str(EXPORT_ID) / "finance.xlsx").exists()
 
 
 def test_persist_generated_export_artifact_rejects_stale_failed_terminal_row(tmp_path):
@@ -734,6 +735,11 @@ def test_persist_generated_export_artifact_rejects_stale_failed_terminal_row(tmp
     )
 
     class FailedTerminalRepository:
+        """Repository stub for a failed terminal export job.
+
+        Simulates interactions for an export job that has already failed,
+        rejecting completion attempts and allowing retrieval of the failed job entry.
+        """
         @staticmethod
         def complete_artifact(**_kwargs: object) -> NoReturn:
             """Attempt to complete the export artifact and raise terminal state errors if job is already finalized."""
