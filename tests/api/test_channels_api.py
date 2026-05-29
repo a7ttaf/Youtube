@@ -21,10 +21,7 @@ from ums_smart_revenue.org.channel_registry import (
 # authentication headers, and test cases for channel listing behaviors.
 
 class StaleUpdateRegistry:
-    """
-    Stub registry for handling stale channel updates in tests.
-    Provides default channel entries or exceptions for update operations.
-    """
+    """Registry stub that raises when mapping updates race with concurrent changes."""
 
     @staticmethod
     def list_channels() -> list[ChannelRegistryEntry]:
@@ -63,10 +60,7 @@ class StaleUpdateRegistry:
 
 
 class ScopedListRegistry:
-    """
-    Registry for scoped channel listings by identifiers.
-    Disallows unscoped listings and returns entries only for specified channel IDs.
-    """
+    """Registry stub that restricts visible channels to an explicit id allowlist."""
 
     @staticmethod
     def list_channels() -> list[ChannelRegistryEntry]:
@@ -204,9 +198,7 @@ def test_company_manager_reads_scoped_outside_cms_monitor():
 
 
 def test_global_outside_cms_monitor_keeps_official_manual_import_visible():
-    """Test that official manual revenue imports remain visible when monitoring
-    channels outside CMS with global permissions.
-    """
+    """Manual official revenue imports remain visible in global outside-CMS monitoring."""
     app = create_bootstrap_app()
     app.dependency_overrides[current_channel_registry] = lambda: ChannelRegistry(
         [
@@ -242,14 +234,11 @@ def test_global_outside_cms_monitor_keeps_official_manual_import_visible():
         "revenue_required_count": 2,
         "missing_official_revenue_count": 1,
     }
-    try:
-        manual_import_item = next(
-            item
-            for item in payload["items"]
-            if item["youtube_channel_id"] == "channel-news-a"
-        )
-    except StopIteration:
-        return
+    manual_import_item = next(
+        item
+        for item in payload["items"]
+        if item["youtube_channel_id"] == "channel-news-a"
+    )
     assert manual_import_item["missing_official_revenue"] is False
     assert manual_import_item["recommended_action"] == (
         "Keep manual official revenue import current; CMS linking remains recommended."
@@ -257,9 +246,7 @@ def test_global_outside_cms_monitor_keeps_official_manual_import_visible():
 
 
 def test_company_manager_reads_scoped_channel_issues_without_cross_company_leak():
-    """Test that a company manager only sees channel issues for their own company
-    and cannot view cross-company channel issues.
-    """
+    """Company managers only see channel issues for their own company."""
     app = create_bootstrap_app()
     app.dependency_overrides[current_channel_registry] = lambda: ChannelRegistry(
         [
@@ -305,9 +292,7 @@ def test_company_manager_reads_scoped_channel_issues_without_cross_company_leak(
 
 
 def test_global_channel_issues_include_registry_health_summary():
-    """Test that global channel issues endpoint includes registry health summary
-    information along with channel issue details.
-    """
+    """Global channel issues include registry health summary details."""
     missing_sector_company_id = "00000000-0000-0000-0000-000000009999"
     app = create_bootstrap_app()
     app.dependency_overrides[current_channel_registry] = lambda: ChannelRegistry(

@@ -553,26 +553,26 @@ def test_database_principal_rejects_blank_user_id_as_missing_header(tmp_path):
     assert response.json()["detail"] == "Missing authentication headers"
 
 
- def test_database_principal_rejects_bad_token_before_opening_session(monkeypatch):
-     """Invalid gateway tokens are rejected before allocating a DB session."""
-     counter = SessionAllocationCounter()
-     monkeypatch.setattr(
-         "ums_smart_revenue.app.build_session_factory", counter.build_session_factory
-     )
-     client = TestClient(
-         create_app(
-             database_url="sqlite+pysqlite:///:memory:",
-             authz_source="database",
-         )
-     )
-     headers = auth_headers(include_bootstrap_claims=False)
-     headers["x-ums-trusted-gateway-token"] = "invalid-token"
+def test_database_principal_rejects_bad_token_before_opening_session(monkeypatch):
+    """Invalid gateway tokens are rejected before allocating a DB session."""
+    counter = SessionAllocationCounter()
+    monkeypatch.setattr(
+        "ums_smart_revenue.app.build_session_factory", counter.build_session_factory
+    )
+    client = TestClient(
+        create_app(
+            database_url="sqlite+pysqlite:///:memory:",
+            authz_source="database",
+        )
+    )
+    headers = auth_headers(include_bootstrap_claims=False)
+    headers["x-ums-trusted-gateway-token"] = "invalid-token"
 
-     response = client.get("/security/roles", headers=headers)
+    response = client.get("/security/roles", headers=headers)
 
-     assert response.status_code == 401
-     assert response.json()["detail"] == "Invalid trusted gateway token"
-     assert counter.opened_sessions == 0
+    assert response.status_code == 401
+    assert response.json()["detail"] == "Invalid trusted gateway token"
+    assert counter.opened_sessions == 0
 
 # Test module for database tenant resolver behavior, including the health endpoint.
 # This module ensures that bypass paths are normalized before authentication and that the health

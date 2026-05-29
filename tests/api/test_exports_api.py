@@ -490,18 +490,18 @@ def test_export_list_scan_limit_marks_has_more_and_logs_metric(caplog):
                 has_more=True,
             )
 
-    """This module provides an EmptyGroupRegistry with stub implementations for listing and retrieving groups."""
-        class EmptyGroupRegistry:
-            """Stub registry that returns no groups; list_groups returns empty list and get_group returns None."""
-            @staticmethod
-            def list_groups() -> list[object]:
-                """Return an empty list of group objects."""
-                return []
+    class EmptyGroupRegistry:
+        """Registry stub with no groups for export authorization tests."""
 
-            @staticmethod
-            def get_group(group_id: str) -> None:
-                """Assert that a group ID is provided; no group is returned."""
-                assert group_id
+        @staticmethod
+        def list_groups() -> list[object]:
+            """Return no groups."""
+            return []
+
+        @staticmethod
+        def get_group(group_id: str) -> None:
+            """Validate the requested group id without returning a group."""
+            assert group_id
 
     repository = PagedRepository()
     user = UserPrincipal(user_id=str(USER_ID), email="no-export-access@example.com")
@@ -822,8 +822,6 @@ def test_export_list_applies_current_scope_and_type_permissions(tmp_path):
             "reason": "Other company analytics export",
         },
     )
-        },
-    )
     company_a_finance = client.post(
         "/exports",
         headers=auth_headers("finance_admin"),
@@ -832,8 +830,6 @@ def test_export_list_applies_current_scope_and_type_permissions(tmp_path):
             "scope_type": "company",
             "scope_id": str(COMPANY_A_ID),
             "month": "2026-03",
-"""Module tests for export API endpoints, ensuring correct permission checks and export retrieval functionality."""
-
             "currency": "USD",
             "reason": "Finance export before role change",
         },

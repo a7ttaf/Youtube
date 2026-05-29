@@ -10,8 +10,8 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.auth.user_permissions import SqlAlchemyUserPermissionGrantRepository
-from ums_smart_revenue.db.exceptions import (
+from ums_smart_revenue.auth.user_permissions import (
+    SqlAlchemyUserPermissionGrantRepository,
     UserPermissionGrantNotFoundError,
 )
 from ums_smart_revenue.db.security_models import (
@@ -42,7 +42,7 @@ class _ScalarResult:
 
 
 class _NestedTransaction:
-    """Context manager stub for nested transactions, always returns False to indicate exceptions are not suppressed."""
+    """Context manager stub for nested transactions."""
 
     def __enter__(self) -> _NestedTransaction:
         return self
@@ -57,7 +57,7 @@ class _NestedTransaction:
 
 
 class _FkRaceSession:
-    """Test session stub simulating foreign key race conditions, returning preset scalar and user existence results along with a default AccessScopeORM."""
+    """Session stub that simulates FK races during permission grant writes."""
 
     def __init__(
         self, *, scalars_results: list[object | None], user_exists_results: list[object]
@@ -101,6 +101,7 @@ class _FkRaceSession:
     @staticmethod
     def add(_row: object) -> None:
         """Add a row to the session stub (no-op)."""
+        return None
 
     @staticmethod
     def flush() -> Never:
@@ -109,7 +110,7 @@ class _FkRaceSession:
 
 
 def _tenant(tenant_id: UUID = OTHER_TENANT_ID) -> Tenant:
-    """Create a Tenant model instance for testing with given tenant ID and default properties."""
+    """Create a tenant model for repository tests."""
     now = datetime.now(UTC)
     return Tenant(
         id=tenant_id,

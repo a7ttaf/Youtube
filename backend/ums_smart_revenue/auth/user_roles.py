@@ -55,22 +55,21 @@ class UserRoleAssignmentEntry:
 class UserRoleAssignmentError(ValueError):
     """Base exception for user role assignment processing errors."""
 
-    pass
-
 
 class UserRoleAssignmentConflictError(UserRoleAssignmentError):
-    """Error raised when attempting to assign a role that conflicts
-    with existing assignments."""
+    """Role assignment conflicts with an existing assignment."""
 
 
 class UserRoleAssignmentNotFoundError(UserRoleAssignmentError):
     """Error raised when a requested user role assignment is not found."""
+
+
 class UserRoleAssignmentValidationError(UserRoleAssignmentError):
     """Error raised for invalid data during user role assignment."""
 
+
 class SqlAlchemyUserRoleAssignmentRepository:
-    """Repository handling user role assignment operations using SQLAlchemy
-    within a specified tenant context."""
+    """SQLAlchemy repository for tenant-scoped user role assignments."""
 
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind role assignment operations to an explicit or request tenant."""
