@@ -16,14 +16,14 @@
 #     build_connector_service_principal (RUN_CONNECTOR_JOBS service actor).
 # ============================================================================
 """
+"""
+CLI for running deduction-component ingestion.
+
+This module parses command-line arguments and orchestrates
+the deduction ingestion process for a specified tenant and month.
+"""
 
 from __future__ import annotations
-
-"""Module to run deduction-component ingestion for tenants and finance months.
-
-This script parses command-line arguments and orchestrates the deduction ingestion
-process, including audit logging and database interactions.
-"""
 
 import argparse
 import sys
@@ -47,8 +47,8 @@ _BACKEND_PATH = str(_PROJECT_ROOT / "backend")
 if _BACKEND_PATH not in sys.path:
     sys.path.insert(0, _BACKEND_PATH)
 
+
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    ...
     """Parse command-line arguments for deduction ingestion.
 
     Args:
@@ -57,6 +57,7 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     Returns:
         argparse.Namespace: Parsed arguments including tenant, month, reason, source, and dry-run.
     """
+    ...
     parser = argparse.ArgumentParser(
         description="Run deduction-component ingestion for one (tenant, month).",
     )

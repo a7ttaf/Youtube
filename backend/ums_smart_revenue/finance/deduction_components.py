@@ -232,10 +232,6 @@ def map_adsense_gap_to_components(
     components: list[DeductionComponentInput] = []
     for account in sorted(set(settled) & set(paid)):
         gap = settled[account] - paid[account]
-"""
-This module provides utilities for constructing deduction components and converting Decimal values
-for API usage in the finance deduction components workflow.
-"""
         if gap == 0:
             continue
         components.append(

@@ -5,9 +5,7 @@ from ums_smart_revenue.auth.permissions import Permission
 
 
 class AuditEventType(StrEnum):
-    """
-    Enumeration of audit event types used for logging and tracking system actions.
-    """
+    """Enumeration of audit event types used for logging and tracking system actions."""
 
     LOGIN = "LOGIN"
     LOGOUT = "LOGOUT"
