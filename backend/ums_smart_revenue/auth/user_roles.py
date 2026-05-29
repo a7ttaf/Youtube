@@ -21,6 +21,7 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 @dataclass(frozen=True)
 class UserRoleAssignmentEntry:
+    """Data class representing the details of a user role assignment."""
     id: str
     user_id: str
     role_key: str
@@ -34,6 +35,7 @@ class UserRoleAssignmentEntry:
     active: bool
 
     def to_api(self) -> dict[str, object]:
+        """Convert the user role instance to a dictionary suitable for API responses."""
         return {
             "id": self.id,
             "user_id": self.user_id,
@@ -50,22 +52,29 @@ class UserRoleAssignmentEntry:
 
 
 class UserRoleAssignmentError(ValueError):
+    """Base exception for user role assignment processing errors."""
+"""Module for managing user role assignments, including repository and related exceptions."""
+
     pass
 
 
 class UserRoleAssignmentConflictError(UserRoleAssignmentError):
+    """Error raised when attempting to assign a role that conflicts with existing assignments."""
     pass
 
 
 class UserRoleAssignmentNotFoundError(UserRoleAssignmentError):
+    """Error raised when a requested user role assignment is not found."""
     pass
 
 
 class UserRoleAssignmentValidationError(UserRoleAssignmentError):
+    """Error raised for invalid data during user role assignment."""
     pass
 
 
 class SqlAlchemyUserRoleAssignmentRepository:
+    """Repository handling user role assignment operations using SQLAlchemy within a specified tenant context."""
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind role assignment operations to an explicit or request tenant."""
         self._session = session
@@ -81,6 +90,7 @@ class SqlAlchemyUserRoleAssignmentRepository:
         assigned_by: str,
         reason: str,
     ) -> UserRoleAssignmentEntry:
+        """Assign a role to a user within a given scope, ensuring validations and tenant context."""
         target_user_id = _parse_uuid(user_id, field_name="user_id")
         actor_user_id = _parse_uuid(assigned_by, field_name="assigned_by")
         role = _parse_role(role_key)
@@ -139,6 +149,12 @@ class SqlAlchemyUserRoleAssignmentRepository:
     def get_assignment(
         self, *, user_id: str, assignment_id: str
     ) -> UserRoleAssignmentEntry:
+        """
+        Retrieve a role assignment entry by user and assignment IDs.
+
+        Validate user and assignment IDs, fetch the assignment and its scope,
+        and return a UserRoleAssignmentEntry.
+        """
         target_user_id = _parse_uuid(user_id, field_name="user_id")
         assignment_uuid = _parse_uuid(assignment_id, field_name="assignment_id")
         row = self._session.scalars(
@@ -167,6 +183,12 @@ class SqlAlchemyUserRoleAssignmentRepository:
         revoked_by: str,
         reason: str,
     ) -> UserRoleAssignmentEntry:
+        """
+        Revoke an active role assignment for a user.
+
+        Validate inputs, mark the assignment as revoked with reason and actor,
+        and return the updated UserRoleAssignmentEntry.
+        """
         target_user_id = _parse_uuid(user_id, field_name="user_id")
         assignment_uuid = _parse_uuid(assignment_id, field_name="assignment_id")
         actor_user_id = _parse_uuid(revoked_by, field_name="revoked_by")
@@ -202,6 +224,11 @@ class SqlAlchemyUserRoleAssignmentRepository:
         return self._to_entry(row, scope)
 
     def _require_user(self, user_id: UUID) -> UserORM:
+        """
+        Ensure that the specified user exists and belongs to the current tenant.
+
+        Fetch the UserORM by ID and verify tenant isolation, or raise an error.
+        """
         # Keep session.get so the identity-map cache fast-paths repeat lookups
         # in the same transaction; defend cross-tenant access in Python rather
         # than emitting a wider SELECT. Composite FKs introduced in fbf58e1
@@ -212,6 +239,11 @@ class SqlAlchemyUserRoleAssignmentRepository:
         return row
 
     def _require_actor_user(self, user_id: UUID) -> None:
+        """
+        Verify that the actor user exists within the current tenant.
+
+        Query the UserORM ID and raise an error if not found.
+        """
         exists = self._session.scalar(
             select(UserORM.id).where(
                 UserORM.id == user_id,
@@ -223,6 +255,11 @@ class SqlAlchemyUserRoleAssignmentRepository:
 
     @staticmethod
     def _require_assignable_role(target_user: UserORM, role: RoleKey) -> None:
+        """
+        Verify that the role can be assigned to the given user.
+
+        Raise an error if a service-only role is assigned to a non-service account.
+        """
         definition = ROLE_DEFINITIONS[role]
         if definition.service_only and not target_user.is_service_account:
             raise UserRoleAssignmentValidationError(
@@ -232,6 +269,12 @@ class SqlAlchemyUserRoleAssignmentRepository:
     def _get_or_create_scope(
         self, *, scope_type: str, scope_id: str | None
     ) -> AccessScopeORM:
+        """
+        Retrieve or create an access scope based on type and optional ID.
+
+        Normalize inputs, attempt to fetch an existing scope, or create a new one
+        if none exists, handling concurrent writers gracefully.
+        """
         normalized_scope_type, normalized_scope_id = _normalize_scope(
             scope_type, scope_id
         )
@@ -271,6 +314,11 @@ class SqlAlchemyUserRoleAssignmentRepository:
     def _to_entry(
         row: UserRoleAssignmentORM, scope: AccessScopeORM
     ) -> UserRoleAssignmentEntry:
+        """
+        Convert ORM row and scope into a UserRoleAssignmentEntry.
+
+        Populate entry fields from the ORM row and associated scope.
+        """
         return UserRoleAssignmentEntry(
             id=str(row.id),
             user_id=str(row.user_id),
@@ -287,6 +335,11 @@ class SqlAlchemyUserRoleAssignmentRepository:
 
 
 def _parse_uuid(value: str, *, field_name: str) -> UUID:
+    """
+    Parse a string into a UUID for the given field name.
+
+    Raises a validation error if the value is not a valid UUID.
+    """
     try:
         return UUID(value)
     except ValueError as exc:
@@ -318,6 +371,11 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
 
 
 def _parse_role(value: str) -> RoleKey:
+    """
+    Parse and validate a role key string into a RoleKey enum.
+
+    Raises a validation error for unknown role keys.
+    """
     try:
         return RoleKey(_normalize_required_string(value, "role_key"))
     except ValueError as exc:
@@ -325,6 +383,11 @@ def _parse_role(value: str) -> RoleKey:
 
 
 def _require_compatible_scope_type(role: RoleKey, scope_type: str) -> None:
+    """
+    Ensure the scope type is allowed for the given role.
+
+    Raise a validation error if the scope type is not compatible with the role.
+    """
     definition = ROLE_DEFINITIONS[role]
     normalized = scope_type.strip().lower()
     if normalized not in definition.allowed_scope_types:
@@ -336,6 +399,11 @@ def _require_compatible_scope_type(role: RoleKey, scope_type: str) -> None:
 
 
 def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | None]:
+    """
+    Normalize and validate scope type and optional scope ID.
+
+    Validate that scope ID requirements are met for the specified scope type.
+    """
     try:
         parsed_scope_type = ScopeType(
             _normalize_required_string(scope_type, "scope_type")
@@ -359,6 +427,11 @@ def _normalize_scope(scope_type: str, scope_id: str | None) -> tuple[str, str | 
 
 
 def _normalize_required_string(value: str, field_name: str) -> str:
+    """
+    Ensure a string field is not blank after stripping whitespace.
+
+    Return the stripped string or raise a validation error if blank.
+    """
     normalized = value.strip()
     if not normalized:
         raise UserRoleAssignmentValidationError(f"{field_name} must not be blank")
@@ -366,8 +439,18 @@ def _normalize_required_string(value: str, field_name: str) -> str:
 
 
 def _normalize_reason(value: str) -> str:
+    """
+    Normalize the reason string by stripping whitespace.
+
+    Ensures the reason is not blank.
+    """
     return _normalize_required_string(value, "reason")
 
 
 def _scope_label(scope_type: str, scope_id: str | None) -> str:
+    """
+    Generate a human-readable label for a scope.
+
+    Return 'Global' for global scopes or 'type:id' for scoped entries.
+    """
     return "Global" if scope_id is None else f"{scope_type}:{scope_id}"

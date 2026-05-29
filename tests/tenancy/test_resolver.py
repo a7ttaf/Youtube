@@ -95,7 +95,6 @@ def _make_tenant_row(**kwargs: object) -> TenantORM:
 
 def _build_app(engine: Engine) -> FastAPI:
     """Bare FastAPI app with the resolver middleware and a probe endpoint."""
-
     app = FastAPI()
     factory = sessionmaker(engine, expire_on_commit=False)
 
@@ -121,12 +120,10 @@ def _build_app(engine: Engine) -> FastAPI:
     @app.get("/stream")
     def stream() -> StreamingResponse:
         """Stream the tenant slug while response body iteration is active."""
-
         def _gen() -> Iterator[str]:
             """Yield the tenant slug from inside the streaming iterator."""
             tenant = get_current_tenant()
             yield tenant.slug if tenant is not None else "none"
-
         return StreamingResponse(_gen(), media_type="text/plain")
 
     return app

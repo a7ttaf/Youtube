@@ -19,6 +19,8 @@ from ums_smart_revenue.finance.adsense_payments import (
 )
 from ums_smart_revenue.finance.bank_reconciliation import (
     BankReconciliationValidationError,
+"""Unit tests for finance month advisory lock using a dialect session stub and tenant fixtures."""
+
     SqlAlchemyBankReconciliationRepository,
 )
 from ums_smart_revenue.finance.manual_overrides import ManualOverrideValidationError
@@ -40,18 +42,22 @@ OTHER_TENANT_ID = UUID("00000000-0000-0000-0000-00000000f301")
 
 
 class _DialectSession:
+    """A session stub that simulates SQLAlchemy session dialect binding for tests by capturing executed statements."""
     def __init__(self, dialect_name: str) -> None:
         self._bind = SimpleNamespace(dialect=SimpleNamespace(name=dialect_name))
         self.executed: list[tuple[object, dict[str, object]]] = []
 
     def get_bind(self) -> SimpleNamespace:
+        """Return the session's SQLAlchemy dialect bind stub."""
         return self._bind
 
     def execute(self, statement: object, parameters: dict[str, object]) -> None:
+        """Record an executed statement and its parameters in the executed list."""
         self.executed.append((statement, parameters))
 
 
 def _tenant(tenant_id: UUID = OTHER_TENANT_ID) -> Tenant:
+    """Create and return a Tenant object with default active status and timestamps for testing."""
     now = datetime.now(UTC)
     return Tenant(
         id=tenant_id,
@@ -63,7 +69,6 @@ def _tenant(tenant_id: UUID = OTHER_TENANT_ID) -> Tenant:
         created_at=now,
         updated_at=now,
     )
-
 
 def test_finance_month_advisory_lock_uses_postgres_transaction_lock() -> None:
     """Postgres close attempts acquire a stable transaction-scoped month lock."""
@@ -105,6 +110,10 @@ def test_finance_month_advisory_lock_is_noop_for_sqlite_tests() -> None:
     assert session.executed == []
 
 
+"""
+Tests for month close locking logic in the finance module, ensuring correct lock acquisition and row creation behavior.
+"""
+
 def test_get_or_create_month_close_row_acquires_guard_before_row_lock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -112,21 +121,31 @@ def test_get_or_create_month_close_row_acquires_guard_before_row_lock(
     calls: list[tuple[str, object]] = []
 
     class ScalarRows:
+        """
+        Represents a collection of rows returned by a scalar database query,
+        allowing retrieval of zero or one result.
+        """
         @staticmethod
         def one_or_none() -> SimpleNamespace:
+            """Return a single result or None for the scalar query; simulates fetching month close status."""
             calls.append(("fetch", None))
             return SimpleNamespace(month="2026-03", status="OPEN")
 
     class Session:
+        """
+        Mock session class to simulate database session interactions for testing,
+        providing scalar query execution returning ScalarRows.
+        """
         @staticmethod
         def scalars(statement: object) -> ScalarRows:
+            """Execute the given statement and return a ScalarRows object representing query results."""
             calls.append(("select", statement))
             return ScalarRows()
 
     def record_guard(
         session: object, month: str, *, tenant_id: UUID | str | None = None
     ) -> None:
-        del session
+        """Acquire a record-level guard for the specified month and tenant to prevent concurrent access."""
         calls.append(("guard", (month, tenant_id)))
 
     monkeypatch.setattr(
@@ -204,24 +223,26 @@ def test_finance_month_close_repository_uses_explicit_tenant() -> None:
     """The close repository reads and writes the tenant it is bound to."""
     tenant_id = UUID("00000000-0000-0000-0000-00000000f202")
     actor_user_id = "00000000-0000-0000-0000-00000000f203"
-    engine = create_engine("sqlite+pysqlite:///:memory:")
-    FinanceBase.metadata.create_all(engine)
+"""Test module for finance month close locking behavior.
+Contains tests for verifying advisory lock acquisition and readiness checks."""
 
-    with Session(engine) as session:
-        repository = SqlAlchemyFinanceMonthCloseRepository(session, tenant_id=tenant_id)
-        entry = repository.lock_month(month="2026-03", actor_user_id=actor_user_id)
+engine = create_engine("sqlite+pysqlite:///:memory:")
+FinanceBase.metadata.create_all(engine)
 
-        tenant_row = session.get(FinanceMonthCloseORM, (tenant_id, "2026-03"))
-        default_row = session.get(
-            FinanceMonthCloseORM,
-            (DEFAULT_TENANT_ID, "2026-03"),
-        )
+with Session(engine) as session:
+    repository = SqlAlchemyFinanceMonthCloseRepository(session, tenant_id=tenant_id)
+    entry = repository.lock_month(month="2026-03", actor_user_id=actor_user_id)
 
-    assert entry.status == "LOCKED"
-    assert tenant_row is not None
-    assert tenant_row.status == "LOCKED"
-    assert default_row is None
+    tenant_row = session.get(FinanceMonthCloseORM, (tenant_id, "2026-03"))
+    default_row = session.get(
+        FinanceMonthCloseORM,
+        (DEFAULT_TENANT_ID, "2026-03"),
+    )
 
+assert entry.status == "LOCKED"
+assert tenant_row is not None
+assert tenant_row.status == "LOCKED"
+assert default_row is None
 
 def test_for_update_readiness_acquires_guard_before_blocker_queries(
     monkeypatch: pytest.MonkeyPatch,
@@ -232,22 +253,24 @@ def test_for_update_readiness_acquires_guard_before_blocker_queries(
     def record_guard(
         session: object, month: str, *, tenant_id: UUID | str | None = None
     ) -> None:
+        """Record guard invocation for finance month lock, appending month and tenant_id to calls."""
         del session
         calls.append(("guard", (month, tenant_id)))
 
     def record_pending(self: object, month: str, *, for_update: bool) -> int:
-        del self, month
+        """Record pending manual override check invocation, appending for_update flag to calls and returning mock count."""
         calls.append(("pending", for_update))
         return 0
 
     def record_missing(self: object, month: str, *, for_update: bool) -> int:
-        del self, month
+        """Record missing required revenue fact count invocation, appending for_update flag to calls and returning mock count."""
         calls.append(("missing", for_update))
         return 0
 
     def record_facts(self: object, month: str, *, for_update: bool) -> list[object]:
-        del self, month
+        """Record month facts retrieval invocation, appending for_update flag to calls and returning empty list."""
         calls.append(("facts", for_update))
+        return []
         return []
 
     monkeypatch.setattr(
@@ -297,7 +320,8 @@ def test_revenue_fact_writes_use_guarded_month_open_check(
         tenant_id: UUID | str | None = None,
         for_update: bool,
     ) -> SimpleNamespace:
-        del session
+        """Simulate retrieving or creating a month-close record for testing purposes.
+        Records the month, tenant_id, and for_update flag, and returns an OPEN status."""
         calls.append((month, tenant_id, for_update))
         return SimpleNamespace(status="OPEN")
 
@@ -314,6 +338,8 @@ def test_revenue_fact_writes_use_guarded_month_open_check(
     assert calls == [("2026-03", DEFAULT_TENANT_ID, True)]
 
 
+"""Module containing tests for month-close locking behavior in SqlAlchemyManualOverrideRepository."""
+
 def test_manual_override_writes_use_guarded_month_open_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -327,7 +353,7 @@ def test_manual_override_writes_use_guarded_month_open_check(
         tenant_id: UUID | str | None = None,
         for_update: bool,
     ) -> SimpleNamespace:
-        del session
+        """Fake implementation capturing calls and returning an OPEN status row."""
         calls.append((month, tenant_id, for_update))
         return SimpleNamespace(status="OPEN")
 
@@ -344,6 +370,10 @@ def test_manual_override_writes_use_guarded_month_open_check(
     assert calls == [("2026-03", DEFAULT_TENANT_ID, True)]
 
 
+"""
+Finance tests for month close locking logic in AdSense payments.
+"""
+
 def test_adsense_payment_writes_use_context_tenant_in_month_open_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -357,7 +387,7 @@ def test_adsense_payment_writes_use_context_tenant_in_month_open_check(
         tenant_id: UUID | str | None = None,
         for_update: bool,
     ) -> SimpleNamespace:
-        del session
+        """Mock function to get or create a month close row and record invocation."""
         calls.append((month, tenant_id, for_update))
         return SimpleNamespace(status="OPEN")
 
@@ -388,7 +418,7 @@ def test_bank_reconciliation_writes_use_context_tenant_in_month_open_check(
         tenant_id: UUID | str | None = None,
         for_update: bool,
     ) -> SimpleNamespace:
-        del session
+        """Simulated get_or_create_month_close_row that records its arguments and returns an OPEN status."""
         calls.append((month, tenant_id, for_update))
         return SimpleNamespace(status="OPEN")
 

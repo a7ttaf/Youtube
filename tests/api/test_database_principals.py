@@ -575,6 +575,12 @@ def test_database_principal_rejects_bad_token_before_opening_session(monkeypatch
     assert counter.opened_sessions == 0
 
 
+"""
+Test module for database tenant resolver behavior, including the health endpoint.
+This module ensures that bypass paths are normalized before authentication and that the health
+endpoint correctly reports the service status.
+"""
+
 def test_database_tenant_resolver_normalizes_bypass_paths_before_auth():
     """Database-auth wrapper bypasses normalized paths before gateway checks."""
     app = FastAPI()
@@ -587,6 +593,7 @@ def test_database_tenant_resolver_normalizes_bypass_paths_before_auth():
 
     @app.get("/health")
     def health() -> dict[str, str]:
+        """Health endpoint returning the overall service status."""
         return {"status": "ok"}
 
     response = TestClient(app).get("/health")
