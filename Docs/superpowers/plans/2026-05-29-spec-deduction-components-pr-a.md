@@ -531,7 +531,7 @@ python -m ruff check backend/ums_smart_revenue/db/finance_models.py backend/ums_
 git add backend/ums_smart_revenue/db/finance_models.py backend/ums_smart_revenue/db/alembic/versions/20260529_0002_deduction_components.py tests/db/test_deduction_components_migration_postgres.py
 git commit -m "feat(db): deduction_components table + migration"
 ```
-End the commit message with the `Co-Authored-By` trailer.
+End the commit message with the `Co-Authored-By` trailer (same exact format as Task 1 Step 6).
 
 ---
 
@@ -1070,7 +1070,7 @@ python -m ruff check backend/ums_smart_revenue/finance/deduction_components.py t
 git add backend/ums_smart_revenue/finance/deduction_components.py tests/finance/test_deduction_components.py
 git commit -m "feat(finance): pure deduction-component mappers (tax/deduction, bank fee/FX, AdSense gap)"
 ```
-End the commit message with the `Co-Authored-By` trailer.
+End the commit message with the `Co-Authored-By` trailer (same exact format as Task 1 Step 6).
 
 ---
 
@@ -1619,7 +1619,7 @@ python -m ruff check backend/ums_smart_revenue/finance/deduction_ingestion.py te
 git add backend/ums_smart_revenue/finance/deduction_ingestion.py tests/finance/test_deduction_ingestion.py
 git commit -m "feat(finance): deduction-component repository + ingestion service"
 ```
-End the commit message with the `Co-Authored-By` trailer.
+End the commit message with the `Co-Authored-By` trailer (same exact format as Task 1 Step 6).
 
 ---
 
@@ -1985,7 +1985,7 @@ python -m ruff check scripts/run_deduction_ingestion.py tests/scripts/test_run_d
 git add scripts/run_deduction_ingestion.py tests/scripts/test_run_deduction_ingestion_cli.py
 git commit -m "feat(scripts): operator CLI for deduction-component ingestion"
 ```
-End the commit message with the `Co-Authored-By` trailer.
+End the commit message with the `Co-Authored-By` trailer (same exact format as Task 1 Step 6).
 
 ---
 
@@ -2016,12 +2016,25 @@ docker run --rm -d --name ums-mig-pg -p 55432:5432 -e POSTGRES_PASSWORD=ums post
 # POSIX:      export UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/postgres
 python -m pytest tests/db/test_deduction_components_migration_postgres.py -q
 ```
-Expected: PASS — 4 passed. Then re-run `python -m pytest -q` under `UMS_TEST_DATABASE_URL` for full-gate parity (the 26 pre-existing `*_postgres.py` migration tests now run too).
+Expected: PASS — 4 passed.
+
+For full-gate parity, use a test-named disposable database. The broader
+Postgres tests intentionally fail closed before destructive schema resets
+against the default `postgres` database.
+
+```bash
+docker exec ums-mig-pg dropdb -U postgres --if-exists test_ums
+docker exec ums-mig-pg createdb -U postgres test_ums
+# PowerShell: $env:UMS_TEST_DATABASE_URL = 'postgresql+psycopg://postgres:ums@localhost:55432/test_ums'
+# POSIX:      export UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/test_ums
+python -m pytest -q
+```
+Expected: PASS — 1497 passed.
 
 ### Completion evidence (2026-05-30)
 
 - `python -m ruff check backend tests scripts` -> `All checks passed!`
-- `$env:UMS_TEST_DATABASE_URL='postgresql+psycopg://postgres:ums@localhost:55432/test_ums'; python -m pytest -q` -> `1497 passed in 142.58s`
+- `$env:UMS_TEST_DATABASE_URL='postgresql+psycopg://postgres:ums@localhost:55432/test_ums'; python -m pytest -q` -> `1497 passed`
 - `git diff --check` -> no output
 
 ---
