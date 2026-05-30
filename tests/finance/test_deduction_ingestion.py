@@ -208,6 +208,109 @@ def test_dry_run_writes_nothing_and_records_no_audit(tmp_path):
     assert result.total_upserted >= 4  # would-upsert count is still reported
 
 
+def test_dry_run_refuses_locked_month(tmp_path):
+    """Test that dry-run mode rejects locked finance months without audit writes."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed(session, locked=True)
+        sink = InMemoryAuditSink()
+        service = _mod().DeductionIngestionService(session, audit_sink=sink)
+        with pytest.raises(_mod().DeductionComponentLockedMonthError):
+            service.ingest(month=MONTH, actor=_actor(), reason="r", dry_run=True)
+        assert sink.records == []
+
+
+@pytest.mark.parametrize(
+    ("selected_source", "expected_reads"),
+    [
+        ("source_rows", {"source_rows"}),
+        ("bank", {"bank"}),
+        ("gap", {"source_rows", "payments"}),
+    ],
+)
+def test_source_filter_reads_only_required_adapters(
+    monkeypatch, selected_source, expected_reads
+):
+    """Test that a source-filtered dry run does not touch unrelated adapters."""
+    module = _mod()
+    reads: list[str] = []
+
+    class _FakeRepository:
+        """Repository stub that lets dry-run lock validation pass."""
+
+        def __init__(self, session, *, tenant_id=None):
+            pass
+
+        def _require_month_open(self, month):
+            pass
+
+        def upsert_components(self, *, month, components):
+            raise AssertionError("dry-run source filtering must not upsert")
+
+    class _FakePaymentRepository:
+        """Payment adapter stub that records selected reads."""
+
+        def __init__(self, session, *, tenant_id=None):
+            pass
+
+        def list_month_payments(self, *, month):
+            reads.append("payments")
+            if "payments" not in expected_reads:
+                raise AssertionError("payment storage was read for another source")
+            return []
+
+    class _FakeBankRepository:
+        """Bank adapter stub that records selected reads."""
+
+        def __init__(self, session, *, tenant_id=None):
+            pass
+
+        def list_month_entries(self, *, month):
+            reads.append("bank")
+            if "bank" not in expected_reads:
+                raise AssertionError("bank storage was read for another source")
+            return []
+
+    class _FakeSourceRowRepository:
+        """Source-row adapter stub that records selected reads."""
+
+        def __init__(self, session):
+            pass
+
+        def list(self, tenant_id, *, report_month):
+            reads.append("source_rows")
+            if "source_rows" not in expected_reads:
+                raise AssertionError("source-row storage was read for another source")
+            return []
+
+    monkeypatch.setattr(module, "SqlAlchemyDeductionComponentRepository", _FakeRepository)
+    monkeypatch.setattr(
+        module,
+        "get_month_close_status",
+        lambda session, month, *, tenant_id=None: None,
+        raising=False,
+    )
+    monkeypatch.setattr(module, "SqlAlchemyAdSensePaymentRepository", _FakePaymentRepository)
+    monkeypatch.setattr(module, "SqlAlchemyBankReconciliationRepository", _FakeBankRepository)
+    monkeypatch.setattr(
+        module,
+        "SqlAlchemyGoogleRevenueSourceRowRepository",
+        _FakeSourceRowRepository,
+    )
+
+    service = module.DeductionIngestionService(object(), audit_sink=InMemoryAuditSink())
+    result = service.ingest(
+        month=MONTH,
+        actor=_actor(),
+        reason="r",
+        source=selected_source,
+        dry_run=True,
+    )
+
+    assert result.total_upserted == 0
+    assert set(reads) == expected_reads
+
+
 def test_audit_details_carry_only_summary_counts(tmp_path):
     """Test that the audit details record only summary counts and no sensitive payload data."""
     engine = _engine(tmp_path)

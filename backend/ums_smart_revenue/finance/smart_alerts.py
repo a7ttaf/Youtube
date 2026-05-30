@@ -250,7 +250,8 @@ def _revenue_trend_anomaly_details(
     threshold_percent: Decimal,
 ) -> dict[str, object]:
     """
-    Compute and return details for channels where revenue trend changes exceed a percentage threshold.
+    Compute details for channels where revenue trend changes exceed a
+    percentage threshold.
 
     Args:
         current_revenue_facts: Iterable of RevenueFactEntry for the current period.

@@ -28,7 +28,10 @@ from ums_smart_revenue.finance.deduction_components import (
     map_bank_entries_to_components,
     map_source_rows_to_components,
 )
-from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
+from ums_smart_revenue.finance.month_close import (
+    get_month_close_status,
+    get_or_create_month_close_row,
+)
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 INGESTION_SOURCES: tuple[str, ...] = ("source_rows", "bank", "gap")
@@ -269,44 +272,58 @@ class DeductionIngestionService:
     ) -> DeductionIngestionResult:
         """Ingest deduction evidence for one finance month.
 
-        Reads source rows, bank entries, and AdSense payments, maps them to
-        deduction components, upserts in live mode, and records one summary
-        audit event.
+        Reads the selected source-of-truth adapters, maps them to deduction
+        components, upserts in live mode, and records one summary audit event.
 
         Raises:
             DeductionComponentValidationError: The month, source, tenant ID, or
                 repository dialect/input contract is invalid.
             DeductionComponentLockedMonthError: The target finance month is
-                locked and must not accept live deduction-component writes.
+                locked and must not accept deduction-component ingestion.
         """
         _validate_month(month)
         if source is not None and source not in INGESTION_SOURCES:
             raise DeductionComponentValidationError(
                 f"source must be one of {INGESTION_SOURCES} or None"
             )
-        payment_repo = SqlAlchemyAdSensePaymentRepository(
-            self._session, tenant_id=self._tenant_id
-        )
-        bank_repo = SqlAlchemyBankReconciliationRepository(
-            self._session, tenant_id=self._tenant_id
-        )
-        source_row_repo = SqlAlchemyGoogleRevenueSourceRowRepository(self._session)
-
-        payments = payment_repo.list_month_payments(month=month)
-        bank_entries = bank_repo.list_month_entries(month=month)
-        source_rows = source_row_repo.list(self._tenant_id, report_month=month)
+        # FIX: Dry-run must report the same locked-month refusal as live
+        # ingestion without creating an OPEN close row as a dry-run side effect.
+        if (
+            dry_run
+            and get_month_close_status(
+                self._session, month, tenant_id=self._tenant_id
+            )
+            == "LOCKED"
+        ):
+            raise DeductionComponentLockedMonthError(
+                "Finance month is locked for deduction-component ingestion"
+            )
 
         components: list[DeductionComponentInput] = []
         skipped_non_usd = 0
+        source_rows = []
+        # FIX: Source-filtered runs must read only the selected adapter set.
+        # The AdSense gap mapper needs source rows + payments, never bank rows.
+        if source in (None, "source_rows", "gap"):
+            source_row_repo = SqlAlchemyGoogleRevenueSourceRowRepository(self._session)
+            source_rows = source_row_repo.list(self._tenant_id, report_month=month)
         if source in (None, "source_rows"):
             mapped, skipped = map_source_rows_to_components(source_rows)
             components.extend(mapped)
             skipped_non_usd += skipped
         if source in (None, "bank"):
+            bank_repo = SqlAlchemyBankReconciliationRepository(
+                self._session, tenant_id=self._tenant_id
+            )
+            bank_entries = bank_repo.list_month_entries(month=month)
             mapped, skipped = map_bank_entries_to_components(bank_entries, month=month)
             components.extend(mapped)
             skipped_non_usd += skipped
         if source in (None, "gap"):
+            payment_repo = SqlAlchemyAdSensePaymentRepository(
+                self._session, tenant_id=self._tenant_id
+            )
+            payments = payment_repo.list_month_payments(month=month)
             mapped, skipped = map_adsense_gap_to_components(
                 month=month, source_rows=source_rows, payments=payments
             )
