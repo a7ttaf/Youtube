@@ -20,14 +20,6 @@ class PaymentMatchValidationError(ValueError):
 
 
 @dataclass(frozen=True)
-"""
-Module for summarizing and matching monthly payments.
-
-This module defines the MonthlyPaymentMatchSummary class for aggregating and reconciling
-monthly payment data and provides functions to build these summaries and convert them
-to API-ready dictionaries.
-"""
-
 class MonthlyPaymentMatchSummary:
     """Represents a summary of payment matching for a month, including totals, counts, and reconciliation issues."""
     month: str

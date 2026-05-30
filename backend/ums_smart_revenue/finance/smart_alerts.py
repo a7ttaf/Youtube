@@ -54,20 +54,18 @@ class MonthlySmartAlertSummary:
     alerts: list[MonthlySmartAlert]
 
     def to_api(self) -> dict[str, object]:
-        """Convert the monthly smart alert summary into a dictionary for API output."""
-        return {
-            "month": self.month,
-            "status": self.status,
-            "highest_severity": self.highest_severity,
-            "alert_count": len(self.alerts),
-            "alerts": [alert.to_api() for alert in self.alerts],
-        }
+       """Convert the monthly smart alert summary into a dictionary for API output."""
+       return {
+           "month": self.month,
+           "status": self.status,
+           "highest_severity": self.highest_severity,
+           "alert_count": len(self.alerts),
+           "alerts": [alert.to_api() for alert in self.alerts],
+       }
 
 
 def build_monthly_smart_alert_summary(
-    *,  # existing parameters
-):
-    """Build a summary of monthly smart alerts based on provided smart alert data."""
+    *,
     month: str,
     payment_match: MonthlyPaymentMatchSummary,
     bank_reconciliation: MonthBankReconciliationSummary,

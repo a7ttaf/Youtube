@@ -7,14 +7,7 @@ from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntr
 from ums_smart_revenue.finance.reconciliation import SOURCE_PRIORITY
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 
-
 @dataclass(frozen=True)
-"""
-Module for building and converting adjusted revenue summaries for YouTube channels.
-Provides data model and utilities to generate summaries with baseline revenue, manual overrides,
-and final adjusted revenue, and convert them to API-friendly formats.
-"""
-
 class AdjustedRevenueSummary:
     """
     Represents a summary of adjusted revenue for a YouTube channel in a specific month,

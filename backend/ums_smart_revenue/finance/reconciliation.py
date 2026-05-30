@@ -131,57 +131,51 @@ def build_revenue_reconciliation_preview(
     variance_percent = _safe_percent(variance_usd, primary.gross_revenue_usd)
 
     issues: list[ReconciliationIssue] = []
-    if len(sorted_facts) == 1:
-        status = "INSUFFICIENT_SOURCES"
-        confidence_score = (primary.confidence_score * Decimal("0.5")).quantize(
-            Decimal("0.0001"), rounding=ROUND_HALF_UP
+if len(sorted_facts) == 1:
+    status = "INSUFFICIENT_SOURCES"
+    confidence_score = (primary.confidence_score * Decimal("0.5")).quantize(
+        Decimal("0.0001"), rounding=ROUND_HALF_UP
+    )
+    issues.append(
+        ReconciliationIssue(
+            issue_type="INSUFFICIENT_SOURCES",
+            severity="MEDIUM",
+            message=(
+                f"Only one revenue source is available for "
+                f"{primary.youtube_channel_id} in {primary.month}."
+            ),
         )
-        issues.append(
-            ReconciliationIssue(
-                issue_type="INSUFFICIENT_SOURCES",
-                severity="MEDIUM",
-                message=(
-                    f"Only one revenue source is available for "
-                    f"{primary.youtube_channel_id} in {primary.month}."
-                ),
-            )
+    )
+elif variance_percent > variance_tolerance_percent:
+    status = "VARIANCE_DETECTED"
+    severity = "HIGH" if variance_percent >= Decimal("0.05") else "MEDIUM"
+    confidence_score = (
+        _average_confidence(sorted_facts) - variance_percent
+    ).quantize(
+        Decimal("0.0001"),
+        rounding=ROUND_HALF_UP,
+    )
+    issues.append(
+        ReconciliationIssue(
+            issue_type="GROSS_REVENUE_VARIANCE",
+            severity=severity,
+            message=(
+                f"Gross revenue sources differ by "
+                f"{_percent_message(variance_percent)} "
+                f"for {primary.youtube_channel_id} in {primary.month}."
+            ),
         )
-    elif variance_percent > variance_tolerance_percent:
-        status = "VARIANCE_DETECTED"
-        severity = "HIGH" if variance_percent >= Decimal("0.05") else "MEDIUM"
-        confidence_score = (
-            _average_confidence(sorted_facts) - variance_percent
-        ).quantize(
-            Decimal("0.0001"),
-            rounding=ROUND_HALF_UP,
-        )
-        issues.append(
-            ReconciliationIssue(
-                issue_type="GROSS_REVENUE_VARIANCE",
-                severity=severity,
-                message=(
-                    f"Gross revenue sources differ by "
-                    f"{_percent_message(variance_percent)} "
-                    f"for {primary.youtube_channel_id} in {primary.month}."
-                ),
-            )
-"""Revenue reconciliation module.
+    )
+else:
+    status = "RECONCILED"
+    confidence_score = (
+        _average_confidence(sorted_facts) - variance_percent
+    ).quantize(
+        Decimal("0.0001"),
+        rounding=ROUND_HALF_UP,
+    )
 
-Provides functions to build previews of revenue reconciliation, calculate confidence scores, handle
-percentage computations safely, and assemble issue queues for reconciliation discrepancies.
-"""
-
-        )
-    else:
-        status = "RECONCILED"
-        confidence_score = (
-            _average_confidence(sorted_facts) - variance_percent
-        ).quantize(
-            Decimal("0.0001"),
-            rounding=ROUND_HALF_UP,
-        )
-
-    confidence_score = min(Decimal("1.0000"), max(Decimal("0.0000"), confidence_score))
+confidence_score = min(Decimal("1.0000"), max(Decimal("0.0000"), confidence_score))
     return RevenueReconciliationPreview(
         month=primary.month,
         youtube_channel_id=primary.youtube_channel_id,

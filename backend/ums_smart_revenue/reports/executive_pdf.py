@@ -40,6 +40,7 @@ _SECTION_SOURCES = {
 
 
 class ExecutivePdfValidationError(ValueError):
+class ExecutivePdfValidationError(Exception):
     """Raised when there is a validation error in generating the executive PDF report."""
     pass
 

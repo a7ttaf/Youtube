@@ -20,7 +20,6 @@ from ums_smart_revenue.connectors.google.audit import (  # noqa: E402
 from ums_smart_revenue.db.session import build_session_factory  # noqa: E402
 from ums_smart_revenue.finance.deduction_ingestion import (  # noqa: E402
     INGESTION_SOURCES,
-    DeductionComponentError,
     DeductionIngestionService,
 )
 

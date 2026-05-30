@@ -176,7 +176,7 @@ class SqlAlchemyBankReconciliationRepository:
             recorded_by=actor_uuid,
             updated_at=now,
         )
-        statement = insert_statement.on_conflict_do_update(
+        statement = insert_statement.on_conflict_do_update()
     def list_month_entries(self, *, month: str) -> list[BankReconciliationEntry]:
         """List bank reconciliation entries for the specified month.
 

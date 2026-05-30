@@ -70,14 +70,6 @@ class FinanceWorkbookSheet:
 
 
 @dataclass(frozen=True)
-"""
-Finance workbook builder module.
-
-Provides functions to create finance workbook previews and generate XLSX workbooks
-from financial export data, including summaries for net revenue, payment match,
-bank reconciliation, and smart alerts.
-"""
-
 class FinanceWorkbookPreview:
     """Data class representing a finance workbook preview, including export job details and summaries for net revenue, payment match, bank reconciliation, and smart alerts."""
     export_job: ExportJobEntry
@@ -96,6 +88,7 @@ class FinanceWorkbookPreview:
             "status": "READY_FOR_GENERATION",
             "month": self.export_job.month,
             "currency": self.export_job.currency,
+        }
             "scope_type": self.export_job.scope_type,
             "scope_id": self.export_job.scope_id,
             "month_lock_status": self.export_job.month_lock_status,

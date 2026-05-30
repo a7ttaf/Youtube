@@ -37,20 +37,6 @@ class RevenueManualOverrideEntry:
 
         Returns:
             dict[str, object]: A dictionary containing the override's attributes in a serializable form.
-        """
-        return {
-            "id": self.id,
-            "month": self.month,
-            "youtube_channel_id": self.youtube_channel_id,
-            "adjustment_revenue_usd": _decimal_to_api(self.adjustment_revenue_usd),
-            "reason": self.reason,
-            "status": self.status,
-            "created_by": self.created_by,
-            "approved_by": self.approved_by,
-            "approval_reason": self.approval_reason,
-        }
-
-
 class ManualOverrideError(ValueError):
     """Base exception for manual override related errors."""
     pass
@@ -58,10 +44,6 @@ class ManualOverrideError(ValueError):
 
 class ManualOverrideConflictError(ManualOverrideError):
     """Raised when a manual override conflicts with an existing override."""
-"""
-Module for managing manual revenue overrides including creation, retrieval, listing, and approval for tenants and channels.
-"""
-
     pass
 
 

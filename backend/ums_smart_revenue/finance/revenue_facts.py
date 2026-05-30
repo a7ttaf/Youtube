@@ -1,4 +1,5 @@
-"""This module provides functionality to transform revenue fact instances into a dictionary suitable for API responses."""
+"""This module provides functionality to transform revenue fact
+instances into a dictionary suitable for API responses."""
 
 import re
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 class RevenueFactSourceKind(StrEnum):
     """Enumeration of possible sources for revenue facts."""
+
     YOUTUBE_CMS = "YOUTUBE_CMS"
     YOUTUBE_ANALYTICS = "YOUTUBE_ANALYTICS"
     ADSENSE = "ADSENSE"
@@ -33,7 +35,9 @@ class RevenueFactSourceKind(StrEnum):
 
 @dataclass(frozen=True)
 class RevenueFactEntry:
-    """Data class for representing a revenue fact entry, including identifiers, revenue metrics, and related metadata."""
+    """Data class for representing a revenue fact entry, including
+    identifiers, revenue metrics, and related metadata."""
+
     id: str
     month: str
     youtube_channel_id: str
@@ -54,7 +58,8 @@ class RevenueFactEntry:
         return f"{self.youtube_channel_id}:{self.month}:{self.source_kind}"
 
     def to_api(self) -> dict[str, object]:
-        """Convert this revenue fact instance into a dictionary suitable for API responses."""
+        """Convert this revenue fact instance into a dictionary suitable for API
+        responses."""
         return {
             "id": self.id,
             "month": self.month,
@@ -77,23 +82,17 @@ class RevenueFactEntry:
 
 class RevenueFactError(ValueError):
     """Base exception for errors related to revenue fact processing."""
-    pass
 
 
 class RevenueFactLockedMonthError(RevenueFactError):
     """Exception raised when attempting to modify revenue facts for a locked month."""
-    pass
 
 
 class RevenueFactValidationError(RevenueFactError):
     """Exception raised for validation failures of revenue fact data."""
-    pass
-
 
 class RevenueFactNotFoundError(RevenueFactError):
     """Exception raised when a requested revenue fact is not found."""
-    pass
-
 
 class SqlAlchemyRevenueFactRepository:
     """SQL-backed revenue fact repository scoped to a single tenant."""
@@ -121,8 +120,8 @@ class SqlAlchemyRevenueFactRepository:
         actor_user_id: str,
     ) -> RevenueFactEntry:
         """Record a revenue fact for a specified month and YouTube channel.
-        
-        Validates the month, revenue amounts, and metrics before persisting the record 
+
+        Validates the month, revenue amounts, and metrics before persisting the record
         in the database and returns the resulting RevenueFactEntry.
         """
         _validate_month(month)
@@ -201,7 +200,8 @@ class SqlAlchemyRevenueFactRepository:
         limit: int | None = None,
         offset: int = 0,
     ) -> list[RevenueFactEntry]:
-        """Return a list of RevenueFactEntry for a specific month across channels, with optional filtering and pagination."""
+        """Return a list of RevenueFactEntry for a specific month across channels,
+        with optional filtering and pagination."""
         _validate_month(month)
         if youtube_channel_ids == set():
             return []
@@ -246,7 +246,8 @@ class SqlAlchemyRevenueFactRepository:
         limit: int | None = None,
         offset: int = 0,
     ) -> list[str]:
-        """Return a list of YouTube channel IDs that have revenue facts for a specific month, with optional filters and pagination."""
+        """Return a list of YouTube channel IDs that have revenue facts,
+        for a specific month, with optional filters and pagination."""
         _validate_month(month)
         if youtube_channel_ids == set():
             return []
@@ -282,7 +283,8 @@ class SqlAlchemyRevenueFactRepository:
         return list(self._session.scalars(statement).all())
 
     def _require_month_open(self, month: str) -> None:
-        """Ensure the given month is open for revenue fact imports, raising an error if the month is locked."""
+        """Ensure the given month is open for revenue fact imports, raising an
+        error if the month is locked."""
         close = get_or_create_month_close_row(
             self._session,
             month,
@@ -295,14 +297,18 @@ class SqlAlchemyRevenueFactRepository:
             )
 
     def _require_active_channel_for_import(self, youtube_channel_id: str) -> None:
-        """Ensure a YouTube channel is active before importing revenue facts, raising a validation error if not found."""
+        """Ensure a YouTube channel is active before importing revenue facts,
+        raising a validation error if not found."""
         if not self._active_channel_exists(youtube_channel_id):
             raise RevenueFactValidationError(
                 "youtube_channel_id must reference an active channel"
             )
 
     def _require_active_channel_for_read(self, youtube_channel_id: str) -> None:
-        """Ensure a YouTube channel is active before reading revenue facts, raising not found error if not present."""
+        """
+        Ensure a YouTube channel is active before reading revenue facts,
+        raising not found error if not present.
+        """
         if not self._active_channel_exists(youtube_channel_id):
             raise RevenueFactNotFoundError("Channel not found")
 
@@ -367,7 +373,10 @@ def _validate_month(month: str) -> None:
 
 
 def _normalize_source_kind(source_kind: str) -> str:
-    """Normalize the source_kind string to a valid RevenueFactSourceKind value or raise validation error."""
+    """
+    Normalize the source_kind string to a valid RevenueFactSourceKind
+    value or raise validation error.
+    """
     try:
         return RevenueFactSourceKind(source_kind).value
     except ValueError as exc:
@@ -391,7 +400,8 @@ def _actor_identity_uuid(value: str) -> UUID:
 def _validate_metrics(
     *, views: int, watch_time_minutes: Decimal, confidence_score: Decimal
 ) -> None:
-    """Validate views, watch_time_minutes, and confidence_score metrics for correct ranges and finiteness."""
+    """Validate views, watch_time_minutes, and confidence_score metrics
+    for correct ranges and finiteness."""
     if not watch_time_minutes.is_finite():
         raise RevenueFactValidationError("watch_time_minutes must be a finite decimal")
     if not confidence_score.is_finite():
@@ -412,7 +422,8 @@ def _validate_revenue_amounts(
     longform_revenue_usd: Decimal | None,
     subscription_revenue_usd: Decimal | None,
 ) -> None:
-    """Validate revenue amounts for finiteness, non-negativity, and consistency of breakdown totals."""
+    """Validate revenue amounts for finiteness, non-negativity,
+    and consistency of breakdown totals."""
     if not gross_revenue_usd.is_finite() or gross_revenue_usd < 0:
         raise RevenueFactValidationError("gross_revenue_usd must be a finite decimal >= 0")
     if net_revenue_usd is not None and (not net_revenue_usd.is_finite() or net_revenue_usd < 0):

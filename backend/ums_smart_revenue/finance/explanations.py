@@ -21,7 +21,9 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 @dataclass(frozen=True)
 class NumberExplanationEntry:
-    """Represents a detailed explanation of a numeric metric for an entity in a given month, including value, formula, components, and warnings."""
+    """Represents a detailed explanation of a numeric metric for an entity in a
+    given month, including value, formula, components, and warnings."""
+
     month: str
     entity_type: str
     entity_id: str
@@ -35,7 +37,8 @@ class NumberExplanationEntry:
 
     def to_api(self) -> dict[str, object]:
         """
-        Convert the instance attributes into a dictionary formatted for API consumption.
+        Convert the instance attributes into a dictionary formatted for API
+        consumption.
 
         Returns:
             dict[str, object]: A mapping of the object's data ready for API usage.
@@ -56,21 +59,20 @@ class NumberExplanationEntry:
 
 class NumberExplanationError(ValueError):
     """Base exception for errors related to number explanations."""
-    pass
 
 
 class NumberExplanationValidationError(NumberExplanationError):
     """Exception raised when a NumberExplanationEntry fails validation checks."""
-    pass
 
+# This module provides functionality to build and record detailed
+# revenue explanations for YouTube channels, using SQLAlchemy for
+# persistence and domain models for revenue facts and overrides.
 
-"""
-This module provides functionality to build and record detailed revenue explanations for YouTube channels,
-using SQLAlchemy for persistence and domain models for revenue facts and overrides.
-"""
 
 class SqlAlchemyNumberExplanationRepository:
-    """Repository for persisting and retrieving NumberExplanationEntry objects using SQLAlchemy."""
+    """Repository for persisting and retrieving NumberExplanationEntry objects
+    using SQLAlchemy."""
+
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind number explanation upserts to an explicit or request tenant."""
         self._session = session
@@ -122,7 +124,8 @@ def build_channel_month_revenue_explanation(
     metric: str,
 ) -> NumberExplanationEntry:
     """Build a detailed revenue explanation for a YouTube channel for a specific month by combining
-    revenue facts and manual overrides, validating that the metric is adjusted gross revenue."""
+    revenue facts and manual overrides, validating that the metric is adjusted gross revenue.
+    """
     if metric != ADJUSTED_GROSS_REVENUE_METRIC:
         raise NumberExplanationValidationError(
             f"Unsupported explanation metric: {metric}"
@@ -196,7 +199,8 @@ def _primary_fact(facts: list[RevenueFactEntry]) -> RevenueFactEntry | None:
     """
     Select the primary revenue fact from a list.
 
-    Sorts the provided list of RevenueFactEntry objects by their source priority and returns the first item. 
+    Sorts the provided list of RevenueFactEntry objects by their source priority
+    and returns the first item.
     Returns None if the list is empty.
     """
     if not facts:
@@ -213,8 +217,9 @@ def _confidence(
     """
     Compute confidence metrics for a revenue fact.
 
-    Calculates the confidence score for the given primary_fact, applies a maximum cap if warnings are present,
-    determines a confidence label (HIGH, MEDIUM, or LOW), and returns the formatted result.
+    Calculates the confidence score for the given primary_fact, applies a
+    maximum cap if warnings are present, determines a confidence label (HIGH,
+    MEDIUM, or LOW), and returns the formatted result.
     """
     score = primary_fact.confidence_score if primary_fact else Decimal("0")
     if warnings and score > Decimal("0.9000"):
