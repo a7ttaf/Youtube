@@ -57,6 +57,11 @@ def test_page_returns_all_with_total_when_unfiltered(tmp_path):
         page = repo.list_month_components_page(month=MONTH, limit=100, offset=0)
     assert page.total_count == 3
     assert len(page.components) == 3
+    assert [(t.scope_kind, t.component_count, t.total_amount_usd) for t in page.scope_totals] == [
+        ("ACCOUNT", 1, Decimal("10.00")),
+        ("CHANNEL", 1, Decimal("10.00")),
+        ("PAYMENT", 1, Decimal("10.00")),
+    ]
     # deterministic order: scope_kind, scope_id, component_kind, component_key
     assert [c.scope_kind for c in page.components] == ["ACCOUNT", "CHANNEL", "PAYMENT"]
 
@@ -85,6 +90,27 @@ def test_page_scope_kind_filter_counts_only_matches(tmp_path):
         )
     assert page.total_count == 1
     assert page.components[0].scope_kind == "CHANNEL"
+    assert [(t.scope_kind, t.component_count) for t in page.scope_totals] == [("CHANNEL", 1)]
+
+
+def test_page_scope_id_filter_counts_only_matches(tmp_path):
+    """scope_id filter returns only the requested scope id and counts the filtered set."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed(session)
+        _add(session, kind="DEDUCTION", scope_kind="CHANNEL", scope_id="chan-2", key="k-chan-2")
+        session.commit()
+        repo = SqlAlchemyDeductionComponentRepository(session)
+        page = repo.list_month_components_page(
+            month=MONTH,
+            scope_kind="CHANNEL",
+            scope_id="chan-1",
+            limit=100,
+            offset=0,
+        )
+    assert page.total_count == 1
+    assert [component.scope_id for component in page.components] == ["chan-1"]
+    assert [(t.scope_kind, t.component_count) for t in page.scope_totals] == [("CHANNEL", 1)]
 
 
 def test_page_limit_offset_paginates_but_total_is_full_match_count(tmp_path):
@@ -97,8 +123,29 @@ def test_page_limit_offset_paginates_but_total_is_full_match_count(tmp_path):
         page2 = repo.list_month_components_page(month=MONTH, limit=1, offset=2)
     assert page.total_count == 3
     assert len(page.components) == 1
+    assert [(t.scope_kind, t.component_count) for t in page.scope_totals] == [
+        ("ACCOUNT", 1),
+        ("CHANNEL", 1),
+        ("PAYMENT", 1),
+    ]
     assert page.components[0].scope_kind == "ACCOUNT"  # first in deterministic order
     assert page2.components[0].scope_kind == "PAYMENT"  # third
+
+
+def test_list_month_components_filters_component_kinds_in_sql(tmp_path):
+    """list_month_components can restrict CHANNEL reads to net-applicable component kinds."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed(session)
+        _add(session, kind="TRANSFER_FEE", scope_kind="CHANNEL", scope_id="chan-1", key="k-fee")
+        session.commit()
+        repo = SqlAlchemyDeductionComponentRepository(session)
+        components = repo.list_month_components(
+            month=MONTH,
+            youtube_channel_ids={"chan-1"},
+            component_kinds={"TAX", "DEDUCTION"},
+        )
+    assert [component.component_kind for component in components] == ["DEDUCTION"]
 
 
 def test_page_malformed_month_raises(tmp_path):

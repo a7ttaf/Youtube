@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api import revenue as revenue_api
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.finance_models import (
     DeductionComponentORM,
@@ -239,3 +240,40 @@ def test_net_revenue_endpoint_derives_component_net_for_missing_net_channel(tmp_
     assert channel_b["deduction_amount_usd"] == "20"
     assert body["missing_net_source_count"] == 0   # b is now derived, not missing
     assert body["audit_event"]["event_type"] == "REVENUE_VIEWED"
+
+
+def test_net_revenue_endpoint_requests_only_net_applicable_components(tmp_path):
+    """Net-revenue route asks the repository for only TAX/DEDUCTION component kinds."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+
+    class RecordingDeductionComponentRepository:
+        """Capture the component_kinds argument passed by the route."""
+
+        def __init__(self):
+            self.component_kinds = None
+
+        def list_month_components(
+            self,
+            *,
+            month,
+            youtube_channel_ids=None,
+            component_kinds=None,
+        ):
+            self.component_kinds = component_kinds
+            return []
+
+    repository = RecordingDeductionComponentRepository()
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[
+        revenue_api.current_deduction_component_repository
+    ] = lambda: repository
+    client = TestClient(app)
+
+    response = client.get(
+        f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
+        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
+    )
+
+    assert response.status_code == 200
+    assert set(repository.component_kinds) == {"TAX", "DEDUCTION"}

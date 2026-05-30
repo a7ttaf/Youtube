@@ -3,6 +3,7 @@
 from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from uuid import UUID, uuid4
 
 from sqlalchemy import delete, func, select
@@ -70,10 +71,20 @@ class DeductionIngestionResult:
 
 
 @dataclass(frozen=True)
+class DeductionComponentScopeTotal:
+    """Full-match aggregate for one scope_kind in a component page."""
+
+    scope_kind: str
+    component_count: int
+    total_amount_usd: Decimal
+
+
+@dataclass(frozen=True)
 class DeductionComponentPage:
-    """One page of deduction components plus the full-match total count."""
+    """One component page plus full-match totals."""
 
     total_count: int
+    scope_totals: list[DeductionComponentScopeTotal]
     components: list[DeductionComponent]
 
 
@@ -281,6 +292,7 @@ class SqlAlchemyDeductionComponentRepository:
         *,
         month: str,
         youtube_channel_ids: set[str] | None = None,
+        component_kinds: Collection[str] | None = None,
     ) -> list[DeductionComponent]:
         """List persisted deduction components for one finance month.
 
@@ -298,6 +310,11 @@ class SqlAlchemyDeductionComponentRepository:
             .where(DeductionComponentORM.tenant_id == self._tenant_id)
             .where(DeductionComponentORM.month == month)
         )
+        if component_kinds is not None:
+            normalized_kinds = tuple(sorted(component_kinds))
+            if not normalized_kinds:
+                return []
+            query = query.where(DeductionComponentORM.component_kind.in_(normalized_kinds))
         if youtube_channel_ids is not None:
             query = query.where(
                 DeductionComponentORM.scope_kind == "CHANNEL",
@@ -315,7 +332,7 @@ class SqlAlchemyDeductionComponentRepository:
 
     # ============================================================================
     # Purpose: Return a filtered, paginated page of components for one month,
-    #   plus the full COUNT(*) over the filtered set (not a Python slice).
+    #   plus full COUNT(*) and grouped amount totals over the filtered set.
     #   Used exclusively by the read-only GET /revenue/months/{month}/deduction-components
     #   endpoint to avoid loading an entire month into memory.
     # Database/ORM: Reads deduction_components / DeductionComponentORM.
@@ -330,10 +347,11 @@ class SqlAlchemyDeductionComponentRepository:
         month: str,
         component_kind: str | None = None,
         scope_kind: str | None = None,
+        scope_id: str | None = None,
         limit: int,
         offset: int,
     ) -> DeductionComponentPage:
-        """Return a filtered, paginated page of components + the full match count.
+        """Return a filtered page plus full-match count and scope totals.
 
         Raises:
             DeductionComponentValidationError: If the month is malformed,
@@ -352,9 +370,21 @@ class SqlAlchemyDeductionComponentRepository:
             filters.append(DeductionComponentORM.component_kind == component_kind)
         if scope_kind is not None:
             filters.append(DeductionComponentORM.scope_kind == scope_kind)
+        if scope_id is not None:
+            filters.append(DeductionComponentORM.scope_id == scope_id)
         total_count = self._session.scalar(
             select(func.count()).select_from(DeductionComponentORM).where(*filters)
         )
+        scope_total_rows = self._session.execute(
+            select(
+                DeductionComponentORM.scope_kind,
+                func.count(),
+                func.sum(DeductionComponentORM.amount_usd),
+            )
+            .where(*filters)
+            .group_by(DeductionComponentORM.scope_kind)
+            .order_by(DeductionComponentORM.scope_kind)
+        ).all()
         rows = self._session.scalars(
             select(DeductionComponentORM)
             .where(*filters)
@@ -369,6 +399,14 @@ class SqlAlchemyDeductionComponentRepository:
         ).all()
         return DeductionComponentPage(
             total_count=int(total_count or 0),
+            scope_totals=[
+                DeductionComponentScopeTotal(
+                    scope_kind=scope_kind,
+                    component_count=int(component_count or 0),
+                    total_amount_usd=total_amount_usd or Decimal("0"),
+                )
+                for scope_kind, component_count, total_amount_usd in scope_total_rows
+            ],
             components=[self._to_entry(row) for row in rows],
         )
 

@@ -111,6 +111,14 @@ def _seed_channel_component(database_url, *, amount, source_system):
         session.commit()
 
 
+def _seed_extra_component(database_url, **kwargs):
+    """Seed one extra component row for endpoint filter tests."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(_component(**kwargs))
+        session.commit()
+
+
 def test_finance_viewer_reads_components_grouped_with_audit(tmp_path):
     """Finance viewer with global grants reads all components, grouped by scope, with three audit events."""
     database_url = build_database_url(tmp_path)
@@ -127,6 +135,12 @@ def test_finance_viewer_reads_components_grouped_with_audit(tmp_path):
     assert body["total_count"] == 3
     scopes = {group["scope_kind"]: group for group in body["scopes"]}
     assert set(scopes) == {"CHANNEL", "ACCOUNT", "PAYMENT"}
+    assert scopes["CHANNEL"]["component_count"] == 1
+    assert scopes["CHANNEL"]["total_amount_usd"] == "120"
+    assert scopes["ACCOUNT"]["component_count"] == 1
+    assert scopes["ACCOUNT"]["total_amount_usd"] == "70"
+    assert scopes["PAYMENT"]["component_count"] == 1
+    assert scopes["PAYMENT"]["total_amount_usd"] == "5"
     assert scopes["CHANNEL"]["components"][0]["component_kind"] == "DEDUCTION"
     # raw_payload must never appear anywhere in the response.
     assert "raw_payload" not in str(body)
@@ -174,6 +188,41 @@ def test_scope_kind_filter(tmp_path):
     assert {g["scope_kind"] for g in body["scopes"]} == {"CHANNEL"}
 
 
+def test_scope_id_filter_and_channel_only_audit(tmp_path):
+    """scope_id narrows the SQL result and CHANNEL-only reads emit only revenue audit evidence."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_components(database_url)
+    _seed_extra_component(
+        database_url,
+        kind="DEDUCTION",
+        scope_kind="CHANNEL",
+        scope_id="channel-tv-b",
+        amount="33.00",
+        source_system="adsense_management",
+        key_suffix="chan-b",
+    )
+    client = TestClient(create_app(database_url=database_url))
+    body = client.get(
+        f"/revenue/months/{MONTH}/deduction-components?scope_kind=CHANNEL&scope_id={CHANNEL}",
+        headers=auth_headers("finance_viewer", "global"),
+    ).json()
+
+    assert body["total_count"] == 1
+    assert body["returned_count"] == 1
+    assert [event["event_type"] for event in body["audit_events"]] == ["REVENUE_VIEWED"]
+    scopes = {group["scope_kind"]: group for group in body["scopes"]}
+    assert scopes["CHANNEL"]["component_count"] == 1
+    assert scopes["CHANNEL"]["total_amount_usd"] == "120"
+    assert [c["scope_id"] for c in scopes["CHANNEL"]["components"]] == [CHANNEL]
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        from sqlalchemy import select
+        logs = session.scalars(select(AuditLogORM)).all()
+    assert [log.event_type for log in logs] == ["REVENUE_VIEWED"]
+
+
 def test_pagination_limit_and_offset(tmp_path):
     """Limit+offset pagination returns one row per page while total_count reflects the full match set."""
     database_url = build_database_url(tmp_path)
@@ -188,6 +237,10 @@ def test_pagination_limit_and_offset(tmp_path):
     assert body["total_count"] == 3
     returned = sum(len(g["components"]) for g in body["scopes"])
     assert returned == 1
+    paged_scopes = {group["scope_kind"]: group for group in body["scopes"]}
+    assert set(paged_scopes) == {"CHANNEL", "ACCOUNT", "PAYMENT"}
+    assert paged_scopes["CHANNEL"]["total_amount_usd"] == "120"
+    assert paged_scopes["CHANNEL"]["components"] == []
     # First page of 3 with limit 1 -> more remain; next_offset advances.
     assert body["pagination"] == {
         "limit": 1,
@@ -206,6 +259,19 @@ def test_pagination_limit_and_offset(tmp_path):
         "next_offset": None,
         "has_more": False,
     }
+
+
+def test_deduction_components_openapi_uses_typed_response_model(tmp_path):
+    """OpenAPI advertises the concrete response model for deduction-components."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    schema = client.get("/openapi.json").json()
+    response_schema = schema["paths"][
+        "/revenue/months/{month}/deduction-components"
+    ]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+
+    assert response_schema["$ref"].endswith("/MonthDeductionComponentsResponse")
 
 
 def test_malformed_month_returns_422(tmp_path):
