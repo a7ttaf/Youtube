@@ -16,12 +16,12 @@ YOUTUBE_REVENUE_SOURCE_PRIORITY = {
 
 class PaymentMatchValidationError(ValueError):
     """Exception raised for errors in payment match validation."""
-    pass
 
 
 @dataclass(frozen=True)
 class MonthlyPaymentMatchSummary:
     """Represents a summary of payment matching for a month, including totals, counts, and reconciliation issues."""
+
     month: str
     currency: str
     status: str
@@ -163,11 +163,6 @@ def build_monthly_payment_match_summary(
             ReconciliationIssue(
                 issue_type="NON_PAID_ADSENSE_PAYMENTS",
                 severity="MEDIUM",
-"""Module for matching payments between AdSense and YouTube revenue facts.
-Provides utilities for selecting YouTube revenue facts by channel,
-identifying channels without YouTube sources, quantizing monetary values,
-and normalizing payment currencies for matching logic.
-"""
                 message=(
                     f"{non_paid_payment_count} AdSense payment record(s) for "
                     f"{month} are not PAID and were excluded from the match."

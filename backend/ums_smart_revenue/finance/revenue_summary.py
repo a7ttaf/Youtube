@@ -7,12 +7,11 @@ from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntr
 from ums_smart_revenue.finance.reconciliation import SOURCE_PRIORITY
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 
+
 @dataclass(frozen=True)
 class AdjustedRevenueSummary:
-    """
-    Represents a summary of adjusted revenue for a YouTube channel in a specific month,
-    including baseline revenue, approved manual overrides, and final adjusted totals.
-    """
+    """Adjusted revenue summary for one YouTube channel and month."""
+
     month: str
     youtube_channel_id: str
     status: str
@@ -126,7 +125,6 @@ def build_adjusted_revenue_summary(
         approved_manual_override_count=len(approved),
         pending_manual_override_count=len(pending),
     )
-
 
 
 def _validate_same_period_and_channel(

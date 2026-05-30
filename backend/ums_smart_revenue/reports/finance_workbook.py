@@ -43,7 +43,6 @@ _SHEET_SOURCES = {
 
 class FinanceWorkbookPreviewValidationError(ValueError):
     """Exception raised when validation of a finance workbook preview fails."""
-    pass
 
 
 @dataclass(frozen=True)
@@ -71,7 +70,8 @@ class FinanceWorkbookSheet:
 
 @dataclass(frozen=True)
 class FinanceWorkbookPreview:
-    """Data class representing a finance workbook preview, including export job details and summaries for net revenue, payment match, bank reconciliation, and smart alerts."""
+    """Finance workbook preview with export metadata and source summaries."""
+
     export_job: ExportJobEntry
     sheets: tuple[FinanceWorkbookSheet, ...]
     net_revenue: MonthNetRevenueSummary
@@ -88,7 +88,6 @@ class FinanceWorkbookPreview:
             "status": "READY_FOR_GENERATION",
             "month": self.export_job.month,
             "currency": self.export_job.currency,
-        }
             "scope_type": self.export_job.scope_type,
             "scope_id": self.export_job.scope_id,
             "month_lock_status": self.export_job.month_lock_status,
@@ -121,7 +120,7 @@ def build_finance_workbook_preview(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> FinanceWorkbookPreview:
-    """Build a FinanceWorkbookPreview from the provided export job and source summaries, validating export type, month, and currency."""
+    """Build a finance workbook preview from export metadata and summaries."""
     if export_job.export_type != "FINANCE_EXCEL":
         raise FinanceWorkbookPreviewValidationError(
             "finance workbook preview only supports FINANCE_EXCEL exports"
@@ -161,7 +160,7 @@ def build_finance_workbook_preview(
 
 
 def build_finance_workbook_xlsx(preview: FinanceWorkbookPreview) -> bytes:
-    """Generate an XLSX workbook binary from a FinanceWorkbookPreview, writing summary and monthly close sheets with financial data."""
+    """Generate an XLSX workbook binary from a finance workbook preview."""
     workbook = Workbook()
     workbook.iso_dates = True
     summary_sheet = workbook.active
@@ -282,11 +281,6 @@ def build_finance_workbook_xlsx(preview: FinanceWorkbookPreview) -> bytes:
     _write_table_sheet(
         workbook.create_sheet("Confidence Notes"),
         ["code", "severity", "source", "confidence", "message"],
-"""
-Finance workbook preview module provides functions to validate data consistency, generate executive summaries,
-breakdowns, and write styled tables and key-value sheets for finance reporting.
-"""
-
         [
             [
                 alert.code,

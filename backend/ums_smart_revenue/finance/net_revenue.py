@@ -11,7 +11,8 @@ from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 
 @dataclass(frozen=True)
 class ChannelNetRevenueSummary:
-    """Summary of net revenue for a YouTube channel in a specific month, including gross and net revenue, deductions, confidence level, and manual override details."""
+    """Summary of net revenue for one YouTube channel and month."""
+
     month: str
     youtube_channel_id: str
     status: str
@@ -62,7 +63,8 @@ class ChannelNetRevenueSummary:
 
 @dataclass(frozen=True)
 class MonthNetRevenueSummary:
-    """Aggregated net revenue summary across channels for a given month, including totals, counts, and per-channel details."""
+    """Aggregated net revenue summary across channels for one month."""
+
     month: str
     status: str
     channel_count: int
@@ -73,10 +75,6 @@ class MonthNetRevenueSummary:
     total_net_revenue_usd: Decimal
     total_deduction_amount_usd: Decimal
     channels: list[ChannelNetRevenueSummary]
-"""
-Module for net revenue processing: provides utilities to normalize currency,
-build channel net revenue summaries, and serialize data for API consumption.
-"""
 
     def to_api(self) -> dict[str, object]:
         """Serialize the channel net revenue summary to a dictionary for API usage."""
@@ -100,7 +98,6 @@ build channel net revenue summaries, and serialize data for API consumption.
 
 class NetRevenueValidationError(ValueError):
     """Exception raised for errors during net revenue validation, e.g., unsupported currency."""
-    pass
 
 
 def normalize_net_revenue_currency(currency: str) -> str:
@@ -263,11 +260,6 @@ def build_month_net_revenue_summary(
         channel_count=len(channels),
         calculated_count=len(calculated),
         missing_count=missing_count,
-"""
-This module provides functions to generate net revenue summaries for channels and months,
-including utilities for empty channel summaries, month status determination,
-entry validation, and deduction percentage calculations.
-"""
         pending_count=pending_count,
     )
     return MonthNetRevenueSummary(

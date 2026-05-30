@@ -76,6 +76,7 @@ class BankReconciliationEntry:
 @dataclass(frozen=True)
 class MonthBankReconciliationSummary:
     """Data class summarizing bank reconciliation data for a specific month, including totals and issues."""
+
     month: str
     currency: str
     status: str
@@ -93,32 +94,33 @@ class MonthBankReconciliationSummary:
     issues: list[ReconciliationIssue]
     entries: list[BankReconciliationEntry]
 
-def to_api(self) -> dict[str, object]:
-    """Convert the reconciliation summary into an API-friendly dictionary representation."""
-    return {
-        "month": self.month,
-        "currency": self.currency,
-        "status": self.status,
-        "adsense_paid_amount_usd": _decimal_to_api(self.adsense_paid_amount_usd),
-        "bank_received_amount_usd": _decimal_to_api(self.bank_received_amount_usd),
-        "bank_gap_usd": _decimal_to_api(self.bank_gap_usd),
-        "transfer_fee_usd": _decimal_to_api(self.transfer_fee_usd),
-        "fx_difference_usd": _decimal_to_api(self.fx_difference_usd),
-        "payment_count": self.payment_count,
-        "paid_payment_count": self.paid_payment_count,
-        "non_paid_payment_count": self.non_paid_payment_count,
-        "unsupported_payment_currency_count": (
-            self.unsupported_payment_currency_count
-        ),
-        "entry_count": self.entry_count,
-        "tolerance_usd": _decimal_to_api(self.tolerance_usd),
-        "issues": [issue.to_api() for issue in self.issues],
-        "entries": [entry.to_api() for entry in self.entries],
-    }
+    def to_api(self) -> dict[str, object]:
+        """Convert the reconciliation summary into an API-friendly dictionary."""
+        return {
+            "month": self.month,
+            "currency": self.currency,
+            "status": self.status,
+            "adsense_paid_amount_usd": _decimal_to_api(self.adsense_paid_amount_usd),
+            "bank_received_amount_usd": _decimal_to_api(self.bank_received_amount_usd),
+            "bank_gap_usd": _decimal_to_api(self.bank_gap_usd),
+            "transfer_fee_usd": _decimal_to_api(self.transfer_fee_usd),
+            "fx_difference_usd": _decimal_to_api(self.fx_difference_usd),
+            "payment_count": self.payment_count,
+            "paid_payment_count": self.paid_payment_count,
+            "non_paid_payment_count": self.non_paid_payment_count,
+            "unsupported_payment_currency_count": (
+                self.unsupported_payment_currency_count
+            ),
+            "entry_count": self.entry_count,
+            "tolerance_usd": _decimal_to_api(self.tolerance_usd),
+            "issues": [issue.to_api() for issue in self.issues],
+            "entries": [entry.to_api() for entry in self.entries],
+        }
 
 
 class SqlAlchemyBankReconciliationRepository:
     """SQLAlchemy-based repository for recording and retrieving bank reconciliation entries."""
+
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
@@ -176,7 +178,32 @@ class SqlAlchemyBankReconciliationRepository:
             recorded_by=actor_uuid,
             updated_at=now,
         )
-        statement = insert_statement.on_conflict_do_update()
+        statement = insert_statement.on_conflict_do_update(
+            index_elements=[
+                BankReconciliationEntryORM.tenant_id,
+                BankReconciliationEntryORM.month,
+                BankReconciliationEntryORM.bank_reference,
+            ],
+            set_={
+                "bank_received_date": bank_received_date,
+                "bank_received_amount": bank_received_amount,
+                "bank_received_currency": normalized_currency,
+                "bank_received_amount_usd": bank_received_amount_usd,
+                "transfer_fee_usd": transfer_fee_usd,
+                "fx_difference_usd": fx_difference_usd,
+                "notes": normalized_notes,
+                "source_report_id": normalized_source_report_id,
+                "recorded_by": actor_uuid,
+                "updated_at": now,
+            },
+        ).returning(BankReconciliationEntryORM.id)
+        row_id = self._session.execute(statement).scalar_one()
+        row = self._session.get(BankReconciliationEntryORM, row_id)
+        if row is None:
+            raise BankReconciliationValidationError("Bank reconciliation upsert failed")
+        self._session.refresh(row)
+        return self._to_entry(row)
+
     def list_month_entries(self, *, month: str) -> list[BankReconciliationEntry]:
         """List bank reconciliation entries for the specified month.
 
@@ -249,16 +276,20 @@ class SqlAlchemyBankReconciliationRepository:
 def _filter_by_month(items, month):
     return [item for item in items if item.month == month]
 
+
 def _filter_usd_payments(payments):
     return [payment for payment in payments if payment.payment_currency == "USD"]
+
 
 def _filter_paid_payments(payments):
     return [payment for payment in payments if payment.payment_status == "PAID"]
 
+
 def _sum_and_quantize(items, attr):
     return _quantize_money(
-        sum(getattr(item, attr) for item in items), Decimal("0")
+        sum((getattr(item, attr) for item in items), Decimal("0"))
     )
+
 
 def build_month_bank_reconciliation_summary(
     *,
@@ -288,9 +319,10 @@ def build_month_bank_reconciliation_summary(
     unsupported_payment_currency_count = len(month_payments) - len(usd_payments)
 
     adsense_paid_amount = _sum_and_quantize(paid_payments, "payment_amount")
-    bank_received_amount_usd = _sum_and_quantize(month_entries, "bank_received_amount_usd")
-    transfer_fee_usd = _sum_and_quantize(month_entries, "transfer_fee_usd")
+    bank_received_amount_usd = _sum_and_quantize(
+        month_entries, "bank_received_amount_usd"
     )
+    transfer_fee_usd = _sum_and_quantize(month_entries, "transfer_fee_usd")
     fx_difference_usd = _quantize_money(
         sum((entry.fx_difference_usd for entry in month_entries), Decimal("0"))
     )
@@ -354,9 +386,6 @@ def build_month_bank_reconciliation_summary(
                 ),
             )
         )
-"""
-Module for bank reconciliation utilities: provides validation, normalization, parsing, and quantization functions for money, dates, and identifiers.
-"""
 
     return MonthBankReconciliationSummary(
         month=month,
@@ -443,7 +472,7 @@ def _validate_finite_money(value: Decimal, field_name: str) -> None:
 
 def _actor_identity_uuid(value: str) -> UUID:
     """
-    Parse an actor identity string into a UUID, accepting either a literal UUID or a gateway subject, raising a validation error on failure.
+    Parse an actor identity string into a UUID.
     """
     # Accept either a UUID literal or a trusted-gateway subject; the shared
     # helper derives a deterministic UUID5 for the latter so header-auth

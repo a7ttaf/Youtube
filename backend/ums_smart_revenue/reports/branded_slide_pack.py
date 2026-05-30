@@ -50,7 +50,30 @@ _BRAND_LINE = RGBColor(217, 222, 230)
 
 class BrandedSlidePackValidationError(ValueError):
     """Exception raised when validation of a branded slide pack fails."""
-    pass
+
+
+@dataclass(frozen=True)
+class BrandedSlide:
+    """Data class representing a single slide in the branded slide pack."""
+    name: str
+    source: str
+    status: str
+    sensitive: bool
+
+    def to_api(self) -> dict[str, object]:
+        """Convert the instance to a dictionary formatted for API consumption.
+
+        Returns:
+            Dictionary with the instance's name, source, status, and sensitive flag.
+        """
+        return {
+            "name": self.name,
+            "source": self.source,
+            "status": self.status,
+            "sensitive": self.sensitive,
+        }
+
+
 @dataclass(frozen=True)
 class BrandedSlidePackReport:
     """Data class representing the full branded slide pack report with export job and slide summaries."""

@@ -1,5 +1,4 @@
-"""This module provides functionality to transform revenue fact
-instances into a dictionary suitable for API responses."""
+"""Revenue fact repository and API serialization helpers."""
 
 import re
 from dataclasses import dataclass
@@ -35,9 +34,7 @@ class RevenueFactSourceKind(StrEnum):
 
 @dataclass(frozen=True)
 class RevenueFactEntry:
-    """Data class for representing a revenue fact entry, including
-    identifiers, revenue metrics, and related metadata."""
-
+    """Revenue fact entry with identifiers, metrics, and metadata."""
     id: str
     month: str
     youtube_channel_id: str
@@ -200,8 +197,7 @@ class SqlAlchemyRevenueFactRepository:
         limit: int | None = None,
         offset: int = 0,
     ) -> list[RevenueFactEntry]:
-        """Return a list of RevenueFactEntry for a specific month across channels,
-        with optional filtering and pagination."""
+        """Return revenue facts for a month across channels."""
         _validate_month(month)
         if youtube_channel_ids == set():
             return []
@@ -246,8 +242,7 @@ class SqlAlchemyRevenueFactRepository:
         limit: int | None = None,
         offset: int = 0,
     ) -> list[str]:
-        """Return a list of YouTube channel IDs that have revenue facts,
-        for a specific month, with optional filters and pagination."""
+        """Return YouTube channel IDs that have revenue facts for a month."""
         _validate_month(month)
         if youtube_channel_ids == set():
             return []
@@ -297,8 +292,7 @@ class SqlAlchemyRevenueFactRepository:
             )
 
     def _require_active_channel_for_import(self, youtube_channel_id: str) -> None:
-        """Ensure a YouTube channel is active before importing revenue facts,
-        raising a validation error if not found."""
+        """Ensure a YouTube channel is active before import."""
         if not self._active_channel_exists(youtube_channel_id):
             raise RevenueFactValidationError(
                 "youtube_channel_id must reference an active channel"

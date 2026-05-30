@@ -69,6 +69,12 @@ class CurrencyExchangeRateEntry:
         return {
             "id": self.id,
             "rate_date": self.rate_date.isoformat(),
+            "base_currency": self.base_currency,
+            "quote_currency": self.quote_currency,
+            "rate": _decimal_to_api(self.rate),
+            "provider_key": self.provider_key,
+            "source_report_id": self.source_report_id,
+            "imported_by": self.imported_by,
             "raw_payload": self.raw_payload if include_raw_payload else None,
         }
 
@@ -84,7 +90,6 @@ class ExchangeRateValidationError(ExchangeRateError):
 class SqlAlchemyExchangeRateRepository:
     """
     Repository for syncing currency exchange rates to the database using SQLAlchemy.
-    """
     """
 
     def __init__(self, session: Session):
@@ -109,10 +114,6 @@ class SqlAlchemyExchangeRateRepository:
             provider_key: Identifier for the rate provider.
             actor_user_id: UUID string of the user performing the import.
             source_report_id: Optional identifier of the source report.
-
-        """
-        # Implementation goes here
-        ...
 
         Returns:
             A list of CurrencyExchangeRateEntry instances representing the stored rates.
@@ -201,9 +202,7 @@ class SqlAlchemyExchangeRateRepository:
         as_of_date: date,
         provider_key: str | None = None,
     ) -> CurrencyExchangeRateEntry | None:
-        """Retrieve the latest exchange rate entry for the given base and quote
-        currencies as of the specified date. Optionally filters by
-        provider key."""
+        """Retrieve the latest exchange rate for a base/quote pair and date."""
         normalized_base = _normalize_currency(base_currency, "base_currency")
         normalized_quote = _normalize_currency(quote_currency, "quote_currency")
         if normalized_base == normalized_quote:
@@ -277,10 +276,7 @@ def _normalize_rate_input(
 
 
 def _normalize_currency(value: str, field_name: str) -> str:
-    """Normalize a required string value for currency.
-    Convert it to uppercase and validate it matches the
-    three-letter ISO format.
-    """
+    """Normalize and validate a three-letter currency code."""
     normalized = _normalize_required_string(value, field_name).upper()
     if not CURRENCY_PATTERN.fullmatch(normalized):
         raise ExchangeRateValidationError(

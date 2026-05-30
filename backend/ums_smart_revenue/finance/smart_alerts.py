@@ -18,7 +18,8 @@ _SEVERITY_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
 
 @dataclass(frozen=True)
 class MonthlySmartAlert:
-    """Represents a single monthly smart alert with code, severity, message, source, confidence, and details."""
+    """Represents one monthly smart alert."""
+
     code: str
     severity: str
     message: str
@@ -26,28 +27,22 @@ class MonthlySmartAlert:
     confidence: str
     details: dict[str, object]
 
-"""
-Module for building and serializing smart alert summaries for finance operations.
-Provides utilities to convert smart alert data into API-friendly dictionaries and
-to construct monthly smart alert summaries based on revenue facts, payment matches,
-and reconciliation statuses.
-"""
-
-def to_api(self) -> dict[str, object]:
-    """Convert the smart alert instance into a dictionary suitable for API responses."""
-    return {
-        "code": self.code,
-        "severity": self.severity,
-        "message": self.message,
-        "source": self.source,
-        "confidence": self.confidence,
-        "details": dict(self.details),
-    }
+    def to_api(self) -> dict[str, object]:
+        """Convert the smart alert instance into an API dictionary."""
+        return {
+            "code": self.code,
+            "severity": self.severity,
+            "message": self.message,
+            "source": self.source,
+            "confidence": self.confidence,
+            "details": dict(self.details),
+        }
 
 
 @dataclass(frozen=True)
 class MonthlySmartAlertSummary:
-    """Represents a summary of smart alerts for a specific month, including status, highest severity, and the list of alerts."""
+    """Summary of smart alerts for one finance month."""
+
     month: str
     status: str
     highest_severity: str | None
@@ -78,10 +73,7 @@ def build_monthly_smart_alert_summary(
         DEFAULT_REVENUE_TREND_ANOMALY_THRESHOLD_PERCENT
     ),
 ) -> MonthlySmartAlertSummary:
-    """Generate a MonthlySmartAlertSummary for a specific month using payment match,
-    bank reconciliation results, close status, manual overrides, and revenue facts.
-    Validates thresholds and aggregates alerts accordingly.
-    """
+    """Build a monthly smart alert summary from finance signal inputs."""
     if high_gap_threshold_usd < 0:
         raise ValueError("high_gap_threshold_usd must be non-negative")
     if revenue_trend_anomaly_threshold_percent < 0:
@@ -195,10 +187,6 @@ def build_monthly_smart_alert_summary(
                 source="finance_close",
                 confidence="D_ESTIMATED",
                 details={"close_status": normalized_close_status},
-"""
-Module finance.smart_alerts: Provides utilities to generate smart alerts for revenue
-anomalies, including gaps in payments, changes in revenue trends, and manual overrides.
-"""
             )
         )
 

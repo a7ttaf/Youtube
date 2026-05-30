@@ -37,29 +37,38 @@ class RevenueManualOverrideEntry:
 
         Returns:
             dict[str, object]: A dictionary containing the override's attributes in a serializable form.
+        """
+        return {
+            "id": self.id,
+            "month": self.month,
+            "youtube_channel_id": self.youtube_channel_id,
+            "adjustment_revenue_usd": _decimal_to_api(self.adjustment_revenue_usd),
+            "reason": self.reason,
+            "status": self.status,
+            "created_by": self.created_by,
+            "approved_by": self.approved_by,
+            "approval_reason": self.approval_reason,
+        }
+
+
 class ManualOverrideError(ValueError):
     """Base exception for manual override related errors."""
-    pass
 
 
 class ManualOverrideConflictError(ManualOverrideError):
     """Raised when a manual override conflicts with an existing override."""
-    pass
 
 
 class ManualOverrideLockedMonthError(ManualOverrideError):
     """Raised when attempting a manual override on a locked month."""
-    pass
 
 
 class ManualOverrideNotFoundError(ManualOverrideError):
     """Raised when a specified manual override entry is not found."""
-    pass
 
 
 class ManualOverrideValidationError(ManualOverrideError):
     """Raised when manual override parameters fail validation checks."""
-    pass
 
 
 class SqlAlchemyManualOverrideRepository:

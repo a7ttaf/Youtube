@@ -21,9 +21,7 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 @dataclass(frozen=True)
 class NumberExplanationEntry:
-    """Represents a detailed explanation of a numeric metric for an entity in a
-    given month, including value, formula, components, and warnings."""
-
+    """Explains a monthly metric value, formula, components, and warnings."""
     month: str
     entity_type: str
     entity_id: str
@@ -199,8 +197,7 @@ def _primary_fact(facts: list[RevenueFactEntry]) -> RevenueFactEntry | None:
     """
     Select the primary revenue fact from a list.
 
-    Sorts the provided list of RevenueFactEntry objects by their source priority
-    and returns the first item.
+    Sorts the provided list of RevenueFactEntry objects by their source priority and returns the first item.
     Returns None if the list is empty.
     """
     if not facts:

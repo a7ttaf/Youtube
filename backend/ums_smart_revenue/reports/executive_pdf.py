@@ -40,23 +40,20 @@ _SECTION_SOURCES = {
 
 
 class ExecutivePdfValidationError(ValueError):
-class ExecutivePdfValidationError(Exception):
     """Raised when there is a validation error in generating the executive PDF report."""
-    pass
 
 
 @dataclass(frozen=True)
 class ExecutivePdfSection:
-    """Represents a section of the executive PDF report, including its name, data source, status, and sensitivity."""
+    """Executive PDF section metadata."""
+
     name: str
     source: str
     status: str
     sensitive: bool
 
-    """Module providing utilities for converting report objects into API-friendly dictionaries for executive PDFs."""
-
     def to_api(self) -> dict[str, object]:
-        """Convert the current instance into a dictionary formatted for API consumption, including name, source, status, and sensitivity."""
+        """Convert the section into an API dictionary."""
         return {
             "name": self.name,
             "source": self.source,
@@ -66,7 +63,6 @@ class ExecutivePdfSection:
 
 
 @dataclass(frozen=True)
-"""Module for generating executive PDF reports. Provides functionality to build report objects, serialize to API format, and render PDF bytes."""
 class ExecutivePdfReport:
     """Represents the executive PDF report, aggregating job info, sections, and summary data for generation."""
     export_job: ExportJobEntry
@@ -208,7 +204,7 @@ def _validate_same_month(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> None:
-    """Ensure all provided summaries correspond to the same month, raising an ExecutivePdfValidationError if they differ."""
+    """Ensure all provided summaries use the export month."""
     months = {
         export_job.month,
         net_revenue.month,
@@ -305,7 +301,7 @@ def _ranking_table(report: ExecutivePdfReport, *, ranking_label: str) -> Table:
 
 
 def _channel_ranking_table(report: ExecutivePdfReport) -> Table:
-    """Generate a styled table showing top channels ranked by net revenue, including deductions and confidence scores."""
+    """Generate a styled table of top channels by net revenue."""
     rows = [
         ["Channel", "Net Revenue USD", "Deduction USD", "Confidence"],
         *[
@@ -344,7 +340,7 @@ def _problem_summary(
 def _recommendations(
     report: ExecutivePdfReport, styles: dict[str, ParagraphStyle]
 ) -> Paragraph:
-    """Provide a paragraph with recommendations based on payment matching, bank reconciliation, and smart alert statuses."""
+    """Build recommendations from finance status summaries."""
     if report.payment_match.status != "PAYMENT_MATCHED":
         return Paragraph(
             "Review AdSense payment matching before finance sign-off.",
@@ -401,7 +397,7 @@ def _styled_table(rows: list[list[object]]) -> Table:
 
 
 def _pdf_styles() -> dict[str, ParagraphStyle]:
-    """Define and return a dictionary of ParagraphStyle objects for PDF elements, customizing fonts, sizes, and colors."""
+    """Define paragraph styles for PDF elements."""
     styles = getSampleStyleSheet()
     styles["Title"].fontName = "Helvetica"
     styles["Title"].fontSize = 20
