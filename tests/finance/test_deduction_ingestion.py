@@ -373,10 +373,14 @@ def test_source_filter_reads_only_required_adapters(
             self._session = session
             self._tenant_id = tenant_id
 
-        def _require_month_open(self, month: str) -> None:
+        @staticmethod
+        def _require_month_open(month: str) -> None:
+            """Accept only the expected open month for dry-run validation."""
             assert month == MONTH
 
-        def upsert_components(self, *, month: str, components: list[object]):
+        @staticmethod
+        def upsert_components(*, month: str, components: list[object]) -> None:
+            """Reject writes because this dry-run path must not persist components."""
             raise AssertionError("dry-run source filtering must not upsert")
 
     class _FakePaymentRepository:
@@ -386,7 +390,9 @@ def test_source_filter_reads_only_required_adapters(
             self._session = session
             self._tenant_id = tenant_id
 
-        def list_month_payments(self, *, month: str) -> list[object]:
+        @staticmethod
+        def list_month_payments(*, month: str) -> list[object]:
+            """Record payment reads for source-filter assertions."""
             reads.append("payments")
             if "payments" not in expected_reads:
                 raise AssertionError("payment storage was read for another source")
@@ -399,7 +405,9 @@ def test_source_filter_reads_only_required_adapters(
             self._session = session
             self._tenant_id = tenant_id
 
-        def list_month_entries(self, *, month: str) -> list[object]:
+        @staticmethod
+        def list_month_entries(*, month: str) -> list[object]:
+            """Record bank reconciliation reads for source-filter assertions."""
             reads.append("bank")
             if "bank" not in expected_reads:
                 raise AssertionError("bank storage was read for another source")
@@ -413,6 +421,7 @@ def test_source_filter_reads_only_required_adapters(
 
         @staticmethod
         def list(tenant_id: UUID, *, report_month: str) -> list[object]:
+            """Record source-row reads for source-filter assertions."""
             reads.append("source_rows")
             if "source_rows" not in expected_reads:
                 raise AssertionError("source-row storage was read for another source")

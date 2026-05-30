@@ -76,11 +76,19 @@ class _FakeServiceOK:
 
 def _patch_common(monkeypatch, module, *, session, service, settings=None):
     """Patch common CLI dependencies: settings, session factory, connector, and service."""
+    def _session_factory():
+        """Return the fake session for CLI tests."""
+        return session
+
+    def _build_session_factory(_url):
+        """Return the fake session factory for CLI tests."""
+        return _session_factory
+
     monkeypatch.setattr(
         module, "load_app_settings",
         lambda: settings if settings is not None else _FakeSettings(),
     )
-    monkeypatch.setattr(module, "build_session_factory", lambda _url: (lambda: session))
+    monkeypatch.setattr(module, "build_session_factory", _build_session_factory)
     monkeypatch.setattr(
         module, "build_connector_service_principal", lambda *, tenant_id: object()
     )
