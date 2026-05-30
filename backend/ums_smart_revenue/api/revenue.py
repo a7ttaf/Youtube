@@ -34,6 +34,11 @@ from ums_smart_revenue.finance.bank_reconciliation import (
     SqlAlchemyBankReconciliationRepository,
     build_month_bank_reconciliation_summary,
 )
+from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
+from ums_smart_revenue.finance.deduction_ingestion import (
+    DeductionComponentValidationError,
+    SqlAlchemyDeductionComponentRepository,
+)
 from ums_smart_revenue.finance.explanations import (
     NumberExplanationValidationError,
     SqlAlchemyNumberExplanationRepository,
@@ -49,6 +54,7 @@ from ums_smart_revenue.finance.manual_overrides import (
 )
 from ums_smart_revenue.finance.month_close import SqlAlchemyFinanceMonthCloseRepository
 from ums_smart_revenue.finance.net_revenue import (
+    NET_APPLICABLE_COMPONENT_KINDS,
     NetRevenueValidationError,
     build_month_net_revenue_summary,
     normalize_net_revenue_currency,
@@ -96,12 +102,76 @@ _REVENUE_SOURCE_KINDS_BY_CONNECTOR_KEY = {
 
 
 class AuthorizationCheckResponse(BaseModel):
+    """API response confirming whether a principal holds revenue access for a channel."""
+
     authorized: bool
     channel_id: str
     permission: str
 
 
+class DeductionComponentApiItem(BaseModel):
+    """API-safe deduction-component item without raw source payload."""
+
+    id: str
+    month: str
+    component_kind: str
+    scope_kind: str
+    scope_id: str
+    amount_usd: str
+    amount_native: str | None
+    currency_code: str
+    source_system: str
+    source_table: str
+    source_id: str | None
+    source_key: str | None
+    source_report_id: str | None
+    component_key: str
+
+
+class DeductionComponentScopeGroup(BaseModel):
+    """One full-match scope aggregate plus paginated component rows."""
+
+    scope_kind: str
+    component_count: int
+    total_amount_usd: str
+    components: list[DeductionComponentApiItem]
+
+
+class DeductionComponentsPagination(BaseModel):
+    """Offset pagination metadata for deduction-component reads."""
+
+    limit: int
+    offset: int
+    next_offset: int | None
+    has_more: bool
+
+
+class AuditEventResponse(BaseModel):
+    """Safe audit-event shape returned by finance read endpoints."""
+
+    event_type: str
+    entity_type: str
+    entity_id: str
+    scope_type: str
+    scope_id: str | None
+    reason: str | None
+    sensitive: bool
+
+
+class MonthDeductionComponentsResponse(BaseModel):
+    """Typed monthly deduction-components response."""
+
+    month: str
+    total_count: int
+    returned_count: int
+    scopes: list[DeductionComponentScopeGroup]
+    pagination: DeductionComponentsPagination
+    audit_events: list[AuditEventResponse]
+
+
 class RevenueFactImportRequest(BaseModel):
+    """Validated request payload for importing a connector-sourced monthly revenue fact."""
+
     month: str
     youtube_channel_id: str = Field(min_length=1)
     source_kind: str = Field(min_length=1)
@@ -117,14 +187,23 @@ class RevenueFactImportRequest(BaseModel):
     confidence_score: Decimal = Field(default=Decimal("1"), ge=0, le=1)
     reason: str = Field(min_length=1)
 
-    @field_validator("month", "youtube_channel_id", "source_kind", "connector_key", "reason", mode="before")
+    @field_validator(
+        "month",
+        "youtube_channel_id",
+        "source_kind",
+        "connector_key",
+        "reason",
+        mode="before",
+    )
     @classmethod
     def strip_required_strings(cls, value):
+        """Strip whitespace from required string fields and reject blank values."""
         return _strip_required_string(value)
 
     @field_validator("source_report_id", mode="before")
     @classmethod
     def strip_optional_string(cls, value):
+        """Strip whitespace from optional string fields, returning None for blank input."""
         if value is None:
             return None
         if isinstance(value, str):
@@ -134,6 +213,8 @@ class RevenueFactImportRequest(BaseModel):
 
 
 class ManualOverrideCreateRequest(BaseModel):
+    """Validated request payload for creating a pending manual revenue override."""
+
     month: str
     youtube_channel_id: str = Field(min_length=1)
     adjustment_revenue_usd: Decimal
@@ -142,19 +223,25 @@ class ManualOverrideCreateRequest(BaseModel):
     @field_validator("month", "youtube_channel_id", "reason", mode="before")
     @classmethod
     def strip_required_strings(cls, value):
+        """Strip whitespace from required string fields and reject blank values."""
         return _strip_required_string(value)
 
 
 class ManualOverrideApprovalRequest(BaseModel):
+    """Validated request payload for approving an existing manual revenue override."""
+
     reason: str = Field(min_length=1)
 
     @field_validator("reason", mode="before")
     @classmethod
     def strip_required_strings(cls, value):
+        """Strip whitespace from required string fields and reject blank values."""
         return _strip_required_string(value)
 
 
 class BankReconciliationRecordRequest(BaseModel):
+    """Validated request payload for recording a bank-received reconciliation entry."""
+
     bank_reference: str = Field(min_length=1)
     bank_received_date: date
     bank_received_amount: Decimal = Field(ge=0)
@@ -169,11 +256,13 @@ class BankReconciliationRecordRequest(BaseModel):
     @field_validator("bank_reference", "bank_received_currency", "reason", mode="before")
     @classmethod
     def strip_required_strings(cls, value):
+        """Strip whitespace from required string fields and reject blank values."""
         return _strip_required_string(value)
 
     @field_validator("notes", "source_report_id", mode="before")
     @classmethod
     def strip_optional_strings(cls, value):
+        """Strip whitespace from optional string fields, returning None for blank input."""
         if value is None:
             return None
         if isinstance(value, str):
@@ -183,6 +272,8 @@ class BankReconciliationRecordRequest(BaseModel):
 
 
 class RevenueRecalculationRequest(BaseModel):
+    """Validated request payload for triggering a scoped revenue recalculation preview."""
+
     month: str
     allocation_method: str = Field(min_length=1)
     scope_type: str = Field(default="global", min_length=1)
@@ -201,11 +292,13 @@ class RevenueRecalculationRequest(BaseModel):
     )
     @classmethod
     def strip_required_strings(cls, value):
+        """Strip whitespace from required string fields and reject blank values."""
         return _strip_required_string(value)
 
     @field_validator("scope_id", mode="before")
     @classmethod
     def strip_optional_string(cls, value):
+        """Strip whitespace from the optional scope_id field, returning None for blank input."""
         if value is None:
             return None
         if isinstance(value, str):
@@ -217,52 +310,68 @@ class RevenueRecalculationRequest(BaseModel):
 def current_org_access_index(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> OrgAccessIndex:
+    """Load the org-access index from the current database session for scope resolution."""
     return load_org_access_index_from_session(session)
 
 
 def current_revenue_fact_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyRevenueFactRepository:
+    """Build the revenue-fact repository bound to the current database session."""
     return SqlAlchemyRevenueFactRepository(session)
 
 
 def current_adsense_payment_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyAdSensePaymentRepository:
+    """Build the AdSense payment repository bound to the current database session."""
     return SqlAlchemyAdSensePaymentRepository(session)
 
 
 def current_manual_override_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyManualOverrideRepository:
+    """Build the manual-override repository bound to the current database session."""
     return SqlAlchemyManualOverrideRepository(session)
 
 
 def current_bank_reconciliation_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyBankReconciliationRepository:
+    """Build the bank-reconciliation repository bound to the current database session."""
     return SqlAlchemyBankReconciliationRepository(session)
 
 
 def current_finance_month_close_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyFinanceMonthCloseRepository:
+    """Build the finance-month-close repository bound to the current database session."""
     return SqlAlchemyFinanceMonthCloseRepository(session)
+
+
+def current_deduction_component_repository(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyDeductionComponentRepository:
+    """Build the tenant-aware deduction-component repository for a request."""
+    return SqlAlchemyDeductionComponentRepository(session)
 
 
 def current_number_explanation_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyNumberExplanationRepository:
+    """Build the tenant-aware number-explanation repository for a request."""
     return SqlAlchemyNumberExplanationRepository(session)
 
 
 def current_revenue_audit_sink() -> InMemoryAuditSink:
+    """Return the module-level in-memory audit sink for revenue route events."""
     return _AUDIT_SINK
 
 
 def sql_revenue_audit_sink_from_session(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyAuditSink:
+    """Build a SQLAlchemy-backed audit sink bound to the current database session."""
     return SqlAlchemyAuditSink(session)
 
 
@@ -272,6 +381,7 @@ def check_channel_revenue_authorization(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
 ) -> AuthorizationCheckResponse:
+    """Check whether the caller holds VIEW_REVENUE permission for the given channel."""
     target_scope = AccessScope.channel(channel_id)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     return AuthorizationCheckResponse(
@@ -296,6 +406,7 @@ def request_revenue_recalculation(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
+    """Build a dry-run revenue recalculation preview for the requested scope."""
     target_scope, channel_ids = _revenue_read_scope_to_channel_ids(
         scope_type=payload.scope_type,
         scope_id=payload.scope_id,
@@ -366,9 +477,13 @@ def request_revenue_recalculation(
 def import_revenue_fact(
     payload: RevenueFactImportRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyRevenueFactRepository, Depends(current_revenue_fact_repository)],
+    repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
+    """Validate and persist a connector-sourced monthly fact, then audit it."""
     connector_scope = AccessScope.connector(payload.connector_key)
     _require_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
     try:
@@ -391,7 +506,10 @@ def import_revenue_fact(
     except RevenueFactLockedMonthError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except RevenueFactValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
 
     record = record_audit_event(
         sink=audit_sink,
@@ -421,9 +539,13 @@ def list_channel_month_revenue_facts(
     month: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    repository: Annotated[SqlAlchemyRevenueFactRepository, Depends(current_revenue_fact_repository)],
+    repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
+    """Return all revenue facts recorded for a channel in a given month."""
     target_scope = AccessScope.channel(channel_id)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     try:
@@ -431,7 +553,10 @@ def list_channel_month_revenue_facts(
     except RevenueFactNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except RevenueFactValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
 
     record = record_audit_event(
         sink=audit_sink,
@@ -456,9 +581,13 @@ def get_channel_month_reconciliation_preview(
     month: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    repository: Annotated[SqlAlchemyRevenueFactRepository, Depends(current_revenue_fact_repository)],
+    repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
+    """Build and return the multi-source reconciliation preview for a channel and month."""
     target_scope = AccessScope.channel(channel_id)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
@@ -467,9 +596,16 @@ def get_channel_month_reconciliation_preview(
     except RevenueFactNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except RevenueFactValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
 
-    preview = build_revenue_reconciliation_preview(facts, month=month, youtube_channel_id=channel_id)
+    preview = build_revenue_reconciliation_preview(
+        facts,
+        month=month,
+        youtube_channel_id=channel_id,
+    )
     record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -491,11 +627,15 @@ def list_month_reconciliation_issues(
     month: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    repository: Annotated[SqlAlchemyRevenueFactRepository, Depends(current_revenue_fact_repository)],
+    repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     limit: int = Query(default=100, ge=1, le=100),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, object]:
+    """Return the reconciliation issue queue for the caller's channels."""
     # Reject only when the caller has no relevant grant at all; a caller whose
     # scoped grant currently maps to zero channels (e.g. sector/company with
     # no active mapping) should see an empty queue, not 403.
@@ -504,8 +644,16 @@ def list_month_reconciliation_issues(
     if not _granted_scopes_for_permission(user, Permission.VIEW_CONFIDENCE):
         _raise_missing_permission(Permission.VIEW_CONFIDENCE)
 
-    revenue_channel_ids = _authorized_channel_ids_for_permission(user, Permission.VIEW_REVENUE, org_index)
-    confidence_channel_ids = _authorized_channel_ids_for_permission(user, Permission.VIEW_CONFIDENCE, org_index)
+    revenue_channel_ids = _authorized_channel_ids_for_permission(
+        user,
+        Permission.VIEW_REVENUE,
+        org_index,
+    )
+    confidence_channel_ids = _authorized_channel_ids_for_permission(
+        user,
+        Permission.VIEW_CONFIDENCE,
+        org_index,
+    )
     visible_channel_ids = _intersect_channel_sets(revenue_channel_ids, confidence_channel_ids)
     if visible_channel_ids is not None and not visible_channel_ids:
         record_audit_event(
@@ -547,7 +695,10 @@ def list_month_reconciliation_issues(
             youtube_channel_ids=set(channel_ids_for_page),
         )
     except RevenueFactValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
 
     has_more = len(page_channel_ids) > limit
     queue = build_revenue_reconciliation_issue_queue(facts, month=month)
@@ -563,7 +714,9 @@ def list_month_reconciliation_issues(
             "page_channel_count": len(channel_ids_for_page),
             "page_fact_count": len(facts),
             "has_more": has_more,
-            "scoped_channel_count": len(visible_channel_ids) if visible_channel_ids is not None else None,
+            "scoped_channel_count": (
+                len(visible_channel_ids) if visible_channel_ids is not None else None
+            ),
         },
     )
     response = queue.to_api()
@@ -591,6 +744,7 @@ def get_month_payment_match(
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     currency: Annotated[str, Query(min_length=1)] = "USD",
 ) -> dict[str, object]:
+    """Compare monthly YouTube revenue facts against AdSense payments."""
     revenue_scope = AccessScope.global_scope()
     payment_scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.VIEW_REVENUE, revenue_scope)
@@ -674,6 +828,7 @@ def get_month_smart_alerts(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
+    """Aggregate cross-domain health signals for a month into a prioritized smart-alert summary."""
     global_scope = AccessScope.global_scope()
     month_scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.VIEW_REVENUE, global_scope)
@@ -761,6 +916,126 @@ def get_month_smart_alerts(
     return summary_api
 
 
+# ============================================================================
+# Purpose: Read-only per-month deduction-evidence view, grouped by scope
+#   (CHANNEL/ACCOUNT/PAYMENT). Surfaces the typed components PR-A ingested; never
+#   writes, never triggers ingestion, never returns raw_payload.
+# Database/ORM: Reads deduction_components via SqlAlchemyDeductionComponentRepository.
+# Standards: smart-alerts four-permission auth; audit events match filtered
+#   evidence scopes; month validation -> 422; offset/limit pagination.
+# Blast Radius: Finance read (deduction evidence). No finance mutation, no Neo4j.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/deduction_ingestion.py -> repo.
+#   - File: backend/ums_smart_revenue/finance/deduction_components.py -> to_api().
+# ============================================================================
+@router.get(
+    "/months/{month}/deduction-components",
+    response_model=MonthDeductionComponentsResponse,
+)
+def get_month_deduction_components(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[
+        SqlAlchemyDeductionComponentRepository,
+        Depends(current_deduction_component_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    component_kind: str | None = None,
+    scope_kind: str | None = None,
+    scope_id: Annotated[str | None, Query(min_length=1)] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> MonthDeductionComponentsResponse:
+    """Return one month's deduction evidence grouped by scope for finance review."""
+    global_scope = AccessScope.global_scope()
+    month_scope = AccessScope.finance_month(month)
+    _require_permission(user, Permission.VIEW_REVENUE, global_scope)
+    _require_permission(user, Permission.VIEW_CONFIDENCE, global_scope)
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
+    _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
+    try:
+        page = repository.list_month_components_page(
+            month=month,
+            component_kind=component_kind,
+            scope_kind=scope_kind,
+            scope_id=scope_id,
+            limit=limit,
+            offset=offset,
+        )
+    except DeductionComponentValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for component in page.components:
+        grouped.setdefault(component.scope_kind, []).append(component.to_api())
+    scopes = [
+        {
+            "scope_kind": total.scope_kind,
+            "component_count": total.component_count,
+            "total_amount_usd": _decimal_to_api(total.total_amount_usd),
+            "components": grouped.get(total.scope_kind, []),
+        }
+        for total in page.scope_totals
+    ]
+
+    audit_details = {
+        "month": month,
+        "total_count": page.total_count,
+        "returned_count": len(page.components),
+    }
+    scope_kinds = {total.scope_kind for total in page.scope_totals}
+    audit_events = []
+    revenue_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="monthly_deduction_components",
+        entity_id=month,
+        scope=global_scope,
+        details=audit_details,
+    )
+    audit_events.append(audit_record_to_api(revenue_record))
+    if scope_kinds & {"ACCOUNT", "PAYMENT"}:
+        payment_record = record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.PAYMENT_VIEWED,
+            entity_type="monthly_deduction_components",
+            entity_id=month,
+            scope=month_scope,
+            details=audit_details,
+        )
+        audit_events.append(audit_record_to_api(payment_record))
+    if "PAYMENT" in scope_kinds:
+        bank_record = record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
+            entity_type="monthly_deduction_components",
+            entity_id=month,
+            scope=month_scope,
+            details=audit_details,
+        )
+        audit_events.append(audit_record_to_api(bank_record))
+    has_more = offset + len(page.components) < page.total_count
+    return MonthDeductionComponentsResponse(
+        month=month,
+        total_count=page.total_count,
+        returned_count=len(page.components),
+        scopes=scopes,
+        pagination={
+            "limit": limit,
+            "offset": offset,
+            "next_offset": (offset + limit) if has_more else None,
+            "has_more": has_more,
+        },
+        audit_events=audit_events,
+    )
+
+
 @router.get("/months/{month}/net-revenue")
 def get_month_net_revenue(
     month: str,
@@ -774,11 +1049,16 @@ def get_month_net_revenue(
         SqlAlchemyManualOverrideRepository,
         Depends(current_manual_override_repository),
     ],
+    deduction_component_repository: Annotated[
+        SqlAlchemyDeductionComponentRepository,
+        Depends(current_deduction_component_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     scope_type: Annotated[str, Query(min_length=1)] = "global",
     scope_id: str | None = None,
     currency: Annotated[str, Query(min_length=1)] = "USD",
 ) -> dict[str, object]:
+    """Return the scoped monthly net-revenue summary for an authorized finance viewer."""
     target_scope, channel_ids = _revenue_read_scope_to_channel_ids(
         scope_type=scope_type,
         scope_id=scope_id,
@@ -796,12 +1076,19 @@ def get_month_net_revenue(
             month=month,
             youtube_channel_ids=channel_ids,
         )
+        deduction_components = deduction_component_repository.list_month_components(
+            month=month,
+            youtube_channel_ids=channel_ids,
+            component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
+        )
         summary = build_month_net_revenue_summary(
             month=month,
             facts=facts,
             manual_overrides=overrides,
+            deduction_components=deduction_components,
         )
     except (
+        DeductionComponentValidationError,
         ManualOverrideValidationError,
         NetRevenueValidationError,
         RevenueFactValidationError,
@@ -845,6 +1132,7 @@ def record_month_bank_reconciliation(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
+    """Persist a bank-received reconciliation entry for a month and emit an audit event."""
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.MANAGE_BANK_RECONCILIATION, scope)
     try:
@@ -906,6 +1194,7 @@ def get_month_bank_reconciliation(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
+    """Return the bank-reconciliation summary for a month."""
     scope = AccessScope.finance_month(month)
     _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, scope)
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, scope)
@@ -965,8 +1254,14 @@ def explain_channel_month_revenue_metric(
     month: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    revenue_repository: Annotated[SqlAlchemyRevenueFactRepository, Depends(current_revenue_fact_repository)],
-    override_repository: Annotated[SqlAlchemyManualOverrideRepository, Depends(current_manual_override_repository)],
+    revenue_repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
+    override_repository: Annotated[
+        SqlAlchemyManualOverrideRepository,
+        Depends(current_manual_override_repository),
+    ],
     explanation_repository: Annotated[
         SqlAlchemyNumberExplanationRepository,
         Depends(current_number_explanation_repository),
@@ -974,12 +1269,19 @@ def explain_channel_month_revenue_metric(
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     metric: str = "adjusted_gross_revenue_usd",
 ) -> dict[str, object]:
+    """Generate and persist a channel-month metric explanation."""
     target_scope = AccessScope.channel(channel_id)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
     try:
-        facts = revenue_repository.list_channel_month_facts(month=month, youtube_channel_id=channel_id)
-        overrides = override_repository.list_channel_month_overrides(month=month, youtube_channel_id=channel_id)
+        facts = revenue_repository.list_channel_month_facts(
+            month=month,
+            youtube_channel_id=channel_id,
+        )
+        overrides = override_repository.list_channel_month_overrides(
+            month=month,
+            youtube_channel_id=channel_id,
+        )
         explanation = build_channel_month_revenue_explanation(
             facts=facts,
             manual_overrides=overrides,
@@ -990,8 +1292,15 @@ def explain_channel_month_revenue_metric(
         explanation_repository.record_explanation(explanation)
     except RevenueFactNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
-    except (ManualOverrideValidationError, NumberExplanationValidationError, RevenueFactValidationError) as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    except (
+        ManualOverrideValidationError,
+        NumberExplanationValidationError,
+        RevenueFactValidationError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
 
     record = record_audit_event(
         sink=audit_sink,
@@ -1012,9 +1321,13 @@ def create_manual_override(
     payload: ManualOverrideCreateRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    repository: Annotated[SqlAlchemyManualOverrideRepository, Depends(current_manual_override_repository)],
+    repository: Annotated[
+        SqlAlchemyManualOverrideRepository,
+        Depends(current_manual_override_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
+    """Create a pending manual revenue adjustment for a channel-month and emit an audit event."""
     target_scope = AccessScope.channel(payload.youtube_channel_id)
     _require_permission(user, Permission.CREATE_MANUAL_OVERRIDE, target_scope, org_index)
     try:
@@ -1028,7 +1341,10 @@ def create_manual_override(
     except ManualOverrideLockedMonthError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ManualOverrideValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
 
     record = record_audit_event(
         sink=audit_sink,
@@ -1053,22 +1369,42 @@ def approve_manual_override(
     payload: ManualOverrideApprovalRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    repository: Annotated[SqlAlchemyManualOverrideRepository, Depends(current_manual_override_repository)],
+    repository: Annotated[
+        SqlAlchemyManualOverrideRepository,
+        Depends(current_manual_override_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
-    if _authorized_channel_ids_for_permission(user, Permission.APPROVE_MANUAL_OVERRIDE, org_index) == set():
+    """Approve a pending manual revenue override after scoped auth."""
+    if (
+        _authorized_channel_ids_for_permission(
+            user,
+            Permission.APPROVE_MANUAL_OVERRIDE,
+            org_index,
+        )
+        == set()
+    ):
         _raise_missing_permission(Permission.APPROVE_MANUAL_OVERRIDE)
 
     try:
         target_channel_id = repository.get_override_channel_id(manual_override_id)
     except ManualOverrideValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
     if target_channel_id is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Manual override not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Manual override not found",
+        )
 
     target_scope = AccessScope.channel(target_channel_id)
     if not has_permission(user, Permission.APPROVE_MANUAL_OVERRIDE, target_scope, org_index):
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Manual override not found")
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Manual override not found",
+        )
     try:
         override = repository.approve_override(
             override_id=manual_override_id,
@@ -1082,7 +1418,10 @@ def approve_manual_override(
     except ManualOverrideLockedMonthError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ManualOverrideValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
 
     record = record_audit_event(
         sink=audit_sink,
@@ -1107,19 +1446,35 @@ def get_channel_month_revenue_summary(
     month: str,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
-    revenue_repository: Annotated[SqlAlchemyRevenueFactRepository, Depends(current_revenue_fact_repository)],
-    override_repository: Annotated[SqlAlchemyManualOverrideRepository, Depends(current_manual_override_repository)],
+    revenue_repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
+    override_repository: Annotated[
+        SqlAlchemyManualOverrideRepository,
+        Depends(current_manual_override_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
+    """Return the adjusted-revenue summary for a channel and month, including manual overrides."""
     target_scope = AccessScope.channel(channel_id)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     try:
-        facts = revenue_repository.list_channel_month_facts(month=month, youtube_channel_id=channel_id)
-        overrides = override_repository.list_channel_month_overrides(month=month, youtube_channel_id=channel_id)
+        facts = revenue_repository.list_channel_month_facts(
+            month=month,
+            youtube_channel_id=channel_id,
+        )
+        overrides = override_repository.list_channel_month_overrides(
+            month=month,
+            youtube_channel_id=channel_id,
+        )
     except RevenueFactNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except (ManualOverrideValidationError, RevenueFactValidationError) as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
 
     summary = build_adjusted_revenue_summary(
         facts=facts,
@@ -1149,6 +1504,7 @@ def _require_permission(
     scope: AccessScope,
     org_index: OrgAccessIndex | None = None,
 ) -> None:
+    """Raise HTTP 403 if the principal does not hold the given permission for the given scope."""
     if not has_permission(user, permission, scope, org_index):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -1157,6 +1513,7 @@ def _require_permission(
 
 
 def _raise_missing_permission(permission: Permission) -> None:
+    """Unconditionally raise HTTP 403 for a missing permission without revealing caller details."""
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail=f"Missing permission: {permission.value}",
@@ -1168,6 +1525,7 @@ def _authorized_channel_ids_for_permission(
     permission: Permission,
     org_index: OrgAccessIndex,
 ) -> set[str] | None:
+    """Resolve permitted channel IDs for a permission, or None for global."""
     if user.disabled:
         return set()
 
@@ -1179,16 +1537,24 @@ def _authorized_channel_ids_for_permission(
             channel_ids.add(scope.id)
         elif scope.type == ScopeType.COMPANY and scope.id is not None:
             channel_ids.update(
-                channel_id for channel_id, company_id in org_index.channel_company.items() if company_id == scope.id
+                channel_id
+                for channel_id, company_id in org_index.channel_company.items()
+                if company_id == scope.id
             )
         elif scope.type == ScopeType.SECTOR and scope.id is not None:
             channel_ids.update(
-                channel_id for channel_id, sector_id in org_index.channel_sector.items() if sector_id == scope.id
+                channel_id
+                for channel_id, sector_id in org_index.channel_sector.items()
+                if sector_id == scope.id
             )
     return channel_ids
 
 
-def _granted_scopes_for_permission(user: UserPrincipal, permission: Permission) -> tuple[AccessScope, ...]:
+def _granted_scopes_for_permission(
+    user: UserPrincipal,
+    permission: Permission,
+) -> tuple[AccessScope, ...]:
+    """Collect all active direct or role scopes granting a permission."""
     scopes: list[AccessScope] = []
     for grant in user.direct_permissions:
         if grant.active and grant.permission == permission:
@@ -1200,6 +1566,7 @@ def _granted_scopes_for_permission(user: UserPrincipal, permission: Permission) 
 
 
 def _intersect_channel_sets(left: set[str] | None, right: set[str] | None) -> set[str] | None:
+    """Intersect two nullable channel-ID sets, treating None as the universe (no restriction)."""
     if left is None:
         return right
     if right is None:
@@ -1208,6 +1575,7 @@ def _intersect_channel_sets(left: set[str] | None, right: set[str] | None) -> se
 
 
 def _previous_month(month: str) -> str:
+    """Return the YYYY-MM string for the calendar month immediately preceding the given month."""
     if not MONTH_VALUE_PATTERN.fullmatch(month):
         raise RevenueFactValidationError(
             "month must use YYYY-MM with a calendar month from 01 to 12"
@@ -1239,6 +1607,7 @@ def _revenue_read_scope_to_channel_ids(
     scope_id: str | None,
     org_index: OrgAccessIndex,
 ) -> tuple[AccessScope, set[str] | None]:
+    """Translate a revenue read scope into an AccessScope and channel filter."""
     normalized_scope_type = scope_type.strip()
     normalized_scope_id = (
         scope_id.strip() if isinstance(scope_id, str) else scope_id
@@ -1285,6 +1654,7 @@ def _revenue_read_scope_to_channel_ids(
 
 
 def audit_record_to_api(record: AuditRecord) -> dict[str, object]:
+    """Serialize an AuditRecord to the safe API-facing dictionary shape."""
     return {
         "event_type": record.event_type,
         "entity_type": record.entity_type,
@@ -1297,6 +1667,7 @@ def audit_record_to_api(record: AuditRecord) -> dict[str, object]:
 
 
 def _with_audit_event(fact: RevenueFactEntry, record: AuditRecord) -> dict[str, object]:
+    """Attach the serialized audit event to a revenue-fact API response dictionary."""
     response = fact.to_api()
     response["audit_event"] = audit_record_to_api(record)
     return response
@@ -1306,12 +1677,14 @@ def _manual_override_with_audit_event(
     override: RevenueManualOverrideEntry,
     record: AuditRecord,
 ) -> dict[str, object]:
+    """Attach the serialized audit event to a manual-override API response dictionary."""
     response = override.to_api()
     response["audit_event"] = audit_record_to_api(record)
     return response
 
 
 def _strip_required_string(value):
+    """Strip whitespace from a string value, raising ValueError if the result is empty."""
     if isinstance(value, str):
         stripped = value.strip()
         if not stripped:
@@ -1321,10 +1694,13 @@ def _strip_required_string(value):
 
 
 def _validate_connector_source_kind(connector_key: str, source_kind: str) -> str:
+    """Validate and return the normalized source_kind value allowed for the given connector_key."""
     try:
         normalized_source_kind = RevenueFactSourceKind(source_kind).value
     except ValueError as exc:
-        raise RevenueFactValidationError(f"Unknown revenue fact source_kind: {source_kind}") from exc
+        raise RevenueFactValidationError(
+            f"Unknown revenue fact source_kind: {source_kind}"
+        ) from exc
 
     allowed_source_kinds = _REVENUE_SOURCE_KINDS_BY_CONNECTOR_KEY.get(connector_key)
     if allowed_source_kinds is None:

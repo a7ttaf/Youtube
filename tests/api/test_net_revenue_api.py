@@ -6,8 +6,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api import revenue as revenue_api
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.finance_models import (
+    DeductionComponentORM,
     FinanceBase,
     MonthlyChannelRevenueFactORM,
     RevenueManualOverrideORM,
@@ -28,6 +30,7 @@ def auth_headers(
     scope_type: str = "global",
     scope_id: str | None = None,
 ) -> dict[str, str]:
+    """Build trusted-gateway auth headers for the given role and scope."""
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "net-revenue@example.com",
@@ -41,10 +44,12 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """Return a unique SQLite URL under pytest's temp path."""
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
+    """Seed org, security, and finance rows for net-revenue test isolation."""
     engine = create_engine(database_url)
     OrgBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
@@ -133,6 +138,7 @@ def seed_database(database_url: str) -> None:
 
 
 def test_finance_viewer_reads_month_net_revenue_summary_with_audit(tmp_path):
+    """Finance viewer reads the company-scoped monthly net-revenue summary and emits a REVENUE_VIEWED audit event."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -159,6 +165,7 @@ def test_finance_viewer_reads_month_net_revenue_summary_with_audit(tmp_path):
 
 
 def test_assistant_cannot_read_month_net_revenue_summary_by_default(tmp_path):
+    """assistant_analyst lacks VIEW_REVENUE and is rejected with HTTP 403 on the net-revenue endpoint."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -173,6 +180,7 @@ def test_assistant_cannot_read_month_net_revenue_summary_by_default(tmp_path):
 
 
 def test_month_net_revenue_summary_rejects_non_usd_until_fx_support(tmp_path):
+    """Requesting a non-USD currency is rejected with HTTP 422 until exchange-rate support is implemented."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -186,3 +194,87 @@ def test_month_net_revenue_summary_rejects_non_usd_until_fx_support(tmp_path):
     assert response.json()["detail"] == (
         "currency must be USD until exchange-rate support is implemented"
     )
+
+
+def test_net_revenue_endpoint_derives_component_net_for_missing_net_channel(tmp_path):
+    """Net-revenue endpoint derives COMPONENT_DERIVED net via youtube_reporting component when source net is absent."""
+    # channel-tv-b has 2026-03 fact with net_revenue_usd=None, gross=200.00,
+    # source_kind=YOUTUBE_CMS. A youtube_reporting component (maps to YOUTUBE_CMS)
+    # of 20.00 must derive net=180.00 and flip the channel to COMPONENT_DERIVED.
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            DeductionComponentORM(
+                id=uuid4(),
+                month="2026-03",
+                component_kind="DEDUCTION",
+                scope_kind="CHANNEL",
+                scope_id="channel-tv-b",
+                amount_usd=Decimal("20.00"),
+                amount_native=None,
+                currency_code="USD",
+                source_system="youtube_reporting",
+                source_table="google_revenue_source_rows",
+                source_id=None,
+                source_key="k-b",
+                source_report_id=None,
+                raw_payload={"k": "v"},
+                component_key="srcrow:youtube_reporting:k-b",
+            )
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+    response = client.get(
+        f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
+        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    channels_by_id = {c["youtube_channel_id"]: c for c in body["channels"]}
+    assert "channel-tv-b" in channels_by_id
+    channel_b = channels_by_id["channel-tv-b"]
+    assert channel_b["status"] == "COMPONENT_DERIVED"
+    assert channel_b["net_revenue_usd"] == "180"   # 200 - 20, trimmed
+    assert channel_b["deduction_amount_usd"] == "20"
+    assert body["missing_net_source_count"] == 0   # b is now derived, not missing
+    assert body["audit_event"]["event_type"] == "REVENUE_VIEWED"
+
+
+def test_net_revenue_endpoint_requests_only_net_applicable_components(tmp_path):
+    """Net-revenue route asks the repository for only TAX/DEDUCTION component kinds."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+
+    class RecordingDeductionComponentRepository:
+        """Capture the component_kinds argument passed by the route."""
+
+        def __init__(self):
+            self.component_kinds = None
+
+        def list_month_components(
+            self,
+            *,
+            month,
+            youtube_channel_ids=None,
+            component_kinds=None,
+        ):
+            """Record route-supplied component filters and return no deduction rows."""
+            self.component_kinds = component_kinds
+            return []
+
+    repository = RecordingDeductionComponentRepository()
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[
+        revenue_api.current_deduction_component_repository
+    ] = lambda: repository
+    client = TestClient(app)
+
+    response = client.get(
+        f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
+        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
+    )
+
+    assert response.status_code == 200
+    assert set(repository.component_kinds) == {"TAX", "DEDUCTION"}
