@@ -29,6 +29,7 @@ def auth_headers(
     scope_type: str = "global",
     scope_id: str | None = None,
 ) -> dict[str, str]:
+    """Build trusted-gateway auth headers for the given role and scope."""
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "net-revenue@example.com",
@@ -42,10 +43,12 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """Return a unique SQLite URL under pytest's temp path."""
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
+    """Seed org, security, and finance rows for net-revenue test isolation."""
     engine = create_engine(database_url)
     OrgBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
