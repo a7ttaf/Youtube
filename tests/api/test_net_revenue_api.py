@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.finance_models import (
+    DeductionComponentORM,
     FinanceBase,
     MonthlyChannelRevenueFactORM,
     RevenueManualOverrideORM,
@@ -186,3 +187,46 @@ def test_month_net_revenue_summary_rejects_non_usd_until_fx_support(tmp_path):
     assert response.json()["detail"] == (
         "currency must be USD until exchange-rate support is implemented"
     )
+
+
+def test_net_revenue_endpoint_derives_component_net_for_missing_net_channel(tmp_path):
+    # channel-tv-b has 2026-03 fact with net_revenue_usd=None, gross=200.00,
+    # source_kind=YOUTUBE_CMS. A youtube_reporting component (maps to YOUTUBE_CMS)
+    # of 20.00 must derive net=180.00 and flip the channel to COMPONENT_DERIVED.
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            DeductionComponentORM(
+                id=uuid4(),
+                month="2026-03",
+                component_kind="DEDUCTION",
+                scope_kind="CHANNEL",
+                scope_id="channel-tv-b",
+                amount_usd=Decimal("20.00"),
+                amount_native=None,
+                currency_code="USD",
+                source_system="youtube_reporting",
+                source_table="google_revenue_source_rows",
+                source_id=None,
+                source_key="k-b",
+                source_report_id=None,
+                raw_payload={"k": "v"},
+                component_key="srcrow:youtube_reporting:k-b",
+            )
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+    response = client.get(
+        f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
+        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    channel_b = next(c for c in body["channels"] if c["youtube_channel_id"] == "channel-tv-b")
+    assert channel_b["status"] == "COMPONENT_DERIVED"
+    assert channel_b["net_revenue_usd"] == "180"   # 200 - 20, trimmed
+    assert channel_b["deduction_amount_usd"] == "20"
+    assert body["missing_net_source_count"] == 0   # b is now derived, not missing
+    assert body["audit_event"]["event_type"] == "REVENUE_VIEWED"

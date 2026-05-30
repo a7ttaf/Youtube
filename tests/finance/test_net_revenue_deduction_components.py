@@ -31,11 +31,11 @@ def fact(*, source_kind="ADSENSE", gross="1000.00", net=None):
 
 
 def component(*, kind="DEDUCTION", scope_kind="CHANNEL", scope_id=CHANNEL,
-              amount="120.00", source_system="adsense_management"):
+              amount="120.00", source_system="adsense_management", month=MONTH):
     """Build a persisted DeductionComponent read-model row for tests."""
     return DeductionComponent(
         id=f"dc-{kind}-{scope_id}-{amount}",
-        month=MONTH,
+        month=month,
         component_kind=kind,
         scope_kind=scope_kind,
         scope_id=scope_id,
@@ -152,3 +152,25 @@ def test_over_deduction_yields_negative_net_without_clamp():
     assert summary.status == "COMPONENT_DERIVED"
     assert summary.net_revenue_usd == Decimal("-50.00")  # 100 - 150
     assert summary.deduction_amount_usd == Decimal("150.00")
+
+
+def test_channel_builder_excludes_other_month_components():
+    # A component for a different month must NOT derive net for this month's fact.
+    summary = _channel(
+        facts=[fact(net=None, gross="1000.00")],
+        components=[component(kind="DEDUCTION", amount="120.00", month="2026-03")],
+    )
+    assert summary.status == "NET_REVENUE_SOURCE_MISSING"
+    assert summary.net_revenue_usd is None
+
+
+def test_month_builder_excludes_other_month_components():
+    summary = _mod().build_month_net_revenue_summary(
+        month=MONTH,
+        facts=[fact(net=None, gross="1000.00")],
+        manual_overrides=[],
+        deduction_components=[component(kind="DEDUCTION", amount="90.00", month="2026-03")],
+    )
+    channel = summary.channels[0]
+    assert channel.status == "NET_REVENUE_SOURCE_MISSING"
+    assert summary.missing_net_source_count == 1

@@ -187,7 +187,8 @@ def build_channel_net_revenue_summary(
         applicable = [
             component
             for component in deduction_components
-            if component.scope_kind == "CHANNEL"
+            if component.month == resolved_month
+            and component.scope_kind == "CHANNEL"
             and component.scope_id == resolved_channel_id
             and component.component_kind in _NET_APPLICABLE_COMPONENT_KINDS
             and SOURCE_SYSTEM_TO_SOURCE_KIND.get(component.source_system)
@@ -297,7 +298,7 @@ def build_month_net_revenue_summary(
 
     components_by_channel: dict[str, list[DeductionComponent]] = defaultdict(list)
     for component in deduction_components:
-        if component.scope_kind == "CHANNEL":
+        if component.month == month and component.scope_kind == "CHANNEL":
             components_by_channel[component.scope_id].append(component)
 
     channel_ids = sorted(set(facts_by_channel) | set(overrides_by_channel))
