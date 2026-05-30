@@ -128,7 +128,6 @@ def normalize_net_revenue_currency(currency: str) -> str:
     return normalized
 
 
-# skipcq: PY-R1000
 def build_channel_net_revenue_summary(
     *,
     facts: Iterable[RevenueFactEntry],
@@ -286,7 +285,6 @@ def build_channel_net_revenue_summary(
     )
 
 
-# skipcq: PY-R1000
 def build_month_net_revenue_summary(
     *,
     month: str,
