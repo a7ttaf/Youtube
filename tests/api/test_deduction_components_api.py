@@ -188,6 +188,24 @@ def test_pagination_limit_and_offset(tmp_path):
     assert body["total_count"] == 3
     returned = sum(len(g["components"]) for g in body["scopes"])
     assert returned == 1
+    # First page of 3 with limit 1 -> more remain; next_offset advances.
+    assert body["pagination"] == {
+        "limit": 1,
+        "offset": 0,
+        "next_offset": 1,
+        "has_more": True,
+    }
+    # Last page: offset past the final row -> no more, next_offset is None.
+    last = client.get(
+        f"/revenue/months/{MONTH}/deduction-components?limit=1&offset=2",
+        headers=auth_headers("finance_viewer", "global"),
+    ).json()
+    assert last["pagination"] == {
+        "limit": 1,
+        "offset": 2,
+        "next_offset": None,
+        "has_more": False,
+    }
 
 
 def test_malformed_month_returns_422(tmp_path):

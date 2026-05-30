@@ -108,3 +108,21 @@ def test_page_malformed_month_raises(tmp_path):
         repo = SqlAlchemyDeductionComponentRepository(session)
         with pytest.raises(DeductionComponentValidationError):
             repo.list_month_components_page(month="2026-13", limit=100, offset=0)
+
+
+def test_page_rejects_non_positive_limit(tmp_path):
+    """A limit below 1 fails closed with DeductionComponentValidationError."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyDeductionComponentRepository(session)
+        with pytest.raises(DeductionComponentValidationError, match="limit must be >= 1"):
+            repo.list_month_components_page(month=MONTH, limit=0, offset=0)
+
+
+def test_page_rejects_negative_offset(tmp_path):
+    """A negative offset fails closed with DeductionComponentValidationError."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyDeductionComponentRepository(session)
+        with pytest.raises(DeductionComponentValidationError, match="offset must be >= 0"):
+            repo.list_month_components_page(month=MONTH, limit=10, offset=-1)
