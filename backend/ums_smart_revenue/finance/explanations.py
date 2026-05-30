@@ -35,13 +35,7 @@ class NumberExplanationEntry:
     warnings: list[dict[str, object]]
 
     def to_api(self) -> dict[str, object]:
-        """
-        Convert the instance attributes into a dictionary formatted for API
-        consumption.
-
-        Returns:
-            dict[str, object]: A mapping of the object's data ready for API usage.
-        """
+        """Convert the explanation entry into an API dictionary."""
         return {
             "month": self.month,
             "entity_type": self.entity_type,
@@ -69,9 +63,7 @@ class NumberExplanationValidationError(NumberExplanationError):
 
 
 class SqlAlchemyNumberExplanationRepository:
-    """Repository for persisting and retrieving NumberExplanationEntry objects
-    using SQLAlchemy.
-    """
+    """Repository for persisting number explanation entries."""
 
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind number explanation upserts to an explicit or request tenant."""
@@ -81,9 +73,7 @@ class SqlAlchemyNumberExplanationRepository:
     def record_explanation(
         self, explanation: NumberExplanationEntry
     ) -> NumberExplanationEntry:
-        """Record or update a NumberExplanationEntry in the database and
-        return the provided explanation entry.
-        """
+        """Record or update a number explanation entry."""
         row = self._session.scalars(
             select(NumberExplanationORM).where(
                 NumberExplanationORM.tenant_id == self._tenant_id,
@@ -125,9 +115,7 @@ def build_channel_month_revenue_explanation(
     youtube_channel_id: str,
     metric: str,
 ) -> NumberExplanationEntry:
-    """Build a detailed revenue explanation for a YouTube channel for a specific month by combining
-    revenue facts and manual overrides, validating that the metric is adjusted gross revenue.
-    """
+    """Build an adjusted-gross-revenue explanation for one channel month."""
     if metric != ADJUSTED_GROSS_REVENUE_METRIC:
         raise NumberExplanationValidationError(
             f"Unsupported explanation metric: {metric}"
@@ -198,13 +186,7 @@ def build_channel_month_revenue_explanation(
 
 
 def _primary_fact(facts: list[RevenueFactEntry]) -> RevenueFactEntry | None:
-    """
-    Select the primary revenue fact from a list.
-
-    Sorts the provided list of RevenueFactEntry objects by their source priority
-    and returns the first item.
-    Returns None if the list is empty.
-    """
+    """Select the highest-priority revenue fact, if one exists."""
     if not facts:
         return None
     return sorted(
@@ -216,13 +198,7 @@ def _primary_fact(facts: list[RevenueFactEntry]) -> RevenueFactEntry | None:
 def _confidence(
     primary_fact: RevenueFactEntry | None, warnings: list[dict[str, object]]
 ) -> dict[str, object]:
-    """
-    Compute confidence metrics for a revenue fact.
-
-    Calculates the confidence score for the given primary_fact, applies a
-    maximum cap if warnings are present, determines a confidence label (HIGH,
-    MEDIUM, or LOW), and returns the formatted result.
-    """
+    """Compute confidence metadata for a revenue fact."""
     score = primary_fact.confidence_score if primary_fact else Decimal("0")
     if warnings and score > Decimal("0.9000"):
         score = Decimal("0.9000")

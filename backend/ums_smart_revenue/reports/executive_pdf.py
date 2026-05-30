@@ -119,28 +119,28 @@ def build_executive_pdf_report(
         smart_alerts=smart_alerts,
     )
     if export_job.currency != "USD":
-    raise ExecutivePdfValidationError("executive PDF report requires USD currency")
-if payment_match.currency != "USD" or bank_reconciliation.currency != "USD":
-    raise ExecutivePdfValidationError(
-        "executive PDF report requires USD source summaries"
-    )
-
-return ExecutivePdfReport(
-    export_job=export_job,
-    sections=tuple(
-        ExecutivePdfSection(
-            name=name,
-            source=_SECTION_SOURCES[name],
-            status="READY",
-            sensitive=True,
+        raise ExecutivePdfValidationError("executive PDF report requires USD currency")
+    if payment_match.currency != "USD" or bank_reconciliation.currency != "USD":
+        raise ExecutivePdfValidationError(
+            "executive PDF report requires USD source summaries"
         )
-        for name in EXECUTIVE_PDF_SECTION_NAMES
-    ),
-    net_revenue=net_revenue,
-    payment_match=payment_match,
-    bank_reconciliation=bank_reconciliation,
-    smart_alerts=smart_alerts,
-)
+
+    return ExecutivePdfReport(
+        export_job=export_job,
+        sections=tuple(
+            ExecutivePdfSection(
+                name=name,
+                source=_SECTION_SOURCES[name],
+                status="READY",
+                sensitive=True,
+            )
+            for name in EXECUTIVE_PDF_SECTION_NAMES
+        ),
+        net_revenue=net_revenue,
+        payment_match=payment_match,
+        bank_reconciliation=bank_reconciliation,
+        smart_alerts=smart_alerts,
+    )
 
 
 def build_executive_pdf_bytes(report: ExecutivePdfReport) -> bytes:

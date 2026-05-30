@@ -42,10 +42,7 @@ class AuditEventType(StrEnum):
 
 @dataclass(frozen=True)
 class AuditEventDefinition:
-    """
-    Defines an audit event configuration, specifying its type,
-    whether a reason is required, and associated permission.
-    """
+    """Define audit event type, reason, and permission requirements."""
 
     event_type: AuditEventType
     reason_required: bool = False

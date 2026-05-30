@@ -20,11 +20,7 @@ class PaymentMatchValidationError(ValueError):
 
 @dataclass(frozen=True)
 class MonthlyPaymentMatchSummary:
-    """Represents a summary of payment matching for a month, including totals,
-"""This module provides functionality to filter revenue facts and AdSense payment entries by month and currency, and build a reconciliation summary for a given month."""
-
-    counts, and reconciliation issues.
-    """
+    """Summarize monthly payment matching totals, counts, and issues."""
 
     month: str
     currency: str
@@ -43,7 +39,28 @@ class MonthlyPaymentMatchSummary:
 
     def to_api(self) -> dict[str, object]:
         """Convert the summary into a dictionary suitable for API communication."""
+        # FIX: Preserve the full payment-match API payload; a docstring refactor
+        # previously reduced this response to only reconciliation issues.
         return {
+            "month": self.month,
+            "currency": self.currency,
+            "status": self.status,
+            "youtube_revenue_total_usd": _decimal_to_api(
+                self.youtube_revenue_total_usd
+            ),
+            "adsense_paid_amount": _decimal_to_api(self.adsense_paid_amount),
+            "payment_gap_usd": _decimal_to_api(self.payment_gap_usd),
+            "youtube_source_channel_count": self.youtube_source_channel_count,
+            "missing_youtube_source_channel_count": (
+                self.missing_youtube_source_channel_count
+            ),
+            "payment_count": self.payment_count,
+            "paid_payment_count": self.paid_payment_count,
+            "non_paid_payment_count": self.non_paid_payment_count,
+            "unsupported_payment_currency_count": (
+                self.unsupported_payment_currency_count
+            ),
+            "tolerance_usd": _decimal_to_api(self.tolerance_usd),
             "issues": [issue.to_api() for issue in self.issues],
         }
 

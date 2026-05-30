@@ -54,8 +54,7 @@ class BankReconciliationEntry:
     recorded_by: str
 
     def to_api(self) -> dict[str, object]:
-        """Convert the bank reconciliation record to a JSON-serializable
-        dictionary for API responses."""
+        """Convert the bank reconciliation record into an API dictionary."""
         return {
             "id": self.id,
             "month": self.month,
@@ -74,8 +73,7 @@ class BankReconciliationEntry:
 
 @dataclass(frozen=True)
 class MonthBankReconciliationSummary:
-    """Data class summarizing bank reconciliation data for a specific
-    month, including totals and issues."""
+    """Summarize one month of bank reconciliation totals and issues."""
 
     month: str
     currency: str
@@ -224,54 +222,54 @@ class SqlAlchemyBankReconciliationRepository:
             .order_by(
                 BankReconciliationEntryORM.bank_received_date.desc(),
                 BankReconciliationEntryORM.bank_reference,
+            )
+        ).all()
+        return [self._to_entry(row) for row in rows]
+
+    def _require_month_open(self, month: str) -> None:
+        """Ensure that the specified finance month is open for reconciliation.
+
+        Args:
+            month (str): The month in YYYY-MM format to check.
+
+        Raises:
+            BankReconciliationLockedMonthError: If the finance month is locked.
+        """
+        close = get_or_create_month_close_row(
+            self._session,
+            month,
+            tenant_id=self._tenant_id,
+            for_update=True,
         )
-    ).all()
-    return [self._to_entry(row) for row in rows]
+        if close.status == "LOCKED":
+            raise BankReconciliationLockedMonthError(
+                "Finance month is locked for bank reconciliation"
+            )
 
-def _require_month_open(self, month: str) -> None:
-    """Ensure that the specified finance month is open for reconciliation.
+    @staticmethod
+    def _to_entry(row: BankReconciliationEntryORM) -> BankReconciliationEntry:
+        """Convert a BankReconciliationEntryORM row to a domain entry object.
 
-    Args:
-        month (str): The month in YYYY-MM format to check.
+        Args:
+            row (BankReconciliationEntryORM): The ORM row to convert.
 
-    Raises:
-        BankReconciliationLockedMonthError: If the finance month is locked.
-    """
-    close = get_or_create_month_close_row(
-        self._session,
-        month,
-        tenant_id=self._tenant_id,
-        for_update=True,
-    )
-    if close.status == "LOCKED":
-        raise BankReconciliationLockedMonthError(
-            "Finance month is locked for bank reconciliation"
+        Returns:
+            BankReconciliationEntry: The domain representation of the bank reconciliation entry.
+        """
+        return BankReconciliationEntry(
+            id=str(row.id),
+            month=row.month,
+            bank_reference=row.bank_reference,
+            bank_received_date=row.bank_received_date,
+            bank_received_amount=row.bank_received_amount,
+            bank_received_currency=row.bank_received_currency,
+            bank_received_amount_usd=row.bank_received_amount_usd,
+            transfer_fee_usd=row.transfer_fee_usd,
+            fx_difference_usd=row.fx_difference_usd,
+            notes=row.notes,
+            source_report_id=row.source_report_id,
+            recorded_by=str(row.recorded_by),
         )
-
-@staticmethod
-def _to_entry(row: BankReconciliationEntryORM) -> BankReconciliationEntry:
-    """Convert a BankReconciliationEntryORM row to a domain entry object.
-
-    Args:
-        row (BankReconciliationEntryORM): The ORM row to convert.
-
-    Returns:
-        BankReconciliationEntry: The domain representation of the bank reconciliation entry.
-    """
-    return BankReconciliationEntry(
-        id=str(row.id),
-        month=row.month,
-        bank_reference=row.bank_reference,
-        bank_received_date=row.bank_received_date,
-        bank_received_amount=row.bank_received_amount,
-        bank_received_currency=row.bank_received_currency,
-        bank_received_amount_usd=row.bank_received_amount_usd,
-        transfer_fee_usd=row.transfer_fee_usd,
-        fx_difference_usd=row.fx_difference_usd,
-        notes=row.notes,
-        source_report_id=row.source_report_id,
-        recorded_by=str(row.recorded_by),
-    )
 
 
 def _filter_by_month(items, month):
@@ -447,10 +445,7 @@ def build_month_bank_reconciliation_summary(
 
 
 def _validate_month(month: str) -> None:
-    """
-    Validate that the provided month string follows YYYY-MM format and
-    represents a valid calendar month from 01 to 12.
-    """
+    """Validate a YYYY-MM value with a real 01-12 calendar month."""
     if not MONTH_PATTERN.fullmatch(month):
         raise BankReconciliationValidationError(
             "month must use YYYY-MM with a calendar month from 01 to 12"
@@ -458,9 +453,7 @@ def _validate_month(month: str) -> None:
 
 
 def _normalize_currency(value: str) -> str:
-    """
-    Normalize and validate a required currency code string to a three-letter uppercase ISO code.
-    """
+    """Normalize and validate a required three-letter currency code."""
     normalized = _normalize_required_string(value, "bank_received_currency").upper()
     if len(normalized) != 3 or not normalized.isalpha():
         raise BankReconciliationValidationError(
@@ -470,10 +463,7 @@ def _normalize_currency(value: str) -> str:
 
 
 def _normalize_required_string(value: str, field_name: str) -> str:
-    """
-    Trim whitespace from a required string field and ensure it is not blank;
-    raise an error if empty.
-    """
+    """Trim and validate a required nonblank string field."""
     normalized = value.strip()
     if not normalized:
         raise BankReconciliationValidationError(f"{field_name} must not be blank")
@@ -481,10 +471,7 @@ def _normalize_required_string(value: str, field_name: str) -> str:
 
 
 def _normalize_optional_string(value: str | None) -> str | None:
-    """
-    Trim whitespace from an optional string field and return None if
-    resulting string is empty or input is None.
-    """
+    """Trim an optional string and collapse blanks to None."""
     if value is None:
         return None
     normalized = value.strip()
@@ -492,24 +479,20 @@ def _normalize_optional_string(value: str | None) -> str | None:
 
 
 def _validate_nonnegative_money(value: Decimal, field_name: str) -> None:
-    """
-    Ensure a monetary Decimal value is finite and not negative; raise an error if invalid.
-    """
+    """Ensure a Decimal money value is finite and nonnegative."""
     _validate_finite_money(value, field_name)
     if value < 0:
         raise BankReconciliationValidationError(f"{field_name} must be nonnegative")
 
 
 def _validate_finite_money(value: Decimal, field_name: str) -> None:
-    """
-    Ensure a monetary Decimal value is finite; raise an error if it is infinite or NaN.
-    """
+    """Ensure a Decimal money value is finite."""
     if not value.is_finite():
         raise BankReconciliationValidationError(f"{field_name} must be finite")
 
 
 def _actor_identity_uuid(value: str) -> UUID:
-    """Parse an actor identity string into a UUID."""
+    """Parse or derive the audit actor UUID."""
     # Accept either a UUID literal or a trusted-gateway subject; the shared
     # helper derives a deterministic UUID5 for the latter so header-auth
     # deployments with non-UUID x-user-id values can still record bank
@@ -521,9 +504,7 @@ def _actor_identity_uuid(value: str) -> UUID:
 
 
 def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
-    """
-    Convert a string to UUID, raising a validation error if the input is not a valid UUID format.
-    """
+    """Parse a UUID string or raise a validation error."""
     try:
         return UUID(value)
     except ValueError as exc:
@@ -533,12 +514,7 @@ def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
-    """
-    Determine and return the tenant UUID:
-    Parse provided ID,
-    use current tenant context, or
-    fall back to default.
-    """
+    """Resolve an explicit, contextual, or default tenant UUID."""
     if tenant_id is not None:
         return _parse_tenant_uuid(tenant_id)
     current_tenant = get_current_tenant()
@@ -548,9 +524,7 @@ def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
 
 
 def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
-    """
-    Parse and return a tenant UUID from a UUID instance or string, raising on invalid format.
-    """
+    """Parse a tenant UUID from an object or string value."""
     if isinstance(tenant_id, UUID):
         return tenant_id
     try:
@@ -562,14 +536,12 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
 
 
 def _quantize_money(value: Decimal) -> Decimal:
-    """
-    Quantize a Decimal monetary value to four decimal places using half-up rounding.
-    """
+    """Quantize money to four decimal places with half-up rounding."""
     return value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
 
 def _dialect_insert(dialect_name: str):
-    """Select the SQLAlchemy insert function for the current database dialect."""
+    """Return the insert helper for the active SQL dialect."""
     if dialect_name == "sqlite":
         return sqlite_insert
     if dialect_name == "postgresql":

@@ -18,10 +18,7 @@ MAX_EXCHANGE_RATE_BATCH_SIZE = 100
 
 @dataclass(frozen=True)
 class CurrencyExchangeRateInput:
-    """
-    Input model for currency exchange rate data including date, currencies, rate,
-    and optional raw payload.
-    """
+    """Input payload for one currency exchange rate."""
 
     rate_date: date
     base_currency: str
@@ -32,10 +29,7 @@ class CurrencyExchangeRateInput:
 
 @dataclass(frozen=True)
 class CurrencyExchangeRateEntry:
-    """
-    Immutable data class representing a stored currency exchange rate entry
-    with audit and API conversion methods.
-    """
+    """Stored exchange rate entry with audit and API conversion helpers."""
 
     id: str
     rate_date: date
@@ -55,17 +49,7 @@ class CurrencyExchangeRateEntry:
         )
 
     def to_api(self, *, include_raw_payload: bool = False) -> dict[str, object]:
-        """
-        Convert this exchange rate instance into a dictionary suitable for API responses.
-
-        Parameters:
-            include_raw_payload: If True, include the raw_payload field in the output;
-                                otherwise, omit it.
-
-        Returns:
-            A dictionary representation of the exchange rate with ISO-formatted date
-            and optional raw payload.
-        """
+        """Convert this exchange rate entry into an API dictionary."""
         return {
             "id": self.id,
             "rate_date": self.rate_date.isoformat(),
@@ -88,9 +72,7 @@ class ExchangeRateValidationError(ExchangeRateError):
 
 
 class SqlAlchemyExchangeRateRepository:
-    """
-    Repository for syncing currency exchange rates to the database using SQLAlchemy.
-    """
+    """Repository for syncing exchange rates with SQLAlchemy."""
 
     def __init__(self, session: Session):
         self._session = session
@@ -103,24 +85,7 @@ class SqlAlchemyExchangeRateRepository:
         actor_user_id: str,
         source_report_id: str | None,
     ) -> list[CurrencyExchangeRateEntry]:
-        """
-        Synchronize a batch of currency exchange rates to the database.
-
-        Validates the provided rates, enforces batch size limits, and normalizes inputs
-        before persisting.
-
-        Parameters:
-            rates: List of CurrencyExchangeRateInput objects to be stored.
-            provider_key: Identifier for the rate provider.
-            actor_user_id: UUID string of the user performing the import.
-            source_report_id: Optional identifier of the source report.
-
-        Returns:
-            A list of CurrencyExchangeRateEntry instances representing the stored rates.
-
-        Raises:
-            ExchangeRateValidationError: If the rates list is empty or exceeds batch size limits.
-        """
+        """Synchronize exchange rates after validating batch size and inputs."""
         if not rates:
             raise ExchangeRateValidationError(
                 "rates must contain at least one exchange rate"
@@ -251,11 +216,7 @@ class SqlAlchemyExchangeRateRepository:
 def _normalize_rate_input(
     value: CurrencyExchangeRateInput,
 ) -> CurrencyExchangeRateInput:
-    """Normalize and validate CurrencyExchangeRateInput fields:
-    - Ensures base and quote currencies are valid and differ.
-    - Validates rate is positive and finite.
-    - Ensures raw_payload is a dict if provided.
-    """
+    """Normalize and validate one exchange rate input."""
     base_currency = _normalize_currency(value.base_currency, "base_currency")
     quote_currency = _normalize_currency(value.quote_currency, "quote_currency")
     if base_currency == quote_currency:
@@ -286,9 +247,7 @@ def _normalize_currency(value: str, field_name: str) -> str:
 
 
 def _normalize_required_string(value: str, field_name: str) -> str:
-    """Ensure that a required string is not blank.
-    Strips whitespace and validates that the string is non-empty.
-    """
+    """Trim and validate a required nonblank string field."""
     normalized = value.strip()
     if not normalized:
         raise ExchangeRateValidationError(f"{field_name} must not be blank")
@@ -296,9 +255,7 @@ def _normalize_required_string(value: str, field_name: str) -> str:
 
 
 def _normalize_optional_string(value: str | None) -> str | None:
-    """Normalize an optional string by stripping whitespace.
-    Returns None if the resulting string is empty.
-    """
+    """Trim an optional string and collapse blanks to None."""
     if value is None:
         return None
     normalized = value.strip()
@@ -306,9 +263,7 @@ def _normalize_optional_string(value: str | None) -> str | None:
 
 
 def _parse_uuid_or_none(value: str) -> UUID | None:
-    """Parse a UUID from a required string.
-    Returns a UUID object or None if parsing fails.
-    """
+    """Parse a UUID string, returning None for invalid values."""
     normalized = _normalize_required_string(value, "actor_user_id")
     try:
         return UUID(normalized)
@@ -317,10 +272,7 @@ def _parse_uuid_or_none(value: str) -> UUID | None:
 
 
 def _quantize_rate(value: Decimal) -> Decimal:
-    """Quantize a Decimal rate to 10 decimal places.
-    Validates that it remains positive and has acceptable
-    precision.
-    """
+    """Quantize a positive Decimal rate to 10 places."""
     try:
         quantized = value.quantize(Decimal("0.0000000001"))
     except InvalidOperation as exc:
@@ -335,7 +287,7 @@ def _quantize_rate(value: Decimal) -> Decimal:
 
 
 def _dialect_insert(dialect_name: str):
-    """Select the SQLAlchemy insert function for the current database dialect."""
+    """Return the insert helper for the active SQL dialect."""
     if dialect_name == "sqlite":
         return sqlite_insert
     if dialect_name == "postgresql":

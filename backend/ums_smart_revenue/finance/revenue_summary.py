@@ -23,10 +23,7 @@ class AdjustedRevenueSummary:
     pending_manual_override_count: int
 
     def to_api(self) -> dict[str, object]:
-        """
-        Convert this AdjustedRevenueSummary into a dictionary suitable for API responses,
-        converting Decimal fields to JSON-friendly formats.
-        """
+        """Convert the summary into an API dictionary."""
         return {
             "month": self.month,
             "youtube_channel_id": self.youtube_channel_id,
@@ -53,26 +50,7 @@ def build_adjusted_revenue_summary(
     month: str | None = None,
     youtube_channel_id: str | None = None,
 ) -> AdjustedRevenueSummary:
-    """
-    Build an AdjustedRevenueSummary object from provided revenue facts and manual
-    overrides.
-
-    Parameters:
-        facts: Iterable of RevenueFactEntry objects representing revenue data
-            from various sources.
-        manual_overrides: Iterable of RevenueManualOverrideEntry objects
-            for approved or pending manual adjustments.
-        month: Optional month string to resolve the period if facts are empty.
-        youtube_channel_id: Optional channel ID to resolve if facts are empty.
-
-    Returns:
-        AdjustedRevenueSummary containing consolidated baseline and adjusted
-            revenue and counts.
-
-    Raises:
-        ValueError: If month or youtube_channel_id are not provided when facts list
-            is empty.
-    """
+    """Build an adjusted revenue summary from facts and overrides."""
     fact_list = sorted(
         facts,
         key=lambda fact: (SOURCE_PRIORITY.get(fact.source_kind, 99), fact.source_kind),
