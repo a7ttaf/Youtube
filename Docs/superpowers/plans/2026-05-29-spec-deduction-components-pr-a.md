@@ -2018,6 +2018,12 @@ python -m pytest tests/db/test_deduction_components_migration_postgres.py -q
 ```
 Expected: PASS — 4 passed. Then re-run `python -m pytest -q` under `UMS_TEST_DATABASE_URL` for full-gate parity (the 26 pre-existing `*_postgres.py` migration tests now run too).
 
+### Completion evidence (2026-05-30)
+
+- `python -m ruff check backend tests scripts` -> `All checks passed!`
+- `$env:UMS_TEST_DATABASE_URL='postgresql+psycopg://postgres:ums@localhost:55432/test_ums'; python -m pytest -q` -> `1497 passed in 142.58s`
+- `git diff --check` -> no output
+
 ---
 
 ## Notes for the implementer
