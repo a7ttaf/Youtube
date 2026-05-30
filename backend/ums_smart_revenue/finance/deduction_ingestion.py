@@ -274,8 +274,9 @@ class SqlAlchemyDeductionComponentRepository:
         """List persisted deduction components for one finance month.
 
         When youtube_channel_ids is provided, only CHANNEL-scoped components
-        whose scope_id is in the set are returned. Pass None to return all
-        components regardless of scope_id (global/admin path).
+        whose scope_id is in the set are returned (scope_kind == "CHANNEL" is
+        enforced alongside the scope_id filter). Pass None to return all
+        components regardless of scope (global/admin path).
 
         Raises:
             DeductionComponentValidationError: If the month is malformed.
@@ -288,7 +289,8 @@ class SqlAlchemyDeductionComponentRepository:
         )
         if youtube_channel_ids is not None:
             query = query.where(
-                DeductionComponentORM.scope_id.in_(youtube_channel_ids)
+                DeductionComponentORM.scope_kind == "CHANNEL",
+                DeductionComponentORM.scope_id.in_(youtube_channel_ids),
             )
         rows = self._session.scalars(
             query.order_by(
