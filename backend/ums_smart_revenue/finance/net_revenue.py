@@ -22,6 +22,8 @@ SOURCE_SYSTEM_TO_SOURCE_KIND: dict[str, str] = {
     "youtube_reporting": "YOUTUBE_CMS",
     "youtube_analytics": "YOUTUBE_ANALYTICS",
 }
+# Only blind, source-labeled reductions reduce a component-derived net; signed
+# FX_VARIANCE / TRANSFER_FEE / UNRESOLVED_PAYMENT_GAP kinds never reduce net.
 _NET_APPLICABLE_COMPONENT_KINDS: frozenset[str] = frozenset({"TAX", "DEDUCTION"})
 
 

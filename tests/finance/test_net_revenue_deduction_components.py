@@ -139,3 +139,16 @@ def test_month_summary_includes_component_derived_channel_in_totals():
     assert channel.status == "COMPONENT_DERIVED"
     assert summary.total_net_revenue_usd == Decimal("880.00")  # 1000 - 120
     assert summary.missing_net_source_count == 0
+
+
+def test_over_deduction_yields_negative_net_without_clamp():
+    # Evidence-derived net is NOT clamped: Sigma(components) > adjusted_gross
+    # produces a negative Decimal net. Locks this in so a future well-meaning
+    # clamp cannot silently change finance output.
+    summary = _channel(
+        facts=[fact(net=None, gross="100.00")],
+        components=[component(kind="DEDUCTION", amount="150.00")],
+    )
+    assert summary.status == "COMPONENT_DERIVED"
+    assert summary.net_revenue_usd == Decimal("-50.00")  # 100 - 150
+    assert summary.deduction_amount_usd == Decimal("150.00")
