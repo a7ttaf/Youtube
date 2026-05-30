@@ -30,6 +30,7 @@ class _FakeSettings:
     def __init__(self, database_url="sqlite+pysqlite:///:memory:"):
         self.database_url = database_url
 
+
 class _SpySession:
     """Dummy session used for testing that tracks the number of commit operations."""
 
@@ -50,8 +51,14 @@ class _SpySession:
 def _fake_result():
     """Return a dummy result object with expected ingestion attributes."""
     return type(
-        "R", (), {"month": "2026-04", "total_upserted": 4,
-                  "by_kind": {"TRANSFER_FEE": 1}, "skipped_non_usd": 0, "dry_run": False},
+        "R", (),
+        {
+            "month": "2026-04",
+            "total_upserted": 4,
+            "by_kind": {"TRANSFER_FEE": 1},
+            "skipped_non_usd": 0,
+            "dry_run": False,
+        },
     )()
 
 
@@ -145,6 +152,29 @@ def test_cli_typed_failure_returns_2(monkeypatch, capsys, error):
     assert session.commits == 0
 
 
+def test_cli_ingestion_value_error_returns_2(monkeypatch, capsys):
+    """Test that ingestion ValueError returns code 2 without committing."""
+    module = _load_cli()
+    session = _SpySession()
+
+    class _RaisesValueError:
+        """Service stub that raises a ValueError during ingestion."""
+
+        def __init__(self, session, *, audit_sink, tenant_id=None):
+            """Initialize the stub service."""
+
+        @staticmethod
+        def ingest(**kwargs):
+            """Fail during ingestion with an operator input error."""
+            raise ValueError("bad ingestion input")
+
+    _patch_common(monkeypatch, module, session=session, service=_RaisesValueError)
+    rc = module.main(BASE_ARGV)
+    assert rc == 2
+    assert "ValueError" in capsys.readouterr().err
+    assert session.commits == 0
+
+
 def test_cli_malformed_settings_returns_2_before_db_session(monkeypatch, capsys):
     """Test that malformed settings errors are caught before DB setup and return code 2."""
     # Settings validation failures are operator input errors -> exit 2 before any
@@ -167,7 +197,7 @@ def test_cli_malformed_settings_returns_2_before_db_session(monkeypatch, capsys)
 
 
 def test_cli_missing_service_actor_returns_2(monkeypatch, capsys):
-    """Test that missing service actor id raises ValueError and returns code 2 without committing."""
+    """Test missing actor ValueError returns code 2 without committing."""
     # A missing/blank service-actor id raises ValueError before any write -> exit 2.
     module = _load_cli()
     session = _SpySession()
@@ -195,8 +225,7 @@ def test_cli_untyped_error_propagates(monkeypatch):
         """Service stub that always raises errors to test error propagation."""
 
         def __init__(self, session, *, audit_sink, tenant_id=None):
-            """Fail during service construction."""
-            raise NotImplementedError()
+            """Initialize the stub service."""
 
         @staticmethod
         def ingest(**kwargs):

@@ -105,15 +105,13 @@ def build_adjusted_revenue_summary(
         pending_manual_override_count=len(pending),
     )
 
-
-
-
 def _validate_same_period_and_channel(
     entries: Iterable[RevenueFactEntry | RevenueManualOverrideEntry],
     *,
     month: str,
     youtube_channel_id: str,
 ) -> None:
+    """Ensure revenue summary inputs share the requested month and channel."""
     for entry in entries:
         if entry.month != month or entry.youtube_channel_id != youtube_channel_id:
             raise ValueError(

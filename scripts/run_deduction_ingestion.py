@@ -1,26 +1,16 @@
 #!/usr/bin/env python
 """CLI entrypoint for deduction-component ingestion."""
-
-# ============================================================================
-# Purpose: Operator CLI driving one deduction-component ingestion run for a
-#   single (tenant, month). Translates argparse/config/typed errors into stable
-#   exit codes; live mode commits, dry-run never commits.
-# Database/ORM: Opens one Session; SQL owned by DeductionIngestionService /
-#   SqlAlchemyDeductionComponentRepository / SqlAlchemyAuditSink.
-# Standards: thin entrypoint; typed DeductionComponentError -> exit 2; untyped
-#   errors propagate. No secret/token printed.
-# Blast Radius: Operator surface only. No finance math, no allocation here.
-# Connections:
-#   - File: backend/ums_smart_revenue/finance/deduction_ingestion.py -> service.
-#   - File: backend/ums_smart_revenue/connectors/google/audit.py ->
-#     build_connector_service_principal (RUN_CONNECTOR_JOBS service actor).
-# ============================================================================
 from __future__ import annotations
 
 import argparse
 import sys
 from pathlib import Path
 from uuid import UUID
+
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_BACKEND_PATH = str(_PROJECT_ROOT / "backend")
+if _BACKEND_PATH not in sys.path:
+    sys.path.insert(0, _BACKEND_PATH)
 
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink  # noqa: E402
 from ums_smart_revenue.config.settings import load_app_settings  # noqa: E402
@@ -34,22 +24,9 @@ from ums_smart_revenue.finance.deduction_ingestion import (  # noqa: E402
     DeductionIngestionService,
 )
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[1]
-_BACKEND_PATH = str(_PROJECT_ROOT / "backend")
-if _BACKEND_PATH not in sys.path:
-    sys.path.insert(0, _BACKEND_PATH)
-
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
-    """Parse command-line arguments for deduction ingestion.
-
-    Args:
-        argv (list[str]): List of command-line arguments.
-
-    Returns:
-        argparse.Namespace: Parsed arguments including tenant, month, reason, source, and dry-run.
-    """
-    ...
+    """Parse operator CLI arguments for one deduction ingestion run."""
     parser = argparse.ArgumentParser(
         description="Run deduction-component ingestion for one (tenant, month).",
     )
@@ -70,17 +47,23 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
     return args
 
 
+# ============================================================================
+# Purpose: Operator CLI driving one deduction-component ingestion run for a
+#   single (tenant, month). Translates argparse/config/typed errors into stable
+#   exit codes; live mode commits, dry-run never commits.
+# Database/ORM: Opens one Session; SQL owned by DeductionIngestionService /
+#   SqlAlchemyDeductionComponentRepository / SqlAlchemyAuditSink.
+# Standards: thin entrypoint; typed DeductionComponentError / operator
+#   ValueError -> exit 2; untyped non-ValueError failures propagate. No
+#   secret/token printed.
+# Blast Radius: Operator surface only. No finance math, no allocation here.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/deduction_ingestion.py -> service.
+#   - File: backend/ums_smart_revenue/connectors/google/audit.py ->
+#     build_connector_service_principal (RUN_CONNECTOR_JOBS service actor).
+# ============================================================================
 def main(argv: list[str] | None = None) -> int:
-    """Main entry point for deduction ingestion script.
-
-    Parses arguments, sets up database session and audit sink, and runs the ingestion service.
-
-    Args:
-        argv (list[str] | None): List of command-line arguments or None to use sys.argv[1:].
-
-    Returns:
-        int: Exit code (0 on success, 2 on error).
-    """
+    """Run deduction ingestion and return the operator exit code."""
     args = _parse_args(argv if argv is not None else sys.argv[1:])
     try:
         settings = load_app_settings()
@@ -109,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
                 month=args.month, actor=actor, reason=args.reason,
                 source=args.source, dry_run=args.dry_run,
             )
-        except DeductionComponentError as exc:
+        except (DeductionComponentError, ValueError) as exc:
             print(f"{type(exc).__name__}: {exc!s}", file=sys.stderr)
             return 2
 

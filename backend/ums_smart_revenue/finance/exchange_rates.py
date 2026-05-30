@@ -270,6 +270,7 @@ def _quantize_rate(value: Decimal) -> Decimal:
 
 
 def _dialect_insert(dialect_name: str):
+    """Select the SQLAlchemy insert function for the current dialect."""
     if dialect_name == "sqlite":
         return sqlite_insert
     if dialect_name == "postgresql":

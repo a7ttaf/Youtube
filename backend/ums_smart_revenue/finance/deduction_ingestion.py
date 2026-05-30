@@ -71,7 +71,11 @@ def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
 
 
 def _validate_month(month: str) -> None:
-    """Validate YYYY-MM month input."""
+    """Validate YYYY-MM month input.
+
+    Raises:
+        DeductionComponentValidationError: If the month is malformed.
+    """
     if len(month) != _MONTH_LENGTH or month[4] != "-":
         raise DeductionComponentValidationError("month must use YYYY-MM")
     year, sep, mm = month[:4], month[4], month[5:]
@@ -80,7 +84,11 @@ def _validate_month(month: str) -> None:
 
 
 def _dialect_insert(dialect_name: str):
-    """Select the SQLAlchemy insert function for the current dialect."""
+    """Select the SQLAlchemy insert function for the current dialect.
+
+    Raises:
+        DeductionComponentValidationError: If the dialect is unsupported.
+    """
     if dialect_name == "sqlite":
         return sqlite_insert
     if dialect_name == "postgresql":
@@ -106,7 +114,11 @@ class SqlAlchemyDeductionComponentRepository:
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
     def _require_month_open(self, month: str) -> None:
-        """Raise when the target finance month is locked."""
+        """Raise when the target finance month is locked.
+
+        Raises:
+            DeductionComponentLockedMonthError: If the finance month is LOCKED.
+        """
         close = get_or_create_month_close_row(
             self._session, month, tenant_id=self._tenant_id, for_update=True
         )
@@ -118,7 +130,13 @@ class SqlAlchemyDeductionComponentRepository:
     def upsert_components(
         self, *, month: str, components: list[DeductionComponentInput]
     ) -> list[DeductionComponent]:
-        """Upsert validated deduction components for one finance month."""
+        """Upsert validated deduction components for one finance month.
+
+        Raises:
+            DeductionComponentValidationError: For malformed month, unsupported
+                dialect, or failed upsert verification.
+            DeductionComponentLockedMonthError: If the finance month is LOCKED.
+        """
         _validate_month(month)
         # FIX: refuse LOCKED months even for a zero-component run. Live ingestion
         # must fail closed BEFORE the empty-return (and before the service's audit
@@ -179,7 +197,11 @@ class SqlAlchemyDeductionComponentRepository:
         return entries
 
     def list_month_components(self, *, month: str) -> list[DeductionComponent]:
-        """List persisted deduction components for one finance month."""
+        """List persisted deduction components for one finance month.
+
+        Raises:
+            DeductionComponentValidationError: If the month is malformed.
+        """
         _validate_month(month)
         rows = self._session.scalars(
             select(DeductionComponentORM)

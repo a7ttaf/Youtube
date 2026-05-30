@@ -23,6 +23,7 @@ def decimal_to_api(value: None) -> None: ...
 #     same formatting contract for workbook export cells.
 # ============================================================================
 def decimal_to_api(value: Decimal | None) -> str | None:
+    """Convert a Decimal API/export value into the canonical string form."""
     if value is None:
         return None
     normalized = value.normalize()
