@@ -34,6 +34,10 @@ from ums_smart_revenue.finance.bank_reconciliation import (
     SqlAlchemyBankReconciliationRepository,
     build_month_bank_reconciliation_summary,
 )
+from ums_smart_revenue.finance.deduction_ingestion import (
+    DeductionComponentValidationError,
+    SqlAlchemyDeductionComponentRepository,
+)
 from ums_smart_revenue.finance.explanations import (
     NumberExplanationValidationError,
     SqlAlchemyNumberExplanationRepository,
@@ -248,6 +252,13 @@ def current_finance_month_close_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyFinanceMonthCloseRepository:
     return SqlAlchemyFinanceMonthCloseRepository(session)
+
+
+def current_deduction_component_repository(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyDeductionComponentRepository:
+    """Build the tenant-aware deduction-component repository for a request."""
+    return SqlAlchemyDeductionComponentRepository(session)
 
 
 def current_number_explanation_repository(
@@ -774,6 +785,10 @@ def get_month_net_revenue(
         SqlAlchemyManualOverrideRepository,
         Depends(current_manual_override_repository),
     ],
+    deduction_component_repository: Annotated[
+        SqlAlchemyDeductionComponentRepository,
+        Depends(current_deduction_component_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     scope_type: Annotated[str, Query(min_length=1)] = "global",
     scope_id: str | None = None,
@@ -796,12 +811,17 @@ def get_month_net_revenue(
             month=month,
             youtube_channel_ids=channel_ids,
         )
+        deduction_components = deduction_component_repository.list_month_components(
+            month=month,
+        )
         summary = build_month_net_revenue_summary(
             month=month,
             facts=facts,
             manual_overrides=overrides,
+            deduction_components=deduction_components,
         )
     except (
+        DeductionComponentValidationError,
         ManualOverrideValidationError,
         NetRevenueValidationError,
         RevenueFactValidationError,

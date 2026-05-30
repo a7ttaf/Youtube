@@ -4,9 +4,25 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
+from ums_smart_revenue.finance.deduction_components import DeductionComponent
 from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntry
 from ums_smart_revenue.finance.reconciliation import SOURCE_PRIORITY
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
+
+# ============================================================================
+# Purpose: Map a Google source_system to the RevenueFactSourceKind it backs, so
+#   a channel-scoped deduction component is only applied to a net derived from
+#   the SAME source (no cross-source mixing). Used only on the missing-net path.
+# Database/ORM: None.
+# Standards: explicit, closed map; unknown source_system -> no match -> ignored.
+# Blast Radius: Finance net-revenue derivation (missing-net path only).
+# ============================================================================
+SOURCE_SYSTEM_TO_SOURCE_KIND: dict[str, str] = {
+    "adsense_management": "ADSENSE",
+    "youtube_reporting": "YOUTUBE_CMS",
+    "youtube_analytics": "YOUTUBE_ANALYTICS",
+}
+_NET_APPLICABLE_COMPONENT_KINDS: frozenset[str] = frozenset({"TAX", "DEDUCTION"})
 
 
 @dataclass(frozen=True)
@@ -116,6 +132,7 @@ def build_channel_net_revenue_summary(
     manual_overrides: Iterable[RevenueManualOverrideEntry],
     month: str | None = None,
     youtube_channel_id: str | None = None,
+    deduction_components: Iterable[DeductionComponent] = (),
 ) -> ChannelNetRevenueSummary:
     """Construct a ChannelNetRevenueSummary from provided revenue facts and manual overrides,
     resolving the target month and channel ID.
@@ -165,6 +182,41 @@ def build_channel_net_revenue_summary(
     primary = fact_list[0]
     adjusted_gross = primary.gross_revenue_usd + approved_total
     if primary.net_revenue_usd is None:
+        applicable = [
+            component
+            for component in deduction_components
+            if component.scope_kind == "CHANNEL"
+            and component.scope_id == resolved_channel_id
+            and component.component_kind in _NET_APPLICABLE_COMPONENT_KINDS
+            and SOURCE_SYSTEM_TO_SOURCE_KIND.get(component.source_system)
+            == primary.source_kind
+        ]
+        if applicable:
+            component_total = sum(
+                (component.amount_usd for component in applicable),
+                Decimal("0"),
+            )
+            component_derived_net = adjusted_gross - component_total
+            return ChannelNetRevenueSummary(
+                month=resolved_month,
+                youtube_channel_id=resolved_channel_id,
+                status="COMPONENT_DERIVED",
+                primary_source_kind=primary.source_kind,
+                baseline_gross_revenue_usd=primary.gross_revenue_usd,
+                baseline_net_revenue_usd=None,
+                approved_manual_override_total_usd=approved_total,
+                adjusted_gross_revenue_usd=adjusted_gross,
+                net_revenue_usd=component_derived_net,
+                deduction_amount_usd=component_total,
+                deduction_percentage=_deduction_percentage(
+                    deduction_amount=component_total,
+                    gross_revenue_usd=adjusted_gross,
+                ),
+                confidence="D_ESTIMATED",
+                approved_manual_override_count=len(approved),
+                pending_manual_override_count=len(pending),
+                issues=[],
+            )
         return ChannelNetRevenueSummary(
             month=resolved_month,
             youtube_channel_id=resolved_channel_id,
@@ -221,6 +273,7 @@ def build_month_net_revenue_summary(
     month: str,
     facts: Iterable[RevenueFactEntry],
     manual_overrides: Iterable[RevenueManualOverrideEntry],
+    deduction_components: Iterable[DeductionComponent] = (),
 ) -> MonthNetRevenueSummary:
     """
     Build a summary of net revenue for a given month across all channels.
@@ -240,6 +293,11 @@ def build_month_net_revenue_summary(
         if override.month == month:
             overrides_by_channel[override.youtube_channel_id].append(override)
 
+    components_by_channel: dict[str, list[DeductionComponent]] = defaultdict(list)
+    for component in deduction_components:
+        if component.scope_kind == "CHANNEL":
+            components_by_channel[component.scope_id].append(component)
+
     channel_ids = sorted(set(facts_by_channel) | set(overrides_by_channel))
     channels = [
         build_channel_net_revenue_summary(
@@ -247,6 +305,7 @@ def build_month_net_revenue_summary(
             manual_overrides=overrides_by_channel[channel_id],
             month=month,
             youtube_channel_id=channel_id,
+            deduction_components=components_by_channel.get(channel_id, ()),
         )
         for channel_id in channel_ids
     ]
