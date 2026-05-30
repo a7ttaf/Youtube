@@ -859,11 +859,18 @@ def get_month_deduction_components(
         scope=month_scope,
         details=audit_details,
     )
+    has_more = offset + len(page.components) < page.total_count
     return {
         "month": month,
         "total_count": page.total_count,
         "returned_count": len(page.components),
         "scopes": scopes,
+        "pagination": {
+            "limit": limit,
+            "offset": offset,
+            "next_offset": (offset + limit) if has_more else None,
+            "has_more": has_more,
+        },
         "audit_events": [
             audit_record_to_api(revenue_record),
             audit_record_to_api(payment_record),

@@ -311,6 +311,10 @@ class SqlAlchemyDeductionComponentRepository:
             DeductionComponentValidationError: If the month is malformed.
         """
         _validate_month(month)
+        if limit < 1:
+            raise DeductionComponentValidationError("limit must be >= 1")
+        if offset < 0:
+            raise DeductionComponentValidationError("offset must be >= 0")
         filters = [
             DeductionComponentORM.tenant_id == self._tenant_id,
             DeductionComponentORM.month == month,

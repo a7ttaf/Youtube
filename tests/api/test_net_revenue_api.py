@@ -190,6 +190,7 @@ def test_month_net_revenue_summary_rejects_non_usd_until_fx_support(tmp_path):
 
 
 def test_net_revenue_endpoint_derives_component_net_for_missing_net_channel(tmp_path):
+    """Net-revenue endpoint derives COMPONENT_DERIVED net via youtube_reporting component when source net is absent."""
     # channel-tv-b has 2026-03 fact with net_revenue_usd=None, gross=200.00,
     # source_kind=YOUTUBE_CMS. A youtube_reporting component (maps to YOUTUBE_CMS)
     # of 20.00 must derive net=180.00 and flip the channel to COMPONENT_DERIVED.
@@ -224,7 +225,9 @@ def test_net_revenue_endpoint_derives_component_net_for_missing_net_channel(tmp_
     )
     assert response.status_code == 200
     body = response.json()
-    channel_b = next(c for c in body["channels"] if c["youtube_channel_id"] == "channel-tv-b")
+    channels_by_id = {c["youtube_channel_id"]: c for c in body["channels"]}
+    assert "channel-tv-b" in channels_by_id
+    channel_b = channels_by_id["channel-tv-b"]
     assert channel_b["status"] == "COMPONENT_DERIVED"
     assert channel_b["net_revenue_usd"] == "180"   # 200 - 20, trimmed
     assert channel_b["deduction_amount_usd"] == "20"

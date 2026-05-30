@@ -138,6 +138,11 @@ def build_channel_net_revenue_summary(
 ) -> ChannelNetRevenueSummary:
     """Construct a ChannelNetRevenueSummary from provided revenue facts and manual overrides,
     resolving the target month and channel ID.
+
+    Raises:
+        NetRevenueValidationError: If no facts are provided and month or
+            youtube_channel_id is None, or if facts/overrides span multiple
+            months or channels.
     """
     fact_list = sorted(
         facts,
@@ -183,6 +188,15 @@ def build_channel_net_revenue_summary(
 
     primary = fact_list[0]
     adjusted_gross = primary.gross_revenue_usd + approved_total
+    # ============================================================================
+    # Purpose: When the primary source has no net, derive a channel net from
+    #   same-month, same-channel, source-aligned TAX/DEDUCTION components only.
+    #   The net-present path below is left unchanged (anti-double-count).
+    # Database/ORM: None (pure over already-read facts + deduction components).
+    # Standards: unknown source_system or non-CHANNEL/non-TAX/DEDUCTION scope is
+    #   ignored; signed FX/fee/gap kinds never reduce net.
+    # Blast Radius: Finance net-revenue derivation, missing-net branch only.
+    # ============================================================================
     if primary.net_revenue_usd is None:
         applicable = [
             component

@@ -112,6 +112,7 @@ def _seed_channel_component(database_url, *, amount, source_system):
 
 
 def test_finance_viewer_reads_components_grouped_with_audit(tmp_path):
+    """Finance viewer with global grants reads all components, grouped by scope, with three audit events."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_components(database_url)
@@ -145,6 +146,7 @@ def test_finance_viewer_reads_components_grouped_with_audit(tmp_path):
 
 
 def test_component_kind_filter(tmp_path):
+    """Component-kind query param narrows total_count and returned rows to matching kind."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_components(database_url)
@@ -159,6 +161,7 @@ def test_component_kind_filter(tmp_path):
 
 
 def test_scope_kind_filter(tmp_path):
+    """Scope-kind query param narrows total_count and returned rows to matching scope."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_components(database_url)
@@ -172,6 +175,7 @@ def test_scope_kind_filter(tmp_path):
 
 
 def test_pagination_limit_and_offset(tmp_path):
+    """Limit+offset pagination returns one row per page while total_count reflects the full match set."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_components(database_url)
@@ -187,6 +191,7 @@ def test_pagination_limit_and_offset(tmp_path):
 
 
 def test_malformed_month_returns_422(tmp_path):
+    """A month value outside 01-12 is rejected with HTTP 422."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -198,6 +203,7 @@ def test_malformed_month_returns_422(tmp_path):
 
 
 def test_net_revenue_endpoint_uses_channel_component_when_net_missing(tmp_path):
+    """Net-revenue endpoint derives COMPONENT_DERIVED net from an ADSENSE channel component when net is absent."""
     # PR-B integration: a channel whose only fact has net=NULL plus a CHANNEL
     # DEDUCTION component -> /net-revenue derives COMPONENT_DERIVED net.
     # Uses ADSENSE source_kind + adsense_management source_system (distinct from
@@ -218,6 +224,7 @@ def test_net_revenue_endpoint_uses_channel_component_when_net_missing(tmp_path):
 
 
 def test_assistant_without_view_revenue_is_403(tmp_path):
+    """assistant_analyst lacks VIEW_REVENUE and receives HTTP 403 on the deduction-components endpoint."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -230,6 +237,7 @@ def test_assistant_without_view_revenue_is_403(tmp_path):
 
 
 def test_finance_admin_global_reads_components(tmp_path):
+    """finance_admin with global scope holds all four required permissions and receives HTTP 200."""
     # finance_admin holds all four permissions globally -> 200 (the positive
     # gate companion to the assistant 403). Mirrors the smart-alerts sibling's
     # all-permissions read path; both roles are real in auth/roles.py.
@@ -245,6 +253,7 @@ def test_finance_admin_global_reads_components(tmp_path):
 
 
 def test_missing_trusted_gateway_token_is_401(tmp_path):
+    """A request missing the trusted-gateway token header is rejected with HTTP 401."""
     # Trusted-gateway enforcement runs before route auth; a dropped token -> 401
     # (matches tests/api/test_guarded_routes.py:85-90).
     database_url = build_database_url(tmp_path)
@@ -259,6 +268,7 @@ def test_missing_trusted_gateway_token_is_401(tmp_path):
 
 
 def test_invalid_trusted_gateway_token_is_401(tmp_path):
+    """An incorrect trusted-gateway token value is rejected with HTTP 401."""
     # A wrong gateway token -> 401 (matches tests/api/test_database_principals.py:569-573).
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -272,6 +282,7 @@ def test_invalid_trusted_gateway_token_is_401(tmp_path):
 
 
 def test_company_scoped_finance_viewer_is_403_on_global_revenue_gate(tmp_path):
+    """A company-scoped finance_viewer lacks the global VIEW_REVENUE grant and receives HTTP 403."""
     # The endpoint checks VIEW_REVENUE on global_scope() with no org_index (like
     # smart-alerts, revenue.py:679), so it requires a GLOBAL grant. A
     # company-scoped finance_viewer has only a company grant -> first gate fails

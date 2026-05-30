@@ -10,6 +10,7 @@ CHANNEL = "chan-1"
 
 
 def _mod():
+    """Import and return the net_revenue module for builder access."""
     return import_module("ums_smart_revenue.finance.net_revenue")
 
 
@@ -53,6 +54,7 @@ def component(*, kind="DEDUCTION", scope_kind="CHANNEL", scope_id=CHANNEL,
 
 
 def _channel(*, facts, components=()):
+    """Call build_channel_net_revenue_summary for the fixed test channel and month."""
     return _mod().build_channel_net_revenue_summary(
         facts=facts, manual_overrides=[], month=MONTH,
         youtube_channel_id=CHANNEL, deduction_components=components,
@@ -60,6 +62,7 @@ def _channel(*, facts, components=()):
 
 
 def test_net_present_path_unchanged_components_ignored_for_net():
+    """When a source net is present, components are ignored and the official net path is used unchanged."""
     # Source net present -> official net path untouched; components do NOT subtract.
     summary = _channel(
         facts=[fact(net="900.00")],
@@ -71,6 +74,7 @@ def test_net_present_path_unchanged_components_ignored_for_net():
 
 
 def test_missing_net_with_channel_components_is_component_derived():
+    """Missing source net + applicable CHANNEL components yields COMPONENT_DERIVED status and derived net."""
     summary = _channel(
         facts=[fact(net=None, gross="1000.00")],
         components=[component(kind="DEDUCTION", amount="120.00"),
@@ -83,6 +87,7 @@ def test_missing_net_with_channel_components_is_component_derived():
 
 
 def test_missing_net_without_applicable_components_stays_missing():
+    """Missing source net with no applicable components produces NET_REVENUE_SOURCE_MISSING status."""
     summary = _channel(facts=[fact(net=None)], components=[])
     assert summary.status == "NET_REVENUE_SOURCE_MISSING"
     assert summary.net_revenue_usd is None
@@ -90,6 +95,7 @@ def test_missing_net_without_applicable_components_stays_missing():
 
 
 def test_cross_source_components_excluded_from_derived_net():
+    """A component from a different source_system than the primary fact is excluded from net derivation."""
     # Primary is ADSENSE; a youtube_reporting (YOUTUBE_CMS) component must NOT apply.
     summary = _channel(
         facts=[fact(source_kind="ADSENSE", net=None)],
@@ -100,6 +106,7 @@ def test_cross_source_components_excluded_from_derived_net():
 
 
 def test_account_scoped_components_never_affect_net():
+    """ACCOUNT-scoped components are never applied to channel net derivation."""
     summary = _channel(
         facts=[fact(net=None)],
         components=[component(scope_kind="ACCOUNT", scope_id="pub-1", amount="120.00")],
@@ -108,6 +115,7 @@ def test_account_scoped_components_never_affect_net():
 
 
 def test_payment_and_fee_fx_gap_components_never_affect_net():
+    """TRANSFER_FEE, FX_VARIANCE, and UNRESOLVED_PAYMENT_GAP component kinds never reduce channel net."""
     summary = _channel(
         facts=[fact(net=None)],
         components=[
@@ -120,6 +128,7 @@ def test_payment_and_fee_fx_gap_components_never_affect_net():
 
 
 def test_other_channel_components_excluded():
+    """A CHANNEL component for a different scope_id is excluded from net derivation."""
     summary = _channel(
         facts=[fact(net=None)],
         components=[component(scope_id="other-chan", amount="120.00")],
@@ -128,6 +137,7 @@ def test_other_channel_components_excluded():
 
 
 def test_month_summary_includes_component_derived_channel_in_totals():
+    """build_month_net_revenue_summary counts COMPONENT_DERIVED channels in totals and not in missing count."""
     mod = _mod()
     summary = mod.build_month_net_revenue_summary(
         month=MONTH,
@@ -142,6 +152,7 @@ def test_month_summary_includes_component_derived_channel_in_totals():
 
 
 def test_over_deduction_yields_negative_net_without_clamp():
+    """When total components exceed gross, the derived net is negative and not clamped to zero."""
     # Evidence-derived net is NOT clamped: Sigma(components) > adjusted_gross
     # produces a negative Decimal net. Locks this in so a future well-meaning
     # clamp cannot silently change finance output.
@@ -155,6 +166,7 @@ def test_over_deduction_yields_negative_net_without_clamp():
 
 
 def test_channel_builder_excludes_other_month_components():
+    """A component with a different month than the fact is excluded from channel net derivation."""
     # A component for a different month must NOT derive net for this month's fact.
     summary = _channel(
         facts=[fact(net=None, gross="1000.00")],
@@ -165,6 +177,7 @@ def test_channel_builder_excludes_other_month_components():
 
 
 def test_month_builder_excludes_other_month_components():
+    """build_month_net_revenue_summary ignores components from a different month than the target."""
     summary = _mod().build_month_net_revenue_summary(
         month=MONTH,
         facts=[fact(net=None, gross="1000.00")],

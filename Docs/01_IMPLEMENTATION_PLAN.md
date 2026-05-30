@@ -435,7 +435,7 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
 - ⏳ Tax/deduction ingestion — substrate + ingestion shipped (PR #55):
   `deduction_components` table + three adapters (Google value_kind tax/deduction,
   bank transfer-fee/FX, AdSense earnings→payment gap) + operator CLI + sensitive
-  `DEDUCTION_COMPONENTS_INGESTED` audit. Consumption shipped (this PR): net_revenue
+  `DEDUCTION_COMPONENTS_INGESTED` audit. Consumption shipped (PR #56): net_revenue
   derives a channel-direct `COMPONENT_DERIVED`/`D_ESTIMATED` net from same-month,
   same-source CHANNEL TAX/DEDUCTION components only when source net is missing
   (anti-double-count, anti-cross-source), plus read-only
@@ -467,11 +467,15 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   per-channel table today; full reconciled net awaits the allocation engine +
   tax/deduction ingestion.
 
-### Status (2026-05-29)
+### Status (2026-05-30)
 
 Net-revenue roll-up, manual overrides, payment-match, and confidence labels
-ship at the API layer; the allocation engine and tax/deduction ingestion
-remain the largest blockers to a fully reconciled net figure.
+ship at the API layer. PR-A (PR #55) ingested deduction evidence; PR-B (PR #56)
+wired net-revenue to derive `COMPONENT_DERIVED`/`D_ESTIMATED` nets from
+channel-scoped TAX/DEDUCTION components on the missing-net path, and added the
+read-only `GET /revenue/months/{month}/deduction-components` endpoint. The
+allocation engine (account→channel distribution, Spec 2) remains the largest
+blocker to a fully reconciled net figure.
 
 ---
 

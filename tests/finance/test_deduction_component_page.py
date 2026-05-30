@@ -18,6 +18,7 @@ TENANT = UUID(UMS_TENANT_ID)
 
 
 def _engine(tmp_path):
+    """Create a fresh SQLite engine with FinanceBase tables for one test run."""
     engine = create_engine(
         f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
     )
@@ -26,6 +27,7 @@ def _engine(tmp_path):
 
 
 def _add(session, *, kind, scope_kind, scope_id, key):
+    """Insert one DeductionComponentORM row with fixed USD amounts into the session."""
     session.add(
         DeductionComponentORM(
             id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind=kind,
@@ -39,6 +41,7 @@ def _add(session, *, kind, scope_kind, scope_id, key):
 
 
 def _seed(session):
+    """Seed one CHANNEL, ACCOUNT, and PAYMENT component covering all three scope kinds."""
     _add(session, kind="DEDUCTION", scope_kind="CHANNEL", scope_id="chan-1", key="k-chan")
     _add(session, kind="UNRESOLVED_PAYMENT_GAP", scope_kind="ACCOUNT", scope_id="pub-1", key="k-acct")
     _add(session, kind="TRANSFER_FEE", scope_kind="PAYMENT", scope_id="BANK-1", key="k-pay")
@@ -46,6 +49,7 @@ def _seed(session):
 
 
 def test_page_returns_all_with_total_when_unfiltered(tmp_path):
+    """Unfiltered page returns all three rows with total_count == 3 in deterministic order."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)
@@ -58,6 +62,7 @@ def test_page_returns_all_with_total_when_unfiltered(tmp_path):
 
 
 def test_page_component_kind_filter_counts_only_matches(tmp_path):
+    """component_kind filter returns only matching rows and sets total_count to the filtered count."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)
@@ -70,6 +75,7 @@ def test_page_component_kind_filter_counts_only_matches(tmp_path):
 
 
 def test_page_scope_kind_filter_counts_only_matches(tmp_path):
+    """scope_kind filter returns only matching rows and sets total_count to the filtered count."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)
@@ -82,6 +88,7 @@ def test_page_scope_kind_filter_counts_only_matches(tmp_path):
 
 
 def test_page_limit_offset_paginates_but_total_is_full_match_count(tmp_path):
+    """limit/offset slices the returned rows while total_count always reflects the full filtered set."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed(session)
@@ -95,6 +102,7 @@ def test_page_limit_offset_paginates_but_total_is_full_match_count(tmp_path):
 
 
 def test_page_malformed_month_raises(tmp_path):
+    """A month value with an invalid calendar month raises DeductionComponentValidationError."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyDeductionComponentRepository(session)
