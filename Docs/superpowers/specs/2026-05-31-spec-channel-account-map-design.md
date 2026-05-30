@@ -90,7 +90,7 @@ the deduction-components hardening.
 | `content_owner_id` | Text, NOT NULL | YouTube CMS content owner |
 | `verification_status` | Text, NOT NULL | CHECK ∈ {`UNVERIFIED`, `VERIFIED`, `REJECTED`, `CONFLICT`}; default `UNVERIFIED` |
 | `provenance_kind` | Text, NOT NULL | e.g. `OPERATOR_ASSERTED`, `CONNECTOR_HINT` |
-| `provenance_payload` | JSON, nullable | raw evidence; **never serialized to API** |
+| `provenance_payload` | JSONB (PG) / JSON, **NOT NULL**, default `{}` | `JSON().with_variant(postgresql.JSONB(), "postgresql"), nullable=False, server_default=text("'{}'")` (mirrors `DeductionComponentORM.raw_payload`); object-only PG CHECK (below); raw evidence; **never serialized to API** |
 | `verified_by` | uuid, nullable | principal id; set on verify/reject |
 | `verified_at` | timestamptz, nullable | set on verify/reject |
 | `verification_reason` | Text, nullable | required on verify/reject (audit reason) |
@@ -106,6 +106,9 @@ Constraints/indexes:
   the read contract.
 - CHECK `effective_month_end IS NULL OR effective_month_end >= effective_month_start`.
 - CHECK `effective_month_start ~ '^\d{4}-\d{2}$'` (and same for end when present).
+- PostgreSQL-only CHECK `jsonb_typeof(provenance_payload) = 'object'` (name
+  `ck_adsense_content_owner_links_provenance_payload_object`), added in the migration for
+  the Postgres dialect only (SQLite skips), mirroring `ck_deduction_components_raw_payload_object`.
 
 ### 4.2 `content_owner_channel_links` (Layer 2 — derived link)
 
@@ -187,21 +190,29 @@ allocation. A unique constraint on `(tenant, account, owner, effective_month_sta
 **not** enforce it: two verified links with different start months (e.g. `2026-01..2026-06`
 and `2026-03..open`) pass the unique key yet overlap for `2026-03..06`.
 
-**Enforcement (authoritative): repository-level, fail-closed.** On the
-`UNVERIFIED → VERIFIED` transition (and on any effective-range edit of a `VERIFIED` link),
-the repository, inside the same transaction, selects existing `VERIFIED` links for
-`(tenant, account)` and checks the candidate's range against each. Any overlap raises a
-typed `ChannelAccountLinkConflictError`, translated at the route boundary to **HTTP 409**.
-The operator resolves by adjusting ranges or rejecting the competing link first.
+**Enforcement (authoritative): transaction-scoped advisory lock + repository overlap
+check, fail-closed.** A bare select-and-check is *not* a concurrency guard — two concurrent
+verify transactions can each miss the other's uncommitted row and both commit overlapping
+`VERIFIED` rows (TOCTOU). The repository therefore mirrors the existing classification-lock
+precedent (`backend/ums_smart_revenue/connectors/google_source_rows/repository.py:591`): on
+the `UNVERIFIED → VERIFIED` transition (and any effective-range edit of a `VERIFIED` link),
+it **first acquires a transaction-scoped PostgreSQL advisory lock keyed by
+`(tenant_id, adsense_account_id)`** — `pg_advisory_xact_lock(key)`, where `key` is a stable
+signed bigint from `blake2b(b"adsense_content_owner_links\0<tenant_id>\0<adsense_account_id>",
+digest_size=8)` shifted `>> 1`. Holding the per-account lock, it selects the existing
+`VERIFIED` links for `(tenant, account)` and checks the candidate range; any overlap raises
+a typed `ChannelAccountLinkConflictError` → **HTTP 409**. The lock serializes all verifies
+for one account, which is what makes the check authoritative under concurrency. On SQLite
+the lock is a no-op (no transaction advisory-lock primitive) and unit tests run serially,
+so the check logic is still exercised. The lock key contains only the table name, tenant,
+and account id — never payload, amounts, or credentials.
 
-**Why not a DB constraint alone.** A portable unique/CHECK constraint cannot express range
-overlap. PostgreSQL could enforce it with `EXCLUDE USING gist`, but the unit-test suite
-runs on SQLite (the migration round-trip runs on Postgres), and SQLite cannot honor an
-`EXCLUDE` constraint — so a DB-only approach would diverge between test tiers. The
-repository check is therefore authoritative and is exercised on SQLite. An optional
-Postgres-only partial exclusion constraint MAY be added in the Alembic migration as
-defense-in-depth, but only if it is applied in the migration (not in the shared SQLAlchemy
-table metadata), so `FinanceBase.metadata.create_all` on SQLite is unaffected.
+**Database constraints.** A portable unique/CHECK constraint cannot express range overlap,
+and a PostgreSQL `EXCLUDE USING gist` cannot run on the SQLite unit tier — so the advisory
+lock + repository check above is the **required** guard, not optional defense-in-depth. A
+Postgres-only exclusion constraint MAY *additionally* be added in the Alembic migration
+(dialect-guarded, never in shared `FinanceBase.metadata`, so `create_all` on SQLite is
+unaffected) as belt-and-suspenders on top of the lock.
 
 ## 7. Layer 2 derivation from source rows
 
@@ -289,8 +300,11 @@ money-gating ownership decision.
 ## 11. Migration and blast radius
 
 - **Alembic migration** under `backend/ums_smart_revenue/db/alembic/versions/` adds the two
-  tables with the §4 constraints/indexes/CHECKs. Optional Postgres-only exclusion-constraint
-  hardening (§6) is added in the migration only, never in shared SQLAlchemy metadata.
+  tables with the §4 constraints/indexes/CHECKs, including the PG-dialect-only
+  `provenance_payload` object CHECK (mirroring the deduction-components migration). The §6
+  concurrency guard is a runtime advisory lock (no schema); a Postgres-only overlap
+  exclusion constraint is optional belt-and-suspenders added in the migration only, never in
+  shared SQLAlchemy metadata.
 - Validated by the disposable-Postgres round-trip (container `ums-mig-pg-test`,
   `postgresql+psycopg://postgres:ums@localhost:55432/test_ums`).
 
@@ -310,12 +324,18 @@ Blast-radius answers:
 
 ## 12. Testing
 
-- **Models/migration:** Postgres round-trip; constraints, indexes, CHECKs; unique keys.
+- **Models/migration:** Postgres round-trip; constraints, indexes, CHECKs; unique keys;
+  `provenance_payload` is NOT NULL defaulting `{}` and the PG object CHECK rejects a
+  non-object payload (SQLite skips the CHECK, like the deduction-components precedent).
 - **Verification state machine:** propose → verify/reject transitions; `verified_by/at/reason`
   stamped; reason required.
-- **§6 overlap invariant:** verify that would overlap an existing `VERIFIED` link →
-  `ChannelAccountLinkConflictError` (409); non-overlapping verify succeeds; open-ended
-  ranges handled; re-verify after rejecting the competitor succeeds.
+- **§6 overlap invariant + concurrency:** verify that would overlap an existing `VERIFIED`
+  link → `ChannelAccountLinkConflictError` (409); non-overlapping verify succeeds;
+  open-ended ranges handled; re-verify after rejecting the competitor succeeds. Advisory
+  lock-key derivation is deterministic/stable and excludes payload/secrets; true
+  concurrent-race prevention is a PostgreSQL runtime property (mirroring the
+  classification-lock precedent), exercised serially on SQLite and, where practical, by a
+  Postgres-tier concurrent-verify test.
 - **Layer 2 derivation:** only rows with both `content_owner_id` and `youtube_channel_id`
   produce links; `source_account_id` never used; provenance `SOURCE_ROW`; re-run
   idempotent (identical rows).
