@@ -421,7 +421,6 @@ python -m ruff check backend/ums_smart_revenue/finance/net_revenue.py backend/um
 git add backend/ums_smart_revenue/finance/net_revenue.py backend/ums_smart_revenue/api/revenue.py tests/finance/test_net_revenue_deduction_components.py
 git commit -m "feat(finance): channel-direct deduction consumption in net-revenue (missing-net only)"
 ```
-End the commit message with: `Co-Authored-By: Claude Opus 4.8 (1M context) <noreply@anthropic.com>`
 
 ---
 
@@ -681,16 +680,251 @@ def test_finance_admin_global_reads_components(tmp_path):
         headers=auth_headers("finance_admin", "global"),
     )
     assert response.status_code == 200
+
+
+def test_missing_trusted_gateway_token_is_401(tmp_path):
+    # Trusted-gateway enforcement runs before route auth; a dropped token -> 401
+    # (matches tests/api/test_guarded_routes.py:85-90).
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers("finance_admin", "global")
+    headers.pop("x-ums-trusted-gateway-token")
+    response = client.get(
+        f"/revenue/months/{MONTH}/deduction-components", headers=headers,
+    )
+    assert response.status_code == 401
+
+
+def test_invalid_trusted_gateway_token_is_401(tmp_path):
+    # A wrong gateway token -> 401 (matches tests/api/test_database_principals.py:569-573).
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    headers = auth_headers("finance_admin", "global")
+    headers["x-ums-trusted-gateway-token"] = "invalid-token"
+    response = client.get(
+        f"/revenue/months/{MONTH}/deduction-components", headers=headers,
+    )
+    assert response.status_code == 401
+
+
+def test_company_scoped_finance_viewer_is_403_on_global_revenue_gate(tmp_path):
+    # The endpoint checks VIEW_REVENUE on global_scope() with no org_index (like
+    # smart-alerts, revenue.py:679), so it requires a GLOBAL grant. A
+    # company-scoped finance_viewer has only a company grant -> first gate fails
+    # -> 403 "Missing permission: finance.view_revenue". Confirms the global vs
+    # finance-month scope split is enforced, not bypassed by an org-scoped grant.
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    response = client.get(
+        f"/revenue/months/{MONTH}/deduction-components",
+        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
 ```
 
-> **403/200 roles — use only roles confirmed real in `auth/roles.py`.** This plan uses `assistant_analyst` (lacks `VIEW_REVENUE` → 403 "Missing permission: finance.view_revenue", exactly as the sibling net-revenue/smart-alerts 403 tests) and `finance_admin` (all four permissions → 200). It deliberately does NOT assert an isolated `VIEW_BANK_RECONCILIATION`-only failure: there is no verified single RoleKey with revenue+confidence+payments-but-not-bank (`revenue_auditor`/`payment_auditor` are NOT RoleKeys). If the implementer wants that fourth-gate isolation, first confirm the role→permission map in `auth/seed.py` and use a real role, or use a `finance_admin` header scoped to a mismatched `finance-month` so the finance-month checks fail — never invent a role name.
+> **403/200 roles — use only roles confirmed real in `auth/roles.py`.** This plan uses `assistant_analyst` (lacks `VIEW_REVENUE` → 403 "Missing permission: finance.view_revenue", exactly as the sibling net-revenue/smart-alerts 403 tests), `finance_admin` (all four permissions globally → 200), and `finance_viewer` scoped to a company (passes the gateway but fails the endpoint's GLOBAL `VIEW_REVENUE` gate → 403, since the endpoint checks `global_scope()` with no `org_index`, like smart-alerts at revenue.py:679). It deliberately does NOT assert an isolated `VIEW_BANK_RECONCILIATION`-only failure: there is no verified single RoleKey with revenue+confidence+payments-but-not-bank (`revenue_auditor`/`payment_auditor` are NOT RoleKeys), and a global-vs-finance-month mixed-scope endpoint cannot cleanly isolate the bank gate with one role header. Never invent a role name.
 
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `python -m pytest tests/api/test_deduction_components_api.py -q`
 Expected: FAIL — the 7 deduction-endpoint tests 404 (route not defined yet); the net-revenue integration test also fails until Task 1's wiring is in. (If Task 1 already merged its wiring, that one test passes — the 7 endpoint tests still fail.)
 
-- [ ] **Step 3: Add the read endpoint to `revenue.py`**
+- [ ] **Step 3: Add a filtered + paginated repository page method (DB-layer, not in-memory)**
+
+Filtering, pagination, and `total_count` belong in the repository — the API route must not load a whole month and slice in Python (a finance evidence table can grow large; the count + page must be computed in SQL). Add a `DeductionComponentPage` result + a `list_month_components_page` method to `SqlAlchemyDeductionComponentRepository` in `backend/ums_smart_revenue/finance/deduction_ingestion.py`.
+
+First, write the failing repository tests. Create `tests/finance/test_deduction_component_page.py`:
+
+```python
+"""Repository-layer filtering + pagination for deduction components (SQLite)."""
+from datetime import date
+from decimal import Decimal
+from uuid import UUID, uuid4
+
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from ums_smart_revenue.db.finance_models import DeductionComponentORM, FinanceBase
+from ums_smart_revenue.finance.deduction_ingestion import (
+    DeductionComponentValidationError,
+    SqlAlchemyDeductionComponentRepository,
+)
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
+MONTH = "2026-04"
+TENANT = UUID(UMS_TENANT_ID)
+
+
+def _engine(tmp_path):
+    engine = create_engine(
+        f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
+    )
+    FinanceBase.metadata.create_all(engine)
+    return engine
+
+
+def _add(session, *, kind, scope_kind, scope_id, key):
+    session.add(
+        DeductionComponentORM(
+            id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind=kind,
+            scope_kind=scope_kind, scope_id=scope_id, amount_usd=Decimal("10.00"),
+            amount_native=None, currency_code="USD",
+            source_system="adsense_management", source_table="google_revenue_source_rows",
+            source_id=None, source_key=key, source_report_id=None,
+            raw_payload={"k": "v"}, component_key=key,
+        )
+    )
+
+
+def _seed(session):
+    _add(session, kind="DEDUCTION", scope_kind="CHANNEL", scope_id="chan-1", key="k-chan")
+    _add(session, kind="UNRESOLVED_PAYMENT_GAP", scope_kind="ACCOUNT", scope_id="pub-1", key="k-acct")
+    _add(session, kind="TRANSFER_FEE", scope_kind="PAYMENT", scope_id="BANK-1", key="k-pay")
+    session.commit()
+
+
+def test_page_returns_all_with_total_when_unfiltered(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed(session)
+        repo = SqlAlchemyDeductionComponentRepository(session)
+        page = repo.list_month_components_page(month=MONTH, limit=100, offset=0)
+    assert page.total_count == 3
+    assert len(page.components) == 3
+    # deterministic order: scope_kind, scope_id, component_kind, component_key
+    assert [c.scope_kind for c in page.components] == ["ACCOUNT", "CHANNEL", "PAYMENT"]
+
+
+def test_page_component_kind_filter_counts_only_matches(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed(session)
+        repo = SqlAlchemyDeductionComponentRepository(session)
+        page = repo.list_month_components_page(
+            month=MONTH, component_kind="TRANSFER_FEE", limit=100, offset=0
+        )
+    assert page.total_count == 1
+    assert page.components[0].component_kind == "TRANSFER_FEE"
+
+
+def test_page_scope_kind_filter_counts_only_matches(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed(session)
+        repo = SqlAlchemyDeductionComponentRepository(session)
+        page = repo.list_month_components_page(
+            month=MONTH, scope_kind="CHANNEL", limit=100, offset=0
+        )
+    assert page.total_count == 1
+    assert page.components[0].scope_kind == "CHANNEL"
+
+
+def test_page_limit_offset_paginates_but_total_is_full_match_count(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed(session)
+        repo = SqlAlchemyDeductionComponentRepository(session)
+        page = repo.list_month_components_page(month=MONTH, limit=1, offset=0)
+        page2 = repo.list_month_components_page(month=MONTH, limit=1, offset=2)
+    assert page.total_count == 3
+    assert len(page.components) == 1
+    assert page.components[0].scope_kind == "ACCOUNT"  # first in deterministic order
+    assert page2.components[0].scope_kind == "PAYMENT"  # third
+
+
+def test_page_malformed_month_raises(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyDeductionComponentRepository(session)
+        with pytest.raises(DeductionComponentValidationError):
+            repo.list_month_components_page(month="2026-13", limit=100, offset=0)
+```
+
+Run: `python -m pytest tests/finance/test_deduction_component_page.py -q`
+Expected: FAIL — `AttributeError: 'SqlAlchemyDeductionComponentRepository' object has no attribute 'list_month_components_page'`.
+
+Add the result dataclass next to `DeductionIngestionResult` in `deduction_ingestion.py` (after its definition, ~line 69):
+
+```python
+@dataclass(frozen=True)
+class DeductionComponentPage:
+    """One page of deduction components plus the full-match total count."""
+
+    total_count: int
+    components: list[DeductionComponent]
+```
+
+Add the method to `SqlAlchemyDeductionComponentRepository`, immediately after `list_month_components` (the existing read), reusing the same deterministic ordering. It computes the total via a SQL `COUNT(*)` over the filtered set and returns only the requested page:
+
+```python
+    def list_month_components_page(
+        self, *,
+        month: str,
+        component_kind: str | None = None,
+        scope_kind: str | None = None,
+        limit: int,
+        offset: int,
+    ) -> DeductionComponentPage:
+        """Return a filtered, paginated page of components + the full match count.
+
+        Raises:
+            DeductionComponentValidationError: If the month is malformed.
+        """
+        _validate_month(month)
+        filters = [
+            DeductionComponentORM.tenant_id == self._tenant_id,
+            DeductionComponentORM.month == month,
+        ]
+        if component_kind is not None:
+            filters.append(DeductionComponentORM.component_kind == component_kind)
+        if scope_kind is not None:
+            filters.append(DeductionComponentORM.scope_kind == scope_kind)
+        total_count = self._session.scalar(
+            select(func.count()).select_from(DeductionComponentORM).where(*filters)
+        )
+        rows = self._session.scalars(
+            select(DeductionComponentORM)
+            .where(*filters)
+            .order_by(
+                DeductionComponentORM.scope_kind,
+                DeductionComponentORM.scope_id,
+                DeductionComponentORM.component_kind,
+                DeductionComponentORM.component_key,
+            )
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        return DeductionComponentPage(
+            total_count=int(total_count or 0),
+            components=[self._to_entry(row) for row in rows],
+        )
+```
+
+Add `func` to the SQLAlchemy import at the top of `deduction_ingestion.py` (currently `from sqlalchemy import delete, select`):
+
+```python
+from sqlalchemy import delete, func, select
+```
+
+Run: `python -m pytest tests/finance/test_deduction_component_page.py -q`
+Expected: PASS — 5 passed.
+
+Lint + commit the repository method:
+
+```bash
+python -m ruff check backend/ums_smart_revenue/finance/deduction_ingestion.py tests/finance/test_deduction_component_page.py
+git add backend/ums_smart_revenue/finance/deduction_ingestion.py tests/finance/test_deduction_component_page.py
+git commit -m "feat(finance): filtered+paginated deduction-component repository page method"
+```
+
+> **Scope note:** this is the one allowed touch to `deduction_ingestion.py` (PR-A file) — a purely additive read method + result dataclass, no change to ingestion/upsert/audit behavior. The "Don't change PR-A" rule in the implementer notes refers to *behavioral* changes; an additive read query for the new endpoint is in-scope for PR-B.
+
+- [ ] **Step 4: Add the read endpoint to `revenue.py`**
 
 Insert this handler immediately AFTER `get_month_smart_alerts` ends (after revenue.py:761, before `@router.get("/months/{month}/net-revenue")`). The provider, `SqlAlchemyDeductionComponentRepository`, and `DeductionComponentValidationError` imports were added in Task 1 Step 7.
 
@@ -729,22 +963,21 @@ def get_month_deduction_components(
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
     _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
     try:
-        components = repository.list_month_components(month=month)
+        page = repository.list_month_components_page(
+            month=month,
+            component_kind=component_kind,
+            scope_kind=scope_kind,
+            limit=limit,
+            offset=offset,
+        )
     except DeductionComponentValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
 
-    if component_kind is not None:
-        components = [c for c in components if c.component_kind == component_kind]
-    if scope_kind is not None:
-        components = [c for c in components if c.scope_kind == scope_kind]
-    total_count = len(components)
-    page = components[offset : offset + limit]
-
     grouped: dict[str, list[dict[str, object]]] = {}
-    for component in page:
+    for component in page.components:
         grouped.setdefault(component.scope_kind, []).append(component.to_api())
     scopes = [
         {"scope_kind": kind, "components": grouped[kind]}
@@ -753,8 +986,8 @@ def get_month_deduction_components(
 
     audit_details = {
         "month": month,
-        "total_count": total_count,
-        "returned_count": len(page),
+        "total_count": page.total_count,
+        "returned_count": len(page.components),
     }
     revenue_record = record_audit_event(
         sink=audit_sink,
@@ -785,8 +1018,8 @@ def get_month_deduction_components(
     )
     return {
         "month": month,
-        "total_count": total_count,
-        "returned_count": len(page),
+        "total_count": page.total_count,
+        "returned_count": len(page.components),
         "scopes": scopes,
         "audit_events": [
             audit_record_to_api(revenue_record),
@@ -798,19 +1031,18 @@ def get_month_deduction_components(
 
 (`Query`, `status`, `HTTPException`, `AuditSink`, `record_audit_event`, `audit_record_to_api`, `AccessScope`, `Permission`, `AuditEventType`, `UserPrincipal`, `current_principal_from_headers` are all already imported in `revenue.py` — they back the sibling endpoints. Confirm before adding new imports.)
 
-- [ ] **Step 4: Run to verify the endpoint tests pass**
+- [ ] **Step 5: Run to verify the endpoint tests pass**
 
 Run: `python -m pytest tests/api/test_deduction_components_api.py -q`
-Expected: PASS — 8 passed (1 grouped-read+audit, 2 filter, 1 pagination, 1 malformed-month 422, 1 net-revenue component-derived integration, 1 assistant 403, 1 finance_admin 200).
+Expected: PASS — 11 passed (1 grouped-read+audit, 2 filter, 1 pagination, 1 malformed-month 422, 1 net-revenue component-derived integration, 1 assistant 403, 1 company-scoped-viewer 403, 1 missing-gateway-token 401, 1 invalid-gateway-token 401, 1 finance_admin 200).
 
-- [ ] **Step 5: Lint + commit**
+- [ ] **Step 6: Lint + commit**
 
 ```bash
 python -m ruff check backend/ums_smart_revenue/api/revenue.py tests/api/test_deduction_components_api.py
 git add backend/ums_smart_revenue/api/revenue.py tests/api/test_deduction_components_api.py
 git commit -m "feat(api): read-only GET /revenue/months/{month}/deduction-components"
 ```
-End the commit message with the `Co-Authored-By` trailer.
 
 ---
 
@@ -826,7 +1058,7 @@ Expected: `All checks passed!`
 - [ ] **Step 2: Full test suite**
 
 Run: `python -m pytest -q`
-Expected: PASS — prior count + the new tests (8 pure net-revenue + 8 API). 0 failed.
+Expected: PASS — prior count + the new tests (8 pure net-revenue + 5 repository-page + 11 API). 0 failed.
 If `UMS_TEST_DATABASE_URL` is unset, the pre-existing `*_postgres.py` tests fail-fast (unchanged env-gating) — this PR adds NO migration, so a SQLite-only run otherwise green is acceptable; for full parity run under the disposable `test_*`-named Postgres.
 
 - [ ] **Step 3: Whitespace/diff hygiene**
