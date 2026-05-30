@@ -39,6 +39,10 @@ def _month_format(column: str) -> str:
 # Standards: object JSONB CHECK is Postgres-only (dialect guard), mirroring
 #   deduction_components. Downgrade drops indexes then tables.
 # Blast Radius: Finance source-of-truth (additive). No auth/Neo4j schema impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/finance_models.py -> ORM contract
+#     (AdsenseContentOwnerLinkORM, ContentOwnerChannelLinkORM).
+#   - File: Docs/superpowers/specs/2026-05-31-spec-channel-account-map-design.md
 # ============================================================================
 def upgrade() -> None:
     """Create both map tables with constraints and indexes."""
@@ -121,7 +125,8 @@ def upgrade() -> None:
             name="ck_content_owner_channel_links_range",
         ),
     )
-    # Postgres-only object guard (invalid SQLite CREATE syntax).
+    # Postgres-only object guard (invalid SQLite CREATE syntax), mirroring the
+    # ORM's .ddl_if(dialect="postgresql") CHECK in finance_models.py.
     if op.get_bind().dialect.name == "postgresql":
         op.create_check_constraint(
             "ck_adsense_content_owner_links_provenance_payload_object",

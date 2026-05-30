@@ -15,11 +15,13 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 
 @pytest.fixture
 def postgres_url() -> str:
+    """Return the PostgreSQL database URL for testing."""
     return require_postgres_url()
 
 
 @pytest.fixture
 def alembic_config(postgres_url: str) -> Config:
+    """Create an Alembic Config pointed at the test Postgres URL and script location."""
     cfg = Config()
     cfg.set_main_option("sqlalchemy.url", postgres_url)
     cfg.set_main_option(
@@ -31,6 +33,7 @@ def alembic_config(postgres_url: str) -> Config:
 
 @pytest.fixture
 def fresh_engine(postgres_url: str):
+    """Provide a fresh engine with a clean public schema for each test."""
     engine = create_engine(postgres_url)
     with engine.begin() as conn:
         conn.execute(text("DROP SCHEMA public CASCADE"))
@@ -59,6 +62,18 @@ def test_upgrade_creates_both_tables_with_constraints(alembic_config, fresh_engi
     )
     fks = {c["name"] for c in inspector.get_foreign_keys("content_owner_channel_links")}
     assert "fk_content_owner_channel_links_tenant" in fks
+    uniques2 = {
+        c["name"]: tuple(c["column_names"])
+        for c in inspector.get_unique_constraints("content_owner_channel_links")
+    }
+    assert uniques2["uq_content_owner_channel_links_key"] == (
+        "tenant_id", "content_owner_id", "youtube_channel_id", "effective_month_start",
+    )
+    indexes = {c["name"] for c in inspector.get_indexes("adsense_content_owner_links")} | {
+        c["name"] for c in inspector.get_indexes("content_owner_channel_links")
+    }
+    assert "ix_adsense_content_owner_links_account_status" in indexes
+    assert "ix_content_owner_channel_links_owner" in indexes
 
 
 def test_downgrade_drops_both_tables(alembic_config, fresh_engine):
@@ -83,6 +98,18 @@ def test_provenance_payload_object_check_rejects_array(alembic_config, fresh_eng
         "(tenant_id, adsense_account_id, content_owner_id, provenance_kind, "
         "provenance_payload, effective_month_start) VALUES "
         "(:tenant, 'pub-1', 'owner-1', 'OPERATOR_ASSERTED', '[]'::jsonb, '2026-01')"
+    )
+    with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
+        conn.execute(insert_sql, {"tenant": UMS_TENANT_ID})
+
+
+def test_owner_channel_provenance_kind_check_rejects_unknown(alembic_config, fresh_engine):
+    command.upgrade(alembic_config, "head")
+    insert_sql = text(
+        "INSERT INTO content_owner_channel_links "
+        "(tenant_id, content_owner_id, youtube_channel_id, provenance_kind, "
+        "effective_month_start) VALUES "
+        "(:tenant, 'owner-1', 'chan-1', 'BOGUS', '2026-04')"
     )
     with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
         conn.execute(insert_sql, {"tenant": UMS_TENANT_ID})
