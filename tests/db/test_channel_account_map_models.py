@@ -77,3 +77,28 @@ def test_owner_channel_link_persists_active_default(tmp_path):
         session.commit()
         row = session.query(ContentOwnerChannelLinkORM).one()
     assert row.active is True
+
+
+@pytest.mark.parametrize("bad_month", ["2026-13", "202601", "2026-1x"])
+def test_account_owner_link_month_format_check_rejects_malformed(tmp_path, bad_month):
+    engine = _engine(tmp_path)
+    with Session(engine) as session, pytest.raises(IntegrityError):
+        session.add(
+            AdsenseContentOwnerLinkORM(
+                tenant_id=TENANT, adsense_account_id="pub-1", content_owner_id="owner-1",
+                provenance_kind="OPERATOR_ASSERTED", effective_month_start=bad_month,
+            )
+        )
+        session.commit()
+
+
+def test_owner_channel_link_provenance_kind_check_rejects_unknown(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session, pytest.raises(IntegrityError):
+        session.add(
+            ContentOwnerChannelLinkORM(
+                tenant_id=TENANT, content_owner_id="owner-1", youtube_channel_id="chan-1",
+                provenance_kind="BOGUS", effective_month_start="2026-04",
+            )
+        )
+        session.commit()
