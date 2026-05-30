@@ -264,6 +264,7 @@ def current_deduction_component_repository(
 def current_number_explanation_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyNumberExplanationRepository:
+    """Build the tenant-aware number-explanation repository for a request."""
     return SqlAlchemyNumberExplanationRepository(session)
 
 
@@ -901,6 +902,7 @@ def get_month_net_revenue(
     scope_id: str | None = None,
     currency: Annotated[str, Query(min_length=1)] = "USD",
 ) -> dict[str, object]:
+    """Return the scoped monthly net-revenue summary for an authorized finance viewer."""
     target_scope, channel_ids = _revenue_read_scope_to_channel_ids(
         scope_type=scope_type,
         scope_id=scope_id,
