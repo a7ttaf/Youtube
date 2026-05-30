@@ -95,7 +95,6 @@ def _make_tenant_row(**kwargs: object) -> TenantORM:
 
 def _build_app(engine: Engine) -> FastAPI:
     """Bare FastAPI app with the resolver middleware and a probe endpoint."""
-
     app = FastAPI()
     factory = sessionmaker(engine, expire_on_commit=False)
 
@@ -121,12 +120,10 @@ def _build_app(engine: Engine) -> FastAPI:
     @app.get("/stream")
     def stream() -> StreamingResponse:
         """Stream the tenant slug while response body iteration is active."""
-
         def _gen() -> Iterator[str]:
             """Yield the tenant slug from inside the streaming iterator."""
             tenant = get_current_tenant()
             yield tenant.slug if tenant is not None else "none"
-
         return StreamingResponse(_gen(), media_type="text/plain")
 
     return app
@@ -656,7 +653,8 @@ class _ScalarResult:
 class _CorruptTenantSession:
     """Session fake that returns a malformed tenant registry row."""
 
-    def scalars(self, _statement: object) -> _ScalarResult:
+    @staticmethod
+    def scalars(_statement: object) -> _ScalarResult:
         """Return a row that fails repository domain validation."""
         return _ScalarResult(_make_tenant_row(primary_currency="usd"))
 
@@ -671,7 +669,8 @@ class _BrokenDatabaseSession:
         """Track whether middleware still closes failed sessions."""
         self._closed = closed
 
-    def scalars(self, _statement: object) -> object:
+    @staticmethod
+    def scalars(_statement: object) -> object:
         """Raise a representative database error from the lookup path."""
         raise OperationalError("SELECT tenants", {}, DatabaseOfflineError())
 
@@ -683,11 +682,13 @@ class _BrokenDatabaseSession:
 class _CloseRaisesSession:
     """Session fake whose cleanup fails after lookup validation fails."""
 
-    def scalars(self, _statement: object) -> object:
+    @staticmethod
+    def scalars(_statement: object) -> object:
         """Raise a representative database error from the lookup path."""
         raise OperationalError("SELECT tenants", {}, DatabaseOfflineError())
 
-    def close(self) -> None:
+    @staticmethod
+    def close() -> None:
         """Raise a close failure that must not mask the lookup error."""
         raise SessionCloseUnavailableError
 

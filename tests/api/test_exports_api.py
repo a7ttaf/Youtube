@@ -41,6 +41,7 @@ def auth_headers(
     scope_id: str | None = None,
     user_id: str | UUID = USER_ID,
 ) -> dict[str, str]:
+    """Build trusted-gateway headers for export API permission scenarios."""
     headers = {
         "x-user-id": str(user_id),
         "x-user-email": f"{role}@example.com",
@@ -54,10 +55,12 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """Return an isolated SQLite database URL for export API tests."""
     return f"sqlite+pysqlite:///{(tmp_path / 'exports.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
+    """Seed export tests with authorization, org, finance, and report rows."""
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
     OrgBase.metadata.create_all(engine)
@@ -98,6 +101,7 @@ def seed_database(database_url: str) -> None:
 
 
 def test_finance_admin_requests_finance_export_with_audit_and_lock_snapshot(tmp_path):
+    """Verify finance export requests persist audit and lock snapshot metadata."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -137,6 +141,7 @@ def test_finance_admin_requests_finance_export_with_audit_and_lock_snapshot(tmp_
 
 
 def test_channel_export_request_rejects_unknown_channel_scope(tmp_path):
+    """Verify unknown channel export scopes fail before job or audit creation."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -166,6 +171,7 @@ def test_channel_export_request_rejects_unknown_channel_scope(tmp_path):
 
 
 def test_export_request_denies_missing_export_permission_before_scope_lookup(tmp_path):
+    """Verify missing export permission fails before group scope lookup side effects."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -318,6 +324,7 @@ def test_group_export_read_uses_snapshot_authorization_after_group_deletion(tmp_
 
 
 def test_export_operator_cannot_request_finance_export_without_finance_visibility(tmp_path):
+    """Test that an export operator without finance visibility cannot request a finance export."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -340,6 +347,7 @@ def test_export_operator_cannot_request_finance_export_without_finance_visibilit
 
 
 def test_finance_export_request_requires_artifact_read_permissions(tmp_path):
+    """Test that requesting a finance export requires artifact read permissions."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     app = create_app(database_url=database_url)
@@ -383,6 +391,7 @@ def test_finance_export_request_requires_artifact_read_permissions(tmp_path):
 
 
 def test_export_operator_can_request_analytics_export_for_assigned_company(tmp_path):
+    """Test that an export operator can request an analytics export for their assigned company."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     app = create_app(database_url=database_url)
@@ -412,6 +421,7 @@ def test_export_operator_can_request_analytics_export_for_assigned_company(tmp_p
 
 
 def test_non_uuid_gateway_actor_can_create_and_list_exports(tmp_path):
+    """Test that a non-UUID gateway actor can create an export and list it successfully."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -444,9 +454,12 @@ def test_non_uuid_gateway_actor_can_create_and_list_exports(tmp_path):
 
 
 def test_export_list_scan_limit_marks_has_more_and_logs_metric(caplog):
+    """Test pagination behavior of export listing, ensuring has_more is marked and metrics are logged."""
     created_at = datetime(2026, 4, 30, 10, 0, tzinfo=UTC)
 
     class PagedRepository:
+        """Provides paginated retrieval of export jobs via the list_jobs method."""
+
         def __init__(self) -> None:
             self.offsets: list[int] = []
 
@@ -457,6 +470,7 @@ def test_export_list_scan_limit_marks_has_more_and_logs_metric(caplog):
             limit: int,
             offset: int,
         ) -> ExportJobPage:
+            """Retrieve a page of export jobs with the given pagination parameters."""
             assert requested_by == str(USER_ID)
             self.offsets.append(offset)
             return ExportJobPage(
@@ -484,10 +498,16 @@ def test_export_list_scan_limit_marks_has_more_and_logs_metric(caplog):
             )
 
     class EmptyGroupRegistry:
-        def list_groups(self) -> list[object]:
+        """Registry stub with no groups for export authorization tests."""
+
+        @staticmethod
+        def list_groups() -> list[object]:
+            """Return no groups."""
             return []
 
-        def get_group(self, group_id: str) -> None:
+        @staticmethod
+        def get_group(group_id: str) -> None:
+            """Validate the requested group id without returning a group."""
             assert group_id
 
     repository = PagedRepository()
@@ -589,6 +609,7 @@ def test_export_list_combines_global_and_month_scoped_finance_permissions(tmp_pa
 
 
 def test_export_list_uses_snapshot_authorization_for_channel_grants(tmp_path):
+    """Verify that export listing respects snapshot authorization for channel grants."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     export_id = uuid4()
@@ -635,6 +656,7 @@ def test_export_list_uses_snapshot_authorization_for_channel_grants(tmp_path):
 
 
 def test_company_manager_cannot_request_export_for_another_company(tmp_path):
+    """Ensure that a company manager cannot request exports for a different company."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -657,6 +679,7 @@ def test_company_manager_cannot_request_export_for_another_company(tmp_path):
 
 
 def test_group_export_requires_access_to_every_member_channel(tmp_path):
+    """Ensure that group exports are rejected if user lacks access to all member channels."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -679,6 +702,7 @@ def test_group_export_requires_access_to_every_member_channel(tmp_path):
 
 
 def test_export_request_rejects_non_usd_currency_until_exchange_rates_exist(tmp_path):
+    """Verify that export requests with non-USD currency are rejected until exchange rate support is available."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -701,6 +725,7 @@ def test_export_request_rejects_non_usd_currency_until_exchange_rates_exist(tmp_
 
 
 def test_export_list_returns_requesting_users_jobs_only(tmp_path):
+    """Ensure that export listing returns only jobs requested by the current user."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -748,6 +773,7 @@ def test_export_list_returns_requesting_users_jobs_only(tmp_path):
 
 
 def test_user_without_export_permission_cannot_list_historical_export_jobs(tmp_path):
+    """Verify that users without export permissions cannot list historical export jobs."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -775,6 +801,7 @@ def test_user_without_export_permission_cannot_list_historical_export_jobs(tmp_p
 
 
 def test_export_list_applies_current_scope_and_type_permissions(tmp_path):
+    """Ensure that export listing applies the user's current scope and type permissions."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -836,6 +863,7 @@ def test_export_list_applies_current_scope_and_type_permissions(tmp_path):
 
 
 def test_export_operator_can_get_own_export_job(tmp_path):
+    """Test that an export operator can retrieve their own export job and that audit logs are recorded properly."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -873,6 +901,7 @@ def test_export_operator_can_get_own_export_job(tmp_path):
 
 
 def test_get_export_enforces_scope_even_for_job_owner(tmp_path):
+    """Test that get export endpoint enforces scope restrictions even for the job owner."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     export_id = uuid4()
@@ -906,6 +935,7 @@ def test_get_export_enforces_scope_even_for_job_owner(tmp_path):
 
 
 def test_user_without_export_permission_cannot_probe_export_ids(tmp_path):
+    """Test that a user without export permissions receives 403 when accessing export endpoints."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))

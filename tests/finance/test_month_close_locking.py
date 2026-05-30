@@ -40,18 +40,23 @@ OTHER_TENANT_ID = UUID("00000000-0000-0000-0000-00000000f301")
 
 
 class _DialectSession:
+    """Session stub that captures SQLAlchemy dialect statements."""
+
     def __init__(self, dialect_name: str) -> None:
         self._bind = SimpleNamespace(dialect=SimpleNamespace(name=dialect_name))
         self.executed: list[tuple[object, dict[str, object]]] = []
 
     def get_bind(self) -> SimpleNamespace:
+        """Return the session's SQLAlchemy dialect bind stub."""
         return self._bind
 
     def execute(self, statement: object, parameters: dict[str, object]) -> None:
+        """Record an executed statement and its parameters in the executed list."""
         self.executed.append((statement, parameters))
 
 
 def _tenant(tenant_id: UUID = OTHER_TENANT_ID) -> Tenant:
+    """Create an active tenant model for tests."""
     now = datetime.now(UTC)
     return Tenant(
         id=tenant_id,
@@ -112,19 +117,27 @@ def test_get_or_create_month_close_row_acquires_guard_before_row_lock(
     calls: list[tuple[str, object]] = []
 
     class ScalarRows:
-        def one_or_none(self) -> SimpleNamespace:
+        """Scalar result wrapper with one-or-none semantics."""
+
+        @staticmethod
+        def one_or_none() -> SimpleNamespace:
+            """Return the month-close status row."""
             calls.append(("fetch", None))
             return SimpleNamespace(month="2026-03", status="OPEN")
 
     class Session:
-        def scalars(self, statement: object) -> ScalarRows:
+        """Session stub that returns scalar rows for month-close checks."""
+
+        @staticmethod
+        def scalars(statement: object) -> ScalarRows:
+            """Record the select statement and return scalar rows."""
             calls.append(("select", statement))
             return ScalarRows()
 
     def record_guard(
         session: object, month: str, *, tenant_id: UUID | str | None = None
     ) -> None:
-        del session
+        """Record the month guard request."""
         calls.append(("guard", (month, tenant_id)))
 
     monkeypatch.setattr(
@@ -181,6 +194,7 @@ def test_get_or_create_month_close_row_uses_request_tenant_context() -> None:
         TENANT_CTX.reset(token)
 
 
+
 def test_finance_month_advisory_lock_uses_request_tenant_context() -> None:
     """Omitted advisory-lock tenant ids resolve to the active request tenant."""
     default_session = _DialectSession("postgresql")
@@ -230,21 +244,21 @@ def test_for_update_readiness_acquires_guard_before_blocker_queries(
     def record_guard(
         session: object, month: str, *, tenant_id: UUID | str | None = None
     ) -> None:
-        del session
+        """Record guard invocation for finance month lock."""
         calls.append(("guard", (month, tenant_id)))
 
     def record_pending(self: object, month: str, *, for_update: bool) -> int:
-        del self, month
+        """Record pending manual override checks."""
         calls.append(("pending", for_update))
         return 0
 
     def record_missing(self: object, month: str, *, for_update: bool) -> int:
-        del self, month
+        """Record missing required revenue checks."""
         calls.append(("missing", for_update))
         return 0
 
     def record_facts(self: object, month: str, *, for_update: bool) -> list[object]:
-        del self, month
+        """Record month fact retrieval checks."""
         calls.append(("facts", for_update))
         return []
 
@@ -295,7 +309,7 @@ def test_revenue_fact_writes_use_guarded_month_open_check(
         tenant_id: UUID | str | None = None,
         for_update: bool,
     ) -> SimpleNamespace:
-        del session
+        """Record the month-close row lookup."""
         calls.append((month, tenant_id, for_update))
         return SimpleNamespace(status="OPEN")
 
@@ -325,7 +339,7 @@ def test_manual_override_writes_use_guarded_month_open_check(
         tenant_id: UUID | str | None = None,
         for_update: bool,
     ) -> SimpleNamespace:
-        del session
+        """Fake implementation capturing calls and returning an OPEN status row."""
         calls.append((month, tenant_id, for_update))
         return SimpleNamespace(status="OPEN")
 
@@ -342,6 +356,8 @@ def test_manual_override_writes_use_guarded_month_open_check(
     assert calls == [("2026-03", DEFAULT_TENANT_ID, True)]
 
 
+# Finance tests for month close locking logic in AdSense payments.
+
 def test_adsense_payment_writes_use_context_tenant_in_month_open_check(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -355,7 +371,7 @@ def test_adsense_payment_writes_use_context_tenant_in_month_open_check(
         tenant_id: UUID | str | None = None,
         for_update: bool,
     ) -> SimpleNamespace:
-        del session
+        """Record the month-close row lookup."""
         calls.append((month, tenant_id, for_update))
         return SimpleNamespace(status="OPEN")
 
@@ -386,7 +402,7 @@ def test_bank_reconciliation_writes_use_context_tenant_in_month_open_check(
         tenant_id: UUID | str | None = None,
         for_update: bool,
     ) -> SimpleNamespace:
-        del session
+        """Record the month-close row lookup."""
         calls.append((month, tenant_id, for_update))
         return SimpleNamespace(status="OPEN")
 
