@@ -42,17 +42,25 @@ _SHEET_SOURCES = {
 
 
 class FinanceWorkbookPreviewValidationError(ValueError):
+    """Exception raised when validation of a finance workbook preview fails."""
     pass
 
 
 @dataclass(frozen=True)
 class FinanceWorkbookSheet:
+    """Data class representing a single sheet in the finance workbook preview."""
     name: str
     source: str
     status: str
     sensitive: bool
 
     def to_api(self) -> dict[str, object]:
+        """Convert the object's attributes to a dictionary suitable for API use.
+
+        Returns:
+            dict[str, object]: A dictionary containing the "name", "source", "status",
+                and "sensitive" attributes of this object.
+        """
         return {
             "name": self.name,
             "source": self.source,
@@ -62,7 +70,16 @@ class FinanceWorkbookSheet:
 
 
 @dataclass(frozen=True)
+"""
+Finance workbook builder module.
+
+Provides functions to create finance workbook previews and generate XLSX workbooks
+from financial export data, including summaries for net revenue, payment match,
+bank reconciliation, and smart alerts.
+"""
+
 class FinanceWorkbookPreview:
+    """Data class representing a finance workbook preview, including export job details and summaries for net revenue, payment match, bank reconciliation, and smart alerts."""
     export_job: ExportJobEntry
     sheets: tuple[FinanceWorkbookSheet, ...]
     net_revenue: MonthNetRevenueSummary
@@ -71,6 +88,7 @@ class FinanceWorkbookPreview:
     smart_alerts: MonthlySmartAlertSummary
 
     def to_api(self) -> dict[str, object]:
+        """Convert this FinanceWorkbookPreview into a dictionary payload for API export."""
         return {
             "export_id": self.export_job.id,
             "export_type": self.export_job.export_type,
@@ -110,6 +128,7 @@ def build_finance_workbook_preview(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> FinanceWorkbookPreview:
+    """Build a FinanceWorkbookPreview from the provided export job and source summaries, validating export type, month, and currency."""
     if export_job.export_type != "FINANCE_EXCEL":
         raise FinanceWorkbookPreviewValidationError(
             "finance workbook preview only supports FINANCE_EXCEL exports"
@@ -149,6 +168,7 @@ def build_finance_workbook_preview(
 
 
 def build_finance_workbook_xlsx(preview: FinanceWorkbookPreview) -> bytes:
+    """Generate an XLSX workbook binary from a FinanceWorkbookPreview, writing summary and monthly close sheets with financial data."""
     workbook = Workbook()
     workbook.iso_dates = True
     summary_sheet = workbook.active
@@ -269,6 +289,11 @@ def build_finance_workbook_xlsx(preview: FinanceWorkbookPreview) -> bytes:
     _write_table_sheet(
         workbook.create_sheet("Confidence Notes"),
         ["code", "severity", "source", "confidence", "message"],
+"""
+Finance workbook preview module provides functions to validate data consistency, generate executive summaries,
+breakdowns, and write styled tables and key-value sheets for finance reporting.
+"""
+
         [
             [
                 alert.code,
@@ -302,6 +327,10 @@ def _validate_same_month(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> None:
+    """
+    Ensure that all provided summaries correspond to the same month as the export job.
+    Raises a validation error if multiple different months are found.
+    """
     months = {
         export_job.month,
         net_revenue.month,
@@ -323,6 +352,11 @@ def _executive_summary(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> dict[str, object]:
+    """
+    Build and return the executive summary dictionary combining export job info
+    and statuses and metrics from net revenue, payment match, bank reconciliation,
+    and smart alerts summaries.
+    """
     return {
         "month": export_job.month,
         "scope_type": export_job.scope_type,
@@ -351,6 +385,10 @@ def _executive_summary(
 def _scope_breakdown(
     preview: FinanceWorkbookPreview, *, breakdown_type: str
 ) -> dict[str, object]:
+    """
+    Generate a scope breakdown dictionary for the given preview and breakdown type,
+    including revenue metrics and channel counts.
+    """
     return {
         "breakdown_type": breakdown_type,
         "scope_type": preview.export_job.scope_type,
@@ -372,6 +410,10 @@ def _scope_breakdown(
 
 
 def _write_key_value_sheet(sheet: Worksheet, values: dict[str, object]) -> None:
+    """
+    Write a key-value mapping to the provided worksheet as a two-column table.
+    Keys become the first column and their corresponding formatted values the second.
+    """
     _write_table_sheet(
         sheet,
         ["Metric", "Value"],
@@ -382,6 +424,10 @@ def _write_key_value_sheet(sheet: Worksheet, values: dict[str, object]) -> None:
 def _write_table_sheet(
     sheet: Worksheet, headers: list[str], rows: list[list[object]]
 ) -> None:
+    """
+    Populate the worksheet with the given headers and rows,
+    then freeze the header row, apply header styling, and autosize columns.
+    """
     sheet.append(headers)
     for row in rows:
         sheet.append([_cell_value(value) for value in row])
@@ -391,6 +437,10 @@ def _write_table_sheet(
 
 
 def _style_header(sheet: Worksheet) -> None:
+    """
+    Apply styling to the header row of the sheet: solid fill, white bold font,
+    and center alignment.
+    """
     fill = PatternFill("solid", fgColor="1F2933")
     font = Font(color="FFFFFF", bold=True)
     for cell in sheet[1]:
@@ -400,6 +450,10 @@ def _style_header(sheet: Worksheet) -> None:
 
 
 def _autosize_columns(sheet: Worksheet) -> None:
+    """
+    Adjust each column's width based on the maximum length of cell values,
+    with defined minimum and maximum width constraints.
+    """
     for column in sheet.columns:
         max_length = 0
         column_letter = column[0].column_letter
@@ -411,6 +465,10 @@ def _autosize_columns(sheet: Worksheet) -> None:
 
 
 def _cell_value(value: object) -> object:
+    """
+    Convert values for cell insertion: Decimal to API format,
+    dict or list to JSON string, otherwise return value unchanged.
+    """
     if isinstance(value, Decimal):
         return _decimal_to_api(value)
     if isinstance(value, (dict, list)):

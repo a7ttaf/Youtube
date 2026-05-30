@@ -40,17 +40,22 @@ _SECTION_SOURCES = {
 
 
 class ExecutivePdfValidationError(ValueError):
+    """Raised when there is a validation error in generating the executive PDF report."""
     pass
 
 
 @dataclass(frozen=True)
 class ExecutivePdfSection:
+    """Represents a section of the executive PDF report, including its name, data source, status, and sensitivity."""
     name: str
     source: str
     status: str
     sensitive: bool
 
+    """Module providing utilities for converting report objects into API-friendly dictionaries for executive PDFs."""
+
     def to_api(self) -> dict[str, object]:
+        """Convert the current instance into a dictionary formatted for API consumption, including name, source, status, and sensitivity."""
         return {
             "name": self.name,
             "source": self.source,
@@ -60,7 +65,9 @@ class ExecutivePdfSection:
 
 
 @dataclass(frozen=True)
+"""Module for generating executive PDF reports. Provides functionality to build report objects, serialize to API format, and render PDF bytes."""
 class ExecutivePdfReport:
+    """Represents the executive PDF report, aggregating job info, sections, and summary data for generation."""
     export_job: ExportJobEntry
     sections: tuple[ExecutivePdfSection, ...]
     net_revenue: MonthNetRevenueSummary
@@ -69,6 +76,7 @@ class ExecutivePdfReport:
     smart_alerts: MonthlySmartAlertSummary
 
     def to_api(self) -> dict[str, object]:
+        """Convert the ExecutivePdfReport instance into an API payload dictionary."""
         return {
             "export_id": self.export_job.id,
             "export_type": self.export_job.export_type,
@@ -98,6 +106,7 @@ def build_executive_pdf_report(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> ExecutivePdfReport:
+    """Build and validate an ExecutivePdfReport object from given summaries and export job."""
     if export_job.export_type != "EXECUTIVE_PDF":
         raise ExecutivePdfValidationError(
             "executive PDF report only supports EXECUTIVE_PDF exports"
@@ -135,6 +144,7 @@ def build_executive_pdf_report(
 
 
 def build_executive_pdf_bytes(report: ExecutivePdfReport) -> bytes:
+    """Generate PDF bytes for the given ExecutivePdfReport using reportlab, returning the PDF binary."""
     buffer = BytesIO()
     document = SimpleDocTemplate(
         buffer,
@@ -197,6 +207,7 @@ def _validate_same_month(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> None:
+    """Ensure all provided summaries correspond to the same month, raising an ExecutivePdfValidationError if they differ."""
     months = {
         export_job.month,
         net_revenue.month,
@@ -218,6 +229,7 @@ def _executive_summary(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> dict[str, object]:
+    """Generate a summary dictionary containing key metrics and statuses for the executive PDF report."""
     return {
         "month": export_job.month,
         "scope_type": export_job.scope_type,
@@ -244,6 +256,7 @@ def _executive_summary(
 
 
 def _summary_table(report: ExecutivePdfReport) -> Table:
+    """Create a summary table with key executive summary metrics for display in the PDF."""
     summary = report.to_api()["executive_summary"]
     return _key_value_table(
         {
@@ -258,6 +271,7 @@ def _summary_table(report: ExecutivePdfReport) -> Table:
 
 
 def _gross_net_table(report: ExecutivePdfReport) -> Table:
+    """Generate a table of gross and net revenue figures along with deductions and gaps."""
     return _key_value_table(
         {
             "Adjusted Gross Revenue USD": _decimal_to_api(
@@ -276,6 +290,7 @@ def _gross_net_table(report: ExecutivePdfReport) -> Table:
 
 
 def _ranking_table(report: ExecutivePdfReport, *, ranking_label: str) -> Table:
+    """Build a table displaying company ranking information based on net revenue, labeled by the given ranking label."""
     return _styled_table(
         [["Ranking", "Channels", "Total Net Revenue USD"]]
         + [
@@ -289,6 +304,7 @@ def _ranking_table(report: ExecutivePdfReport, *, ranking_label: str) -> Table:
 
 
 def _channel_ranking_table(report: ExecutivePdfReport) -> Table:
+    """Generate a styled table showing top channels ranked by net revenue, including deductions and confidence scores."""
     rows = [
         ["Channel", "Net Revenue USD", "Deduction USD", "Confidence"],
         *[
@@ -315,6 +331,7 @@ def _channel_ranking_table(report: ExecutivePdfReport) -> Table:
 def _problem_summary(
     report: ExecutivePdfReport, styles: dict[str, ParagraphStyle]
 ) -> Paragraph:
+    """Create a paragraph summarizing detected smart alerts or indicate that none were generated."""
     if not report.smart_alerts.alerts:
         return Paragraph(
             "No smart alerts were generated for this export scope.", styles["BodyText"]
@@ -326,6 +343,7 @@ def _problem_summary(
 def _recommendations(
     report: ExecutivePdfReport, styles: dict[str, ParagraphStyle]
 ) -> Paragraph:
+    """Provide a paragraph with recommendations based on payment matching, bank reconciliation, and smart alert statuses."""
     if report.payment_match.status != "PAYMENT_MATCHED":
         return Paragraph(
             "Review AdSense payment matching before finance sign-off.",
@@ -347,11 +365,13 @@ def _recommendations(
 
 
 def _key_value_table(values: dict[str, object]) -> Table:
+    """Construct a key-value styled table from a dictionary of metrics and their values."""
     rows = [["Metric", "Value"], *[[key, value] for key, value in values.items()]]
     return _styled_table(rows)
 
 
 def _styled_table(rows: list[list[object]]) -> Table:
+    """Apply consistent styling to a table, including fonts, colors, padding, and grid layout, for use in the PDF."""
     table = Table(rows, hAlign="LEFT", repeatRows=1)
     table.setStyle(
         TableStyle(
@@ -380,6 +400,7 @@ def _styled_table(rows: list[list[object]]) -> Table:
 
 
 def _pdf_styles() -> dict[str, ParagraphStyle]:
+    """Define and return a dictionary of ParagraphStyle objects for PDF elements, customizing fonts, sizes, and colors."""
     styles = getSampleStyleSheet()
     styles["Title"].fontName = "Helvetica"
     styles["Title"].fontSize = 20

@@ -92,7 +92,7 @@ def main(argv: list[str] | None = None) -> int:
                 month=args.month, actor=actor, reason=args.reason,
                 source=args.source, dry_run=args.dry_run,
             )
-        except (DeductionComponentError, ValueError) as exc:
+        except ValueError as exc:
             print(f"{type(exc).__name__}: {exc!s}", file=sys.stderr)
             return 2
 

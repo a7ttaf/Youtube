@@ -21,6 +21,7 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 @dataclass(frozen=True)
 class RevenueManualOverrideEntry:
+    """Represents a manual revenue override entry with its details and conversion to API format."""
     id: str
     month: str
     youtube_channel_id: str
@@ -32,6 +33,11 @@ class RevenueManualOverrideEntry:
     approval_reason: str | None
 
     def to_api(self) -> dict[str, object]:
+        """Convert this manual override instance into a dictionary formatted for API responses.
+
+        Returns:
+            dict[str, object]: A dictionary containing the override's attributes in a serializable form.
+        """
         return {
             "id": self.id,
             "month": self.month,
@@ -46,22 +52,31 @@ class RevenueManualOverrideEntry:
 
 
 class ManualOverrideError(ValueError):
+    """Base exception for manual override related errors."""
     pass
 
 
 class ManualOverrideConflictError(ManualOverrideError):
+    """Raised when a manual override conflicts with an existing override."""
+"""
+Module for managing manual revenue overrides including creation, retrieval, listing, and approval for tenants and channels.
+"""
+
     pass
 
 
 class ManualOverrideLockedMonthError(ManualOverrideError):
+    """Raised when attempting a manual override on a locked month."""
     pass
 
 
 class ManualOverrideNotFoundError(ManualOverrideError):
+    """Raised when a specified manual override entry is not found."""
     pass
 
 
 class ManualOverrideValidationError(ManualOverrideError):
+    """Raised when manual override parameters fail validation checks."""
     pass
 
 
@@ -69,6 +84,7 @@ class SqlAlchemyManualOverrideRepository:
     """SQL-backed manual override repository scoped to a single tenant."""
 
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        """Initialize repository with DB session and resolve tenant identifier."""
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
@@ -81,6 +97,7 @@ class SqlAlchemyManualOverrideRepository:
         reason: str,
         actor_user_id: str,
     ) -> RevenueManualOverrideEntry:
+        """Create a manual revenue override for a specific channel and month with reason and actor."""
         _validate_month(month)
         _validate_nonzero_adjustment(adjustment_revenue_usd)
         normalized_reason = _normalize_reason(reason)
@@ -104,10 +121,12 @@ class SqlAlchemyManualOverrideRepository:
         return self._to_entry(row)
 
     def get_override(self, override_id: str) -> RevenueManualOverrideEntry:
+        """Retrieve a revenue manual override entry by its ID."""
         row = self._get_row(override_id)
         return self._to_entry(row)
 
     def get_override_channel_id(self, override_id: str) -> str | None:
+        """Retrieve the YouTube channel ID associated with a manual override."""
         override_uuid = _parse_uuid(override_id, field_name="manual_override_id")
         return self._session.scalar(
             select(RevenueManualOverrideORM.youtube_channel_id).where(
@@ -119,6 +138,7 @@ class SqlAlchemyManualOverrideRepository:
     def list_channel_month_overrides(
         self, *, month: str, youtube_channel_id: str
     ) -> list[RevenueManualOverrideEntry]:
+        """List manual override entries for a given channel and month."""
         _validate_month(month)
         rows = self._session.scalars(
             select(RevenueManualOverrideORM)
@@ -137,6 +157,7 @@ class SqlAlchemyManualOverrideRepository:
         month: str,
         youtube_channel_ids: set[str] | None = None,
     ) -> list[RevenueManualOverrideEntry]:
+        """List manual override entries for a given month and optional set of channels."""
         _validate_month(month)
         if youtube_channel_ids == set():
             return []
@@ -176,6 +197,7 @@ class SqlAlchemyManualOverrideRepository:
         actor_user_id: str,
         reason: str,
     ) -> RevenueManualOverrideEntry:
+        """Approve a pending manual override, ensuring actor and month constraints."""
         actor_uuid = _actor_identity_uuid(actor_user_id)
         normalized_reason = _normalize_reason(reason)
         row = self._get_row(override_id, for_update=True)
@@ -200,6 +222,7 @@ class SqlAlchemyManualOverrideRepository:
     def _get_row(
         self, override_id: str, *, for_update: bool = False
     ) -> RevenueManualOverrideORM:
+        """Internal helper to fetch a manual override ORM row by ID, optionally locking it."""
         override_uuid = _parse_uuid(override_id, field_name="manual_override_id")
         statement = select(RevenueManualOverrideORM).where(
             RevenueManualOverrideORM.tenant_id == self._tenant_id,
@@ -213,6 +236,7 @@ class SqlAlchemyManualOverrideRepository:
         return row
 
     def _require_active_channel(self, youtube_channel_id: str) -> None:
+        """Internal helper to validate that a channel is active for the current tenant."""
         row = self._session.scalars(
             select(YouTubeChannelORM).where(
                 YouTubeChannelORM.tenant_id == self._tenant_id,
@@ -226,6 +250,7 @@ class SqlAlchemyManualOverrideRepository:
             )
 
     def _require_month_open(self, month: str, *, for_update: bool = True) -> None:
+        """Internal helper to ensure the finance month is open for overrides."""
         close = get_or_create_month_close_row(
             self._session,
             month,
@@ -239,6 +264,7 @@ class SqlAlchemyManualOverrideRepository:
 
     @staticmethod
     def _to_entry(row: RevenueManualOverrideORM) -> RevenueManualOverrideEntry:
+        """Convert a RevenueManualOverrideORM row to a RevenueManualOverrideEntry dataclass."""
         return RevenueManualOverrideEntry(
             id=str(row.id),
             month=row.month,
@@ -253,6 +279,7 @@ class SqlAlchemyManualOverrideRepository:
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Resolve or obtain the tenant UUID from input or current context."""
     if tenant_id is not None:
         return _parse_tenant_uuid(tenant_id)
     current_tenant = get_current_tenant()
@@ -262,6 +289,7 @@ def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
 
 
 def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    """Convert or validate a tenant UUID from a string or UUID instance."""
     if isinstance(tenant_id, UUID):
         return tenant_id
     try:
@@ -271,6 +299,7 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
 
 
 def _validate_month(month: str) -> None:
+    """Validate that month string matches YYYY-MM format and valid month."""
     if not MONTH_PATTERN.fullmatch(month):
         raise ManualOverrideValidationError(
             "month must use YYYY-MM with a calendar month from 01 to 12"
@@ -278,6 +307,7 @@ def _validate_month(month: str) -> None:
 
 
 def _validate_nonzero_adjustment(value: Decimal) -> None:
+    """Ensure the adjustment revenue decimal is finite and non-zero."""
     if not value.is_finite():
         raise ManualOverrideValidationError(
             "adjustment_revenue_usd must be a finite decimal"
@@ -287,6 +317,7 @@ def _validate_nonzero_adjustment(value: Decimal) -> None:
 
 
 def _normalize_reason(reason: str) -> str:
+    """Normalize and validate the reason text, trimming whitespace."""
     normalized = reason.strip()
     if not normalized:
         raise ManualOverrideValidationError("reason must not be blank")
@@ -294,6 +325,7 @@ def _normalize_reason(reason: str) -> str:
 
 
 def _actor_identity_uuid(value: str) -> UUID:
+    """Derive a UUID for the actor from input, accepting UUID literals or gateway IDs."""
     # Accept either a UUID literal or a trusted-gateway subject; the shared
     # helper derives a deterministic UUID5 for the latter so header-auth
     # deployments with non-UUID x-user-id values can still create or approve
@@ -306,6 +338,7 @@ def _actor_identity_uuid(value: str) -> UUID:
 
 
 def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
+    """Parse and validate a UUID string for a given field name, raising on error."""
     try:
         return UUID(value)
     except ValueError as exc:

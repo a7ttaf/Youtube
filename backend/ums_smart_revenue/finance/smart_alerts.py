@@ -18,6 +18,7 @@ _SEVERITY_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
 
 @dataclass(frozen=True)
 class MonthlySmartAlert:
+    """Represents a single monthly smart alert with code, severity, message, source, confidence, and details."""
     code: str
     severity: str
     message: str
@@ -25,25 +26,35 @@ class MonthlySmartAlert:
     confidence: str
     details: dict[str, object]
 
-    def to_api(self) -> dict[str, object]:
-        return {
-            "code": self.code,
-            "severity": self.severity,
-            "message": self.message,
-            "source": self.source,
-            "confidence": self.confidence,
-            "details": dict(self.details),
-        }
+"""
+Module for building and serializing smart alert summaries for finance operations.
+Provides utilities to convert smart alert data into API-friendly dictionaries and
+to construct monthly smart alert summaries based on revenue facts, payment matches,
+and reconciliation statuses.
+"""
+
+def to_api(self) -> dict[str, object]:
+    """Convert the smart alert instance into a dictionary suitable for API responses."""
+    return {
+        "code": self.code,
+        "severity": self.severity,
+        "message": self.message,
+        "source": self.source,
+        "confidence": self.confidence,
+        "details": dict(self.details),
+    }
 
 
 @dataclass(frozen=True)
 class MonthlySmartAlertSummary:
+    """Represents a summary of smart alerts for a specific month, including status, highest severity, and the list of alerts."""
     month: str
     status: str
     highest_severity: str | None
     alerts: list[MonthlySmartAlert]
 
     def to_api(self) -> dict[str, object]:
+        """Convert the monthly smart alert summary into a dictionary for API output."""
         return {
             "month": self.month,
             "status": self.status,
@@ -54,7 +65,9 @@ class MonthlySmartAlertSummary:
 
 
 def build_monthly_smart_alert_summary(
-    *,
+    *,  # existing parameters
+):
+    """Build a summary of monthly smart alerts based on provided smart alert data."""
     month: str,
     payment_match: MonthlyPaymentMatchSummary,
     bank_reconciliation: MonthBankReconciliationSummary,
@@ -67,6 +80,10 @@ def build_monthly_smart_alert_summary(
         DEFAULT_REVENUE_TREND_ANOMALY_THRESHOLD_PERCENT
     ),
 ) -> MonthlySmartAlertSummary:
+    """Generate a MonthlySmartAlertSummary for a specific month using payment match,
+    bank reconciliation results, close status, manual overrides, and revenue facts.
+    Validates thresholds and aggregates alerts accordingly.
+    """
     if high_gap_threshold_usd < 0:
         raise ValueError("high_gap_threshold_usd must be non-negative")
     if revenue_trend_anomaly_threshold_percent < 0:
@@ -180,6 +197,10 @@ def build_monthly_smart_alert_summary(
                 source="finance_close",
                 confidence="D_ESTIMATED",
                 details={"close_status": normalized_close_status},
+"""
+Module finance.smart_alerts: Provides utilities to generate smart alerts for revenue
+anomalies, including gaps in payments, changes in revenue trends, and manual overrides.
+"""
             )
         )
 
@@ -211,6 +232,20 @@ def _high_gap_details(
     bank_gap_usd: Decimal | None,
     threshold_usd: Decimal,
 ) -> dict[str, object]:
+    """
+    Return details of payment and bank gaps that exceed the specified threshold.
+
+    Args:
+        payment_gap_usd: Difference between expected and actual payments in USD.
+        bank_gap_usd: Difference between expected and actual bank amounts in USD.
+        threshold_usd: Minimum gap value to include in the details.
+
+    Raises:
+        ValueError: If threshold_usd is negative.
+
+    Returns:
+        A dictionary with gap details if any gaps exceed the threshold, otherwise an empty dict.
+    """
     if threshold_usd < 0:
         raise ValueError("high_gap_threshold_usd must be non-negative")
     details: dict[str, object] = {"threshold_usd": _decimal_to_api(threshold_usd)}
@@ -227,6 +262,18 @@ def _revenue_trend_anomaly_details(
     previous_revenue_facts: Iterable[RevenueFactEntry],
     threshold_percent: Decimal,
 ) -> dict[str, object]:
+    """
+    Compute and return details for channels where revenue trend changes exceed a percentage threshold.
+
+    Args:
+        current_revenue_facts: Iterable of RevenueFactEntry for the current period.
+        previous_revenue_facts: Iterable of RevenueFactEntry for the previous period.
+        threshold_percent: Decimal percent change threshold to report anomalies.
+
+    Returns:
+        A dictionary containing threshold, channel count, and list of channel-specific change details,
+        or an empty dict if no channels exceed the threshold.
+    """
     current_by_channel = _select_primary_facts_by_channel(current_revenue_facts)
     previous_by_channel = _select_primary_facts_by_channel(previous_revenue_facts)
     channels: list[dict[str, object]] = []
@@ -270,6 +317,15 @@ def _revenue_trend_anomaly_details(
 def _select_primary_facts_by_channel(
     facts: Iterable[RevenueFactEntry],
 ) -> dict[str, RevenueFactEntry]:
+    """
+    Select the primary RevenueFactEntry for each channel based on defined source priority.
+
+    Args:
+        facts: Iterable of RevenueFactEntry objects to select from.
+
+    Returns:
+        A dict mapping channel IDs to the chosen RevenueFactEntry with highest priority.
+    """
     selected: dict[str, RevenueFactEntry] = {}
     for fact in sorted(
         facts,
@@ -286,12 +342,30 @@ def _select_primary_facts_by_channel(
 
 
 def _highest_severity(alerts: list[MonthlySmartAlert]) -> str | None:
+    """
+    Determine the highest severity among a list of MonthlySmartAlert instances.
+
+    Args:
+        alerts: List of MonthlySmartAlert objects.
+
+    Returns:
+        The severity string of the highest-severity alert, or None if the list is empty.
+    """
     if not alerts:
         return None
     return max(alerts, key=lambda alert: _SEVERITY_RANK[alert.severity]).severity
 
 
 def _to_percent(value: Decimal) -> Decimal:
+    """
+    Convert a decimal ratio to a percentage with four decimal places, rounding half up.
+
+    Args:
+        value: Decimal ratio to convert (e.g., 0.05 for 5%).
+
+    Returns:
+        Decimal percentage value quantized to four decimal places.
+    """
     return (value * Decimal("100")).quantize(
         Decimal("0.0001"),
         rounding=ROUND_HALF_UP,
