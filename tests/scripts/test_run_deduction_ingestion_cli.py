@@ -211,8 +211,11 @@ def test_cli_malformed_settings_returns_2_before_db_session(monkeypatch, capsys)
     monkeypatch.setattr(module, "load_app_settings", _bad_settings)
     monkeypatch.setattr(module, "build_session_factory", _unexpected_session_factory)
     rc = module.main(BASE_ARGV)
+    stderr = capsys.readouterr().err
     assert rc == 2
-    assert "ValueError" in capsys.readouterr().err
+    assert "ValueError" in stderr
+    assert "invalid operator settings" in stderr
+    assert "malformed operator settings" not in stderr
 
 
 def test_cli_missing_service_actor_returns_2(monkeypatch, capsys):
@@ -228,8 +231,11 @@ def test_cli_missing_service_actor_returns_2(monkeypatch, capsys):
 
     monkeypatch.setattr(module, "build_connector_service_principal", _no_actor)
     rc = module.main(BASE_ARGV)
+    stderr = capsys.readouterr().err
     assert rc == 2
-    assert "ValueError" in capsys.readouterr().err
+    assert "ValueError" in stderr
+    assert "invalid service principal configuration" in stderr
+    assert "service actor id is required" not in stderr
     assert session.commits == 0
 
 

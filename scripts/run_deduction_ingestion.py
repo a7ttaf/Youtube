@@ -150,7 +150,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         settings = deps.load_settings()
     except ValueError as exc:
-        print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
+        # FIX: Do not echo settings validation text; it can include rejected
+        # secret values such as database URLs from operator environments.
+        print(f"{type(exc).__name__}: invalid operator settings", file=sys.stderr)
         return 2
     if not settings.database_url:
         print(
@@ -163,7 +165,12 @@ def main(argv: list[str] | None = None) -> int:
         try:
             actor = deps.service_principal_factory(tenant_id=args.tenant)
         except ValueError as exc:
-            print(f"{type(exc).__name__}: {exc!s}", file=sys.stderr)
+            # FIX: Service principal setup reads operator configuration, so keep
+            # the terminal error stable without echoing raw settings values.
+            print(
+                f"{type(exc).__name__}: invalid service principal configuration",
+                file=sys.stderr,
+            )
             return 2
         audit_sink = deps.audit_sink_cls(session, tenant_id=args.tenant)
         service = deps.ingestion_service_cls(
