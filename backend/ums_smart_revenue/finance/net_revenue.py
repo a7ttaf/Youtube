@@ -2,6 +2,7 @@ from collections import defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
+from typing import overload
 
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.deduction_components import DeductionComponent
@@ -134,7 +135,12 @@ def _resolved_period_and_channel(
     month: str | None,
     youtube_channel_id: str | None,
 ) -> tuple[str, str]:
-    """Resolve target month/channel from facts or required explicit arguments."""
+    """Resolve target month/channel from facts or required explicit arguments.
+
+    Raises:
+        NetRevenueValidationError: If no facts are provided and either month
+            or youtube_channel_id is None.
+    """
     if fact_list:
         return (
             month or fact_list[0].month,
@@ -391,17 +397,42 @@ def build_channel_net_revenue_summary(
     )
 
 
+@overload
+def _group_by_channel(
+    items: Iterable[RevenueFactEntry],
+    *,
+    month: str,
+) -> dict[str, list[RevenueFactEntry]]: ...
+
+
+@overload
+def _group_by_channel(
+    items: Iterable[RevenueManualOverrideEntry],
+    *,
+    month: str,
+) -> dict[str, list[RevenueManualOverrideEntry]]: ...
+
+
+def _group_by_channel(
+    items: Iterable[RevenueFactEntry] | Iterable[RevenueManualOverrideEntry],
+    *,
+    month: str,
+) -> dict[str, list[RevenueFactEntry]] | dict[str, list[RevenueManualOverrideEntry]]:
+    """Group entries for the requested month by YouTube channel ID."""
+    grouped = defaultdict(list)
+    for item in items:
+        if item.month == month:
+            grouped[item.youtube_channel_id].append(item)
+    return grouped
+
+
 def _facts_by_channel(
     facts: Iterable[RevenueFactEntry],
     *,
     month: str,
 ) -> dict[str, list[RevenueFactEntry]]:
     """Group revenue facts for the requested month by channel."""
-    facts_by_channel: dict[str, list[RevenueFactEntry]] = defaultdict(list)
-    for fact in facts:
-        if fact.month == month:
-            facts_by_channel[fact.youtube_channel_id].append(fact)
-    return facts_by_channel
+    return _group_by_channel(facts, month=month)
 
 
 def _overrides_by_channel(
@@ -410,13 +441,7 @@ def _overrides_by_channel(
     month: str,
 ) -> dict[str, list[RevenueManualOverrideEntry]]:
     """Group manual overrides for the requested month by channel."""
-    overrides_by_channel: dict[str, list[RevenueManualOverrideEntry]] = defaultdict(
-        list
-    )
-    for override in manual_overrides:
-        if override.month == month:
-            overrides_by_channel[override.youtube_channel_id].append(override)
-    return overrides_by_channel
+    return _group_by_channel(manual_overrides, month=month)
 
 
 def _deduction_components_by_channel(
