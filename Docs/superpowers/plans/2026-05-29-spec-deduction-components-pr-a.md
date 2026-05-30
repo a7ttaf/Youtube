@@ -2034,7 +2034,7 @@ Expected: PASS — 1497 passed.
 ### Completion evidence (2026-05-30)
 
 - `python -m ruff check backend tests scripts` -> `All checks passed!`
-- `$env:UMS_TEST_DATABASE_URL='postgresql+psycopg://postgres:ums@localhost:55432/test_ums'; python -m pytest -q` -> `1497 passed`
+- PowerShell full suite: set `$env:UMS_TEST_DATABASE_URL = 'postgresql+psycopg://postgres:ums@localhost:55432/test_ums'`, then run `python -m pytest -q` -> `1497 passed`
 - `git diff --check` -> no output
 
 ---
