@@ -772,6 +772,106 @@ def get_month_smart_alerts(
     return summary_api
 
 
+# ============================================================================
+# Purpose: Read-only per-month deduction-evidence view, grouped by scope
+#   (CHANNEL/ACCOUNT/PAYMENT). Surfaces the typed components PR-A ingested; never
+#   writes, never triggers ingestion, never returns raw_payload.
+# Database/ORM: Reads deduction_components via SqlAlchemyDeductionComponentRepository.
+# Standards: smart-alerts four-permission auth; sensitive-view audit (revenue +
+#   payment + bank); month validation -> 422; offset/limit pagination.
+# Blast Radius: Finance read (deduction evidence). No finance mutation, no Neo4j.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/deduction_ingestion.py -> repo.
+#   - File: backend/ums_smart_revenue/finance/deduction_components.py -> to_api().
+# ============================================================================
+@router.get("/months/{month}/deduction-components")
+def get_month_deduction_components(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[
+        SqlAlchemyDeductionComponentRepository,
+        Depends(current_deduction_component_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    component_kind: str | None = None,
+    scope_kind: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 100,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, object]:
+    """Return one month's deduction evidence grouped by scope for finance review."""
+    global_scope = AccessScope.global_scope()
+    month_scope = AccessScope.finance_month(month)
+    _require_permission(user, Permission.VIEW_REVENUE, global_scope)
+    _require_permission(user, Permission.VIEW_CONFIDENCE, global_scope)
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
+    _require_permission(user, Permission.VIEW_BANK_RECONCILIATION, month_scope)
+    try:
+        page = repository.list_month_components_page(
+            month=month,
+            component_kind=component_kind,
+            scope_kind=scope_kind,
+            limit=limit,
+            offset=offset,
+        )
+    except DeductionComponentValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    grouped: dict[str, list[dict[str, object]]] = {}
+    for component in page.components:
+        grouped.setdefault(component.scope_kind, []).append(component.to_api())
+    scopes = [
+        {"scope_kind": kind, "components": grouped[kind]}
+        for kind in sorted(grouped)
+    ]
+
+    audit_details = {
+        "month": month,
+        "total_count": page.total_count,
+        "returned_count": len(page.components),
+    }
+    revenue_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="monthly_deduction_components",
+        entity_id=month,
+        scope=global_scope,
+        details=audit_details,
+    )
+    payment_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.PAYMENT_VIEWED,
+        entity_type="monthly_deduction_components",
+        entity_id=month,
+        scope=month_scope,
+        details=audit_details,
+    )
+    bank_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
+        entity_type="monthly_deduction_components",
+        entity_id=month,
+        scope=month_scope,
+        details=audit_details,
+    )
+    return {
+        "month": month,
+        "total_count": page.total_count,
+        "returned_count": len(page.components),
+        "scopes": scopes,
+        "audit_events": [
+            audit_record_to_api(revenue_record),
+            audit_record_to_api(payment_record),
+            audit_record_to_api(bank_record),
+        ],
+    }
+
+
 @router.get("/months/{month}/net-revenue")
 def get_month_net_revenue(
     month: str,

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -67,6 +67,14 @@ class DeductionIngestionResult:
     by_kind: dict[str, int]
     skipped_non_usd: int
     dry_run: bool
+
+
+@dataclass(frozen=True)
+class DeductionComponentPage:
+    """One page of deduction components plus the full-match total count."""
+
+    total_count: int
+    components: list
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
@@ -276,6 +284,60 @@ class SqlAlchemyDeductionComponentRepository:
             )
         ).all()
         return [self._to_entry(row) for row in rows]
+
+    # ============================================================================
+    # Purpose: Return a filtered, paginated page of components for one month,
+    #   plus the full COUNT(*) over the filtered set (not a Python slice).
+    #   Used exclusively by the read-only GET /revenue/months/{month}/deduction-components
+    #   endpoint to avoid loading an entire month into memory.
+    # Database/ORM: Reads deduction_components / DeductionComponentORM.
+    # Standards: SQL-layer COUNT + LIMIT/OFFSET; deterministic ORDER BY mirrors
+    #   list_month_components; no write path touched.
+    # Blast Radius: Finance read only. No auth/Neo4j/ingestion impact.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_deduction_components.
+    # ============================================================================
+    def list_month_components_page(
+        self, *,
+        month: str,
+        component_kind: str | None = None,
+        scope_kind: str | None = None,
+        limit: int,
+        offset: int,
+    ) -> DeductionComponentPage:
+        """Return a filtered, paginated page of components + the full match count.
+
+        Raises:
+            DeductionComponentValidationError: If the month is malformed.
+        """
+        _validate_month(month)
+        filters = [
+            DeductionComponentORM.tenant_id == self._tenant_id,
+            DeductionComponentORM.month == month,
+        ]
+        if component_kind is not None:
+            filters.append(DeductionComponentORM.component_kind == component_kind)
+        if scope_kind is not None:
+            filters.append(DeductionComponentORM.scope_kind == scope_kind)
+        total_count = self._session.scalar(
+            select(func.count()).select_from(DeductionComponentORM).where(*filters)
+        )
+        rows = self._session.scalars(
+            select(DeductionComponentORM)
+            .where(*filters)
+            .order_by(
+                DeductionComponentORM.scope_kind,
+                DeductionComponentORM.scope_id,
+                DeductionComponentORM.component_kind,
+                DeductionComponentORM.component_key,
+            )
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        return DeductionComponentPage(
+            total_count=int(total_count or 0),
+            components=[self._to_entry(row) for row in rows],
+        )
 
     @staticmethod
     def _to_entry(row: DeductionComponentORM) -> DeductionComponent:
