@@ -546,7 +546,7 @@ def test_provenance_payload_object_check_rejects_array(alembic_config, fresh_eng
 - [ ] **Step 2: Run test to verify it fails**
 
 Start the disposable Postgres container (see Validation gate), then:
-Run: `set UMS_TEST_POSTGRES_URL=postgresql+psycopg://postgres:ums@localhost:55432/test_ums && pytest tests/db/test_channel_account_map_migration_postgres.py -q` (PowerShell: `$env:UMS_TEST_POSTGRES_URL="postgresql+psycopg://postgres:ums@localhost:55432/test_ums"`)
+Run: `set UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/test_ums && pytest tests/db/test_channel_account_map_migration_postgres.py -q` (PowerShell: `$env:UMS_TEST_DATABASE_URL="postgresql+psycopg://postgres:ums@localhost:55432/test_ums"`)
 Expected: FAIL — `KeyError`/`alembic ... Can't locate revision` (migration file absent) or table-not-found.
 
 > Note: confirm the env var name `require_postgres_url()` reads by opening `tests/db/_postgres_helpers.py` (it is the same helper `test_deduction_components_migration_postgres.py` uses). Use exactly that variable.
@@ -708,7 +708,7 @@ def downgrade() -> None:
 
 - [ ] **Step 4: Run test to verify it passes**
 
-Run: `pytest tests/db/test_channel_account_map_migration_postgres.py -q` (with `UMS_TEST_POSTGRES_URL` set)
+Run: `pytest tests/db/test_channel_account_map_migration_postgres.py -q` (with `UMS_TEST_DATABASE_URL` set)
 Expected: PASS (4 tests).
 
 - [ ] **Step 5: Confirm the SQLite model path still matches the migration**
@@ -1239,12 +1239,24 @@ def test_verify_missing_id_raises_not_found(tmp_path):
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
         with pytest.raises(ChannelAccountLinkNotFoundError):
             repo.verify_account_owner_link(str(uuid4()), verified_by=VERIFIER, reason="x")
+
+
+def test_get_account_owner_link_returns_and_raises(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo)
+        got = repo.get_account_owner_link(link.id)
+        assert got.id == link.id
+        assert got.adsense_account_id == "pub-1"
+        with pytest.raises(ChannelAccountLinkNotFoundError):
+            repo.get_account_owner_link(str(uuid4()))
 ```
 
 - [ ] **Step 2: Run to verify they fail**
 
-Run: `pytest tests/finance/test_channel_account_links.py -q -k "verify or reject"`
-Expected: FAIL — `verify_account_owner_link` / `reject_account_owner_link` missing.
+Run: `pytest tests/finance/test_channel_account_links.py -q -k "verify or reject or get_account_owner"`
+Expected: FAIL — `verify_account_owner_link` / `reject_account_owner_link` / `get_account_owner_link` missing.
 
 - [ ] **Step 3: Implement verify/reject + the private transition helper**
 
@@ -1265,6 +1277,17 @@ Append inside `SqlAlchemyChannelAccountLinkRepository`:
         if row is None:
             raise ChannelAccountLinkNotFoundError(f"unknown link: {link_id!r}")
         return row
+
+    def get_account_owner_link(self, link_id: str) -> AccountOwnerLink:
+        """Return one account↔owner link by id (tenant-scoped, exact read).
+
+        Used by the verify/reject route to authorize on the link's own month
+        without scanning a paginated list.
+
+        Raises:
+            ChannelAccountLinkNotFoundError: If the link id is unknown.
+        """
+        return self._to_account_owner_link(self._load_owned(link_id))
 
     def verify_account_owner_link(
         self, link_id: str, *, verified_by: UUID, reason: str
@@ -1324,8 +1347,8 @@ Append inside `SqlAlchemyChannelAccountLinkRepository`:
 
 - [ ] **Step 4: Run to verify they pass**
 
-Run: `pytest tests/finance/test_channel_account_links.py -q -k "verify or reject"`
-Expected: PASS (5 tests).
+Run: `pytest tests/finance/test_channel_account_links.py -q -k "verify or reject or get_account_owner"`
+Expected: PASS (6 tests).
 
 - [ ] **Step 5: Commit**
 
@@ -2277,31 +2300,29 @@ class LinkDecisionRequest(BaseModel):
         return value.strip() if isinstance(value, str) else value
 
 
-def _require_link_decision_permissions(
-    user: UserPrincipal, effective_month_start: str
-) -> None:
-    """Require BOTH org-mapping trust and allocation authority for the decision."""
-    _require_permission(user, Permission.MANAGE_ORG_MAPPING, AccessScope.global_scope())
-    _require_permission(
-        user, Permission.CHANGE_ALLOCATION_RULE,
-        AccessScope.finance_month(effective_month_start),
-    )
-
-
 def _decide_link(
     *, link_id: str, reason: str, verify: bool,
     user: UserPrincipal, repository: SqlAlchemyChannelAccountLinkRepository,
     audit_sink: AuditSink,
 ) -> AccountOwnerLinkMutationResponse:
-    """Shared verify/reject handler: load, authorize on the link month, mutate, audit."""
+    """Shared verify/reject handler: gate, exact-load, authorize on month, mutate, audit.
+
+    MANAGE_ORG_MAPPING (global, month-independent) is checked FIRST so a caller
+    without org-mapping trust cannot probe link existence. The exact link is then
+    loaded by id (404 if unknown — no list pagination), and CHANGE_ALLOCATION_RULE
+    is checked on that link's own effective month.
+    """
+    _require_permission(user, Permission.MANAGE_ORG_MAPPING, AccessScope.global_scope())
     try:
-        existing = repository.list_account_owner_links(limit=500, offset=0)
-    except ChannelAccountLinkValidationError as exc:  # pragma: no cover - fixed args
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
-    match = next((link for link in existing.links if link.id == link_id), None)
-    if match is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="unknown link")
-    _require_link_decision_permissions(user, match.effective_month_start)
+        existing = repository.get_account_owner_link(link_id)
+    except ChannelAccountLinkNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="unknown link"
+        ) from exc
+    _require_permission(
+        user, Permission.CHANGE_ALLOCATION_RULE,
+        AccessScope.finance_month(existing.effective_month_start),
+    )
     try:
         if verify:
             link = repository.verify_account_owner_link(
@@ -2402,52 +2423,71 @@ git commit -m "feat(api): POST verify/reject channel-account link (dual gate, 40
 
 Append to `tests/db/test_channel_account_map_migration_postgres.py`:
 ```python
-def test_advisory_lock_blocks_concurrent_verify(alembic_config, fresh_engine):
-    """A held per-account advisory lock blocks a second verify path (proves the lock runs).
+def test_repo_verify_blocks_on_held_per_account_advisory_lock(alembic_config, fresh_engine):
+    """Proof the repository verify path acquires the per-account advisory lock.
 
-    Connection A holds pg_advisory_xact_lock for (tenant, account); connection B,
-    with a short lock_timeout, attempts the same lock and must error out — proving
-    verify serializes on the per-account key rather than racing.
+    Connection A holds pg_advisory_xact_lock for (tenant, "pub-lock"). A second
+    Session runs the repository's verify_account_owner_link under a short
+    statement_timeout; because verify acquires the SAME per-account lock, the
+    lock wait is canceled and raises. Commenting out _acquire_account_owner_lock
+    in verify makes this test fail (the contender would not block).
     """
+    from uuid import UUID, uuid4
+
     from sqlalchemy.exc import OperationalError
     from sqlalchemy.orm import Session
 
-    from ums_smart_revenue.finance.channel_account_links import _account_owner_lock_key
+    from ums_smart_revenue.finance.channel_account_links import (
+        SqlAlchemyChannelAccountLinkRepository,
+        _account_owner_lock_key,
+    )
     from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
     command.upgrade(alembic_config, "head")
-    from uuid import UUID
     tenant = UUID(UMS_TENANT_ID)
+
+    # Seed one UNVERIFIED link (committed so the contender Session can load it).
+    with Session(fresh_engine) as setup:
+        link_id = (
+            SqlAlchemyChannelAccountLinkRepository(setup, tenant_id=tenant)
+            .propose_account_owner_link(
+                adsense_account_id="pub-lock", content_owner_id="owner-1",
+                effective_month_start="2026-01", effective_month_end=None,
+                provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+            )
+            .id
+        )
+        setup.commit()
+
     key = _account_owner_lock_key(tenant, "pub-lock")
-
-    conn_a = fresh_engine.connect()
-    conn_b = fresh_engine.connect()
+    holder = fresh_engine.connect()
+    holder_txn = holder.begin()
     try:
-        conn_a.execute(text("BEGIN"))
-        conn_a.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
-        conn_b.execute(text("SET lock_timeout = '500ms'"))
-        conn_b.execute(text("BEGIN"))
-        raised = False
-        try:
-            conn_b.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
-        except OperationalError:
-            raised = True
-        assert raised, "second connection should block on the held advisory lock"
+        holder.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
+        with Session(fresh_engine) as contender:
+            # statement_timeout reliably cancels a blocked advisory-lock wait.
+            contender.execute(text("SET statement_timeout = '750ms'"))
+            repo = SqlAlchemyChannelAccountLinkRepository(contender, tenant_id=tenant)
+            raised = False
+            try:
+                repo.verify_account_owner_link(link_id, verified_by=uuid4(), reason="x")
+            except OperationalError:
+                raised = True
+            assert raised, "verify must block on the held per-account advisory lock"
     finally:
-        conn_a.execute(text("ROLLBACK"))
-        conn_b.execute(text("ROLLBACK"))
-        conn_a.close()
-        conn_b.close()
+        holder_txn.rollback()
+        holder.close()
 
 
-def test_repo_verify_runs_advisory_lock_on_postgres(alembic_config, fresh_engine):
-    """The repository verify path executes against live Postgres (lock path exercised)."""
+def test_repo_verify_succeeds_uncontended_on_postgres(alembic_config, fresh_engine):
+    """Happy path: the verify path runs end-to-end against live Postgres."""
+    from uuid import UUID, uuid4
+
     from sqlalchemy.orm import Session
 
     from ums_smart_revenue.finance.channel_account_links import (
         SqlAlchemyChannelAccountLinkRepository,
     )
-    from uuid import UUID, uuid4
     from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
     command.upgrade(alembic_config, "head")
@@ -2459,17 +2499,15 @@ def test_repo_verify_runs_advisory_lock_on_postgres(alembic_config, fresh_engine
             effective_month_start="2026-01", effective_month_end=None,
             provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
         )
-        out = repo.verify_account_owner_link(
-            link.id, verified_by=uuid4(), reason="postgres path"
-        )
+        out = repo.verify_account_owner_link(link.id, verified_by=uuid4(), reason="ok")
         session.commit()
     assert out.verification_status == "VERIFIED"
 ```
 
-- [ ] **Step 2: Run to verify it fails (or passes meaningfully)**
+- [ ] **Step 2: Run to verify it passes (and is a real proof)**
 
-Run: `pytest tests/db/test_channel_account_map_migration_postgres.py -q -k "advisory_lock or runs_advisory" ` (with `UMS_TEST_POSTGRES_URL` set)
-Expected: with the implementation from Tasks 5–7 present, the lock-path test should PASS. If `pg_advisory_xact_lock` were missing from the verify path, the blocking test would fail (second connection would NOT block). Confirm it fails when you temporarily comment out `_acquire_account_owner_lock(...)` in `verify_account_owner_link` (then restore it).
+Run: `pytest tests/db/test_channel_account_map_migration_postgres.py -q -k "blocks_on_held or succeeds_uncontended"` (with `UMS_TEST_DATABASE_URL` set)
+Expected: PASS (2 tests). This is a genuine proof — the contender runs the *repository* `verify_account_owner_link`, which acquires the same per-account advisory lock and is canceled by `statement_timeout` while connection A holds it. Confirm by temporarily commenting out `_acquire_account_owner_lock(...)` in `verify_account_owner_link`: the contender then does NOT block, no `OperationalError` is raised, and `test_repo_verify_blocks_on_held_per_account_advisory_lock` FAILS. Restore the line.
 
 - [ ] **Step 3: No new implementation required**
 
@@ -2477,7 +2515,7 @@ The advisory lock from Task 5/7 is the implementation. This task only adds the P
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `pytest tests/db/test_channel_account_map_migration_postgres.py -q` (with `UMS_TEST_POSTGRES_URL` set)
+Run: `pytest tests/db/test_channel_account_map_migration_postgres.py -q` (with `UMS_TEST_DATABASE_URL` set)
 Expected: PASS (all migration + concurrency tests).
 
 - [ ] **Step 5: Commit**
@@ -2540,7 +2578,7 @@ python -m ruff check backend tests
 # Unit tier (SQLite) — fast, no container:
 pytest -q
 # Postgres tier — start the container first (see Validation gate):
-$env:UMS_TEST_POSTGRES_URL="postgresql+psycopg://postgres:ums@localhost:55432/test_ums"
+$env:UMS_TEST_DATABASE_URL="postgresql+psycopg://postgres:ums@localhost:55432/test_ums"
 pytest -q tests/db/test_channel_account_map_migration_postgres.py
 git diff --check
 ```
