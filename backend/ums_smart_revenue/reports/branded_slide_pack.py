@@ -380,9 +380,7 @@ def _add_textbox(
     font_size,
     color: RGBColor,
 ) -> None:
-    """
-    Add a textbox at the specified position with given text, font size, and color.
-    """
+    """Add a textbox with the given text, font size, and color."""
     frame = slide.shapes.add_textbox(left, top, width, height).text_frame
     frame.clear()
     paragraph = frame.paragraphs[0]
@@ -411,9 +409,7 @@ def _outside_cms_bullets(report: BrandedSlidePackReport) -> list[str]:
 
 
 def _action_item_bullets(report: BrandedSlidePackReport) -> list[str]:
-    """
-    Generate bullet points for finance action items based on report matching statuses.
-    """
+    """Generate finance action items from report matching statuses."""
     if report.payment_match.status != "PAYMENT_MATCHED":
         return ["Resolve AdSense payment matching before distributing this deck."]
     if report.bank_reconciliation.status != "BANK_CONFIRMED":

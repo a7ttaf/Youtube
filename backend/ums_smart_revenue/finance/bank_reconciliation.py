@@ -3,6 +3,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal
+from typing import TypeVar
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -272,10 +273,16 @@ class SqlAlchemyBankReconciliationRepository:
         )
 
 
-def _filter_by_month[T: (AdSensePaymentEntry, BankReconciliationEntry)](
-    items: Iterable[T],
+_MonthFilterEntry = TypeVar(
+    "_MonthFilterEntry", AdSensePaymentEntry, BankReconciliationEntry
+)
+
+
+# DeepSource's Python analyzer rejects PEP 695 generic function syntax here.
+def _filter_by_month(  # noqa: UP047
+    items: Iterable[_MonthFilterEntry],
     month: str,
-) -> list[T]:
+) -> list[_MonthFilterEntry]:
     """Filter items by month.
 
     Args:

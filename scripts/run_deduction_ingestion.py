@@ -22,46 +22,68 @@ DeductionComponentError: Any = None
 DeductionIngestionService: Any = None
 
 
+class _RuntimeDependencies:
+    """Project dependency bundle resolved after the backend path is importable."""
+
+    def __init__(
+        self,
+        *,
+        audit_sink_cls: Any,
+        load_settings: Any,
+        service_principal_factory: Any,
+        session_factory_builder: Any,
+        ingestion_error_cls: type[Exception],
+        ingestion_service_cls: Any,
+    ) -> None:
+        self.audit_sink_cls = audit_sink_cls
+        self.load_settings = load_settings
+        self.service_principal_factory = service_principal_factory
+        self.session_factory_builder = session_factory_builder
+        self.ingestion_error_cls = ingestion_error_cls
+        self.ingestion_service_cls = ingestion_service_cls
+
+
 def _ensure_backend_path() -> None:
     """Make the local backend package importable for direct script execution."""
     if _BACKEND_PATH not in sys.path:
         sys.path.insert(0, _BACKEND_PATH)
 
 
-def _load_runtime_dependencies() -> None:
+def _load_runtime_dependencies() -> _RuntimeDependencies:
     """Load project dependencies lazily after fixing the import path."""
-    global DeductionComponentError, DeductionIngestionService
-    global SqlAlchemyAuditSink
-    global build_connector_service_principal
-    global build_session_factory
-    global load_app_settings
-
     _ensure_backend_path()
-    if SqlAlchemyAuditSink is None:
+    audit_sink_cls = SqlAlchemyAuditSink
+    load_settings = load_app_settings
+    service_principal_factory = build_connector_service_principal
+    session_factory_builder = build_session_factory
+    ingestion_error_cls = DeductionComponentError
+    ingestion_service_cls = DeductionIngestionService
+
+    if audit_sink_cls is None:
         from ums_smart_revenue.auth.sql_audit_sink import (
             SqlAlchemyAuditSink as _SqlAlchemyAuditSink,
         )
 
-        SqlAlchemyAuditSink = _SqlAlchemyAuditSink
-    if load_app_settings is None:
+        audit_sink_cls = _SqlAlchemyAuditSink
+    if load_settings is None:
         from ums_smart_revenue.config.settings import (
             load_app_settings as _load_app_settings,
         )
 
-        load_app_settings = _load_app_settings
-    if build_connector_service_principal is None:
+        load_settings = _load_app_settings
+    if service_principal_factory is None:
         from ums_smart_revenue.connectors.google.audit import (
             build_connector_service_principal as _build_connector_service_principal,
         )
 
-        build_connector_service_principal = _build_connector_service_principal
-    if build_session_factory is None:
+        service_principal_factory = _build_connector_service_principal
+    if session_factory_builder is None:
         from ums_smart_revenue.db.session import (
             build_session_factory as _build_session_factory,
         )
 
-        build_session_factory = _build_session_factory
-    if DeductionComponentError is None or DeductionIngestionService is None:
+        session_factory_builder = _build_session_factory
+    if ingestion_error_cls is None or ingestion_service_cls is None:
         from ums_smart_revenue.finance.deduction_ingestion import (
             DeductionComponentError as _DeductionComponentError,
         )
@@ -69,10 +91,19 @@ def _load_runtime_dependencies() -> None:
             DeductionIngestionService as _DeductionIngestionService,
         )
 
-        if DeductionComponentError is None:
-            DeductionComponentError = _DeductionComponentError
-        if DeductionIngestionService is None:
-            DeductionIngestionService = _DeductionIngestionService
+        if ingestion_error_cls is None:
+            ingestion_error_cls = _DeductionComponentError
+        if ingestion_service_cls is None:
+            ingestion_service_cls = _DeductionIngestionService
+
+    return _RuntimeDependencies(
+        audit_sink_cls=audit_sink_cls,
+        load_settings=load_settings,
+        service_principal_factory=service_principal_factory,
+        session_factory_builder=session_factory_builder,
+        ingestion_error_cls=ingestion_error_cls,
+        ingestion_service_cls=ingestion_service_cls,
+    )
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -115,9 +146,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 def main(argv: list[str] | None = None) -> int:
     """Run deduction ingestion and return the operator exit code."""
     args = _parse_args(argv if argv is not None else sys.argv[1:])
-    _load_runtime_dependencies()
+    deps = _load_runtime_dependencies()
     try:
-        settings = load_app_settings()
+        settings = deps.load_settings()
     except ValueError as exc:
         print(f"{type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
@@ -127,15 +158,15 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
-    session_factory = build_session_factory(settings.database_url)
+    session_factory = deps.session_factory_builder(settings.database_url)
     with session_factory() as session:
         try:
-            actor = build_connector_service_principal(tenant_id=args.tenant)
+            actor = deps.service_principal_factory(tenant_id=args.tenant)
         except ValueError as exc:
             print(f"{type(exc).__name__}: {exc!s}", file=sys.stderr)
             return 2
-        audit_sink = SqlAlchemyAuditSink(session, tenant_id=args.tenant)
-        service = DeductionIngestionService(
+        audit_sink = deps.audit_sink_cls(session, tenant_id=args.tenant)
+        service = deps.ingestion_service_cls(
             session, audit_sink=audit_sink, tenant_id=args.tenant
         )
         try:
@@ -143,7 +174,7 @@ def main(argv: list[str] | None = None) -> int:
                 month=args.month, actor=actor, reason=args.reason,
                 source=args.source, dry_run=args.dry_run,
             )
-        except DeductionComponentError as exc:
+        except deps.ingestion_error_cls as exc:
             print(f"{type(exc).__name__}: {exc!s}", file=sys.stderr)
             return 2
 

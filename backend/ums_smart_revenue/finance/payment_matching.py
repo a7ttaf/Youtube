@@ -66,12 +66,12 @@ class MonthlyPaymentMatchSummary:
 
 
 def _filter_by_month(items, month):
-    """Filter a collection of items by their month attribute, returning only those matching the given month."""
+    """Return items whose month attribute matches the requested month."""
     return [item for item in items if item.month == month]
 
 
 def _filter_payments_by_currency(payments, currency):
-    """Filter a list of payment entries by the specified currency, returning only matching payments."""
+    """Return payments using the requested currency code."""
     return [payment for payment in payments if payment.payment_currency == currency]
 
 

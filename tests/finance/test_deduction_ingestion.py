@@ -411,7 +411,8 @@ def test_source_filter_reads_only_required_adapters(
         def __init__(self, session: object) -> None:
             self._session = session
 
-        def list(self, tenant_id: UUID, *, report_month: str) -> list[object]:
+        @staticmethod
+        def list(tenant_id: UUID, *, report_month: str) -> list[object]:
             reads.append("source_rows")
             if "source_rows" not in expected_reads:
                 raise AssertionError("source-row storage was read for another source")
