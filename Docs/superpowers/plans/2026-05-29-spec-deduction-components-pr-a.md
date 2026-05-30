@@ -345,7 +345,14 @@ def test_duplicate_component_key_rejected_by_unique(alembic_config, fresh_engine
 
 - [ ] **Step 3: Run it to verify it fails**
 
-Run (Postgres must be available — see Step 6): `set UMS_TEST_DATABASE_URL=... ; python -m pytest tests/db/test_deduction_components_migration_postgres.py -q`
+Run (Postgres must be available — see Step 6):
+
+```bash
+# PowerShell: $env:UMS_TEST_DATABASE_URL = 'postgresql+psycopg://postgres:ums@localhost:55432/postgres'
+# POSIX:      export UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/postgres
+python -m pytest tests/db/test_deduction_components_migration_postgres.py -q
+```
+
 Expected: FAIL — `alembic.util.exc.CommandError` / missing revision (the `20260529_0002` migration does not exist yet), or `KeyError: 'deduction_components'`.
 
 - [ ] **Step 4: Write the migration**
