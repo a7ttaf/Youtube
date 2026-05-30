@@ -16,6 +16,10 @@ down_revision = "20260529_0001"
 branch_labels = None
 depends_on = None
 
+# Keep this migration self-contained with the UMS tenant seeded in
+# 20260516_0001_tenants_foundation.py.
+UMS_TENANT_ID = "00000000-0000-0000-0000-000000000001"
+
 
 # ============================================================================
 # Purpose: Create the deduction_components substrate table that ingestion
@@ -37,12 +41,17 @@ def upgrade() -> None:
             "id", sa.Uuid(), primary_key=True,
             server_default=sa.text("gen_random_uuid()"),
         ),
-        sa.Column("tenant_id", sa.Uuid(), nullable=False),
+        sa.Column(
+            "tenant_id",
+            sa.Uuid(),
+            nullable=False,
+            server_default=sa.text(f"'{UMS_TENANT_ID}'"),
+        ),
         sa.Column("month", sa.Text(), nullable=False),
         sa.Column("component_kind", sa.Text(), nullable=False),
         sa.Column("scope_kind", sa.Text(), nullable=False),
         sa.Column("scope_id", sa.Text(), nullable=False),
-        sa.Column("amount_usd", sa.Numeric(18, 6), nullable=False),
+        sa.Column("amount_usd", sa.Numeric(20, 6), nullable=False),
         sa.Column("amount_native", sa.Numeric(20, 6), nullable=True),
         sa.Column("currency_code", sa.Text(), nullable=False),
         sa.Column("source_system", sa.Text(), nullable=False),
@@ -68,12 +77,20 @@ def upgrade() -> None:
         sa.UniqueConstraint(
             "tenant_id", "component_key", name="uq_deduction_components_key"
         ),
+        sa.ForeignKeyConstraint(
+            ["tenant_id"],
+            ["tenants.id"],
+            name="fk_deduction_components_tenant",
+            ondelete="RESTRICT",
+        ),
         sa.CheckConstraint(
             "length(month) = 7 AND substr(month, 5, 1) = '-' "
             "AND substr(month, 1, 1) BETWEEN '0' AND '9' "
             "AND substr(month, 2, 1) BETWEEN '0' AND '9' "
             "AND substr(month, 3, 1) BETWEEN '0' AND '9' "
             "AND substr(month, 4, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 6, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 7, 1) BETWEEN '0' AND '9' "
             "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
             name="ck_deduction_components_month_format",
         ),
@@ -87,11 +104,7 @@ def upgrade() -> None:
             name="ck_deduction_components_scope_kind",
         ),
         sa.CheckConstraint(
-            "length(currency_code) = 3 "
-            "AND currency_code = upper(currency_code) "
-            "AND substr(currency_code, 1, 1) BETWEEN 'A' AND 'Z' "
-            "AND substr(currency_code, 2, 1) BETWEEN 'A' AND 'Z' "
-            "AND substr(currency_code, 3, 1) BETWEEN 'A' AND 'Z'",
+            "currency_code = 'USD'",
             name="ck_deduction_components_currency_code",
         ),
         sa.CheckConstraint(

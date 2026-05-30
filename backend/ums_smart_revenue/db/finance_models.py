@@ -22,6 +22,7 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 from ums_smart_revenue.db.org_models import OrgBase
+from ums_smart_revenue.db.tenant_models import TenantORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 
@@ -586,7 +587,7 @@ class DeductionComponentORM(FinanceBase):
     component_kind: Mapped[str] = mapped_column(Text, nullable=False)
     scope_kind: Mapped[str] = mapped_column(Text, nullable=False)
     scope_id: Mapped[str] = mapped_column(Text, nullable=False)
-    amount_usd: Mapped[Decimal] = mapped_column(Numeric(18, 6), nullable=False)
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
     amount_native: Mapped[Decimal | None] = mapped_column(Numeric(20, 6), nullable=True)
     currency_code: Mapped[str] = mapped_column(Text, nullable=False)
     source_system: Mapped[str] = mapped_column(Text, nullable=False)
@@ -613,6 +614,11 @@ class DeductionComponentORM(FinanceBase):
     )
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id"], [TenantORM.id],
+            name="fk_deduction_components_tenant",
+            ondelete="RESTRICT",
+        ),
         UniqueConstraint(
             "tenant_id", "component_key", name="uq_deduction_components_key"
         ),
@@ -622,6 +628,8 @@ class DeductionComponentORM(FinanceBase):
             "AND substr(month, 2, 1) BETWEEN '0' AND '9' "
             "AND substr(month, 3, 1) BETWEEN '0' AND '9' "
             "AND substr(month, 4, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 6, 1) BETWEEN '0' AND '9' "
+            "AND substr(month, 7, 1) BETWEEN '0' AND '9' "
             "AND substr(month, 6, 2) BETWEEN '01' AND '12'",
             name="ck_deduction_components_month_format",
         ),
@@ -635,11 +643,7 @@ class DeductionComponentORM(FinanceBase):
             name="ck_deduction_components_scope_kind",
         ),
         CheckConstraint(
-            "length(currency_code) = 3 "
-            "AND currency_code = upper(currency_code) "
-            "AND substr(currency_code, 1, 1) BETWEEN 'A' AND 'Z' "
-            "AND substr(currency_code, 2, 1) BETWEEN 'A' AND 'Z' "
-            "AND substr(currency_code, 3, 1) BETWEEN 'A' AND 'Z'",
+            "currency_code = 'USD'",
             name="ck_deduction_components_currency_code",
         ),
         CheckConstraint(

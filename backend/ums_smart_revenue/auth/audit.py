@@ -141,6 +141,7 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     ),
     AuditEventType.DEDUCTION_COMPONENTS_INGESTED: AuditEventDefinition(
         AuditEventType.DEDUCTION_COMPONENTS_INGESTED,
+        reason_required=True,
         permission=Permission.RUN_CONNECTOR_JOBS,
     ),
     AuditEventType.CONNECTOR_SETTINGS_CHANGED: AuditEventDefinition(

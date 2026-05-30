@@ -152,8 +152,8 @@ def test_cli_typed_failure_returns_2(monkeypatch, capsys, error):
     assert session.commits == 0
 
 
-def test_cli_ingestion_value_error_returns_2(monkeypatch, capsys):
-    """Test that ingestion ValueError returns code 2 without committing."""
+def test_cli_ingestion_value_error_propagates(monkeypatch):
+    """Test that untyped ingestion ValueError propagates without committing."""
     module = _load_cli()
     session = _SpySession()
 
@@ -169,9 +169,8 @@ def test_cli_ingestion_value_error_returns_2(monkeypatch, capsys):
             raise ValueError("bad ingestion input")
 
     _patch_common(monkeypatch, module, session=session, service=_RaisesValueError)
-    rc = module.main(BASE_ARGV)
-    assert rc == 2
-    assert "ValueError" in capsys.readouterr().err
+    with pytest.raises(ValueError):
+        module.main(BASE_ARGV)
     assert session.commits == 0
 
 

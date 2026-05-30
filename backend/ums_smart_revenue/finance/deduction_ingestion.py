@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
@@ -33,9 +33,11 @@ from ums_smart_revenue.finance.month_close import (
     get_or_create_month_close_row,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 INGESTION_SOURCES: tuple[str, ...] = ("source_rows", "bank", "gap")
 _MONTH_LENGTH = 7
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 class DeductionComponentError(ValueError):
@@ -62,13 +64,20 @@ class DeductionIngestionResult:
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
-    """Resolve the configured tenant UUID for repository scoping."""
-    if tenant_id is None:
-        return UUID(UMS_TENANT_ID)
+    """Resolve explicit, ambient, or default tenant UUID for repository scoping.
+
+    Raises:
+        DeductionComponentValidationError: If an explicit tenant id is invalid.
+    """
     if isinstance(tenant_id, UUID):
         return tenant_id
+    if tenant_id is None:
+        current_tenant = get_current_tenant()
+        if current_tenant is not None:
+            return current_tenant.id
+        return _DEFAULT_TENANT_UUID
     try:
-        return UUID(str(tenant_id))
+        return UUID(str(tenant_id).strip())
     except ValueError as exc:
         raise DeductionComponentValidationError(f"invalid tenant_id: {tenant_id!r}") from exc
 
@@ -82,7 +91,12 @@ def _validate_month(month: str) -> None:
     if len(month) != _MONTH_LENGTH or month[4] != "-":
         raise DeductionComponentValidationError("month must use YYYY-MM")
     year, sep, mm = month[:4], month[4], month[5:]
-    if not (year.isdigit() and sep == "-" and mm.isdigit() and 1 <= int(mm) <= 12):
+    if not (
+        all("0" <= char <= "9" for char in year)
+        and sep == "-"
+        and all("0" <= char <= "9" for char in mm)
+        and 1 <= int(mm) <= 12
+    ):
         raise DeductionComponentValidationError("month must use YYYY-MM")
 
 
@@ -145,7 +159,12 @@ class SqlAlchemyDeductionComponentRepository:
         # must fail closed BEFORE the empty-return (and before the service's audit
         # path), so the lock check precedes the empty-component short-circuit.
         self._require_month_open(month)
+        live_component_keys = {component.component_key for component in components}
         if not components:
+            self._delete_stale_month_components(
+                month=month,
+                live_component_keys=live_component_keys,
+            )
             return []
         insert_builder = _dialect_insert(self._session.get_bind().dialect.name)
         entries: list[DeductionComponent] = []
@@ -197,7 +216,26 @@ class SqlAlchemyDeductionComponentRepository:
                 raise DeductionComponentValidationError("deduction component upsert failed")
             self._session.refresh(row)
             entries.append(self._to_entry(row))
+        self._delete_stale_month_components(
+            month=month,
+            live_component_keys=live_component_keys,
+        )
         return entries
+
+    def _delete_stale_month_components(
+        self, *, month: str, live_component_keys: set[str]
+    ) -> None:
+        """Delete tenant/month rows that were not produced by this ingestion run."""
+        statement = (
+            delete(DeductionComponentORM)
+            .where(DeductionComponentORM.tenant_id == self._tenant_id)
+            .where(DeductionComponentORM.month == month)
+        )
+        if live_component_keys:
+            statement = statement.where(
+                DeductionComponentORM.component_key.not_in(live_component_keys)
+            )
+        self._session.execute(statement)
 
     def list_month_components(self, *, month: str) -> list[DeductionComponent]:
         """List persisted deduction components for one finance month.
@@ -282,6 +320,8 @@ class DeductionIngestionService:
                 locked and must not accept deduction-component ingestion.
         """
         _validate_month(month)
+        if not reason.strip():
+            raise DeductionComponentValidationError("reason must not be blank")
         if source is not None and source not in INGESTION_SOURCES:
             raise DeductionComponentValidationError(
                 f"source must be one of {INGESTION_SOURCES} or None"

@@ -272,7 +272,10 @@ class SqlAlchemyBankReconciliationRepository:
         )
 
 
-def _filter_by_month(items, month):
+def _filter_by_month[T: (AdSensePaymentEntry, BankReconciliationEntry)](
+    items: Iterable[T],
+    month: str,
+) -> list[T]:
     """Filter items by month.
 
     Args:
@@ -285,7 +288,9 @@ def _filter_by_month(items, month):
     return [item for item in items if item.month == month]
 
 
-def _filter_usd_payments(payments):
+def _filter_usd_payments(
+    payments: Iterable[AdSensePaymentEntry],
+) -> list[AdSensePaymentEntry]:
     """Filter payments to those in USD currency.
 
     Args:
@@ -297,7 +302,9 @@ def _filter_usd_payments(payments):
     return [payment for payment in payments if payment.payment_currency == "USD"]
 
 
-def _filter_paid_payments(payments):
+def _filter_paid_payments(
+    payments: Iterable[AdSensePaymentEntry],
+) -> list[AdSensePaymentEntry]:
     """Filter payments to those with 'PAID' status.
 
     Args:
@@ -309,7 +316,7 @@ def _filter_paid_payments(payments):
     return [payment for payment in payments if payment.payment_status == "PAID"]
 
 
-def _sum_and_quantize(items, attr):
+def _sum_and_quantize(items: Iterable[object], attr: str) -> Decimal:
     """Sum a numeric attribute across items and quantize the result to two decimal places.
 
     Args:

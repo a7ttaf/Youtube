@@ -18,6 +18,7 @@ SqlAlchemyAuditSink: Any = None
 load_app_settings: Any = None
 build_connector_service_principal: Any = None
 build_session_factory: Any = None
+DeductionComponentError: Any = None
 DeductionIngestionService: Any = None
 
 
@@ -29,7 +30,7 @@ def _ensure_backend_path() -> None:
 
 def _load_runtime_dependencies() -> None:
     """Load project dependencies lazily after fixing the import path."""
-    global DeductionIngestionService
+    global DeductionComponentError, DeductionIngestionService
     global SqlAlchemyAuditSink
     global build_connector_service_principal
     global build_session_factory
@@ -60,12 +61,18 @@ def _load_runtime_dependencies() -> None:
         )
 
         build_session_factory = _build_session_factory
-    if DeductionIngestionService is None:
+    if DeductionComponentError is None or DeductionIngestionService is None:
+        from ums_smart_revenue.finance.deduction_ingestion import (
+            DeductionComponentError as _DeductionComponentError,
+        )
         from ums_smart_revenue.finance.deduction_ingestion import (
             DeductionIngestionService as _DeductionIngestionService,
         )
 
-        DeductionIngestionService = _DeductionIngestionService
+        if DeductionComponentError is None:
+            DeductionComponentError = _DeductionComponentError
+        if DeductionIngestionService is None:
+            DeductionIngestionService = _DeductionIngestionService
 
 
 def _parse_args(argv: list[str]) -> argparse.Namespace:
@@ -96,9 +103,9 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 #   exit codes; live mode commits, dry-run never commits.
 # Database/ORM: Opens one Session; SQL owned by DeductionIngestionService /
 #   SqlAlchemyDeductionComponentRepository / SqlAlchemyAuditSink.
-# Standards: thin entrypoint; typed DeductionComponentError / operator
-#   ValueError -> exit 2; untyped non-ValueError failures propagate. No
-#   secret/token printed.
+# Standards: thin entrypoint; service DeductionComponentError / operator
+#   ValueError -> exit 2; unexpected service failures propagate. No secret/token
+#   printed.
 # Blast Radius: Operator surface only. No finance math, no allocation here.
 # Connections:
 #   - File: backend/ums_smart_revenue/finance/deduction_ingestion.py -> service.
@@ -136,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
                 month=args.month, actor=actor, reason=args.reason,
                 source=args.source, dry_run=args.dry_run,
             )
-        except ValueError as exc:
+        except DeductionComponentError as exc:
             print(f"{type(exc).__name__}: {exc!s}", file=sys.stderr)
             return 2
 
