@@ -78,7 +78,8 @@ class BrandedSlide:
 @dataclass(frozen=True)
 class BrandedSlidePackReport:
     """Data class representing the full branded slide pack report with
-    export job and slide summaries."""
+    export job and slide summaries.
+    """
 
     export_job: ExportJobEntry
     slides: tuple[BrandedSlide, ...]
@@ -89,7 +90,8 @@ class BrandedSlidePackReport:
 
     def to_api(self) -> dict[str, object]:
         """Convert the BrandedSlidePackReport instance into a dictionary
-        formatted for API consumption."""
+        formatted for API consumption.
+        """
         return {
             "export_id": self.export_job.id,
             "export_type": self.export_job.export_type,
@@ -265,9 +267,7 @@ def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
 def _add_cover_slide(
     presentation: Presentation, report: BrandedSlidePackReport
 ) -> None:
-    """
-    Add a cover slide with the branded bar, title, and footer to the presentation.
-    """
+    """Add a cover slide with the branded bar, title, and footer to the presentation."""
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
     _add_brand_bar(slide)
     _add_textbox(
@@ -431,9 +431,7 @@ def _validate_same_month(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> None:
-    """
-    Ensure all report summaries use the same export month; raise error if not.
-    """
+    """Ensure all report summaries use the same export month; raise error if not."""
     months = {
         export_job.month,
         net_revenue.month,

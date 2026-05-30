@@ -34,8 +34,10 @@ class ReconciliationIssue:
 
 @dataclass(frozen=True)
 class RevenueReconciliationPreview:
-    """Previews revenue reconciliation results for a channel and month,
-    including variance and detected issues."""
+    """
+    Previews revenue reconciliation results for a channel and month,
+    including variance and detected issues.
+    """
 
     month: str
     youtube_channel_id: str
@@ -49,8 +51,10 @@ class RevenueReconciliationPreview:
     issues: list[ReconciliationIssue]
 
     def to_api(self) -> dict[str, object]:
-        """Convert this revenue reconciliation preview instance to an API-friendly
-        dictionary representation."""
+        """
+        Convert this revenue reconciliation preview instance to an API-friendly
+        dictionary representation.
+        """
         return {
             "month": self.month,
             "youtube_channel_id": self.youtube_channel_id,

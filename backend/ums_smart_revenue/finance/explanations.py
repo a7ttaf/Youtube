@@ -82,7 +82,8 @@ class SqlAlchemyNumberExplanationRepository:
         self, explanation: NumberExplanationEntry
     ) -> NumberExplanationEntry:
         """Record or update a NumberExplanationEntry in the database and
-        return the provided explanation entry."""
+        return the provided explanation entry.
+        """
         row = self._session.scalars(
             select(NumberExplanationORM).where(
                 NumberExplanationORM.tenant_id == self._tenant_id,

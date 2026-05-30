@@ -21,7 +21,10 @@ class PaymentMatchValidationError(ValueError):
 @dataclass(frozen=True)
 class MonthlyPaymentMatchSummary:
     """Represents a summary of payment matching for a month, including totals,
-    counts, and reconciliation issues."""
+"""This module provides functionality to filter revenue facts and AdSense payment entries by month and currency, and build a reconciliation summary for a given month."""
+
+    counts, and reconciliation issues.
+    """
 
     month: str
     currency: str
@@ -46,10 +49,12 @@ class MonthlyPaymentMatchSummary:
 
 
 def _filter_by_month(items, month):
+    """Filter a collection of items by their month attribute, returning only those matching the given month."""
     return [item for item in items if item.month == month]
 
 
 def _filter_payments_by_currency(payments, currency):
+    """Filter a list of payment entries by the specified currency, returning only matching payments."""
     return [payment for payment in payments if payment.payment_currency == currency]
 
 

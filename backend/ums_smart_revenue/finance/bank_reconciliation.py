@@ -224,57 +224,54 @@ class SqlAlchemyBankReconciliationRepository:
             .order_by(
                 BankReconciliationEntryORM.bank_received_date.desc(),
                 BankReconciliationEntryORM.bank_reference,
-            )
-        ).all()
-        return [self._to_entry(row) for row in rows]
-
-    def _require_month_open(self, month: str) -> None:
-        """Ensure that the specified finance month is open for reconciliation.
-
-        Args:
-            month (str): The month in YYYY-MM format to check.
-
-        Raises:
-            BankReconciliationLockedMonthError: If the finance month is locked.
-        """
-        close = get_or_create_month_close_row(
-            self._session,
-            month,
-            tenant_id=self._tenant_id,
-            for_update=True,
         )
-        if close.status == "LOCKED":
-            raise BankReconciliationLockedMonthError(
-                "Finance month is locked for bank reconciliation"
-            )
+    ).all()
+    return [self._to_entry(row) for row in rows]
 
-    @staticmethod
-"""
-Bank reconciliation module providing utilities to filter and summarize AdSense payments and bank entries.
-"""
-    def _to_entry(row: BankReconciliationEntryORM) -> BankReconciliationEntry:
-        """Convert a BankReconciliationEntryORM row to a domain entry object.
+def _require_month_open(self, month: str) -> None:
+    """Ensure that the specified finance month is open for reconciliation.
 
-        Args:
-            row (BankReconciliationEntryORM): The ORM row to convert.
+    Args:
+        month (str): The month in YYYY-MM format to check.
 
-        Returns:
-            BankReconciliationEntry: The domain representation of the bank reconciliation entry.
-        """
-        return BankReconciliationEntry(
-            id=str(row.id),
-            month=row.month,
-            bank_reference=row.bank_reference,
-            bank_received_date=row.bank_received_date,
-            bank_received_amount=row.bank_received_amount,
-            bank_received_currency=row.bank_received_currency,
-            bank_received_amount_usd=row.bank_received_amount_usd,
-            transfer_fee_usd=row.transfer_fee_usd,
-            fx_difference_usd=row.fx_difference_usd,
-            notes=row.notes,
-            source_report_id=row.source_report_id,
-            recorded_by=str(row.recorded_by),
+    Raises:
+        BankReconciliationLockedMonthError: If the finance month is locked.
+    """
+    close = get_or_create_month_close_row(
+        self._session,
+        month,
+        tenant_id=self._tenant_id,
+        for_update=True,
+    )
+    if close.status == "LOCKED":
+        raise BankReconciliationLockedMonthError(
+            "Finance month is locked for bank reconciliation"
         )
+
+@staticmethod
+def _to_entry(row: BankReconciliationEntryORM) -> BankReconciliationEntry:
+    """Convert a BankReconciliationEntryORM row to a domain entry object.
+
+    Args:
+        row (BankReconciliationEntryORM): The ORM row to convert.
+
+    Returns:
+        BankReconciliationEntry: The domain representation of the bank reconciliation entry.
+    """
+    return BankReconciliationEntry(
+        id=str(row.id),
+        month=row.month,
+        bank_reference=row.bank_reference,
+        bank_received_date=row.bank_received_date,
+        bank_received_amount=row.bank_received_amount,
+        bank_received_currency=row.bank_received_currency,
+        bank_received_amount_usd=row.bank_received_amount_usd,
+        transfer_fee_usd=row.transfer_fee_usd,
+        fx_difference_usd=row.fx_difference_usd,
+        notes=row.notes,
+        source_report_id=row.source_report_id,
+        recorded_by=str(row.recorded_by),
+    )
 
 
 def _filter_by_month(items, month):

@@ -65,7 +65,8 @@ class ExecutivePdfSection:
 @dataclass(frozen=True)
 class ExecutivePdfReport:
     """Represents the executive PDF report, aggregating job info, sections,
-    and summary data for generation."""
+    and summary data for generation.
+    """
 
     export_job: ExportJobEntry
     sections: tuple[ExecutivePdfSection, ...]
@@ -118,33 +119,34 @@ def build_executive_pdf_report(
         smart_alerts=smart_alerts,
     )
     if export_job.currency != "USD":
-        raise ExecutivePdfValidationError("executive PDF report requires USD currency")
-    if payment_match.currency != "USD" or bank_reconciliation.currency != "USD":
-        raise ExecutivePdfValidationError(
-            "executive PDF report requires USD source summaries"
-        )
-
-    return ExecutivePdfReport(
-        export_job=export_job,
-        sections=tuple(
-            ExecutivePdfSection(
-                name=name,
-                source=_SECTION_SOURCES[name],
-                status="READY",
-                sensitive=True,
-            )
-            for name in EXECUTIVE_PDF_SECTION_NAMES
-        ),
-        net_revenue=net_revenue,
-        payment_match=payment_match,
-        bank_reconciliation=bank_reconciliation,
-        smart_alerts=smart_alerts,
+    raise ExecutivePdfValidationError("executive PDF report requires USD currency")
+if payment_match.currency != "USD" or bank_reconciliation.currency != "USD":
+    raise ExecutivePdfValidationError(
+        "executive PDF report requires USD source summaries"
     )
+
+return ExecutivePdfReport(
+    export_job=export_job,
+    sections=tuple(
+        ExecutivePdfSection(
+            name=name,
+            source=_SECTION_SOURCES[name],
+            status="READY",
+            sensitive=True,
+        )
+        for name in EXECUTIVE_PDF_SECTION_NAMES
+    ),
+    net_revenue=net_revenue,
+    payment_match=payment_match,
+    bank_reconciliation=bank_reconciliation,
+    smart_alerts=smart_alerts,
+)
 
 
 def build_executive_pdf_bytes(report: ExecutivePdfReport) -> bytes:
     """Generate PDF bytes for the given ExecutivePdfReport using reportlab.
-    Return the PDF binary."""
+    Return the PDF binary.
+    """
     buffer = BytesIO()
     document = SimpleDocTemplate(
         buffer,
@@ -230,7 +232,8 @@ def _executive_summary(
     smart_alerts: MonthlySmartAlertSummary,
 ) -> dict[str, object]:
     """Generate a summary dictionary containing key metrics and statuses
-    for the executive PDF report."""
+    for the executive PDF report.
+    """
     return {
         "month": export_job.month,
         "scope_type": export_job.scope_type,
@@ -376,7 +379,8 @@ def _key_value_table(values: dict[str, object]) -> Table:
 
 def _styled_table(rows: list[list[object]]) -> Table:
     """Apply consistent styling to a table, including fonts, colors,
-    padding, and grid layout, for use in the PDF."""
+    padding, and grid layout, for use in the PDF.
+    """
     table = Table(rows, hAlign="LEFT", repeatRows=1)
     table.setStyle(
         TableStyle(

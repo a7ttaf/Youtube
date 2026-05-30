@@ -92,7 +92,8 @@ class SqlAlchemyManualOverrideRepository:
         actor_user_id: str,
     ) -> RevenueManualOverrideEntry:
         """Create a manual revenue override for a specific channel and month
-        with reason and actor."""
+        with reason and actor.
+        """
         _validate_month(month)
         _validate_nonzero_adjustment(adjustment_revenue_usd)
         normalized_reason = _normalize_reason(reason)
