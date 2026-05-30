@@ -1,10 +1,11 @@
 from datetime import date, datetime
 from decimal import Decimal
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import (
     JSON,
     BigInteger,
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -37,6 +38,20 @@ class FinanceBase(DeclarativeBase):
 # the rationale (single source of truth for the UMS tenant id).
 _TENANT_ID_DEFAULT = text(f"'{UMS_TENANT_ID}'")
 _TENANT_ID_DEFAULT_VALUE = UUID(UMS_TENANT_ID)
+
+
+def _month_format_check(column: str) -> str:
+    """Return a SQLite/Postgres-portable CHECK expression validating YYYY-MM."""
+    return (
+        f"length({column}) = 7 AND substr({column}, 5, 1) = '-' "
+        f"AND substr({column}, 1, 1) BETWEEN '0' AND '9' "
+        f"AND substr({column}, 2, 1) BETWEEN '0' AND '9' "
+        f"AND substr({column}, 3, 1) BETWEEN '0' AND '9' "
+        f"AND substr({column}, 4, 1) BETWEEN '0' AND '9' "
+        f"AND substr({column}, 6, 1) BETWEEN '0' AND '9' "
+        f"AND substr({column}, 7, 1) BETWEEN '0' AND '9' "
+        f"AND substr({column}, 6, 2) BETWEEN '01' AND '12'"
+    )
 
 
 class FinanceMonthCloseORM(FinanceBase):
@@ -677,5 +692,171 @@ class DeductionComponentORM(FinanceBase):
         Index(
             "ix_deduction_components_tenant_month_kind",
             "tenant_id", "month", "component_kind",
+        ),
+    )
+
+
+# ============================================================================
+# Purpose: Operator-verified link between an AdSense publisher account and a
+#   YouTube CMS content owner. Verification is the money-gating trust decision
+#   the allocation engine (Spec 2b) consumes; effective ranges make historical
+#   allocation reproducible.
+# Database/ORM: adsense_content_owner_links / AdsenseContentOwnerLinkORM.
+# Standards: tenant FK RESTRICT; status CHECK; YYYY-MM CHECKs; object-only
+#   JSONB provenance CHECK (Postgres-only). No amounts; no auth/Neo4j schema.
+# Blast Radius: Finance source-of-truth (new, additive). Read by Spec 2b.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/channel_account_links.py -> repo.
+#   - File: Docs/superpowers/specs/2026-05-31-spec-channel-account-map-design.md
+# ============================================================================
+class AdsenseContentOwnerLinkORM(FinanceBase):
+    """Operator-verified AdSense-account ↔ content-owner link."""
+
+    __tablename__ = "adsense_content_owner_links"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True,
+        default=uuid4, server_default=text("gen_random_uuid()"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE, server_default=_TENANT_ID_DEFAULT,
+    )
+    adsense_account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    content_owner_id: Mapped[str] = mapped_column(Text, nullable=False)
+    verification_status: Mapped[str] = mapped_column(
+        Text, nullable=False, server_default=text("'UNVERIFIED'")
+    )
+    provenance_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    provenance_payload: Mapped[dict[str, object]] = mapped_column(
+        JSON().with_variant(postgresql.JSONB(), "postgresql"),
+        nullable=False, server_default=text("'{}'"),
+    )
+    verified_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
+    verified_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    verification_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
+    effective_month_start: Mapped[str] = mapped_column(Text, nullable=False)
+    effective_month_end: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        server_default=func.now(), onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id"], [TenantORM.id],
+            name="fk_adsense_content_owner_links_tenant", ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "tenant_id", "adsense_account_id", "content_owner_id",
+            "effective_month_start", name="uq_adsense_content_owner_links_key",
+        ),
+        CheckConstraint(
+            "verification_status IN ('UNVERIFIED', 'VERIFIED', 'REJECTED', 'CONFLICT')",
+            name="ck_adsense_content_owner_links_status",
+        ),
+        CheckConstraint(
+            _month_format_check("effective_month_start"),
+            name="ck_adsense_content_owner_links_start_format",
+        ),
+        CheckConstraint(
+            f"effective_month_end IS NULL OR ({_month_format_check('effective_month_end')})",
+            name="ck_adsense_content_owner_links_end_format",
+        ),
+        CheckConstraint(
+            "effective_month_end IS NULL OR effective_month_end >= effective_month_start",
+            name="ck_adsense_content_owner_links_range",
+        ),
+        CheckConstraint(
+            "length(adsense_account_id) >= 1",
+            name="ck_adsense_content_owner_links_account_nonempty",
+        ),
+        CheckConstraint(
+            "length(content_owner_id) >= 1",
+            name="ck_adsense_content_owner_links_owner_nonempty",
+        ),
+        CheckConstraint(
+            "jsonb_typeof(provenance_payload) = 'object'",
+            name="ck_adsense_content_owner_links_provenance_payload_object",
+        ).ddl_if(dialect="postgresql"),
+        Index(
+            "ix_adsense_content_owner_links_account_status",
+            "tenant_id", "adsense_account_id", "verification_status",
+        ),
+    )
+
+
+# ============================================================================
+# Purpose: Derived link between a content owner and a YouTube channel, sourced
+#   from observed (content_owner_id, youtube_channel_id) co-occurrence in
+#   google_revenue_source_rows. Trusted by provenance; no human verification.
+# Database/ORM: content_owner_channel_links / ContentOwnerChannelLinkORM.
+# Standards: tenant FK RESTRICT; YYYY-MM CHECKs; idempotent upsert key. No
+#   amounts; never derived from source_account_id.
+# Blast Radius: Finance source-of-truth (new, additive). Read by Spec 2b.
+# ============================================================================
+class ContentOwnerChannelLinkORM(FinanceBase):
+    """Derived content-owner ↔ YouTube-channel link."""
+
+    __tablename__ = "content_owner_channel_links"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True,
+        default=uuid4, server_default=text("gen_random_uuid()"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE, server_default=_TENANT_ID_DEFAULT,
+    )
+    content_owner_id: Mapped[str] = mapped_column(Text, nullable=False)
+    youtube_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    provenance_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    provenance_source_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    active: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("true")
+    )
+    effective_month_start: Mapped[str] = mapped_column(Text, nullable=False)
+    effective_month_end: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        server_default=func.now(), onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id"], [TenantORM.id],
+            name="fk_content_owner_channel_links_tenant", ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "tenant_id", "content_owner_id", "youtube_channel_id",
+            "effective_month_start", name="uq_content_owner_channel_links_key",
+        ),
+        CheckConstraint(
+            "provenance_kind IN ('SOURCE_ROW', 'CHANNEL_REGISTRY', 'MANUAL')",
+            name="ck_content_owner_channel_links_provenance_kind",
+        ),
+        CheckConstraint(
+            _month_format_check("effective_month_start"),
+            name="ck_content_owner_channel_links_start_format",
+        ),
+        CheckConstraint(
+            f"effective_month_end IS NULL OR ({_month_format_check('effective_month_end')})",
+            name="ck_content_owner_channel_links_end_format",
+        ),
+        CheckConstraint(
+            "effective_month_end IS NULL OR effective_month_end >= effective_month_start",
+            name="ck_content_owner_channel_links_range",
+        ),
+        Index(
+            "ix_content_owner_channel_links_owner",
+            "tenant_id", "content_owner_id", "effective_month_start",
         ),
     )
