@@ -273,6 +273,34 @@ def test_repository_reingest_removes_stale_month_components(tmp_path):
         assert repo.list_month_components(month=MONTH) == []
 
 
+def test_scoped_bank_ingest_preserves_other_source_components(tmp_path):
+    """A bank-only rerun removes stale bank rows, not other source families."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed(session)
+        service = _service(session)
+        service.ingest(month=MONTH, actor=_actor(), reason="full")
+        session.commit()
+
+        bank_entry = session.scalars(select(BankReconciliationEntryORM)).one()
+        bank_entry.fx_difference_usd = Decimal("0.00")
+        session.commit()
+
+        service.ingest(month=MONTH, actor=_actor(), reason="bank", source="bank")
+        session.commit()
+
+        repo = _mod().SqlAlchemyDeductionComponentRepository(session)
+        component_keys = {
+            component.component_key
+            for component in repo.list_month_components(month=MONTH)
+        }
+
+    assert "bank:2026-04:BANK-1:transfer_fee" in component_keys
+    assert "bank:2026-04:BANK-1:fx_variance" not in component_keys
+    assert any(key.startswith("srcrow:") for key in component_keys)
+    assert "adsense_gap:pub-1:2026-04" in component_keys
+
+
 def test_repository_uses_request_tenant_context_by_default(tmp_path):
     """Ambient TENANT_CTX scopes deduction component writes by default."""
     engine = _engine(tmp_path)

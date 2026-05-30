@@ -1,5 +1,6 @@
 """Ingest tenant-scoped deduction-component evidence into finance storage."""
 
+from collections.abc import Collection
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
@@ -36,6 +37,11 @@ from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
 INGESTION_SOURCES: tuple[str, ...] = ("source_rows", "bank", "gap")
+_SOURCE_REPLACE_TABLES: dict[str, frozenset[str]] = {
+    "source_rows": frozenset({"google_revenue_source_rows"}),
+    "bank": frozenset({"bank_reconciliation_entries"}),
+    "gap": frozenset({"adsense_payment_gap"}),
+}
 _MONTH_LENGTH = 7
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
@@ -145,7 +151,10 @@ class SqlAlchemyDeductionComponentRepository:
             )
 
     def upsert_components(
-        self, *, month: str, components: list[DeductionComponentInput]
+        self, *,
+        month: str,
+        components: list[DeductionComponentInput],
+        replace_source_tables: Collection[str] | None = None,
     ) -> list[DeductionComponent]:
         """Upsert validated deduction components for one finance month.
 
@@ -164,6 +173,7 @@ class SqlAlchemyDeductionComponentRepository:
             self._delete_stale_month_components(
                 month=month,
                 live_component_keys=live_component_keys,
+                replace_source_tables=replace_source_tables,
             )
             return []
         insert_builder = _dialect_insert(self._session.get_bind().dialect.name)
@@ -219,11 +229,15 @@ class SqlAlchemyDeductionComponentRepository:
         self._delete_stale_month_components(
             month=month,
             live_component_keys=live_component_keys,
+            replace_source_tables=replace_source_tables,
         )
         return entries
 
     def _delete_stale_month_components(
-        self, *, month: str, live_component_keys: set[str]
+        self, *,
+        month: str,
+        live_component_keys: set[str],
+        replace_source_tables: Collection[str] | None = None,
     ) -> None:
         """Delete tenant/month rows that were not produced by this ingestion run."""
         statement = (
@@ -231,6 +245,12 @@ class SqlAlchemyDeductionComponentRepository:
             .where(DeductionComponentORM.tenant_id == self._tenant_id)
             .where(DeductionComponentORM.month == month)
         )
+        if replace_source_tables is not None:
+            if not replace_source_tables:
+                return
+            statement = statement.where(
+                DeductionComponentORM.source_table.in_(tuple(replace_source_tables))
+            )
         if live_component_keys:
             statement = statement.where(
                 DeductionComponentORM.component_key.not_in(live_component_keys)
@@ -376,7 +396,16 @@ class DeductionIngestionService:
         total = len(components)
 
         if not dry_run:
-            self._repository.upsert_components(month=month, components=components)
+            # FIX: Scoped ingestion replaces only the selected source family; a
+            # bank-only rerun must not delete source-row or gap evidence.
+            replace_source_tables = (
+                None if source is None else _SOURCE_REPLACE_TABLES[source]
+            )
+            self._repository.upsert_components(
+                month=month,
+                components=components,
+                replace_source_tables=replace_source_tables,
+            )
             record_audit_event(
                 sink=self._audit_sink,
                 actor=actor,
