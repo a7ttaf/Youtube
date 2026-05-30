@@ -265,6 +265,17 @@ class SqlAlchemyDeductionComponentRepository:
             )
         self._session.execute(statement)
 
+    # ============================================================================
+    # Purpose: Return all persisted deduction components for one finance month,
+    #   optionally scoped to a caller-resolved set of YouTube channel IDs.
+    #   When channel_ids is provided, only CHANNEL-scoped rows for those IDs
+    #   are returned (scope_kind enforced); None returns the full month set.
+    # Database/ORM: Reads deduction_components / DeductionComponentORM.
+    # Standards: Deterministic ORDER BY; no write path touched.
+    # Blast Radius: Finance read only. No auth/Neo4j/ingestion impact.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_net_revenue.
+    # ============================================================================
     def list_month_components(
         self,
         *,
