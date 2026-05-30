@@ -84,15 +84,27 @@ def _patch_common(monkeypatch, module, *, session, service, settings=None):
         """Return the fake session factory for CLI tests."""
         return _session_factory
 
+    def _load_app_settings():
+        """Return configured fake settings for CLI tests."""
+        return settings if settings is not None else _FakeSettings()
+
+    def _build_connector_service_principal(*, tenant_id):
+        """Return a fake connector service principal for CLI tests."""
+        _ = tenant_id
+        return object()
+
+    def _audit_sink(_session, *, tenant_id=None):
+        """Return a fake audit sink for CLI tests."""
+        _ = tenant_id
+        return object()
+
     monkeypatch.setattr(
         module, "load_app_settings",
-        lambda: settings if settings is not None else _FakeSettings(),
+        _load_app_settings,
     )
     monkeypatch.setattr(module, "build_session_factory", _build_session_factory)
-    monkeypatch.setattr(
-        module, "build_connector_service_principal", lambda *, tenant_id: object()
-    )
-    monkeypatch.setattr(module, "SqlAlchemyAuditSink", lambda _s, *, tenant_id=None: object())
+    monkeypatch.setattr(module, "build_connector_service_principal", _build_connector_service_principal)
+    monkeypatch.setattr(module, "SqlAlchemyAuditSink", _audit_sink)
     monkeypatch.setattr(module, "DeductionIngestionService", service)
 
 
