@@ -111,11 +111,29 @@ def _seed_channel_component(database_url, *, amount, source_system):
         session.commit()
 
 
-def _seed_extra_component(database_url, **kwargs):
+def _seed_extra_component(
+    database_url,
+    *,
+    kind,
+    scope_kind,
+    scope_id,
+    amount,
+    source_system,
+    key_suffix,
+):
     """Seed one extra component row for endpoint filter tests."""
     engine = create_engine(database_url)
     with Session(engine) as session:
-        session.add(_component(**kwargs))
+        session.add(
+            _component(
+                kind=kind,
+                scope_kind=scope_kind,
+                scope_id=scope_id,
+                amount=amount,
+                source_system=source_system,
+                key_suffix=key_suffix,
+            )
+        )
         session.commit()
 
 

@@ -260,6 +260,7 @@ def test_net_revenue_endpoint_requests_only_net_applicable_components(tmp_path):
             youtube_channel_ids=None,
             component_kinds=None,
         ):
+            """Record route-supplied component filters and return no deduction rows."""
             self.component_kinds = component_kinds
             return []
 
