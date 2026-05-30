@@ -15,10 +15,17 @@ task that first uses it so every commit stays ruff-clean (no unused imports):
 """
 from uuid import UUID, uuid4
 
+import pytest
 from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import FinanceBase
-from ums_smart_revenue.finance.channel_account_links import AccountOwnerLink
+from ums_smart_revenue.finance.channel_account_links import (
+    AccountOwnerLink,
+    SqlAlchemyChannelAccountLinkRepository,
+    _account_owner_lock_key,
+    _ranges_overlap,
+)
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 TENANT = UUID(UMS_TENANT_ID)
@@ -44,3 +51,38 @@ def test_to_api_excludes_provenance_payload():
     assert "LEAK" not in str(api)
     assert api["adsense_account_id"] == "pub-1"
     assert api["verification_status"] == "UNVERIFIED"
+
+
+def test_lock_key_is_deterministic_and_signed_bigint():
+    a = _account_owner_lock_key(TENANT, "pub-1")
+    b = _account_owner_lock_key(TENANT, "pub-1")
+    assert a == b
+    assert 0 <= a < 2**63  # fits PostgreSQL signed bigint
+
+
+def test_lock_key_differs_by_account_and_tenant():
+    other_tenant = UUID("00000000-0000-0000-0000-0000000c00ff")
+    assert _account_owner_lock_key(TENANT, "pub-1") != _account_owner_lock_key(TENANT, "pub-2")
+    assert _account_owner_lock_key(TENANT, "pub-1") != _account_owner_lock_key(other_tenant, "pub-1")
+
+
+@pytest.mark.parametrize(
+    ("sa", "ea", "sb", "eb", "expected"),
+    [
+        ("2026-01", "2026-06", "2026-03", None, True),    # B open, overlaps tail
+        ("2026-01", "2026-02", "2026-03", "2026-04", False),  # disjoint
+        ("2026-01", None, "2030-01", "2030-02", True),     # A open, covers everything later
+        ("2026-05", "2026-05", "2026-05", "2026-05", True),   # same single month
+        ("2026-01", "2026-02", "2026-02", "2026-03", True),   # touch at 2026-02
+    ],
+)
+def test_ranges_overlap_truth_table(sa, ea, sb, eb, expected):
+    assert _ranges_overlap(sa, ea, sb, eb) is expected
+
+
+def test_acquire_lock_is_noop_on_sqlite(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        # On SQLite this must return without error (no advisory-lock primitive).
+        repo._acquire_account_owner_lock("pub-1")

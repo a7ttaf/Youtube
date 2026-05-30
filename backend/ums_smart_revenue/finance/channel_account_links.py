@@ -21,6 +21,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from uuid import UUID
 
+from sqlalchemy import func, select
+from sqlalchemy.orm import Session
+
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
@@ -145,3 +148,33 @@ def _account_owner_lock_key(tenant_id: UUID, adsense_account_id: str) -> int:
     ).encode()
     digest = hashlib.blake2b(payload, digest_size=8).digest()
     return int.from_bytes(digest, "big") >> 1
+
+
+class SqlAlchemyChannelAccountLinkRepository:
+    """Tenant-scoped storage for the channel↔account map."""
+
+    # ========================================================================
+    # Purpose: Manage account↔owner link lifecycle (propose/verify/reject) with
+    #   a per-account advisory lock guarding a fail-closed overlap invariant,
+    #   derive owner↔channel links from source rows, and serve the verified
+    #   read contract for allocation.
+    # Database/ORM: adsense_content_owner_links, content_owner_channel_links,
+    #   read-only google_revenue_source_rows.
+    # Standards: tenant-explicit; pg_advisory_xact_lock on PostgreSQL (SQLite
+    #   no-op); typed errors; reads never write.
+    # Blast Radius: Finance source-of-truth writes (new tables). No Neo4j.
+    # ========================================================================
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
+        self._session = session
+        self._tenant_id = _resolve_tenant_id(tenant_id)
+
+    def _acquire_account_owner_lock(self, adsense_account_id: str) -> None:
+        """Serialize verify/reject for one account via a transaction advisory lock.
+
+        PostgreSQL-only; SQLite has no comparable primitive and no-ops (unit
+        tests run serially, so the overlap check is still exercised).
+        """
+        if self._session.get_bind().dialect.name != "postgresql":
+            return
+        lock_key = _account_owner_lock_key(self._tenant_id, adsense_account_id)
+        self._session.execute(select(func.pg_advisory_xact_lock(lock_key)))
