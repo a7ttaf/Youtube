@@ -74,7 +74,7 @@ class DeductionComponentPage:
     """One page of deduction components plus the full-match total count."""
 
     total_count: int
-    components: list
+    components: list[DeductionComponent]
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
