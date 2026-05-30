@@ -922,6 +922,7 @@ def get_month_net_revenue(
         )
         deduction_components = deduction_component_repository.list_month_components(
             month=month,
+            youtube_channel_ids=channel_ids,
         )
         summary = build_month_net_revenue_summary(
             month=month,

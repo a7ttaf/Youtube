@@ -134,6 +134,7 @@ def seed_database(database_url: str) -> None:
 
 
 def test_finance_viewer_reads_month_net_revenue_summary_with_audit(tmp_path):
+    """Finance viewer reads the company-scoped monthly net-revenue summary and emits a REVENUE_VIEWED audit event."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -160,6 +161,7 @@ def test_finance_viewer_reads_month_net_revenue_summary_with_audit(tmp_path):
 
 
 def test_assistant_cannot_read_month_net_revenue_summary_by_default(tmp_path):
+    """assistant_analyst lacks VIEW_REVENUE and is rejected with HTTP 403 on the net-revenue endpoint."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -174,6 +176,7 @@ def test_assistant_cannot_read_month_net_revenue_summary_by_default(tmp_path):
 
 
 def test_month_net_revenue_summary_rejects_non_usd_until_fx_support(tmp_path):
+    """Requesting a non-USD currency is rejected with HTTP 422 until exchange-rate support is implemented."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))

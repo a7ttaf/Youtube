@@ -265,18 +265,33 @@ class SqlAlchemyDeductionComponentRepository:
             )
         self._session.execute(statement)
 
-    def list_month_components(self, *, month: str) -> list[DeductionComponent]:
+    def list_month_components(
+        self,
+        *,
+        month: str,
+        youtube_channel_ids: set[str] | None = None,
+    ) -> list[DeductionComponent]:
         """List persisted deduction components for one finance month.
+
+        When youtube_channel_ids is provided, only CHANNEL-scoped components
+        whose scope_id is in the set are returned. Pass None to return all
+        components regardless of scope_id (global/admin path).
 
         Raises:
             DeductionComponentValidationError: If the month is malformed.
         """
         _validate_month(month)
-        rows = self._session.scalars(
+        query = (
             select(DeductionComponentORM)
             .where(DeductionComponentORM.tenant_id == self._tenant_id)
             .where(DeductionComponentORM.month == month)
-            .order_by(
+        )
+        if youtube_channel_ids is not None:
+            query = query.where(
+                DeductionComponentORM.scope_id.in_(youtube_channel_ids)
+            )
+        rows = self._session.scalars(
+            query.order_by(
                 DeductionComponentORM.scope_kind,
                 DeductionComponentORM.scope_id,
                 DeductionComponentORM.component_kind,
@@ -308,7 +323,8 @@ class SqlAlchemyDeductionComponentRepository:
         """Return a filtered, paginated page of components + the full match count.
 
         Raises:
-            DeductionComponentValidationError: If the month is malformed.
+            DeductionComponentValidationError: If the month is malformed,
+                limit is less than 1, or offset is negative.
         """
         _validate_month(month)
         if limit < 1:
