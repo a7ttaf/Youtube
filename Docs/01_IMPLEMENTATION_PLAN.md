@@ -432,11 +432,15 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   UI not built.
 - ⏳ Manual bank/payment input — remaining: bank recon repo (PR #29);
   input UI not built.
-- ⏳ Tax/deduction ingestion — substrate + source-reported ingestion shipped
-  (PR #55): `deduction_components` table + three adapters (Google value_kind
-  tax/deduction, bank transfer-fee/FX, AdSense earnings→payment gap) + operator
-  CLI + sensitive `DEDUCTION_COMPONENTS_INGESTED` audit. Remaining: net_revenue
-  consumption + read endpoint (PR-B); account→channel allocation (Spec 2).
+- ⏳ Tax/deduction ingestion — substrate + ingestion shipped (PR #55):
+  `deduction_components` table + three adapters (Google value_kind tax/deduction,
+  bank transfer-fee/FX, AdSense earnings→payment gap) + operator CLI + sensitive
+  `DEDUCTION_COMPONENTS_INGESTED` audit. Consumption shipped (this PR): net_revenue
+  derives a channel-direct `COMPONENT_DERIVED`/`D_ESTIMATED` net from same-month,
+  same-source CHANNEL TAX/DEDUCTION components only when source net is missing
+  (anti-double-count, anti-cross-source), plus read-only
+  `GET /revenue/months/{month}/deduction-components`. Remaining: account→channel
+  allocation of ACCOUNT/PAYMENT evidence (Spec 2).
 - ⏳ Allocation rules — remaining: not started.
 - ✅ Net revenue by channel/company/sector — shipped: GET
   /revenue/months/{month}/net-revenue (build_month_net_revenue_summary;
