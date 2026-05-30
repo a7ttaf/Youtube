@@ -3,6 +3,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
+from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntry
 from ums_smart_revenue.finance.reconciliation import SOURCE_PRIORITY
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
@@ -10,6 +11,8 @@ from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 
 @dataclass(frozen=True)
 class ChannelNetRevenueSummary:
+    """Summary of net revenue for one YouTube channel and month."""
+
     month: str
     youtube_channel_id: str
     status: str
@@ -27,6 +30,12 @@ class ChannelNetRevenueSummary:
     issues: list[dict[str, str]]
 
     def to_api(self) -> dict[str, object]:
+        """
+        Convert the NetRevenue instance to a dictionary suitable for API consumption.
+
+        Returns:
+            dict[str, object]: A mapping of field names to their API-compatible values.
+        """
         return {
             "month": self.month,
             "youtube_channel_id": self.youtube_channel_id,
@@ -54,6 +63,8 @@ class ChannelNetRevenueSummary:
 
 @dataclass(frozen=True)
 class MonthNetRevenueSummary:
+    """Aggregated net revenue summary across channels for one month."""
+
     month: str
     status: str
     channel_count: int
@@ -66,6 +77,7 @@ class MonthNetRevenueSummary:
     channels: list[ChannelNetRevenueSummary]
 
     def to_api(self) -> dict[str, object]:
+        """Serialize the channel net revenue summary to a dictionary for API usage."""
         return {
             "month": self.month,
             "status": self.status,
@@ -85,10 +97,11 @@ class MonthNetRevenueSummary:
 
 
 class NetRevenueValidationError(ValueError):
-    pass
+    """Exception raised for errors during net revenue validation, e.g., unsupported currency."""
 
 
 def normalize_net_revenue_currency(currency: str) -> str:
+    """Normalize the currency string to uppercase USD and validate that only USD is supported."""
     normalized = currency.strip().upper()
     if normalized != "USD":
         raise NetRevenueValidationError(
@@ -104,6 +117,9 @@ def build_channel_net_revenue_summary(
     month: str | None = None,
     youtube_channel_id: str | None = None,
 ) -> ChannelNetRevenueSummary:
+    """Construct a ChannelNetRevenueSummary from provided revenue facts and manual overrides,
+    resolving the target month and channel ID.
+    """
     fact_list = sorted(
         facts,
         key=lambda fact: (SOURCE_PRIORITY.get(fact.source_kind, 99), fact.source_kind),
@@ -206,6 +222,13 @@ def build_month_net_revenue_summary(
     facts: Iterable[RevenueFactEntry],
     manual_overrides: Iterable[RevenueManualOverrideEntry],
 ) -> MonthNetRevenueSummary:
+    """
+    Build a summary of net revenue for a given month across all channels.
+
+    Aggregates revenue facts and manual overrides for the specified month,
+    computes per-channel net revenue summaries, and returns a consolidated
+    MonthNetRevenueSummary.
+    """
     facts_by_channel: dict[str, list[RevenueFactEntry]] = defaultdict(list)
     overrides_by_channel: dict[str, list[RevenueManualOverrideEntry]] = defaultdict(
         list
@@ -271,6 +294,10 @@ def _empty_channel_summary(
     approved_count: int,
     pending_count: int,
 ) -> ChannelNetRevenueSummary:
+    """
+    Create an empty channel summary with NO_FACTS status and default revenue values
+    for a specified month and YouTube channel.
+    """
     return ChannelNetRevenueSummary(
         month=month,
         youtube_channel_id=youtube_channel_id,
@@ -305,6 +332,10 @@ def _month_status(
     missing_count: int,
     pending_count: int,
 ) -> str:
+    """
+    Determine the overall status of a month based on channel counts,
+    missing data, and pending manual overrides.
+    """
     if channel_count == 0:
         return "NO_FACTS"
     if missing_count:
@@ -322,6 +353,10 @@ def _validate_same_period_and_channel(
     month: str,
     youtube_channel_id: str,
 ) -> None:
+    """
+    Validate that all entries share the same month and YouTube channel,
+    raising an error if any inconsistency is found.
+    """
     for entry in entries:
         if entry.month != month or entry.youtube_channel_id != youtube_channel_id:
             raise NetRevenueValidationError(
@@ -334,18 +369,13 @@ def _deduction_percentage(
     deduction_amount: Decimal,
     gross_revenue_usd: Decimal,
 ) -> Decimal:
+    """
+    Calculate the deduction percentage relative to gross revenue,
+    formatted to four decimal places with HALF_UP rounding.
+    """
     if gross_revenue_usd == 0:
         return Decimal("0.0000")
     return ((deduction_amount / gross_revenue_usd) * Decimal("100")).quantize(
         Decimal("0.0001"),
         rounding=ROUND_HALF_UP,
     )
-
-
-def _decimal_to_api(value: Decimal | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.normalize()
-    if normalized == normalized.to_integral():
-        return format(normalized, "f")
-    return format(normalized, "f").rstrip("0").rstrip(".")

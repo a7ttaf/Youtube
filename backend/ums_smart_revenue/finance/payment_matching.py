@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
 from ums_smart_revenue.finance.adsense_payments import AdSensePaymentEntry
+from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.reconciliation import ReconciliationIssue
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 
@@ -14,11 +15,13 @@ YOUTUBE_REVENUE_SOURCE_PRIORITY = {
 
 
 class PaymentMatchValidationError(ValueError):
-    pass
+    """Exception raised for errors in payment match validation."""
 
 
 @dataclass(frozen=True)
 class MonthlyPaymentMatchSummary:
+    """Summarize monthly payment matching totals, counts, and issues."""
+
     month: str
     currency: str
     status: str
@@ -35,6 +38,9 @@ class MonthlyPaymentMatchSummary:
     issues: list[ReconciliationIssue]
 
     def to_api(self) -> dict[str, object]:
+        """Convert the summary into a dictionary suitable for API communication."""
+        # FIX: Preserve the full payment-match API payload; a docstring refactor
+        # previously reduced this response to only reconciliation issues.
         return {
             "month": self.month,
             "currency": self.currency,
@@ -59,6 +65,16 @@ class MonthlyPaymentMatchSummary:
         }
 
 
+def _filter_by_month(items, month):
+    """Return items whose month attribute matches the requested month."""
+    return [item for item in items if item.month == month]
+
+
+def _filter_payments_by_currency(payments, currency):
+    """Return payments using the requested currency code."""
+    return [payment for payment in payments if payment.payment_currency == currency]
+
+
 def build_monthly_payment_match_summary(
     *,
     month: str,
@@ -67,16 +83,21 @@ def build_monthly_payment_match_summary(
     currency: str = "USD",
     tolerance_usd: Decimal = DEFAULT_PAYMENT_MATCH_TOLERANCE_USD,
 ) -> MonthlyPaymentMatchSummary:
+    """Build a MonthlyPaymentMatchSummary for the specified month from revenue
+    facts and AdSense payments.
+
+    Filters facts and payments by the given month and currency,
+    applies reconciliation tolerance,
+    and aggregates totals, counts, and reconciliation issues into a summary object.
+    """
     if tolerance_usd < 0:
         raise PaymentMatchValidationError("tolerance_usd must be non-negative")
     normalized_currency = normalize_payment_match_currency(currency)
-    month_facts = [fact for fact in facts if fact.month == month]
-    month_payments = [payment for payment in payments if payment.month == month]
-    eligible_currency_payments = [
-        payment
-        for payment in month_payments
-        if payment.payment_currency == normalized_currency
-    ]
+    month_facts = _filter_by_month(facts, month)
+    month_payments = _filter_by_month(payments, month)
+    eligible_currency_payments = _filter_payments_by_currency(
+        month_payments, normalized_currency
+    )
     unsupported_payment_currency_count = len(month_payments) - len(
         eligible_currency_payments
     )
@@ -182,6 +203,10 @@ def build_monthly_payment_match_summary(
 def _select_youtube_facts_by_channel(
     facts: list[RevenueFactEntry],
 ) -> dict[str, RevenueFactEntry]:
+    """Selects the highest priority YouTube revenue fact for each channel.
+    Returns a mapping from channel ID to the selected RevenueFactEntry
+    based on predefined source priority.
+    """
     selected: dict[str, RevenueFactEntry] = {}
     for fact in sorted(
         facts,
@@ -198,6 +223,9 @@ def _select_youtube_facts_by_channel(
 
 
 def _channel_ids_without_youtube_sources(facts: list[RevenueFactEntry]) -> set[str]:
+    """Returns the set of channel IDs that have no YouTube revenue sources.
+    Compares all channel IDs against those with recognized YouTube sources.
+    """
     all_channel_ids = {fact.youtube_channel_id for fact in facts}
     youtube_channel_ids = {
         fact.youtube_channel_id
@@ -208,10 +236,16 @@ def _channel_ids_without_youtube_sources(facts: list[RevenueFactEntry]) -> set[s
 
 
 def _quantize_money(value: Decimal) -> Decimal:
+    """Quantizes a Decimal monetary value to four decimal places using half-up rounding.
+    Ensures consistent precision for monetary calculations.
+    """
     return value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
 
 def normalize_payment_match_currency(value: str) -> str:
+    """Normalizes and validates a currency string for payment matching.
+    Strips whitespace, converts to uppercase, and enforces USD currency.
+    """
     normalized = value.strip().upper()
     if not normalized:
         raise PaymentMatchValidationError("currency must not be blank")
@@ -220,12 +254,3 @@ def normalize_payment_match_currency(value: str) -> str:
             "currency must be USD until exchange-rate support is implemented"
         )
     return normalized
-
-
-def _decimal_to_api(value: Decimal | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.normalize()
-    if normalized == normalized.to_integral():
-        return format(normalized, "f")
-    return format(normalized, "f").rstrip("0").rstrip(".")

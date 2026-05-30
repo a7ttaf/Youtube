@@ -10,6 +10,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import AdSensePaymentORM
+from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
@@ -389,11 +390,3 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
         return UUID(tenant_id.strip())
     except (AttributeError, ValueError) as exc:
         raise AdSensePaymentValidationError("tenant_id must be a valid UUID") from exc
-
-
-def _decimal_to_api(value: Decimal) -> str:
-    """Serialize a Decimal for JSON without losing precision."""
-    normalized = value.normalize()
-    if normalized == normalized.to_integral():
-        return format(normalized, "f")
-    return format(normalized, "f").rstrip("0").rstrip(".")

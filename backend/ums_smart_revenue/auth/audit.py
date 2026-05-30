@@ -5,6 +5,8 @@ from ums_smart_revenue.auth.permissions import Permission
 
 
 class AuditEventType(StrEnum):
+    """Enumeration of audit event types used for logging and tracking system actions."""
+
     LOGIN = "LOGIN"
     LOGOUT = "LOGOUT"
     CHANNEL_CREATED = "CHANNEL_CREATED"
@@ -12,6 +14,7 @@ class AuditEventType(StrEnum):
     GROUP_UPDATED = "GROUP_UPDATED"
     REPORT_IMPORTED = "REPORT_IMPORTED"
     ADSENSE_PAYMENT_SYNCED = "ADSENSE_PAYMENT_SYNCED"
+    DEDUCTION_COMPONENTS_INGESTED = "DEDUCTION_COMPONENTS_INGESTED"
     MONTH_CLOSE_UPDATED = "MONTH_CLOSE_UPDATED"
     MONTH_CLOSE_VIEWED = "MONTH_CLOSE_VIEWED"
     MONTH_LOCKED = "MONTH_LOCKED"
@@ -39,6 +42,8 @@ class AuditEventType(StrEnum):
 
 @dataclass(frozen=True)
 class AuditEventDefinition:
+    """Define audit event type, reason, and permission requirements."""
+
     event_type: AuditEventType
     reason_required: bool = False
     permission: Permission | None = None
@@ -132,6 +137,11 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     ),
     AuditEventType.ADSENSE_PAYMENT_SYNCED: AuditEventDefinition(
         AuditEventType.ADSENSE_PAYMENT_SYNCED,
+        permission=Permission.RUN_CONNECTOR_JOBS,
+    ),
+    AuditEventType.DEDUCTION_COMPONENTS_INGESTED: AuditEventDefinition(
+        AuditEventType.DEDUCTION_COMPONENTS_INGESTED,
+        reason_required=True,
         permission=Permission.RUN_CONNECTOR_JOBS,
     ),
     AuditEventType.CONNECTOR_SETTINGS_CHANGED: AuditEventDefinition(

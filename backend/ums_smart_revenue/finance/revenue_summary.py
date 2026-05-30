@@ -2,6 +2,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from decimal import Decimal
 
+from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntry
 from ums_smart_revenue.finance.reconciliation import SOURCE_PRIORITY
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
@@ -9,6 +10,8 @@ from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 
 @dataclass(frozen=True)
 class AdjustedRevenueSummary:
+    """Adjusted revenue summary for one YouTube channel and month."""
+
     month: str
     youtube_channel_id: str
     status: str
@@ -20,6 +23,7 @@ class AdjustedRevenueSummary:
     pending_manual_override_count: int
 
     def to_api(self) -> dict[str, object]:
+        """Convert the summary into an API dictionary."""
         return {
             "month": self.month,
             "youtube_channel_id": self.youtube_channel_id,
@@ -46,6 +50,7 @@ def build_adjusted_revenue_summary(
     month: str | None = None,
     youtube_channel_id: str | None = None,
 ) -> AdjustedRevenueSummary:
+    """Build an adjusted revenue summary from facts and overrides."""
     fact_list = sorted(
         facts,
         key=lambda fact: (SOURCE_PRIORITY.get(fact.source_kind, 99), fact.source_kind),
@@ -105,19 +110,13 @@ def build_adjusted_revenue_summary(
     )
 
 
-def _decimal_to_api(value: Decimal) -> str:
-    normalized = value.normalize()
-    if normalized == normalized.to_integral():
-        return format(normalized, "f")
-    return format(normalized, "f").rstrip("0").rstrip(".")
-
-
 def _validate_same_period_and_channel(
     entries: Iterable[RevenueFactEntry | RevenueManualOverrideEntry],
     *,
     month: str,
     youtube_channel_id: str,
 ) -> None:
+    """Ensure revenue summary inputs share the requested month and channel."""
     for entry in entries:
         if entry.month != month or entry.youtube_channel_id != youtube_channel_id:
             raise ValueError(

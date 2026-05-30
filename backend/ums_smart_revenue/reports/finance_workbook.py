@@ -10,6 +10,7 @@ from openpyxl.worksheet.worksheet import Worksheet
 from ums_smart_revenue.finance.bank_reconciliation import (
     MonthBankReconciliationSummary,
 )
+from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.net_revenue import MonthNetRevenueSummary
 from ums_smart_revenue.finance.payment_matching import MonthlyPaymentMatchSummary
 from ums_smart_revenue.finance.smart_alerts import MonthlySmartAlertSummary
@@ -41,17 +42,25 @@ _SHEET_SOURCES = {
 
 
 class FinanceWorkbookPreviewValidationError(ValueError):
-    pass
+    """Exception raised when validation of a finance workbook preview fails."""
 
 
 @dataclass(frozen=True)
 class FinanceWorkbookSheet:
+    """Data class representing a single sheet in the finance workbook preview."""
+
     name: str
     source: str
     status: str
     sensitive: bool
 
     def to_api(self) -> dict[str, object]:
+        """Convert the object's attributes to a dictionary suitable for API use.
+
+        Returns:
+            dict[str, object]: A dictionary containing the "name", "source", "status",
+                and "sensitive" attributes of this object.
+        """
         return {
             "name": self.name,
             "source": self.source,
@@ -62,6 +71,8 @@ class FinanceWorkbookSheet:
 
 @dataclass(frozen=True)
 class FinanceWorkbookPreview:
+    """Finance workbook preview with export metadata and source summaries."""
+
     export_job: ExportJobEntry
     sheets: tuple[FinanceWorkbookSheet, ...]
     net_revenue: MonthNetRevenueSummary
@@ -70,6 +81,7 @@ class FinanceWorkbookPreview:
     smart_alerts: MonthlySmartAlertSummary
 
     def to_api(self) -> dict[str, object]:
+        """Convert this FinanceWorkbookPreview into a dictionary payload for API export."""
         return {
             "export_id": self.export_job.id,
             "export_type": self.export_job.export_type,
@@ -109,6 +121,7 @@ def build_finance_workbook_preview(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> FinanceWorkbookPreview:
+    """Build a finance workbook preview from export metadata and summaries."""
     if export_job.export_type != "FINANCE_EXCEL":
         raise FinanceWorkbookPreviewValidationError(
             "finance workbook preview only supports FINANCE_EXCEL exports"
@@ -148,6 +161,7 @@ def build_finance_workbook_preview(
 
 
 def build_finance_workbook_xlsx(preview: FinanceWorkbookPreview) -> bytes:
+    """Generate an XLSX workbook binary from a finance workbook preview."""
     workbook = Workbook()
     workbook.iso_dates = True
     summary_sheet = workbook.active
@@ -301,6 +315,10 @@ def _validate_same_month(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> None:
+    """
+    Ensure that all provided summaries correspond to the same month as the export job.
+    Raises a validation error if multiple different months are found.
+    """
     months = {
         export_job.month,
         net_revenue.month,
@@ -322,6 +340,11 @@ def _executive_summary(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> dict[str, object]:
+    """
+    Build and return the executive summary dictionary combining export job info
+    and statuses and metrics from net revenue, payment match, bank reconciliation,
+    and smart alerts summaries.
+    """
     return {
         "month": export_job.month,
         "scope_type": export_job.scope_type,
@@ -350,6 +373,10 @@ def _executive_summary(
 def _scope_breakdown(
     preview: FinanceWorkbookPreview, *, breakdown_type: str
 ) -> dict[str, object]:
+    """
+    Generate a scope breakdown dictionary for the given preview and breakdown type,
+    including revenue metrics and channel counts.
+    """
     return {
         "breakdown_type": breakdown_type,
         "scope_type": preview.export_job.scope_type,
@@ -371,6 +398,10 @@ def _scope_breakdown(
 
 
 def _write_key_value_sheet(sheet: Worksheet, values: dict[str, object]) -> None:
+    """
+    Write a key-value mapping to the provided worksheet as a two-column table.
+    Keys become the first column and their corresponding formatted values the second.
+    """
     _write_table_sheet(
         sheet,
         ["Metric", "Value"],
@@ -381,6 +412,10 @@ def _write_key_value_sheet(sheet: Worksheet, values: dict[str, object]) -> None:
 def _write_table_sheet(
     sheet: Worksheet, headers: list[str], rows: list[list[object]]
 ) -> None:
+    """
+    Populate the worksheet with the given headers and rows,
+    then freeze the header row, apply header styling, and autosize columns.
+    """
     sheet.append(headers)
     for row in rows:
         sheet.append([_cell_value(value) for value in row])
@@ -390,6 +425,10 @@ def _write_table_sheet(
 
 
 def _style_header(sheet: Worksheet) -> None:
+    """
+    Apply styling to the header row of the sheet: solid fill, white bold font,
+    and center alignment.
+    """
     fill = PatternFill("solid", fgColor="1F2933")
     font = Font(color="FFFFFF", bold=True)
     for cell in sheet[1]:
@@ -399,6 +438,10 @@ def _style_header(sheet: Worksheet) -> None:
 
 
 def _autosize_columns(sheet: Worksheet) -> None:
+    """
+    Adjust each column's width based on the maximum length of cell values,
+    with defined minimum and maximum width constraints.
+    """
     for column in sheet.columns:
         max_length = 0
         column_letter = column[0].column_letter
@@ -410,17 +453,12 @@ def _autosize_columns(sheet: Worksheet) -> None:
 
 
 def _cell_value(value: object) -> object:
+    """
+    Convert values for cell insertion: Decimal to API format,
+    dict or list to JSON string, otherwise return value unchanged.
+    """
     if isinstance(value, Decimal):
         return _decimal_to_api(value)
     if isinstance(value, (dict, list)):
         return json.dumps(value, sort_keys=True)
     return value
-
-
-def _decimal_to_api(value: Decimal | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.normalize()
-    if normalized == normalized.to_integral():
-        return format(normalized, "f")
-    return format(normalized, "f").rstrip("0").rstrip(".")

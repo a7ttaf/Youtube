@@ -3,6 +3,7 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from decimal import ROUND_HALF_UP, Decimal
+from typing import TypeVar
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -13,6 +14,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.finance_models import BankReconciliationEntryORM
 from ums_smart_revenue.finance.adsense_payments import AdSensePaymentEntry
+from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 from ums_smart_revenue.finance.reconciliation import ReconciliationIssue
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
@@ -24,19 +26,21 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 class BankReconciliationError(ValueError):
-    pass
+    """Base exception for bank reconciliation errors."""
 
 
 class BankReconciliationLockedMonthError(BankReconciliationError):
-    pass
+    """Exception for operations on a locked reconciliation month."""
 
 
 class BankReconciliationValidationError(BankReconciliationError):
-    pass
+    """Exception raised when provided data fails bank reconciliation validation checks."""
 
 
 @dataclass(frozen=True)
 class BankReconciliationEntry:
+    """Data class representing a single bank reconciliation entry with detailed information."""
+
     id: str
     month: str
     bank_reference: str
@@ -51,6 +55,7 @@ class BankReconciliationEntry:
     recorded_by: str
 
     def to_api(self) -> dict[str, object]:
+        """Convert the bank reconciliation record into an API dictionary."""
         return {
             "id": self.id,
             "month": self.month,
@@ -69,6 +74,8 @@ class BankReconciliationEntry:
 
 @dataclass(frozen=True)
 class MonthBankReconciliationSummary:
+    """Summarize one month of bank reconciliation totals and issues."""
+
     month: str
     currency: str
     status: str
@@ -87,6 +94,7 @@ class MonthBankReconciliationSummary:
     entries: list[BankReconciliationEntry]
 
     def to_api(self) -> dict[str, object]:
+        """Convert the reconciliation summary into an API-friendly dictionary."""
         return {
             "month": self.month,
             "currency": self.currency,
@@ -110,6 +118,8 @@ class MonthBankReconciliationSummary:
 
 
 class SqlAlchemyBankReconciliationRepository:
+    """SQLAlchemy-based repository for recording and retrieving bank reconciliation entries."""
+
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
@@ -129,6 +139,7 @@ class SqlAlchemyBankReconciliationRepository:
         source_report_id: str | None,
         actor_user_id: str,
     ) -> BankReconciliationEntry:
+        """Create and persist a new bank reconciliation entry with the specified data."""
         _validate_month(month)
         normalized_reference = _normalize_required_string(
             bank_reference,
@@ -193,6 +204,15 @@ class SqlAlchemyBankReconciliationRepository:
         return self._to_entry(row)
 
     def list_month_entries(self, *, month: str) -> list[BankReconciliationEntry]:
+        """List bank reconciliation entries for the specified month.
+
+        Args:
+            month (str): The month in YYYY-MM format to retrieve entries for.
+
+        Returns:
+            list[BankReconciliationEntry]: A list of bank reconciliation
+            entries for the given month.
+        """
         _validate_month(month)
         rows = self._session.scalars(
             select(BankReconciliationEntryORM)
@@ -208,6 +228,14 @@ class SqlAlchemyBankReconciliationRepository:
         return [self._to_entry(row) for row in rows]
 
     def _require_month_open(self, month: str) -> None:
+        """Ensure that the specified finance month is open for reconciliation.
+
+        Args:
+            month (str): The month in YYYY-MM format to check.
+
+        Raises:
+            BankReconciliationLockedMonthError: If the finance month is locked.
+        """
         close = get_or_create_month_close_row(
             self._session,
             month,
@@ -221,6 +249,14 @@ class SqlAlchemyBankReconciliationRepository:
 
     @staticmethod
     def _to_entry(row: BankReconciliationEntryORM) -> BankReconciliationEntry:
+        """Convert a BankReconciliationEntryORM row to a domain entry object.
+
+        Args:
+            row (BankReconciliationEntryORM): The ORM row to convert.
+
+        Returns:
+            BankReconciliationEntry: The domain representation of the bank reconciliation entry.
+        """
         return BankReconciliationEntry(
             id=str(row.id),
             month=row.month,
@@ -237,6 +273,71 @@ class SqlAlchemyBankReconciliationRepository:
         )
 
 
+_MonthFilterEntry = TypeVar(
+    "_MonthFilterEntry", AdSensePaymentEntry, BankReconciliationEntry
+)
+
+
+# DeepSource's Python analyzer rejects PEP 695 generic function syntax here.
+def _filter_by_month(  # noqa: UP047
+    items: Iterable[_MonthFilterEntry],
+    month: str,
+) -> list[_MonthFilterEntry]:
+    """Filter items by month.
+
+    Args:
+        items (Iterable): Items having a 'month' attribute.
+        month (str): Month in 'YYYY-MM' format to filter by.
+
+    Returns:
+        list: Items from the specified month.
+    """
+    return [item for item in items if item.month == month]
+
+
+def _filter_usd_payments(
+    payments: Iterable[AdSensePaymentEntry],
+) -> list[AdSensePaymentEntry]:
+    """Filter payments to those in USD currency.
+
+    Args:
+        payments (Iterable): Payment entries with a 'payment_currency' attribute.
+
+    Returns:
+        list: Payments with currency 'USD'.
+    """
+    return [payment for payment in payments if payment.payment_currency == "USD"]
+
+
+def _filter_paid_payments(
+    payments: Iterable[AdSensePaymentEntry],
+) -> list[AdSensePaymentEntry]:
+    """Filter payments to those with 'PAID' status.
+
+    Args:
+        payments (Iterable): Payment entries with a 'payment_status' attribute.
+
+    Returns:
+        list: Payments with status 'PAID'.
+    """
+    return [payment for payment in payments if payment.payment_status == "PAID"]
+
+
+def _sum_and_quantize(items: Iterable[object], attr: str) -> Decimal:
+    """Sum a numeric attribute across items and quantize the result to two decimal places.
+
+    Args:
+        items (Iterable): Items with a numeric attribute.
+        attr (str): Name of the attribute to sum.
+
+    Returns:
+        Decimal: Sum of the attribute quantized to two decimal places.
+    """
+    return _quantize_money(
+        sum((getattr(item, attr) for item in items), Decimal("0"))
+    )
+
+
 def build_month_bank_reconciliation_summary(
     *,
     month: str,
@@ -244,26 +345,31 @@ def build_month_bank_reconciliation_summary(
     bank_entries: Iterable[BankReconciliationEntry],
     tolerance_usd: Decimal = DEFAULT_BANK_RECONCILIATION_TOLERANCE_USD,
 ) -> MonthBankReconciliationSummary:
-    month_payments = [payment for payment in payments if payment.month == month]
-    month_entries = [entry for entry in bank_entries if entry.month == month]
-    usd_payments = [
-        payment for payment in month_payments if payment.payment_currency == "USD"
-    ]
-    paid_payments = [
-        payment for payment in usd_payments if payment.payment_status == "PAID"
-    ]
+    """Build a summary of bank reconciliation for a given month.
+
+    Filters AdSense payments and bank entries for the month and computes reconciliation metrics.
+
+    Args:
+        month (str): The month in YYYY-MM format for the summary.
+        payments (Iterable[AdSensePaymentEntry]): All AdSense payment entries.
+        bank_entries (Iterable[BankReconciliationEntry]): All bank reconciliation entries.
+        tolerance_usd (Decimal): The USD tolerance for reconciliation discrepancies.
+
+    Returns:
+        MonthBankReconciliationSummary: A summary of the bank reconciliation for the month.
+    """
+    month_payments = _filter_by_month(payments, month)
+    month_entries = _filter_by_month(bank_entries, month)
+    usd_payments = _filter_usd_payments(month_payments)
+    paid_payments = _filter_paid_payments(usd_payments)
     non_paid_payment_count = len(usd_payments) - len(paid_payments)
     unsupported_payment_currency_count = len(month_payments) - len(usd_payments)
 
-    adsense_paid_amount = _quantize_money(
-        sum((payment.payment_amount for payment in paid_payments), Decimal("0"))
+    adsense_paid_amount = _sum_and_quantize(paid_payments, "payment_amount")
+    bank_received_amount_usd = _sum_and_quantize(
+        month_entries, "bank_received_amount_usd"
     )
-    bank_received_amount_usd = _quantize_money(
-        sum((entry.bank_received_amount_usd for entry in month_entries), Decimal("0"))
-    )
-    transfer_fee_usd = _quantize_money(
-        sum((entry.transfer_fee_usd for entry in month_entries), Decimal("0"))
-    )
+    transfer_fee_usd = _sum_and_quantize(month_entries, "transfer_fee_usd")
     fx_difference_usd = _quantize_money(
         sum((entry.fx_difference_usd for entry in month_entries), Decimal("0"))
     )
@@ -353,6 +459,7 @@ def build_month_bank_reconciliation_summary(
 
 
 def _validate_month(month: str) -> None:
+    """Validate a YYYY-MM value with a real 01-12 calendar month."""
     if not MONTH_PATTERN.fullmatch(month):
         raise BankReconciliationValidationError(
             "month must use YYYY-MM with a calendar month from 01 to 12"
@@ -360,6 +467,7 @@ def _validate_month(month: str) -> None:
 
 
 def _normalize_currency(value: str) -> str:
+    """Normalize and validate a required three-letter currency code."""
     normalized = _normalize_required_string(value, "bank_received_currency").upper()
     if len(normalized) != 3 or not normalized.isalpha():
         raise BankReconciliationValidationError(
@@ -369,6 +477,7 @@ def _normalize_currency(value: str) -> str:
 
 
 def _normalize_required_string(value: str, field_name: str) -> str:
+    """Trim and validate a required nonblank string field."""
     normalized = value.strip()
     if not normalized:
         raise BankReconciliationValidationError(f"{field_name} must not be blank")
@@ -376,6 +485,7 @@ def _normalize_required_string(value: str, field_name: str) -> str:
 
 
 def _normalize_optional_string(value: str | None) -> str | None:
+    """Trim an optional string and collapse blanks to None."""
     if value is None:
         return None
     normalized = value.strip()
@@ -383,17 +493,20 @@ def _normalize_optional_string(value: str | None) -> str | None:
 
 
 def _validate_nonnegative_money(value: Decimal, field_name: str) -> None:
+    """Ensure a Decimal money value is finite and nonnegative."""
     _validate_finite_money(value, field_name)
     if value < 0:
         raise BankReconciliationValidationError(f"{field_name} must be nonnegative")
 
 
 def _validate_finite_money(value: Decimal, field_name: str) -> None:
+    """Ensure a Decimal money value is finite."""
     if not value.is_finite():
         raise BankReconciliationValidationError(f"{field_name} must be finite")
 
 
 def _actor_identity_uuid(value: str) -> UUID:
+    """Parse or derive the audit actor UUID."""
     # Accept either a UUID literal or a trusted-gateway subject; the shared
     # helper derives a deterministic UUID5 for the latter so header-auth
     # deployments with non-UUID x-user-id values can still record bank
@@ -405,6 +518,7 @@ def _actor_identity_uuid(value: str) -> UUID:
 
 
 def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
+    """Parse a UUID string or raise a validation error."""
     try:
         return UUID(value)
     except ValueError as exc:
@@ -414,6 +528,7 @@ def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Resolve an explicit, contextual, or default tenant UUID."""
     if tenant_id is not None:
         return _parse_tenant_uuid(tenant_id)
     current_tenant = get_current_tenant()
@@ -423,6 +538,7 @@ def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
 
 
 def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
+    """Parse a tenant UUID from an object or string value."""
     if isinstance(tenant_id, UUID):
         return tenant_id
     try:
@@ -434,19 +550,12 @@ def _parse_tenant_uuid(tenant_id: UUID | str) -> UUID:
 
 
 def _quantize_money(value: Decimal) -> Decimal:
+    """Quantize money to four decimal places with half-up rounding."""
     return value.quantize(Decimal("0.0001"), rounding=ROUND_HALF_UP)
 
 
-def _decimal_to_api(value: Decimal | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.normalize()
-    if normalized == normalized.to_integral():
-        return format(normalized, "f")
-    return format(normalized, "f").rstrip("0").rstrip(".")
-
-
 def _dialect_insert(dialect_name: str):
+    """Return the insert helper for the active SQL dialect."""
     if dialect_name == "sqlite":
         return sqlite_insert
     if dialect_name == "postgresql":

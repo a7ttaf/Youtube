@@ -10,6 +10,7 @@ from pptx.util import Inches, Pt
 from ums_smart_revenue.finance.bank_reconciliation import (
     MonthBankReconciliationSummary,
 )
+from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.net_revenue import MonthNetRevenueSummary
 from ums_smart_revenue.finance.payment_matching import MonthlyPaymentMatchSummary
 from ums_smart_revenue.finance.smart_alerts import MonthlySmartAlertSummary
@@ -48,17 +49,24 @@ _BRAND_LINE = RGBColor(217, 222, 230)
 
 
 class BrandedSlidePackValidationError(ValueError):
-    pass
+    """Exception raised when validation of a branded slide pack fails."""
 
 
 @dataclass(frozen=True)
 class BrandedSlide:
+    """Data class representing a single slide in the branded slide pack."""
+
     name: str
     source: str
     status: str
     sensitive: bool
 
     def to_api(self) -> dict[str, object]:
+        """Convert the instance to a dictionary formatted for API consumption.
+
+        Returns:
+            Dictionary with the instance's name, source, status, and sensitive flag.
+        """
         return {
             "name": self.name,
             "source": self.source,
@@ -69,6 +77,10 @@ class BrandedSlide:
 
 @dataclass(frozen=True)
 class BrandedSlidePackReport:
+    """Data class representing the full branded slide pack report with
+    export job and slide summaries.
+    """
+
     export_job: ExportJobEntry
     slides: tuple[BrandedSlide, ...]
     net_revenue: MonthNetRevenueSummary
@@ -77,6 +89,9 @@ class BrandedSlidePackReport:
     smart_alerts: MonthlySmartAlertSummary
 
     def to_api(self) -> dict[str, object]:
+        """Convert the BrandedSlidePackReport instance into a dictionary
+        formatted for API consumption.
+        """
         return {
             "export_id": self.export_job.id,
             "export_type": self.export_job.export_type,
@@ -106,6 +121,10 @@ def build_branded_slide_pack_report(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> BrandedSlidePackReport:
+    """
+    Construct a BrandedSlidePackReport, validating that summary data matches the
+    export job and uses USD currency.
+    """
     if export_job.export_type != "BRANDED_SLIDE_PACK":
         raise BrandedSlidePackValidationError(
             "branded slide pack only supports BRANDED_SLIDE_PACK exports"
@@ -145,6 +164,10 @@ def build_branded_slide_pack_report(
 
 
 def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
+    """
+    Generate a PowerPoint presentation as a byte string based on the provided
+    BrandedSlidePackReport.
+    """
     presentation = Presentation()
     presentation.core_properties.title = "UMS Branded Finance Report"
     presentation.core_properties.subject = f"Finance export {report.export_job.month}"
@@ -244,6 +267,7 @@ def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
 def _add_cover_slide(
     presentation: Presentation, report: BrandedSlidePackReport
 ) -> None:
+    """Add a cover slide with the branded bar, title, and footer to the presentation."""
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
     _add_brand_bar(slide)
     _add_textbox(
@@ -279,6 +303,7 @@ def _add_cover_slide(
 def _add_content_slide(
     presentation: Presentation, title: str, bullets: list[str]
 ) -> None:
+    """Add a content slide with a title and bullet points to the presentation."""
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
     _add_brand_bar(slide)
     _add_textbox(
@@ -307,6 +332,7 @@ def _add_content_slide(
 
 
 def _add_brand_bar(slide) -> None:
+    """Add a blue brand bar at the top of the slide for UMS branding."""
     shape = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE,
         Inches(0),
@@ -320,6 +346,7 @@ def _add_brand_bar(slide) -> None:
 
 
 def _add_footer(slide) -> None:
+    """Add a footer line and text to the bottom of the slide."""
     line = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE,
         Inches(0.55),
@@ -353,6 +380,7 @@ def _add_textbox(
     font_size,
     color: RGBColor,
 ) -> None:
+    """Add a textbox with the given text, font size, and color."""
     frame = slide.shapes.add_textbox(left, top, width, height).text_frame
     frame.clear()
     paragraph = frame.paragraphs[0]
@@ -363,6 +391,7 @@ def _add_textbox(
 
 
 def _scope_bullets(report: BrandedSlidePackReport, scope_name: str) -> list[str]:
+    """Generate bullet points summarizing the report scope and net revenue details."""
     return [
         f"{scope_name.title()} scope: {report.export_job.scope_id or 'global'}",
         "Total net revenue USD: "
@@ -372,6 +401,7 @@ def _scope_bullets(report: BrandedSlidePackReport, scope_name: str) -> list[str]
 
 
 def _outside_cms_bullets(report: BrandedSlidePackReport) -> list[str]:
+    """Generate bullet points for channels missing official net revenue sources."""
     missing_source_count = report.net_revenue.missing_net_source_count
     if missing_source_count == 0:
         return ["No missing source revenue issues were detected in this export scope."]
@@ -379,6 +409,7 @@ def _outside_cms_bullets(report: BrandedSlidePackReport) -> list[str]:
 
 
 def _action_item_bullets(report: BrandedSlidePackReport) -> list[str]:
+    """Generate finance action items from report matching statuses."""
     if report.payment_match.status != "PAYMENT_MATCHED":
         return ["Resolve AdSense payment matching before distributing this deck."]
     if report.bank_reconciliation.status != "BANK_CONFIRMED":
@@ -396,6 +427,7 @@ def _validate_same_month(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> None:
+    """Ensure all report summaries use the same export month; raise error if not."""
     months = {
         export_job.month,
         net_revenue.month,
@@ -417,6 +449,7 @@ def _executive_summary(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> dict[str, object]:
+    """Build an executive summary dict with key report metrics and statuses."""
     return {
         "month": export_job.month,
         "scope_type": export_job.scope_type,
@@ -440,12 +473,3 @@ def _executive_summary(
         "channel_count": net_revenue.channel_count,
         "calculated_channel_count": net_revenue.calculated_channel_count,
     }
-
-
-def _decimal_to_api(value: Decimal | None) -> str | None:
-    if value is None:
-        return None
-    normalized = value.normalize()
-    if normalized == normalized.to_integral():
-        return format(normalized, "f")
-    return format(normalized, "f").rstrip("0").rstrip(".")
