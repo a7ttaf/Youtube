@@ -26,22 +26,20 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 class BankReconciliationError(ValueError):
     """Base exception for bank reconciliation errors."""
-    pass
 
 
 class BankReconciliationLockedMonthError(BankReconciliationError):
     """Exception for operations on a locked reconciliation month."""
-    pass
 
 
 class BankReconciliationValidationError(BankReconciliationError):
     """Exception raised when provided data fails bank reconciliation validation checks."""
-    pass
 
 
 @dataclass(frozen=True)
 class BankReconciliationEntry:
     """Data class representing a single bank reconciliation entry with detailed information."""
+
     id: str
     month: str
     bank_reference: str
@@ -56,7 +54,8 @@ class BankReconciliationEntry:
     recorded_by: str
 
     def to_api(self) -> dict[str, object]:
-        """Convert the bank reconciliation record to a JSON-serializable dictionary for API responses."""
+        """Convert the bank reconciliation record to a JSON-serializable
+        dictionary for API responses."""
         return {
             "id": self.id,
             "month": self.month,
@@ -75,7 +74,8 @@ class BankReconciliationEntry:
 
 @dataclass(frozen=True)
 class MonthBankReconciliationSummary:
-    """Data class summarizing bank reconciliation data for a specific month, including totals and issues."""
+    """Data class summarizing bank reconciliation data for a specific
+    month, including totals and issues."""
 
     month: str
     currency: str
@@ -211,7 +211,8 @@ class SqlAlchemyBankReconciliationRepository:
             month (str): The month in YYYY-MM format to retrieve entries for.
 
         Returns:
-            list[BankReconciliationEntry]: A list of bank reconciliation entries for the given month.
+            list[BankReconciliationEntry]: A list of bank reconciliation
+            entries for the given month.
         """
         _validate_month(month)
         rows = self._session.scalars(
@@ -248,6 +249,9 @@ class SqlAlchemyBankReconciliationRepository:
             )
 
     @staticmethod
+"""
+Bank reconciliation module providing utilities to filter and summarize AdSense payments and bank entries.
+"""
     def _to_entry(row: BankReconciliationEntryORM) -> BankReconciliationEntry:
         """Convert a BankReconciliationEntryORM row to a domain entry object.
 
@@ -274,18 +278,52 @@ class SqlAlchemyBankReconciliationRepository:
 
 
 def _filter_by_month(items, month):
+    """Filter items by month.
+
+    Args:
+        items (Iterable): Items having a 'month' attribute.
+        month (str): Month in 'YYYY-MM' format to filter by.
+
+    Returns:
+        list: Items from the specified month.
+    """
     return [item for item in items if item.month == month]
 
 
 def _filter_usd_payments(payments):
+    """Filter payments to those in USD currency.
+
+    Args:
+        payments (Iterable): Payment entries with a 'payment_currency' attribute.
+
+    Returns:
+        list: Payments with currency 'USD'.
+    """
     return [payment for payment in payments if payment.payment_currency == "USD"]
 
 
 def _filter_paid_payments(payments):
+    """Filter payments to those with 'PAID' status.
+
+    Args:
+        payments (Iterable): Payment entries with a 'payment_status' attribute.
+
+    Returns:
+        list: Payments with status 'PAID'.
+    """
     return [payment for payment in payments if payment.payment_status == "PAID"]
 
 
 def _sum_and_quantize(items, attr):
+    """Sum a numeric attribute across items and quantize the result to two decimal places.
+
+    Args:
+        items (Iterable): Items with a numeric attribute.
+        attr (str): Name of the attribute to sum.
+
+    Returns:
+        Decimal: Sum of the attribute quantized to two decimal places.
+    """
     return _quantize_money(
         sum((getattr(item, attr) for item in items), Decimal("0"))
     )
@@ -413,7 +451,8 @@ def build_month_bank_reconciliation_summary(
 
 def _validate_month(month: str) -> None:
     """
-    Validate that the provided month string follows YYYY-MM format and represents a valid calendar month from 01 to 12.
+    Validate that the provided month string follows YYYY-MM format and
+    represents a valid calendar month from 01 to 12.
     """
     if not MONTH_PATTERN.fullmatch(month):
         raise BankReconciliationValidationError(
@@ -435,7 +474,8 @@ def _normalize_currency(value: str) -> str:
 
 def _normalize_required_string(value: str, field_name: str) -> str:
     """
-    Trim whitespace from a required string field and ensure it is not blank; raise an error if empty.
+    Trim whitespace from a required string field and ensure it is not blank;
+    raise an error if empty.
     """
     normalized = value.strip()
     if not normalized:
@@ -445,7 +485,8 @@ def _normalize_required_string(value: str, field_name: str) -> str:
 
 def _normalize_optional_string(value: str | None) -> str | None:
     """
-    Trim whitespace from an optional string field and return None if resulting string is empty or input is None.
+    Trim whitespace from an optional string field and return None if
+    resulting string is empty or input is None.
     """
     if value is None:
         return None
@@ -471,9 +512,7 @@ def _validate_finite_money(value: Decimal, field_name: str) -> None:
 
 
 def _actor_identity_uuid(value: str) -> UUID:
-    """
-    Parse an actor identity string into a UUID.
-    """
+    """Parse an actor identity string into a UUID."""
     # Accept either a UUID literal or a trusted-gateway subject; the shared
     # helper derives a deterministic UUID5 for the latter so header-auth
     # deployments with non-UUID x-user-id values can still record bank
@@ -498,7 +537,10 @@ def _parse_uuid(value: str, *, field_name: str = "actor_user_id") -> UUID:
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
     """
-    Determine and return the tenant UUID: parse provided ID, use current tenant context, or fall back to default.
+    Determine and return the tenant UUID:
+    Parse provided ID,
+    use current tenant context, or
+    fall back to default.
     """
     if tenant_id is not None:
         return _parse_tenant_uuid(tenant_id)

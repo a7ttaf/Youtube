@@ -49,14 +49,14 @@ class MonthlySmartAlertSummary:
     alerts: list[MonthlySmartAlert]
 
     def to_api(self) -> dict[str, object]:
-       """Convert the monthly smart alert summary into a dictionary for API output."""
-       return {
-           "month": self.month,
-           "status": self.status,
-           "highest_severity": self.highest_severity,
-           "alert_count": len(self.alerts),
-           "alerts": [alert.to_api() for alert in self.alerts],
-       }
+        """Convert the monthly smart alert summary into a dictionary for API output."""
+        return {
+            "month": self.month,
+            "status": self.status,
+            "highest_severity": self.highest_severity,
+            "alert_count": len(self.alerts),
+            "alerts": [alert.to_api() for alert in self.alerts],
+        }
 
 
 def build_monthly_smart_alert_summary(
@@ -224,22 +224,23 @@ def _high_gap_details(
     Args:
         payment_gap_usd: Difference between expected and actual payments in USD.
         bank_gap_usd: Difference between expected and actual bank amounts in USD.
-        threshold_usd: Minimum gap value to include in the details.
+       threshold_usd: Minimum gap value to include in the details.
 
-    Raises:
-        ValueError: If threshold_usd is negative.
+   Raises:
+       ValueError: If threshold_usd is negative.
 
-    Returns:
-        A dictionary with gap details if any gaps exceed the threshold, otherwise an empty dict.
-    """
-    if threshold_usd < 0:
-        raise ValueError("high_gap_threshold_usd must be non-negative")
-    details: dict[str, object] = {"threshold_usd": _decimal_to_api(threshold_usd)}
-    if payment_gap_usd is not None and abs(payment_gap_usd) >= threshold_usd:
-        details["payment_gap_usd"] = _decimal_to_api(payment_gap_usd)
-    if bank_gap_usd is not None and abs(bank_gap_usd) >= threshold_usd:
-        details["bank_gap_usd"] = _decimal_to_api(bank_gap_usd)
-    return details if len(details) > 1 else {}
+   Returns:
+       A dictionary with gap details if any gaps exceed the threshold,
+       otherwise an empty dict.
+   """
+   if threshold_usd < 0:
+       raise ValueError("high_gap_threshold_usd must be non-negative")
+   details: dict[str, object] = {"threshold_usd": _decimal_to_api(threshold_usd)}
+   if payment_gap_usd is not None and abs(payment_gap_usd) >= threshold_usd:
+       details["payment_gap_usd"] = _decimal_to_api(payment_gap_usd)
+   if bank_gap_usd is not None and abs(bank_gap_usd) >= threshold_usd:
+       details["bank_gap_usd"] = _decimal_to_api(bank_gap_usd)
+   return details if len(details) > 1 else {}
 
 
 def _revenue_trend_anomaly_details(
@@ -257,7 +258,8 @@ def _revenue_trend_anomaly_details(
         threshold_percent: Decimal percent change threshold to report anomalies.
 
     Returns:
-        A dictionary containing threshold, channel count, and list of channel-specific change details,
+        A dictionary containing threshold, channel count, and list of
+        channel-specific change details,
         or an empty dict if no channels exceed the threshold.
     """
     current_by_channel = _select_primary_facts_by_channel(current_revenue_facts)

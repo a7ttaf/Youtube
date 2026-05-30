@@ -55,6 +55,7 @@ class BrandedSlidePackValidationError(ValueError):
 @dataclass(frozen=True)
 class BrandedSlide:
     """Data class representing a single slide in the branded slide pack."""
+
     name: str
     source: str
     status: str
@@ -76,7 +77,9 @@ class BrandedSlide:
 
 @dataclass(frozen=True)
 class BrandedSlidePackReport:
-    """Data class representing the full branded slide pack report with export job and slide summaries."""
+    """Data class representing the full branded slide pack report with
+    export job and slide summaries."""
+
     export_job: ExportJobEntry
     slides: tuple[BrandedSlide, ...]
     net_revenue: MonthNetRevenueSummary
@@ -85,7 +88,8 @@ class BrandedSlidePackReport:
     smart_alerts: MonthlySmartAlertSummary
 
     def to_api(self) -> dict[str, object]:
-        """Convert the BrandedSlidePackReport instance into a dictionary formatted for API consumption."""
+        """Convert the BrandedSlidePackReport instance into a dictionary
+        formatted for API consumption."""
         return {
             "export_id": self.export_job.id,
             "export_type": self.export_job.export_type,
@@ -115,7 +119,10 @@ def build_branded_slide_pack_report(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> BrandedSlidePackReport:
-    """Construct a BrandedSlidePackReport, validating that summary data matches the export job and uses USD currency."""
+    """
+    Construct a BrandedSlidePackReport, validating that summary data matches the
+    export job and uses USD currency.
+    """
     if export_job.export_type != "BRANDED_SLIDE_PACK":
         raise BrandedSlidePackValidationError(
             "branded slide pack only supports BRANDED_SLIDE_PACK exports"
@@ -155,7 +162,10 @@ def build_branded_slide_pack_report(
 
 
 def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
-    """Generate a PowerPoint presentation as a byte string based on the provided BrandedSlidePackReport."""
+    """
+    Generate a PowerPoint presentation as a byte string based on the provided
+    BrandedSlidePackReport.
+    """
     presentation = Presentation()
     presentation.core_properties.title = "UMS Branded Finance Report"
     presentation.core_properties.subject = f"Finance export {report.export_job.month}"
@@ -293,9 +303,7 @@ def _add_cover_slide(
 def _add_content_slide(
     presentation: Presentation, title: str, bullets: list[str]
 ) -> None:
-    """
-    Add a content slide with a title and bullet points to the presentation.
-    """
+    """Add a content slide with a title and bullet points to the presentation."""
     slide = presentation.slides.add_slide(presentation.slide_layouts[6])
     _add_brand_bar(slide)
     _add_textbox(
@@ -324,9 +332,7 @@ def _add_content_slide(
 
 
 def _add_brand_bar(slide) -> None:
-    """
-    Add a blue brand bar at the top of the slide for UMS branding.
-    """
+    """Add a blue brand bar at the top of the slide for UMS branding."""
     shape = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE,
         Inches(0),
@@ -340,9 +346,7 @@ def _add_brand_bar(slide) -> None:
 
 
 def _add_footer(slide) -> None:
-    """
-    Add a footer line and text to the bottom of the slide.
-    """
+    """Add a footer line and text to the bottom of the slide."""
     line = slide.shapes.add_shape(
         MSO_SHAPE.RECTANGLE,
         Inches(0.55),
@@ -389,9 +393,7 @@ def _add_textbox(
 
 
 def _scope_bullets(report: BrandedSlidePackReport, scope_name: str) -> list[str]:
-    """
-    Generate bullet points summarizing the report scope and net revenue details.
-    """
+    """Generate bullet points summarizing the report scope and net revenue details."""
     return [
         f"{scope_name.title()} scope: {report.export_job.scope_id or 'global'}",
         "Total net revenue USD: "
@@ -401,9 +403,7 @@ def _scope_bullets(report: BrandedSlidePackReport, scope_name: str) -> list[str]
 
 
 def _outside_cms_bullets(report: BrandedSlidePackReport) -> list[str]:
-    """
-    Generate bullet points for channels missing official net revenue sources.
-    """
+    """Generate bullet points for channels missing official net revenue sources."""
     missing_source_count = report.net_revenue.missing_net_source_count
     if missing_source_count == 0:
         return ["No missing source revenue issues were detected in this export scope."]
@@ -455,9 +455,7 @@ def _executive_summary(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> dict[str, object]:
-    """
-    Build an executive summary dict with key report metrics and statuses.
-    """
+    """Build an executive summary dict with key report metrics and statuses."""
     return {
         "month": export_job.month,
         "scope_type": export_job.scope_type,

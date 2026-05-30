@@ -64,7 +64,9 @@ class ExecutivePdfSection:
 
 @dataclass(frozen=True)
 class ExecutivePdfReport:
-    """Represents the executive PDF report, aggregating job info, sections, and summary data for generation."""
+    """Represents the executive PDF report, aggregating job info, sections,
+    and summary data for generation."""
+
     export_job: ExportJobEntry
     sections: tuple[ExecutivePdfSection, ...]
     net_revenue: MonthNetRevenueSummary
@@ -141,7 +143,8 @@ def build_executive_pdf_report(
 
 
 def build_executive_pdf_bytes(report: ExecutivePdfReport) -> bytes:
-    """Generate PDF bytes for the given ExecutivePdfReport using reportlab, returning the PDF binary."""
+    """Generate PDF bytes for the given ExecutivePdfReport using reportlab.
+    Return the PDF binary."""
     buffer = BytesIO()
     document = SimpleDocTemplate(
         buffer,
@@ -226,7 +229,8 @@ def _executive_summary(
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
 ) -> dict[str, object]:
-    """Generate a summary dictionary containing key metrics and statuses for the executive PDF report."""
+    """Generate a summary dictionary containing key metrics and statuses
+    for the executive PDF report."""
     return {
         "month": export_job.month,
         "scope_type": export_job.scope_type,
@@ -287,7 +291,10 @@ def _gross_net_table(report: ExecutivePdfReport) -> Table:
 
 
 def _ranking_table(report: ExecutivePdfReport, *, ranking_label: str) -> Table:
-    """Build a table displaying company ranking information based on net revenue, labeled by the given ranking label."""
+    """
+    Build a table displaying company ranking information based on net
+    revenue, labeled by the given ranking label.
+    """
     return _styled_table(
         [["Ranking", "Channels", "Total Net Revenue USD"]]
         + [
@@ -368,7 +375,8 @@ def _key_value_table(values: dict[str, object]) -> Table:
 
 
 def _styled_table(rows: list[list[object]]) -> Table:
-    """Apply consistent styling to a table, including fonts, colors, padding, and grid layout, for use in the PDF."""
+    """Apply consistent styling to a table, including fonts, colors,
+    padding, and grid layout, for use in the PDF."""
     table = Table(rows, hAlign="LEFT", repeatRows=1)
     table.setStyle(
         TableStyle(

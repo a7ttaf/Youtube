@@ -48,6 +48,7 @@ class FinanceWorkbookPreviewValidationError(ValueError):
 @dataclass(frozen=True)
 class FinanceWorkbookSheet:
     """Data class representing a single sheet in the finance workbook preview."""
+
     name: str
     source: str
     status: str

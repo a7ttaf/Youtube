@@ -35,6 +35,7 @@ class RevenueFactSourceKind(StrEnum):
 @dataclass(frozen=True)
 class RevenueFactEntry:
     """Revenue fact entry with identifiers, metrics, and metadata."""
+
     id: str
     month: str
     youtube_channel_id: str
@@ -56,7 +57,8 @@ class RevenueFactEntry:
 
     def to_api(self) -> dict[str, object]:
         """Convert this revenue fact instance into a dictionary suitable for API
-        responses."""
+        responses.
+        """
         return {
             "id": self.id,
             "month": self.month,
@@ -88,8 +90,10 @@ class RevenueFactLockedMonthError(RevenueFactError):
 class RevenueFactValidationError(RevenueFactError):
     """Exception raised for validation failures of revenue fact data."""
 
+
 class RevenueFactNotFoundError(RevenueFactError):
     """Exception raised when a requested revenue fact is not found."""
+
 
 class SqlAlchemyRevenueFactRepository:
     """SQL-backed revenue fact repository scoped to a single tenant."""
@@ -279,7 +283,8 @@ class SqlAlchemyRevenueFactRepository:
 
     def _require_month_open(self, month: str) -> None:
         """Ensure the given month is open for revenue fact imports, raising an
-        error if the month is locked."""
+        error if the month is locked.
+        """
         close = get_or_create_month_close_row(
             self._session,
             month,
@@ -395,7 +400,8 @@ def _validate_metrics(
     *, views: int, watch_time_minutes: Decimal, confidence_score: Decimal
 ) -> None:
     """Validate views, watch_time_minutes, and confidence_score metrics
-    for correct ranges and finiteness."""
+    for correct ranges and finiteness.
+    """
     if not watch_time_minutes.is_finite():
         raise RevenueFactValidationError("watch_time_minutes must be a finite decimal")
     if not confidence_score.is_finite():
@@ -417,7 +423,8 @@ def _validate_revenue_amounts(
     subscription_revenue_usd: Decimal | None,
 ) -> None:
     """Validate revenue amounts for finiteness, non-negativity,
-    and consistency of breakdown totals."""
+    and consistency of breakdown totals.
+    """
     if not gross_revenue_usd.is_finite() or gross_revenue_usd < 0:
         raise RevenueFactValidationError("gross_revenue_usd must be a finite decimal >= 0")
     if net_revenue_usd is not None and (not net_revenue_usd.is_finite() or net_revenue_usd < 0):

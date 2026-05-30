@@ -22,6 +22,7 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 @dataclass(frozen=True)
 class NumberExplanationEntry:
     """Explains a monthly metric value, formula, components, and warnings."""
+
     month: str
     entity_type: str
     entity_id: str
@@ -69,7 +70,8 @@ class NumberExplanationValidationError(NumberExplanationError):
 
 class SqlAlchemyNumberExplanationRepository:
     """Repository for persisting and retrieving NumberExplanationEntry objects
-    using SQLAlchemy."""
+    using SQLAlchemy.
+    """
 
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None):
         """Bind number explanation upserts to an explicit or request tenant."""
@@ -79,7 +81,8 @@ class SqlAlchemyNumberExplanationRepository:
     def record_explanation(
         self, explanation: NumberExplanationEntry
     ) -> NumberExplanationEntry:
-        """Record or update a NumberExplanationEntry in the database and return the provided explanation entry."""
+        """Record or update a NumberExplanationEntry in the database and
+        return the provided explanation entry."""
         row = self._session.scalars(
             select(NumberExplanationORM).where(
                 NumberExplanationORM.tenant_id == self._tenant_id,
@@ -197,7 +200,8 @@ def _primary_fact(facts: list[RevenueFactEntry]) -> RevenueFactEntry | None:
     """
     Select the primary revenue fact from a list.
 
-    Sorts the provided list of RevenueFactEntry objects by their source priority and returns the first item.
+    Sorts the provided list of RevenueFactEntry objects by their source priority
+    and returns the first item.
     Returns None if the list is empty.
     """
     if not facts:

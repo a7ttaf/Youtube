@@ -118,7 +118,8 @@ def build_channel_net_revenue_summary(
     youtube_channel_id: str | None = None,
 ) -> ChannelNetRevenueSummary:
     """Construct a ChannelNetRevenueSummary from provided revenue facts and manual overrides,
-    resolving the target month and channel ID."""
+    resolving the target month and channel ID.
+    """
     fact_list = sorted(
         facts,
         key=lambda fact: (SOURCE_PRIORITY.get(fact.source_kind, 99), fact.source_kind),

@@ -18,14 +18,13 @@ SOURCE_PRIORITY = {
 @dataclass(frozen=True)
 class ReconciliationIssue:
     """Represents a reconciliation issue with its type, severity, and message."""
+
     issue_type: str
     severity: str
     message: str
 
     def to_api(self) -> dict[str, str]:
-        """
-        Convert the reconciliation issue to an API dictionary.
-        """
+        """Convert the reconciliation issue to an API dictionary."""
         return {
             "issue_type": self.issue_type,
             "severity": self.severity,
@@ -35,7 +34,9 @@ class ReconciliationIssue:
 
 @dataclass(frozen=True)
 class RevenueReconciliationPreview:
-    """Previews revenue reconciliation results for a channel and month, including variance and detected issues."""
+    """Previews revenue reconciliation results for a channel and month,
+    including variance and detected issues."""
+
     month: str
     youtube_channel_id: str
     status: str
@@ -48,7 +49,8 @@ class RevenueReconciliationPreview:
     issues: list[ReconciliationIssue]
 
     def to_api(self) -> dict[str, object]:
-        """Convert this revenue reconciliation preview instance to an API-friendly dictionary representation."""
+        """Convert this revenue reconciliation preview instance to an API-friendly
+        dictionary representation."""
         return {
             "month": self.month,
             "youtube_channel_id": self.youtube_channel_id,
@@ -71,7 +73,10 @@ class RevenueReconciliationPreview:
 
 @dataclass(frozen=True)
 class RevenueReconciliationIssueQueue:
-    """Queues multiple revenue reconciliation previews for a specific month and provides issue aggregation."""
+    """
+    Queues multiple revenue reconciliation previews for a specific month
+    and provides issue aggregation.
+    """
 
     month: str
     items: list[RevenueReconciliationPreview]
@@ -235,8 +240,9 @@ def _average_confidence(facts: list[RevenueFactEntry]) -> Decimal:
 def _safe_percent(numerator: Decimal, denominator: Decimal) -> Decimal:
     """Safely compute the percentage ratio of numerator to denominator.
 
-    Returns zero if both numerator and denominator are zero, or one if the denominator
-    is zero and numerator is non-zero. Otherwise, returns the ratio quantized to four decimal places.
+    Returns zero if both numerator and denominator are zero.
+    Or returns one if the denominator is zero and numerator is non-zero.
+    Otherwise, returns the ratio quantized to four decimal places.
     """
     if denominator == 0:
         # With a zero baseline the ratio is undefined. If the numerator is also

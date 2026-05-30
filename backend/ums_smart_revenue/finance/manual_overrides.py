@@ -22,6 +22,7 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 @dataclass(frozen=True)
 class RevenueManualOverrideEntry:
     """Represents a manual revenue override entry with its details and conversion to API format."""
+
     id: str
     month: str
     youtube_channel_id: str
@@ -33,10 +34,12 @@ class RevenueManualOverrideEntry:
     approval_reason: str | None
 
     def to_api(self) -> dict[str, object]:
-        """Convert this manual override instance into a dictionary formatted for API responses.
+        """Convert this manual override instance into a dictionary formatted
+        for API responses.
 
         Returns:
-            dict[str, object]: A dictionary containing the override's attributes in a serializable form.
+            dict[str, object]: A dictionary containing the override's
+                attributes in a serializable form.
         """
         return {
             "id": self.id,
@@ -88,7 +91,8 @@ class SqlAlchemyManualOverrideRepository:
         reason: str,
         actor_user_id: str,
     ) -> RevenueManualOverrideEntry:
-        """Create a manual revenue override for a specific channel and month with reason and actor."""
+        """Create a manual revenue override for a specific channel and month
+        with reason and actor."""
         _validate_month(month)
         _validate_nonzero_adjustment(adjustment_revenue_usd)
         normalized_reason = _normalize_reason(reason)
