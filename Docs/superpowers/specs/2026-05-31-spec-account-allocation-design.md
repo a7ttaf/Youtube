@@ -530,3 +530,7 @@ spec/plan/PR:
   real path), plus the remaining allocation methods.
 - **Map-hardening follow-ups** (PR #57 N2/N8/N9/N10/V8d) as their coverage becomes relevant
   to allocation correctness.
+- **Batched verified-channels lookup** — the read endpoint calls
+  `list_verified_adsense_account_channels` once per distinct account (bounded, acceptable for
+  this read path). Add a batch-by-month repository variant only if profiling shows account
+  fan-out as a real bottleneck.
