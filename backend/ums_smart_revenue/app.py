@@ -11,6 +11,9 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ums_smart_revenue.api.adsense import router as adsense_router
 from ums_smart_revenue.api.audit import router as audit_router
+from ums_smart_revenue.api.channel_account_links import (
+    router as channel_account_links_router,
+)
 from ums_smart_revenue.api.channels import (
     current_audit_sink,
     current_channel_registry,
@@ -111,6 +114,7 @@ def create_app(
 
     app.include_router(adsense_router)
     app.include_router(audit_router)
+    app.include_router(channel_account_links_router)
     app.include_router(channels_router)
     app.include_router(connectors_router)
     app.include_router(exchange_rates_router)
