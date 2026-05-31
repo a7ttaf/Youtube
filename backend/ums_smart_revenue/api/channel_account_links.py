@@ -230,6 +230,7 @@ class LinkDecisionRequest(BaseModel):
     @field_validator("reason", mode="before")
     @classmethod
     def _strip_reason(cls, value):
+        """Strip leading/trailing whitespace from the reason string."""
         return value.strip() if isinstance(value, str) else value
 
 

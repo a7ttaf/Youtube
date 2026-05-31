@@ -84,7 +84,7 @@ def create_app(
         raise ValueError(
             "database authz_source requires database_url or UMS_DATABASE_URL"
         )
-    app = FastAPI(
+    _app = FastAPI(
         title="UMS Smart Revenue Control Center API",
         version="0.1.0",
         description="Numbers-first internal revenue control API for UMS.",
@@ -92,40 +92,40 @@ def create_app(
 
     if resolved_database_url:
         session_factory = build_session_factory(resolved_database_url)
-        overrides = app.dependency_overrides
+        overrides = _app.dependency_overrides
         if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
             overrides[current_db_session] = authenticated_session_dependency(
                 session_factory
             )
         else:
             overrides[current_db_session] = session_dependency(session_factory)
-            app.add_middleware(DefaultTenantMiddleware)
+            _app.add_middleware(DefaultTenantMiddleware)
         overrides[current_channel_registry] = sql_channel_registry_from_session
         overrides[current_group_registry] = sql_group_registry_from_session
         overrides[current_audit_sink] = sql_audit_sink_from_session
         overrides[current_revenue_audit_sink] = sql_revenue_audit_sink_from_session
         if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
             overrides[current_principal_from_headers] = current_principal_from_database
-            app.add_middleware(
+            _app.add_middleware(
                 TrustedGatewayTenantResolverMiddleware,
                 session_factory=session_factory,
                 authorize_tenant=_allow_database_auth_tenant,
             )
 
-    app.include_router(adsense_router)
-    app.include_router(audit_router)
-    app.include_router(channel_account_links_router)
-    app.include_router(channels_router)
-    app.include_router(connectors_router)
-    app.include_router(exchange_rates_router)
-    app.include_router(exports_router)
-    app.include_router(finance_close_router)
-    app.include_router(groups_router)
-    app.include_router(reports_router)
-    app.include_router(revenue_router)
-    app.include_router(security_router)
-    app.include_router(tenants_router)
-    app.include_router(users_router)
+    _app.include_router(adsense_router)
+    _app.include_router(audit_router)
+    _app.include_router(channel_account_links_router)
+    _app.include_router(channels_router)
+    _app.include_router(connectors_router)
+    _app.include_router(exchange_rates_router)
+    _app.include_router(exports_router)
+    _app.include_router(finance_close_router)
+    _app.include_router(groups_router)
+    _app.include_router(reports_router)
+    _app.include_router(revenue_router)
+    _app.include_router(security_router)
+    _app.include_router(tenants_router)
+    _app.include_router(users_router)
 
     def health_payload() -> dict[str, object]:
         """Return service and pinned runtime health metadata."""
@@ -139,15 +139,17 @@ def create_app(
             },
         }
 
-    @app.get("/health", tags=["system"])
+    @_app.get("/health", tags=["system"])
     def health() -> dict[str, object]:
+        """Return service health status."""
         return health_payload()
 
-    @app.get("/livez", tags=["system"])
+    @_app.get("/livez", tags=["system"])
     def livez() -> dict[str, object]:
+        """Return liveness probe status."""
         return health_payload()
 
-    return app
+    return _app
 
 
 def _allow_database_auth_tenant(_scope: object, _tenant_slug: str) -> bool:
@@ -160,14 +162,14 @@ class TrustedGatewayTenantResolverMiddleware:
 
     def __init__(
         self,
-        app: ASGIApp,
+        asgi_app: ASGIApp,
         session_factory: TenantSessionFactory,
         bypass_paths: Iterable[str] = DEFAULT_BYPASS_PATHS,
         authorize_tenant: TenantAuthorizer | None = None,
     ) -> None:
         self._bypass_paths = _normalise_bypass_paths(bypass_paths)
         self._resolver = TenantResolverMiddleware(
-            app,
+            asgi_app,
             session_factory=session_factory,
             bypass_paths=self._bypass_paths,
             authorize_tenant=authorize_tenant,
@@ -195,10 +197,10 @@ class DefaultTenantMiddleware:
 
     def __init__(
         self,
-        app: ASGIApp,
+        asgi_app: ASGIApp,
         bypass_paths: Iterable[str] = DEFAULT_BYPASS_PATHS,
     ) -> None:
-        self.app = app
+        self.app = asgi_app
         self._bypass_paths = _normalise_bypass_paths(bypass_paths)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:

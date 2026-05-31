@@ -144,9 +144,9 @@ def _ranges_overlap(
 
 
 def _account_owner_lock_key(tenant_id: UUID, adsense_account_id: str) -> int:
-    """Return a stable signed-bigint advisory-lock key for one (tenant, account).
+    r"""Return a stable signed-bigint advisory-lock key for one (tenant, account).
 
-    Mirrors connectors/google_source_rows/repository.py: blake2b of a \\0-joined
+    Mirrors connectors/google_source_rows/repository.py: blake2b of a \0-joined
     discriminator, shifted into the positive signed-bigint range. Never includes
     payload, amounts, or credentials.
     """
