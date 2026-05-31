@@ -620,10 +620,12 @@ def test_reject_reloads_link_status_after_acquiring_account_lock(tmp_path, monke
         session.flush()
 
         def _concurrent_verify_and_close(_account_id):
-            # Stand in for another transaction committing during the lock wait:
-            # flip the row to VERIFIED and lock a covered month WITHOUT touching
-            # the already-loaded ORM instance (Core UPDATE, no session sync), so
-            # the in-memory verification_status stays stale until refresh().
+            """Stand in for the lock wait: commit a concurrent verify + month close.
+
+            Flips the row to VERIFIED and locks a covered month via a Core UPDATE
+            WITHOUT touching the already-loaded ORM instance (no session sync), so
+            reject's in-memory verification_status stays stale until refresh().
+            """
             session.execute(
                 update(AdsenseContentOwnerLinkORM)
                 .where(AdsenseContentOwnerLinkORM.adsense_account_id == "pub-1")
