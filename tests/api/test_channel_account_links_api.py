@@ -91,3 +91,42 @@ def test_list_malformed_month_returns_422(tmp_path):
         headers=auth_headers("finance_viewer", "global"),
     )
     assert response.status_code == 422
+
+
+def test_propose_creates_link_with_org_mapping_permission(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    response = client.post(
+        "/revenue/channel-account-links",
+        headers=auth_headers("corporate_admin", "global"),
+        json={
+            "adsense_account_id": "pub-2", "content_owner_id": "owner-2",
+            "effective_month_start": "2026-02", "effective_month_end": None,
+            "provenance_kind": "OPERATOR_ASSERTED",
+            "provenance_payload": {"note": "from contract"},
+            "reason": "operator asserts pub-2 maps to owner-2",
+        },
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["link"]["verification_status"] == "UNVERIFIED"
+    assert "provenance_payload" not in str(body)
+    assert body["audit_event"]["event_type"] == "CHANNEL_ACCOUNT_LINK_PROPOSED"
+
+
+def test_propose_requires_manage_org_mapping(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    response = client.post(
+        "/revenue/channel-account-links",
+        headers=auth_headers("finance_viewer", "global"),  # has finance view, NOT MANAGE_ORG_MAPPING
+        json={
+            "adsense_account_id": "pub-2", "content_owner_id": "owner-2",
+            "effective_month_start": "2026-02", "effective_month_end": None,
+            "provenance_kind": "OPERATOR_ASSERTED", "provenance_payload": {},
+            "reason": "x",
+        },
+    )
+    assert response.status_code == 403

@@ -14,7 +14,7 @@ that first uses it so every commit stays ruff-clean:
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
@@ -136,4 +136,81 @@ def list_channel_account_links(
             "has_more": has_more,
         },
         audit_events=audit_events,
+    )
+
+
+class ProposeAccountOwnerLinkRequest(BaseModel):
+    """Validated payload to propose an UNVERIFIED account↔owner link."""
+
+    adsense_account_id: str = Field(min_length=1)
+    content_owner_id: str = Field(min_length=1)
+    effective_month_start: str = Field(min_length=7, max_length=7)
+    effective_month_end: str | None = None
+    provenance_kind: str = Field(min_length=1)
+    provenance_payload: dict[str, object] = Field(default_factory=dict)
+    reason: str = Field(min_length=1)
+
+    @field_validator(
+        "adsense_account_id", "content_owner_id", "provenance_kind", "reason",
+        mode="before",
+    )
+    @classmethod
+    def _strip(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+class AccountOwnerLinkMutationResponse(BaseModel):
+    """Typed response for a single-link mutation."""
+
+    link: dict[str, object]
+    audit_event: dict[str, object]
+
+
+# ============================================================================
+# Purpose: Propose an UNVERIFIED account↔owner link. A proposal is a mapping
+#   assertion (not money-affecting until verified), gated by MANAGE_ORG_MAPPING.
+# Database/ORM: adsense_content_owner_links (insert).
+# Standards: thin route; 422 on malformed month; reason-required audit; no
+#   provenance_payload in the response.
+# Blast Radius: Authorization (fail-closed); audit; finance map write.
+# ============================================================================
+@router.post(
+    "/channel-account-links",
+    response_model=AccountOwnerLinkMutationResponse,
+    status_code=status.HTTP_201_CREATED,
+)
+def propose_channel_account_link(
+    payload: ProposeAccountOwnerLinkRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[
+        SqlAlchemyChannelAccountLinkRepository,
+        Depends(current_channel_account_link_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+) -> AccountOwnerLinkMutationResponse:
+    """Propose an UNVERIFIED account↔owner link (operator-asserted)."""
+    _require_permission(user, Permission.MANAGE_ORG_MAPPING, AccessScope.global_scope())
+    try:
+        link = repository.propose_account_owner_link(
+            adsense_account_id=payload.adsense_account_id,
+            content_owner_id=payload.content_owner_id,
+            effective_month_start=payload.effective_month_start,
+            effective_month_end=payload.effective_month_end,
+            provenance_kind=payload.provenance_kind,
+            provenance_payload=payload.provenance_payload,
+        )
+    except ChannelAccountLinkValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    record = record_audit_event(
+        sink=audit_sink, actor=user,
+        event_type=AuditEventType.CHANNEL_ACCOUNT_LINK_PROPOSED,
+        entity_type="adsense_content_owner_link", entity_id=link.id,
+        scope=AccessScope.global_scope(), reason=payload.reason,
+        details={"adsense_account_id": link.adsense_account_id,
+                 "content_owner_id": link.content_owner_id},
+    )
+    return AccountOwnerLinkMutationResponse(
+        link=link.to_api(), audit_event=audit_record_to_api(record)
     )
