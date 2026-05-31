@@ -14,6 +14,7 @@ USER_ID = UUID("00000000-0000-0000-0000-0000000d0401")
 
 
 def auth_headers(role, scope_type="global", scope_id=None):
+    """Return auth headers for the given role and scope."""
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "map-admin@example.com",
@@ -27,10 +28,12 @@ def auth_headers(role, scope_type="global", scope_id=None):
 
 
 def build_database_url(tmp_path):
+    """Return a unique SQLite URL under tmp_path."""
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
 def seed(database_url):
+    """Create schema and seed one UNVERIFIED link plus the test user."""
     engine = create_engine(database_url)
     OrgBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
@@ -50,6 +53,7 @@ def seed(database_url):
 
 
 def test_finance_viewer_lists_links_without_provenance_payload(tmp_path):
+    """Finance viewer can list links; provenance_payload is never in the response."""
     database_url = build_database_url(tmp_path)
     seed(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -71,6 +75,7 @@ def test_finance_viewer_lists_links_without_provenance_payload(tmp_path):
 
 
 def test_list_denied_without_finance_view_permissions(tmp_path):
+    """GET list returns 403 when the caller lacks finance-view permissions."""
     database_url = build_database_url(tmp_path)
     seed(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -83,6 +88,7 @@ def test_list_denied_without_finance_view_permissions(tmp_path):
 
 
 def test_list_malformed_month_returns_422(tmp_path):
+    """GET list with a malformed month filter returns 422."""
     database_url = build_database_url(tmp_path)
     seed(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -94,6 +100,7 @@ def test_list_malformed_month_returns_422(tmp_path):
 
 
 def test_propose_creates_link_with_org_mapping_permission(tmp_path):
+    """POST propose creates an UNVERIFIED link for a caller with MANAGE_ORG_MAPPING."""
     database_url = build_database_url(tmp_path)
     seed(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -116,6 +123,7 @@ def test_propose_creates_link_with_org_mapping_permission(tmp_path):
 
 
 def test_propose_requires_manage_org_mapping(tmp_path):
+    """POST propose returns 403 without MANAGE_ORG_MAPPING permission."""
     database_url = build_database_url(tmp_path)
     seed(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -133,6 +141,7 @@ def test_propose_requires_manage_org_mapping(tmp_path):
 
 
 def _propose_via_api(client, *, account="pub-9", owner="owner-9", start="2026-01", end=None):
+    """POST a proposal via the API and return the created link id."""
     return client.post(
         "/revenue/channel-account-links",
         headers=auth_headers("super_owner", "global"),
@@ -145,6 +154,7 @@ def _propose_via_api(client, *, account="pub-9", owner="owner-9", start="2026-01
 
 
 def test_super_owner_can_verify(tmp_path):
+    """super_owner can verify a link; audit event type is CHANNEL_ACCOUNT_LINK_VERIFIED."""
     database_url = build_database_url(tmp_path)
     seed(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -160,6 +170,7 @@ def test_super_owner_can_verify(tmp_path):
 
 
 def test_verify_requires_both_permissions(tmp_path):
+    """Verify returns 403 if either MANAGE_ORG_MAPPING or CHANGE_ALLOCATION_RULE is missing."""
     database_url = build_database_url(tmp_path)
     seed(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -181,6 +192,7 @@ def test_verify_requires_both_permissions(tmp_path):
 
 
 def test_verify_overlap_returns_409(tmp_path):
+    """Verifying a link that overlaps an existing VERIFIED range returns 409."""
     database_url = build_database_url(tmp_path)
     seed(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -200,6 +212,7 @@ def test_verify_overlap_returns_409(tmp_path):
 
 
 def test_reject_sets_rejected(tmp_path):
+    """POST reject transitions a link to REJECTED with an audit event."""
     database_url = build_database_url(tmp_path)
     seed(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -215,6 +228,7 @@ def test_reject_sets_rejected(tmp_path):
 
 
 def test_verify_with_malformed_actor_id_fails_clean(tmp_path):
+    """A non-UUID X-User-Id returns 400, never 500."""
     # A non-UUID X-User-Id must produce a clean 4xx, never an uncaught 500,
     # even for an otherwise fully-authorized caller.
     database_url = build_database_url(tmp_path)

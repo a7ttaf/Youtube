@@ -38,12 +38,14 @@ VERIFIER = UUID("00000000-0000-0000-0000-0000000c0001")
 
 
 def _engine(tmp_path):
+    """Return a fresh SQLite engine with the finance schema applied."""
     engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}")
     FinanceBase.metadata.create_all(engine)
     return engine
 
 
 def test_to_api_excludes_provenance_payload():
+    """to_api() omits provenance_payload and any secrets it contains."""
     link = AccountOwnerLink(
         id="x", adsense_account_id="pub-1", content_owner_id="owner-1",
         verification_status="UNVERIFIED", provenance_kind="OPERATOR_ASSERTED",
@@ -59,6 +61,7 @@ def test_to_api_excludes_provenance_payload():
 
 
 def test_lock_key_is_deterministic_and_signed_bigint():
+    """Lock key is stable across calls and fits in a PostgreSQL signed bigint."""
     a = _account_owner_lock_key(TENANT, "pub-1")
     b = _account_owner_lock_key(TENANT, "pub-1")
     assert a == b
@@ -66,6 +69,7 @@ def test_lock_key_is_deterministic_and_signed_bigint():
 
 
 def test_lock_key_differs_by_account_and_tenant():
+    """Lock key differs when account or tenant differs."""
     other_tenant = UUID("00000000-0000-0000-0000-0000000c00ff")
     assert _account_owner_lock_key(TENANT, "pub-1") != _account_owner_lock_key(TENANT, "pub-2")
     assert _account_owner_lock_key(TENANT, "pub-1") != _account_owner_lock_key(other_tenant, "pub-1")
@@ -82,10 +86,12 @@ def test_lock_key_differs_by_account_and_tenant():
     ],
 )
 def test_ranges_overlap_truth_table(sa, ea, sb, eb, expected):
+    """Parametrized truth table for _ranges_overlap boundary cases."""
     assert _ranges_overlap(sa, ea, sb, eb) is expected
 
 
 def test_acquire_lock_is_noop_on_sqlite(tmp_path):
+    """_acquire_account_owner_lock returns without error on SQLite."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -94,6 +100,7 @@ def test_acquire_lock_is_noop_on_sqlite(tmp_path):
 
 
 def test_propose_creates_unverified_link(tmp_path):
+    """propose_account_owner_link inserts an UNVERIFIED row with correct fields."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -111,6 +118,7 @@ def test_propose_creates_unverified_link(tmp_path):
 
 
 def test_propose_rejects_bad_month(tmp_path):
+    """propose raises ChannelAccountLinkValidationError on a malformed month."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -123,6 +131,7 @@ def test_propose_rejects_bad_month(tmp_path):
 
 
 def test_propose_rejects_end_before_start(tmp_path):
+    """propose raises ValidationError when effective_month_end < effective_month_start."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -135,6 +144,7 @@ def test_propose_rejects_end_before_start(tmp_path):
 
 
 def _propose(repo, *, account="pub-1", owner="owner-1", start="2026-01", end=None):
+    """Propose a link with default values; returns the AccountOwnerLink."""
     return repo.propose_account_owner_link(
         adsense_account_id=account, content_owner_id=owner,
         effective_month_start=start, effective_month_end=end,
@@ -143,6 +153,7 @@ def _propose(repo, *, account="pub-1", owner="owner-1", start="2026-01", end=Non
 
 
 def test_verify_marks_verified_and_stamps(tmp_path):
+    """verify_account_owner_link transitions to VERIFIED and stamps verified_by/at/reason."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -158,6 +169,7 @@ def test_verify_marks_verified_and_stamps(tmp_path):
 
 
 def test_verify_overlapping_verified_raises_conflict(tmp_path):
+    """verify raises ConflictError when a VERIFIED link already overlaps the range."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -169,6 +181,7 @@ def test_verify_overlapping_verified_raises_conflict(tmp_path):
 
 
 def test_verify_non_overlapping_succeeds(tmp_path):
+    """verify succeeds when a VERIFIED link occupies a non-overlapping range."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -180,6 +193,7 @@ def test_verify_non_overlapping_succeeds(tmp_path):
 
 
 def test_reject_then_reverify_competitor_succeeds(tmp_path):
+    """Rejecting the VERIFIED link allows verifying a competing link."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -192,6 +206,7 @@ def test_reject_then_reverify_competitor_succeeds(tmp_path):
 
 
 def test_verify_missing_id_raises_not_found(tmp_path):
+    """verify raises ChannelAccountLinkNotFoundError for an unknown link id."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -200,6 +215,7 @@ def test_verify_missing_id_raises_not_found(tmp_path):
 
 
 def test_get_account_owner_link_returns_and_raises(tmp_path):
+    """get_account_owner_link returns the link or raises NotFoundError."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -212,6 +228,7 @@ def test_get_account_owner_link_returns_and_raises(tmp_path):
 
 
 def test_reverify_rejected_same_link_succeeds(tmp_path):
+    """A REJECTED link can be re-verified as the recovery path."""
     # A REJECTED link can be re-verified (deliberate recovery path): the
     # (tenant, account, owner, start) unique key blocks re-proposing an identical
     # row, so verify is the recovery route. The overlap invariant still guards it.
@@ -227,6 +244,7 @@ def test_reverify_rejected_same_link_succeeds(tmp_path):
 
 
 def test_list_filters_paginates_and_counts(tmp_path):
+    """list_account_owner_links filters by account, paginates, and reports total_count."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -244,6 +262,7 @@ def test_list_filters_paginates_and_counts(tmp_path):
 
 
 def test_list_status_and_month_filter(tmp_path):
+    """status and month filters each independently restrict the result set."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -259,6 +278,7 @@ def test_list_status_and_month_filter(tmp_path):
 
 
 def test_list_rejects_bad_bounds(tmp_path):
+    """list raises ValidationError when limit < 1 or offset < 0."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -269,6 +289,7 @@ def test_list_rejects_bad_bounds(tmp_path):
 
 
 def test_list_rejects_bad_month(tmp_path):
+    """list raises ValidationError on a malformed month filter."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -277,6 +298,7 @@ def test_list_rejects_bad_month(tmp_path):
 
 
 def test_list_rejects_invalid_status(tmp_path):
+    """list raises ValidationError for an unknown status filter value."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -285,6 +307,7 @@ def test_list_rejects_invalid_status(tmp_path):
 
 
 def test_list_month_filter_enforces_upper_bound(tmp_path):
+    """Month filter excludes links whose effective range ended before the queried month."""
     # A link whose range ENDED before the queried month is excluded. The link's
     # start (2026-01) still satisfies the lower bound at 2026-02, so only the
     # upper-bound leg (end >= month) can exclude it — this independently pins
@@ -301,6 +324,7 @@ def test_list_month_filter_enforces_upper_bound(tmp_path):
 
 
 def _source_row(session, *, owner, channel, account="pub-x", month="2026-04", key="k1"):
+    """Insert a GoogleRevenueSourceRowORM row for derivation tests."""
     session.add(
         GoogleRevenueSourceRowORM(
             id=uuid4(), tenant_id=TENANT, source_system="youtube_reporting",
@@ -317,6 +341,7 @@ def _source_row(session, *, owner, channel, account="pub-x", month="2026-04", ke
 
 
 def test_derivation_only_uses_rows_with_both_owner_and_channel(tmp_path):
+    """upsert_owner_channel_links_from_source skips rows missing owner or channel."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _source_row(session, owner="owner-1", channel="chan-1", key="k1")
@@ -337,6 +362,7 @@ def test_derivation_only_uses_rows_with_both_owner_and_channel(tmp_path):
 
 
 def test_derivation_is_idempotent(tmp_path):
+    """Running upsert twice does not create duplicate links."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _source_row(session, owner="owner-1", channel="chan-1", key="k1")
@@ -352,6 +378,7 @@ def test_derivation_is_idempotent(tmp_path):
 
 
 def test_derivation_groups_by_month_and_collapses_duplicate_rows(tmp_path):
+    """Derivation groups source rows by (owner, channel, month) into one link each."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         # Two source rows for the same owner/channel/month -> must collapse to one
@@ -376,6 +403,7 @@ def test_derivation_groups_by_month_and_collapses_duplicate_rows(tmp_path):
 
 
 def test_read_contract_returns_verified_month_scoped_channels(tmp_path):
+    """list_verified_adsense_account_channels returns channels for verified, in-range links."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -396,6 +424,7 @@ def test_read_contract_returns_verified_month_scoped_channels(tmp_path):
 
 
 def test_read_contract_excludes_unverified_account(tmp_path):
+    """UNVERIFIED account links return no channels."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -411,6 +440,7 @@ def test_read_contract_excludes_unverified_account(tmp_path):
 
 
 def test_read_contract_is_tenant_isolated(tmp_path):
+    """Channels for one tenant are not visible to another tenant."""
     # A different tenant sharing the same content_owner_id string must not leak.
     other_tenant = UUID("00000000-0000-0000-0000-0000000c00ff")
     engine = _engine(tmp_path)
@@ -435,6 +465,7 @@ def test_read_contract_is_tenant_isolated(tmp_path):
 
 
 def test_read_contract_excludes_inactive_owner_channel_link(tmp_path):
+    """Inactive owner↔channel links are excluded from the read contract."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
@@ -453,6 +484,7 @@ def test_read_contract_excludes_inactive_owner_channel_link(tmp_path):
 
 
 def test_read_contract_dedups_channel_reachable_twice(tmp_path):
+    """A channel reachable via two owner paths appears only once in results."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)

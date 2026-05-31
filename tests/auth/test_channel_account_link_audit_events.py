@@ -7,6 +7,7 @@ from ums_smart_revenue.auth.permissions import SENSITIVE_PERMISSIONS, Permission
 
 
 def test_link_audit_events_exist_with_reason_and_permissions():
+    """Verify, reject, and propose emit correctly typed audit events with reasons."""
     proposed = AUDIT_EVENT_DEFINITIONS[AuditEventType.CHANNEL_ACCOUNT_LINK_PROPOSED]
     verified = AUDIT_EVENT_DEFINITIONS[AuditEventType.CHANNEL_ACCOUNT_LINK_VERIFIED]
     rejected = AUDIT_EVENT_DEFINITIONS[AuditEventType.CHANNEL_ACCOUNT_LINK_REJECTED]

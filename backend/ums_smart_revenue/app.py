@@ -220,6 +220,7 @@ class DefaultTenantMiddleware:
 
 
 def _trusted_gateway_error(scope: Scope) -> HTTPException | None:
+    """Validate trusted gateway headers; return an HTTPException if they are invalid."""
     headers = Headers(scope=scope)
     try:
         current_trusted_gateway_identity(
@@ -237,6 +238,7 @@ async def _send_http_exception(
     receive: Receive,
     send: Send,
 ) -> None:
+    """Write an HTTP exception response directly to the ASGI send channel."""
     await JSONResponse(
         status_code=exc.status_code,
         content={"detail": exc.detail},
@@ -245,6 +247,7 @@ async def _send_http_exception(
 
 
 def _bootstrap_tenant() -> Tenant:
+    """Return the bootstrap UMS tenant for single-tenant trusted-header requests."""
     now = datetime.now(UTC)
     return Tenant(
         id=UUID(UMS_TENANT_ID),
@@ -259,6 +262,7 @@ def _bootstrap_tenant() -> Tenant:
 
 
 def _tenant_resolution_bypassed(path: str, bypass_paths: Iterable[str]) -> bool:
+    """Return True if the request path matches a configured bypass path."""
     return any(
         path == bypass or path.startswith(bypass + "/") for bypass in bypass_paths
     )

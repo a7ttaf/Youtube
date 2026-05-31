@@ -20,6 +20,7 @@ UMS_TENANT_ID = "00000000-0000-0000-0000-000000000001"
 
 
 def _month_format(column: str) -> str:
+    """Return a SQL CHECK fragment validating YYYY-MM format for the given column."""
     return (
         f"length({column}) = 7 AND substr({column}, 5, 1) = '-' "
         f"AND substr({column}, 1, 1) BETWEEN '0' AND '9' "
@@ -48,11 +49,20 @@ def upgrade() -> None:
     """Create both map tables with constraints and indexes."""
     op.create_table(
         "adsense_content_owner_links",
-        sa.Column("id", sa.Uuid(), primary_key=True, server_default=sa.text("gen_random_uuid()")),
-        sa.Column("tenant_id", sa.Uuid(), nullable=False, server_default=sa.text(f"'{UMS_TENANT_ID}'")),
+        sa.Column(
+            "id", sa.Uuid(), primary_key=True,
+            server_default=sa.text("gen_random_uuid()"),
+        ),
+        sa.Column(
+            "tenant_id", sa.Uuid(), nullable=False,
+            server_default=sa.text(f"'{UMS_TENANT_ID}'"),
+        ),
         sa.Column("adsense_account_id", sa.Text(), nullable=False),
         sa.Column("content_owner_id", sa.Text(), nullable=False),
-        sa.Column("verification_status", sa.Text(), nullable=False, server_default=sa.text("'UNVERIFIED'")),
+        sa.Column(
+            "verification_status", sa.Text(), nullable=False,
+            server_default=sa.text("'UNVERIFIED'"),
+        ),
         sa.Column("provenance_kind", sa.Text(), nullable=False),
         sa.Column(
             "provenance_payload",
@@ -64,10 +74,17 @@ def upgrade() -> None:
         sa.Column("verification_reason", sa.Text(), nullable=True),
         sa.Column("effective_month_start", sa.Text(), nullable=False),
         sa.Column("effective_month_end", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
         sa.UniqueConstraint(
-            "tenant_id", "adsense_account_id", "content_owner_id", "effective_month_start",
+            "tenant_id", "adsense_account_id", "content_owner_id",
+            "effective_month_start",
             name="uq_adsense_content_owner_links_key",
         ),
         sa.ForeignKeyConstraint(
@@ -78,7 +95,10 @@ def upgrade() -> None:
             "verification_status IN ('UNVERIFIED', 'VERIFIED', 'REJECTED', 'CONFLICT')",
             name="ck_adsense_content_owner_links_status",
         ),
-        sa.CheckConstraint(_month_format("effective_month_start"), name="ck_adsense_content_owner_links_start_format"),
+        sa.CheckConstraint(
+            _month_format("effective_month_start"),
+            name="ck_adsense_content_owner_links_start_format",
+        ),
         sa.CheckConstraint(
             f"effective_month_end IS NULL OR ({_month_format('effective_month_end')})",
             name="ck_adsense_content_owner_links_end_format",
@@ -87,24 +107,46 @@ def upgrade() -> None:
             "effective_month_end IS NULL OR effective_month_end >= effective_month_start",
             name="ck_adsense_content_owner_links_range",
         ),
-        sa.CheckConstraint("length(adsense_account_id) >= 1", name="ck_adsense_content_owner_links_account_nonempty"),
-        sa.CheckConstraint("length(content_owner_id) >= 1", name="ck_adsense_content_owner_links_owner_nonempty"),
+        sa.CheckConstraint(
+            "length(adsense_account_id) >= 1",
+            name="ck_adsense_content_owner_links_account_nonempty",
+        ),
+        sa.CheckConstraint(
+            "length(content_owner_id) >= 1",
+            name="ck_adsense_content_owner_links_owner_nonempty",
+        ),
     )
     op.create_table(
         "content_owner_channel_links",
-        sa.Column("id", sa.Uuid(), primary_key=True, server_default=sa.text("gen_random_uuid()")),
-        sa.Column("tenant_id", sa.Uuid(), nullable=False, server_default=sa.text(f"'{UMS_TENANT_ID}'")),
+        sa.Column(
+            "id", sa.Uuid(), primary_key=True,
+            server_default=sa.text("gen_random_uuid()"),
+        ),
+        sa.Column(
+            "tenant_id", sa.Uuid(), nullable=False,
+            server_default=sa.text(f"'{UMS_TENANT_ID}'"),
+        ),
         sa.Column("content_owner_id", sa.Text(), nullable=False),
         sa.Column("youtube_channel_id", sa.Text(), nullable=False),
         sa.Column("provenance_kind", sa.Text(), nullable=False),
         sa.Column("provenance_source_id", sa.Text(), nullable=True),
-        sa.Column("active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
+        sa.Column(
+            "active", sa.Boolean(), nullable=False,
+            server_default=sa.text("true"),
+        ),
         sa.Column("effective_month_start", sa.Text(), nullable=False),
         sa.Column("effective_month_end", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
         sa.UniqueConstraint(
-            "tenant_id", "content_owner_id", "youtube_channel_id", "effective_month_start",
+            "tenant_id", "content_owner_id", "youtube_channel_id",
+            "effective_month_start",
             name="uq_content_owner_channel_links_key",
         ),
         sa.ForeignKeyConstraint(
@@ -115,7 +157,10 @@ def upgrade() -> None:
             "provenance_kind IN ('SOURCE_ROW', 'CHANNEL_REGISTRY', 'MANUAL')",
             name="ck_content_owner_channel_links_provenance_kind",
         ),
-        sa.CheckConstraint(_month_format("effective_month_start"), name="ck_content_owner_channel_links_start_format"),
+        sa.CheckConstraint(
+            _month_format("effective_month_start"),
+            name="ck_content_owner_channel_links_start_format",
+        ),
         sa.CheckConstraint(
             f"effective_month_end IS NULL OR ({_month_format('effective_month_end')})",
             name="ck_content_owner_channel_links_end_format",
@@ -124,8 +169,14 @@ def upgrade() -> None:
             "effective_month_end IS NULL OR effective_month_end >= effective_month_start",
             name="ck_content_owner_channel_links_range",
         ),
-        sa.CheckConstraint("length(content_owner_id) >= 1", name="ck_content_owner_channel_links_owner_nonempty"),
-        sa.CheckConstraint("length(youtube_channel_id) >= 1", name="ck_content_owner_channel_links_channel_nonempty"),
+        sa.CheckConstraint(
+            "length(content_owner_id) >= 1",
+            name="ck_content_owner_channel_links_owner_nonempty",
+        ),
+        sa.CheckConstraint(
+            "length(youtube_channel_id) >= 1",
+            name="ck_content_owner_channel_links_channel_nonempty",
+        ),
     )
     # Postgres-only object guard (invalid SQLite CREATE syntax), mirroring the
     # ORM's .ddl_if(dialect="postgresql") CHECK in finance_models.py.
@@ -149,7 +200,13 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Drop both map tables and their indexes."""
-    op.drop_index("ix_content_owner_channel_links_owner", table_name="content_owner_channel_links")
-    op.drop_index("ix_adsense_content_owner_links_account_status", table_name="adsense_content_owner_links")
+    op.drop_index(
+        "ix_content_owner_channel_links_owner",
+        table_name="content_owner_channel_links",
+    )
+    op.drop_index(
+        "ix_adsense_content_owner_links_account_status",
+        table_name="adsense_content_owner_links",
+    )
     op.drop_table("content_owner_channel_links")
     op.drop_table("adsense_content_owner_links")

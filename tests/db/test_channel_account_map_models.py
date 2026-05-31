@@ -17,12 +17,14 @@ TENANT = UUID(UMS_TENANT_ID)
 
 
 def _engine(tmp_path):
+    """Return a fresh in-memory SQLite engine with the finance schema."""
     engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}")
     FinanceBase.metadata.create_all(engine)
     return engine
 
 
 def test_account_owner_link_persists_with_defaults(tmp_path):
+    """AdsenseContentOwnerLinkORM row persists with expected defaults."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         session.add(
@@ -39,6 +41,7 @@ def test_account_owner_link_persists_with_defaults(tmp_path):
 
 
 def test_account_owner_link_status_check_rejects_unknown(tmp_path):
+    """status CHECK constraint rejects unknown verification_status values."""
     engine = _engine(tmp_path)
     with Session(engine) as session, pytest.raises(IntegrityError):
         session.add(
@@ -52,6 +55,7 @@ def test_account_owner_link_status_check_rejects_unknown(tmp_path):
 
 
 def test_account_owner_link_range_check_rejects_end_before_start(tmp_path):
+    """effective_month range CHECK rejects end < start."""
     engine = _engine(tmp_path)
     with Session(engine) as session, pytest.raises(IntegrityError):
         session.add(
@@ -65,6 +69,7 @@ def test_account_owner_link_range_check_rejects_end_before_start(tmp_path):
 
 
 def test_owner_channel_link_persists_active_default(tmp_path):
+    """ContentOwnerChannelLinkORM row persists with active=True default."""
     engine = _engine(tmp_path)
     with Session(engine) as session:
         session.add(
@@ -81,6 +86,7 @@ def test_owner_channel_link_persists_active_default(tmp_path):
 
 @pytest.mark.parametrize("bad_month", ["2026-13", "202601", "2026-1x"])
 def test_account_owner_link_month_format_check_rejects_malformed(tmp_path, bad_month):
+    """YYYY-MM format CHECK rejects malformed month strings."""
     engine = _engine(tmp_path)
     with Session(engine) as session, pytest.raises(IntegrityError):
         session.add(
@@ -93,6 +99,7 @@ def test_account_owner_link_month_format_check_rejects_malformed(tmp_path, bad_m
 
 
 def test_owner_channel_link_provenance_kind_check_rejects_unknown(tmp_path):
+    """provenance_kind CHECK rejects unknown values on content_owner_channel_links."""
     engine = _engine(tmp_path)
     with Session(engine) as session, pytest.raises(IntegrityError):
         session.add(

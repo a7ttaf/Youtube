@@ -43,6 +43,7 @@ def fresh_engine(postgres_url: str):
 
 
 def test_upgrade_creates_both_tables_with_constraints(alembic_config, fresh_engine):
+    """Upgrade creates both map tables with expected constraints, unique keys, and indexes."""
     command.upgrade(alembic_config, "head")
     inspector = inspect(fresh_engine)
     assert "adsense_content_owner_links" in inspector.get_table_names()
@@ -77,6 +78,7 @@ def test_upgrade_creates_both_tables_with_constraints(alembic_config, fresh_engi
 
 
 def test_downgrade_drops_both_tables(alembic_config, fresh_engine):
+    """Downgrade removes both map tables."""
     command.upgrade(alembic_config, "head")
     command.downgrade(alembic_config, "20260529_0002")
     inspector = inspect(fresh_engine)
@@ -85,6 +87,7 @@ def test_downgrade_drops_both_tables(alembic_config, fresh_engine):
 
 
 def test_round_trip_idempotency(alembic_config, fresh_engine):
+    """Upgrade -> downgrade -> upgrade completes without errors."""
     command.upgrade(alembic_config, "head")
     command.downgrade(alembic_config, "20260529_0002")
     command.upgrade(alembic_config, "head")
@@ -92,6 +95,7 @@ def test_round_trip_idempotency(alembic_config, fresh_engine):
 
 
 def test_provenance_payload_object_check_rejects_array(alembic_config, fresh_engine):
+    """provenance_payload object CHECK rejects a JSON array."""
     command.upgrade(alembic_config, "head")
     insert_sql = text(
         "INSERT INTO adsense_content_owner_links "
@@ -104,6 +108,7 @@ def test_provenance_payload_object_check_rejects_array(alembic_config, fresh_eng
 
 
 def test_owner_channel_provenance_kind_check_rejects_unknown(alembic_config, fresh_engine):
+    """provenance_kind CHECK rejects unknown values on content_owner_channel_links."""
     command.upgrade(alembic_config, "head")
     insert_sql = text(
         "INSERT INTO content_owner_channel_links "
