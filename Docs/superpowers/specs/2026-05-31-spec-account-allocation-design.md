@@ -77,11 +77,17 @@ In scope for this PR (Spec 2b PR-1):
    verified channels, source-aligned raw-gross basis, deterministic rounding with exact
    per-component amount conservation, fail-closed on missing/incomplete basis, and an
    explicit `net_applicable` flag per line.
-2. **`api/allocation.py`** — a new thin router, mounted in `app.py`, exposing
+2. **`deduction_ingestion.py` repository** — add an ACCOUNT-only read method
+   `list_account_components(month, adsense_account_id=None)` on
+   `SqlAlchemyDeductionComponentRepository` that filters `scope_kind == "ACCOUNT"` **in SQL**
+   (mirrors `list_month_components`), so PAYMENT/CHANNEL/bank-grain rows are never fetched.
+   Own repository tests.
+3. **`api/allocation.py`** — a new thin router, mounted in `app.py`, exposing
    `GET /revenue/months/{month}/account-allocations` (optional `adsense_account_id`
-   filter). Gathers inputs via existing repositories, calls the service, returns
-   allocations + unallocated issues + summary. Records `REVENUE_VIEWED` + `PAYMENT_VIEWED`.
-3. **Docs** — `Docs/01_IMPLEMENTATION_PLAN.md` and `Docs/15_DELIVERY_BACKLOG.md` status
+   filter). Gathers inputs via existing repositories (incl. the ACCOUNT-only query above),
+   calls the service, returns allocations + unallocated issues + summary. Records
+   `REVENUE_VIEWED` + `PAYMENT_VIEWED`.
+4. **Docs** — `Docs/01_IMPLEMENTATION_PLAN.md` and `Docs/15_DELIVERY_BACKLOG.md` status
    updates marking Spec 2b PR-1 shipped and the remainder still pending.
 
 Allocation method for this PR is **`gross_revenue_proportional` only** (one of the five
@@ -146,7 +152,9 @@ def build_account_allocation(
 
 ### 4.2 `gross_revenue_proportional` with source-aligned basis
 
-For each ACCOUNT component `C` with `amount_usd = A`, `account = C.scope_id`:
+A zero-amount component (`A == 0`) short-circuits to **allocated with no lines** (nothing to
+distribute; mapping/basis checks skipped). Otherwise, for each ACCOUNT component `C` with
+`amount_usd = A`, `account = C.scope_id`:
 
 1. `channels = verified_channels.get(account, [])`. If empty →
    `UNALLOCATED(ACCOUNT_UNMAPPED_OR_UNVERIFIED)`.
@@ -157,6 +165,10 @@ For each ACCOUNT component `C` with `amount_usd = A`, `account = C.scope_id`:
    - If **some but not all** channels have a basis entry → `UNALLOCATED(BASIS_INCOMPLETE)`
      (fail closed: never allocate a known-incomplete basis, which would over-concentrate
      the deduction on the channels that happen to have gross).
+   - A **present** entry of `0` is a valid basis value (the channel earned zero via this
+     source kind; it contributes zero weight and receives zero). Only an **absent** entry is
+     missing/incomplete. Distinguishing absent from present-zero relies on facts carrying
+     zero-gross rows; the plan verifies this against `RevenueFactEntry`.
 4. `basis_total = Σ basis[ch]`. If `basis_total == 0` (all present but zero) →
    `UNALLOCATED(ZERO_GROSS_BASIS)`.
 5. Otherwise allocate: `raw_share[ch] = A × basis[ch] / basis_total`, with deterministic
@@ -178,8 +190,8 @@ rounding drift), use **largest-remainder (Hamilton) apportionment**:
    fractional remainder, then ascending `youtube_channel_id` as a deterministic tiebreak.
 
 This is fully deterministic (no float dependence; `Decimal` throughout) and conserves the
-amount to the last micro-unit. A zero-amount component (`A == 0`) yields zero-value lines
-and conserves trivially.
+amount to the last micro-unit. Per the §4.2 short-circuit, a zero-amount component (`A == 0`)
+produces **no** lines, counts as allocated, and contributes `0` — conserving trivially.
 
 ### 4.4 `net_applicable` classification
 
@@ -280,11 +292,11 @@ class AllocationNote:           # informational, non-blocking
 
 @dataclass(frozen=True)
 class AllocationSummary:
-    component_count: int
-    allocated_component_count: int
-    unallocated_component_count: int
+    component_count: int                   # all input components
+    allocated_component_count: int         # incl. zero-amount short-circuit (no lines)
+    unallocated_component_count: int       # incl. UNSUPPORTED_SCOPE guard cases
     allocated_total_usd: Decimal
-    unallocated_total_usd: Decimal
+    unallocated_total_usd: Decimal         # Σ amount of every unallocated component
     net_applicable_total_usd: Decimal      # Σ allocated where net_applicable
     reconciliation_total_usd: Decimal      # Σ allocated where not net_applicable
 
@@ -300,9 +312,13 @@ class AccountAllocationResult:
 
 **Conservation invariants (tested):**
 
-- Per component: `Σ line.allocated_amount_usd (over its channels) == component.amount_usd`.
+- Per allocated component: `Σ line.allocated_amount_usd (over its channels) ==
+  component.amount_usd`.
 - Aggregate: `summary.allocated_total_usd + summary.unallocated_total_usd ==
-  Σ amount_usd over all processed ACCOUNT components`.
+  Σ amount_usd over all INPUT components`. Every input component is either allocated or
+  recorded as exactly one `UnallocatedIssue` (including the `UNSUPPORTED_SCOPE` guard case,
+  which counts in `unallocated_component_count` / `unallocated_total_usd`). Via the API the
+  input is ACCOUNT-only, so this equals the sum over the month's ACCOUNT components.
 - `summary.net_applicable_total_usd + summary.reconciliation_total_usd ==
   summary.allocated_total_usd`.
 
@@ -322,9 +338,11 @@ GET /revenue/months/{month}/account-allocations
 - **Path/validation:** `month` validated to `YYYY-MM` (calendar month 01–12) → `422` on
   malformed input, mirroring the existing month endpoints' boundary check.
 - **Input gathering (route, thin):**
-  1. List the month's `deduction_components` and keep `scope_kind == "ACCOUNT"` (optionally
-     filtered to `adsense_account_id`). Only ACCOUNT-grain is passed to the service, so the
-     endpoint enumerates no PAYMENT/bank-grain rows (this is why no `BANK_RECONCILIATION_VIEWED`).
+  1. `deduction_repository.list_account_components(month, adsense_account_id=...)` — an
+     ACCOUNT-only query (`WHERE scope_kind == "ACCOUNT"` in SQL, mirroring
+     `list_month_components`). PAYMENT/CHANNEL/bank-grain rows are never fetched, so the
+     endpoint enumerates no bank-grain data (this is why no `BANK_RECONCILIATION_VIEWED`).
+     The ACCOUNT-only guarantee lives at the query layer, not a route-side filter.
   2. For each distinct ACCOUNT `scope_id`, call
      `list_verified_adsense_account_channels(tenant_id, month, account)` → `verified_channels`.
   3. `revenue_repository.list_month_facts(month=month)` → aggregate
@@ -423,6 +441,13 @@ migration, no advisory lock) — SQLite suffices for API tests; the service test
 - Multi-account, multi-component aggregate conservation.
 - Zero-amount component → zero lines, conserved.
 
+**Repository (`list_account_components`, in the deduction-ingestion repository tests):**
+
+- Returns only `scope_kind == "ACCOUNT"` rows; CHANNEL/PAYMENT rows for the same month are
+  excluded (proves the SQL-layer guarantee — no bank-grain rows fetched).
+- Respects `month`, tenant scope, and the optional `adsense_account_id` (scope_id) filter.
+- Malformed month → `DeductionComponentValidationError`.
+
 **API (`tests/api/test_allocation_api.py`):**
 
 - `finance_viewer` (VIEW_REVENUE + VIEW_FINALIZED_PAYMENTS) → `200` with expected shape.
@@ -438,7 +463,8 @@ migration, no advisory lock) — SQLite suffices for API tests; the service test
 - Response carries no `raw_payload`/secret fields.
 - Unallocated list + summary totals present and conserved end-to-end.
 
-**Baseline gate:** `python -m ruff check backend tests`, `pytest -q`, `git diff --check`.
+**Baseline gate:** `python -m ruff check backend tests scripts`, `pytest -q`,
+`git diff --check`.
 
 ---
 
@@ -446,11 +472,15 @@ migration, no advisory lock) — SQLite suffices for API tests; the service test
 
 - **Create** `backend/ums_smart_revenue/finance/allocation.py` — pure service + dataclasses
   + typed errors (`AllocationError`, `AllocationValidationError`).
+- **Modify** `backend/ums_smart_revenue/finance/deduction_ingestion.py` — add
+  `list_account_components` (ACCOUNT-only SQL query) on
+  `SqlAlchemyDeductionComponentRepository`.
 - **Create** `backend/ums_smart_revenue/api/allocation.py` — router, request/response
   Pydantic models, auth + audit wiring (modeled on `api/channel_account_links.py` and
   `api/revenue.py`), input gathering.
 - **Modify** `backend/ums_smart_revenue/app.py` — mount the new router.
-- **Create** `tests/finance/test_allocation.py`, `tests/api/test_allocation_api.py`.
+- **Create** `tests/finance/test_allocation.py`, `tests/api/test_allocation_api.py`;
+  **extend** the deduction-ingestion repository tests for `list_account_components`.
 - **Modify** `Docs/01_IMPLEMENTATION_PLAN.md`, `Docs/15_DELIVERY_BACKLOG.md` — status.
 
 Imports reused (no duplication): `DeductionComponent`, `NET_APPLICABLE_COMPONENT_KINDS`,
@@ -481,6 +511,9 @@ wiring.
    `VIEW_FINALIZED_PAYMENTS@finance_month(month)`, matching month-path payment APIs (not
    Spec 2a's cross-month global list).
 7. **`CHANNEL_IN_MULTIPLE_ACCOUNTS` is informational**, not an UNALLOCATED failure.
+8. **ACCOUNT-only at the query layer.** A dedicated `list_account_components` SQL query
+   (not a route-side filter over the full component set) guarantees no PAYMENT/bank-grain
+   rows are ever fetched — defense-in-depth behind the no-bank-audit decision.
 
 ---
 
