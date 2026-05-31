@@ -256,6 +256,10 @@ class SqlAlchemyChannelAccountLinkRepository:
         close inserts a fresh LOCKED row a row lock cannot cover. Closing that
         narrower window needs a shared serialization point on the month-close path
         (gap lock / per-tenant close epoch), a close-path change out of scope here.
+
+        Raises:
+            ChannelAccountLinkLockedMonthError: If any covered finance month in
+                ``[start, end]`` (or ``[start, ∞)`` when open-ended) is LOCKED.
         """
         # FIX: the prior bounded path called _require_month_open() for every
         # covered month, and that helper creates a close row + takes an advisory
@@ -518,6 +522,24 @@ class SqlAlchemyChannelAccountLinkRepository:
             links=[self._to_account_owner_link(row) for row in rows],
         )
 
+    def _owner_channel_link_exists(
+        self, owner_id: str, channel_id: str, month: str
+    ) -> bool:
+        """Return True if an owner↔channel link for (owner, channel, month) already
+        exists under this tenant. Fast existence probe for derivation idempotency."""
+        return bool(
+            self._session.scalar(
+                select(func.count())
+                .select_from(ContentOwnerChannelLinkORM)
+                .where(
+                    ContentOwnerChannelLinkORM.tenant_id == self._tenant_id,
+                    ContentOwnerChannelLinkORM.content_owner_id == owner_id,
+                    ContentOwnerChannelLinkORM.youtube_channel_id == channel_id,
+                    ContentOwnerChannelLinkORM.effective_month_start == month,
+                )
+            )
+        )
+
     def upsert_owner_channel_links_from_source(self) -> int:
         """Idempotently derive owner↔channel links from source-row co-occurrence.
 
@@ -528,20 +550,29 @@ class SqlAlchemyChannelAccountLinkRepository:
         Months whose finance close row is LOCKED are skipped: the read contract
         consumes active owner↔channel links for that month, so deriving a new
         link after close would change allocation for an already-closed period.
+        The existing close rows for the observed months are screened with a single
+        ``SELECT ... FOR UPDATE`` so a concurrent month close of an existing OPEN
+        observed month is serialized against this derivation — either we read its
+        committed LOCKED state (and skip the month) or it blocks until we commit.
+        FOR UPDATE is a no-op on SQLite.
+
+        Idempotent under concurrency: a per-row existence probe avoids insert
+        churn on the common path, and each insert runs in its own SAVEPOINT so a
+        parallel worker that inserts the same key between our probe and flush
+        raises ``uq_content_owner_channel_links_key`` only inside that savepoint;
+        we roll it back and treat the key as already-derived rather than failing
+        the whole derivation job.
         """
-        # FIX: do not introduce new mapping evidence into a closed allocation
-        # period. Without this, a late/replacement import for an already-LOCKED
-        # month would have its newly co-occurring channels inserted as active
-        # links, silently changing list_verified_adsense_account_channels() for
-        # that closed month.
-        locked_months = set(
-            self._session.scalars(
-                select(FinanceMonthCloseORM.month).where(
-                    FinanceMonthCloseORM.tenant_id == self._tenant_id,
-                    FinanceMonthCloseORM.status == "LOCKED",
-                )
-            ).all()
-        )
+        # FIX (post-close serialization, was PR #57 -GSk): read the observed
+        # (owner, channel, month) co-occurrences first, then row-lock the EXISTING
+        # finance_month_close rows for exactly those months with FOR UPDATE before
+        # deciding which are LOCKED. This takes the SAME row lock the close path
+        # acquires via get_or_create_month_close_row(for_update=True), so a
+        # concurrent close of an existing OPEN observed month cannot flip it to
+        # LOCKED between this read and our insert (it blocks until we commit, or we
+        # read its committed LOCKED state and skip). Residual: a month with NO
+        # close row at read time, closed concurrently via a fresh LOCKED insert —
+        # the same absent-month window tracked as PR #57 N9. No-op on SQLite.
         observed = self._session.execute(
             select(
                 GoogleRevenueSourceRowORM.content_owner_id,
@@ -560,39 +591,52 @@ class SqlAlchemyChannelAccountLinkRepository:
                 GoogleRevenueSourceRowORM.report_month,
             )
         ).all()
+        observed_months = {month for _owner, _channel, month, _key in observed}
+        locked_months: set[str] = set()
+        if observed_months:
+            close_rows = self._session.execute(
+                select(FinanceMonthCloseORM.month, FinanceMonthCloseORM.status)
+                .where(
+                    FinanceMonthCloseORM.tenant_id == self._tenant_id,
+                    FinanceMonthCloseORM.month.in_(observed_months),
+                )
+                .order_by(FinanceMonthCloseORM.month)
+                .with_for_update()
+            ).all()
+            locked_months = {
+                month for month, status in close_rows if status == "LOCKED"
+            }
         created = 0
         for owner_id, channel_id, month, source_key in observed:
             if month in locked_months:
                 continue  # post-close protection: no new evidence for a LOCKED month
-            # Idempotency: this per-row existence probe avoids insert churn; the
-            # unique key uq_content_owner_channel_links_key is the authoritative
-            # backstop — a concurrent double-insert fails closed at flush.
-            exists = self._session.scalar(
-                select(func.count())
-                .select_from(ContentOwnerChannelLinkORM)
-                .where(
-                    ContentOwnerChannelLinkORM.tenant_id == self._tenant_id,
-                    ContentOwnerChannelLinkORM.content_owner_id == owner_id,
-                    ContentOwnerChannelLinkORM.youtube_channel_id == channel_id,
-                    ContentOwnerChannelLinkORM.effective_month_start == month,
-                )
-            )
-            if exists:
+            if self._owner_channel_link_exists(owner_id, channel_id, month):
+                continue  # fast path: already derived, skip the savepoint
+            try:
+                # FIX (idempotent under concurrency, was PR #57 -GSr): a parallel
+                # worker may insert the same (owner, channel, month) key between the
+                # probe above and this flush. Each insert is its own SAVEPOINT, so
+                # the unique-key violation is contained here; we swallow it and
+                # treat the key as already-derived instead of failing the whole job.
+                with self._session.begin_nested():
+                    self._session.add(
+                        ContentOwnerChannelLinkORM(
+                            tenant_id=self._tenant_id,
+                            content_owner_id=owner_id,
+                            youtube_channel_id=channel_id,
+                            provenance_kind="SOURCE_ROW",
+                            provenance_source_id=source_key,
+                            active=True,
+                            effective_month_start=month,
+                            effective_month_end=month,
+                        )
+                    )
+                    self._session.flush()
+            except IntegrityError as exc:
+                if not _is_unique_violation(exc):
+                    raise
                 continue
-            self._session.add(
-                ContentOwnerChannelLinkORM(
-                    tenant_id=self._tenant_id,
-                    content_owner_id=owner_id,
-                    youtube_channel_id=channel_id,
-                    provenance_kind="SOURCE_ROW",
-                    provenance_source_id=source_key,
-                    active=True,
-                    effective_month_start=month,
-                    effective_month_end=month,
-                )
-            )
             created += 1
-        self._session.flush()
         return created
 
     # ============================================================================

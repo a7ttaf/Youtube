@@ -384,6 +384,36 @@ def test_derivation_is_idempotent(tmp_path):
     assert len(rows) == 1
 
 
+def test_derivation_swallows_concurrent_duplicate_insert(tmp_path, monkeypatch):
+    """A duplicate key landing between the probe and flush is swallowed (idempotent).
+
+    Simulates a parallel derivation worker that inserted the same
+    (owner, channel, month) key AFTER our existence probe but BEFORE our flush:
+    force the fast-path probe to miss while the row already exists, then assert the
+    per-row SAVEPOINT swallows uq_content_owner_channel_links_key instead of
+    failing the whole derivation job. Without the savepoint guard this raises
+    IntegrityError out of upsert_owner_channel_links_from_source.
+    """
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        # The key already exists — a concurrent worker won the race to insert it.
+        session.add(ContentOwnerChannelLinkORM(
+            tenant_id=TENANT, content_owner_id="owner-1", youtube_channel_id="chan-1",
+            provenance_kind="SOURCE_ROW", active=True,
+            effective_month_start="2026-04", effective_month_end="2026-04",
+        ))
+        _source_row(session, owner="owner-1", channel="chan-1", month="2026-04", key="k1")
+        session.commit()
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        # Force the fast-path probe to miss so the insert path runs and collides.
+        monkeypatch.setattr(repo, "_owner_channel_link_exists", lambda *a, **k: False)
+        created = repo.upsert_owner_channel_links_from_source()  # must NOT raise
+        session.commit()
+        rows = session.scalars(select(ContentOwnerChannelLinkORM)).all()
+    assert created == 0          # collision swallowed, not counted as a new insert
+    assert len(rows) == 1        # no duplicate row inserted
+
+
 def test_derivation_groups_by_month_and_collapses_duplicate_rows(tmp_path):
     """Derivation groups source rows by (owner, channel, month) into one link each."""
     engine = _engine(tmp_path)

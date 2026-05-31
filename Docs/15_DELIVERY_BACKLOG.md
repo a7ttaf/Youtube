@@ -220,6 +220,27 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
     `test_repo_verify_blocks_on_held_covered_month_close_row_lock` (verify is
     canceled by the held covered-month row-lock wait; reverting the scan to a plain
     SELECT makes it fail).
+  - ✅ PR #57 review hardening round 4 (Codex/Kody/CodeRabbit): the same
+    concurrent-close protection now covers the *derivation* path.
+    `upsert_owner_channel_links_from_source` reads observed source-row months
+    first, then row-locks the `finance_month_close` rows for those months with a
+    single `SELECT ... FOR UPDATE` before deciding which months to skip as LOCKED
+    — so a concurrent close can no longer flip an observed OPEN month to LOCKED
+    between the skip decision and the derived-link inserts (GSk; proven on live
+    Postgres by `test_repo_derivation_blocks_on_held_observed_month_close_row_lock`,
+    which fails "DID NOT RAISE" when the scan is reverted to a plain SELECT). Each
+    derived insert now runs in its own `SAVEPOINT` and swallows only a genuine
+    `uq_content_owner_channel_links_key` unique violation (a duplicate landing
+    between the existence probe and flush from a parallel worker), re-raising any
+    other `IntegrityError` so the derivation stays idempotent under concurrency
+    (GSr; covered by `test_derivation_swallows_concurrent_duplicate_insert`). The
+    verify/reject audit `details` now records the full `effective_month_start`/
+    `effective_month_end` range, not just the start-month scope, so month-level
+    audit review of a later (now closed) period still surfaces the mutation that
+    changed its allocation eligibility (GSp; covered by
+    `test_verify_records_full_effective_range_in_audit_details`). `_require_range_open`
+    gained an explicit `Raises:` docstring section documenting
+    `ChannelAccountLinkLockedMonthError` (KHa).
   - ⏳ Deferred follow-up (PR #57 N9): narrowed residual concurrent-close race in
     `_require_range_open`. The `FOR UPDATE` range scan above closes the race for
     covered months whose close row ALREADY exists. The remaining window is a

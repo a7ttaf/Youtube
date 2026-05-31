@@ -182,6 +182,40 @@ def test_super_owner_can_verify(tmp_path):
     assert response.json()["audit_event"]["event_type"] == "CHANNEL_ACCOUNT_LINK_VERIFIED"
 
 
+def test_verify_records_full_effective_range_in_audit_details(tmp_path):
+    """A multi-month verify records both range bounds in the audit details.
+
+    Regression for PR #57 -GSp: the audit scope is the single start month, so a
+    later (now closed) month's audit review would not surface the mutation that
+    changed its allocation eligibility unless the full [start, end] range is
+    captured in details. Assert against the persisted audit row, not the API
+    response (which omits details).
+    """
+    database_url = build_database_url(tmp_path)
+    seed(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    link_id = _propose_via_api(
+        client, account="pub-9", owner="owner-9", start="2026-01", end="2026-12"
+    )
+    response = client.post(
+        f"/revenue/channel-account-links/{link_id}/verify",
+        headers=auth_headers("super_owner", "global"),
+        json={"reason": "verified across the full year"},
+    )
+    assert response.status_code == 200
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        verified = session.scalars(
+            select(AuditLogORM).where(
+                AuditLogORM.event_type == "CHANNEL_ACCOUNT_LINK_VERIFIED"
+            )
+        ).all()
+    assert len(verified) == 1
+    details = verified[0].details
+    assert details["effective_month_start"] == "2026-01"
+    assert details["effective_month_end"] == "2026-12"
+
+
 def test_verify_requires_both_permissions(tmp_path):
     """Verify returns 403 if either MANAGE_ORG_MAPPING or CHANGE_ALLOCATION_RULE is missing."""
     database_url = build_database_url(tmp_path)

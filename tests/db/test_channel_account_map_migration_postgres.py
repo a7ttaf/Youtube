@@ -265,3 +265,78 @@ def test_repo_verify_blocks_on_held_covered_month_close_row_lock(
     finally:
         holder_txn.rollback()
         holder.close()
+
+
+def test_repo_derivation_blocks_on_held_observed_month_close_row_lock(
+    alembic_config, fresh_engine
+):
+    """Proof derivation FOR UPDATE-locks existing close rows for observed months.
+
+    Connection A holds FOR UPDATE on the finance_month_close row for an observed
+    month (2026-03). A second Session runs upsert_owner_channel_links_from_source
+    under a short statement_timeout; because the derivation row-locks every
+    EXISTING close row for its observed months with FOR UPDATE before deciding
+    which are LOCKED, it blocks on the held 2026-03 row and the lock wait is
+    canceled. This is the serialization that stops a concurrent close from
+    flipping an existing OPEN observed month to LOCKED between the derivation's
+    read and its insert (PR #57 -GSk). Reverting the derivation's close-row scan
+    to a plain (unlocked) SELECT makes this test fail (no block).
+    """
+    from datetime import UTC, datetime
+    from uuid import UUID
+
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session
+
+    from ums_smart_revenue.db.source_models import GoogleRevenueSourceRowORM
+    from ums_smart_revenue.finance.channel_account_links import (
+        SqlAlchemyChannelAccountLinkRepository,
+    )
+    from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
+
+    command.upgrade(alembic_config, "head")
+    tenant = UUID(UMS_TENANT_ID)
+
+    # Seed one source-row co-occurrence for observed month 2026-03 and an existing
+    # OPEN close row for that month (committed so holder/contender can see both).
+    with Session(fresh_engine) as setup:
+        setup.add(
+            GoogleRevenueSourceRowORM(
+                tenant_id=tenant, source_system="youtube_reporting",
+                source_row_key="deriv-lock-key".ljust(64, "0"),
+                source_account_id="pub-deriv", content_owner_id="owner-deriv",
+                youtube_channel_id="chan-deriv", report_month="2026-03",
+                report_type="channel_basic_a2",
+                period_start=datetime(2026, 3, 1, tzinfo=UTC).date(),
+                period_end=datetime(2026, 3, 31, tzinfo=UTC).date(),
+                metric_key="estimated_partner_revenue", value_kind="estimated",
+                amount_native=0, currency_code="USD", raw_payload={},
+            )
+        )
+        get_or_create_month_close_row(setup, "2026-03", tenant_id=tenant)
+        setup.commit()
+
+    holder = fresh_engine.connect()
+    holder_txn = holder.begin()
+    try:
+        # Hold the observed-month close-row lock so the derivation FOR UPDATE blocks.
+        holder.execute(
+            text(
+                "SELECT 1 FROM finance_month_close WHERE tenant_id = :t "
+                "AND month = '2026-03' FOR UPDATE"
+            ),
+            {"t": str(tenant)},
+        )
+        with Session(fresh_engine) as contender:
+            # statement_timeout reliably cancels a blocked FOR UPDATE row-lock wait.
+            contender.execute(text("SET statement_timeout = '750ms'"))
+            repo = SqlAlchemyChannelAccountLinkRepository(contender, tenant_id=tenant)
+            with pytest.raises(OperationalError) as exc_info:
+                repo.upsert_owner_channel_links_from_source()
+            err_msg = str(exc_info.value).lower()
+            assert "canceling statement" in err_msg or "statement timeout" in err_msg, (
+                "derivation must be canceled by the observed-month row-lock wait timeout"
+            )
+    finally:
+        holder_txn.rollback()
+        holder.close()

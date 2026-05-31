@@ -362,12 +362,19 @@ def _decide_link(
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ChannelAccountLinkConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    # FIX: a verify/reject changes allocation eligibility for EVERY month in the
+    # link's [effective_month_start, effective_month_end] range, but the audit
+    # scope is a single finance month (start). Record the full affected range in
+    # details so month-level audit review of a later (now closed) period can still
+    # surface the mutation that touched it, not only the start-month event.
     record = record_audit_event(
         sink=audit_sink, actor=user, event_type=event_type,
         entity_type="adsense_content_owner_link", entity_id=link.id,
         scope=AccessScope.finance_month(link.effective_month_start), reason=reason,
         details={"adsense_account_id": link.adsense_account_id,
-                 "verification_status": link.verification_status},
+                 "verification_status": link.verification_status,
+                 "effective_month_start": link.effective_month_start,
+                 "effective_month_end": link.effective_month_end},
     )
     return AccountOwnerLinkMutationResponse(
         link=link.to_api(), audit_event=audit_record_to_api(record)
