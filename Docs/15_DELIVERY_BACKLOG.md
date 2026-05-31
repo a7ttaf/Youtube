@@ -203,6 +203,39 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
     evidence); and the request model strips whitespace before canonicalizing
     `adsense_account_id` (a padded `accounts/…` value previously 422'd due to
     Pydantic v2 before-validator ordering).
+  - ✅ PR #57 review hardening round 3 (Codex/Kody/CodeRabbit): `_require_range_open`
+    no longer materializes every covered month — it lock-checks only the start
+    month, then screens the rest of the range with a single bounded SELECT for an
+    already-LOCKED close row, so an authorized far-future `effective_month_end`
+    can no longer insert/advisory-lock ~95k `finance_month_close` rows in one
+    transaction; `reject` now reloads the link under the per-account advisory lock
+    (TOCTOU guard: a concurrent verify committing during the lock-wait is observed
+    so the locked-month guard isn't skipped on a stale UNVERIFIED status); the
+    duplicated finance-local `_iter_months` helper was removed (now unused).
+  - ⏳ Deferred follow-up (PR #57 N9): residual concurrent-close race in
+    `_require_range_open`. The covered-range scan reads already-LOCKED months but
+    is not serialized against a month-close that transitions a covered month to
+    LOCKED *after* the scan but before the verify/reject commits — open-ended and
+    long-bounded ranges cannot acquire a per-month advisory lock for every covered
+    month. Fully closing it needs a shared serialization point on the month-close
+    path (e.g. close also rejecting/handling conflicting VERIFIED links, or a
+    per-tenant close-epoch lock) — a close-path change outside this PR's scope.
+    Risk bounded: no production consumer of `list_verified_adsense_account_channels`
+    until Spec 2b; both verify/reject and close are dual-gated admin actions.
+    File: `backend/ums_smart_revenue/finance/channel_account_links.py`
+    (`_require_range_open`); sequence with Spec 2b / month-close hardening.
+  - ⏳ Deferred follow-up (PR #57 N10): the API allocation-permission check
+    `_require_allocation_permission_for_range` iterates `_iter_months(start, end)`
+    for per-finance-month scope checks, so the same far-future `effective_month_end`
+    drives ~95k in-memory authorization iterations (no DB rows/locks, but a CPU
+    cost) for a globally-authorized caller. Shares the root cause of the finance
+    materialization fix above. Recommended fix: short-circuit when the caller
+    holds the global allocation grant (which already authorizes every covered
+    month), and/or cap the accepted effective range at the propose/validation
+    boundary. Authorization-layer change → carries authz-test obligations; kept
+    out of this review-cleanup PR. File:
+    `backend/ums_smart_revenue/api/channel_account_links.py`
+    (`_require_allocation_permission_for_range`, `_iter_months`).
   - ⏳ Deferred follow-up (PR #57 N2): supersede/close-range workflow to
     end-date an open-ended VERIFIED link without `reject` wiping its historical
     months. Needs a dedicated atomic cap-then-verify operation; out of this

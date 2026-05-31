@@ -171,23 +171,6 @@ def _ranges_overlap(
     return start_a <= eb and start_b <= ea
 
 
-def _iter_months(start: str, end: str) -> list[str]:
-    """Return each YYYY-MM month from start to end inclusive (assumes start <= end).
-
-    Finance-local twin of the API-layer helper; defined here so the repository
-    never imports upward from the api layer.
-    """
-    year, month = int(start[:4]), int(start[5:7])
-    end_year, end_month = int(end[:4]), int(end[5:7])
-    months: list[str] = []
-    while (year, month) <= (end_year, end_month):
-        months.append(f"{year:04d}-{month:02d}")
-        month += 1
-        if month > 12:
-            month, year = 1, year + 1
-    return months
-
-
 def _account_owner_lock_key(tenant_id: UUID, adsense_account_id: str) -> int:
     r"""Return a stable signed-bigint advisory-lock key for one (tenant, account).
 
@@ -248,27 +231,34 @@ class SqlAlchemyChannelAccountLinkRepository:
     def _require_range_open(self, start: str, end: str | None) -> None:
         """Raise ChannelAccountLinkLockedMonthError if any covered month is LOCKED.
 
-        A VERIFIED link feeds allocation for every month in ``[start, end]``, so
-        verify/reject must reject when ANY covered finance month is LOCKED — not
-        only the start month. Bounded ranges are materialized and each month is
-        lock-checked under the per-month advisory lock. Open-ended ranges cannot
-        be materialized, so the start month is lock-checked and any already
-        -LOCKED close row at or after the start (a covered month) is rejected.
+        A VERIFIED link feeds allocation for every month in ``[start, end]`` (or
+        ``[start, ∞)`` when open-ended), so verify/reject must reject when ANY
+        covered finance month is LOCKED — not only the start month.
+
+        The start month is lock-checked under its per-month advisory lock
+        (materializing only its own OPEN close row). The rest of the range is
+        screened with a single bounded SELECT for an already-LOCKED close row, so
+        an authorized far-future ``effective_month_end`` cannot insert (and
+        advisory-lock) one ``finance_month_close`` row per covered month. A
+        residual race remains for a covered month closed concurrently after this
+        scan but before commit; fully serializing that needs a shared lock on the
+        month-close path and is tracked as a follow-up (Docs/15_DELIVERY_BACKLOG.md).
         """
-        if end is not None:
-            for month in _iter_months(start, end):
-                self._require_month_open(month)
-            return
+        # FIX: the prior bounded path called _require_month_open() for every
+        # covered month, and that helper creates a close row + takes an advisory
+        # lock per month — a far-future end (e.g. 9999-12) would materialize ~95k
+        # rows and locks in one transaction. Lock+check only the start, then
+        # screen the remaining range with one SELECT for any already-LOCKED month.
         self._require_month_open(start)
+        statement = select(FinanceMonthCloseORM.month).where(
+            FinanceMonthCloseORM.tenant_id == self._tenant_id,
+            FinanceMonthCloseORM.status == "LOCKED",
+            FinanceMonthCloseORM.month >= start,
+        )
+        if end is not None:
+            statement = statement.where(FinanceMonthCloseORM.month <= end)
         locked_month = self._session.scalars(
-            select(FinanceMonthCloseORM.month)
-            .where(
-                FinanceMonthCloseORM.tenant_id == self._tenant_id,
-                FinanceMonthCloseORM.status == "LOCKED",
-                FinanceMonthCloseORM.month >= start,
-            )
-            .order_by(FinanceMonthCloseORM.month)
-            .limit(1)
+            statement.order_by(FinanceMonthCloseORM.month).limit(1)
         ).first()
         if locked_month is not None:
             raise ChannelAccountLinkLockedMonthError(
@@ -427,6 +417,13 @@ class SqlAlchemyChannelAccountLinkRepository:
         """
         row = self._load_owned(link_id)
         self._acquire_account_owner_lock(row.adsense_account_id)
+        # FIX: re-read the row AFTER acquiring the per-account advisory lock. The
+        # row is loaded before the lock; if a concurrent verify commits while this
+        # call waits on the lock, the in-memory verification_status is stale and
+        # the locked-month guard below would be wrongly skipped, letting a
+        # now-VERIFIED link flip to REJECTED over a closed month. refresh() reads
+        # the committed state the lock now serializes us behind.
+        self._session.refresh(row)
         # FIX: rejecting a currently-VERIFIED link removes it from
         # list_verified_adsense_account_channels() for every covered month,
         # which would silently change allocation for already-closed months.

@@ -17,10 +17,11 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine, select
+from sqlalchemy import create_engine, func, select, update
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import (
+    AdsenseContentOwnerLinkORM,
     ContentOwnerChannelLinkORM,
     FinanceBase,
     FinanceMonthCloseORM,
@@ -563,13 +564,78 @@ def test_reject_verified_link_in_locked_range_raises(tmp_path):
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
         link = _propose(repo, start="2026-01", end="2026-03")
         repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="ok")
-        # verify materialized OPEN close rows for every covered month; lock
-        # 2026-02 to model a close that happens after the link is VERIFIED.
-        close = session.scalars(
-            select(FinanceMonthCloseORM).where(FinanceMonthCloseORM.month == "2026-02")
-        ).one()
-        close.status = "LOCKED"
+        # Lock a covered month AFTER the link is VERIFIED to model a close that
+        # lands later. verify no longer materializes every covered month, so the
+        # 2026-02 close row is inserted here directly.
+        session.add(FinanceMonthCloseORM(month="2026-02", status="LOCKED"))
         session.flush()
+        with pytest.raises(ChannelAccountLinkLockedMonthError, match="2026-02"):
+            repo.reject_account_owner_link(link.id, verified_by=VERIFIER, reason="undo")
+
+
+def test_verify_far_future_range_does_not_materialize_months(tmp_path):
+    """A bounded link to a far-future end must not create one close row per month.
+
+    verify screens the covered range with a single bounded SELECT, so an
+    authorized far-future ``effective_month_end`` cannot insert (and
+    advisory-lock) a finance_month_close row for every covered month — only the
+    start month's row is materialized.
+    """
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo, start="2026-01", end="9999-12")
+        repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="ok")
+        session.flush()
+        close_rows = session.scalar(
+            select(func.count()).select_from(FinanceMonthCloseORM)
+        )
+    assert close_rows == 1  # only the start month, not ~96k rows
+
+
+def test_verify_far_future_range_still_detects_locked_month(tmp_path):
+    """The single-SELECT range scan still catches a LOCKED month deep in a long range."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        session.add(FinanceMonthCloseORM(month="2030-06", status="LOCKED"))
+        session.flush()
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo, start="2026-01", end="9999-12")
+        with pytest.raises(ChannelAccountLinkLockedMonthError, match="2030-06"):
+            repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="x")
+
+
+def test_reject_reloads_link_status_after_acquiring_account_lock(tmp_path, monkeypatch):
+    """reject re-reads the row under the per-account lock (TOCTOU guard).
+
+    Models the race window: the row is loaded UNVERIFIED, then another
+    transaction verifies it and locks a covered month while reject waits on the
+    advisory lock. reject must observe the committed VERIFIED status (so the
+    locked-month guard fires), not the stale UNVERIFIED state it first loaded.
+    """
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo, start="2026-01", end="2026-03")
+        session.flush()
+
+        def _concurrent_verify_and_close(_account_id):
+            # Stand in for another transaction committing during the lock wait:
+            # flip the row to VERIFIED and lock a covered month WITHOUT touching
+            # the already-loaded ORM instance (Core UPDATE, no session sync), so
+            # the in-memory verification_status stays stale until refresh().
+            session.execute(
+                update(AdsenseContentOwnerLinkORM)
+                .where(AdsenseContentOwnerLinkORM.adsense_account_id == "pub-1")
+                .values(verification_status="VERIFIED")
+                .execution_options(synchronize_session=False)
+            )
+            session.add(FinanceMonthCloseORM(month="2026-02", status="LOCKED"))
+            session.flush()
+
+        monkeypatch.setattr(
+            repo, "_acquire_account_owner_lock", _concurrent_verify_and_close
+        )
         with pytest.raises(ChannelAccountLinkLockedMonthError, match="2026-02"):
             repo.reject_account_owner_link(link.id, verified_by=VERIFIER, reason="undo")
 
