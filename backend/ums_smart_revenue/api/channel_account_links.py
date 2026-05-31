@@ -29,8 +29,13 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
+from ums_smart_revenue.connectors.google.adsense_management_client import (
+    _validated_account_id,
+)
+from ums_smart_revenue.connectors.google.errors import MalformedAdsenseAccountIdError
 from ums_smart_revenue.finance.channel_account_links import (
     ChannelAccountLinkConflictError,
+    ChannelAccountLinkLockedMonthError,
     ChannelAccountLinkNotFoundError,
     ChannelAccountLinkValidationError,
     SqlAlchemyChannelAccountLinkRepository,
@@ -64,6 +69,55 @@ def _require_permission(
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Missing permission: {permission.value}",
+        )
+
+
+def _iter_months(start: str, end: str) -> list[str]:
+    """Return each YYYY-MM month from start to end inclusive (assumes start <= end)."""
+    year, month = int(start[:4]), int(start[5:7])
+    end_year, end_month = int(end[:4]), int(end[5:7])
+    months: list[str] = []
+    while (year, month) <= (end_year, end_month):
+        months.append(f"{year:04d}-{month:02d}")
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+    return months
+
+
+# ============================================================================
+# Purpose: Authorize a verify/reject decision over the link's FULL effective
+#   month range, not just its start month, before the money-gating transition.
+# Database/ORM: None (pure authorization predicate).
+# Standards: fail-closed; HTTP 403 via _require_permission; route-boundary authz.
+# Blast Radius: Authorization (tightens; never broadens). No finance/audit write.
+# Connections:
+#   - File: backend/ums_smart_revenue/auth/policy.py -> has_permission scope match.
+#   - File: backend/ums_smart_revenue/finance/channel_account_links.py -> a
+#     VERIFIED link is consumed by allocation for every month in [start, end].
+# ============================================================================
+def _require_allocation_permission_for_range(
+    user: UserPrincipal, start: str, end: str | None
+) -> None:
+    """Require CHANGE_ALLOCATION_RULE for every month a verified link is consumed.
+
+    A verified account↔owner link feeds allocation for every month in its
+    [start, end] effective range, so a caller scoped to only the start month
+    must not be able to approve (or reject) a mapping that changes allocations
+    in later months they were not granted. An open-ended link (end=None) spans
+    an unbounded set of future months that no finite set of month-scoped grants
+    can cover, so only a global allocation grant authorizes it. The bounded path
+    falls back to the start month if the stored range is empty so it never
+    authorizes without at least one explicit month check (fail closed).
+    """
+    if end is None:
+        _require_permission(
+            user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()
+        )
+        return
+    for month in _iter_months(start, end) or [start]:
+        _require_permission(
+            user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(month)
         )
 
 
@@ -162,6 +216,17 @@ class ProposeAccountOwnerLinkRequest(BaseModel):
         """Strip leading/trailing whitespace from string field values."""
         return value.strip() if isinstance(value, str) else value
 
+    @field_validator("adsense_account_id", mode="before")
+    @classmethod
+    def _canonicalize_adsense_account_id(cls, value):
+        """Strip the accounts/ resource prefix and reject malformed account ids."""
+        if not isinstance(value, str):
+            return value
+        try:
+            return _validated_account_id(value)
+        except MalformedAdsenseAccountIdError as exc:
+            raise ValueError(str(exc)) from exc
+
 
 class AccountOwnerLinkMutationResponse(BaseModel):
     """Typed response for a single-link mutation."""
@@ -244,7 +309,8 @@ def _decide_link(
     MANAGE_ORG_MAPPING (global, month-independent) is checked FIRST so a caller
     without org-mapping trust cannot probe link existence. The exact link is then
     loaded by id (404 if unknown — no list pagination), and CHANGE_ALLOCATION_RULE
-    is checked on that link's own effective month.
+    is checked on EVERY finance month in the link's effective range (not just the
+    start month) so a month-scoped caller cannot approve a multi-month mapping.
     """
     _require_permission(user, Permission.MANAGE_ORG_MAPPING, AccessScope.global_scope())
     try:
@@ -253,9 +319,12 @@ def _decide_link(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="unknown link"
         ) from exc
-    _require_permission(
-        user, Permission.CHANGE_ALLOCATION_RULE,
-        AccessScope.finance_month(existing.effective_month_start),
+    # FIX: a VERIFIED link is consumed by allocation for every month in its
+    # [start, end] range; the previous check only gated effective_month_start,
+    # letting a caller scoped to the start month approve later months they were
+    # not granted (and any month for an open-ended range). Gate the full range.
+    _require_allocation_permission_for_range(
+        user, existing.effective_month_start, existing.effective_month_end
     )
     # FIX: user.user_id is a str on UserPrincipal; the repository's verified_by
     # parameter is typed UUID and the ORM column is Uuid() — pass a UUID object
@@ -282,6 +351,8 @@ def _decide_link(
             event_type = AuditEventType.CHANNEL_ACCOUNT_LINK_REJECTED
     except ChannelAccountLinkNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ChannelAccountLinkLockedMonthError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     except ChannelAccountLinkConflictError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     record = record_audit_event(

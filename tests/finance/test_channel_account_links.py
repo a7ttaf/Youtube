@@ -20,15 +20,21 @@ import pytest
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.finance_models import ContentOwnerChannelLinkORM, FinanceBase
+from ums_smart_revenue.db.finance_models import (
+    ContentOwnerChannelLinkORM,
+    FinanceBase,
+    FinanceMonthCloseORM,
+)
 from ums_smart_revenue.db.source_models import GoogleRevenueSourceRowORM
 from ums_smart_revenue.finance.channel_account_links import (
     AccountOwnerLink,
     ChannelAccountLinkConflictError,
+    ChannelAccountLinkLockedMonthError,
     ChannelAccountLinkNotFoundError,
     ChannelAccountLinkValidationError,
     SqlAlchemyChannelAccountLinkRepository,
     _account_owner_lock_key,
+    _is_unique_violation,
     _ranges_overlap,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
@@ -507,3 +513,36 @@ def test_read_contract_dedups_channel_reachable_twice(tmp_path):
             tenant_id=TENANT, month="2026-04", adsense_account_id="pub-1"
         )
     assert got == ["chan-1"]  # deduped to a single entry
+
+
+def test_verify_locked_month_raises_error(tmp_path):
+    """verify_account_owner_link raises ChannelAccountLinkLockedMonthError on a LOCKED month."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        session.add(FinanceMonthCloseORM(month="2026-01", status="LOCKED"))
+        session.flush()
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo, start="2026-01")
+        with pytest.raises(ChannelAccountLinkLockedMonthError, match="locked"):
+            repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="x")
+
+
+def test_is_unique_violation_classifies_correctly():
+    """_is_unique_violation returns True only for UNIQUE constraint violations."""
+    from sqlalchemy.exc import IntegrityError as SAIntegrityError
+
+    class _PG23505:
+        pgcode = "23505"
+
+    class _PG23000:
+        pgcode = "23000"
+
+    assert _is_unique_violation(SAIntegrityError("x", {}, _PG23505())) is True
+    assert _is_unique_violation(SAIntegrityError("x", {}, _PG23000())) is False
+    assert _is_unique_violation(
+        SAIntegrityError("x", {}, Exception("UNIQUE constraint failed: t.col"))
+    ) is True
+    assert _is_unique_violation(
+        SAIntegrityError("x", {}, Exception("NOT NULL constraint failed"))
+    ) is False
+    assert _is_unique_violation(SAIntegrityError("x", {}, None)) is False

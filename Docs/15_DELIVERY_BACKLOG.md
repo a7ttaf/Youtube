@@ -186,6 +186,17 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   derived from source rows), audited propose/verify/reject API behind dual
   MANAGE_ORG_MAPPING + CHANGE_ALLOCATION_RULE gates, per-account advisory-lock
   overlap invariant, and `list_verified_adsense_account_channels` for Spec 2b.
+  - ✅ PR #57 review hardening (Codex/Kody): allocation permission now checked
+    for every finance month in a link's effective range (not just start month);
+    verify blocked on LOCKED months (409); AdSense account ids canonicalized
+    (`accounts/` prefix stripped) before persist so verified reads match
+    ingestion; duplicate-proposal IntegrityError narrowed to true unique
+    violations (non-unique integrity errors re-raise instead of mis-mapping
+    to 409).
+  - ⏳ Deferred follow-up (PR #57 N2): supersede/close-range workflow to
+    end-date an open-ended VERIFIED link without `reject` wiping its historical
+    months. Needs a dedicated atomic cap-then-verify operation; out of this
+    PR's contract. Sequence ahead of / with Spec 2b allocation consumption.
 - ⏳ Allocation engine (Spec 2b) — remaining: not started; consumes the verified map.
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed

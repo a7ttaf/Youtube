@@ -30,6 +30,7 @@ from ums_smart_revenue.db.finance_models import (
     ContentOwnerChannelLinkORM,
 )
 from ums_smart_revenue.db.source_models import GoogleRevenueSourceRowORM
+from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
@@ -37,6 +38,16 @@ _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 _MONTH_LENGTH = 7
 _OPEN_END = "9999-12"  # sentinel for open-ended ranges in overlap comparison
 _VALID_LINK_STATUSES = frozenset({"UNVERIFIED", "VERIFIED", "REJECTED", "CONFLICT"})
+
+
+def _is_unique_violation(exc: IntegrityError) -> bool:
+    """Return True when exc is a unique-constraint violation, False otherwise."""
+    orig = getattr(exc, "orig", None)
+    if orig is None:
+        return False
+    if hasattr(orig, "pgcode"):
+        return orig.pgcode == "23505"
+    return "UNIQUE constraint failed" in str(orig)
 
 
 class ChannelAccountLinkError(ValueError):
@@ -53,6 +64,10 @@ class ChannelAccountLinkConflictError(ChannelAccountLinkError):
 
 class ChannelAccountLinkNotFoundError(ChannelAccountLinkError):
     """Raised when a link id does not exist for the tenant."""
+
+
+class ChannelAccountLinkLockedMonthError(ChannelAccountLinkError):
+    """Raised when verifying a link whose effective_month_start is LOCKED."""
 
 
 @dataclass(frozen=True)
@@ -186,6 +201,20 @@ class SqlAlchemyChannelAccountLinkRepository:
         lock_key = _account_owner_lock_key(self._tenant_id, adsense_account_id)
         self._session.execute(select(func.pg_advisory_xact_lock(lock_key)))
 
+    def _require_month_open(self, month: str) -> None:
+        """Raise ChannelAccountLinkLockedMonthError when the month is LOCKED.
+
+        Acquires the finance-month advisory lock (for_update=True) to serialize
+        with concurrent month close/unlock operations.
+        """
+        close = get_or_create_month_close_row(
+            self._session, month, tenant_id=self._tenant_id, for_update=True
+        )
+        if close.status == "LOCKED":
+            raise ChannelAccountLinkLockedMonthError(
+                f"Finance month {month!r} is locked; verify is not permitted"
+            )
+
     def propose_account_owner_link(
         self, *,
         adsense_account_id: str,
@@ -200,6 +229,8 @@ class SqlAlchemyChannelAccountLinkRepository:
         Raises:
             ChannelAccountLinkValidationError: If a month is malformed or end <
                 start.
+            ChannelAccountLinkConflictError: If a proposal for the same
+                (account, owner, effective_month_start) already exists.
         """
         _validate_month(effective_month_start)
         if effective_month_end is not None:
@@ -222,6 +253,8 @@ class SqlAlchemyChannelAccountLinkRepository:
         try:
             self._session.flush()
         except IntegrityError as exc:
+            if not _is_unique_violation(exc):
+                raise
             raise ChannelAccountLinkConflictError(
                 f"a proposal for account {adsense_account_id!r} / owner "
                 f"{content_owner_id!r} starting {effective_month_start!r} already exists"
@@ -291,6 +324,7 @@ class SqlAlchemyChannelAccountLinkRepository:
         """
         row = self._load_owned(link_id)
         self._acquire_account_owner_lock(row.adsense_account_id)
+        self._require_month_open(row.effective_month_start)
         existing = self._session.scalars(
             select(AdsenseContentOwnerLinkORM).where(
                 AdsenseContentOwnerLinkORM.tenant_id == self._tenant_id,

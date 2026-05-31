@@ -1,12 +1,25 @@
 """Endpoint tests for the channel-account map (auth, audit, payload safety)."""
 from uuid import UUID, uuid4
 
+import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.channel_account_links import (
+    _iter_months,
+    _require_allocation_permission_for_range,
+)
 from ums_smart_revenue.app import create_app
-from ums_smart_revenue.db.finance_models import AdsenseContentOwnerLinkORM, FinanceBase
+from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
+from ums_smart_revenue.auth.permissions import Permission
+from ums_smart_revenue.auth.scopes import AccessScope
+from ums_smart_revenue.db.finance_models import (
+    AdsenseContentOwnerLinkORM,
+    FinanceBase,
+    FinanceMonthCloseORM,
+)
 from ums_smart_revenue.db.org_models import OrgBase
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
@@ -243,3 +256,96 @@ def test_verify_with_malformed_actor_id_fails_clean(tmp_path):
         json={"reason": "x"},
     )
     assert response.status_code == 400
+
+
+def test_verify_locked_month_returns_409(tmp_path):
+    """Verify on a LOCKED finance month returns 409 CONFLICT."""
+    database_url = build_database_url(tmp_path)
+    engine = create_engine(database_url)
+    OrgBase.metadata.create_all(engine)
+    SecurityBase.metadata.create_all(engine)
+    FinanceBase.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(UserORM(id=USER_ID, email="map-admin@example.com", display_name="Map Admin"))
+        session.add(FinanceMonthCloseORM(month="2026-09", status="LOCKED"))
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+    link_id = _propose_via_api(client, account="pub-9", owner="owner-9", start="2026-09")
+    response = client.post(
+        f"/revenue/channel-account-links/{link_id}/verify",
+        headers=auth_headers("super_owner", "global"),
+        json={"reason": "attempt on locked month"},
+    )
+    assert response.status_code == 409
+    assert "locked" in response.json()["detail"].lower()
+
+
+def test_propose_canonicalizes_adsense_account_id_prefix(tmp_path):
+    """POST with accounts/ prefix stores the id with the prefix stripped."""
+    database_url = build_database_url(tmp_path)
+    seed(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    response = client.post(
+        "/revenue/channel-account-links",
+        headers=auth_headers("corporate_admin", "global"),
+        json={
+            "adsense_account_id": "accounts/pub-99",
+            "content_owner_id": "owner-9",
+            "effective_month_start": "2026-03",
+            "effective_month_end": None,
+            "provenance_kind": "OPERATOR_ASSERTED",
+            "provenance_payload": {},
+            "reason": "canonicalization test",
+        },
+    )
+    assert response.status_code == 201
+    assert response.json()["link"]["adsense_account_id"] == "pub-99"
+
+
+def test_iter_months_inclusive_with_year_rollover():
+    """_iter_months yields each YYYY-MM start..end inclusive, rolling over years."""
+    assert _iter_months("2026-03", "2026-03") == ["2026-03"]
+    assert _iter_months("2026-11", "2027-02") == [
+        "2026-11", "2026-12", "2027-01", "2027-02",
+    ]
+
+
+def test_allocation_permission_gated_for_whole_range():
+    """CHANGE_ALLOCATION_RULE must cover every month a verified link is consumed.
+
+    A caller scoped to only the start month must not approve a multi-month or
+    open-ended mapping; a global allocation grant authorizes any range.
+    """
+    month_scoped = UserPrincipal(
+        user_id=str(USER_ID),
+        email="map-admin@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.CHANGE_ALLOCATION_RULE,
+                AccessScope.finance_month("2026-01"),
+            ),
+        ),
+    )
+    # Single-month link fully within the grant: allowed (no raise).
+    _require_allocation_permission_for_range(month_scoped, "2026-01", "2026-01")
+    # Multi-month range extends past the granted month: 403.
+    with pytest.raises(HTTPException) as multi:
+        _require_allocation_permission_for_range(month_scoped, "2026-01", "2026-06")
+    assert multi.value.status_code == 403
+    # Open-ended range needs a global grant: 403 for a month-scoped caller.
+    with pytest.raises(HTTPException) as open_ended:
+        _require_allocation_permission_for_range(month_scoped, "2026-01", None)
+    assert open_ended.value.status_code == 403
+
+    global_scoped = UserPrincipal(
+        user_id=str(USER_ID),
+        email="map-admin@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()
+            ),
+        ),
+    )
+    # Global allocation grant authorizes both a bounded and an open-ended range.
+    _require_allocation_permission_for_range(global_scoped, "2026-01", "2026-12")
+    _require_allocation_permission_for_range(global_scoped, "2026-01", None)
