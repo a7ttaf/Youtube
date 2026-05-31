@@ -221,15 +221,24 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
     canceled by the held covered-month row-lock wait; reverting the scan to a plain
     SELECT makes it fail).
   - ✅ PR #57 review hardening round 4 (Codex/Kody/CodeRabbit): the same
-    concurrent-close protection now covers the *derivation* path.
-    `upsert_owner_channel_links_from_source` reads observed source-row months
-    first, then row-locks the `finance_month_close` rows for those months with a
-    single `SELECT ... FOR UPDATE` before deciding which months to skip as LOCKED
-    — so a concurrent close can no longer flip an observed OPEN month to LOCKED
-    between the skip decision and the derived-link inserts (GSk; proven on live
-    Postgres by `test_repo_derivation_blocks_on_held_observed_month_close_row_lock`,
-    which fails "DID NOT RAISE" when the scan is reverted to a plain SELECT). Each
-    derived insert now runs in its own `SAVEPOINT` and swallows only a genuine
+    concurrent-close protection now covers the *derivation* path, and more
+    strongly than the verify/reject path can. `upsert_owner_channel_links_from_source`
+    reads observed source-row months first, then for EVERY observed month
+    get-or-creates + row-locks its `finance_month_close` row under the same
+    advisory + `FOR UPDATE` guard the close path uses
+    (`get_or_create_month_close_row(for_update=True)`), in sorted order for a
+    stable lock sequence. Because the observed months are bounded by months that
+    actually have source rows (unlike a verify link's open-ended/far-future range),
+    derivation can serialize row CREATION too: an absent observed month is created
+    OPEN and locked here, so a concurrent close blocks until we commit (month stays
+    OPEN) or commits first (we read LOCKED and skip the month). This fully closes
+    the absent-month window on the derivation side — there is no N9 residual here
+    (GSk; proven on live Postgres by two contention tests that each fail "DID NOT
+    RAISE" when the guard is downgraded:
+    `test_repo_derivation_blocks_on_held_observed_month_close_row_lock` for an
+    existing OPEN month and
+    `test_repo_derivation_blocks_on_held_absent_observed_month_advisory_lock` for a
+    month with no close row). Each derived insert now runs in its own `SAVEPOINT` and swallows only a genuine
     `uq_content_owner_channel_links_key` unique violation (a duplicate landing
     between the existence probe and flush from a parallel worker), re-raising any
     other `IntegrityError` so the derivation stays idempotent under concurrency
@@ -242,17 +251,23 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
     gained an explicit `Raises:` docstring section documenting
     `ChannelAccountLinkLockedMonthError` (KHa).
   - ⏳ Deferred follow-up (PR #57 N9): narrowed residual concurrent-close race in
-    `_require_range_open`. The `FOR UPDATE` range scan above closes the race for
-    covered months whose close row ALREADY exists. The remaining window is a
-    covered month with NO close row at scan time that is closed concurrently — the
-    close inserts a fresh LOCKED row that a row-level lock on absent rows cannot
-    cover (open-ended/long ranges can't materialize a row per future month to lock
-    it). Eliminating this needs a shared serialization point on the month-close
-    path itself (e.g. PostgreSQL `SERIALIZABLE`/predicate-range lock, or a
-    per-tenant close-epoch advisory lock both paths take) — a close-path change
-    outside this PR's scope. Risk bounded: no production consumer of
-    `list_verified_adsense_account_channels` until Spec 2b; both verify/reject and
-    close are dual-gated admin actions. File:
+    `_require_range_open` (verify/reject path ONLY — the derivation path is now
+    fully closed, see round 4 above). The start month is materialized + locked via
+    `get_or_create_month_close_row(for_update=True)`, and the `FOR UPDATE` range
+    scan closes the race for covered months whose close row ALREADY exists. The
+    remaining window is a covered month *after* start with NO close row at scan
+    time that is closed concurrently — the close inserts a fresh LOCKED row that a
+    row-level lock on absent rows cannot cover. The derivation fix (get-or-create +
+    lock every observed month) does NOT transfer here: a verify link's range can be
+    open-ended (`effective_month_end = None`) or far-future bounded, so per-month
+    materialization is unbounded/infeasible and would reintroduce the ~95k-row
+    insert the round-3 -iW fix removed. Eliminating this needs a shared
+    serialization point on the month-close path itself (e.g. PostgreSQL
+    `SERIALIZABLE`/predicate-range lock, or a per-tenant close-epoch advisory lock
+    both paths take) — a close-path change outside this PR's scope that also needs
+    owner approval as a finance-close refactor. Risk bounded: no production
+    consumer of `list_verified_adsense_account_channels` until Spec 2b; both
+    verify/reject and close are dual-gated admin actions. File:
     `backend/ums_smart_revenue/finance/channel_account_links.py`
     (`_require_range_open`); sequence with Spec 2b / month-close hardening.
   - ⏳ Deferred follow-up (PR #57 N10): the API allocation-permission check

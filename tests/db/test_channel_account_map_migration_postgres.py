@@ -340,3 +340,73 @@ def test_repo_derivation_blocks_on_held_observed_month_close_row_lock(
     finally:
         holder_txn.rollback()
         holder.close()
+
+
+def test_repo_derivation_blocks_on_held_absent_observed_month_advisory_lock(
+    alembic_config, fresh_engine
+):
+    """Proof derivation get-or-creates + locks the close row for an ABSENT month.
+
+    Connection A holds the per-(tenant, month) advisory lock for an observed month
+    that has NO finance_month_close row (2026-07). A second Session runs
+    upsert_owner_channel_links_from_source under a short statement_timeout; because
+    the derivation now get-or-creates + locks EVERY observed month under the same
+    advisory guard the close path uses (get_or_create_month_close_row(for_update=
+    True)) — not only existing rows — it blocks acquiring the held advisory lock and
+    the wait is canceled. This closes the absent-month window (a concurrent close
+    inserting a fresh LOCKED row for a month with no row at read time) on the
+    derivation path (PR #57 -GSk, round 4). Reverting the derivation to lock only
+    EXISTING close rows makes this test fail (the absent month is never locked).
+    """
+    from datetime import UTC, datetime
+    from uuid import UUID
+
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session
+
+    from ums_smart_revenue.db.source_models import GoogleRevenueSourceRowORM
+    from ums_smart_revenue.finance.channel_account_links import (
+        SqlAlchemyChannelAccountLinkRepository,
+    )
+    from ums_smart_revenue.finance.month_close import _finance_month_advisory_lock_key
+
+    command.upgrade(alembic_config, "head")
+    tenant = UUID(UMS_TENANT_ID)
+
+    # Seed one source-row co-occurrence for observed month 2026-07 and NO close row
+    # (the absent-month case the round-4 get-or-create guard must serialize).
+    with Session(fresh_engine) as setup:
+        setup.add(
+            GoogleRevenueSourceRowORM(
+                tenant_id=tenant, source_system="youtube_reporting",
+                source_row_key="deriv-absent-key".ljust(64, "0"),
+                source_account_id="pub-deriv", content_owner_id="owner-absent",
+                youtube_channel_id="chan-absent", report_month="2026-07",
+                report_type="channel_basic_a2",
+                period_start=datetime(2026, 7, 1, tzinfo=UTC).date(),
+                period_end=datetime(2026, 7, 31, tzinfo=UTC).date(),
+                metric_key="estimated_partner_revenue", value_kind="estimated",
+                amount_native=0, currency_code="USD", raw_payload={},
+            )
+        )
+        setup.commit()
+
+    lock_key = _finance_month_advisory_lock_key("2026-07", tenant)
+    holder = fresh_engine.connect()
+    holder_txn = holder.begin()
+    try:
+        # Hold the per-(tenant, month) advisory lock for the ABSENT observed month so
+        # the derivation's get_or_create_month_close_row advisory acquire blocks.
+        holder.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": lock_key})
+        with Session(fresh_engine) as contender:
+            contender.execute(text("SET statement_timeout = '750ms'"))
+            repo = SqlAlchemyChannelAccountLinkRepository(contender, tenant_id=tenant)
+            with pytest.raises(OperationalError) as exc_info:
+                repo.upsert_owner_channel_links_from_source()
+            err_msg = str(exc_info.value).lower()
+            assert "canceling statement" in err_msg or "statement timeout" in err_msg, (
+                "derivation must be canceled waiting on the absent-month advisory lock"
+            )
+    finally:
+        holder_txn.rollback()
+        holder.close()

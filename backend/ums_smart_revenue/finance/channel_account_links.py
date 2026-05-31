@@ -551,11 +551,17 @@ class SqlAlchemyChannelAccountLinkRepository:
         Months whose finance close row is LOCKED are skipped: the read contract
         consumes active owner↔channel links for that month, so deriving a new
         link after close would change allocation for an already-closed period.
-        The existing close rows for the observed months are screened with a single
-        ``SELECT ... FOR UPDATE`` so a concurrent month close of an existing OPEN
-        observed month is serialized against this derivation — either we read its
-        committed LOCKED state (and skip the month) or it blocks until we commit.
-        FOR UPDATE is a no-op on SQLite.
+        Unlike the verify/reject range (which can be open-ended or far-future and
+        must not materialize a row per month), the observed months are bounded by
+        the months that actually have source rows, so each one is get-or-created
+        and row-locked under the SAME advisory + ``FOR UPDATE`` guard the close
+        path uses (``get_or_create_month_close_row(for_update=True)``), in sorted
+        order for a stable lock sequence. This serializes derivation against a
+        concurrent close even for a month with NO close row at read time: the
+        month is created OPEN and locked here, so the close either blocks until we
+        commit or we read its committed LOCKED state and skip — closing the
+        absent-row window that remains (N9) on the verify/reject path. The
+        advisory lock and ``FOR UPDATE`` are no-ops on SQLite.
 
         Idempotent under concurrency: a per-row existence probe avoids insert
         churn on the common path, and each insert runs in its own SAVEPOINT so a
@@ -565,15 +571,16 @@ class SqlAlchemyChannelAccountLinkRepository:
         the whole derivation job.
         """
         # FIX (post-close serialization, was PR #57 -GSk): read the observed
-        # (owner, channel, month) co-occurrences first, then row-lock the EXISTING
-        # finance_month_close rows for exactly those months with FOR UPDATE before
-        # deciding which are LOCKED. This takes the SAME row lock the close path
-        # acquires via get_or_create_month_close_row(for_update=True), so a
-        # concurrent close of an existing OPEN observed month cannot flip it to
-        # LOCKED between this read and our insert (it blocks until we commit, or we
-        # read its committed LOCKED state and skip). Residual: a month with NO
-        # close row at read time, closed concurrently via a fresh LOCKED insert —
-        # the same absent-month window tracked as PR #57 N9. No-op on SQLite.
+        # (owner, channel, month) co-occurrences first, then for EVERY observed
+        # month get-or-create + row-lock its finance_month_close row under the SAME
+        # advisory + FOR UPDATE guard the close path uses
+        # (get_or_create_month_close_row(for_update=True)). The observed months are
+        # bounded by months that actually have source rows, so — unlike the
+        # open-ended verify/reject range — we can serialize CREATION too: an absent
+        # observed month is created OPEN and locked here, so a concurrent close
+        # blocks until we commit (and we keep the month OPEN) or commits first (and
+        # we read LOCKED and skip). This closes the absent-row window that remains
+        # as N9 on the verify/reject path. Advisory lock + FOR UPDATE no-op on SQLite.
         observed = self._session.execute(
             select(
                 GoogleRevenueSourceRowORM.content_owner_id,
@@ -592,21 +599,13 @@ class SqlAlchemyChannelAccountLinkRepository:
                 GoogleRevenueSourceRowORM.report_month,
             )
         ).all()
-        observed_months = {month for _owner, _channel, month, _key in observed}
         locked_months: set[str] = set()
-        if observed_months:
-            close_rows = self._session.execute(
-                select(FinanceMonthCloseORM.month, FinanceMonthCloseORM.status)
-                .where(
-                    FinanceMonthCloseORM.tenant_id == self._tenant_id,
-                    FinanceMonthCloseORM.month.in_(observed_months),
-                )
-                .order_by(FinanceMonthCloseORM.month)
-                .with_for_update()
-            ).all()
-            locked_months = {
-                month for month, status in close_rows if status == "LOCKED"
-            }
+        for month in sorted({m for _owner, _channel, m, _key in observed}):
+            close = get_or_create_month_close_row(
+                self._session, month, tenant_id=self._tenant_id, for_update=True
+            )
+            if close.status == "LOCKED":
+                locked_months.add(month)
         created = 0
         for owner_id, channel_id, month, source_key in observed:
             if month in locked_months:
