@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
@@ -232,3 +232,85 @@ class SqlAlchemyChannelAccountLinkRepository:
             effective_month_start=row.effective_month_start,
             effective_month_end=row.effective_month_end,
         )
+
+    def _load_owned(self, link_id: str) -> AdsenseContentOwnerLinkORM:
+        """Load a tenant-owned account↔owner row by id or raise NotFound."""
+        try:
+            uuid_id = UUID(str(link_id))
+        except ValueError as exc:
+            raise ChannelAccountLinkNotFoundError(f"unknown link: {link_id!r}") from exc
+        row = self._session.scalars(
+            select(AdsenseContentOwnerLinkORM).where(
+                AdsenseContentOwnerLinkORM.id == uuid_id,
+                AdsenseContentOwnerLinkORM.tenant_id == self._tenant_id,
+            )
+        ).one_or_none()
+        if row is None:
+            raise ChannelAccountLinkNotFoundError(f"unknown link: {link_id!r}")
+        return row
+
+    def get_account_owner_link(self, link_id: str) -> AccountOwnerLink:
+        """Return one account↔owner link by id (tenant-scoped, exact read).
+
+        Used by the verify/reject route to authorize on the link's own month
+        without scanning a paginated list.
+
+        Raises:
+            ChannelAccountLinkNotFoundError: If the link id is unknown.
+        """
+        return self._to_account_owner_link(self._load_owned(link_id))
+
+    def verify_account_owner_link(
+        self, link_id: str, *, verified_by: UUID, reason: str
+    ) -> AccountOwnerLink:
+        """Transition a link to VERIFIED, enforcing the per-account overlap invariant.
+
+        Acquires the per-account advisory lock first so concurrent verifies for
+        one account cannot both commit overlapping VERIFIED rows.
+
+        Raises:
+            ChannelAccountLinkNotFoundError: If the link id is unknown.
+            ChannelAccountLinkConflictError: If a VERIFIED link already overlaps.
+        """
+        row = self._load_owned(link_id)
+        self._acquire_account_owner_lock(row.adsense_account_id)
+        existing = self._session.scalars(
+            select(AdsenseContentOwnerLinkORM).where(
+                AdsenseContentOwnerLinkORM.tenant_id == self._tenant_id,
+                AdsenseContentOwnerLinkORM.adsense_account_id == row.adsense_account_id,
+                AdsenseContentOwnerLinkORM.verification_status == "VERIFIED",
+                AdsenseContentOwnerLinkORM.id != row.id,
+            )
+        ).all()
+        for other in existing:
+            if _ranges_overlap(
+                row.effective_month_start, row.effective_month_end,
+                other.effective_month_start, other.effective_month_end,
+            ):
+                raise ChannelAccountLinkConflictError(
+                    "a verified link already covers an overlapping month range "
+                    f"for account {row.adsense_account_id}"
+                )
+        row.verification_status = "VERIFIED"
+        row.verified_by = verified_by
+        row.verified_at = datetime.now(UTC)
+        row.verification_reason = reason
+        self._session.flush()
+        return self._to_account_owner_link(row)
+
+    def reject_account_owner_link(
+        self, link_id: str, *, verified_by: UUID, reason: str
+    ) -> AccountOwnerLink:
+        """Transition a link to REJECTED (money-affecting; same gate as verify).
+
+        Raises:
+            ChannelAccountLinkNotFoundError: If the link id is unknown.
+        """
+        row = self._load_owned(link_id)
+        self._acquire_account_owner_lock(row.adsense_account_id)
+        row.verification_status = "REJECTED"
+        row.verified_by = verified_by
+        row.verified_at = datetime.now(UTC)
+        row.verification_reason = reason
+        self._session.flush()
+        return self._to_account_owner_link(row)

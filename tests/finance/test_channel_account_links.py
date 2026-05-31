@@ -22,6 +22,8 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.db.finance_models import FinanceBase
 from ums_smart_revenue.finance.channel_account_links import (
     AccountOwnerLink,
+    ChannelAccountLinkConflictError,
+    ChannelAccountLinkNotFoundError,
     ChannelAccountLinkValidationError,
     SqlAlchemyChannelAccountLinkRepository,
     _account_owner_lock_key,
@@ -128,3 +130,80 @@ def test_propose_rejects_end_before_start(tmp_path):
                 effective_month_start="2026-06", effective_month_end="2026-01",
                 provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
             )
+
+
+def _propose(repo, *, account="pub-1", owner="owner-1", start="2026-01", end=None):
+    return repo.propose_account_owner_link(
+        adsense_account_id=account, content_owner_id=owner,
+        effective_month_start=start, effective_month_end=end,
+        provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+    )
+
+
+def test_verify_marks_verified_and_stamps(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo)
+        out = repo.verify_account_owner_link(
+            link.id, verified_by=VERIFIER, reason="confirmed via contract"
+        )
+        session.commit()
+    assert out.verification_status == "VERIFIED"
+    assert out.verified_by == str(VERIFIER)
+    assert out.verification_reason == "confirmed via contract"
+    assert out.verified_at is not None
+
+
+def test_verify_overlapping_verified_raises_conflict(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        first = _propose(repo, owner="owner-1", start="2026-01", end="2026-06")
+        repo.verify_account_owner_link(first.id, verified_by=VERIFIER, reason="r1")
+        second = _propose(repo, owner="owner-2", start="2026-03", end=None)
+        with pytest.raises(ChannelAccountLinkConflictError):
+            repo.verify_account_owner_link(second.id, verified_by=VERIFIER, reason="r2")
+
+
+def test_verify_non_overlapping_succeeds(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        first = _propose(repo, owner="owner-1", start="2026-01", end="2026-06")
+        repo.verify_account_owner_link(first.id, verified_by=VERIFIER, reason="r1")
+        second = _propose(repo, owner="owner-2", start="2026-07", end=None)
+        out = repo.verify_account_owner_link(second.id, verified_by=VERIFIER, reason="r2")
+    assert out.verification_status == "VERIFIED"
+
+
+def test_reject_then_reverify_competitor_succeeds(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        first = _propose(repo, owner="owner-1", start="2026-01", end=None)
+        repo.verify_account_owner_link(first.id, verified_by=VERIFIER, reason="r1")
+        second = _propose(repo, owner="owner-2", start="2026-01", end=None)
+        repo.reject_account_owner_link(first.id, verified_by=VERIFIER, reason="superseded")
+        out = repo.verify_account_owner_link(second.id, verified_by=VERIFIER, reason="r2")
+    assert out.verification_status == "VERIFIED"
+
+
+def test_verify_missing_id_raises_not_found(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        with pytest.raises(ChannelAccountLinkNotFoundError):
+            repo.verify_account_owner_link(str(uuid4()), verified_by=VERIFIER, reason="x")
+
+
+def test_get_account_owner_link_returns_and_raises(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo)
+        got = repo.get_account_owner_link(link.id)
+        assert got.id == link.id
+        assert got.adsense_account_id == "pub-1"
+        with pytest.raises(ChannelAccountLinkNotFoundError):
+            repo.get_account_owner_link(str(uuid4()))
