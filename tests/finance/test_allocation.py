@@ -1,5 +1,7 @@
 from decimal import Decimal
 
+import pytest
+
 from ums_smart_revenue.finance import allocation
 
 
@@ -234,6 +236,36 @@ def test_aggregate_conservation_across_components():
         result.summary.allocated_total_usd + result.summary.unallocated_total_usd
         == total_in
     )
+
+
+def test_proportional_allocation_rejects_non_positive_basis():
+    with pytest.raises(allocation.AllocationValidationError):
+        allocation._proportional_allocation(Decimal("10.000000"), [])
+    with pytest.raises(allocation.AllocationValidationError):
+        allocation._proportional_allocation(Decimal("10.000000"), [("a", Decimal("0"))])
+
+
+def test_proportional_allocation_negative_residual_conserves():
+    result = allocation._proportional_allocation(
+        Decimal("-1.000000"),
+        [("c1", Decimal("1")), ("c2", Decimal("1")), ("c3", Decimal("1"))],
+    )
+    assert sum(result.values()) == Decimal("-1.000000")
+    assert result == {
+        "c1": Decimal("-0.333333"),
+        "c2": Decimal("-0.333333"),
+        "c3": Decimal("-0.333334"),
+    }
+
+
+def test_negative_total_basis_is_unallocated():
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(amount="5.00")],
+        verified_channels={"pub-1": ["chA"]},
+        gross_basis={("chA", "ADSENSE"): Decimal("-5")},
+    )
+    assert result.unallocated[0].issue_code == "ZERO_GROSS_BASIS"
 
 
 def test_allocates_negative_amount_preserving_sign_and_conservation():

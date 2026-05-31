@@ -26,7 +26,6 @@ from ums_smart_revenue.finance.channel_account_links import (
 )
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api
 from ums_smart_revenue.finance.deduction_ingestion import (
-    DeductionComponentValidationError,
     SqlAlchemyDeductionComponentRepository,
 )
 from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
@@ -180,15 +179,13 @@ def get_account_allocations(
     _require_permission(user, Permission.VIEW_REVENUE, revenue_scope)
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, payment_scope)
 
-    try:
-        components = deduction_repository.list_account_components(
-            month=month, adsense_account_id=adsense_account_id
-        )
-        facts = revenue_repository.list_month_facts(month=month)
-    except DeductionComponentValidationError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
-        ) from exc
+    # _require_valid_month is the single 422 boundary gate; it validates the
+    # same month string passed to every repo, so repo-level month validation
+    # is unreachable here.
+    components = deduction_repository.list_account_components(
+        month=month, adsense_account_id=adsense_account_id
+    )
+    facts = revenue_repository.list_month_facts(month=month)
 
     gross_basis: dict[tuple[str, str], Decimal] = {}
     for fact in facts:

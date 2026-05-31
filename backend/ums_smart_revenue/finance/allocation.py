@@ -45,6 +45,18 @@ def _basis_source_kind(source_system: str) -> str | None:
     return None
 
 
+def _issue(component: DeductionComponent, code: str, detail: str) -> UnallocatedIssue:
+    """Build an UnallocatedIssue from an ACCOUNT component."""
+    return UnallocatedIssue(
+        scope_id=component.scope_id,
+        component_kind=component.component_kind,
+        component_key=component.component_key,
+        amount_usd=component.amount_usd,
+        issue_code=code,
+        detail=detail,
+    )
+
+
 def _proportional_allocation(
     amount: Decimal, weights: list[tuple[str, Decimal]]
 ) -> dict[str, Decimal]:
@@ -52,10 +64,19 @@ def _proportional_allocation(
 
     Largest-remainder (Hamilton) apportionment: floor each share to 6dp, then
     hand the leftover micro-units to the largest fractional remainders
-    (channel_id ascending as the deterministic tiebreak). Requires
-    basis_total > 0; conserves exactly: sum(result.values()) == amount.
+    (channel_id ascending as the deterministic tiebreak). For NEGATIVE amounts
+    the leftover micro-units land on the least-negative remainder (the tiebreak
+    is sign-relative; ascending channel_id still breaks exact ties).
+
+    Raises AllocationValidationError when basis_total <= 0; the caller in
+    build_account_allocation guards this case before reaching here.
+    Conserves exactly: sum(result.values()) == amount.
     """
     basis_total = sum((weight for _, weight in weights), Decimal("0"))
+    if basis_total <= 0:
+        raise AllocationValidationError(
+            "basis_total must be positive for proportional allocation"
+        )
     floors: dict[str, Decimal] = {}
     remainders: list[tuple[Decimal, str]] = []
     allocated = Decimal("0")
@@ -155,7 +176,13 @@ def build_account_allocation(
     verified_channels: Mapping[str, Sequence[str]],
     gross_basis: Mapping[tuple[str, str], Decimal],
 ) -> AccountAllocationResult:
-    """Compute per-channel allocation + unallocated issues for one month."""
+    """Compute per-channel allocation + unallocated issues for one month.
+
+    Precondition: each verified_channels[account] is expected to contain
+    DISTINCT channel ids (the Spec 2a read contract
+    list_verified_adsense_account_channels guarantees this via .distinct());
+    duplicates would double-count.
+    """
     lines: list[AllocationLine] = []
     unallocated: list[UnallocatedIssue] = []
     notes: list[AllocationNote] = []
@@ -234,10 +261,10 @@ def build_account_allocation(
             continue
 
         basis_total = sum((gross for _, gross in present), Decimal("0"))
-        if basis_total == 0:
+        if basis_total <= 0:
             unallocated.append(
                 _issue(component, "ZERO_GROSS_BASIS",
-                       "verified channels have zero source-aligned gross")
+                       "verified channels have zero or negative source-aligned gross")
             )
             continue
 
@@ -283,16 +310,4 @@ def build_account_allocation(
         unallocated=tuple(unallocated),
         notes=tuple(notes),
         summary=summary,
-    )
-
-
-def _issue(component: DeductionComponent, code: str, detail: str) -> UnallocatedIssue:
-    """Build an UnallocatedIssue from an ACCOUNT component."""
-    return UnallocatedIssue(
-        scope_id=component.scope_id,
-        component_kind=component.component_kind,
-        component_key=component.component_key,
-        amount_usd=component.amount_usd,
-        issue_code=code,
-        detail=detail,
     )
