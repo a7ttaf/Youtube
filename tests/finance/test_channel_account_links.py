@@ -102,6 +102,8 @@ def test_propose_creates_unverified_link(tmp_path):
     assert link.verification_status == "UNVERIFIED"
     assert link.adsense_account_id == "pub-1"
     assert link.effective_month_end is None
+    assert isinstance(link.id, str) and link.id
+    assert link.provenance_payload == {"note": "manual"}
 
 
 def test_propose_rejects_bad_month(tmp_path):
@@ -112,5 +114,17 @@ def test_propose_rejects_bad_month(tmp_path):
             repo.propose_account_owner_link(
                 adsense_account_id="pub-1", content_owner_id="owner-1",
                 effective_month_start="2026-13", effective_month_end=None,
+                provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+            )
+
+
+def test_propose_rejects_end_before_start(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        with pytest.raises(ChannelAccountLinkValidationError, match="effective_month_end"):
+            repo.propose_account_owner_link(
+                adsense_account_id="pub-1", content_owner_id="owner-1",
+                effective_month_start="2026-06", effective_month_end="2026-01",
                 provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
             )
