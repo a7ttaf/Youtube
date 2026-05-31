@@ -532,9 +532,13 @@ def test_is_unique_violation_classifies_correctly():
     from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
     class _PG23505:
+        """Stand-in DBAPI cause with the PostgreSQL unique-violation pgcode."""
+
         pgcode = "23505"
 
     class _PG23000:
+        """Stand-in DBAPI cause with a non-unique integrity pgcode."""
+
         pgcode = "23000"
 
     assert _is_unique_violation(SAIntegrityError("x", {}, _PG23505())) is True
