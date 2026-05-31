@@ -22,6 +22,7 @@ from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import (
@@ -35,6 +36,7 @@ from ums_smart_revenue.tenancy.context import get_current_tenant
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 _MONTH_LENGTH = 7
 _OPEN_END = "9999-12"  # sentinel for open-ended ranges in overlap comparison
+_VALID_LINK_STATUSES = frozenset({"UNVERIFIED", "VERIFIED", "REJECTED", "CONFLICT"})
 
 
 class ChannelAccountLinkError(ValueError):
@@ -217,7 +219,13 @@ class SqlAlchemyChannelAccountLinkRepository:
             effective_month_end=effective_month_end,
         )
         self._session.add(row)
-        self._session.flush()
+        try:
+            self._session.flush()
+        except IntegrityError as exc:
+            raise ChannelAccountLinkConflictError(
+                f"a proposal for account {adsense_account_id!r} / owner "
+                f"{content_owner_id!r} starting {effective_month_start!r} already exists"
+            ) from exc
         return self._to_account_owner_link(row)
 
     @staticmethod
@@ -348,6 +356,10 @@ class SqlAlchemyChannelAccountLinkRepository:
             raise ChannelAccountLinkValidationError("offset must be >= 0")
         filters = [AdsenseContentOwnerLinkORM.tenant_id == self._tenant_id]
         if status is not None:
+            if status not in _VALID_LINK_STATUSES:
+                raise ChannelAccountLinkValidationError(
+                    f"invalid status {status!r}; expected one of {sorted(_VALID_LINK_STATUSES)}"
+                )
             filters.append(AdsenseContentOwnerLinkORM.verification_status == status)
         if adsense_account_id is not None:
             filters.append(AdsenseContentOwnerLinkORM.adsense_account_id == adsense_account_id)

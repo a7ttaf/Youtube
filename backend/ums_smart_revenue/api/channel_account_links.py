@@ -159,6 +159,7 @@ class ProposeAccountOwnerLinkRequest(BaseModel):
     )
     @classmethod
     def _strip(cls, value):
+        """Strip leading/trailing whitespace from string field values."""
         return value.strip() if isinstance(value, str) else value
 
 
@@ -206,6 +207,8 @@ def propose_channel_account_link(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
+    except ChannelAccountLinkConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
     record = record_audit_event(
         sink=audit_sink, actor=user,
         event_type=AuditEventType.CHANNEL_ACCOUNT_LINK_PROPOSED,

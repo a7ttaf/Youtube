@@ -133,7 +133,6 @@ def test_repo_verify_blocks_on_held_per_account_advisory_lock(alembic_config, fr
         SqlAlchemyChannelAccountLinkRepository,
         _account_owner_lock_key,
     )
-    from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
     command.upgrade(alembic_config, "head")
     tenant = UUID(UMS_TENANT_ID)
@@ -160,12 +159,12 @@ def test_repo_verify_blocks_on_held_per_account_advisory_lock(alembic_config, fr
             # statement_timeout reliably cancels a blocked advisory-lock wait.
             contender.execute(text("SET statement_timeout = '750ms'"))
             repo = SqlAlchemyChannelAccountLinkRepository(contender, tenant_id=tenant)
-            raised = False
-            try:
+            with pytest.raises(OperationalError) as exc_info:
                 repo.verify_account_owner_link(link_id, verified_by=uuid4(), reason="x")
-            except OperationalError:
-                raised = True
-            assert raised, "verify must block on the held per-account advisory lock"
+            err_msg = str(exc_info.value).lower()
+            assert "canceling statement" in err_msg or "statement timeout" in err_msg, (
+                "verify must be canceled by lock-wait timeout, not another OperationalError"
+            )
     finally:
         holder_txn.rollback()
         holder.close()
@@ -180,7 +179,6 @@ def test_repo_verify_succeeds_uncontended_on_postgres(alembic_config, fresh_engi
     from ums_smart_revenue.finance.channel_account_links import (
         SqlAlchemyChannelAccountLinkRepository,
     )
-    from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
     command.upgrade(alembic_config, "head")
     tenant = UUID(UMS_TENANT_ID)

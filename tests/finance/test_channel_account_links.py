@@ -276,6 +276,14 @@ def test_list_rejects_bad_month(tmp_path):
             repo.list_account_owner_links(month="2026-13", limit=10, offset=0)
 
 
+def test_list_rejects_invalid_status(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        with pytest.raises(ChannelAccountLinkValidationError, match="invalid status"):
+            repo.list_account_owner_links(status="BOGUS", limit=10, offset=0)
+
+
 def test_list_month_filter_enforces_upper_bound(tmp_path):
     # A link whose range ENDED before the queried month is excluded. The link's
     # start (2026-01) still satisfies the lower bound at 2026-02, so only the

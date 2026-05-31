@@ -124,6 +124,8 @@ def upgrade() -> None:
             "effective_month_end IS NULL OR effective_month_end >= effective_month_start",
             name="ck_content_owner_channel_links_range",
         ),
+        sa.CheckConstraint("length(content_owner_id) >= 1", name="ck_content_owner_channel_links_owner_nonempty"),
+        sa.CheckConstraint("length(youtube_channel_id) >= 1", name="ck_content_owner_channel_links_channel_nonempty"),
     )
     # Postgres-only object guard (invalid SQLite CREATE syntax), mirroring the
     # ORM's .ddl_if(dialect="postgresql") CHECK in finance_models.py.

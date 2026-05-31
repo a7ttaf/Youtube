@@ -855,6 +855,14 @@ class ContentOwnerChannelLinkORM(FinanceBase):
             "effective_month_end IS NULL OR effective_month_end >= effective_month_start",
             name="ck_content_owner_channel_links_range",
         ),
+        CheckConstraint(
+            "length(content_owner_id) >= 1",
+            name="ck_content_owner_channel_links_owner_nonempty",
+        ),
+        CheckConstraint(
+            "length(youtube_channel_id) >= 1",
+            name="ck_content_owner_channel_links_channel_nonempty",
+        ),
         Index(
             "ix_content_owner_channel_links_owner",
             "tenant_id", "content_owner_id", "effective_month_start",
