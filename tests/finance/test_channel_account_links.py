@@ -222,3 +222,53 @@ def test_reverify_rejected_same_link_succeeds(tmp_path):
         out = repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="reinstated")
     assert out.verification_status == "VERIFIED"
     assert out.verification_reason == "reinstated"
+
+
+def test_list_filters_paginates_and_counts(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        _propose(repo, account="pub-1", owner="owner-1", start="2026-01")
+        _propose(repo, account="pub-1", owner="owner-2", start="2026-02")
+        _propose(repo, account="pub-2", owner="owner-9", start="2026-01")
+        session.flush()
+        page = repo.list_account_owner_links(
+            adsense_account_id="pub-1", limit=1, offset=0
+        )
+        all_pub1 = repo.list_account_owner_links(adsense_account_id="pub-1", limit=50, offset=0)
+    assert page.total_count == 2
+    assert len(page.links) == 1
+    assert {link.adsense_account_id for link in all_pub1.links} == {"pub-1"}
+
+
+def test_list_status_and_month_filter(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        a = _propose(repo, account="pub-1", owner="owner-1", start="2026-01", end="2026-03")
+        _propose(repo, account="pub-1", owner="owner-2", start="2026-08", end=None)
+        repo.verify_account_owner_link(a.id, verified_by=VERIFIER, reason="r")
+        session.flush()
+        verified = repo.list_account_owner_links(status="VERIFIED", limit=50, offset=0)
+        feb = repo.list_account_owner_links(month="2026-02", limit=50, offset=0)
+    assert {link.verification_status for link in verified.links} == {"VERIFIED"}
+    assert all(link.effective_month_start <= "2026-02" for link in feb.links)
+    assert feb.total_count == 1
+
+
+def test_list_rejects_bad_bounds(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        with pytest.raises(ChannelAccountLinkValidationError, match="limit"):
+            repo.list_account_owner_links(limit=0, offset=0)
+        with pytest.raises(ChannelAccountLinkValidationError, match="offset"):
+            repo.list_account_owner_links(limit=10, offset=-1)
+
+
+def test_list_rejects_bad_month(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        with pytest.raises(ChannelAccountLinkValidationError):
+            repo.list_account_owner_links(month="2026-13", limit=10, offset=0)

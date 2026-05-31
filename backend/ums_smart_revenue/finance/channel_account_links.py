@@ -319,3 +319,58 @@ class SqlAlchemyChannelAccountLinkRepository:
         row.verification_reason = reason
         self._session.flush()
         return self._to_account_owner_link(row)
+
+    def list_account_owner_links(
+        self, *,
+        status: str | None = None,
+        adsense_account_id: str | None = None,
+        content_owner_id: str | None = None,
+        month: str | None = None,
+        limit: int,
+        offset: int,
+    ) -> AccountOwnerLinkPage:
+        """Return a filtered, paginated page of account↔owner links + full count.
+
+        ``month`` filters to links valid for that month (start <= month <=
+        coalesce(end, month)).
+
+        Raises:
+            ChannelAccountLinkValidationError: If month is malformed, limit < 1,
+                or offset < 0.
+        """
+        if limit < 1:
+            raise ChannelAccountLinkValidationError("limit must be >= 1")
+        if offset < 0:
+            raise ChannelAccountLinkValidationError("offset must be >= 0")
+        filters = [AdsenseContentOwnerLinkORM.tenant_id == self._tenant_id]
+        if status is not None:
+            filters.append(AdsenseContentOwnerLinkORM.verification_status == status)
+        if adsense_account_id is not None:
+            filters.append(AdsenseContentOwnerLinkORM.adsense_account_id == adsense_account_id)
+        if content_owner_id is not None:
+            filters.append(AdsenseContentOwnerLinkORM.content_owner_id == content_owner_id)
+        if month is not None:
+            _validate_month(month)
+            filters.append(AdsenseContentOwnerLinkORM.effective_month_start <= month)
+            filters.append(
+                (AdsenseContentOwnerLinkORM.effective_month_end.is_(None))
+                | (AdsenseContentOwnerLinkORM.effective_month_end >= month)
+            )
+        total_count = self._session.scalar(
+            select(func.count()).select_from(AdsenseContentOwnerLinkORM).where(*filters)
+        )
+        rows = self._session.scalars(
+            select(AdsenseContentOwnerLinkORM)
+            .where(*filters)
+            .order_by(
+                AdsenseContentOwnerLinkORM.adsense_account_id,
+                AdsenseContentOwnerLinkORM.content_owner_id,
+                AdsenseContentOwnerLinkORM.effective_month_start,
+            )
+            .limit(limit)
+            .offset(offset)
+        ).all()
+        return AccountOwnerLinkPage(
+            total_count=int(total_count or 0),
+            links=[self._to_account_owner_link(row) for row in rows],
+        )
