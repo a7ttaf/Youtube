@@ -208,7 +208,7 @@ class ProposeAccountOwnerLinkRequest(BaseModel):
     reason: str = Field(min_length=1)
 
     @field_validator(
-        "adsense_account_id", "content_owner_id", "provenance_kind", "reason",
+        "content_owner_id", "provenance_kind", "reason",
         mode="before",
     )
     @classmethod
@@ -219,11 +219,18 @@ class ProposeAccountOwnerLinkRequest(BaseModel):
     @field_validator("adsense_account_id", mode="before")
     @classmethod
     def _canonicalize_adsense_account_id(cls, value):
-        """Strip the accounts/ resource prefix and reject malformed account ids."""
+        """Strip whitespace + the accounts/ prefix; reject malformed account ids."""
         if not isinstance(value, str):
             return value
         try:
-            return _validated_account_id(value)
+            # FIX: strip here rather than relying on the shared `_strip`
+            # validator. Pydantic v2 runs same-mode `before` validators in
+            # reverse declaration order, so `_canonicalize` ran BEFORE `_strip`
+            # and passed the still-padded value to `_validated_account_id`,
+            # which fail-closes on surrounding whitespace — so a valid padded id
+            # like "  accounts/pub-1  " was rejected with 422. adsense_account_id
+            # is no longer in `_strip`'s field list to avoid double-processing.
+            return _validated_account_id(value.strip())
         except MalformedAdsenseAccountIdError as exc:
             raise ValueError(str(exc)) from exc
 

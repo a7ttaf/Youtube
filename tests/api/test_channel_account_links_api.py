@@ -301,6 +301,25 @@ def test_propose_canonicalizes_adsense_account_id_prefix(tmp_path):
     assert response.status_code == 201
     assert response.json()["link"]["adsense_account_id"] == "pub-99"
 
+    # Surrounding whitespace + the accounts/ prefix together: must strip then
+    # canonicalize (locks in the validator-ordering fix — a padded value reached
+    # _validated_account_id un-stripped and was wrongly rejected with 422).
+    padded = client.post(
+        "/revenue/channel-account-links",
+        headers=auth_headers("corporate_admin", "global"),
+        json={
+            "adsense_account_id": "  accounts/pub-100  ",
+            "content_owner_id": "owner-10",
+            "effective_month_start": "2026-04",
+            "effective_month_end": None,
+            "provenance_kind": "OPERATOR_ASSERTED",
+            "provenance_payload": {},
+            "reason": "whitespace + prefix canonicalization",
+        },
+    )
+    assert padded.status_code == 201
+    assert padded.json()["link"]["adsense_account_id"] == "pub-100"
+
 
 def test_iter_months_inclusive_with_year_rollover():
     """_iter_months yields each YYYY-MM start..end inclusive, rolling over years."""

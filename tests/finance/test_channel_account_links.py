@@ -527,22 +527,112 @@ def test_verify_locked_month_raises_error(tmp_path):
             repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="x")
 
 
+def test_verify_locked_month_inside_bounded_range_raises(tmp_path):
+    """verify rejects when a LOCKED month sits inside the link's bounded range.
+
+    The link starts in an OPEN month (2026-01) but spans a LOCKED month
+    (2026-02); a VERIFIED link feeds allocation for every covered month, so
+    verify must reject the whole range — not only check the start month.
+    """
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        session.add(FinanceMonthCloseORM(month="2026-02", status="LOCKED"))
+        session.flush()
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo, start="2026-01", end="2026-03")
+        with pytest.raises(ChannelAccountLinkLockedMonthError, match="2026-02"):
+            repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="x")
+
+
+def test_verify_open_ended_rejects_when_later_month_locked(tmp_path):
+    """An open-ended link is rejected when a LOCKED month at/after start exists."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        session.add(FinanceMonthCloseORM(month="2026-05", status="LOCKED"))
+        session.flush()
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo, start="2026-01", end=None)
+        with pytest.raises(ChannelAccountLinkLockedMonthError, match="2026-05"):
+            repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="x")
+
+
+def test_reject_verified_link_in_locked_range_raises(tmp_path):
+    """Rejecting a VERIFIED link covering a LOCKED month is blocked (closed-month guard)."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo, start="2026-01", end="2026-03")
+        repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="ok")
+        # verify materialized OPEN close rows for every covered month; lock
+        # 2026-02 to model a close that happens after the link is VERIFIED.
+        close = session.scalars(
+            select(FinanceMonthCloseORM).where(FinanceMonthCloseORM.month == "2026-02")
+        ).one()
+        close.status = "LOCKED"
+        session.flush()
+        with pytest.raises(ChannelAccountLinkLockedMonthError, match="2026-02"):
+            repo.reject_account_owner_link(link.id, verified_by=VERIFIER, reason="undo")
+
+
+def test_reject_unverified_link_in_locked_month_succeeds(tmp_path):
+    """An UNVERIFIED proposal in a LOCKED month is still rejectable (not in read contract)."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        session.add(FinanceMonthCloseORM(month="2026-01", status="LOCKED"))
+        session.flush()
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo, start="2026-01")
+        out = repo.reject_account_owner_link(link.id, verified_by=VERIFIER, reason="bad")
+    assert out.verification_status == "REJECTED"
+
+
+def test_derivation_skips_locked_months(tmp_path):
+    """Derivation does not insert owner↔channel links for a LOCKED month."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        session.add(FinanceMonthCloseORM(month="2026-04", status="LOCKED"))
+        _source_row(session, owner="owner-1", channel="chan-1", month="2026-04", key="k-locked")
+        _source_row(session, owner="owner-1", channel="chan-2", month="2026-05", key="k-open")
+        session.commit()
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        created = repo.upsert_owner_channel_links_from_source()
+        session.commit()
+        rows = session.scalars(select(ContentOwnerChannelLinkORM)).all()
+    assert created == 1  # only the OPEN month's link is derived
+    assert [(r.youtube_channel_id, r.effective_month_start) for r in rows] == [
+        ("chan-2", "2026-05"),
+    ]
+
+
 def test_is_unique_violation_classifies_correctly():
     """_is_unique_violation returns True only for UNIQUE constraint violations."""
     from sqlalchemy.exc import IntegrityError as SAIntegrityError
 
     class _PG23505:
-        """Stand-in DBAPI cause with the PostgreSQL unique-violation pgcode."""
+        """Stand-in DBAPI cause with the psycopg2-style unique-violation pgcode."""
 
         pgcode = "23505"
 
     class _PG23000:
-        """Stand-in DBAPI cause with a non-unique integrity pgcode."""
+        """Stand-in DBAPI cause with a non-unique psycopg2 integrity pgcode."""
 
         pgcode = "23000"
 
+    class _Psycopg3Unique:
+        """Stand-in psycopg3 cause: SQLSTATE via `sqlstate`, no `pgcode`."""
+
+        sqlstate = "23505"
+
+    class _Psycopg3NotNull:
+        """Stand-in psycopg3 cause with a non-unique SQLSTATE."""
+
+        sqlstate = "23502"
+
     assert _is_unique_violation(SAIntegrityError("x", {}, _PG23505())) is True
     assert _is_unique_violation(SAIntegrityError("x", {}, _PG23000())) is False
+    # psycopg3 (the pinned driver) exposes SQLSTATE via `sqlstate`, not `pgcode`.
+    assert _is_unique_violation(SAIntegrityError("x", {}, _Psycopg3Unique())) is True
+    assert _is_unique_violation(SAIntegrityError("x", {}, _Psycopg3NotNull())) is False
     assert _is_unique_violation(
         SAIntegrityError("x", {}, Exception("UNIQUE constraint failed: t.col"))
     ) is True

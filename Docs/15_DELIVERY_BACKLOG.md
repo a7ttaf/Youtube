@@ -193,10 +193,30 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
     ingestion; duplicate-proposal IntegrityError narrowed to true unique
     violations (non-unique integrity errors re-raise instead of mis-mapping
     to 409).
+  - ✅ PR #57 review hardening round 2 (Codex/Kody/CodeRabbit): unique-violation
+    detection now recognizes psycopg3 `sqlstate` (the pinned driver), not only
+    psycopg2 `pgcode`, so duplicate POSTs return 409 on PostgreSQL; verify AND
+    reject now guard the FULL covered month range (a bounded link spanning a
+    later LOCKED month no longer verifies, and rejecting a VERIFIED link over a
+    closed month is blocked so it can't silently drop closed-month allocation
+    evidence); owner↔channel derivation skips LOCKED months (no new post-close
+    evidence); and the request model strips whitespace before canonicalizing
+    `adsense_account_id` (a padded `accounts/…` value previously 422'd due to
+    Pydantic v2 before-validator ordering).
   - ⏳ Deferred follow-up (PR #57 N2): supersede/close-range workflow to
     end-date an open-ended VERIFIED link without `reject` wiping its historical
     months. Needs a dedicated atomic cap-then-verify operation; out of this
     PR's contract. Sequence ahead of / with Spec 2b allocation consumption.
+  - ⏳ Deferred follow-up (PR #57 N8, Codex): reconcile/deactivate stale derived
+    `content_owner_channel_links` when a replacement import removes the backing
+    source rows for a month. `upsert_owner_channel_links_from_source` is
+    currently insert-only, so a derived link can outlive its evidence and keep
+    a channel in `list_verified_adsense_account_channels`. Net-new deactivation
+    behavior with its own locked-month interactions (must not deactivate links
+    for already-closed months); no production consumer until Spec 2b, so
+    sequence with the allocation engine. File:
+    `backend/ums_smart_revenue/finance/channel_account_links.py`
+    (`upsert_owner_channel_links_from_source`).
 - ⏳ Allocation engine (Spec 2b) — remaining: not started; consumes the verified map.
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed

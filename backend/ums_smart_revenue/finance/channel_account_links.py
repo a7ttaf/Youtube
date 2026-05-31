@@ -28,6 +28,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.db.finance_models import (
     AdsenseContentOwnerLinkORM,
     ContentOwnerChannelLinkORM,
+    FinanceMonthCloseORM,
 )
 from ums_smart_revenue.db.source_models import GoogleRevenueSourceRowORM
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
@@ -41,12 +42,24 @@ _VALID_LINK_STATUSES = frozenset({"UNVERIFIED", "VERIFIED", "REJECTED", "CONFLIC
 
 
 def _is_unique_violation(exc: IntegrityError) -> bool:
-    """Return True when exc is a unique-constraint violation, False otherwise."""
+    """Return True when exc wraps a unique-constraint violation, else False.
+
+    Recognizes psycopg3 (``sqlstate``), psycopg2 (``pgcode``), and SQLite
+    (message text) so a duplicate proposal surfaces as a 409 on every backend.
+    """
     orig = getattr(exc, "orig", None)
     if orig is None:
         return False
-    if hasattr(orig, "pgcode"):
-        return orig.pgcode == "23505"
+    # FIX: this project pins psycopg3 (psycopg[binary]==3.3.4), which exposes
+    # SQLSTATE via `sqlstate`, not the psycopg2 `pgcode`. Checking only `pgcode`
+    # let a real PostgreSQL duplicate fall through to the SQLite-message branch
+    # and return False, so the duplicate POST bubbled as an unhandled
+    # IntegrityError instead of the intended 409. Check `sqlstate` first, then
+    # `pgcode` (psycopg2), then the SQLite message.
+    for attr in ("sqlstate", "pgcode"):
+        code = getattr(orig, attr, None)
+        if code is not None:
+            return code == "23505"
     return "UNIQUE constraint failed" in str(orig)
 
 
@@ -67,7 +80,7 @@ class ChannelAccountLinkNotFoundError(ChannelAccountLinkError):
 
 
 class ChannelAccountLinkLockedMonthError(ChannelAccountLinkError):
-    """Raised when verifying a link whose effective_month_start is LOCKED."""
+    """Raised when verify/reject would change a link covering a LOCKED month."""
 
 
 @dataclass(frozen=True)
@@ -158,6 +171,23 @@ def _ranges_overlap(
     return start_a <= eb and start_b <= ea
 
 
+def _iter_months(start: str, end: str) -> list[str]:
+    """Return each YYYY-MM month from start to end inclusive (assumes start <= end).
+
+    Finance-local twin of the API-layer helper; defined here so the repository
+    never imports upward from the api layer.
+    """
+    year, month = int(start[:4]), int(start[5:7])
+    end_year, end_month = int(end[:4]), int(end[5:7])
+    months: list[str] = []
+    while (year, month) <= (end_year, end_month):
+        months.append(f"{year:04d}-{month:02d}")
+        month += 1
+        if month > 12:
+            month, year = 1, year + 1
+    return months
+
+
 def _account_owner_lock_key(tenant_id: UUID, adsense_account_id: str) -> int:
     r"""Return a stable signed-bigint advisory-lock key for one (tenant, account).
 
@@ -213,6 +243,36 @@ class SqlAlchemyChannelAccountLinkRepository:
         if close.status == "LOCKED":
             raise ChannelAccountLinkLockedMonthError(
                 f"Finance month {month!r} is locked; verify is not permitted"
+            )
+
+    def _require_range_open(self, start: str, end: str | None) -> None:
+        """Raise ChannelAccountLinkLockedMonthError if any covered month is LOCKED.
+
+        A VERIFIED link feeds allocation for every month in ``[start, end]``, so
+        verify/reject must reject when ANY covered finance month is LOCKED — not
+        only the start month. Bounded ranges are materialized and each month is
+        lock-checked under the per-month advisory lock. Open-ended ranges cannot
+        be materialized, so the start month is lock-checked and any already
+        -LOCKED close row at or after the start (a covered month) is rejected.
+        """
+        if end is not None:
+            for month in _iter_months(start, end):
+                self._require_month_open(month)
+            return
+        self._require_month_open(start)
+        locked_month = self._session.scalars(
+            select(FinanceMonthCloseORM.month)
+            .where(
+                FinanceMonthCloseORM.tenant_id == self._tenant_id,
+                FinanceMonthCloseORM.status == "LOCKED",
+                FinanceMonthCloseORM.month >= start,
+            )
+            .order_by(FinanceMonthCloseORM.month)
+            .limit(1)
+        ).first()
+        if locked_month is not None:
+            raise ChannelAccountLinkLockedMonthError(
+                f"Finance month {locked_month!r} is locked; verify is not permitted"
             )
 
     def propose_account_owner_link(
@@ -320,11 +380,17 @@ class SqlAlchemyChannelAccountLinkRepository:
 
         Raises:
             ChannelAccountLinkNotFoundError: If the link id is unknown.
+            ChannelAccountLinkLockedMonthError: If any month in the link's
+                effective range is LOCKED.
             ChannelAccountLinkConflictError: If a VERIFIED link already overlaps.
         """
         row = self._load_owned(link_id)
         self._acquire_account_owner_lock(row.adsense_account_id)
-        self._require_month_open(row.effective_month_start)
+        # FIX: a VERIFIED link is consumed by allocation for EVERY month in
+        # [start, end], so a bounded link starting in an OPEN month but spanning
+        # a later LOCKED month must not verify. The prior single-month check only
+        # guarded effective_month_start; require the whole covered range open.
+        self._require_range_open(row.effective_month_start, row.effective_month_end)
         existing = self._session.scalars(
             select(AdsenseContentOwnerLinkORM).where(
                 AdsenseContentOwnerLinkORM.tenant_id == self._tenant_id,
@@ -356,9 +422,19 @@ class SqlAlchemyChannelAccountLinkRepository:
 
         Raises:
             ChannelAccountLinkNotFoundError: If the link id is unknown.
+            ChannelAccountLinkLockedMonthError: If the link is currently VERIFIED
+                and any month in its effective range is LOCKED.
         """
         row = self._load_owned(link_id)
         self._acquire_account_owner_lock(row.adsense_account_id)
+        # FIX: rejecting a currently-VERIFIED link removes it from
+        # list_verified_adsense_account_channels() for every covered month,
+        # which would silently change allocation for already-closed months.
+        # Apply the same locked-month guard verify uses before mutating. Only
+        # VERIFIED rows feed the read contract, so UNVERIFIED/REJECTED proposals
+        # in locked months remain freely rejectable (cleanup is harmless).
+        if row.verification_status == "VERIFIED":
+            self._require_range_open(row.effective_month_start, row.effective_month_end)
         row.verification_status = "REJECTED"
         row.verified_by = verified_by
         row.verified_at = datetime.now(UTC)
@@ -431,7 +507,24 @@ class SqlAlchemyChannelAccountLinkRepository:
         Only rows where BOTH content_owner_id and youtube_channel_id are present
         produce links. source_account_id is never read (it must not infer the
         account↔owner link). Returns the count of newly inserted links.
+
+        Months whose finance close row is LOCKED are skipped: the read contract
+        consumes active owner↔channel links for that month, so deriving a new
+        link after close would change allocation for an already-closed period.
         """
+        # FIX: do not introduce new mapping evidence into a closed allocation
+        # period. Without this, a late/replacement import for an already-LOCKED
+        # month would have its newly co-occurring channels inserted as active
+        # links, silently changing list_verified_adsense_account_channels() for
+        # that closed month.
+        locked_months = set(
+            self._session.scalars(
+                select(FinanceMonthCloseORM.month).where(
+                    FinanceMonthCloseORM.tenant_id == self._tenant_id,
+                    FinanceMonthCloseORM.status == "LOCKED",
+                )
+            ).all()
+        )
         observed = self._session.execute(
             select(
                 GoogleRevenueSourceRowORM.content_owner_id,
@@ -452,6 +545,8 @@ class SqlAlchemyChannelAccountLinkRepository:
         ).all()
         created = 0
         for owner_id, channel_id, month, source_key in observed:
+            if month in locked_months:
+                continue  # post-close protection: no new evidence for a LOCKED month
             # Idempotency: this per-row existence probe avoids insert churn; the
             # unique key uq_content_owner_channel_links_key is the authoritative
             # backstop — a concurrent double-insert fails closed at flush.
