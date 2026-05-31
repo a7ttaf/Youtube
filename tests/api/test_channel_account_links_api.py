@@ -212,3 +212,20 @@ def test_reject_sets_rejected(tmp_path):
     assert response.status_code == 200
     assert response.json()["link"]["verification_status"] == "REJECTED"
     assert response.json()["audit_event"]["event_type"] == "CHANNEL_ACCOUNT_LINK_REJECTED"
+
+
+def test_verify_with_malformed_actor_id_fails_clean(tmp_path):
+    # A non-UUID X-User-Id must produce a clean 4xx, never an uncaught 500,
+    # even for an otherwise fully-authorized caller.
+    database_url = build_database_url(tmp_path)
+    seed(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    link_id = _propose_via_api(client)
+    headers = auth_headers("super_owner", "global")
+    headers["x-user-id"] = "not-a-uuid"
+    response = client.post(
+        f"/revenue/channel-account-links/{link_id}/verify",
+        headers=headers,
+        json={"reason": "x"},
+    )
+    assert response.status_code == 400

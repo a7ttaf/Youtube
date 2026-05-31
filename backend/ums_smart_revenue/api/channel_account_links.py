@@ -256,7 +256,15 @@ def _decide_link(
     # FIX: user.user_id is a str on UserPrincipal; the repository's verified_by
     # parameter is typed UUID and the ORM column is Uuid() — pass a UUID object
     # so SQLite's pysqlite dialect can call .hex without AttributeError.
-    actor_uuid = UUID(user.user_id)
+    try:
+        actor_uuid = UUID(user.user_id)
+    except ValueError as exc:
+        # FIX: a malformed principal id (headers-authz mode does not normalize
+        # X-User-Id) must fail clean, not surface as an uncaught 500 after auth.
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid actor identity",
+        ) from exc
     try:
         if verify:
             link = repository.verify_account_owner_link(
