@@ -24,6 +24,7 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.db.finance_models import AdsenseContentOwnerLinkORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
@@ -178,3 +179,56 @@ class SqlAlchemyChannelAccountLinkRepository:
             return
         lock_key = _account_owner_lock_key(self._tenant_id, adsense_account_id)
         self._session.execute(select(func.pg_advisory_xact_lock(lock_key)))
+
+    def propose_account_owner_link(
+        self, *,
+        adsense_account_id: str,
+        content_owner_id: str,
+        effective_month_start: str,
+        effective_month_end: str | None,
+        provenance_kind: str,
+        provenance_payload: dict[str, object],
+    ) -> AccountOwnerLink:
+        """Insert an UNVERIFIED account↔owner candidate.
+
+        Raises:
+            ChannelAccountLinkValidationError: If a month is malformed or end <
+                start.
+        """
+        _validate_month(effective_month_start)
+        if effective_month_end is not None:
+            _validate_month(effective_month_end)
+            if effective_month_end < effective_month_start:
+                raise ChannelAccountLinkValidationError(
+                    "effective_month_end must be >= effective_month_start"
+                )
+        row = AdsenseContentOwnerLinkORM(
+            tenant_id=self._tenant_id,
+            adsense_account_id=adsense_account_id,
+            content_owner_id=content_owner_id,
+            verification_status="UNVERIFIED",
+            provenance_kind=provenance_kind,
+            provenance_payload=dict(provenance_payload or {}),
+            effective_month_start=effective_month_start,
+            effective_month_end=effective_month_end,
+        )
+        self._session.add(row)
+        self._session.flush()
+        return self._to_account_owner_link(row)
+
+    @staticmethod
+    def _to_account_owner_link(row: AdsenseContentOwnerLinkORM) -> AccountOwnerLink:
+        """Convert an ORM row into the read-model dataclass."""
+        return AccountOwnerLink(
+            id=str(row.id),
+            adsense_account_id=row.adsense_account_id,
+            content_owner_id=row.content_owner_id,
+            verification_status=row.verification_status,
+            provenance_kind=row.provenance_kind,
+            provenance_payload=dict(row.provenance_payload or {}),
+            verified_by=None if row.verified_by is None else str(row.verified_by),
+            verified_at=row.verified_at,
+            verification_reason=row.verification_reason,
+            effective_month_start=row.effective_month_start,
+            effective_month_end=row.effective_month_end,
+        )

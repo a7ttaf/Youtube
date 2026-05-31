@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from ums_smart_revenue.db.finance_models import FinanceBase
 from ums_smart_revenue.finance.channel_account_links import (
     AccountOwnerLink,
+    ChannelAccountLinkValidationError,
     SqlAlchemyChannelAccountLinkRepository,
     _account_owner_lock_key,
     _ranges_overlap,
@@ -86,3 +87,30 @@ def test_acquire_lock_is_noop_on_sqlite(tmp_path):
         repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
         # On SQLite this must return without error (no advisory-lock primitive).
         repo._acquire_account_owner_lock("pub-1")
+
+
+def test_propose_creates_unverified_link(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = repo.propose_account_owner_link(
+            adsense_account_id="pub-1", content_owner_id="owner-1",
+            effective_month_start="2026-01", effective_month_end=None,
+            provenance_kind="OPERATOR_ASSERTED", provenance_payload={"note": "manual"},
+        )
+        session.commit()
+    assert link.verification_status == "UNVERIFIED"
+    assert link.adsense_account_id == "pub-1"
+    assert link.effective_month_end is None
+
+
+def test_propose_rejects_bad_month(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        with pytest.raises(ChannelAccountLinkValidationError):
+            repo.propose_account_owner_link(
+                adsense_account_id="pub-1", content_owner_id="owner-1",
+                effective_month_start="2026-13", effective_month_end=None,
+                provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+            )
