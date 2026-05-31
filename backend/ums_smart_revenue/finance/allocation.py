@@ -8,9 +8,15 @@ Docs/superpowers/specs/2026-05-31-spec-account-allocation-design.md.
 
 from __future__ import annotations
 
+from collections.abc import Iterable, Mapping, Sequence
+from dataclasses import dataclass
 from decimal import ROUND_FLOOR, Decimal
 
-from ums_smart_revenue.finance.net_revenue import SOURCE_SYSTEM_TO_SOURCE_KIND
+from ums_smart_revenue.finance.deduction_components import DeductionComponent
+from ums_smart_revenue.finance.net_revenue import (
+    NET_APPLICABLE_COMPONENT_KINDS,
+    SOURCE_SYSTEM_TO_SOURCE_KIND,
+)
 
 ALLOCATION_METHOD = "gross_revenue_proportional"
 _SCALE = Decimal("0.000001")  # 6dp, matches deduction_components.amount_usd
@@ -64,3 +70,229 @@ def _proportional_allocation(
     for index in range(leftover_units):
         floors[order[index][1]] += _SCALE
     return floors
+
+
+@dataclass(frozen=True)
+class AllocationLine:
+    """One ACCOUNT component's allocated share for one channel."""
+
+    adsense_account_id: str
+    youtube_channel_id: str
+    component_kind: str
+    source_system: str
+    component_key: str
+    basis_source_kind: str
+    basis_gross_usd: Decimal
+    basis_share: Decimal
+    allocated_amount_usd: Decimal
+    net_applicable: bool
+
+
+@dataclass(frozen=True)
+class UnallocatedIssue:
+    """An ACCOUNT component (or guarded non-ACCOUNT row) that was not allocated."""
+
+    scope_id: str
+    component_kind: str
+    component_key: str
+    amount_usd: Decimal
+    issue_code: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class AllocationNote:
+    """Informational, non-blocking observation."""
+
+    note_code: str
+    youtube_channel_id: str
+    detail: str
+
+
+@dataclass(frozen=True)
+class AllocationSummary:
+    """Conserved roll-up over all input components."""
+
+    component_count: int
+    allocated_component_count: int
+    unallocated_component_count: int
+    allocated_total_usd: Decimal
+    unallocated_total_usd: Decimal
+    net_applicable_total_usd: Decimal
+    reconciliation_total_usd: Decimal
+
+
+@dataclass(frozen=True)
+class AccountAllocationResult:
+    """Full allocation result for one month."""
+
+    month: str
+    allocation_method: str
+    lines: tuple[AllocationLine, ...]
+    unallocated: tuple[UnallocatedIssue, ...]
+    notes: tuple[AllocationNote, ...]
+    summary: AllocationSummary
+
+
+# ============================================================================
+# Purpose: Allocate ACCOUNT-grain deduction evidence across each account's
+#   verified channels by source-aligned raw-gross-proportional share. Fails
+#   closed (UNALLOCATED) on unmapped accounts or missing/incomplete basis;
+#   never substitutes a different basis. Pure compute — no DB access.
+# Database/ORM: None (caller resolves components, map, and gross basis).
+# Standards: Decimal arithmetic; exact per-component + aggregate conservation;
+#   net_applicable from net_revenue's NET_APPLICABLE_COMPONENT_KINDS.
+# Blast Radius: Finance read-model only. No persistence, no net_revenue change,
+#   no auth, no Neo4j.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/net_revenue.py -> shared constants.
+#   - File: backend/ums_smart_revenue/api/allocation.py -> read endpoint.
+# ============================================================================
+def build_account_allocation(
+    *,
+    month: str,
+    components: Iterable[DeductionComponent],
+    verified_channels: Mapping[str, Sequence[str]],
+    gross_basis: Mapping[tuple[str, str], Decimal],
+) -> AccountAllocationResult:
+    """Compute per-channel allocation + unallocated issues for one month."""
+    lines: list[AllocationLine] = []
+    unallocated: list[UnallocatedIssue] = []
+    notes: list[AllocationNote] = []
+
+    accounts_by_channel: dict[str, set[str]] = {}
+    for account, channels in verified_channels.items():
+        for channel_id in channels:
+            accounts_by_channel.setdefault(channel_id, set()).add(account)
+    for channel_id, accounts in sorted(accounts_by_channel.items()):
+        if len(accounts) > 1:
+            notes.append(
+                AllocationNote(
+                    note_code="CHANNEL_IN_MULTIPLE_ACCOUNTS",
+                    youtube_channel_id=channel_id,
+                    detail=f"channel reachable from {len(accounts)} accounts",
+                )
+            )
+
+    component_count = 0
+    allocated_component_count = 0
+    for component in components:
+        component_count += 1
+        if component.scope_kind != "ACCOUNT":
+            unallocated.append(
+                UnallocatedIssue(
+                    scope_id=component.scope_id,
+                    component_kind=component.component_kind,
+                    component_key=component.component_key,
+                    amount_usd=component.amount_usd,
+                    issue_code="UNSUPPORTED_SCOPE",
+                    detail=f"scope_kind {component.scope_kind} is not allocatable",
+                )
+            )
+            continue
+
+        account = component.scope_id
+        amount = component.amount_usd
+        net_applicable = component.component_kind in NET_APPLICABLE_COMPONENT_KINDS
+
+        if amount == 0:
+            allocated_component_count += 1
+            continue
+
+        channels = list(verified_channels.get(account) or [])
+        if not channels:
+            unallocated.append(
+                _issue(component, "ACCOUNT_UNMAPPED_OR_UNVERIFIED",
+                       "no verified channels for account-month")
+            )
+            continue
+
+        source_kind = _basis_source_kind(component.source_system)
+        if source_kind is None:
+            unallocated.append(
+                _issue(component, "BASIS_MISSING",
+                       f"unresolved source kind for {component.source_system}")
+            )
+            continue
+
+        present = [
+            (channel_id, gross_basis[(channel_id, source_kind)])
+            for channel_id in channels
+            if (channel_id, source_kind) in gross_basis
+        ]
+        if not present:
+            unallocated.append(
+                _issue(component, "BASIS_MISSING",
+                       "no source-aligned gross for any verified channel")
+            )
+            continue
+        if len(present) != len(channels):
+            unallocated.append(
+                _issue(component, "BASIS_INCOMPLETE",
+                       "some verified channels missing source-aligned gross")
+            )
+            continue
+
+        basis_total = sum((gross for _, gross in present), Decimal("0"))
+        if basis_total == 0:
+            unallocated.append(
+                _issue(component, "ZERO_GROSS_BASIS",
+                       "verified channels have zero source-aligned gross")
+            )
+            continue
+
+        allocated = _proportional_allocation(amount, present)
+        for channel_id, gross in present:
+            lines.append(
+                AllocationLine(
+                    adsense_account_id=account,
+                    youtube_channel_id=channel_id,
+                    component_kind=component.component_kind,
+                    source_system=component.source_system,
+                    component_key=component.component_key,
+                    basis_source_kind=source_kind,
+                    basis_gross_usd=gross,
+                    basis_share=(gross / basis_total).quantize(_SCALE),
+                    allocated_amount_usd=allocated[channel_id],
+                    net_applicable=net_applicable,
+                )
+            )
+        allocated_component_count += 1
+
+    allocated_total = sum((ln.allocated_amount_usd for ln in lines), Decimal("0"))
+    unallocated_total = sum((iss.amount_usd for iss in unallocated), Decimal("0"))
+    net_total = sum(
+        (ln.allocated_amount_usd for ln in lines if ln.net_applicable), Decimal("0")
+    )
+    reconciliation_total = sum(
+        (ln.allocated_amount_usd for ln in lines if not ln.net_applicable), Decimal("0")
+    )
+    summary = AllocationSummary(
+        component_count=component_count,
+        allocated_component_count=allocated_component_count,
+        unallocated_component_count=len(unallocated),
+        allocated_total_usd=allocated_total,
+        unallocated_total_usd=unallocated_total,
+        net_applicable_total_usd=net_total,
+        reconciliation_total_usd=reconciliation_total,
+    )
+    return AccountAllocationResult(
+        month=month,
+        allocation_method=ALLOCATION_METHOD,
+        lines=tuple(lines),
+        unallocated=tuple(unallocated),
+        notes=tuple(notes),
+        summary=summary,
+    )
+
+
+def _issue(component: DeductionComponent, code: str, detail: str) -> UnallocatedIssue:
+    """Build an UnallocatedIssue from an ACCOUNT component."""
+    return UnallocatedIssue(
+        scope_id=component.scope_id,
+        component_kind=component.component_kind,
+        component_key=component.component_key,
+        amount_usd=component.amount_usd,
+        issue_code=code,
+        detail=detail,
+    )
