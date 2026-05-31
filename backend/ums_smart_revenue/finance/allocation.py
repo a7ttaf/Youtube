@@ -159,7 +159,8 @@ class AccountAllocationResult:
 @dataclass(frozen=True)
 class _ComponentOutcome:
     """One component's allocation result: produced lines, an optional blocking
-    issue, and whether it counts as allocated (a success or a zero-amount no-op)."""
+    issue, and whether it counts as allocated (a success or a zero-amount no-op).
+    """
 
     lines: tuple[AllocationLine, ...]
     issue: UnallocatedIssue | None
