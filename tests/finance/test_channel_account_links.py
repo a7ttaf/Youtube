@@ -341,3 +341,27 @@ def test_derivation_is_idempotent(tmp_path):
         rows = session.scalars(select(ContentOwnerChannelLinkORM)).all()
     assert again == 0
     assert len(rows) == 1
+
+
+def test_derivation_groups_by_month_and_collapses_duplicate_rows(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        # Two source rows for the same owner/channel/month -> must collapse to one
+        # link; provenance_source_id = min(source_row_key). Plus a second month.
+        _source_row(session, owner="owner-1", channel="chan-1", month="2026-04", key="k-apr-2")
+        _source_row(session, owner="owner-1", channel="chan-1", month="2026-04", key="k-apr-1")
+        _source_row(session, owner="owner-1", channel="chan-1", month="2026-05", key="k-may-1")
+        session.commit()
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        created = repo.upsert_owner_channel_links_from_source()
+        session.commit()
+        rows = session.scalars(
+            select(ContentOwnerChannelLinkORM).order_by(
+                ContentOwnerChannelLinkORM.effective_month_start
+            )
+        ).all()
+    assert created == 2  # one per month; the duplicate April row collapsed
+    assert [r.effective_month_start for r in rows] == ["2026-04", "2026-05"]
+    assert all(r.effective_month_start == r.effective_month_end for r in rows)
+    # April link's provenance is the lexicographically smallest April source key.
+    assert rows[0].provenance_source_id.startswith("k-apr-1")

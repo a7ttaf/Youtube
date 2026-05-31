@@ -406,6 +406,9 @@ class SqlAlchemyChannelAccountLinkRepository:
         ).all()
         created = 0
         for owner_id, channel_id, month, source_key in observed:
+            # Idempotency: this per-row existence probe avoids insert churn; the
+            # unique key uq_content_owner_channel_links_key is the authoritative
+            # backstop — a concurrent double-insert fails closed at flush.
             exists = self._session.scalar(
                 select(func.count())
                 .select_from(ContentOwnerChannelLinkORM)
