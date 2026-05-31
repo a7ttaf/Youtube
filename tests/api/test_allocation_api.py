@@ -127,9 +127,9 @@ def test_finance_viewer_gets_allocation(tmp_path):
     line = body["allocations"][0]
     assert line["adsense_account_id"] == "pub-1"
     assert line["youtube_channel_id"] == "chA"
-    assert line["allocated_amount_usd"] == "100.000000"
+    assert line["allocated_amount_usd"] == "100"
     assert line["net_applicable"] is True
-    assert body["summary"]["allocated_total_usd"] == "100.000000"
+    assert body["summary"]["allocated_total_usd"] == "100"
     assert {e["event_type"] for e in body["audit_events"]} == {"REVENUE_VIEWED", "PAYMENT_VIEWED"}
     engine = create_engine(database_url)
     with Session(engine) as session:

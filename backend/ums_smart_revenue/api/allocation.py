@@ -84,17 +84,6 @@ def _require_valid_month(month: str) -> None:
         )
 
 
-def _alloc_decimal(value: Decimal) -> str:
-    """Serialize a 6dp-quantized allocation Decimal preserving all six places.
-
-    Allocation values from build_account_allocation are always quantized to
-    _SCALE (1e-6). format(value, 'f') preserves the exponent exactly,
-    producing e.g. '100.000000' rather than the normalized '100' that
-    decimal_to_api would emit after normalize() strips trailing zeros.
-    """
-    return format(value, "f")
-
-
 def _result_to_api(result: AccountAllocationResult) -> dict[str, object]:
     """Serialize the allocation result (no secrets, Decimals as strings)."""
     return {
@@ -110,7 +99,7 @@ def _result_to_api(result: AccountAllocationResult) -> dict[str, object]:
                 "basis_source_kind": ln.basis_source_kind,
                 "basis_gross_usd": decimal_to_api(ln.basis_gross_usd),
                 "basis_share": decimal_to_api(ln.basis_share),
-                "allocated_amount_usd": _alloc_decimal(ln.allocated_amount_usd),
+                "allocated_amount_usd": decimal_to_api(ln.allocated_amount_usd),
                 "net_applicable": ln.net_applicable,
             }
             for ln in result.lines
@@ -138,12 +127,12 @@ def _result_to_api(result: AccountAllocationResult) -> dict[str, object]:
             "component_count": result.summary.component_count,
             "allocated_component_count": result.summary.allocated_component_count,
             "unallocated_component_count": result.summary.unallocated_component_count,
-            "allocated_total_usd": _alloc_decimal(result.summary.allocated_total_usd),
-            "unallocated_total_usd": _alloc_decimal(result.summary.unallocated_total_usd),
-            "net_applicable_total_usd": _alloc_decimal(
+            "allocated_total_usd": decimal_to_api(result.summary.allocated_total_usd),
+            "unallocated_total_usd": decimal_to_api(result.summary.unallocated_total_usd),
+            "net_applicable_total_usd": decimal_to_api(
                 result.summary.net_applicable_total_usd
             ),
-            "reconciliation_total_usd": _alloc_decimal(
+            "reconciliation_total_usd": decimal_to_api(
                 result.summary.reconciliation_total_usd
             ),
         },
