@@ -545,7 +545,8 @@ class SqlAlchemyChannelAccountLinkRepository:
         """Idempotently derive owner↔channel links from source-row co-occurrence.
 
         Only rows where BOTH content_owner_id and youtube_channel_id are present
-        produce links. source_account_id is never read (it must not infer the
+        and non-blank produce links (NULL, empty, and whitespace-only identities
+        are skipped). source_account_id is never read (it must not infer the
         account↔owner link). Returns the count of newly inserted links.
 
         Months whose finance close row is LOCKED are skipped: the read contract
@@ -599,6 +600,21 @@ class SqlAlchemyChannelAccountLinkRepository:
                 GoogleRevenueSourceRowORM.report_month,
             )
         ).all()
+        # FIX (skip blank source identities, was PR #57 -V8b): the source identity
+        # columns are nullable Text with NO non-empty CHECK, so a row can carry ''
+        # or a whitespace-only owner/channel. The .is_not(None) filter above lets
+        # those through, but content_owner_channel_links enforces length(...) >= 1:
+        # an empty identity raises a CHECK violation (sqlstate 23514 — NOT the
+        # unique 23505 the per-row SAVEPOINT below swallows), aborting the WHOLE
+        # derivation job; a whitespace-only identity passes the CHECK and persists a
+        # bogus active link. Drop blank/whitespace-only identities here (str.strip()
+        # also covers tabs/newlines) before grouping. Stored values are otherwise
+        # left as-is — interior normalization would change the derived link key.
+        observed = [
+            (owner, channel, month, key)
+            for owner, channel, month, key in observed
+            if owner and owner.strip() and channel and channel.strip()
+        ]
         locked_months: set[str] = set()
         for month in sorted({m for _owner, _channel, m, _key in observed}):
             close = get_or_create_month_close_row(

@@ -368,6 +368,34 @@ def test_derivation_only_uses_rows_with_both_owner_and_channel(tmp_path):
     assert rows[0].effective_month_end == "2026-04"
 
 
+def test_derivation_skips_blank_source_identities(tmp_path):
+    """upsert skips '' / whitespace-only owner or channel without aborting the job.
+
+    Regression for PR #57 -V8b: the source identity columns are nullable Text with
+    NO non-empty CHECK, so a row can carry '' or a whitespace-only owner/channel.
+    The derivation only excluded NULLs, so a blank identity would hit
+    content_owner_channel_links' length(...) >= 1 CHECK (sqlstate 23514 — not the
+    unique 23505 the per-row SAVEPOINT swallows) and abort the whole derivation, or
+    a whitespace-only value would persist a bogus active link. Both must be skipped,
+    and only the one fully-populated row may derive a link.
+    """
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _source_row(session, owner="owner-ok", channel="chan-ok", key="kok")
+        _source_row(session, owner="", channel="chan-empty", key="kempty")     # empty owner
+        _source_row(session, owner="owner-ws", channel="   ", key="kws")       # whitespace channel
+        _source_row(session, owner="\t\n", channel="chan-tab", key="ktab")     # tab/newline owner
+        session.commit()
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        created = repo.upsert_owner_channel_links_from_source()  # must not raise
+        session.commit()
+        rows = session.scalars(select(ContentOwnerChannelLinkORM)).all()
+    assert created == 1
+    assert len(rows) == 1
+    assert rows[0].content_owner_id == "owner-ok"
+    assert rows[0].youtube_channel_id == "chan-ok"
+
+
 def test_derivation_is_idempotent(tmp_path):
     """Running upsert twice does not create duplicate links."""
     engine = _engine(tmp_path)

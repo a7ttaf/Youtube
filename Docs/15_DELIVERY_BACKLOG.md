@@ -249,7 +249,14 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
     changed its allocation eligibility (GSp; covered by
     `test_verify_records_full_effective_range_in_audit_details`). `_require_range_open`
     gained an explicit `Raises:` docstring section documenting
-    `ChannelAccountLinkLockedMonthError` (KHa).
+    `ChannelAccountLinkLockedMonthError` (KHa). Derivation now also drops blank
+    source identities before grouping: the source identity columns are nullable
+    `Text` with no non-empty CHECK, so a `''`/whitespace-only `content_owner_id` or
+    `youtube_channel_id` would otherwise hit `content_owner_channel_links`'
+    `length(...) >= 1` CHECK (sqlstate 23514, which the unique-only SAVEPOINT does
+    not swallow) and abort the whole derivation, or persist a bogus active link
+    (V8b; covered by `test_derivation_skips_blank_source_identities`, which fails
+    with that exact CHECK violation when the filter is removed).
   - ⏳ Deferred follow-up (PR #57 N9): narrowed residual concurrent-close race in
     `_require_range_open` (verify/reject path ONLY — the derivation path is now
     fully closed, see round 4 above). The start month is materialized + locked via
@@ -295,7 +302,18 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
     for already-closed months); no production consumer until Spec 2b, so
     sequence with the allocation engine. File:
     `backend/ums_smart_revenue/finance/channel_account_links.py`
-    (`upsert_owner_channel_links_from_source`).
+    (`upsert_owner_channel_links_from_source`). Paired requirement (PR #57 V8d):
+    the derivation existence probe `_owner_channel_link_exists` is intentionally
+    active-agnostic and the read contract filters `active IS TRUE`. Today that is
+    correct and the V8d scenario is unreachable — NO code path deactivates a
+    `content_owner_channel_links` row (the derivation insert is its only writer,
+    always `active=True`; the only `row.active = False` writes in the codebase are
+    on unrelated tables: user roles, user permissions, channel groups). When this
+    deactivation/reconcile path is built, the probe must become active-aware and
+    REACTIVATE an existing inactive row when source evidence returns, because the
+    unique key `uq_content_owner_channel_links_key` blocks inserting a fresh active
+    row for the same start month — build the deactivate (N8) and reactivate (V8d)
+    halves together.
 - ⏳ Allocation engine (Spec 2b) — remaining: not started; consumes the verified map.
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed
