@@ -156,6 +156,143 @@ class AccountAllocationResult:
     summary: AllocationSummary
 
 
+@dataclass(frozen=True)
+class _ComponentOutcome:
+    """One component's allocation result: produced lines, an optional blocking
+    issue, and whether it counts as allocated (a success or a zero-amount no-op)."""
+
+    lines: tuple[AllocationLine, ...]
+    issue: UnallocatedIssue | None
+    allocated: bool
+
+
+def _multi_account_notes(
+    verified_channels: Mapping[str, Sequence[str]],
+) -> list[AllocationNote]:
+    """Emit one informational note per channel reachable from >1 account.
+
+    Non-blocking: allocation still runs under each account independently; the
+    note flags that the channel's gross is weighted separately per account.
+    """
+    accounts_by_channel: dict[str, set[str]] = {}
+    for account, channels in verified_channels.items():
+        for channel_id in channels:
+            accounts_by_channel.setdefault(channel_id, set()).add(account)
+    return [
+        AllocationNote(
+            note_code="CHANNEL_IN_MULTIPLE_ACCOUNTS",
+            youtube_channel_id=channel_id,
+            detail=f"channel reachable from {len(accounts)} accounts",
+        )
+        for channel_id, accounts in sorted(accounts_by_channel.items())
+        if len(accounts) > 1
+    ]
+
+
+# ============================================================================
+# Purpose: Allocate ONE ACCOUNT-grain deduction component across its verified
+#   channels by source-aligned raw-gross-proportional share. Fails closed with a
+#   typed UnallocatedIssue on every blocking condition (non-ACCOUNT scope,
+#   unmapped account, unresolved/missing/incomplete basis, non-positive gross);
+#   never substitutes a different basis. Extracted from build_account_allocation
+#   so each function keeps a maintainable branching budget (DeepSource PY-R1000).
+# Database/ORM: None (caller resolves the verified map and gross basis).
+# Standards: Decimal arithmetic; exact per-component conservation via
+#   _proportional_allocation; net_applicable from NET_APPLICABLE_COMPONENT_KINDS.
+# Blast Radius: Finance read-model only. No persistence, no auth, no Neo4j.
+# ============================================================================
+def _allocate_component(
+    component: DeductionComponent,
+    verified_channels: Mapping[str, Sequence[str]],
+    gross_basis: Mapping[tuple[str, str], Decimal],
+) -> _ComponentOutcome:
+    """Return the allocation outcome for a single component (pure compute)."""
+    if component.scope_kind != "ACCOUNT":
+        return _ComponentOutcome(
+            (),
+            UnallocatedIssue(
+                scope_id=component.scope_id,
+                component_kind=component.component_kind,
+                component_key=component.component_key,
+                amount_usd=component.amount_usd,
+                issue_code="UNSUPPORTED_SCOPE",
+                detail=f"scope_kind {component.scope_kind} is not allocatable",
+            ),
+            False,
+        )
+
+    account = component.scope_id
+    amount = component.amount_usd
+    if amount == 0:
+        return _ComponentOutcome((), None, True)
+
+    channels = list(verified_channels.get(account) or [])
+    if not channels:
+        return _ComponentOutcome(
+            (),
+            _issue(component, "ACCOUNT_UNMAPPED_OR_UNVERIFIED",
+                   "no verified channels for account-month"),
+            False,
+        )
+
+    source_kind = _basis_source_kind(component.source_system)
+    if source_kind is None:
+        return _ComponentOutcome(
+            (),
+            _issue(component, "BASIS_MISSING",
+                   f"unresolved source kind for {component.source_system}"),
+            False,
+        )
+
+    present = [
+        (channel_id, gross_basis[(channel_id, source_kind)])
+        for channel_id in channels
+        if (channel_id, source_kind) in gross_basis
+    ]
+    if not present:
+        return _ComponentOutcome(
+            (),
+            _issue(component, "BASIS_MISSING",
+                   "no source-aligned gross for any verified channel"),
+            False,
+        )
+    if len(present) != len(channels):
+        return _ComponentOutcome(
+            (),
+            _issue(component, "BASIS_INCOMPLETE",
+                   "some verified channels missing source-aligned gross"),
+            False,
+        )
+
+    basis_total = sum((gross for _, gross in present), Decimal("0"))
+    if basis_total <= 0:
+        return _ComponentOutcome(
+            (),
+            _issue(component, "ZERO_GROSS_BASIS",
+                   "verified channels have zero or negative source-aligned gross"),
+            False,
+        )
+
+    net_applicable = component.component_kind in NET_APPLICABLE_COMPONENT_KINDS
+    allocated = _proportional_allocation(amount, present)
+    lines = tuple(
+        AllocationLine(
+            adsense_account_id=account,
+            youtube_channel_id=channel_id,
+            component_kind=component.component_kind,
+            source_system=component.source_system,
+            component_key=component.component_key,
+            basis_source_kind=source_kind,
+            basis_gross_usd=gross,
+            basis_share=(gross / basis_total).quantize(_SCALE),
+            allocated_amount_usd=allocated[channel_id],
+            net_applicable=net_applicable,
+        )
+        for channel_id, gross in present
+    )
+    return _ComponentOutcome(lines, None, True)
+
+
 # ============================================================================
 # Purpose: Allocate ACCOUNT-grain deduction evidence across each account's
 #   verified channels by source-aligned raw-gross-proportional share. Fails
@@ -186,106 +323,18 @@ def build_account_allocation(
     """
     lines: list[AllocationLine] = []
     unallocated: list[UnallocatedIssue] = []
-    notes: list[AllocationNote] = []
-
-    accounts_by_channel: dict[str, set[str]] = {}
-    for account, channels in verified_channels.items():
-        for channel_id in channels:
-            accounts_by_channel.setdefault(channel_id, set()).add(account)
-    for channel_id, accounts in sorted(accounts_by_channel.items()):
-        if len(accounts) > 1:
-            notes.append(
-                AllocationNote(
-                    note_code="CHANNEL_IN_MULTIPLE_ACCOUNTS",
-                    youtube_channel_id=channel_id,
-                    detail=f"channel reachable from {len(accounts)} accounts",
-                )
-            )
+    notes = _multi_account_notes(verified_channels)
 
     component_count = 0
     allocated_component_count = 0
     for component in components:
         component_count += 1
-        if component.scope_kind != "ACCOUNT":
-            unallocated.append(
-                UnallocatedIssue(
-                    scope_id=component.scope_id,
-                    component_kind=component.component_kind,
-                    component_key=component.component_key,
-                    amount_usd=component.amount_usd,
-                    issue_code="UNSUPPORTED_SCOPE",
-                    detail=f"scope_kind {component.scope_kind} is not allocatable",
-                )
-            )
-            continue
-
-        account = component.scope_id
-        amount = component.amount_usd
-        net_applicable = component.component_kind in NET_APPLICABLE_COMPONENT_KINDS
-
-        if amount == 0:
+        outcome = _allocate_component(component, verified_channels, gross_basis)
+        lines.extend(outcome.lines)
+        if outcome.issue is not None:
+            unallocated.append(outcome.issue)
+        if outcome.allocated:
             allocated_component_count += 1
-            continue
-
-        channels = list(verified_channels.get(account) or [])
-        if not channels:
-            unallocated.append(
-                _issue(component, "ACCOUNT_UNMAPPED_OR_UNVERIFIED",
-                       "no verified channels for account-month")
-            )
-            continue
-
-        source_kind = _basis_source_kind(component.source_system)
-        if source_kind is None:
-            unallocated.append(
-                _issue(component, "BASIS_MISSING",
-                       f"unresolved source kind for {component.source_system}")
-            )
-            continue
-
-        present = [
-            (channel_id, gross_basis[(channel_id, source_kind)])
-            for channel_id in channels
-            if (channel_id, source_kind) in gross_basis
-        ]
-        if not present:
-            unallocated.append(
-                _issue(component, "BASIS_MISSING",
-                       "no source-aligned gross for any verified channel")
-            )
-            continue
-        if len(present) != len(channels):
-            unallocated.append(
-                _issue(component, "BASIS_INCOMPLETE",
-                       "some verified channels missing source-aligned gross")
-            )
-            continue
-
-        basis_total = sum((gross for _, gross in present), Decimal("0"))
-        if basis_total <= 0:
-            unallocated.append(
-                _issue(component, "ZERO_GROSS_BASIS",
-                       "verified channels have zero or negative source-aligned gross")
-            )
-            continue
-
-        allocated = _proportional_allocation(amount, present)
-        for channel_id, gross in present:
-            lines.append(
-                AllocationLine(
-                    adsense_account_id=account,
-                    youtube_channel_id=channel_id,
-                    component_kind=component.component_kind,
-                    source_system=component.source_system,
-                    component_key=component.component_key,
-                    basis_source_kind=source_kind,
-                    basis_gross_usd=gross,
-                    basis_share=(gross / basis_total).quantize(_SCALE),
-                    allocated_amount_usd=allocated[channel_id],
-                    net_applicable=net_applicable,
-                )
-            )
-        allocated_component_count += 1
 
     allocated_total = sum((ln.allocated_amount_usd for ln in lines), Decimal("0"))
     unallocated_total = sum((iss.amount_usd for iss in unallocated), Decimal("0"))
