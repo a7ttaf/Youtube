@@ -400,3 +400,70 @@ def test_read_contract_excludes_unverified_account(tmp_path):
             tenant_id=TENANT, month="2026-04", adsense_account_id="pub-1"
         )
     assert got == []
+
+
+def test_read_contract_is_tenant_isolated(tmp_path):
+    # A different tenant sharing the same content_owner_id string must not leak.
+    other_tenant = UUID("00000000-0000-0000-0000-0000000c00ff")
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo, account="pub-1", owner="owner-1", start="2026-01", end=None)
+        repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="r")
+        _source_row(session, owner="owner-1", channel="chan-A", month="2026-04", key="sa")
+        session.commit()
+        repo.upsert_owner_channel_links_from_source()
+        # Other tenant: same owner_id string, different channel, valid for the month.
+        session.add(ContentOwnerChannelLinkORM(
+            tenant_id=other_tenant, content_owner_id="owner-1", youtube_channel_id="chan-B",
+            provenance_kind="MANUAL", active=True,
+            effective_month_start="2026-04", effective_month_end=None,
+        ))
+        session.commit()
+        got = repo.list_verified_adsense_account_channels(
+            tenant_id=TENANT, month="2026-04", adsense_account_id="pub-1"
+        )
+    assert got == ["chan-A"]  # other tenant's chan-B excluded
+
+
+def test_read_contract_excludes_inactive_owner_channel_link(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo, account="pub-1", owner="owner-1", start="2026-01", end=None)
+        repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="r")
+        session.add(ContentOwnerChannelLinkORM(
+            tenant_id=TENANT, content_owner_id="owner-1", youtube_channel_id="chan-x",
+            provenance_kind="MANUAL", active=False,
+            effective_month_start="2026-04", effective_month_end=None,
+        ))
+        session.commit()
+        got = repo.list_verified_adsense_account_channels(
+            tenant_id=TENANT, month="2026-04", adsense_account_id="pub-1"
+        )
+    assert got == []  # inactive owner-channel link excluded
+
+
+def test_read_contract_dedups_channel_reachable_twice(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo, account="pub-1", owner="owner-1", start="2026-01", end=None)
+        repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="r")
+        # Same channel via two distinct owner-channel rows, both valid for 2026-04
+        # (different effective_month_start so the unique key permits both).
+        session.add(ContentOwnerChannelLinkORM(
+            tenant_id=TENANT, content_owner_id="owner-1", youtube_channel_id="chan-1",
+            provenance_kind="SOURCE_ROW", active=True,
+            effective_month_start="2026-04", effective_month_end="2026-04",
+        ))
+        session.add(ContentOwnerChannelLinkORM(
+            tenant_id=TENANT, content_owner_id="owner-1", youtube_channel_id="chan-1",
+            provenance_kind="MANUAL", active=True,
+            effective_month_start="2026-01", effective_month_end=None,
+        ))
+        session.commit()
+        got = repo.list_verified_adsense_account_channels(
+            tenant_id=TENANT, month="2026-04", adsense_account_id="pub-1"
+        )
+    assert got == ["chan-1"]  # deduped to a single entry

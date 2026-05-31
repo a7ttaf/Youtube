@@ -464,6 +464,10 @@ class SqlAlchemyChannelAccountLinkRepository:
         unmapped/unverified (Spec 2b turns that into UNALLOCATED + a blocking
         issue). Pure read — no derivation, no writes.
 
+        The explicit ``tenant_id`` argument is the authoritative scope for this
+        standalone contract (the value Spec 2b passes); both query layers are
+        filtered to it.
+
         Raises:
             ChannelAccountLinkValidationError: If ``month`` is malformed.
         """
