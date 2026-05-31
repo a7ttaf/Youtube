@@ -441,7 +441,12 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   (anti-double-count, anti-cross-source), plus read-only
   `GET /revenue/months/{month}/deduction-components`. Remaining: account→channel
   allocation of ACCOUNT/PAYMENT evidence (Spec 2).
-- ⏳ Allocation rules (Spec 2b) — remaining: not started. Prerequisite SHIPPED
+- ⏳ Allocation rules (Spec 2b) — PR-1 SHIPPED (this branch): account-level
+  deduction allocation compute + read endpoint
+  (`GET /revenue/months/{month}/account-allocations`), source-aligned raw-gross-
+  proportional, fail-closed UNALLOCATED, no persistence/net change. Remaining:
+  net integration, PAYMENT-grain, persisted/committed writes, other methods.
+  Prerequisite SHIPPED
   (this branch): canonical channel↔account map — `adsense_content_owner_links`
   (operator-verified account↔owner) + `content_owner_channel_links` (derived from
   source-row co-occurrence) + Alembic migration + audited propose/verify/reject
