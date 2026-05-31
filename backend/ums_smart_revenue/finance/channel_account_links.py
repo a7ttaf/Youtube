@@ -526,7 +526,8 @@ class SqlAlchemyChannelAccountLinkRepository:
         self, owner_id: str, channel_id: str, month: str
     ) -> bool:
         """Return True if an owner↔channel link for (owner, channel, month) already
-        exists under this tenant. Fast existence probe for derivation idempotency."""
+        exists under this tenant. Fast existence probe for derivation idempotency.
+        """
         return bool(
             self._session.scalar(
                 select(func.count())
