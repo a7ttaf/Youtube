@@ -197,3 +197,71 @@ def test_repo_verify_succeeds_uncontended_on_postgres(alembic_config, fresh_engi
         out = repo.verify_account_owner_link(link.id, verified_by=uuid4(), reason="ok")
         session.commit()
     assert out.verification_status == "VERIFIED"
+
+
+def test_repo_verify_blocks_on_held_covered_month_close_row_lock(
+    alembic_config, fresh_engine
+):
+    """Proof verify FOR UPDATE-locks existing close rows across the covered range.
+
+    Connection A holds FOR UPDATE on the finance_month_close row for a covered
+    month (2026-03) inside a link's range [2026-01, 2026-06]. A second Session
+    runs verify under a short statement_timeout; because _require_range_open
+    row-locks every EXISTING close row in the range with FOR UPDATE, it blocks on
+    the held 2026-03 row and the lock wait is canceled. This is the serialization
+    that stops a concurrent close from flipping an existing OPEN covered month to
+    LOCKED between the scan and the verify/reject commit (PR #57 -bC / -iV).
+    Reverting the range scan to a plain SELECT makes this test fail (no block).
+    """
+    from uuid import UUID, uuid4
+
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session
+
+    from ums_smart_revenue.finance.channel_account_links import (
+        SqlAlchemyChannelAccountLinkRepository,
+    )
+    from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
+
+    command.upgrade(alembic_config, "head")
+    tenant = UUID(UMS_TENANT_ID)
+
+    # Seed one UNVERIFIED link covering 2026-01..2026-06 and an existing OPEN close
+    # row for the covered month 2026-03 (committed so holder/contender can see it).
+    with Session(fresh_engine) as setup:
+        link_id = (
+            SqlAlchemyChannelAccountLinkRepository(setup, tenant_id=tenant)
+            .propose_account_owner_link(
+                adsense_account_id="pub-rng", content_owner_id="owner-rng",
+                effective_month_start="2026-01", effective_month_end="2026-06",
+                provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+            )
+            .id
+        )
+        get_or_create_month_close_row(setup, "2026-03", tenant_id=tenant)
+        setup.commit()
+
+    holder = fresh_engine.connect()
+    holder_txn = holder.begin()
+    try:
+        # Hold the covered-month close-row lock so verify's range FOR UPDATE blocks.
+        holder.execute(
+            text(
+                "SELECT 1 FROM finance_month_close WHERE tenant_id = :t "
+                "AND month = '2026-03' FOR UPDATE"
+            ),
+            {"t": str(tenant)},
+        )
+        with Session(fresh_engine) as contender:
+            # statement_timeout reliably cancels a blocked FOR UPDATE row-lock wait.
+            contender.execute(text("SET statement_timeout = '750ms'"))
+            repo = SqlAlchemyChannelAccountLinkRepository(contender, tenant_id=tenant)
+            with pytest.raises(OperationalError) as exc_info:
+                repo.verify_account_owner_link(link_id, verified_by=uuid4(), reason="x")
+            err_msg = str(exc_info.value).lower()
+            assert "canceling statement" in err_msg or "statement timeout" in err_msg, (
+                "verify must be canceled by the covered-month row-lock wait timeout"
+            )
+    finally:
+        holder_txn.rollback()
+        holder.close()

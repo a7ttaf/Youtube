@@ -236,30 +236,50 @@ class SqlAlchemyChannelAccountLinkRepository:
         covered finance month is LOCKED — not only the start month.
 
         The start month is lock-checked under its per-month advisory lock
-        (materializing only its own OPEN close row). The rest of the range is
-        screened with a single bounded SELECT for an already-LOCKED close row, so
-        an authorized far-future ``effective_month_end`` cannot insert (and
-        advisory-lock) one ``finance_month_close`` row per covered month. A
-        residual race remains for a covered month closed concurrently after this
-        scan but before commit; fully serializing that needs a shared lock on the
-        month-close path and is tracked as a follow-up (Docs/15_DELIVERY_BACKLOG.md).
+        (materializing only its own OPEN close row). The remaining covered range
+        is then screened with a single ``SELECT ... FOR UPDATE`` over the
+        ``finance_month_close`` rows that ALREADY exist in ``[start, end]``:
+
+        - It row-locks only existing rows, so an authorized far-future
+          ``effective_month_end`` (e.g. 9999-12) cannot materialize/advisory-lock
+          ~95k close rows in one transaction.
+        - The row lock serializes against the month-close path, which takes the
+          same ``FOR UPDATE`` on the close row via
+          ``get_or_create_month_close_row(for_update=True)``. So a concurrent
+          close cannot flip an existing OPEN covered month to LOCKED between this
+          scan and our verify/reject commit — it blocks until we commit (and we
+          then read its OPEN state) or we block until it commits (and we read
+          LOCKED and reject).
+
+        Residual (tracked as PR #57 N9 in Docs/15_DELIVERY_BACKLOG.md): a covered
+        month with NO close row at scan time that is closed concurrently — the
+        close inserts a fresh LOCKED row a row lock cannot cover. Closing that
+        narrower window needs a shared serialization point on the month-close path
+        (gap lock / per-tenant close epoch), a close-path change out of scope here.
         """
         # FIX: the prior bounded path called _require_month_open() for every
         # covered month, and that helper creates a close row + takes an advisory
         # lock per month — a far-future end (e.g. 9999-12) would materialize ~95k
-        # rows and locks in one transaction. Lock+check only the start, then
-        # screen the remaining range with one SELECT for any already-LOCKED month.
+        # rows/locks in one transaction. Lock+check only the start, then row-lock
+        # the EXISTING close rows across the covered range with FOR UPDATE (no
+        # materialization) so a concurrent close cannot flip an OPEN covered month
+        # to LOCKED behind us; FOR UPDATE is a no-op on SQLite (unit tests).
         self._require_month_open(start)
-        statement = select(FinanceMonthCloseORM.month).where(
+        statement = select(FinanceMonthCloseORM).where(
             FinanceMonthCloseORM.tenant_id == self._tenant_id,
-            FinanceMonthCloseORM.status == "LOCKED",
             FinanceMonthCloseORM.month >= start,
         )
         if end is not None:
             statement = statement.where(FinanceMonthCloseORM.month <= end)
-        locked_month = self._session.scalars(
-            statement.order_by(FinanceMonthCloseORM.month).limit(1)
-        ).first()
+        statement = statement.order_by(FinanceMonthCloseORM.month).with_for_update()
+        locked_month = next(
+            (
+                row.month
+                for row in self._session.scalars(statement)
+                if row.status == "LOCKED"
+            ),
+            None,
+        )
         if locked_month is not None:
             raise ChannelAccountLinkLockedMonthError(
                 f"Finance month {locked_month!r} is locked; verify is not permitted"
