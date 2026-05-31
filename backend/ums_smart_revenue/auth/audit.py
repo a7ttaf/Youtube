@@ -38,6 +38,9 @@ class AuditEventType(StrEnum):
     BANK_RECONCILIATION_RECORDED = "BANK_RECONCILIATION_RECORDED"
     BANK_RECONCILIATION_VIEWED = "BANK_RECONCILIATION_VIEWED"
     AUDIT_LOG_VIEWED = "AUDIT_LOG_VIEWED"
+    CHANNEL_ACCOUNT_LINK_PROPOSED = "CHANNEL_ACCOUNT_LINK_PROPOSED"
+    CHANNEL_ACCOUNT_LINK_VERIFIED = "CHANNEL_ACCOUNT_LINK_VERIFIED"
+    CHANNEL_ACCOUNT_LINK_REJECTED = "CHANNEL_ACCOUNT_LINK_REJECTED"
 
 
 @dataclass(frozen=True)
@@ -178,5 +181,20 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     AuditEventType.AUDIT_LOG_VIEWED: AuditEventDefinition(
         AuditEventType.AUDIT_LOG_VIEWED,
         permission=Permission.VIEW_AUDIT_LOG,
+    ),
+    AuditEventType.CHANNEL_ACCOUNT_LINK_PROPOSED: AuditEventDefinition(
+        AuditEventType.CHANNEL_ACCOUNT_LINK_PROPOSED,
+        reason_required=True,
+        permission=Permission.MANAGE_ORG_MAPPING,
+    ),
+    AuditEventType.CHANNEL_ACCOUNT_LINK_VERIFIED: AuditEventDefinition(
+        AuditEventType.CHANNEL_ACCOUNT_LINK_VERIFIED,
+        reason_required=True,
+        permission=Permission.CHANGE_ALLOCATION_RULE,
+    ),
+    AuditEventType.CHANNEL_ACCOUNT_LINK_REJECTED: AuditEventDefinition(
+        AuditEventType.CHANNEL_ACCOUNT_LINK_REJECTED,
+        reason_required=True,
+        permission=Permission.CHANGE_ALLOCATION_RULE,
     ),
 }

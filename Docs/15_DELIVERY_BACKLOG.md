@@ -181,6 +181,140 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   /revenue/recalculate (build_recalculation_preview; dry-run-only
   allocation-method preview with blocking-issue detection; committed writes
   intentionally rejected as not-yet-implemented).
+- ⏳ Channel↔account map — shipped (this branch): two-layer canonical map
+  (`adsense_content_owner_links` operator-verified + `content_owner_channel_links`
+  derived from source rows), audited propose/verify/reject API behind dual
+  MANAGE_ORG_MAPPING + CHANGE_ALLOCATION_RULE gates, per-account advisory-lock
+  overlap invariant, and `list_verified_adsense_account_channels` for Spec 2b.
+  - ✅ PR #57 review hardening (Codex/Kody): allocation permission now checked
+    for every finance month in a link's effective range (not just start month);
+    verify blocked on LOCKED months (409); AdSense account ids canonicalized
+    (`accounts/` prefix stripped) before persist so verified reads match
+    ingestion; duplicate-proposal IntegrityError narrowed to true unique
+    violations (non-unique integrity errors re-raise instead of mis-mapping
+    to 409).
+  - ✅ PR #57 review hardening round 2 (Codex/Kody/CodeRabbit): unique-violation
+    detection now recognizes psycopg3 `sqlstate` (the pinned driver), not only
+    psycopg2 `pgcode`, so duplicate POSTs return 409 on PostgreSQL; verify AND
+    reject now guard the FULL covered month range (a bounded link spanning a
+    later LOCKED month no longer verifies, and rejecting a VERIFIED link over a
+    closed month is blocked so it can't silently drop closed-month allocation
+    evidence); owner↔channel derivation skips LOCKED months (no new post-close
+    evidence); and the request model strips whitespace before canonicalizing
+    `adsense_account_id` (a padded `accounts/…` value previously 422'd due to
+    Pydantic v2 before-validator ordering).
+  - ✅ PR #57 review hardening round 3 (Codex/Kody/CodeRabbit): `_require_range_open`
+    no longer materializes every covered month — it lock-checks only the start
+    month, then row-locks the `finance_month_close` rows that already exist across
+    the covered range with a single `SELECT ... FOR UPDATE`. This (a) stops an
+    authorized far-future `effective_month_end` from inserting/advisory-locking
+    ~95k rows in one transaction, and (b) serializes against the month-close path
+    (which takes the same `FOR UPDATE` on the close row via
+    `get_or_create_month_close_row(for_update=True)`), so a concurrent close can no
+    longer flip an existing OPEN covered month to LOCKED between the scan and the
+    verify/reject commit. `reject` now reloads the link under the per-account
+    advisory lock (TOCTOU guard: a concurrent verify committing during the
+    lock-wait is observed so the locked-month guard isn't skipped on a stale
+    UNVERIFIED status); the duplicated finance-local `_iter_months` helper was
+    removed (now unused). Proven on live Postgres by
+    `test_repo_verify_blocks_on_held_covered_month_close_row_lock` (verify is
+    canceled by the held covered-month row-lock wait; reverting the scan to a plain
+    SELECT makes it fail).
+  - ✅ PR #57 review hardening round 4 (Codex/Kody/CodeRabbit): the same
+    concurrent-close protection now covers the *derivation* path, and more
+    strongly than the verify/reject path can. `upsert_owner_channel_links_from_source`
+    reads observed source-row months first, then for EVERY observed month
+    get-or-creates + row-locks its `finance_month_close` row under the same
+    advisory + `FOR UPDATE` guard the close path uses
+    (`get_or_create_month_close_row(for_update=True)`), in sorted order for a
+    stable lock sequence. Because the observed months are bounded by months that
+    actually have source rows (unlike a verify link's open-ended/far-future range),
+    derivation can serialize row CREATION too: an absent observed month is created
+    OPEN and locked here, so a concurrent close blocks until we commit (month stays
+    OPEN) or commits first (we read LOCKED and skip the month). This fully closes
+    the absent-month window on the derivation side — there is no N9 residual here
+    (GSk; proven on live Postgres by two contention tests that each fail "DID NOT
+    RAISE" when the guard is downgraded:
+    `test_repo_derivation_blocks_on_held_observed_month_close_row_lock` for an
+    existing OPEN month and
+    `test_repo_derivation_blocks_on_held_absent_observed_month_advisory_lock` for a
+    month with no close row). Each derived insert now runs in its own `SAVEPOINT` and swallows only a genuine
+    `uq_content_owner_channel_links_key` unique violation (a duplicate landing
+    between the existence probe and flush from a parallel worker), re-raising any
+    other `IntegrityError` so the derivation stays idempotent under concurrency
+    (GSr; covered by `test_derivation_swallows_concurrent_duplicate_insert`). The
+    verify/reject audit `details` now records the full `effective_month_start`/
+    `effective_month_end` range, not just the start-month scope, so month-level
+    audit review of a later (now closed) period still surfaces the mutation that
+    changed its allocation eligibility (GSp; covered by
+    `test_verify_records_full_effective_range_in_audit_details`). `_require_range_open`
+    gained an explicit `Raises:` docstring section documenting
+    `ChannelAccountLinkLockedMonthError` (KHa). Derivation now also drops blank
+    source identities before grouping: the source identity columns are nullable
+    `Text` with no non-empty CHECK, so a `''`/whitespace-only `content_owner_id` or
+    `youtube_channel_id` would otherwise hit `content_owner_channel_links`'
+    `length(...) >= 1` CHECK (sqlstate 23514, which the unique-only SAVEPOINT does
+    not swallow) and abort the whole derivation, or persist a bogus active link
+    (V8b; covered by `test_derivation_skips_blank_source_identities`, which fails
+    with that exact CHECK violation when the filter is removed).
+  - ⏳ Deferred follow-up (PR #57 N9): narrowed residual concurrent-close race in
+    `_require_range_open` (verify/reject path ONLY — the derivation path is now
+    fully closed, see round 4 above). The start month is materialized + locked via
+    `get_or_create_month_close_row(for_update=True)`, and the `FOR UPDATE` range
+    scan closes the race for covered months whose close row ALREADY exists. The
+    remaining window is a covered month *after* start with NO close row at scan
+    time that is closed concurrently — the close inserts a fresh LOCKED row that a
+    row-level lock on absent rows cannot cover. The derivation fix (get-or-create +
+    lock every observed month) does NOT transfer here: a verify link's range can be
+    open-ended (`effective_month_end = None`) or far-future bounded, so per-month
+    materialization is unbounded/infeasible and would reintroduce the ~95k-row
+    insert the round-3 -iW fix removed. Eliminating this needs a shared
+    serialization point on the month-close path itself (e.g. PostgreSQL
+    `SERIALIZABLE`/predicate-range lock, or a per-tenant close-epoch advisory lock
+    both paths take) — a close-path change outside this PR's scope that also needs
+    owner approval as a finance-close refactor. Risk bounded: no production
+    consumer of `list_verified_adsense_account_channels` until Spec 2b; both
+    verify/reject and close are dual-gated admin actions. File:
+    `backend/ums_smart_revenue/finance/channel_account_links.py`
+    (`_require_range_open`); sequence with Spec 2b / month-close hardening.
+  - ⏳ Deferred follow-up (PR #57 N10): the API allocation-permission check
+    `_require_allocation_permission_for_range` iterates `_iter_months(start, end)`
+    for per-finance-month scope checks, so the same far-future `effective_month_end`
+    drives ~95k in-memory authorization iterations (no DB rows/locks, but a CPU
+    cost) for a globally-authorized caller. Shares the root cause of the finance
+    materialization fix above. Recommended fix: short-circuit when the caller
+    holds the global allocation grant (which already authorizes every covered
+    month), and/or cap the accepted effective range at the propose/validation
+    boundary. Authorization-layer change → carries authz-test obligations; kept
+    out of this review-cleanup PR. File:
+    `backend/ums_smart_revenue/api/channel_account_links.py`
+    (`_require_allocation_permission_for_range`, `_iter_months`).
+  - ⏳ Deferred follow-up (PR #57 N2): supersede/close-range workflow to
+    end-date an open-ended VERIFIED link without `reject` wiping its historical
+    months. Needs a dedicated atomic cap-then-verify operation; out of this
+    PR's contract. Sequence ahead of / with Spec 2b allocation consumption.
+  - ⏳ Deferred follow-up (PR #57 N8, Codex): reconcile/deactivate stale derived
+    `content_owner_channel_links` when a replacement import removes the backing
+    source rows for a month. `upsert_owner_channel_links_from_source` is
+    currently insert-only, so a derived link can outlive its evidence and keep
+    a channel in `list_verified_adsense_account_channels`. Net-new deactivation
+    behavior with its own locked-month interactions (must not deactivate links
+    for already-closed months); no production consumer until Spec 2b, so
+    sequence with the allocation engine. File:
+    `backend/ums_smart_revenue/finance/channel_account_links.py`
+    (`upsert_owner_channel_links_from_source`). Paired requirement (PR #57 V8d):
+    the derivation existence probe `_owner_channel_link_exists` is intentionally
+    active-agnostic and the read contract filters `active IS TRUE`. Today that is
+    correct and the V8d scenario is unreachable — NO code path deactivates a
+    `content_owner_channel_links` row (the derivation insert is its only writer,
+    always `active=True`; the only `row.active = False` writes in the codebase are
+    on unrelated tables: user roles, user permissions, channel groups). When this
+    deactivation/reconcile path is built, the probe must become active-aware and
+    REACTIVATE an existing inactive row when source evidence returns, because the
+    unique key `uq_content_owner_channel_links_key` blocks inserting a fresh active
+    row for the same start month — build the deactivate (N8) and reactivate (V8d)
+    halves together.
+- ⏳ Allocation engine (Spec 2b) — remaining: not started; consumes the verified map.
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed
   permissions). Month-close status UI remains unbuilt (Phase 5).

@@ -441,7 +441,14 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   (anti-double-count, anti-cross-source), plus read-only
   `GET /revenue/months/{month}/deduction-components`. Remaining: account→channel
   allocation of ACCOUNT/PAYMENT evidence (Spec 2).
-- ⏳ Allocation rules — remaining: not started.
+- ⏳ Allocation rules (Spec 2b) — remaining: not started. Prerequisite SHIPPED
+  (this branch): canonical channel↔account map — `adsense_content_owner_links`
+  (operator-verified account↔owner) + `content_owner_channel_links` (derived from
+  source-row co-occurrence) + Alembic migration + audited propose/verify/reject
+  API (dual MANAGE_ORG_MAPPING + CHANGE_ALLOCATION_RULE gate, per-account
+  advisory-lock overlap invariant) + `list_verified_adsense_account_channels`
+  read contract. Allocation consumes only VERIFIED links; unmapped/unverified
+  accounts stay UNALLOCATED.
 - ✅ Net revenue by channel/company/sector — shipped: GET
   /revenue/months/{month}/net-revenue (build_month_net_revenue_summary;
   per-channel gross/net/deduction roll-up with channel/company/sector/global
@@ -467,15 +474,17 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   per-channel table today; full reconciled net awaits the allocation engine +
   tax/deduction ingestion.
 
-### Status (2026-05-30)
+### Status (2026-05-31)
 
 Net-revenue roll-up, manual overrides, payment-match, and confidence labels
 ship at the API layer. PR-A (PR #55) ingested deduction evidence; PR-B (PR #56)
 wired net-revenue to derive `COMPONENT_DERIVED`/`D_ESTIMATED` nets from
 channel-scoped TAX/DEDUCTION components on the missing-net path, and added the
-read-only `GET /revenue/months/{month}/deduction-components` endpoint. The
-allocation engine (account→channel distribution, Spec 2) remains the largest
-blocker to a fully reconciled net figure.
+read-only `GET /revenue/months/{month}/deduction-components` endpoint. This
+branch ships the canonical channel↔account map substrate (two-layer ORM +
+Alembic migration + audited propose/verify/reject API + read contract) as the
+prerequisite for Spec 2b. The allocation engine (account→channel distribution,
+Spec 2b) remains the largest blocker to a fully reconciled net figure.
 
 ---
 
