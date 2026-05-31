@@ -207,3 +207,18 @@ def test_get_account_owner_link_returns_and_raises(tmp_path):
         assert got.adsense_account_id == "pub-1"
         with pytest.raises(ChannelAccountLinkNotFoundError):
             repo.get_account_owner_link(str(uuid4()))
+
+
+def test_reverify_rejected_same_link_succeeds(tmp_path):
+    # A REJECTED link can be re-verified (deliberate recovery path): the
+    # (tenant, account, owner, start) unique key blocks re-proposing an identical
+    # row, so verify is the recovery route. The overlap invariant still guards it.
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo)
+        repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="r1")
+        repo.reject_account_owner_link(link.id, verified_by=VERIFIER, reason="mistake")
+        out = repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="reinstated")
+    assert out.verification_status == "VERIFIED"
+    assert out.verification_reason == "reinstated"

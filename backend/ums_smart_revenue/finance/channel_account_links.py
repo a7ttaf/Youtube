@@ -268,6 +268,11 @@ class SqlAlchemyChannelAccountLinkRepository:
         Acquires the per-account advisory lock first so concurrent verifies for
         one account cannot both commit overlapping VERIFIED rows.
 
+        A REJECTED or already-VERIFIED link may be re-verified: this is the recovery
+        path, since the (tenant, account, owner, effective_month_start) unique key
+        blocks re-proposing an identical row. The overlap invariant is re-checked on
+        every transition, so re-verifying can never create overlapping VERIFIED links.
+
         Raises:
             ChannelAccountLinkNotFoundError: If the link id is unknown.
             ChannelAccountLinkConflictError: If a VERIFIED link already overlaps.
