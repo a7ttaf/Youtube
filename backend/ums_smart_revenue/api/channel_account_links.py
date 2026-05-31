@@ -12,6 +12,7 @@ that first uses it so every commit stays ruff-clean:
             from finance.channel_account_links.
 """
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
@@ -29,6 +30,8 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.finance.channel_account_links import (
+    ChannelAccountLinkConflictError,
+    ChannelAccountLinkNotFoundError,
     ChannelAccountLinkValidationError,
     SqlAlchemyChannelAccountLinkRepository,
 )
@@ -213,4 +216,119 @@ def propose_channel_account_link(
     )
     return AccountOwnerLinkMutationResponse(
         link=link.to_api(), audit_event=audit_record_to_api(record)
+    )
+
+
+class LinkDecisionRequest(BaseModel):
+    """Validated payload for a verify/reject decision (reason required)."""
+
+    reason: str = Field(min_length=1)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def _strip_reason(cls, value):
+        return value.strip() if isinstance(value, str) else value
+
+
+def _decide_link(
+    *, link_id: str, reason: str, verify: bool,
+    user: UserPrincipal, repository: SqlAlchemyChannelAccountLinkRepository,
+    audit_sink: AuditSink,
+) -> AccountOwnerLinkMutationResponse:
+    """Shared verify/reject handler: gate, exact-load, authorize on month, mutate, audit.
+
+    MANAGE_ORG_MAPPING (global, month-independent) is checked FIRST so a caller
+    without org-mapping trust cannot probe link existence. The exact link is then
+    loaded by id (404 if unknown — no list pagination), and CHANGE_ALLOCATION_RULE
+    is checked on that link's own effective month.
+    """
+    _require_permission(user, Permission.MANAGE_ORG_MAPPING, AccessScope.global_scope())
+    try:
+        existing = repository.get_account_owner_link(link_id)
+    except ChannelAccountLinkNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND, detail="unknown link"
+        ) from exc
+    _require_permission(
+        user, Permission.CHANGE_ALLOCATION_RULE,
+        AccessScope.finance_month(existing.effective_month_start),
+    )
+    # FIX: user.user_id is a str on UserPrincipal; the repository's verified_by
+    # parameter is typed UUID and the ORM column is Uuid() — pass a UUID object
+    # so SQLite's pysqlite dialect can call .hex without AttributeError.
+    actor_uuid = UUID(user.user_id)
+    try:
+        if verify:
+            link = repository.verify_account_owner_link(
+                link_id, verified_by=actor_uuid, reason=reason
+            )
+            event_type = AuditEventType.CHANNEL_ACCOUNT_LINK_VERIFIED
+        else:
+            link = repository.reject_account_owner_link(
+                link_id, verified_by=actor_uuid, reason=reason
+            )
+            event_type = AuditEventType.CHANNEL_ACCOUNT_LINK_REJECTED
+    except ChannelAccountLinkNotFoundError as exc:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
+    except ChannelAccountLinkConflictError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    record = record_audit_event(
+        sink=audit_sink, actor=user, event_type=event_type,
+        entity_type="adsense_content_owner_link", entity_id=link.id,
+        scope=AccessScope.finance_month(link.effective_month_start), reason=reason,
+        details={"adsense_account_id": link.adsense_account_id,
+                 "verification_status": link.verification_status},
+    )
+    return AccountOwnerLinkMutationResponse(
+        link=link.to_api(), audit_event=audit_record_to_api(record)
+    )
+
+
+# ============================================================================
+# Purpose: Verify/reject an account↔owner link — the money-gating trust
+#   decision. Requires BOTH MANAGE_ORG_MAPPING (global) and CHANGE_ALLOCATION_
+#   RULE (finance month of the link's start). Verify enforces the overlap
+#   invariant (409). reason-required sensitive audit.
+# Database/ORM: adsense_content_owner_links (update).
+# Blast Radius: Authorization (fail-closed, dual); audit; finance map state.
+# ============================================================================
+@router.post(
+    "/channel-account-links/{link_id}/verify",
+    response_model=AccountOwnerLinkMutationResponse,
+)
+def verify_channel_account_link(
+    link_id: str,
+    payload: LinkDecisionRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[
+        SqlAlchemyChannelAccountLinkRepository,
+        Depends(current_channel_account_link_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+) -> AccountOwnerLinkMutationResponse:
+    """Verify an account↔owner link (dual-permission, overlap-guarded)."""
+    return _decide_link(
+        link_id=link_id, reason=payload.reason, verify=True,
+        user=user, repository=repository, audit_sink=audit_sink,
+    )
+
+
+@router.post(
+    "/channel-account-links/{link_id}/reject",
+    response_model=AccountOwnerLinkMutationResponse,
+)
+def reject_channel_account_link(
+    link_id: str,
+    payload: LinkDecisionRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[
+        SqlAlchemyChannelAccountLinkRepository,
+        Depends(current_channel_account_link_repository),
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+) -> AccountOwnerLinkMutationResponse:
+    """Reject an account↔owner link (dual-permission)."""
+    return _decide_link(
+        link_id=link_id, reason=payload.reason, verify=False,
+        user=user, repository=repository, audit_sink=audit_sink,
     )

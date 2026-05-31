@@ -130,3 +130,85 @@ def test_propose_requires_manage_org_mapping(tmp_path):
         },
     )
     assert response.status_code == 403
+
+
+def _propose_via_api(client, *, account="pub-9", owner="owner-9", start="2026-01", end=None):
+    return client.post(
+        "/revenue/channel-account-links",
+        headers=auth_headers("super_owner", "global"),
+        json={
+            "adsense_account_id": account, "content_owner_id": owner,
+            "effective_month_start": start, "effective_month_end": end,
+            "provenance_kind": "OPERATOR_ASSERTED", "provenance_payload": {}, "reason": "seed",
+        },
+    ).json()["link"]["id"]
+
+
+def test_super_owner_can_verify(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    link_id = _propose_via_api(client)
+    response = client.post(
+        f"/revenue/channel-account-links/{link_id}/verify",
+        headers=auth_headers("super_owner", "global"),
+        json={"reason": "verified against signed contract"},
+    )
+    assert response.status_code == 200
+    assert response.json()["link"]["verification_status"] == "VERIFIED"
+    assert response.json()["audit_event"]["event_type"] == "CHANNEL_ACCOUNT_LINK_VERIFIED"
+
+
+def test_verify_requires_both_permissions(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    link_id = _propose_via_api(client)
+    # corporate_admin: MANAGE_ORG_MAPPING but NOT CHANGE_ALLOCATION_RULE -> 403.
+    r1 = client.post(
+        f"/revenue/channel-account-links/{link_id}/verify",
+        headers=auth_headers("corporate_admin", "global"),
+        json={"reason": "x"},
+    )
+    assert r1.status_code == 403
+    # finance_admin: CHANGE_ALLOCATION_RULE but NOT MANAGE_ORG_MAPPING -> 403.
+    r2 = client.post(
+        f"/revenue/channel-account-links/{link_id}/verify",
+        headers=auth_headers("finance_admin", "global"),
+        json={"reason": "x"},
+    )
+    assert r2.status_code == 403
+
+
+def test_verify_overlap_returns_409(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    first = _propose_via_api(client, account="pub-9", owner="owner-1", start="2026-01", end="2026-06")
+    client.post(
+        f"/revenue/channel-account-links/{first}/verify",
+        headers=auth_headers("super_owner", "global"),
+        json={"reason": "r1"},
+    )
+    second = _propose_via_api(client, account="pub-9", owner="owner-2", start="2026-03", end=None)
+    response = client.post(
+        f"/revenue/channel-account-links/{second}/verify",
+        headers=auth_headers("super_owner", "global"),
+        json={"reason": "r2"},
+    )
+    assert response.status_code == 409
+
+
+def test_reject_sets_rejected(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    link_id = _propose_via_api(client)
+    response = client.post(
+        f"/revenue/channel-account-links/{link_id}/reject",
+        headers=auth_headers("super_owner", "global"),
+        json={"reason": "operator rejects unverified mapping"},
+    )
+    assert response.status_code == 200
+    assert response.json()["link"]["verification_status"] == "REJECTED"
+    assert response.json()["audit_event"]["event_type"] == "CHANNEL_ACCOUNT_LINK_REJECTED"
