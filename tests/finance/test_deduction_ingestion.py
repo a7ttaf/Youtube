@@ -468,3 +468,70 @@ def test_audit_details_carry_only_summary_counts(tmp_path):
     assert set(details) == {"month", "total_upserted", "by_kind", "skipped_non_usd"}
     # No amounts/currencies/payloads leak into the audit record.
     assert "amount" not in repr(details).lower()
+
+
+def _add_component(
+    session,
+    *,
+    scope_kind,
+    scope_id,
+    component_kind="DEDUCTION",
+    amount="10.00",
+    source_system="adsense_management",
+    key=None,
+):
+    """Insert one DeductionComponentORM row for the shared MONTH."""
+    session.add(
+        DeductionComponentORM(
+            id=uuid4(),
+            tenant_id=_ums_tenant(),
+            month=MONTH,
+            component_kind=component_kind,
+            scope_kind=scope_kind,
+            scope_id=scope_id,
+            amount_usd=Decimal(amount),
+            currency_code="USD",
+            source_system=source_system,
+            source_table="google_revenue_source_rows",
+            component_key=key or f"{scope_kind}:{scope_id}:{component_kind}",
+            raw_payload={},
+        )
+    )
+
+
+def test_list_account_components_returns_only_account_scope(tmp_path):
+    """Only scope_kind == ACCOUNT rows are returned; CHANNEL/PAYMENT excluded."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _add_component(session, scope_kind="ACCOUNT", scope_id="pub-1")
+        _add_component(session, scope_kind="CHANNEL", scope_id="chan-1")
+        _add_component(
+            session, scope_kind="PAYMENT", scope_id="BANK-1",
+            source_system="bank_reconciliation",
+        )
+        session.commit()
+        repo = _mod().SqlAlchemyDeductionComponentRepository(session)
+        rows = repo.list_account_components(month=MONTH)
+    assert [r.scope_kind for r in rows] == ["ACCOUNT"]
+    assert rows[0].scope_id == "pub-1"
+
+
+def test_list_account_components_filters_by_account(tmp_path):
+    """The optional adsense_account_id narrows to one account's scope_id."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _add_component(session, scope_kind="ACCOUNT", scope_id="pub-1", key="a")
+        _add_component(session, scope_kind="ACCOUNT", scope_id="pub-2", key="b")
+        session.commit()
+        repo = _mod().SqlAlchemyDeductionComponentRepository(session)
+        rows = repo.list_account_components(month=MONTH, adsense_account_id="pub-2")
+    assert [r.scope_id for r in rows] == ["pub-2"]
+
+
+def test_list_account_components_rejects_malformed_month(tmp_path):
+    """A malformed month raises DeductionComponentValidationError."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = _mod().SqlAlchemyDeductionComponentRepository(session)
+        with pytest.raises(_mod().DeductionComponentValidationError):
+            repo.list_account_components(month="2026-13")

@@ -1,6 +1,6 @@
 # Delivery Backlog
 
-## Status (2026-05-29)
+## Status (2026-05-31)
 
 Reconciled through PR #50 (B2.6 connector row-count classification). Marker conventions
 match `01_IMPLEMENTATION_PLAN.md`:
@@ -314,7 +314,17 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
     unique key `uq_content_owner_channel_links_key` blocks inserting a fresh active
     row for the same start month — build the deactivate (N8) and reactivate (V8d)
     halves together.
-- ⏳ Allocation engine (Spec 2b) — remaining: not started; consumes the verified map.
+- ⏳ Allocation engine (Spec 2b) — PR-1 shipped (this branch): account-level
+  deduction allocation compute + read. `finance/allocation.py` distributes
+  ACCOUNT-grain `deduction_components` across each account's verified channels
+  (`list_verified_adsense_account_channels`) by source-aligned raw-gross-proportional
+  share with exact per-component conservation; `net_applicable` from
+  `NET_APPLICABLE_COMPONENT_KINDS`; fail-closed UNALLOCATED on unmapped/missing/
+  incomplete basis. Read-only `GET /revenue/months/{month}/account-allocations`
+  (ACCOUNT-only query, `VIEW_REVENUE@global` + `VIEW_FINALIZED_PAYMENTS@finance_month`,
+  REVENUE_VIEWED + PAYMENT_VIEWED). No persistence, no migration, no net-revenue change.
+  Remaining: net-revenue integration of net-applicable lines; PAYMENT-grain (needs a
+  payment→account hop); persisted/committed allocation; other allocation methods.
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed
   permissions). Month-close status UI remains unbuilt (Phase 5).

@@ -410,6 +410,45 @@ class SqlAlchemyDeductionComponentRepository:
             components=[self._to_entry(row) for row in rows],
         )
 
+    # ========================================================================
+    # Purpose: Return all ACCOUNT-scoped deduction components for one finance
+    #   month — the allocation engine's input domain. Filters scope_kind ==
+    #   "ACCOUNT" in SQL so PAYMENT/CHANNEL/bank-grain rows are never fetched.
+    # Database/ORM: Reads deduction_components / DeductionComponentORM.
+    # Standards: deterministic ORDER BY; tenant-scoped; no write path touched.
+    # Blast Radius: Finance read only. No auth/Neo4j/ingestion impact.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/allocation.py -> account allocation.
+    # ========================================================================
+    def list_account_components(
+        self, *, month: str, adsense_account_id: str | None = None
+    ) -> list[DeductionComponent]:
+        """List ACCOUNT-scoped deduction components for one finance month.
+
+        When adsense_account_id is provided, restricts to that account's
+        scope_id. PAYMENT/CHANNEL-grain rows are excluded at the query layer.
+
+        Raises:
+            DeductionComponentValidationError: If the month is malformed.
+        """
+        _validate_month(month)
+        query = (
+            select(DeductionComponentORM)
+            .where(DeductionComponentORM.tenant_id == self._tenant_id)
+            .where(DeductionComponentORM.month == month)
+            .where(DeductionComponentORM.scope_kind == "ACCOUNT")
+        )
+        if adsense_account_id is not None:
+            query = query.where(DeductionComponentORM.scope_id == adsense_account_id)
+        rows = self._session.scalars(
+            query.order_by(
+                DeductionComponentORM.scope_id,
+                DeductionComponentORM.component_kind,
+                DeductionComponentORM.component_key,
+            )
+        ).all()
+        return [self._to_entry(row) for row in rows]
+
     @staticmethod
     def _to_entry(row: DeductionComponentORM) -> DeductionComponent:
         """Convert an ORM row into a read-model dataclass."""
