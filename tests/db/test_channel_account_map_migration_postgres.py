@@ -113,3 +113,84 @@ def test_owner_channel_provenance_kind_check_rejects_unknown(alembic_config, fre
     )
     with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
         conn.execute(insert_sql, {"tenant": UMS_TENANT_ID})
+
+
+def test_repo_verify_blocks_on_held_per_account_advisory_lock(alembic_config, fresh_engine):
+    """Proof the repository verify path acquires the per-account advisory lock.
+
+    Connection A holds pg_advisory_xact_lock for (tenant, "pub-lock"). A second
+    Session runs the repository's verify_account_owner_link under a short
+    statement_timeout; because verify acquires the SAME per-account lock, the
+    lock wait is canceled and raises. Commenting out _acquire_account_owner_lock
+    in verify makes this test fail (the contender would not block).
+    """
+    from uuid import UUID, uuid4
+
+    from sqlalchemy.exc import OperationalError
+    from sqlalchemy.orm import Session
+
+    from ums_smart_revenue.finance.channel_account_links import (
+        SqlAlchemyChannelAccountLinkRepository,
+        _account_owner_lock_key,
+    )
+    from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
+    command.upgrade(alembic_config, "head")
+    tenant = UUID(UMS_TENANT_ID)
+
+    # Seed one UNVERIFIED link (committed so the contender Session can load it).
+    with Session(fresh_engine) as setup:
+        link_id = (
+            SqlAlchemyChannelAccountLinkRepository(setup, tenant_id=tenant)
+            .propose_account_owner_link(
+                adsense_account_id="pub-lock", content_owner_id="owner-1",
+                effective_month_start="2026-01", effective_month_end=None,
+                provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+            )
+            .id
+        )
+        setup.commit()
+
+    key = _account_owner_lock_key(tenant, "pub-lock")
+    holder = fresh_engine.connect()
+    holder_txn = holder.begin()
+    try:
+        holder.execute(text("SELECT pg_advisory_xact_lock(:k)"), {"k": key})
+        with Session(fresh_engine) as contender:
+            # statement_timeout reliably cancels a blocked advisory-lock wait.
+            contender.execute(text("SET statement_timeout = '750ms'"))
+            repo = SqlAlchemyChannelAccountLinkRepository(contender, tenant_id=tenant)
+            raised = False
+            try:
+                repo.verify_account_owner_link(link_id, verified_by=uuid4(), reason="x")
+            except OperationalError:
+                raised = True
+            assert raised, "verify must block on the held per-account advisory lock"
+    finally:
+        holder_txn.rollback()
+        holder.close()
+
+
+def test_repo_verify_succeeds_uncontended_on_postgres(alembic_config, fresh_engine):
+    """Happy path: the verify path runs end-to-end against live Postgres."""
+    from uuid import UUID, uuid4
+
+    from sqlalchemy.orm import Session
+
+    from ums_smart_revenue.finance.channel_account_links import (
+        SqlAlchemyChannelAccountLinkRepository,
+    )
+    from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
+    command.upgrade(alembic_config, "head")
+    tenant = UUID(UMS_TENANT_ID)
+    with Session(fresh_engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=tenant)
+        link = repo.propose_account_owner_link(
+            adsense_account_id="pub-pg", content_owner_id="owner-pg",
+            effective_month_start="2026-01", effective_month_end=None,
+            provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+        )
+        out = repo.verify_account_owner_link(link.id, verified_by=uuid4(), reason="ok")
+        session.commit()
+    assert out.verification_status == "VERIFIED"
