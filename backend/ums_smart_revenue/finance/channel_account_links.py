@@ -203,6 +203,11 @@ class SqlAlchemyChannelAccountLinkRepository:
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
+    @property
+    def tenant_id(self) -> UUID:
+        """The tenant UUID this repository is scoped to (read-only)."""
+        return self._tenant_id
+
     def _acquire_account_owner_lock(self, adsense_account_id: str) -> None:
         """Serialize verify/reject for one account via a transaction advisory lock.
 

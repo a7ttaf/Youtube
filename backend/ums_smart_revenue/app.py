@@ -10,6 +10,7 @@ from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from ums_smart_revenue.api.adsense import router as adsense_router
+from ums_smart_revenue.api.allocation import router as allocation_router
 from ums_smart_revenue.api.audit import router as audit_router
 from ums_smart_revenue.api.channel_account_links import (
     router as channel_account_links_router,
@@ -113,6 +114,7 @@ def create_app(
             )
 
     _app.include_router(adsense_router)
+    _app.include_router(allocation_router)
     _app.include_router(audit_router)
     _app.include_router(channel_account_links_router)
     _app.include_router(channels_router)
