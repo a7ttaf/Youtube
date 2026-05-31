@@ -37,6 +37,7 @@ def auth_headers(role, scope_type="global", scope_id=None):
 
 
 def build_database_url(tmp_path):
+    """Return a unique per-test sqlite file URL under tmp_path."""
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
@@ -138,6 +139,7 @@ def test_finance_viewer_gets_allocation(tmp_path):
 
 
 def test_unmapped_account_reports_blocking_issue(tmp_path):
+    """An account with no verified channels surfaces ACCOUNT_UNMAPPED_OR_UNVERIFIED."""
     database_url = build_database_url(tmp_path)
     seed(database_url, add_unmapped=True)
     client = TestClient(create_app(database_url=database_url))
@@ -152,6 +154,7 @@ def test_unmapped_account_reports_blocking_issue(tmp_path):
 
 
 def test_account_filter_narrows_results(tmp_path):
+    """The adsense_account_id query filter returns only the requested account."""
     database_url = build_database_url(tmp_path)
     seed(database_url, add_unmapped=True)
     client = TestClient(create_app(database_url=database_url))
@@ -179,6 +182,7 @@ def test_missing_finance_view_is_forbidden(tmp_path):
 
 
 def test_malformed_month_returns_422(tmp_path):
+    """A non-calendar month (2026-13) is rejected at the 422 boundary gate."""
     database_url = build_database_url(tmp_path)
     seed(database_url)
     client = TestClient(create_app(database_url=database_url))

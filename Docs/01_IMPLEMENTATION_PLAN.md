@@ -488,8 +488,11 @@ channel-scoped TAX/DEDUCTION components on the missing-net path, and added the
 read-only `GET /revenue/months/{month}/deduction-components` endpoint. This
 branch ships the canonical channel↔account map substrate (two-layer ORM +
 Alembic migration + audited propose/verify/reject API + read contract) as the
-prerequisite for Spec 2b. The allocation engine (account→channel distribution,
-Spec 2b) remains the largest blocker to a fully reconciled net figure.
+prerequisite for Spec 2b, plus Spec 2b PR-1: the account-level deduction
+allocation compute + read endpoint (`GET /revenue/months/{month}/account-allocations`).
+The allocation engine's remaining work — net-revenue integration of the
+net-applicable lines, PAYMENT-grain distribution, and persisted/committed
+writes — remains the largest blocker to a fully reconciled net figure.
 
 ---
 

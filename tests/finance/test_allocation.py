@@ -91,6 +91,7 @@ def test_allocates_by_source_aligned_gross_and_conserves():
 
 
 def test_single_channel_gets_full_amount():
+    """A single verified channel receives the component's full amount."""
     result = build_account_allocation(
         month="2026-04",
         components=[_component(amount="42.50")],
@@ -136,6 +137,7 @@ def test_net_applicable_buckets_split_correctly():
 
 
 def test_zero_amount_component_allocated_with_no_lines():
+    """A zero-amount component counts as allocated but produces no allocation lines."""
     result = build_account_allocation(
         month="2026-04",
         components=[_component(amount="0.00")],
@@ -148,6 +150,7 @@ def test_zero_amount_component_allocated_with_no_lines():
 
 
 def test_unmapped_account_is_unallocated():
+    """A component for an account with no verified channels is UNALLOCATED."""
     result = build_account_allocation(
         month="2026-04",
         components=[_component(amount="10.00", scope_id="pub-x")],
@@ -183,6 +186,7 @@ def test_present_zero_basis_is_valid_when_total_positive():
 
 
 def test_zero_total_basis_is_unallocated():
+    """Zero source-aligned gross basis yields ZERO_GROSS_BASIS (fail-closed)."""
     result = build_account_allocation(
         month="2026-04",
         components=[_component(amount="10.00")],
@@ -205,6 +209,7 @@ def test_unsupported_scope_is_guarded():
 
 
 def test_channel_in_multiple_accounts_emits_informational_note():
+    """A channel verified under multiple accounts emits the multi-account note and still allocates."""
     result = build_account_allocation(
         month="2026-04",
         components=[_component(amount="10.00", scope_id="pub-1", key="a")],
@@ -217,6 +222,7 @@ def test_channel_in_multiple_accounts_emits_informational_note():
 
 
 def test_aggregate_conservation_across_components():
+    """Allocated + unallocated totals conserve the full input across mixed components."""
     result = build_account_allocation(
         month="2026-04",
         components=[
@@ -239,6 +245,7 @@ def test_aggregate_conservation_across_components():
 
 
 def test_proportional_allocation_rejects_non_positive_basis():
+    """Empty or zero-weight inputs raise AllocationValidationError."""
     with pytest.raises(allocation.AllocationValidationError):
         allocation._proportional_allocation(Decimal("10.000000"), [])
     with pytest.raises(allocation.AllocationValidationError):
@@ -246,6 +253,7 @@ def test_proportional_allocation_rejects_non_positive_basis():
 
 
 def test_proportional_allocation_negative_residual_conserves():
+    """A negative amount's residual micro-unit is placed deterministically and conserves the sum."""
     result = allocation._proportional_allocation(
         Decimal("-1.000000"),
         [("c1", Decimal("1")), ("c2", Decimal("1")), ("c3", Decimal("1"))],
@@ -259,6 +267,7 @@ def test_proportional_allocation_negative_residual_conserves():
 
 
 def test_negative_total_basis_is_unallocated():
+    """A negative source-aligned gross total yields ZERO_GROSS_BASIS (fail-closed)."""
     result = build_account_allocation(
         month="2026-04",
         components=[_component(amount="5.00")],

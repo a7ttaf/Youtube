@@ -1,6 +1,6 @@
 # Delivery Backlog
 
-## Status (2026-05-29)
+## Status (2026-05-31)
 
 Reconciled through PR #50 (B2.6 connector row-count classification). Marker conventions
 match `01_IMPLEMENTATION_PLAN.md`:

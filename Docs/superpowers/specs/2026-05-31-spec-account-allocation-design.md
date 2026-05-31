@@ -169,8 +169,8 @@ distribute; mapping/basis checks skipped). Otherwise, for each ACCOUNT component
      source kind; it contributes zero weight and receives zero). Only an **absent** entry is
      missing/incomplete. Distinguishing absent from present-zero relies on facts carrying
      zero-gross rows; the plan verifies this against `RevenueFactEntry`.
-4. `basis_total = Σ basis[ch]`. If `basis_total == 0` (all present but zero) →
-   `UNALLOCATED(ZERO_GROSS_BASIS)`.
+4. `basis_total = Σ basis[ch]`. If `basis_total <= 0` (all present but summing to zero
+   or negative) → `UNALLOCATED(ZERO_GROSS_BASIS)`.
 5. Otherwise allocate: `raw_share[ch] = A × basis[ch] / basis_total`, with deterministic
    largest-remainder rounding (§4.3). One `AllocationLine` per `(component, channel)`.
 
@@ -240,7 +240,7 @@ single `UnallocatedIssue` carrying its full `amount_usd`. The codes:
 | `ACCOUNT_UNMAPPED_OR_UNVERIFIED` | `list_verified_adsense_account_channels` returned `[]` for the account-month (no verified account↔owner link, or no active owner↔channel link). | yes |
 | `BASIS_MISSING` | Source kind unresolved, or **no** verified channel has a source-aligned gross fact. | yes |
 | `BASIS_INCOMPLETE` | **Some but not all** verified channels have a source-aligned gross fact. | yes |
-| `ZERO_GROSS_BASIS` | All verified channels have gross present, but `Σ == 0`. | yes |
+| `ZERO_GROSS_BASIS` | All verified channels have gross present, but `Σ <= 0` (zero or negative). | yes |
 | `UNSUPPORTED_SCOPE` | A PAYMENT-grain or non-ACCOUNT component reached the allocator. | yes |
 | `CHANNEL_IN_MULTIPLE_ACCOUNTS` | A channel is reachable from ≥2 accounts in the month. | **no — informational only** |
 
@@ -431,7 +431,7 @@ migration, no advisory lock) — SQLite suffices for API tests; the service test
   unresolvable.
 - `BASIS_INCOMPLETE` when some-but-not-all channels have gross (fail closed; nothing
   allocated for that component).
-- `ZERO_GROSS_BASIS` when all present but `Σ == 0`.
+- `ZERO_GROSS_BASIS` when all present but `Σ <= 0` (zero or negative).
 - Source alignment: an `adsense_management` component ignores `YOUTUBE_CMS` gross of the
   same channels; `adsense_payment_gap` uses `ADSENSE` gross.
 - `net_applicable` true for TAX/DEDUCTION, false for UNRESOLVED_PAYMENT_GAP/TRANSFER_FEE/

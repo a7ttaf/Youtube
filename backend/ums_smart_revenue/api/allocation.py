@@ -4,12 +4,15 @@ from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.channel_account_links import (
+    current_channel_account_link_repository,
+)
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
-from ums_smart_revenue.api.dependencies import (
-    current_db_session,
-    current_principal_from_headers,
+from ums_smart_revenue.api.dependencies import current_principal_from_headers
+from ums_smart_revenue.api.revenue import (
+    current_deduction_component_repository,
+    current_revenue_fact_repository,
 )
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
@@ -31,27 +34,6 @@ from ums_smart_revenue.finance.deduction_ingestion import (
 from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
 
 router = APIRouter(prefix="/revenue", tags=["account-allocations"])
-
-
-def current_deduction_component_repository(
-    session: Annotated[Session, Depends(current_db_session)],
-) -> SqlAlchemyDeductionComponentRepository:
-    """Build the tenant-aware deduction-component repository for a request."""
-    return SqlAlchemyDeductionComponentRepository(session)
-
-
-def current_channel_account_link_repository(
-    session: Annotated[Session, Depends(current_db_session)],
-) -> SqlAlchemyChannelAccountLinkRepository:
-    """Build the tenant-aware channel-account-link repository for a request."""
-    return SqlAlchemyChannelAccountLinkRepository(session)
-
-
-def current_revenue_fact_repository(
-    session: Annotated[Session, Depends(current_db_session)],
-) -> SqlAlchemyRevenueFactRepository:
-    """Build the tenant-aware revenue-fact repository for a request."""
-    return SqlAlchemyRevenueFactRepository(session)
 
 
 def _require_permission(

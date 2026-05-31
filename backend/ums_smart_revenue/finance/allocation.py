@@ -64,9 +64,10 @@ def _proportional_allocation(
 
     Largest-remainder (Hamilton) apportionment: floor each share to 6dp, then
     hand the leftover micro-units to the largest fractional remainders
-    (channel_id ascending as the deterministic tiebreak). For NEGATIVE amounts
-    the leftover micro-units land on the least-negative remainder (the tiebreak
-    is sign-relative; ascending channel_id still breaks exact ties).
+    (channel_id ascending as the deterministic tiebreak). Remainders are always
+    non-negative fractional parts (exact - floor), so the same largest-remainder
+    rule applies to negative amounts: handing those shares an extra micro-unit
+    makes them less negative; ascending channel_id still breaks exact ties.
 
     Raises AllocationValidationError when basis_total <= 0; the caller in
     build_account_allocation guards this case before reaching here.
