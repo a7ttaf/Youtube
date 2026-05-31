@@ -526,6 +526,26 @@ def test_aggregate_conservation_across_components():
         result.summary.allocated_total_usd + result.summary.unallocated_total_usd
         == total_in
     )
+
+
+def test_allocates_negative_amount_preserving_sign_and_conservation():
+    """A negative UNRESOLVED_PAYMENT_GAP (settled - paid) splits with sign + exact sum."""
+    result = build_account_allocation(
+        month="2026-04",
+        components=[
+            _component(
+                component_kind="UNRESOLVED_PAYMENT_GAP", amount="-9.00",
+                source_system="adsense_payment_gap", key="neg",
+            )
+        ],
+        verified_channels={"pub-1": ["chA", "chB"]},
+        gross_basis={("chA", "ADSENSE"): Decimal("2"), ("chB", "ADSENSE"): Decimal("1")},
+    )
+    by_channel = {ln.youtube_channel_id: ln.allocated_amount_usd for ln in result.lines}
+    assert by_channel == {"chA": Decimal("-6.000000"), "chB": Decimal("-3.000000")}
+    assert sum(by_channel.values()) == Decimal("-9.000000")
+    assert all(not ln.net_applicable for ln in result.lines)  # reconciliation bucket
+    assert result.summary.reconciliation_total_usd == Decimal("-9.000000")
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
@@ -844,7 +864,7 @@ def build_database_url(tmp_path):
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
-def seed(database_url, *, add_unmapped=False):
+def seed(database_url, *, add_unmapped=False, add_payment=False):
     """Create schema + one verified-map account with gross and a deduction."""
     engine = create_engine(database_url)
     OrgBase.metadata.create_all(engine)
@@ -901,6 +921,17 @@ def seed(database_url, *, add_unmapped=False):
                     component_key="acct-ded-x", raw_payload={},
                 )
             )
+        if add_payment:
+            session.add(
+                DeductionComponentORM(
+                    id=uuid4(), tenant_id=TENANT, month=MONTH,
+                    component_kind="TRANSFER_FEE", scope_kind="PAYMENT",
+                    scope_id="BANK-1", amount_usd=Decimal("2.50"),
+                    currency_code="USD", source_system="bank_reconciliation",
+                    source_table="bank_reconciliation_entries",
+                    component_key="pay-fee-1", raw_payload={},
+                )
+            )
         session.commit()
 
 
@@ -911,7 +942,7 @@ def test_finance_viewer_gets_allocation(tmp_path):
     client = TestClient(create_app(database_url=database_url))
     response = client.get(
         f"/revenue/months/{MONTH}/account-allocations",
-        headers=auth_headers("finance_viewer", "finance_month", MONTH),
+        headers=auth_headers("finance_viewer", "global"),
     )
     assert response.status_code == 200
     body = response.json()
@@ -936,7 +967,7 @@ def test_unmapped_account_reports_blocking_issue(tmp_path):
     client = TestClient(create_app(database_url=database_url))
     response = client.get(
         f"/revenue/months/{MONTH}/account-allocations",
-        headers=auth_headers("finance_viewer", "finance_month", MONTH),
+        headers=auth_headers("finance_viewer", "global"),
     )
     assert response.status_code == 200
     body = response.json()
@@ -951,7 +982,7 @@ def test_account_filter_narrows_results(tmp_path):
     response = client.get(
         f"/revenue/months/{MONTH}/account-allocations",
         params={"adsense_account_id": "pub-1"},
-        headers=auth_headers("finance_viewer", "finance_month", MONTH),
+        headers=auth_headers("finance_viewer", "global"),
     )
     assert response.status_code == 200
     body = response.json()
@@ -966,7 +997,7 @@ def test_missing_finance_view_is_forbidden(tmp_path):
     client = TestClient(create_app(database_url=database_url))
     response = client.get(
         f"/revenue/months/{MONTH}/account-allocations",
-        headers=auth_headers("corporate_admin", "finance_month", MONTH),
+        headers=auth_headers("corporate_admin", "global"),
     )
     assert response.status_code == 403
 
@@ -977,9 +1008,44 @@ def test_malformed_month_returns_422(tmp_path):
     client = TestClient(create_app(database_url=database_url))
     response = client.get(
         "/revenue/months/2026-13/account-allocations",
-        headers=auth_headers("finance_viewer", "finance_month", "2026-13"),
+        headers=auth_headers("finance_viewer", "global"),
     )
     assert response.status_code == 422
+
+
+def test_finance_month_scope_is_rejected_for_global_read(tmp_path):
+    """A finance-month-scoped grant cannot satisfy the VIEW_REVENUE@global target."""
+    database_url = build_database_url(tmp_path)
+    seed(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    response = client.get(
+        f"/revenue/months/{MONTH}/account-allocations",
+        headers=auth_headers("finance_viewer", "finance-month", MONTH),
+    )
+    assert response.status_code == 403
+
+
+def test_payment_grain_excluded_and_no_bank_audit(tmp_path):
+    """A PAYMENT-grain component is never fetched/returned and emits no bank audit."""
+    database_url = build_database_url(tmp_path)
+    seed(database_url, add_payment=True)
+    client = TestClient(create_app(database_url=database_url))
+    response = client.get(
+        f"/revenue/months/{MONTH}/account-allocations",
+        headers=auth_headers("finance_viewer", "global"),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    surfaced = {ln["adsense_account_id"] for ln in body["allocations"]} | {
+        iss["scope_id"] for iss in body["unallocated"]
+    }
+    assert "BANK-1" not in surfaced  # PAYMENT-grain never fetched or surfaced
+    assert all(ln["youtube_channel_id"] == "chA" for ln in body["allocations"])
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        logs = {log.event_type for log in session.scalars(select(AuditLogORM)).all()}
+    assert "BANK_RECONCILIATION_VIEWED" not in logs
+    assert logs == {"REVENUE_VIEWED", "PAYMENT_VIEWED"}
 ```
 
 - [ ] **Step 3: Run the API tests to verify they fail**
@@ -1254,7 +1320,7 @@ And add the mount call in the `include_router` block (after `adsense_router`, be
 - [ ] **Step 6: Run the API tests to verify they pass**
 
 Run: `python -m pytest tests/api/test_allocation_api.py -v`
-Expected: 5 passed.
+Expected: 7 passed.
 
 - [ ] **Step 7: Commit**
 
@@ -1353,3 +1419,11 @@ Expected: ruff clean; full suite green (new tests included); no whitespace error
 **Type consistency:** `build_account_allocation` signature, dataclass field names, `AllocationLine`/`UnallocatedIssue`/`AllocationNote`/`AllocationSummary`/`AccountAllocationResult`, `_basis_source_kind`, `_proportional_allocation`, and `list_account_components` are used identically across T2/T3/T4. `decimal_to_api`, `list_month_facts`, `list_verified_adsense_account_channels`, and `tenant_id` match the verified anchors.
 
 **Constructor parity (verified):** `SqlAlchemyRevenueFactRepository.__init__(self, session, *, tenant_id=None)` (`revenue_facts.py:101`) matches the deduction/link repos, so the `current_revenue_fact_repository` provider's `SqlAlchemyRevenueFactRepository(session)` is correct.
+
+---
+
+## Plan review patches (pre-execution, Mahmoud)
+
+1. **Task 4 auth fix.** The endpoint requires `VIEW_REVENUE@global`; a finance-month-scoped grant cannot satisfy a global target (`OrgAccessIndex.contains`, `scopes.py:60-61`), and the real `x-scope-type` header value is `finance-month` (hyphen; `ScopeType.FINANCE_MONTH`, `scopes.py:12`) — not `finance_month`. All happy-path/filter/unmapped/422 tests now authenticate as `finance_viewer` at **`global`** (a global grant satisfies both the global revenue check and the finance-month payment check, `scopes.py:58`); the 403 test uses `corporate_admin` at `global`. Added `test_finance_month_scope_is_rejected_for_global_read` proving a `finance-month`-scoped `finance_viewer` is rejected (403) for this global management read.
+2. **Task 3 negative-amount test.** `test_allocates_negative_amount_preserving_sign_and_conservation` covers a negative `UNRESOLVED_PAYMENT_GAP` (settled − paid can be negative): the split preserves sign and conserves exactly, landing in the reconciliation (non-net) bucket.
+3. **Task 4 PAYMENT-grain test.** `test_payment_grain_excluded_and_no_bank_audit` seeds a PAYMENT-grain component and asserts it never appears in the response and that only `REVENUE_VIEWED` + `PAYMENT_VIEWED` (no `BANK_RECONCILIATION_VIEWED`) are recorded — proving the SQL-layer ACCOUNT-only boundary.
