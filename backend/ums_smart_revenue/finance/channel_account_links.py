@@ -24,7 +24,11 @@ from uuid import UUID
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.finance_models import AdsenseContentOwnerLinkORM
+from ums_smart_revenue.db.finance_models import (
+    AdsenseContentOwnerLinkORM,
+    ContentOwnerChannelLinkORM,
+)
+from ums_smart_revenue.db.source_models import GoogleRevenueSourceRowORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
@@ -374,3 +378,58 @@ class SqlAlchemyChannelAccountLinkRepository:
             total_count=int(total_count or 0),
             links=[self._to_account_owner_link(row) for row in rows],
         )
+
+    def upsert_owner_channel_links_from_source(self) -> int:
+        """Idempotently derive owner↔channel links from source-row co-occurrence.
+
+        Only rows where BOTH content_owner_id and youtube_channel_id are present
+        produce links. source_account_id is never read (it must not infer the
+        account↔owner link). Returns the count of newly inserted links.
+        """
+        observed = self._session.execute(
+            select(
+                GoogleRevenueSourceRowORM.content_owner_id,
+                GoogleRevenueSourceRowORM.youtube_channel_id,
+                GoogleRevenueSourceRowORM.report_month,
+                func.min(GoogleRevenueSourceRowORM.source_row_key),
+            )
+            .where(
+                GoogleRevenueSourceRowORM.tenant_id == self._tenant_id,
+                GoogleRevenueSourceRowORM.content_owner_id.is_not(None),
+                GoogleRevenueSourceRowORM.youtube_channel_id.is_not(None),
+            )
+            .group_by(
+                GoogleRevenueSourceRowORM.content_owner_id,
+                GoogleRevenueSourceRowORM.youtube_channel_id,
+                GoogleRevenueSourceRowORM.report_month,
+            )
+        ).all()
+        created = 0
+        for owner_id, channel_id, month, source_key in observed:
+            exists = self._session.scalar(
+                select(func.count())
+                .select_from(ContentOwnerChannelLinkORM)
+                .where(
+                    ContentOwnerChannelLinkORM.tenant_id == self._tenant_id,
+                    ContentOwnerChannelLinkORM.content_owner_id == owner_id,
+                    ContentOwnerChannelLinkORM.youtube_channel_id == channel_id,
+                    ContentOwnerChannelLinkORM.effective_month_start == month,
+                )
+            )
+            if exists:
+                continue
+            self._session.add(
+                ContentOwnerChannelLinkORM(
+                    tenant_id=self._tenant_id,
+                    content_owner_id=owner_id,
+                    youtube_channel_id=channel_id,
+                    provenance_kind="SOURCE_ROW",
+                    provenance_source_id=source_key,
+                    active=True,
+                    effective_month_start=month,
+                    effective_month_end=month,
+                )
+            )
+            created += 1
+        self._session.flush()
+        return created
