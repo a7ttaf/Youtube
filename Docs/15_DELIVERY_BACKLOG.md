@@ -181,6 +181,12 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   /revenue/recalculate (build_recalculation_preview; dry-run-only
   allocation-method preview with blocking-issue detection; committed writes
   intentionally rejected as not-yet-implemented).
+- ⏳ Channel↔account map — shipped (this branch): two-layer canonical map
+  (`adsense_content_owner_links` operator-verified + `content_owner_channel_links`
+  derived from source rows), audited propose/verify/reject API behind dual
+  MANAGE_ORG_MAPPING + CHANGE_ALLOCATION_RULE gates, per-account advisory-lock
+  overlap invariant, and `list_verified_adsense_account_channels` for Spec 2b.
+- ⏳ Allocation engine (Spec 2b) — remaining: not started; consumes the verified map.
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed
   permissions). Month-close status UI remains unbuilt (Phase 5).
