@@ -365,3 +365,38 @@ def test_derivation_groups_by_month_and_collapses_duplicate_rows(tmp_path):
     assert all(r.effective_month_start == r.effective_month_end for r in rows)
     # April link's provenance is the lexicographically smallest April source key.
     assert rows[0].provenance_source_id.startswith("k-apr-1")
+
+
+def test_read_contract_returns_verified_month_scoped_channels(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        link = _propose(repo, account="pub-1", owner="owner-1", start="2026-01", end=None)
+        repo.verify_account_owner_link(link.id, verified_by=VERIFIER, reason="r")
+        _source_row(session, owner="owner-1", channel="chan-1", month="2026-04", key="s1")
+        session.commit()
+        repo.upsert_owner_channel_links_from_source()
+        session.commit()
+        got = repo.list_verified_adsense_account_channels(
+            tenant_id=TENANT, month="2026-04", adsense_account_id="pub-1"
+        )
+        wrong_month = repo.list_verified_adsense_account_channels(
+            tenant_id=TENANT, month="2026-05", adsense_account_id="pub-1"
+        )
+    assert got == ["chan-1"]
+    assert wrong_month == []  # owner-channel link only observed for 2026-04
+
+
+def test_read_contract_excludes_unverified_account(tmp_path):
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        repo = SqlAlchemyChannelAccountLinkRepository(session, tenant_id=TENANT)
+        _propose(repo, account="pub-1", owner="owner-1", start="2026-01", end=None)  # never verified
+        _source_row(session, owner="owner-1", channel="chan-1", month="2026-04", key="s1")
+        session.commit()
+        repo.upsert_owner_channel_links_from_source()
+        session.commit()
+        got = repo.list_verified_adsense_account_channels(
+            tenant_id=TENANT, month="2026-04", adsense_account_id="pub-1"
+        )
+    assert got == []

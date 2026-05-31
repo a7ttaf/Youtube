@@ -436,3 +436,61 @@ class SqlAlchemyChannelAccountLinkRepository:
             created += 1
         self._session.flush()
         return created
+
+    # ============================================================================
+    # Purpose: Return channels reachable from an AdSense account in a given month
+    #   via a VERIFIED account↔owner link and an active owner↔channel link, both
+    #   valid for that month. This is the verified read contract consumed by the
+    #   allocation engine (Spec 2b). Unmapped or unverified accounts return [].
+    # Database/ORM: AdsenseContentOwnerLinkORM (adsense_content_owner_links),
+    #   ContentOwnerChannelLinkORM (content_owner_channel_links). Pure read.
+    # Standards: tenant-explicit; month-validation gate; typed error on malformed
+    #   month; no writes; no derivation.
+    # Blast Radius: None — pure read; no mutation of any table.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/finance/channel_account_links.py ->
+    #       _validate_month, _resolve_tenant_id, AdsenseContentOwnerLinkORM,
+    #       ContentOwnerChannelLinkORM all defined/imported in this module.
+    #   - Spec 2b allocation engine: consumes the returned channel list to determine
+    #       which channels a payment row can be allocated to.
+    # ============================================================================
+    def list_verified_adsense_account_channels(
+        self, *, tenant_id: UUID | str, month: str, adsense_account_id: str
+    ) -> list[str]:
+        """Return channels for an account in a month via VERIFIED+valid links only.
+
+        Joins VERIFIED account↔owner links valid for ``month`` to active
+        owner↔channel links valid for ``month``. Empty when the account is
+        unmapped/unverified (Spec 2b turns that into UNALLOCATED + a blocking
+        issue). Pure read — no derivation, no writes.
+
+        Raises:
+            ChannelAccountLinkValidationError: If ``month`` is malformed.
+        """
+        _validate_month(month)
+        resolved_tenant = _resolve_tenant_id(tenant_id)
+        owner_subquery = (
+            select(AdsenseContentOwnerLinkORM.content_owner_id)
+            .where(
+                AdsenseContentOwnerLinkORM.tenant_id == resolved_tenant,
+                AdsenseContentOwnerLinkORM.adsense_account_id == adsense_account_id,
+                AdsenseContentOwnerLinkORM.verification_status == "VERIFIED",
+                AdsenseContentOwnerLinkORM.effective_month_start <= month,
+                (AdsenseContentOwnerLinkORM.effective_month_end.is_(None))
+                | (AdsenseContentOwnerLinkORM.effective_month_end >= month),
+            )
+        )
+        rows = self._session.scalars(
+            select(ContentOwnerChannelLinkORM.youtube_channel_id)
+            .where(
+                ContentOwnerChannelLinkORM.tenant_id == resolved_tenant,
+                ContentOwnerChannelLinkORM.content_owner_id.in_(owner_subquery),
+                ContentOwnerChannelLinkORM.active.is_(True),
+                ContentOwnerChannelLinkORM.effective_month_start <= month,
+                (ContentOwnerChannelLinkORM.effective_month_end.is_(None))
+                | (ContentOwnerChannelLinkORM.effective_month_end >= month),
+            )
+            .order_by(ContentOwnerChannelLinkORM.youtube_channel_id)
+            .distinct()
+        ).all()
+        return list(rows)
