@@ -1,31 +1,24 @@
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from typing import overload
 
+from ums_smart_revenue.finance.allocation import AllocationLine, UnallocatedIssue
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.deduction_components import DeductionComponent
+
+# Re-exported from the neutral deduction_policy module so existing
+# `from ums_smart_revenue.finance.net_revenue import NET_APPLICABLE_COMPONENT_KINDS`
+# (and SOURCE_SYSTEM_TO_SOURCE_KIND) call sites keep working unchanged, while
+# finance.allocation imports them from deduction_policy to avoid an import cycle.
+from ums_smart_revenue.finance.deduction_policy import (  # noqa: F401  (re-export)
+    NET_APPLICABLE_COMPONENT_KINDS,
+    SOURCE_SYSTEM_TO_SOURCE_KIND,
+)
 from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntry
 from ums_smart_revenue.finance.reconciliation import SOURCE_PRIORITY
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
-
-# ============================================================================
-# Purpose: Map a Google source_system to the RevenueFactSourceKind it backs, so
-#   a channel-scoped deduction component is only applied to a net derived from
-#   the SAME source (no cross-source mixing). Used only on the missing-net path.
-# Database/ORM: None.
-# Standards: explicit, closed map; unknown source_system -> no match -> ignored.
-# Blast Radius: Finance net-revenue derivation (missing-net path only).
-# ============================================================================
-SOURCE_SYSTEM_TO_SOURCE_KIND: dict[str, str] = {
-    "adsense_management": "ADSENSE",
-    "youtube_reporting": "YOUTUBE_CMS",
-    "youtube_analytics": "YOUTUBE_ANALYTICS",
-}
-# Only blind, source-labeled reductions reduce a component-derived net; signed
-# FX_VARIANCE / TRANSFER_FEE / UNRESOLVED_PAYMENT_GAP kinds never reduce net.
-NET_APPLICABLE_COMPONENT_KINDS: frozenset[str] = frozenset({"TAX", "DEDUCTION"})
 
 
 @dataclass(frozen=True)
@@ -42,6 +35,8 @@ class ChannelNetRevenueSummary:
     adjusted_gross_revenue_usd: Decimal
     net_revenue_usd: Decimal | None
     deduction_amount_usd: Decimal | None
+    channel_direct_deduction_amount_usd: Decimal | None
+    account_allocated_deduction_amount_usd: Decimal | None
     deduction_percentage: Decimal | None
     confidence: str
     approved_manual_override_count: int
@@ -72,6 +67,12 @@ class ChannelNetRevenueSummary:
             ),
             "net_revenue_usd": _decimal_to_api(self.net_revenue_usd),
             "deduction_amount_usd": _decimal_to_api(self.deduction_amount_usd),
+            "channel_direct_deduction_amount_usd": _decimal_to_api(
+                self.channel_direct_deduction_amount_usd
+            ),
+            "account_allocated_deduction_amount_usd": _decimal_to_api(
+                self.account_allocated_deduction_amount_usd
+            ),
             "deduction_percentage": _decimal_to_api(self.deduction_percentage),
             "confidence": self.confidence,
             "approved_manual_override_count": self.approved_manual_override_count,
@@ -93,6 +94,8 @@ class MonthNetRevenueSummary:
     total_adjusted_gross_revenue_usd: Decimal
     total_net_revenue_usd: Decimal
     total_deduction_amount_usd: Decimal
+    unallocated_account_deduction_total_usd: Decimal | None
+    unallocated_account_issues: list[dict[str, str]] | None
     channels: list[ChannelNetRevenueSummary]
 
     def to_api(self) -> dict[str, object]:
@@ -111,6 +114,10 @@ class MonthNetRevenueSummary:
             "total_deduction_amount_usd": _decimal_to_api(
                 self.total_deduction_amount_usd
             ),
+            "unallocated_account_deduction_total_usd": _decimal_to_api(
+                self.unallocated_account_deduction_total_usd
+            ),
+            "unallocated_account_issues": self.unallocated_account_issues,
             "channels": [channel.to_api() for channel in self.channels],
         }
 
@@ -186,6 +193,26 @@ def _applicable_deduction_components(
     ]
 
 
+def _applicable_account_allocations(
+    allocations: Iterable[AllocationLine],
+    *,
+    youtube_channel_id: str,
+    primary_source_kind: str,
+) -> list[AllocationLine]:
+    """Return source-aligned net-applicable account allocations for a channel.
+
+    Same source-alignment rule as _applicable_deduction_components; basis_source_kind
+    is provenance only and is deliberately NOT used as a second alignment contract.
+    """
+    return [
+        line
+        for line in allocations
+        if line.youtube_channel_id == youtube_channel_id
+        and line.net_applicable
+        and SOURCE_SYSTEM_TO_SOURCE_KIND.get(line.source_system) == primary_source_kind
+    ]
+
+
 def _component_derived_channel_summary(
     *,
     primary: RevenueFactEntry,
@@ -193,11 +220,13 @@ def _component_derived_channel_summary(
     youtube_channel_id: str,
     approved_total: Decimal,
     adjusted_gross: Decimal,
-    component_total: Decimal,
+    channel_direct_total: Decimal,
+    account_allocated_total: Decimal,
     approved_count: int,
     pending_count: int,
 ) -> ChannelNetRevenueSummary:
     """Build a channel summary whose missing net is derived from components."""
+    component_total = channel_direct_total + account_allocated_total
     component_derived_net = adjusted_gross - component_total
     return ChannelNetRevenueSummary(
         month=month,
@@ -215,6 +244,8 @@ def _component_derived_channel_summary(
             gross_revenue_usd=adjusted_gross,
         ),
         confidence="D_ESTIMATED",
+        channel_direct_deduction_amount_usd=channel_direct_total,
+        account_allocated_deduction_amount_usd=account_allocated_total,
         approved_manual_override_count=approved_count,
         pending_manual_override_count=pending_count,
         issues=[],
@@ -243,6 +274,8 @@ def _missing_net_source_summary(
         adjusted_gross_revenue_usd=adjusted_gross,
         net_revenue_usd=None,
         deduction_amount_usd=None,
+        channel_direct_deduction_amount_usd=None,
+        account_allocated_deduction_amount_usd=None,
         deduction_percentage=None,
         confidence="E_MISSING",
         approved_manual_override_count=approved_count,
@@ -289,6 +322,8 @@ def _calculated_channel_summary(
             gross_revenue_usd=adjusted_gross,
         ),
         confidence="D_ESTIMATED" if pending_count else "B_RECONCILED",
+        channel_direct_deduction_amount_usd=None,
+        account_allocated_deduction_amount_usd=None,
         approved_manual_override_count=approved_count,
         pending_manual_override_count=pending_count,
         issues=[],
@@ -302,6 +337,7 @@ def build_channel_net_revenue_summary(
     month: str | None = None,
     youtube_channel_id: str | None = None,
     deduction_components: Iterable[DeductionComponent] = (),
+    account_allocations: Iterable[AllocationLine] = (),
 ) -> ChannelNetRevenueSummary:
     """Construct a ChannelNetRevenueSummary from provided revenue facts and manual overrides,
     resolving the target month and channel ID.
@@ -355,15 +391,31 @@ def build_channel_net_revenue_summary(
     # Blast Radius: Finance net-revenue derivation, missing-net branch only.
     # ============================================================================
     if primary.net_revenue_usd is None:
-        applicable = _applicable_deduction_components(
+        channel_direct = _applicable_deduction_components(
             deduction_components,
             month=resolved_month,
             youtube_channel_id=resolved_channel_id,
             primary_source_kind=primary.source_kind,
         )
-        if applicable:
-            component_total = sum(
-                (component.amount_usd for component in applicable),
+        applied_keys = {component.component_key for component in channel_direct}
+        account_allocated = [
+            line
+            for line in _applicable_account_allocations(
+                account_allocations,
+                youtube_channel_id=resolved_channel_id,
+                primary_source_kind=primary.source_kind,
+            )
+            # Safety dedup (defensive; disjoint by construction): never apply an
+            # allocated line whose component_key already applied as channel-direct.
+            if line.component_key not in applied_keys
+        ]
+        if channel_direct or account_allocated:
+            channel_direct_total = sum(
+                (component.amount_usd for component in channel_direct),
+                Decimal("0"),
+            )
+            account_allocated_total = sum(
+                (line.allocated_amount_usd for line in account_allocated),
                 Decimal("0"),
             )
             return _component_derived_channel_summary(
@@ -372,7 +424,8 @@ def build_channel_net_revenue_summary(
                 youtube_channel_id=resolved_channel_id,
                 approved_total=approved_total,
                 adjusted_gross=adjusted_gross,
-                component_total=component_total,
+                channel_direct_total=channel_direct_total,
+                account_allocated_total=account_allocated_total,
                 approved_count=len(approved),
                 pending_count=len(pending),
             )
@@ -457,6 +510,16 @@ def _deduction_components_by_channel(
     return components_by_channel
 
 
+def _account_allocations_by_channel(
+    account_allocations: Iterable[AllocationLine],
+) -> dict[str, list[AllocationLine]]:
+    """Group account-allocation lines by YouTube channel."""
+    grouped: dict[str, list[AllocationLine]] = defaultdict(list)
+    for line in account_allocations:
+        grouped[line.youtube_channel_id].append(line)
+    return grouped
+
+
 def _month_net_revenue_counts(
     channels: list[ChannelNetRevenueSummary],
 ) -> tuple[list[ChannelNetRevenueSummary], int, int]:
@@ -471,12 +534,48 @@ def _month_net_revenue_counts(
     return calculated, missing_count, pending_count
 
 
+# ============================================================================
+# Purpose: Restrict month-wide account-allocation lines to an authorized channel
+#   set so scoped net-revenue reads and finance exports never surface allocation
+#   rows (and totals) for channels outside the caller's scope.
+# Database/ORM: None (operates on already-loaded AllocationLine values).
+# Standards: Pure, typed boundary; fail-closed on scoped reads (only explicitly
+#   authorized channels survive); global reads (channel_ids is None) pass through.
+# Blast Radius: Finance numbers + authorization — prevents cross-scope leakage of
+#   account-allocated channels into scoped responses/exports.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/revenue.py -> net-revenue route scope.
+#   - File: backend/ums_smart_revenue/api/exports.py -> finance export scope.
+# ============================================================================
+def filter_account_allocations_to_scope(
+    account_allocations: Iterable[AllocationLine],
+    channel_ids: Collection[str] | None,
+) -> list[AllocationLine]:
+    """Restrict account-allocation lines to an authorized channel set.
+
+    ``compute_month_account_allocation`` always resolves month-wide, so a scoped
+    (company/sector/channel/group) read must drop lines for channels outside the
+    authorized set before they reach the summary builder; otherwise a caller
+    authorized for one scope could receive other channels' allocation-derived
+    rows and totals. ``channel_ids is None`` marks a global read and keeps every
+    line unchanged.
+    """
+    if channel_ids is None:
+        return list(account_allocations)
+    allowed = set(channel_ids)
+    return [
+        line for line in account_allocations if line.youtube_channel_id in allowed
+    ]
+
+
 def build_month_net_revenue_summary(
     *,
     month: str,
     facts: Iterable[RevenueFactEntry],
     manual_overrides: Iterable[RevenueManualOverrideEntry],
     deduction_components: Iterable[DeductionComponent] = (),
+    account_allocations: Iterable[AllocationLine] = (),
+    unallocated_account_issues: Iterable[UnallocatedIssue] | None = None,
 ) -> MonthNetRevenueSummary:
     """
     Build a summary of net revenue for a given month across all channels.
@@ -491,15 +590,26 @@ def build_month_net_revenue_summary(
         deduction_components,
         month=month,
     )
+    allocations_by_channel = _account_allocations_by_channel(account_allocations)
 
-    channel_ids = sorted(set(facts_by_channel) | set(overrides_by_channel))
+    # FIX: include allocations_by_channel so channels with allocated deductions
+    # but no revenue facts or overrides are not silently dropped from the summary.
+    channel_ids = sorted(
+        set(facts_by_channel) | set(overrides_by_channel) | set(allocations_by_channel)
+    )
+    # FIX: use .get(channel_id, ()) for facts/overrides to match the sibling
+    # component/allocation lookups below and the declared dict return type;
+    # allocation-only channel_ids are absent from facts_by_channel/
+    # overrides_by_channel, so direct subscripting relied on an undocumented
+    # defaultdict side effect that a future plain-dict refactor would break.
     channels = [
         build_channel_net_revenue_summary(
-            facts=facts_by_channel[channel_id],
-            manual_overrides=overrides_by_channel[channel_id],
+            facts=facts_by_channel.get(channel_id, ()),
+            manual_overrides=overrides_by_channel.get(channel_id, ()),
             month=month,
             youtube_channel_id=channel_id,
             deduction_components=components_by_channel.get(channel_id, ()),
+            account_allocations=allocations_by_channel.get(channel_id, ()),
         )
         for channel_id in channel_ids
     ]
@@ -510,6 +620,30 @@ def build_month_net_revenue_summary(
         missing_count=missing_count,
         pending_count=pending_count,
     )
+    if unallocated_account_issues is None:
+        unallocated_total: Decimal | None = None
+        unallocated_api: list[dict[str, str]] | None = None
+    else:
+        net_applicable_issues = [
+            issue
+            for issue in unallocated_account_issues
+            if issue.component_kind in NET_APPLICABLE_COMPONENT_KINDS
+        ]
+        unallocated_total = sum(
+            (issue.amount_usd for issue in net_applicable_issues),
+            Decimal("0"),
+        )
+        unallocated_api = [
+            {
+                "scope_id": issue.scope_id,
+                "component_kind": issue.component_kind,
+                "component_key": issue.component_key,
+                "amount_usd": _decimal_to_api(issue.amount_usd),
+                "issue_code": issue.issue_code,
+                "detail": issue.detail,
+            }
+            for issue in net_applicable_issues
+        ]
     return MonthNetRevenueSummary(
         month=month,
         status=status,
@@ -529,6 +663,8 @@ def build_month_net_revenue_summary(
             (channel.deduction_amount_usd for channel in calculated),
             Decimal("0"),
         ),
+        unallocated_account_deduction_total_usd=unallocated_total,
+        unallocated_account_issues=unallocated_api,
         channels=channels,
     )
 
@@ -556,6 +692,8 @@ def _empty_channel_summary(
         adjusted_gross_revenue_usd=approved_total,
         net_revenue_usd=None,
         deduction_amount_usd=None,
+        channel_direct_deduction_amount_usd=None,
+        account_allocated_deduction_amount_usd=None,
         deduction_percentage=None,
         confidence="E_MISSING",
         approved_manual_override_count=approved_count,

@@ -25,6 +25,7 @@ from ums_smart_revenue.reports.exports import ExportJobEntry
 
 
 def test_branded_slide_pack_report_builds_planned_slide_manifest():
+    """Slide pack report builds the correct manifest and executive summary."""
     report = build_branded_slide_pack_report(
         export_job=_export_job(export_type="BRANDED_SLIDE_PACK"),
         net_revenue=_net_revenue_summary(),
@@ -46,6 +47,7 @@ def test_branded_slide_pack_report_builds_planned_slide_manifest():
 
 
 def test_branded_slide_pack_rejects_non_slide_export_type():
+    """Slide pack rejects export jobs that are not BRANDED_SLIDE_PACK."""
     with pytest.raises(BrandedSlidePackValidationError) as exc_info:
         build_branded_slide_pack_report(
             export_job=_export_job(export_type="EXECUTIVE_PDF"),
@@ -61,6 +63,7 @@ def test_branded_slide_pack_rejects_non_slide_export_type():
 
 
 def test_branded_slide_pack_pptx_contains_planned_slides_and_summary_values():
+    """Generated PPTX contains all planned slides and summary values."""
     report = build_branded_slide_pack_report(
         export_job=_export_job(export_type="BRANDED_SLIDE_PACK"),
         net_revenue=_net_revenue_summary(),
@@ -87,6 +90,7 @@ def test_branded_slide_pack_pptx_contains_planned_slides_and_summary_values():
 
 
 def test_branded_slide_pack_pptx_handles_missing_channel_net_revenue():
+    """PPTX gracefully renders channels with missing net revenue source."""
     report = build_branded_slide_pack_report(
         export_job=_export_job(export_type="BRANDED_SLIDE_PACK"),
         net_revenue=_net_revenue_summary(include_missing_channel=True),
@@ -104,6 +108,7 @@ def test_branded_slide_pack_pptx_handles_missing_channel_net_revenue():
 
 
 def _slide_texts(presentation: Presentation) -> list[str]:
+    """Extract all text from each slide in a Presentation."""
     return [
         "\n".join(shape.text for shape in slide.shapes if hasattr(shape, "text"))
         for slide in presentation.slides
@@ -111,6 +116,7 @@ def _slide_texts(presentation: Presentation) -> list[str]:
 
 
 def _export_job(*, export_type: str) -> ExportJobEntry:
+    """Build a minimal ExportJobEntry for slide-pack tests."""
     return ExportJobEntry(
         id=str(uuid4()),
         export_type=export_type,
@@ -132,6 +138,7 @@ def _export_job(*, export_type: str) -> ExportJobEntry:
 def _net_revenue_summary(
     *, include_missing_channel: bool = False
 ) -> MonthNetRevenueSummary:
+    """Build a MonthNetRevenueSummary for slide-pack tests."""
     channel = ChannelNetRevenueSummary(
         month="2026-03",
         youtube_channel_id="channel-tv-a",
@@ -143,6 +150,8 @@ def _net_revenue_summary(
         adjusted_gross_revenue_usd=Decimal("1050.00"),
         net_revenue_usd=Decimal("930.00"),
         deduction_amount_usd=Decimal("120.00"),
+        channel_direct_deduction_amount_usd=None,
+        account_allocated_deduction_amount_usd=None,
         deduction_percentage=Decimal("11.4286"),
         confidence="B_RECONCILED",
         approved_manual_override_count=1,
@@ -163,6 +172,8 @@ def _net_revenue_summary(
                 adjusted_gross_revenue_usd=Decimal("100.00"),
                 net_revenue_usd=None,
                 deduction_amount_usd=None,
+                channel_direct_deduction_amount_usd=None,
+                account_allocated_deduction_amount_usd=None,
                 deduction_percentage=None,
                 confidence="E_MISSING",
                 approved_manual_override_count=0,
@@ -180,11 +191,14 @@ def _net_revenue_summary(
         total_adjusted_gross_revenue_usd=Decimal("1050.00"),
         total_net_revenue_usd=Decimal("930.00"),
         total_deduction_amount_usd=Decimal("120.00"),
+        unallocated_account_deduction_total_usd=None,
+        unallocated_account_issues=None,
         channels=channels,
     )
 
 
 def _payment_match_summary(*, status: str) -> MonthlyPaymentMatchSummary:
+    """Build a MonthlyPaymentMatchSummary for slide-pack tests."""
     return MonthlyPaymentMatchSummary(
         month="2026-03",
         currency="USD",
@@ -204,6 +218,7 @@ def _payment_match_summary(*, status: str) -> MonthlyPaymentMatchSummary:
 
 
 def _bank_summary(*, status: str) -> MonthBankReconciliationSummary:
+    """Build a MonthBankReconciliationSummary for slide-pack tests."""
     return MonthBankReconciliationSummary(
         month="2026-03",
         currency="USD",
@@ -225,6 +240,7 @@ def _bank_summary(*, status: str) -> MonthBankReconciliationSummary:
 
 
 def _smart_alert_summary() -> MonthlySmartAlertSummary:
+    """Build a MonthlySmartAlertSummary for slide-pack tests."""
     return MonthlySmartAlertSummary(
         month="2026-03",
         status="CLEAR",

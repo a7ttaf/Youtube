@@ -25,6 +25,7 @@ from ums_smart_revenue.reports.finance_workbook import (
 
 
 def test_finance_workbook_preview_builds_sheet_manifest_from_source_summaries():
+    """Workbook preview builds the correct sheet manifest and executive summary."""
     preview = build_finance_workbook_preview(
         export_job=_export_job(export_type="FINANCE_EXCEL"),
         net_revenue=_net_revenue_summary(),
@@ -62,6 +63,7 @@ def test_finance_workbook_preview_builds_sheet_manifest_from_source_summaries():
 
 
 def test_finance_workbook_preview_rejects_non_workbook_export_type():
+    """Workbook preview rejects export jobs that are not FINANCE_EXCEL."""
     with pytest.raises(FinanceWorkbookPreviewValidationError) as exc_info:
         build_finance_workbook_preview(
             export_job=_export_job(export_type="EXECUTIVE_PDF"),
@@ -77,6 +79,7 @@ def test_finance_workbook_preview_rejects_non_workbook_export_type():
 
 
 def test_finance_workbook_xlsx_contains_expected_sheets_and_source_values():
+    """Generated XLSX contains expected sheets and source values."""
     preview = build_finance_workbook_preview(
         export_job=_export_job(export_type="FINANCE_EXCEL"),
         net_revenue=_net_revenue_summary(),
@@ -103,6 +106,7 @@ def test_finance_workbook_xlsx_contains_expected_sheets_and_source_values():
 
 
 def _export_job(*, export_type: str) -> ExportJobEntry:
+    """Build a minimal ExportJobEntry for workbook preview tests."""
     return ExportJobEntry(
         id=str(uuid4()),
         export_type=export_type,
@@ -122,6 +126,7 @@ def _export_job(*, export_type: str) -> ExportJobEntry:
 
 
 def _net_revenue_summary() -> MonthNetRevenueSummary:
+    """Build a MonthNetRevenueSummary for workbook preview tests."""
     channel = ChannelNetRevenueSummary(
         month="2026-03",
         youtube_channel_id="channel-tv-a",
@@ -133,6 +138,8 @@ def _net_revenue_summary() -> MonthNetRevenueSummary:
         adjusted_gross_revenue_usd=Decimal("1050.00"),
         net_revenue_usd=Decimal("930.00"),
         deduction_amount_usd=Decimal("120.00"),
+        channel_direct_deduction_amount_usd=None,
+        account_allocated_deduction_amount_usd=None,
         deduction_percentage=Decimal("11.4286"),
         confidence="B_RECONCILED",
         approved_manual_override_count=1,
@@ -149,11 +156,14 @@ def _net_revenue_summary() -> MonthNetRevenueSummary:
         total_adjusted_gross_revenue_usd=Decimal("1050.00"),
         total_net_revenue_usd=Decimal("930.00"),
         total_deduction_amount_usd=Decimal("120.00"),
+        unallocated_account_deduction_total_usd=None,
+        unallocated_account_issues=None,
         channels=[channel],
     )
 
 
 def _payment_match_summary(*, status: str) -> MonthlyPaymentMatchSummary:
+    """Build a MonthlyPaymentMatchSummary for workbook preview tests."""
     return MonthlyPaymentMatchSummary(
         month="2026-03",
         currency="USD",
@@ -173,6 +183,7 @@ def _payment_match_summary(*, status: str) -> MonthlyPaymentMatchSummary:
 
 
 def _bank_summary(*, status: str) -> MonthBankReconciliationSummary:
+    """Build a MonthBankReconciliationSummary for workbook preview tests."""
     return MonthBankReconciliationSummary(
         month="2026-03",
         currency="USD",
@@ -194,6 +205,7 @@ def _bank_summary(*, status: str) -> MonthBankReconciliationSummary:
 
 
 def _smart_alert_summary(*, alert_count: int) -> MonthlySmartAlertSummary:
+    """Build a MonthlySmartAlertSummary for workbook preview tests."""
     assert alert_count == 0
     return MonthlySmartAlertSummary(
         month="2026-03",

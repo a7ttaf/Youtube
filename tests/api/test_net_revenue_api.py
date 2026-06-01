@@ -7,8 +7,14 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api import revenue as revenue_api
+from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
+from ums_smart_revenue.auth.permissions import Permission
+from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.db.finance_models import (
+    AdsenseContentOwnerLinkORM,
+    ContentOwnerChannelLinkORM,
     DeductionComponentORM,
     FinanceBase,
     MonthlyChannelRevenueFactORM,
@@ -19,8 +25,10 @@ from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, User
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-00000000c101")
 COMPANY_ID = UUID("00000000-0000-0000-0000-00000000c201")
+COMPANY_2_ID = UUID("00000000-0000-0000-0000-00000000c202")
 CHANNEL_A_ROW_ID = UUID("00000000-0000-0000-0000-00000000c301")
 CHANNEL_B_ROW_ID = UUID("00000000-0000-0000-0000-00000000c302")
+CHANNEL_C_ROW_ID = UUID("00000000-0000-0000-0000-00000000c303")
 USER_ID = UUID("00000000-0000-0000-0000-00000000c401")
 APPROVER_ID = UUID("00000000-0000-0000-0000-00000000c402")
 
@@ -41,6 +49,21 @@ def auth_headers(
     if scope_id is not None:
         headers["x-scope-id"] = scope_id
     return headers
+
+
+def _company_finance_principal() -> UserPrincipal:
+    """Return a principal authorized for company-scoped net-revenue reads."""
+    return UserPrincipal(
+        user_id=str(USER_ID),
+        email="net-revenue@example.com",
+        direct_permissions=(
+            PermissionGrant(Permission.VIEW_REVENUE, AccessScope.company(str(COMPANY_ID))),
+            PermissionGrant(Permission.VIEW_CONFIDENCE, AccessScope.company(str(COMPANY_ID))),
+            PermissionGrant(
+                Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month("2026-03")
+            ),
+        ),
+    )
 
 
 def build_database_url(tmp_path) -> str:
@@ -141,16 +164,17 @@ def test_finance_viewer_reads_month_net_revenue_summary_with_audit(tmp_path):
     """Finance viewer reads the company-scoped monthly net-revenue summary and emits a REVENUE_VIEWED audit event."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    client = TestClient(create_app(database_url=database_url))
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
+    client = TestClient(app)
 
     response = client.get(
         f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
-        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
     )
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        audit_log = session.scalars(select(AuditLogORM)).one()
+        audit_kinds = {row.event_type for row in session.scalars(select(AuditLogORM)).all()}
 
     assert response.status_code == 200
     assert response.json()["status"] == "PARTIAL"
@@ -159,9 +183,11 @@ def test_finance_viewer_reads_month_net_revenue_summary_with_audit(tmp_path):
     assert response.json()["missing_net_source_count"] == 1
     assert response.json()["total_adjusted_gross_revenue_usd"] == "1250"
     assert response.json()["total_net_revenue_usd"] == "930"
-    assert response.json()["audit_event"]["event_type"] == "REVENUE_VIEWED"
-    assert audit_log.event_type == "REVENUE_VIEWED"
-    assert audit_log.sensitive is True
+    assert {e["event_type"] for e in response.json()["audit_events"]} == {
+        "REVENUE_VIEWED",
+        "PAYMENT_VIEWED",
+    }
+    assert audit_kinds == {"REVENUE_VIEWED", "PAYMENT_VIEWED"}
 
 
 def test_assistant_cannot_read_month_net_revenue_summary_by_default(tmp_path):
@@ -225,10 +251,11 @@ def test_net_revenue_endpoint_derives_component_net_for_missing_net_channel(tmp_
             )
         )
         session.commit()
-    client = TestClient(create_app(database_url=database_url))
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
+    client = TestClient(app)
     response = client.get(
         f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
-        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
     )
     assert response.status_code == 200
     body = response.json()
@@ -239,7 +266,10 @@ def test_net_revenue_endpoint_derives_component_net_for_missing_net_channel(tmp_
     assert channel_b["net_revenue_usd"] == "180"   # 200 - 20, trimmed
     assert channel_b["deduction_amount_usd"] == "20"
     assert body["missing_net_source_count"] == 0   # b is now derived, not missing
-    assert body["audit_event"]["event_type"] == "REVENUE_VIEWED"
+    assert {e["event_type"] for e in body["audit_events"]} == {
+        "REVENUE_VIEWED",
+        "PAYMENT_VIEWED",
+    }
 
 
 def test_net_revenue_endpoint_requests_only_net_applicable_components(tmp_path):
@@ -264,17 +294,200 @@ def test_net_revenue_endpoint_requests_only_net_applicable_components(tmp_path):
             self.component_kinds = component_kinds
             return []
 
+        @staticmethod
+        def list_account_components(*, month, adsense_account_id=None):
+            """No ACCOUNT-grain rows; the allocation orchestrator needs this method."""
+            return []
+
     repository = RecordingDeductionComponentRepository()
     app = create_app(database_url=database_url)
     app.dependency_overrides[
         revenue_api.current_deduction_component_repository
     ] = lambda: repository
+    app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
     client = TestClient(app)
 
     response = client.get(
         f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
-        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
     )
 
     assert response.status_code == 200
     assert set(repository.component_kinds) == {"TAX", "DEDUCTION"}
+
+
+def test_net_revenue_forbidden_without_finalized_payment_permission(tmp_path):
+    """A principal with VIEW_REVENUE + VIEW_CONFIDENCE but NOT VIEW_FINALIZED_PAYMENTS
+    is rejected by the new gate (fail-closed).
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="revenue-no-payments@example.com",
+        direct_permissions=(
+            PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()),
+            PermissionGrant(Permission.VIEW_CONFIDENCE, AccessScope.global_scope()),
+            # deliberately NO VIEW_FINALIZED_PAYMENTS grant
+        ),
+    )
+    client = TestClient(app)
+    response = client.get("/revenue/months/2026-03/net-revenue?scope_type=global")
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_finalized_payments"
+
+
+def test_net_revenue_scoped_omits_unallocated_surface(tmp_path):
+    """A scoped (company) request serializes unallocated-account fields as null."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
+    client = TestClient(app)
+    response = client.get(
+        f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["unallocated_account_deduction_total_usd"] is None
+    assert body["unallocated_account_issues"] is None
+
+
+def test_net_revenue_global_includes_unallocated_surface(tmp_path):
+    """A global request includes the unallocated-account surface (possibly empty)."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    response = client.get(
+        "/revenue/months/2026-03/net-revenue?scope_type=global",
+        headers=auth_headers("finance_viewer", "global"),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    # present (not None) at global scope — empty when nothing unallocated
+    assert body["unallocated_account_deduction_total_usd"] is not None
+    assert body["unallocated_account_issues"] is not None
+
+
+def test_net_revenue_global_visibility_uses_normalized_scope_type(tmp_path):
+    """Whitespace-normalized global scope still receives the global-only surface."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    response = client.get(
+        "/revenue/months/2026-03/net-revenue",
+        params={"scope_type": " global "},
+        headers=auth_headers("finance_viewer", "global"),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["unallocated_account_deduction_total_usd"] is not None
+    assert body["unallocated_account_issues"] is not None
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        entity_ids = {row.entity_id for row in session.scalars(select(AuditLogORM)).all()}
+
+    assert entity_ids == {"2026-03:global:global"}
+
+
+def _seed_out_of_scope_account_allocation(database_url: str) -> None:
+    """Add a second company + channel ("channel-tv-c") that has an ACCOUNT
+    deduction mapped via a VERIFIED link. It is outside COMPANY_ID and must not
+    appear in a COMPANY_ID-scoped net-revenue response.
+    """
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                OrgUnitORM(
+                    id=COMPANY_2_ID,
+                    parent_id=SECTOR_ID,
+                    type="COMPANY",
+                    name="Other Company",
+                    active=True,
+                ),
+                YouTubeChannelORM(
+                    id=CHANNEL_C_ROW_ID,
+                    youtube_channel_id="channel-tv-c",
+                    channel_name="TV C",
+                    primary_org_unit_id=COMPANY_2_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-c",
+                    source_kind="ADSENSE",
+                    source_report_id="adsense-report-2026-03",
+                    gross_revenue_usd=Decimal("500.00"),
+                    net_revenue_usd=None,
+                    views=80000,
+                    watch_time_minutes=Decimal("2000.00"),
+                    confidence_score=Decimal("0.9600"),
+                    imported_by=USER_ID,
+                ),
+                AdsenseContentOwnerLinkORM(
+                    id=uuid4(),
+                    adsense_account_id="pub-9",
+                    content_owner_id="owner-9",
+                    verification_status="VERIFIED",
+                    provenance_kind="OPERATOR_ASSERTED",
+                    provenance_payload={},
+                    effective_month_start="2026-01",
+                ),
+                ContentOwnerChannelLinkORM(
+                    id=uuid4(),
+                    content_owner_id="owner-9",
+                    youtube_channel_id="channel-tv-c",
+                    provenance_kind="SOURCE_ROW",
+                    active=True,
+                    effective_month_start="2026-01",
+                ),
+                DeductionComponentORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    component_kind="DEDUCTION",
+                    scope_kind="ACCOUNT",
+                    scope_id="pub-9",
+                    amount_usd=Decimal("70.00"),
+                    amount_native=None,
+                    currency_code="USD",
+                    source_system="adsense_management",
+                    source_table="google_revenue_source_rows",
+                    source_id=None,
+                    source_key="k-c",
+                    source_report_id=None,
+                    raw_payload={"k": "v"},
+                    component_key="srcrow:adsense_management:k-c",
+                ),
+            ]
+        )
+        session.commit()
+
+
+def test_net_revenue_scoped_excludes_out_of_scope_account_allocation(tmp_path):
+    """Regression (PR #59 review): account allocations resolve month-wide, so a
+    COMPANY_ID-scoped request must not surface "channel-tv-c" (a different
+    company) just because it has an account-level deduction.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_out_of_scope_account_allocation(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
+    client = TestClient(app)
+
+    response = client.get(
+        f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    channel_ids = {c["youtube_channel_id"] for c in body["channels"]}
+    assert "channel-tv-c" not in channel_ids  # out-of-scope allocation filtered
+    assert channel_ids == {"channel-tv-a", "channel-tv-b"}
+    assert body["channel_count"] == 2
