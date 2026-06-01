@@ -47,6 +47,21 @@ def auth_headers(
     return headers
 
 
+def _company_finance_principal() -> UserPrincipal:
+    """Return a principal authorized for company-scoped net-revenue reads."""
+    return UserPrincipal(
+        user_id=str(USER_ID),
+        email="net-revenue@example.com",
+        direct_permissions=(
+            PermissionGrant(Permission.VIEW_REVENUE, AccessScope.company(str(COMPANY_ID))),
+            PermissionGrant(Permission.VIEW_CONFIDENCE, AccessScope.company(str(COMPANY_ID))),
+            PermissionGrant(
+                Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month("2026-03")
+            ),
+        ),
+    )
+
+
 def build_database_url(tmp_path) -> str:
     """Return a unique SQLite URL under pytest's temp path."""
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
@@ -145,11 +160,12 @@ def test_finance_viewer_reads_month_net_revenue_summary_with_audit(tmp_path):
     """Finance viewer reads the company-scoped monthly net-revenue summary and emits a REVENUE_VIEWED audit event."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    client = TestClient(create_app(database_url=database_url))
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
+    client = TestClient(app)
 
     response = client.get(
         f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
-        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
     )
 
     engine = create_engine(database_url)
@@ -231,10 +247,11 @@ def test_net_revenue_endpoint_derives_component_net_for_missing_net_channel(tmp_
             )
         )
         session.commit()
-    client = TestClient(create_app(database_url=database_url))
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
+    client = TestClient(app)
     response = client.get(
         f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
-        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
     )
     assert response.status_code == 200
     body = response.json()
@@ -283,11 +300,11 @@ def test_net_revenue_endpoint_requests_only_net_applicable_components(tmp_path):
     app.dependency_overrides[
         revenue_api.current_deduction_component_repository
     ] = lambda: repository
+    app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
     client = TestClient(app)
 
     response = client.get(
         f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
-        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
     )
 
     assert response.status_code == 200
@@ -320,10 +337,11 @@ def test_net_revenue_scoped_omits_unallocated_surface(tmp_path):
     """A scoped (company) request serializes unallocated-account fields as null."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    client = TestClient(create_app(database_url=database_url))
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
+    client = TestClient(app)
     response = client.get(
         f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
-        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
     )
     assert response.status_code == 200
     body = response.json()

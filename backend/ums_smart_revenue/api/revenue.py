@@ -1096,7 +1096,9 @@ def get_month_net_revenue(
     )
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
-    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, target_scope, org_index)
+    _require_permission(
+        user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month)
+    )
     # FIX: Derive the global-surface gate and audit entity ids from the resolved
     # AccessScope, not the raw scope_type/scope_id query strings. The permission
     # checks above already run on the normalized target_scope, so keying the
