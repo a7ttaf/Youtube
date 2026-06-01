@@ -10,8 +10,11 @@ from ums_smart_revenue.db.explanation_models import (
     ExplanationBase,
     NumberExplanationORM,
 )
+from ums_smart_revenue.finance.allocation import AllocationLine
+from ums_smart_revenue.finance.deduction_components import DeductionComponent
 from ums_smart_revenue.finance.explanations import (
     ADJUSTED_GROSS_REVENUE_METRIC,
+    NET_REVENUE_METRIC,
     NumberExplanationEntry,
     NumberExplanationValidationError,
     SqlAlchemyNumberExplanationRepository,
@@ -56,6 +59,7 @@ def revenue_fact(
     month: str = "2026-03",
     youtube_channel_id: str = "channel-tv-a",
     source_report_id: str | None = None,
+    net_revenue_usd: str | None = None,
 ) -> RevenueFactEntry:
     return RevenueFactEntry(
         id=f"fact-{source_kind}",
@@ -64,11 +68,67 @@ def revenue_fact(
         source_kind=source_kind,
         source_report_id=source_report_id or f"report-{source_kind}",
         gross_revenue_usd=Decimal(gross_revenue_usd),
-        net_revenue_usd=None,
+        net_revenue_usd=(
+            Decimal(net_revenue_usd) if net_revenue_usd is not None else None
+        ),
         views=0,
         watch_time_minutes=Decimal("0"),
         confidence_score=Decimal(confidence_score),
         imported_by=None,
+    )
+
+
+def deduction_component(
+    *,
+    component_key: str,
+    amount_usd: str,
+    component_kind: str = "TAX",
+    source_system: str = "adsense_management",
+    scope_id: str = "channel-tv-a",
+    month: str = "2026-03",
+) -> DeductionComponent:
+    return DeductionComponent(
+        id=f"dc-{component_key}",
+        month=month,
+        component_kind=component_kind,
+        scope_kind="CHANNEL",
+        scope_id=scope_id,
+        amount_usd=Decimal(amount_usd),
+        amount_native=None,
+        currency_code="USD",
+        source_system=source_system,
+        source_table="deduction_components",
+        source_id=None,
+        source_key=None,
+        source_report_id=None,
+        raw_payload={},
+        component_key=component_key,
+    )
+
+
+def allocation_line(
+    *,
+    component_key: str,
+    allocated_amount_usd: str,
+    adsense_account_id: str = "pub-1",
+    youtube_channel_id: str = "channel-tv-a",
+    component_kind: str = "DEDUCTION",
+    source_system: str = "adsense_management",
+    basis_source_kind: str = "ADSENSE",
+    basis_share: str = "0.5",
+    net_applicable: bool = True,
+) -> AllocationLine:
+    return AllocationLine(
+        adsense_account_id=adsense_account_id,
+        youtube_channel_id=youtube_channel_id,
+        component_kind=component_kind,
+        source_system=source_system,
+        component_key=component_key,
+        basis_source_kind=basis_source_kind,
+        basis_gross_usd=Decimal("1000.000000"),
+        basis_share=Decimal(basis_share),
+        allocated_amount_usd=Decimal(allocated_amount_usd),
+        net_applicable=net_applicable,
     )
 
 
@@ -737,3 +797,127 @@ def test_map_net_confidence_pins_each_net_label_and_defaults_low():
     assert map_net_confidence("E_MISSING") == {"label": "LOW", "score": "0"}
     # Defensive default for any unexpected/future label.
     assert map_net_confidence("SOMETHING_NEW") == {"label": "LOW", "score": "0"}
+
+
+# -----------------------------------------------------------------------------
+# build_channel_month_revenue_explanation -- net_revenue_usd metric
+# -----------------------------------------------------------------------------
+
+
+def test_net_explanation_source_net_path_single_source_deduction_component():
+    entry = build_channel_month_revenue_explanation(
+        facts=[
+            revenue_fact(
+                source_kind="YOUTUBE_CMS",
+                gross_revenue_usd="1000.00",
+                net_revenue_usd="900.00",
+            )
+        ],
+        manual_overrides=[],
+        month="2026-03",
+        youtube_channel_id="channel-tv-a",
+        metric=NET_REVENUE_METRIC,
+    )
+    assert entry.metric == NET_REVENUE_METRIC
+    assert entry.value == Decimal("900.00")
+    assert entry.confidence == {"label": "HIGH", "score": "0.95"}  # B_RECONCILED
+    keys = [c["key"] for c in entry.components]
+    assert "source_reported_deduction_usd" in keys
+    assert "account_allocated_deduction_usd" not in keys  # None on source-net path
+    src = next(
+        c for c in entry.components if c["key"] == "source_reported_deduction_usd"
+    )
+    assert src["value"] == "100"  # 1000 - 900
+    assert src["source_kind"] == "YOUTUBE_CMS"
+    baseline = next(
+        c for c in entry.components if c["key"] == "baseline_gross_revenue_usd"
+    )
+    assert baseline["source_report_id"] == "report-YOUTUBE_CMS"  # §5.5 parity w/ gross
+
+
+def test_net_explanation_component_derived_path_with_full_provenance_and_sum_identity():
+    components = [
+        deduction_component(
+            component_key="cd-1", component_kind="TAX", amount_usd="30.00"
+        )
+    ]
+    allocations = [
+        allocation_line(
+            component_key="acct-1",
+            youtube_channel_id="channel-tv-a",
+            adsense_account_id="pub-1",
+            component_kind="DEDUCTION",
+            source_system="adsense_management",
+            basis_source_kind="ADSENSE",
+            basis_share="0.5",
+            allocated_amount_usd="100.00",
+            net_applicable=True,
+        )
+    ]
+    entry = build_channel_month_revenue_explanation(
+        facts=[revenue_fact(source_kind="ADSENSE", gross_revenue_usd="1000.00")],
+        manual_overrides=[],
+        month="2026-03",
+        youtube_channel_id="channel-tv-a",
+        metric=NET_REVENUE_METRIC,
+        deduction_components=components,
+        account_allocations=allocations,
+    )
+    assert entry.value == Decimal("870.00")  # 1000 - 30 - 100
+    assert entry.confidence == {"label": "MEDIUM", "score": "0.80"}  # D_ESTIMATED
+    by_key = {c["key"]: c for c in entry.components}
+    cd = by_key["channel_direct_deduction_usd"]
+    assert cd["value"] == "30"
+    assert cd["count"] == 1
+    assert cd["components"] == [
+        {
+            "component_kind": "TAX",
+            "source_system": "adsense_management",
+            "component_key": "cd-1",
+            "amount_usd": "30",
+        }
+    ]
+    aa = by_key["account_allocated_deduction_usd"]
+    assert aa["value"] == "100"
+    assert aa["count"] == 1
+    assert aa["allocations"] == [
+        {
+            "adsense_account_id": "pub-1",
+            "component_kind": "DEDUCTION",
+            "source_system": "adsense_management",
+            "component_key": "acct-1",
+            "basis_source_kind": "ADSENSE",
+            "basis_share": "0.5",
+            "allocated_amount_usd": "100",
+        }
+    ]
+    # No-drift: provenance amounts sum to the component values.
+    assert Decimal(cd["value"]) == sum(
+        Decimal(x["amount_usd"]) for x in cd["components"]
+    )
+    assert Decimal(aa["value"]) == sum(
+        Decimal(x["allocated_amount_usd"]) for x in aa["allocations"]
+    )
+
+
+def test_net_explanation_indeterminate_net_raises():
+    with pytest.raises(NumberExplanationValidationError):
+        build_channel_month_revenue_explanation(
+            facts=[],  # NO_FACTS -> net None -> E_MISSING
+            manual_overrides=[],
+            month="2026-03",
+            youtube_channel_id="channel-tv-a",
+            metric=NET_REVENUE_METRIC,
+        )
+
+
+def test_gross_metric_unchanged_when_net_params_omitted():
+    entry = build_channel_month_revenue_explanation(
+        facts=[revenue_fact(source_kind="YOUTUBE_CMS", gross_revenue_usd="1000.00")],
+        manual_overrides=[],
+        month="2026-03",
+        youtube_channel_id="channel-tv-a",
+        metric="adjusted_gross_revenue_usd",
+    )
+    assert entry.metric == "adjusted_gross_revenue_usd"
+    assert [c["key"] for c in entry.components][0] == "baseline_gross_revenue_usd"

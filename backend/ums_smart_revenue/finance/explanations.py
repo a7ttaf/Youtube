@@ -1,3 +1,4 @@
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -7,8 +8,14 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.explanation_models import NumberExplanationORM
+from ums_smart_revenue.finance.allocation import AllocationLine
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
+from ums_smart_revenue.finance.deduction_components import DeductionComponent
 from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntry
+from ums_smart_revenue.finance.net_revenue import (
+    build_channel_net_revenue_summary,
+    resolve_applicable_channel_deductions,
+)
 from ums_smart_revenue.finance.reconciliation import SOURCE_PRIORITY
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_summary
@@ -17,6 +24,7 @@ from ums_smart_revenue.tenancy.context import get_current_tenant
 
 ADJUSTED_GROSS_REVENUE_METRIC = "adjusted_gross_revenue_usd"
 NET_REVENUE_METRIC = "net_revenue_usd"
+SUPPORTED_METRICS = frozenset({ADJUSTED_GROSS_REVENUE_METRIC, NET_REVENUE_METRIC})
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 _NET_CONFIDENCE_TO_EXPLAIN: dict[str, dict[str, str]] = {
@@ -135,8 +143,19 @@ def build_channel_month_revenue_explanation(
     month: str,
     youtube_channel_id: str,
     metric: str,
+    deduction_components: Iterable[DeductionComponent] = (),
+    account_allocations: Iterable[AllocationLine] = (),
 ) -> NumberExplanationEntry:
-    """Build an adjusted-gross-revenue explanation for one channel month."""
+    """Build an adjusted-gross-revenue or net-revenue explanation for one channel month."""
+    if metric == NET_REVENUE_METRIC:
+        return _build_net_revenue_explanation(
+            facts=facts,
+            manual_overrides=manual_overrides,
+            month=month,
+            youtube_channel_id=youtube_channel_id,
+            deduction_components=deduction_components,
+            account_allocations=account_allocations,
+        )
     if metric != ADJUSTED_GROSS_REVENUE_METRIC:
         raise NumberExplanationValidationError(
             f"Unsupported explanation metric: {metric}"
@@ -201,6 +220,155 @@ def build_channel_month_revenue_explanation(
         currency="USD",
         formula="baseline_gross_revenue_usd + approved_manual_override_total_usd",
         confidence=_confidence(primary_fact, warnings),
+        components=components,
+        warnings=warnings,
+    )
+
+
+def _build_net_revenue_explanation(
+    *,
+    facts: list[RevenueFactEntry],
+    manual_overrides: list[RevenueManualOverrideEntry],
+    month: str,
+    youtube_channel_id: str,
+    deduction_components: Iterable[DeductionComponent],
+    account_allocations: Iterable[AllocationLine],
+) -> NumberExplanationEntry:
+    # ========================================================================
+    # Purpose: Explain net_revenue_usd for one channel-month, reusing the PR-2
+    #   net builder for the value/status/confidence and the shared applicable-
+    #   deduction helper for channel-direct + account-allocated provenance.
+    #   Indeterminate net (E_MISSING) is rejected (422) -- no fabricated value.
+    # Database/ORM: None (operates on loaded read models; persisted by caller).
+    # Standards: Typed; raises NumberExplanationValidationError on indeterminate net.
+    # Blast Radius: Finance number explanations; net provenance + confidence.
+    # ========================================================================
+    deduction_components = list(deduction_components)
+    account_allocations = list(account_allocations)
+    summary = build_channel_net_revenue_summary(
+        facts=facts,
+        manual_overrides=manual_overrides,
+        month=month,
+        youtube_channel_id=youtube_channel_id,
+        deduction_components=deduction_components,
+        account_allocations=account_allocations,
+    )
+    if summary.net_revenue_usd is None:
+        raise NumberExplanationValidationError(
+            f"net_revenue_usd is indeterminate for {youtube_channel_id} in {month} "
+            f"(status {summary.status}); no net explanation is emitted."
+        )
+    # Determinate net implies facts present, so _primary_fact is non-None here; it
+    # carries source_report_id (the summary exposes only primary_source_kind), which
+    # the baseline component must include per spec §5.5 (parity with the gross path).
+    primary_fact = _primary_fact(facts)
+
+    components: list[dict[str, object]] = [
+        {
+            "key": "baseline_gross_revenue_usd",
+            "label": "Baseline gross revenue",
+            "value": _decimal_to_api(summary.baseline_gross_revenue_usd),
+            "source_kind": primary_fact.source_kind,
+            "source_report_id": primary_fact.source_report_id,
+        },
+        {
+            "key": "approved_manual_override_total_usd",
+            "label": "Approved manual overrides",
+            "value": _decimal_to_api(summary.approved_manual_override_total_usd),
+            "count": summary.approved_manual_override_count,
+        },
+    ]
+
+    if summary.status == "COMPONENT_DERIVED":
+        channel_direct, account_allocated = resolve_applicable_channel_deductions(
+            deduction_components=deduction_components,
+            account_allocations=account_allocations,
+            month=month,
+            youtube_channel_id=youtube_channel_id,
+            primary_source_kind=summary.primary_source_kind,
+        )
+        channel_direct = sorted(
+            channel_direct, key=lambda component: (
+                component.source_system, component.component_key
+            )
+        )
+        account_allocated = sorted(
+            account_allocated, key=lambda line: (
+                line.adsense_account_id, line.component_key
+            )
+        )
+        components.append({
+            "key": "channel_direct_deduction_usd",
+            "label": "Channel-direct deductions",
+            "value": _decimal_to_api(summary.channel_direct_deduction_amount_usd),
+            "count": len(channel_direct),
+            "components": [
+                {
+                    "component_kind": component.component_kind,
+                    "source_system": component.source_system,
+                    "component_key": component.component_key,
+                    "amount_usd": _decimal_to_api(component.amount_usd),
+                }
+                for component in channel_direct
+            ],
+        })
+        components.append({
+            "key": "account_allocated_deduction_usd",
+            "label": "Account-allocated deductions",
+            "value": _decimal_to_api(summary.account_allocated_deduction_amount_usd),
+            "count": len(account_allocated),
+            "allocations": [
+                {
+                    "adsense_account_id": line.adsense_account_id,
+                    "component_kind": line.component_kind,
+                    "source_system": line.source_system,
+                    "component_key": line.component_key,
+                    "basis_source_kind": line.basis_source_kind,
+                    "basis_share": _decimal_to_api(line.basis_share),
+                    "allocated_amount_usd": _decimal_to_api(line.allocated_amount_usd),
+                }
+                for line in account_allocated
+            ],
+        })
+        formula = (
+            "net_revenue_usd = adjusted_gross_revenue_usd "
+            "- channel_direct_deduction_amount_usd "
+            "- account_allocated_deduction_amount_usd"
+        )
+    else:
+        components.append({
+            "key": "source_reported_deduction_usd",
+            "label": "Source-reported deductions",
+            "value": _decimal_to_api(summary.deduction_amount_usd),
+            "source_kind": summary.primary_source_kind,
+        })
+        formula = (
+            "net_revenue_usd = source-reported net "
+            "(deduction_amount_usd = adjusted_gross_revenue_usd - net_revenue_usd)"
+        )
+
+    warnings: list[dict[str, object]] = [
+        {"code": issue.get("issue_type", "ISSUE"), "message": issue.get("message", "")}
+        for issue in summary.issues
+    ]
+    if summary.pending_manual_override_count:
+        warnings.append({
+            "code": "PENDING_MANUAL_OVERRIDES",
+            "message": (
+                f"{summary.pending_manual_override_count} pending manual override(s) "
+                f"not included in {NET_REVENUE_METRIC}."
+            ),
+        })
+
+    return NumberExplanationEntry(
+        month=month,
+        entity_type="channel",
+        entity_id=youtube_channel_id,
+        metric=NET_REVENUE_METRIC,
+        value=summary.net_revenue_usd,
+        currency="USD",
+        formula=formula,
+        confidence=map_net_confidence(summary.confidence),
         components=components,
         warnings=warnings,
     )
