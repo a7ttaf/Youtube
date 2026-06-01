@@ -1,10 +1,12 @@
 from decimal import Decimal
 
 from ums_smart_revenue.finance.allocation import AllocationLine, UnallocatedIssue
+from ums_smart_revenue.finance.deduction_components import DeductionComponent
 from ums_smart_revenue.finance.net_revenue import (
     build_channel_net_revenue_summary,
     build_month_net_revenue_summary,
     filter_account_allocations_to_scope,
+    resolve_applicable_channel_deductions,
 )
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 
@@ -134,8 +136,6 @@ def test_non_net_applicable_allocation_never_reduces_net():
 
 def test_channel_direct_plus_account_allocated_sum():
     """Both contributions apply additively on the missing-net path."""
-    from ums_smart_revenue.finance.deduction_components import DeductionComponent
-
     channel_direct = DeductionComponent(
         id="dc1", month=MONTH, component_kind="DEDUCTION", scope_kind="CHANNEL",
         scope_id=CH, amount_usd=Decimal("30.00"), amount_native=None,
@@ -161,8 +161,6 @@ def test_safety_dedup_skips_duplicate_component_key():
     """An allocated line sharing a component_key with an applied channel-direct
     component is skipped (defensive; disjoint by construction).
     """
-    from ums_smart_revenue.finance.deduction_components import DeductionComponent
-
     shared_key = "dup-key"
     channel_direct = DeductionComponent(
         id="dc1", month=MONTH, component_kind="DEDUCTION", scope_kind="CHANNEL",
@@ -268,3 +266,52 @@ def test_filter_account_allocations_scoped_drops_out_of_scope_lines():
 def test_filter_account_allocations_empty_scope_drops_everything():
     """An empty authorized set is fail-closed: no allocation lines survive."""
     assert filter_account_allocations_to_scope([_alloc(channel="chA")], set()) == []
+
+
+def _component(*, key="cd-1", kind="TAX", amount="30.00",
+               source_system="adsense_management", channel=CH, month=MONTH):
+    """Build a CHANNEL-scoped DeductionComponent for test scenarios."""
+    return DeductionComponent(
+        id=f"dc-{key}", month=month, component_kind=kind, scope_kind="CHANNEL",
+        scope_id=channel, amount_usd=Decimal(amount), amount_native=None,
+        currency_code="USD", source_system=source_system,
+        source_table="deduction_components", source_id=None, source_key=None,
+        source_report_id=None, raw_payload={}, component_key=key,
+    )
+
+
+def test_resolve_applicable_channel_deductions_filters_dedups_and_matches_totals():
+    """The shared helper filters, dedups by component_key, and matches the builder totals."""
+    components = [_component(key="cd-1", kind="TAX", amount="30.00")]
+    allocations = [
+        _alloc(key="acct-1", amount="100.000000"),               # applies
+        _alloc(key="cd-1", amount="999.000000"),                 # dedup vs channel-direct key
+        _alloc(channel="ch-other", key="acct-2", amount="500.000000"),  # wrong channel
+    ]
+
+    channel_direct, account_allocated = resolve_applicable_channel_deductions(
+        deduction_components=components,
+        account_allocations=allocations,
+        month=MONTH,
+        youtube_channel_id=CH,
+        primary_source_kind="ADSENSE",
+    )
+    assert [c.component_key for c in channel_direct] == ["cd-1"]
+    assert [line.component_key for line in account_allocated] == ["acct-1"]
+
+    # No-drift: the helper's sums equal the builder's COMPONENT_DERIVED breakdown.
+    summary = build_channel_net_revenue_summary(
+        facts=[_fact(net=None, gross="1000.00")],  # source_kind ADSENSE -> aligned
+        manual_overrides=[],
+        month=MONTH,
+        youtube_channel_id=CH,
+        deduction_components=components,
+        account_allocations=allocations,
+    )
+    assert summary.status == "COMPONENT_DERIVED"
+    assert summary.channel_direct_deduction_amount_usd == sum(
+        (c.amount_usd for c in channel_direct), Decimal("0")
+    )
+    assert summary.account_allocated_deduction_amount_usd == sum(
+        (line.allocated_amount_usd for line in account_allocated), Decimal("0")
+    )

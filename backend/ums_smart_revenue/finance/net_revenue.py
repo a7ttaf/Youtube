@@ -330,6 +330,46 @@ def _calculated_channel_summary(
     )
 
 
+def resolve_applicable_channel_deductions(
+    *,
+    deduction_components: Iterable[DeductionComponent],
+    account_allocations: Iterable[AllocationLine],
+    month: str,
+    youtube_channel_id: str,
+    primary_source_kind: str,
+) -> tuple[list[DeductionComponent], list[AllocationLine]]:
+    """Resolve a channel's source-aligned channel-direct and account-allocated deductions."""
+    # ========================================================================
+    # Purpose: Single source of truth for a channel's source-aligned,
+    #   net-applicable channel-direct deduction components and account-allocation
+    #   lines, with account lines deduped against channel-direct component_keys.
+    #   Both the net builder (totals) and the explanation builder (provenance)
+    #   call this so the explained breakdown cannot drift from the computed total.
+    # Database/ORM: None (operates on already-loaded read models).
+    # Standards: Pure function; deterministic; no I/O.
+    # Blast Radius: Finance net-revenue totals + explanation provenance.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/finance/explanations.py -> net provenance.
+    # ========================================================================
+    channel_direct = _applicable_deduction_components(
+        deduction_components,
+        month=month,
+        youtube_channel_id=youtube_channel_id,
+        primary_source_kind=primary_source_kind,
+    )
+    applied_keys = {component.component_key for component in channel_direct}
+    account_allocated = [
+        line
+        for line in _applicable_account_allocations(
+            account_allocations,
+            youtube_channel_id=youtube_channel_id,
+            primary_source_kind=primary_source_kind,
+        )
+        if line.component_key not in applied_keys
+    ]
+    return channel_direct, account_allocated
+
+
 def build_channel_net_revenue_summary(
     *,
     facts: Iterable[RevenueFactEntry],
@@ -391,24 +431,13 @@ def build_channel_net_revenue_summary(
     # Blast Radius: Finance net-revenue derivation, missing-net branch only.
     # ============================================================================
     if primary.net_revenue_usd is None:
-        channel_direct = _applicable_deduction_components(
-            deduction_components,
+        channel_direct, account_allocated = resolve_applicable_channel_deductions(
+            deduction_components=deduction_components,
+            account_allocations=account_allocations,
             month=resolved_month,
             youtube_channel_id=resolved_channel_id,
             primary_source_kind=primary.source_kind,
         )
-        applied_keys = {component.component_key for component in channel_direct}
-        account_allocated = [
-            line
-            for line in _applicable_account_allocations(
-                account_allocations,
-                youtube_channel_id=resolved_channel_id,
-                primary_source_kind=primary.source_kind,
-            )
-            # Safety dedup (defensive; disjoint by construction): never apply an
-            # allocated line whose component_key already applied as channel-direct.
-            if line.component_key not in applied_keys
-        ]
         if channel_direct or account_allocated:
             channel_direct_total = sum(
                 (component.amount_usd for component in channel_direct),

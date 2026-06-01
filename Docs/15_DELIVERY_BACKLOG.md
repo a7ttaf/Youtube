@@ -1,6 +1,6 @@
 # Delivery Backlog
 
-## Status (2026-05-31)
+## Status (2026-06-01)
 
 Reconciled through PR #50 (B2.6 connector row-count classification). Marker conventions
 match `01_IMPLEMENTATION_PLAN.md`:
@@ -314,7 +314,7 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
     unique key `uq_content_owner_channel_links_key` blocks inserting a fresh active
     row for the same start month — build the deactivate (N8) and reactivate (V8d)
     halves together.
-- ⏳ Allocation engine (Spec 2b) — PR-1 + PR-2 shipped (this branch): account-level
+- ⏳ Allocation engine (Spec 2b) — PR-1 + PR-2 + PR-3 shipped (this branch): account-level
   deduction allocation compute + read. `finance/allocation.py` distributes
   ACCOUNT-grain `deduction_components` across each account's verified channels
   (`list_verified_adsense_account_channels`) by source-aligned raw-gross-proportional
@@ -329,9 +329,16 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   unallocated-account surface, a VIEW_FINALIZED_PAYMENTS gate (on the route's org target_scope)
   + PAYMENT_VIEWED audit on the net route, and PAYMENT_VIEWED on all finance-artifact exports.
   Net-revenue audit envelope
-  changed from `audit_event` to `audit_events` (plural). Remaining: PAYMENT-grain (needs a
-  payment→account hop); persisted/committed allocation; other allocation methods; explain-path
-  provenance; export breakdown columns.
+  changed from `audit_event` to `audit_events` (plural).
+  PR-3 shipped (this branch): a `net_revenue_usd` metric on
+  `POST /revenue/channels/{channel_id}/months/{month}/explain` that reuses the PR-2 net builder
+  + a shared no-drift `resolve_applicable_channel_deductions` helper to emit channel-direct +
+  account-allocated deduction provenance in the existing `number_explanations` components JSON
+  (read + persist, no migration, no schema change), gated by
+  VIEW_FINALIZED_PAYMENTS@finance_month(month) with dual REVENUE_VIEWED + PAYMENT_VIEWED audit.
+  Remaining: PAYMENT-grain (needs a
+  payment→account hop); persisted/committed allocation; other allocation methods;
+  export breakdown columns.
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed
   permissions). Month-close status UI remains unbuilt (Phase 5).

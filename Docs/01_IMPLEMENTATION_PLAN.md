@@ -442,10 +442,15 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   `GET /revenue/months/{month}/deduction-components`. This branch now consumes
   verified account→channel allocation for ACCOUNT-grain net-applicable evidence;
   remaining allocation work is PAYMENT-grain evidence plus persisted allocation state.
-- ⏳ Allocation rules (Spec 2b) — PR-1 SHIPPED + PR-2 SHIPPED (this branch): PR-2 folds
+- ⏳ Allocation rules (Spec 2b) — PR-1 SHIPPED + PR-2 SHIPPED + PR-3 SHIPPED (this branch): PR-2 folds
   account-allocated net-applicable lines into net-revenue (API + finance exports) on the
-  missing-net path, read/compute only (no persistence, no migration). Remaining: PAYMENT-grain,
-  persisted/committed writes, other methods, explain-path provenance, export breakdown columns.
+  missing-net path, read/compute only (no persistence, no migration). PR-3 adds a
+  `net_revenue_usd` metric to `POST /revenue/channels/{channel_id}/months/{month}/explain`,
+  reusing PR-2's net builder + a shared no-drift account-allocation provenance helper to emit
+  channel-direct + account-allocated deduction breakdowns in the existing `number_explanations`
+  components JSON (read + persist, no migration, no schema change), gated by
+  VIEW_FINALIZED_PAYMENTS@finance_month(month) with dual REVENUE_VIEWED + PAYMENT_VIEWED audit.
+  Remaining: PAYMENT-grain, persisted/committed writes, other methods, export breakdown columns.
   Prerequisite SHIPPED
   (this branch): canonical channel↔account map — `adsense_content_owner_links`
   (operator-verified account↔owner) + `content_owner_channel_links` (derived from
@@ -495,7 +500,12 @@ prerequisite for Spec 2b, plus Spec 2b PR-1: the account-level deduction
 allocation compute + read endpoint (`GET /revenue/months/{month}/account-allocations`).
 Spec 2b PR-2 now wires source-aligned, net-applicable ACCOUNT allocations into
 `GET /revenue/months/{month}/net-revenue` and finance exports with matching
-`PAYMENT_VIEWED` audit coverage. The allocation engine's remaining work —
+`PAYMENT_VIEWED` audit coverage. Spec 2b PR-3 extends the channel-month explain
+endpoint with a `net_revenue_usd` metric that reuses the PR-2 net builder and a
+shared no-drift provenance helper to surface channel-direct + account-allocated
+deduction breakdowns in the persisted `number_explanations` components JSON (no
+migration), gated by `VIEW_FINALIZED_PAYMENTS@finance_month(month)` with dual
+`REVENUE_VIEWED` + `PAYMENT_VIEWED` audit. The allocation engine's remaining work —
 PAYMENT-grain distribution and persisted/committed writes — remains the largest
 blocker to a fully reconciled net figure.
 
