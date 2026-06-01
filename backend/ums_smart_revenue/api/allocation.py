@@ -1,6 +1,5 @@
 """Read-only account-level deduction allocation endpoint (Phase 4 Spec 2b PR-1)."""
 
-from decimal import Decimal
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -20,10 +19,8 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
-from ums_smart_revenue.finance.allocation import (
-    AccountAllocationResult,
-    build_account_allocation,
-)
+from ums_smart_revenue.finance.allocation import AccountAllocationResult
+from ums_smart_revenue.finance.allocation_inputs import compute_month_account_allocation
 from ums_smart_revenue.finance.channel_account_links import (
     SqlAlchemyChannelAccountLinkRepository,
 )
@@ -161,33 +158,14 @@ def get_account_allocations(
     _require_permission(user, Permission.VIEW_REVENUE, revenue_scope)
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, payment_scope)
 
-    # _require_valid_month is the single 422 boundary gate; it validates the
-    # same month string passed to every repo, so repo-level month validation
-    # is unreachable here.
-    components = deduction_repository.list_account_components(
-        month=month, adsense_account_id=adsense_account_id
-    )
-    facts = revenue_repository.list_month_facts(month=month)
-
-    gross_basis: dict[tuple[str, str], Decimal] = {}
-    for fact in facts:
-        key = (fact.youtube_channel_id, fact.source_kind)
-        gross_basis[key] = gross_basis.get(key, Decimal("0")) + fact.gross_revenue_usd
-
-    tenant_id = link_repository.tenant_id
-    accounts = sorted({component.scope_id for component in components})
-    verified_channels = {
-        account: link_repository.list_verified_adsense_account_channels(
-            tenant_id=tenant_id, month=month, adsense_account_id=account
-        )
-        for account in accounts
-    }
-
-    result = build_account_allocation(
+    # _require_valid_month is the single 422 boundary gate; the same month is
+    # passed to the orchestrator, so repo-level month validation is unreachable.
+    result = compute_month_account_allocation(
         month=month,
-        components=components,
-        verified_channels=verified_channels,
-        gross_basis=gross_basis,
+        deduction_repository=deduction_repository,
+        revenue_repository=revenue_repository,
+        link_repository=link_repository,
+        adsense_account_id=adsense_account_id,
     )
 
     details = {
