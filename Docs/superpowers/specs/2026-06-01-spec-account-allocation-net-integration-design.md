@@ -641,7 +641,7 @@ after the orchestrator extraction (all PR-1 tests stay green).
   finance-artifact exports (keep `BANK_RECONCILIATION_VIEWED` global-only).
 - **Create/extend tests**: `tests/finance/test_deduction_policy.py` (constant-parity),
   `tests/finance/test_net_revenue.py`, `tests/finance/test_allocation_inputs.py`,
-  `tests/api/test_revenue_api.py`, `tests/api/test_exports_api.py`; keep
+  `tests/api/test_net_revenue_api.py`, `tests/api/test_exports_api.py`; keep
   `tests/api/test_allocation_api.py` green.
 - **Modify** `Docs/01_IMPLEMENTATION_PLAN.md`, `Docs/15_DELIVERY_BACKLOG.md` — status
   (incl. the `audit_event` → `audit_events` net-route response-shape note).

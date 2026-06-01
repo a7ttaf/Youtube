@@ -439,8 +439,9 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   derives a channel-direct `COMPONENT_DERIVED`/`D_ESTIMATED` net from same-month,
   same-source CHANNEL TAX/DEDUCTION components only when source net is missing
   (anti-double-count, anti-cross-source), plus read-only
-  `GET /revenue/months/{month}/deduction-components`. Remaining: account→channel
-  allocation of ACCOUNT/PAYMENT evidence (Spec 2).
+  `GET /revenue/months/{month}/deduction-components`. This branch now consumes
+  verified account→channel allocation for ACCOUNT-grain net-applicable evidence;
+  remaining allocation work is PAYMENT-grain evidence plus persisted allocation state.
 - ⏳ Allocation rules (Spec 2b) — PR-1 SHIPPED + PR-2 SHIPPED (this branch): PR-2 folds
   account-allocated net-applicable lines into net-revenue (API + finance exports) on the
   missing-net path, read/compute only (no persistence, no migration). Remaining: PAYMENT-grain,
@@ -456,8 +457,9 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
 - ✅ Net revenue by channel/company/sector — shipped: GET
   /revenue/months/{month}/net-revenue (build_month_net_revenue_summary;
   per-channel gross/net/deduction roll-up with channel/company/sector/global
-  scoping, USD-only). Tax/deduction ingestion + allocation-rule application
-  remain unbuilt.
+  scoping, USD-only). Channel-direct deductions and ACCOUNT-grain allocations
+  now apply on the missing-source-net path; PAYMENT-grain allocation remains
+  unbuilt.
 - ✅ Manual override rules — shipped: create + approve flow (POST
   /revenue/manual-overrides, /manual-overrides/{id}/approve) with locked-month
   guard and APPROVE_MANUAL_OVERRIDE scope. Override-rules dashboard UI remains
@@ -468,17 +470,19 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
 - ⏳ Gross revenue / Deductions / Net revenue / Deduction percentage /
   Unresolved gap / Confidence rating — gross, net, unresolved payment gap, and
   confidence labels ARE produced (net-revenue + payment-match + explain APIs);
-  remaining is tax/deduction ingestion + allocation rules to complete the
-  deduction figures.
+  deduction figures now include channel-direct and account-allocated
+  net-applicable components on missing-source-net rows. Remaining is
+  PAYMENT-grain allocation plus committed/persisted allocation state.
 
 ### Acceptance gate
 
 - ⏳ Finance can generate a channel-level net revenue table for a selected
   month — partially met: GET /revenue/months/{month}/net-revenue produces the
-  per-channel table today; full reconciled net awaits the allocation engine +
-  tax/deduction ingestion.
+  per-channel table today and includes channel-direct/account-allocated
+  deductions on the missing-source-net path; full reconciled net awaits
+  PAYMENT-grain allocation and committed/persisted allocation state.
 
-### Status (2026-05-31)
+### Status (2026-06-01)
 
 Net-revenue roll-up, manual overrides, payment-match, and confidence labels
 ship at the API layer. PR-A (PR #55) ingested deduction evidence; PR-B (PR #56)
@@ -489,9 +493,11 @@ branch ships the canonical channel↔account map substrate (two-layer ORM +
 Alembic migration + audited propose/verify/reject API + read contract) as the
 prerequisite for Spec 2b, plus Spec 2b PR-1: the account-level deduction
 allocation compute + read endpoint (`GET /revenue/months/{month}/account-allocations`).
-The allocation engine's remaining work — net-revenue integration of the
-net-applicable lines, PAYMENT-grain distribution, and persisted/committed
-writes — remains the largest blocker to a fully reconciled net figure.
+Spec 2b PR-2 now wires source-aligned, net-applicable ACCOUNT allocations into
+`GET /revenue/months/{month}/net-revenue` and finance exports with matching
+`PAYMENT_VIEWED` audit coverage. The allocation engine's remaining work —
+PAYMENT-grain distribution and persisted/committed writes — remains the largest
+blocker to a fully reconciled net figure.
 
 ---
 

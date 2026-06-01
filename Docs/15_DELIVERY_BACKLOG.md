@@ -314,7 +314,7 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
     unique key `uq_content_owner_channel_links_key` blocks inserting a fresh active
     row for the same start month — build the deactivate (N8) and reactivate (V8d)
     halves together.
-- ⏳ Allocation engine (Spec 2b) — PR-1 shipped (this branch): account-level
+- ⏳ Allocation engine (Spec 2b) — PR-1 + PR-2 shipped (this branch): account-level
   deduction allocation compute + read. `finance/allocation.py` distributes
   ACCOUNT-grain `deduction_components` across each account's verified channels
   (`list_verified_adsense_account_channels`) by source-aligned raw-gross-proportional
@@ -322,7 +322,7 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   `NET_APPLICABLE_COMPONENT_KINDS`; fail-closed UNALLOCATED on unmapped/missing/
   incomplete basis. Read-only `GET /revenue/months/{month}/account-allocations`
   (ACCOUNT-only query, `VIEW_REVENUE@global` + `VIEW_FINALIZED_PAYMENTS@finance_month`,
-  REVENUE_VIEWED + PAYMENT_VIEWED). No persistence, no migration, no net-revenue change.
+  REVENUE_VIEWED + PAYMENT_VIEWED). No persistence, no migration.
   PR-2 shipped (this branch): net-revenue API + finance exports consume account-allocated
   net-applicable (TAX/DEDUCTION) lines on the missing-net path (COMPONENT_DERIVED), with
   per-channel channel_direct/account_allocated breakdown fields, a global-scope-only

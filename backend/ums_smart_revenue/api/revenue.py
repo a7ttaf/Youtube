@@ -1087,6 +1087,15 @@ def get_month_net_revenue(
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, target_scope, org_index)
+    # FIX: Derive the global-surface gate and audit entity ids from the resolved
+    # AccessScope, not the raw scope_type/scope_id query strings. The permission
+    # checks above already run on the normalized target_scope, so keying the
+    # global-only unallocated surface and the audit ids off the raw strings would
+    # diverge (e.g. " global " authorizes as global but would be denied the
+    # surface and write a malformed entity id).
+    normalized_scope_type = target_scope.type.value
+    normalized_scope_id = target_scope.id or "global"
+    is_global_scope = target_scope == AccessScope.global_scope()
     try:
         normalized_currency = normalize_net_revenue_currency(currency)
         facts = revenue_repository.list_month_facts(
@@ -1115,7 +1124,7 @@ def get_month_net_revenue(
             deduction_components=deduction_components,
             account_allocations=account_result.lines,
             unallocated_account_issues=(
-                account_result.unallocated if scope_type == "global" else None
+                account_result.unallocated if is_global_scope else None
             ),
         )
     except (
@@ -1136,7 +1145,7 @@ def get_month_net_revenue(
         actor=user,
         event_type=AuditEventType.REVENUE_VIEWED,
         entity_type="monthly_net_revenue_summary",
-        entity_id=f"{month}:{scope_type}:{scope_id or 'global'}",
+        entity_id=f"{month}:{normalized_scope_type}:{normalized_scope_id}",
         scope=target_scope,
         details={
             "status": summary.status,
@@ -1150,7 +1159,7 @@ def get_month_net_revenue(
         actor=user,
         event_type=AuditEventType.PAYMENT_VIEWED,
         entity_type="monthly_net_revenue_summary",
-        entity_id=f"{month}:{scope_type}:{scope_id or 'global'}",
+        entity_id=f"{month}:{normalized_scope_type}:{normalized_scope_id}",
         scope=AccessScope.finance_month(month),
         details={
             "status": summary.status,

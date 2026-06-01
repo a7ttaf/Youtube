@@ -343,3 +343,26 @@ def test_net_revenue_global_includes_unallocated_surface(tmp_path):
     # present (not None) at global scope — empty when nothing unallocated
     assert body["unallocated_account_deduction_total_usd"] is not None
     assert body["unallocated_account_issues"] is not None
+
+
+def test_net_revenue_global_visibility_uses_normalized_scope_type(tmp_path):
+    """Whitespace-normalized global scope still receives the global-only surface."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    response = client.get(
+        "/revenue/months/2026-03/net-revenue",
+        params={"scope_type": " global "},
+        headers=auth_headers("finance_viewer", "global"),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["unallocated_account_deduction_total_usd"] is not None
+    assert body["unallocated_account_issues"] is not None
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        entity_ids = {row.entity_id for row in session.scalars(select(AuditLogORM)).all()}
+
+    assert entity_ids == {"2026-03:global:global"}
