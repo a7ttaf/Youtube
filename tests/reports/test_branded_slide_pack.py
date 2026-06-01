@@ -191,6 +191,8 @@ def _net_revenue_summary(
         total_adjusted_gross_revenue_usd=Decimal("1050.00"),
         total_net_revenue_usd=Decimal("930.00"),
         total_deduction_amount_usd=Decimal("120.00"),
+        total_channel_direct_deduction_amount_usd=Decimal("0.00"),
+        total_account_allocated_deduction_amount_usd=Decimal("0.00"),
         unallocated_account_deduction_total_usd=None,
         unallocated_account_issues=None,
         channels=channels,

@@ -265,6 +265,8 @@ def test_net_revenue_endpoint_derives_component_net_for_missing_net_channel(tmp_
     assert channel_b["status"] == "COMPONENT_DERIVED"
     assert channel_b["net_revenue_usd"] == "180"   # 200 - 20, trimmed
     assert channel_b["deduction_amount_usd"] == "20"
+    assert body["total_channel_direct_deduction_amount_usd"] == "20"
+    assert body["total_account_allocated_deduction_amount_usd"] == "0"
     assert body["missing_net_source_count"] == 0   # b is now derived, not missing
     assert {e["event_type"] for e in body["audit_events"]} == {
         "REVENUE_VIEWED",

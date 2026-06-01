@@ -94,6 +94,8 @@ class MonthNetRevenueSummary:
     total_adjusted_gross_revenue_usd: Decimal
     total_net_revenue_usd: Decimal
     total_deduction_amount_usd: Decimal
+    total_channel_direct_deduction_amount_usd: Decimal
+    total_account_allocated_deduction_amount_usd: Decimal
     unallocated_account_deduction_total_usd: Decimal | None
     unallocated_account_issues: list[dict[str, str]] | None
     channels: list[ChannelNetRevenueSummary]
@@ -113,6 +115,12 @@ class MonthNetRevenueSummary:
             "total_net_revenue_usd": _decimal_to_api(self.total_net_revenue_usd),
             "total_deduction_amount_usd": _decimal_to_api(
                 self.total_deduction_amount_usd
+            ),
+            "total_channel_direct_deduction_amount_usd": _decimal_to_api(
+                self.total_channel_direct_deduction_amount_usd
+            ),
+            "total_account_allocated_deduction_amount_usd": _decimal_to_api(
+                self.total_account_allocated_deduction_amount_usd
             ),
             "unallocated_account_deduction_total_usd": _decimal_to_api(
                 self.unallocated_account_deduction_total_usd
@@ -690,6 +698,23 @@ def build_month_net_revenue_summary(
         ),
         total_deduction_amount_usd=sum(
             (channel.deduction_amount_usd for channel in calculated),
+            Decimal("0"),
+        ),
+        # Breakdown fields are None on source-net channels, so coalesce to 0;
+        # these aggregates therefore capture only the component-derived split and
+        # do NOT necessarily equal total_deduction_amount_usd (see spec section 4).
+        total_channel_direct_deduction_amount_usd=sum(
+            (
+                (channel.channel_direct_deduction_amount_usd or Decimal("0"))
+                for channel in calculated
+            ),
+            Decimal("0"),
+        ),
+        total_account_allocated_deduction_amount_usd=sum(
+            (
+                (channel.account_allocated_deduction_amount_usd or Decimal("0"))
+                for channel in calculated
+            ),
             Decimal("0"),
         ),
         unallocated_account_deduction_total_usd=unallocated_total,
