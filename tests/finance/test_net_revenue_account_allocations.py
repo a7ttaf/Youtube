@@ -136,8 +136,6 @@ def test_non_net_applicable_allocation_never_reduces_net():
 
 def test_channel_direct_plus_account_allocated_sum():
     """Both contributions apply additively on the missing-net path."""
-    from ums_smart_revenue.finance.deduction_components import DeductionComponent
-
     channel_direct = DeductionComponent(
         id="dc1", month=MONTH, component_kind="DEDUCTION", scope_kind="CHANNEL",
         scope_id=CH, amount_usd=Decimal("30.00"), amount_native=None,
@@ -163,8 +161,6 @@ def test_safety_dedup_skips_duplicate_component_key():
     """An allocated line sharing a component_key with an applied channel-direct
     component is skipped (defensive; disjoint by construction).
     """
-    from ums_smart_revenue.finance.deduction_components import DeductionComponent
-
     shared_key = "dup-key"
     channel_direct = DeductionComponent(
         id="dc1", month=MONTH, component_kind="DEDUCTION", scope_kind="CHANNEL",
