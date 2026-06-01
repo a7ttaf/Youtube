@@ -26,12 +26,20 @@ from ums_smart_revenue.finance.adsense_payments import (
     AdSensePaymentValidationError,
     SqlAlchemyAdSensePaymentRepository,
 )
+from ums_smart_revenue.finance.allocation_inputs import compute_month_account_allocation
 from ums_smart_revenue.finance.bank_reconciliation import (
     BankReconciliationValidationError,
     MonthBankReconciliationSummary,
     SqlAlchemyBankReconciliationRepository,
     build_month_bank_reconciliation_summary,
 )
+from ums_smart_revenue.finance.channel_account_links import (
+    SqlAlchemyChannelAccountLinkRepository,
+)
+from ums_smart_revenue.finance.deduction_ingestion import (
+    SqlAlchemyDeductionComponentRepository,
+)
+from ums_smart_revenue.finance.deduction_policy import NET_APPLICABLE_COMPONENT_KINDS
 from ums_smart_revenue.finance.manual_overrides import (
     ManualOverrideValidationError,
     SqlAlchemyManualOverrideRepository,
@@ -1032,10 +1040,26 @@ def _build_finance_source_summaries_for_export(
     close = SqlAlchemyFinanceMonthCloseRepository(session).get(export_job.month)
     close_status = close.status if close is not None else export_job.month_lock_status
 
+    deduction_components = SqlAlchemyDeductionComponentRepository(session).list_month_components(
+        month=export_job.month,
+        youtube_channel_ids=channel_ids,
+        component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
+    )
+    account_result = compute_month_account_allocation(
+        month=export_job.month,
+        deduction_repository=SqlAlchemyDeductionComponentRepository(session),
+        revenue_repository=revenue_repository,
+        link_repository=SqlAlchemyChannelAccountLinkRepository(session),
+    )
     net_revenue = build_month_net_revenue_summary(
         month=export_job.month,
         facts=facts,
         manual_overrides=manual_overrides,
+        deduction_components=deduction_components,
+        account_allocations=account_result.lines,
+        unallocated_account_issues=(
+            account_result.unallocated if export_job.scope_type == "global" else None
+        ),
     )
     payment_match = build_monthly_payment_match_summary(
         month=export_job.month,
@@ -1103,28 +1127,28 @@ def _record_finance_export_artifact_audit(
         )
         for revenue_scope in revenue_scopes
     ]
+    audit_records.append(
+        record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.PAYMENT_VIEWED,
+            entity_type="export_job",
+            entity_id=export_job.id,
+            scope=month_scope,
+            details=details,
+        )
+    )
     if export_job.scope_type == "global":
-        audit_records.extend(
-            [
-                record_audit_event(
-                    sink=audit_sink,
-                    actor=user,
-                    event_type=AuditEventType.PAYMENT_VIEWED,
-                    entity_type="export_job",
-                    entity_id=export_job.id,
-                    scope=month_scope,
-                    details=details,
-                ),
-                record_audit_event(
-                    sink=audit_sink,
-                    actor=user,
-                    event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
-                    entity_type="export_job",
-                    entity_id=export_job.id,
-                    scope=month_scope,
-                    details=details,
-                ),
-            ]
+        audit_records.append(
+            record_audit_event(
+                sink=audit_sink,
+                actor=user,
+                event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
+                entity_type="export_job",
+                entity_id=export_job.id,
+                scope=month_scope,
+                details=details,
+            )
         )
     if include_download_event:
         audit_records.append(

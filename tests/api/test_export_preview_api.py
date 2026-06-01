@@ -305,7 +305,13 @@ def test_scoped_finance_workbook_omits_month_wide_cash_without_attribution(tmp_p
     assert payload["executive_summary"]["bank_reconciliation_status"] == (
         "MISSING_ADSENSE_PAYMENT"
     )
-    assert [event.event_type for event in audit_events] == ["REVENUE_VIEWED"]
+    # Scoped finance-artifact exports now emit PAYMENT_VIEWED alongside
+    # REVENUE_VIEWED (export net consumes account allocations); month-wide cash
+    # exposure (BANK_RECONCILIATION_VIEWED) stays global-only.
+    assert [event.event_type for event in audit_events] == [
+        "PAYMENT_VIEWED",
+        "REVENUE_VIEWED",
+    ]
 
 
 def test_finance_export_preview_includes_revenue_trend_alerts(tmp_path):
