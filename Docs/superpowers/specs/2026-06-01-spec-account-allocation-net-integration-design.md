@@ -604,7 +604,7 @@ after the orchestrator extraction (all PR-1 tests stay green).
 - **Create** `backend/ums_smart_revenue/finance/allocation_inputs.py` —
   `compute_month_account_allocation`.
 - **Modify** `backend/ums_smart_revenue/finance/net_revenue.py` — import the two constants from
-  `deduction_policy` (optionally re-export for back-compat); import `AllocationLine` +
+  `deduction_policy` and **MUST re-export** them for back-compat (§4.6); import `AllocationLine` +
   `UnallocatedIssue` from `allocation`; new builder params (`account_allocations`,
   `unallocated_account_issues`), breakdown fields, `_applicable_account_allocations`,
   `_account_allocations_by_channel`, the COMPONENT_DERIVED application + dedup, unallocated
