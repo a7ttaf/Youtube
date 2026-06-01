@@ -1357,6 +1357,7 @@ def explain_channel_month_revenue_metric(
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     metric: str = "adjusted_gross_revenue_usd",
 ) -> dict[str, object]:
+    """Generate, persist, and audit a channel-month metric explanation (gross or net)."""
     # ========================================================================
     # Purpose: Generate and persist a channel-month metric explanation. Supports
     #   the gross metric (byte-identical legacy path: VIEW_REVENUE+VIEW_CONFIDENCE

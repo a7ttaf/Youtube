@@ -34,6 +34,7 @@ APPROVER_ID = UUID("00000000-0000-0000-0000-000000011403")
 def auth_headers(
     role: str, user_id: UUID = FINANCE_USER_ID, scope_id: str | None = None
 ) -> dict[str, str]:
+    """Build trusted-gateway request headers for the given role, user, and optional scope id."""
     headers = {
         "x-user-id": str(user_id),
         "x-user-email": f"{role}@example.com",
@@ -47,10 +48,12 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """Return a SQLite database URL rooted at the pytest tmp_path directory."""
     return f"sqlite+pysqlite:///{(tmp_path / 'revenue-explanations.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
+    """Create org/security/finance/explanation tables and seed channel, users, facts, and overrides."""
     engine = create_engine(database_url)
     OrgBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
@@ -135,6 +138,7 @@ def seed_database(database_url: str) -> None:
 def test_finance_viewer_gets_adjusted_revenue_explanation_with_audit_and_snapshot(
     tmp_path,
 ):
+    """Assert a finance_viewer gets a 200 adjusted_gross explanation with a pending-override warning, snapshot, log."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -190,6 +194,7 @@ def test_finance_viewer_gets_adjusted_revenue_explanation_with_audit_and_snapsho
 
 
 def test_assistant_cannot_get_revenue_explanation(tmp_path):
+    """Assert an assistant_analyst is denied the explain endpoint with 403 and a missing finance.view_revenue detail."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -204,6 +209,7 @@ def test_assistant_cannot_get_revenue_explanation(tmp_path):
 
 
 def test_revenue_explanation_rejects_unsupported_metric(tmp_path):
+    """Assert an unsupported metric query returns 422 with an unsupported-explanation-metric detail."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -260,6 +266,7 @@ def _post_net_explain(client, *, channel, month, principal):
 def test_net_revenue_explanation_global_finance_returns_value_provenance_and_plural_audit(
     tmp_path,
 ):
+    """Assert a global finance principal gets a 200 net_revenue_usd explanation with plural audits and one snapshot."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -293,6 +300,7 @@ def test_net_revenue_explanation_global_finance_returns_value_provenance_and_plu
 def test_net_revenue_explanation_org_scoped_finance_viewer_403_on_net_200_on_gross(
     tmp_path,
 ):
+    """Assert an org-scoped finance_viewer is denied net_revenue_usd (403) but allowed adjusted_gross_revenue (200)."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -312,6 +320,7 @@ def test_net_revenue_explanation_org_scoped_finance_viewer_403_on_net_200_on_gro
 
 
 def test_net_revenue_explanation_no_facts_channel_returns_422(tmp_path):
+    """Assert net_revenue_usd for a fact-less channel returns 422 and persists no explanation snapshot."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     # Seed an active channel with NO revenue facts for the gated month so the
@@ -348,6 +357,7 @@ def test_net_revenue_explanation_no_facts_channel_returns_422(tmp_path):
 
 
 def test_net_revenue_explanation_idempotent_upsert_coexists_with_gross(tmp_path):
+    """Assert repeated net explains upsert to one row that coexists with the adjusted_gross_revenue_usd snapshot."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))

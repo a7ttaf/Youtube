@@ -338,6 +338,7 @@ def resolve_applicable_channel_deductions(
     youtube_channel_id: str,
     primary_source_kind: str,
 ) -> tuple[list[DeductionComponent], list[AllocationLine]]:
+    """Resolve a channel's source-aligned channel-direct and account-allocated deductions."""
     # ========================================================================
     # Purpose: Single source of truth for a channel's source-aligned,
     #   net-applicable channel-direct deduction components and account-allocation

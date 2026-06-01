@@ -35,6 +35,7 @@ _NET_CONFIDENCE_TO_EXPLAIN: dict[str, dict[str, str]] = {
 
 
 def map_net_confidence(net_confidence_label: str) -> dict[str, str]:
+    """Map a net-revenue confidence label to the explain HIGH/MEDIUM/LOW + score shape."""
     # ========================================================================
     # Purpose: Map a net-revenue confidence label (B_RECONCILED/D_ESTIMATED/
     #   E_MISSING) to the explain HIGH/MEDIUM/LOW+score shape. Net explanations
@@ -234,6 +235,7 @@ def _build_net_revenue_explanation(
     deduction_components: Iterable[DeductionComponent],
     account_allocations: Iterable[AllocationLine],
 ) -> NumberExplanationEntry:
+    """Explain net_revenue_usd for one channel-month with deduction provenance."""
     # ========================================================================
     # Purpose: Explain net_revenue_usd for one channel-month, reusing the PR-2
     #   net builder for the value/status/confidence and the shared applicable-
@@ -342,9 +344,15 @@ def _build_net_revenue_explanation(
             "value": _decimal_to_api(summary.deduction_amount_usd),
             "source_kind": summary.primary_source_kind,
         })
+        # FIX: the source-net value is adjusted_net = source-reported net +
+        # approved_manual_override_total_usd, so a literal "net = source-reported
+        # net" formula no longer reconciles to the persisted value once an approved
+        # override exists. State the value purely in terms of emitted components:
+        # baseline_gross + approved_override - source_reported_deduction == adjusted_net.
         formula = (
-            "net_revenue_usd = source-reported net "
-            "(deduction_amount_usd = adjusted_gross_revenue_usd - net_revenue_usd)"
+            "net_revenue_usd = baseline_gross_revenue_usd "
+            "+ approved_manual_override_total_usd "
+            "- source_reported_deduction_usd"
         )
 
     warnings: list[dict[str, object]] = [

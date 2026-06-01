@@ -285,6 +285,7 @@ def _component(*, key="cd-1", kind="TAX", amount="30.00",
 
 
 def test_resolve_applicable_channel_deductions_filters_dedups_and_matches_totals():
+    """The shared helper filters, dedups by component_key, and matches the builder totals."""
     components = [_component(key="cd-1", kind="TAX", amount="30.00")]
     allocations = [
         _alloc(key="acct-1", amount="100.000000"),               # applies
