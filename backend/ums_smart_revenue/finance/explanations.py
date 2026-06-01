@@ -235,7 +235,13 @@ def _build_net_revenue_explanation(
     deduction_components: Iterable[DeductionComponent],
     account_allocations: Iterable[AllocationLine],
 ) -> NumberExplanationEntry:
-    """Explain net_revenue_usd for one channel-month with deduction provenance."""
+    """Explain net_revenue_usd for one channel-month with deduction provenance.
+
+    Raises:
+        NumberExplanationValidationError: If net revenue is indeterminate (no
+            facts or a missing source net) for the given channel-month, so no
+            value is fabricated.
+    """
     # ========================================================================
     # Purpose: Explain net_revenue_usd for one channel-month, reusing the PR-2
     #   net builder for the value/status/confidence and the shared applicable-
