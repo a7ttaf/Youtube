@@ -10,7 +10,7 @@
 
 **Spec:** `Docs/superpowers/specs/2026-06-01-spec-account-allocation-net-integration-design.md` (approved). Branch `spec/account-allocation-net-integration` off `main` (`8a6df2a`).
 
-**Standing constraints:** strict TDD; complete code in every step; NO `Co-Authored-By`/Claude trailer in any commit; do NOT push or open a PR (a separate finishing step handles that after approval). No Postgres tier (no migration/lock) — SQLite suffices. Make doc edits in single sequential passes (no concurrent edits to the same file).
+**Standing constraints:** strict TDD; complete code in every step; NO `Co-Authored-By`/Claude trailer in any commit; do NOT push or open a PR (a separate finishing step handles that after approval). This PR introduces **no new Postgres-specific tests** (no migration/lock; the new tests run on SQLite), but **final validation MUST run the full suite with Postgres enabled** (`UMS_TEST_DATABASE_URL` set) so the existing PG-tier suites pass true-green — see "Final validation". Make doc edits in single sequential passes (no concurrent edits to the same file).
 
 ---
 
@@ -1496,7 +1496,7 @@ git diff --check
 UMS_TEST_DATABASE_URL='postgresql+psycopg://postgres:ums@localhost:55432/test_ums' python -m pytest -q
 ```
 
-Expected: ruff clean; `git diff --check` clean; pytest reports **N passed, 0 failed, 0 errors** (full suite, Postgres tier included — this PR adds no migration, so the PG suites must stay green, not error). If the container genuinely cannot be started in this environment, do NOT declare the branch ready on a partial run — record the exact blocker (command + why) per the CLAUDE.md "if a validation gate cannot run" rule and surface it. Confirm no `Co-Authored-By`/Claude trailer on any commit (`git log --format=%B 8a6df2a..HEAD`). Do NOT push or open a PR until explicitly approved.
+Expected: ruff clean; `git diff --check` clean; pytest reports **N passed, 0 failed, 0 errors** (full suite, Postgres tier included — this PR adds no migration, so the PG suites must stay green, not error). If the container genuinely cannot be started in this environment, do NOT declare the branch ready on a partial run — record the exact blocker (command + why) per the AGENTS.md "if a validation gate cannot run" rule and surface it. Confirm no `Co-Authored-By`/Claude trailer on any commit (`git log --format=%B 8a6df2a..HEAD`). Do NOT push or open a PR until explicitly approved.
 
 ---
 
