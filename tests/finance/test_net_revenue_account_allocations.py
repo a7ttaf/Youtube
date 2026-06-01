@@ -12,6 +12,7 @@ CH = "chA"
 
 
 def _fact(*, source_kind="ADSENSE", gross="1000.00", net=None, channel=CH):
+    """Build a RevenueFactEntry for test scenarios."""
     return RevenueFactEntry(
         id=f"f-{source_kind}-{channel}",
         month=MONTH,
@@ -29,6 +30,7 @@ def _fact(*, source_kind="ADSENSE", gross="1000.00", net=None, channel=CH):
 
 def _alloc(*, channel=CH, account="pub-1", kind="DEDUCTION", amount="100.000000",
            source_system="adsense_management", net_applicable=True, key="k1"):
+    """Build an AllocationLine for test scenarios."""
     return AllocationLine(
         adsense_account_id=account,
         youtube_channel_id=channel,
@@ -44,6 +46,7 @@ def _alloc(*, channel=CH, account="pub-1", kind="DEDUCTION", amount="100.000000"
 
 
 def _issue(*, account="pub-9", kind="DEDUCTION", amount="40.000000", code="ACCOUNT_UNMAPPED_OR_UNVERIFIED", key="u1"):
+    """Build an UnallocatedIssue for test scenarios."""
     return UnallocatedIssue(
         scope_id=account, component_kind=kind, component_key=key,
         amount_usd=Decimal(amount), issue_code=code, detail="unmapped",
@@ -117,6 +120,7 @@ def test_basis_source_kind_mismatch_does_not_override_source_system():
 
 
 def test_non_net_applicable_allocation_never_reduces_net():
+    """A non-net-applicable allocation must not reduce the net revenue."""
     summary = build_channel_net_revenue_summary(
         facts=[_fact(net=None, gross="1000.00")],
         manual_overrides=[],
@@ -154,7 +158,8 @@ def test_channel_direct_plus_account_allocated_sum():
 
 def test_safety_dedup_skips_duplicate_component_key():
     """An allocated line sharing a component_key with an applied channel-direct
-    component is skipped (defensive; disjoint by construction)."""
+    component is skipped (defensive; disjoint by construction).
+    """
     from ums_smart_revenue.finance.deduction_components import DeductionComponent
 
     shared_key = "dup-key"

@@ -30,6 +30,7 @@ TENANT = UUID(UMS_TENANT_ID)
 
 
 def _engine(tmp_path):
+    """Create an in-memory SQLite engine with org and finance schemas."""
     engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}")
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
@@ -38,7 +39,8 @@ def _engine(tmp_path):
 
 def _seed_missing_net_with_components(session):
     """A channel with gross but NO source net + a CHANNEL-direct DEDUCTION + an
-    ACCOUNT deduction mapped to that channel via a VERIFIED link."""
+    ACCOUNT deduction mapped to that channel via a VERIFIED link.
+    """
     session.add(
         YouTubeChannelORM(
             id=uuid4(), tenant_id=TENANT, youtube_channel_id="chA",
@@ -94,6 +96,7 @@ def _seed_missing_net_with_components(session):
 
 
 def _export_job(*, scope_type, scope_channel_ids):
+    """Build a minimal ExportJobEntry for test scenarios."""
     return ExportJobEntry(
         id="exp-1", export_type="FINANCE_EXCEL", scope_type=scope_type,
         scope_id=None if scope_type == "global" else "company-a", month=MONTH,
@@ -108,7 +111,8 @@ def _export_job(*, scope_type, scope_channel_ids):
 def test_export_net_reflects_channel_direct_and_account_deductions(tmp_path):
     """Regression: exports previously passed NO deduction_components, so export net
     diverged from API net. Now the export source summary nets out BOTH the
-    channel-direct (30) and the account-allocated (100) deductions."""
+    channel-direct (30) and the account-allocated (100) deductions.
+    """
     engine = _engine(tmp_path)
     with Session(engine) as session:
         _seed_missing_net_with_components(session)
@@ -127,7 +131,8 @@ def test_export_net_reflects_channel_direct_and_account_deductions(tmp_path):
 
 def test_scoped_finance_export_records_payment_viewed():
     """A scoped (company) finance-artifact export now emits PAYMENT_VIEWED (was
-    global-only); BANK_RECONCILIATION_VIEWED stays global-only."""
+    global-only); BANK_RECONCILIATION_VIEWED stays global-only.
+    """
     sink = InMemoryAuditSink()
     user = UserPrincipal(user_id="user-1", email="exp@example.com")
     records = _record_finance_export_artifact_audit(

@@ -1040,6 +1040,9 @@ def _build_finance_source_summaries_for_export(
     close = SqlAlchemyFinanceMonthCloseRepository(session).get(export_job.month)
     close_status = close.status if close is not None else export_job.month_lock_status
 
+    # FIX: Exports must pass the same channel-direct deduction components and
+    # account-allocation inputs as the net-revenue API; otherwise scoped export
+    # net totals can drift from the API for missing-net channels.
     deduction_components = SqlAlchemyDeductionComponentRepository(session).list_month_components(
         month=export_job.month,
         youtube_channel_ids=channel_ids,

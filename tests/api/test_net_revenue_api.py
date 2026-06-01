@@ -273,7 +273,8 @@ def test_net_revenue_endpoint_requests_only_net_applicable_components(tmp_path):
             self.component_kinds = component_kinds
             return []
 
-        def list_account_components(self, *, month, adsense_account_id=None):
+        @staticmethod
+        def list_account_components(*, month, adsense_account_id=None):
             """No ACCOUNT-grain rows; the allocation orchestrator needs this method."""
             return []
 
@@ -295,7 +296,8 @@ def test_net_revenue_endpoint_requests_only_net_applicable_components(tmp_path):
 
 def test_net_revenue_forbidden_without_finalized_payment_permission(tmp_path):
     """A principal with VIEW_REVENUE + VIEW_CONFIDENCE but NOT VIEW_FINALIZED_PAYMENTS
-    is rejected by the new gate (fail-closed)."""
+    is rejected by the new gate (fail-closed).
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     app = create_app(database_url=database_url)

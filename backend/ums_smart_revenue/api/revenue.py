@@ -1052,6 +1052,16 @@ def get_month_deduction_components(
     )
 
 
+# ============================================================================
+# Purpose: Return the scoped monthly net-revenue summary, including
+#   account-allocated net-applicable deductions on the missing-net path only.
+# Database/ORM: Reads revenue facts, manual overrides, deduction components,
+#   and channel-account links; no writes.
+# Standards: Enforce revenue/confidence/payment access before data reads;
+#   global-only unallocated-account surface; dual REVENUE_VIEWED/PAYMENT_VIEWED
+#   audit events.
+# Blast Radius: Finance read path only. No persistence, no graph impact.
+# ============================================================================
 @router.get("/months/{month}/net-revenue")
 def get_month_net_revenue(
     month: str,

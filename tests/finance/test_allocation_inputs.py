@@ -27,6 +27,7 @@ TENANT = UUID(UMS_TENANT_ID)
 
 
 def _engine(tmp_path):
+    """Create an in-memory SQLite engine with org and finance schemas."""
     engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}")
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
@@ -34,6 +35,7 @@ def _engine(tmp_path):
 
 
 def _seed(session):
+    """Seed a channel, verified account link, revenue fact and account deduction."""
     session.add(
         YouTubeChannelORM(
             id=uuid4(), tenant_id=TENANT, youtube_channel_id="chA",
