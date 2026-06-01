@@ -260,8 +260,8 @@ def _net_revenue_summary_with_breakdown() -> MonthNetRevenueSummary:
         adjusted_gross_revenue_usd=Decimal("1000.00"),
         net_revenue_usd=Decimal("870.00"),
         deduction_amount_usd=Decimal("130.00"),
-        channel_direct_deduction_amount_usd=Decimal("30.00"),
-        account_allocated_deduction_amount_usd=Decimal("100.00"),
+        channel_direct_deduction_amount_usd=Decimal("37.00"),
+        account_allocated_deduction_amount_usd=Decimal("93.00"),
         deduction_percentage=Decimal("13.0000"),
         confidence="D_ESTIMATED",
         approved_manual_override_count=0,
@@ -278,8 +278,8 @@ def _net_revenue_summary_with_breakdown() -> MonthNetRevenueSummary:
         total_adjusted_gross_revenue_usd=Decimal("1000.00"),
         total_net_revenue_usd=Decimal("870.00"),
         total_deduction_amount_usd=Decimal("130.00"),
-        total_channel_direct_deduction_amount_usd=Decimal("30.00"),
-        total_account_allocated_deduction_amount_usd=Decimal("100.00"),
+        total_channel_direct_deduction_amount_usd=Decimal("37.00"),
+        total_account_allocated_deduction_amount_usd=Decimal("93.00"),
         unallocated_account_deduction_total_usd=None,
         unallocated_account_issues=None,
         channels=[channel],
@@ -299,5 +299,5 @@ def test_executive_pdf_renders_deduction_breakdown_aggregate_rows():
 
     assert "Channel-Direct Deduction USD" in text
     assert "Account-Allocated Deduction USD" in text
-    assert "30" in text
-    assert "100" in text
+    assert "37" in text
+    assert "93" in text
