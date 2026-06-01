@@ -985,21 +985,37 @@ to (note: `finance_viewer` already has VIEW_FINALIZED_PAYMENTS, so the existing 
 
 (Replace the `audit_log = session.scalars(select(AuditLogORM)).one()` line with `.all()` usage as above, since there are now two rows.)
 
-Then append two new tests:
+Add these imports to the test file's import block (needed by the gate test):
+
+```python
+from ums_smart_revenue.api.dependencies import current_principal_from_headers
+from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
+from ums_smart_revenue.auth.permissions import Permission
+from ums_smart_revenue.auth.scopes import AccessScope
+```
+
+Then append the gate + surface tests. **No static role grants VIEW_REVENUE without VIEW_FINALIZED_PAYMENTS** (verified against `auth/seed.py`), so the gate test injects a custom `direct_permissions` principal via `dependency_overrides` (precedent: `test_exports_api.py:349-390`); `USER_ID` is the file's existing seeded-user constant:
 
 ```python
 def test_net_revenue_forbidden_without_finalized_payment_permission(tmp_path):
-    """A viewer with revenue+confidence but not finalized-payments is 403 (new gate)."""
+    """A principal with VIEW_REVENUE + VIEW_CONFIDENCE but NOT VIEW_FINALIZED_PAYMENTS
+    is rejected by the new gate (fail-closed)."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
-    client = TestClient(create_app(database_url=database_url))
-    # assistant_analyst has VIEW_ANALYTICS + VIEW_CONFIDENCE but NOT VIEW_REVENUE
-    # nor VIEW_FINALIZED_PAYMENTS -> fail-closed.
-    response = client.get(
-        "/revenue/months/2026-03/net-revenue?scope_type=global",
-        headers=auth_headers("assistant_analyst", "global"),
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="revenue-no-payments@example.com",
+        direct_permissions=(
+            PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()),
+            PermissionGrant(Permission.VIEW_CONFIDENCE, AccessScope.global_scope()),
+            # deliberately NO VIEW_FINALIZED_PAYMENTS grant
+        ),
     )
+    client = TestClient(app)
+    response = client.get("/revenue/months/2026-03/net-revenue?scope_type=global")
     assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_finalized_payments"
 
 
 def test_net_revenue_scoped_omits_unallocated_surface(tmp_path):
@@ -1150,39 +1166,183 @@ git commit -m "feat(api): net-revenue consumes account allocations; dual REVENUE
 
 **Files:**
 - Modify: `backend/ums_smart_revenue/api/exports.py`
-- Test: `tests/api/test_exports_api.py`
+- Test: `tests/api/test_exports_account_allocation.py` (new)
 
-- [ ] **Step 1: Write/adjust the failing tests**
+- [ ] **Step 1: Write the failing tests**
 
-In `tests/api/test_exports_api.py`, add two tests (use the file's existing seed + client helpers; mirror the global/scoped export jobs already exercised):
+There is **no HTTP path in the test suite that materializes a queued export into an artifact** (artifact routes require a COMPLETED job + served file), so these tests target the two changed functions **directly** — `_build_finance_source_summaries_for_export` and `_record_finance_export_artifact_audit` are importable module functions. All four arguments are trivially constructible: `OrgAccessIndex()`, an empty `ChannelGroupRegistry` (unused — `scope_channel_ids`/global resolves the channels, verified via `_resolved_export_channel_ids`), `InMemoryAuditSink`, and a literal `ExportJobEntry`. `datetime.now()` is disallowed in this environment — use a fixed `datetime(2026, 4, 1, tzinfo=UTC)`.
+
+Create `tests/api/test_exports_account_allocation.py`:
 
 ```python
-def test_finance_export_net_matches_api_with_channel_direct_components(tmp_path):
-    """Export net equals API net for a missing-net channel with channel-direct
-    TAX/DEDUCTION (regression: exports previously passed no deduction_components)."""
-    # Seed a missing-net channel + a CHANNEL-scoped DEDUCTION for the same month,
-    # request a finance workbook export (global), and assert the workbook's
-    # net-revenue source-summary equals GET /revenue/months/{month}/net-revenue.
-    # (Concrete seed mirrors the file's finance-export seed + a DeductionComponentORM
-    #  row with scope_kind="CHANNEL"; assert net_revenue totals match.)
-    ...
+from datetime import UTC, datetime
+from decimal import Decimal
+from uuid import UUID, uuid4
+
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from ums_smart_revenue.api.exports import (
+    _build_finance_source_summaries_for_export,
+    _record_finance_export_artifact_audit,
+)
+from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
+from ums_smart_revenue.auth.models import UserPrincipal
+from ums_smart_revenue.auth.scopes import OrgAccessIndex
+from ums_smart_revenue.db.finance_models import (
+    AdsenseContentOwnerLinkORM,
+    ContentOwnerChannelLinkORM,
+    DeductionComponentORM,
+    FinanceBase,
+    FinanceMonthCloseORM,
+    MonthlyChannelRevenueFactORM,
+)
+from ums_smart_revenue.db.org_models import OrgBase, YouTubeChannelORM
+from ums_smart_revenue.org.channel_groups import ChannelGroupRegistry
+from ums_smart_revenue.reports.exports import ExportJobEntry
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
+MONTH = "2026-04"
+TENANT = UUID(UMS_TENANT_ID)
 
 
-def test_scoped_finance_export_records_payment_viewed(tmp_path):
-    """A scoped finance-artifact export now emits PAYMENT_VIEWED (was global-only);
-    BANK_RECONCILIATION_VIEWED stays global-only."""
-    # Create a company-scoped FINANCE_EXCEL export with finance_admin, drive the
-    # artifact path that calls _record_finance_export_artifact_audit, then assert
-    # the audit set includes PAYMENT_VIEWED and excludes BANK_RECONCILIATION_VIEWED.
-    ...
+def _engine(tmp_path):
+    engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}")
+    OrgBase.metadata.create_all(engine)
+    FinanceBase.metadata.create_all(engine)
+    return engine
+
+
+def _seed_missing_net_with_components(session):
+    """A channel with gross but NO source net + a CHANNEL-direct DEDUCTION + an
+    ACCOUNT deduction mapped to that channel via a VERIFIED link."""
+    session.add(
+        YouTubeChannelORM(
+            id=uuid4(), tenant_id=TENANT, youtube_channel_id="chA",
+            channel_name="A", active=True,
+        )
+    )
+    session.add(
+        MonthlyChannelRevenueFactORM(
+            id=uuid4(), tenant_id=TENANT, month=MONTH, youtube_channel_id="chA",
+            source_kind="ADSENSE", gross_revenue_usd=Decimal("1000.00"),
+            net_revenue_usd=None,
+        )
+    )
+    session.add(
+        DeductionComponentORM(
+            id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind="DEDUCTION",
+            scope_kind="CHANNEL", scope_id="chA", amount_usd=Decimal("30.00"),
+            currency_code="USD", source_system="adsense_management",
+            source_table="google_revenue_source_rows", component_key="cd-1",
+            raw_payload={},
+        )
+    )
+    session.add(
+        AdsenseContentOwnerLinkORM(
+            id=uuid4(), tenant_id=TENANT, adsense_account_id="pub-1",
+            content_owner_id="owner-1", verification_status="VERIFIED",
+            provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+            effective_month_start="2026-01",
+        )
+    )
+    session.add(
+        ContentOwnerChannelLinkORM(
+            id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
+            youtube_channel_id="chA", provenance_kind="SOURCE_ROW", active=True,
+            effective_month_start="2026-01",
+        )
+    )
+    session.add(
+        DeductionComponentORM(
+            id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind="DEDUCTION",
+            scope_kind="ACCOUNT", scope_id="pub-1", amount_usd=Decimal("100.00"),
+            currency_code="USD", source_system="adsense_management",
+            source_table="google_revenue_source_rows", component_key="ad-1",
+            raw_payload={},
+        )
+    )
+    session.add(
+        FinanceMonthCloseORM(
+            tenant_id=TENANT, month=MONTH, status="OPEN", allocation_rule_payload={}
+        )
+    )
+    session.commit()
+
+
+def _export_job(*, scope_type, scope_channel_ids):
+    return ExportJobEntry(
+        id="exp-1", export_type="FINANCE_EXCEL", scope_type=scope_type,
+        scope_id=None if scope_type == "global" else "company-a", month=MONTH,
+        currency="USD", requested_by="user-1", status="COMPLETED", file_url=None,
+        month_lock_status="OPEN", include_confidence_notes=False,
+        include_manual_override_notes=False,
+        created_at=datetime(2026, 4, 1, tzinfo=UTC), completed_at=None,
+        scope_channel_ids=scope_channel_ids,
+    )
+
+
+def test_export_net_reflects_channel_direct_and_account_deductions(tmp_path):
+    """Regression: exports previously passed NO deduction_components, so export net
+    diverged from API net. Now the export source summary nets out BOTH the
+    channel-direct (30) and the account-allocated (100) deductions."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed_missing_net_with_components(session)
+        summaries = _build_finance_source_summaries_for_export(
+            export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            session=session,
+            org_index=OrgAccessIndex(),
+            group_registry=ChannelGroupRegistry(),
+        )
+    channel = summaries.net_revenue.channels[0]
+    assert channel.status == "COMPONENT_DERIVED"
+    assert channel.net_revenue_usd == Decimal("870.000000")  # 1000 - 30 - 100
+    assert channel.channel_direct_deduction_amount_usd == Decimal("30.00")
+    assert channel.account_allocated_deduction_amount_usd == Decimal("100.000000")
+
+
+def test_scoped_finance_export_records_payment_viewed():
+    """A scoped (company) finance-artifact export now emits PAYMENT_VIEWED (was
+    global-only); BANK_RECONCILIATION_VIEWED stays global-only."""
+    sink = InMemoryAuditSink()
+    user = UserPrincipal(user_id="user-1", email="exp@example.com")
+    records = _record_finance_export_artifact_audit(
+        audit_sink=sink,
+        user=user,
+        export_job=_export_job(scope_type="company", scope_channel_ids=("chA",)),
+        group_registry=ChannelGroupRegistry(),
+        artifact_type="finance_workbook_xlsx",
+        include_download_event=False,
+    )
+    kinds = {record.event_type for record in records}
+    assert "REVENUE_VIEWED" in kinds
+    assert "PAYMENT_VIEWED" in kinds
+    assert "BANK_RECONCILIATION_VIEWED" not in kinds  # scoped: no bank exposure
+
+
+def test_global_finance_export_still_records_bank_reconciliation_viewed():
+    """Global finance export keeps PAYMENT_VIEWED + BANK_RECONCILIATION_VIEWED."""
+    sink = InMemoryAuditSink()
+    user = UserPrincipal(user_id="user-1", email="exp@example.com")
+    records = _record_finance_export_artifact_audit(
+        audit_sink=sink,
+        user=user,
+        export_job=_export_job(scope_type="global", scope_channel_ids=None),
+        group_registry=ChannelGroupRegistry(),
+        artifact_type="finance_workbook_xlsx",
+        include_download_event=False,
+    )
+    kinds = {record.event_type for record in records}
+    assert {"REVENUE_VIEWED", "PAYMENT_VIEWED", "BANK_RECONCILIATION_VIEWED"} <= kinds
 ```
 
-The implementer fills the `...` using the existing export-test seed/builders in this file (the recon shows `seed_database`, `auth_headers`, the `/exports` POST with `export_type="FINANCE_EXCEL"`, scope_type company/global, and audit assertions via `select(AuditLogORM)`). Both tests must FAIL first against current code.
+**Implementer notes:** (a) confirm `ChannelGroupRegistry` import path by grepping how `api/exports.py`/its tests construct one (recon: `ums_smart_revenue.org.channel_groups.ChannelGroupRegistry`, empty-constructible); if a different concrete store is the norm, use it. (b) Confirm the exact `ExportJobEntry` field list against `reports/exports.py:35-57` and fill every required field (the recon-verified set is above — `include_confidence_notes`/`include_manual_override_notes` are required bools, `artifact_*` default to None). (c) `_record_finance_export_artifact_audit` returns the list of `AuditRecord` it created — assert on that list directly; `event_type` values are plain strings (`"PAYMENT_VIEWED"` etc.).
 
 - [ ] **Step 2: Run to verify failures**
 
-Run: `python -m pytest tests/api/test_exports_api.py -k "net_matches_api or scoped_finance_export_records_payment" -v`
-Expected: FAIL — export net omits channel-direct/account deductions; scoped export records no `PAYMENT_VIEWED`.
+Run: `python -m pytest tests/api/test_exports_account_allocation.py -v`
+Expected: FAIL — `test_export_net_reflects_channel_direct_and_account_deductions` shows the channel as `NET_REVENUE_SOURCE_MISSING` (the export builder passes no components/allocations yet); `test_scoped_finance_export_records_payment_viewed` fails because a scoped export records no `PAYMENT_VIEWED` today. (`test_global_...` passes already — it documents the preserved global behavior.)
 
 - [ ] **Step 3: Feed allocations + channel-direct components into the export builder**
 
@@ -1257,15 +1417,15 @@ In `_record_finance_export_artifact_audit` (`:1068-1141`), restructure the globa
 
 - [ ] **Step 5: Run tests to verify pass (incl. existing export suite)**
 
-Run: `python -m pytest tests/api/test_exports_api.py -v`
-Expected: new tests pass; existing export tests pass — **note** any existing test that asserted scoped finance exports emit ONLY `REVENUE_VIEWED` must be updated to include `PAYMENT_VIEWED` (search for audit-set assertions on finance-artifact exports and update them in this step; this is an intended audit-behavior change).
+Run: `python -m pytest tests/api/test_exports_account_allocation.py tests/api/test_exports_api.py -v`
+Expected: the 3 new tests pass; the existing export suite still passes — **note** any existing test in `tests/api/test_exports_api.py` that asserted a scoped finance-artifact export emits ONLY `REVENUE_VIEWED` (no `PAYMENT_VIEWED`) must be updated to include `PAYMENT_VIEWED` (search for audit-set assertions on finance-artifact exports and update them here; this is the intended audit-behavior change).
 
 - [ ] **Step 6: ruff + commit**
 
-Run: `python -m ruff check backend/ums_smart_revenue/api/exports.py tests/api/test_exports_api.py`
+Run: `python -m ruff check backend/ums_smart_revenue/api/exports.py tests/api/test_exports_account_allocation.py`
 
 ```bash
-git add backend/ums_smart_revenue/api/exports.py tests/api/test_exports_api.py
+git add backend/ums_smart_revenue/api/exports.py tests/api/test_exports_account_allocation.py tests/api/test_exports_api.py
 git commit -m "feat(api): finance exports consume same allocations (no net drift) + PAYMENT_VIEWED on scoped exports"
 ```
 
@@ -1327,13 +1487,16 @@ git commit -m "docs(plan): mark Spec 2b PR-2 net-revenue integration shipped"
 
 ## Final validation (after all tasks)
 
+The `AGENTS.md` baseline (`:116-119`) requires `pytest -q` to pass — a **true-green** run, not "green except known errors." The Postgres-tier suites RAISE (never skip) when `UMS_TEST_DATABASE_URL` is unset, so run the full suite with the disposable container set so there are **zero** errors and zero failures:
+
 ```bash
 python -m ruff check backend tests scripts
-python -m pytest -q
 git diff --check
+# Ensure the PG container is up (ums-mig-pg-test, postgres:18-alpine, port 55432), then:
+UMS_TEST_DATABASE_URL='postgresql+psycopg://postgres:ums@localhost:55432/test_ums' python -m pytest -q
 ```
 
-Expected: ruff clean; full SQLite suite green (43 Postgres-tier errors are the known `UMS_TEST_DATABASE_URL`-required fail-fasts, unrelated — this PR adds no migration). Optionally run the PG tier with the container to confirm no regression. Confirm no `Co-Authored-By`/Claude trailer on any commit (`git log --format=%B 8a6df2a..HEAD`). Do NOT push or open a PR until explicitly approved.
+Expected: ruff clean; `git diff --check` clean; pytest reports **N passed, 0 failed, 0 errors** (full suite, Postgres tier included — this PR adds no migration, so the PG suites must stay green, not error). If the container genuinely cannot be started in this environment, do NOT declare the branch ready on a partial run — record the exact blocker (command + why) per the CLAUDE.md "if a validation gate cannot run" rule and surface it. Confirm no `Co-Authored-By`/Claude trailer on any commit (`git log --format=%B 8a6df2a..HEAD`). Do NOT push or open a PR until explicitly approved.
 
 ---
 
@@ -1341,7 +1504,7 @@ Expected: ruff clean; full SQLite suite green (43 Postgres-tier errors are the k
 
 **Spec coverage:** §2 scope → T0 (deduction_policy), T1 (allocation_inputs + endpoint refactor), T2 (builder: params, breakdown, `_applicable_account_allocations`, `_account_allocations_by_channel`, missing-net application + dedup, unallocated surface, `to_api` deltas), T3 (net route: gather, dual audit, scoped pin, VIEW_FINALIZED_PAYMENTS), T4 (exports: both inputs, drift fix, scoped PAYMENT_VIEWED), T5 (docs). §4.6 cycle → T0. §5.4 export gap → T4. §5.1 audit envelope → T3. §4.4 breakdown semantics → T2 (constructors). §4.5 unallocated surface + finding #3 null → T2 (month builder) + T3 (scoped→None) tests.
 
-**Placeholder scan:** All code steps contain complete code EXCEPT T4 Step 1's two export tests, which are described with the exact seed/builders to use (the export-test fixtures are large and file-specific; the implementer wires them from the recon'd `seed_database`/`auth_headers`/`/exports` POST pattern). Every other step has runnable code + expected output.
+**Placeholder scan:** Every code step contains complete, runnable code with expected output — no `...` placeholders. T4's export tests are full direct-function unit tests in a new `tests/api/test_exports_account_allocation.py` (the recon confirmed no HTTP artifact-generation path exists in the suite to drive over the client, so the two changed functions are tested directly). The few "implementer note" lines (confirm `ChannelGroupRegistry` import path; confirm the exact `ExportJobEntry` field list against `reports/exports.py:35-57`) are verification reminders, not missing code.
 
 **Type consistency:** `account_allocations`/`unallocated_account_issues` param names, `AllocationLine`/`UnallocatedIssue` fields, `_applicable_account_allocations`/`_account_allocations_by_channel` signatures, `compute_month_account_allocation` signature, the four new dataclass fields, and `audit_events` (plural) are used identically across T2/T3/T4. `deduction_policy` constants re-exported (T0) so existing `from net_revenue import …` sites (`api/revenue.py:57`, `allocation.py`) keep working.
 
