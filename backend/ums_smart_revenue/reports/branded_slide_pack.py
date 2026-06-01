@@ -232,6 +232,10 @@ def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
         [
             "Total deduction amount USD: "
             f"{_decimal_to_api(net_revenue.total_deduction_amount_usd)}",
+            "Channel-direct deduction USD: "
+            f"{_decimal_to_api(net_revenue.total_channel_direct_deduction_amount_usd)}",
+            "Account-allocated deduction USD: "
+            f"{_decimal_to_api(net_revenue.total_account_allocated_deduction_amount_usd)}",
             "Deductions use SQL revenue facts plus approved manual overrides.",
             "Pending overrides are shown as risk and do not change net revenue.",
         ],
@@ -467,6 +471,12 @@ def _executive_summary(
         "total_net_revenue_usd": _decimal_to_api(net_revenue.total_net_revenue_usd),
         "total_deduction_amount_usd": _decimal_to_api(
             net_revenue.total_deduction_amount_usd
+        ),
+        "total_channel_direct_deduction_amount_usd": _decimal_to_api(
+            net_revenue.total_channel_direct_deduction_amount_usd
+        ),
+        "total_account_allocated_deduction_amount_usd": _decimal_to_api(
+            net_revenue.total_account_allocated_deduction_amount_usd
         ),
         "payment_gap_usd": _decimal_to_api(payment_match.payment_gap_usd),
         "bank_gap_usd": _decimal_to_api(bank_reconciliation.bank_gap_usd),
