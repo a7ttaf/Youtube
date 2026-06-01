@@ -72,6 +72,8 @@ def test_channel_net_revenue_uses_official_net_and_approved_overrides():
         "adjusted_gross_revenue_usd": "1050",
         "net_revenue_usd": "930",
         "deduction_amount_usd": "120",
+        "channel_direct_deduction_amount_usd": None,
+        "account_allocated_deduction_amount_usd": None,
         "deduction_percentage": "11.4286",
         "confidence": "B_RECONCILED",
         "approved_manual_override_count": 1,

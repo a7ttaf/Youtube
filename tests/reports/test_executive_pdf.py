@@ -137,6 +137,8 @@ def _net_revenue_summary(
         adjusted_gross_revenue_usd=Decimal("1050.00"),
         net_revenue_usd=Decimal("930.00"),
         deduction_amount_usd=Decimal("120.00"),
+        channel_direct_deduction_amount_usd=None,
+        account_allocated_deduction_amount_usd=None,
         deduction_percentage=Decimal("11.4286"),
         confidence="B_RECONCILED",
         approved_manual_override_count=1,
@@ -157,6 +159,8 @@ def _net_revenue_summary(
                 adjusted_gross_revenue_usd=Decimal("100.00"),
                 net_revenue_usd=None,
                 deduction_amount_usd=None,
+                channel_direct_deduction_amount_usd=None,
+                account_allocated_deduction_amount_usd=None,
                 deduction_percentage=None,
                 confidence="E_MISSING",
                 approved_manual_override_count=0,
@@ -174,6 +178,8 @@ def _net_revenue_summary(
         total_adjusted_gross_revenue_usd=Decimal("1050.00"),
         total_net_revenue_usd=Decimal("930.00"),
         total_deduction_amount_usd=Decimal("120.00"),
+        unallocated_account_deduction_total_usd=None,
+        unallocated_account_issues=None,
         channels=channels,
     )
 
