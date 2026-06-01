@@ -16,7 +16,28 @@ from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
 ADJUSTED_GROSS_REVENUE_METRIC = "adjusted_gross_revenue_usd"
+NET_REVENUE_METRIC = "net_revenue_usd"
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
+
+_NET_CONFIDENCE_TO_EXPLAIN: dict[str, dict[str, str]] = {
+    "B_RECONCILED": {"label": "HIGH", "score": "0.95"},
+    "D_ESTIMATED": {"label": "MEDIUM", "score": "0.80"},
+    "E_MISSING": {"label": "LOW", "score": "0"},
+}
+
+
+def map_net_confidence(net_confidence_label: str) -> dict[str, str]:
+    # ========================================================================
+    # Purpose: Map a net-revenue confidence label (B_RECONCILED/D_ESTIMATED/
+    #   E_MISSING) to the explain HIGH/MEDIUM/LOW+score shape. Net explanations
+    #   reject E_MISSING before persistence; the E_MISSING/default rows fail safe.
+    # Database/ORM: None.
+    # Standards: Pure; total function (unknown labels -> LOW/0).
+    # Blast Radius: Finance confidence labels on persisted net explanations.
+    # ========================================================================
+    return _NET_CONFIDENCE_TO_EXPLAIN.get(
+        net_confidence_label, {"label": "LOW", "score": "0"}
+    )
 
 
 @dataclass(frozen=True)

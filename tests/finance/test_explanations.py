@@ -16,6 +16,7 @@ from ums_smart_revenue.finance.explanations import (
     NumberExplanationValidationError,
     SqlAlchemyNumberExplanationRepository,
     build_channel_month_revenue_explanation,
+    map_net_confidence,
 )
 from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntry
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
@@ -723,3 +724,16 @@ def test_repository_rejects_malformed_tenant_id():
             NumberExplanationValidationError, match="tenant_id must be a valid UUID"
         ):
             SqlAlchemyNumberExplanationRepository(session, tenant_id="not-a-uuid")
+
+
+# -----------------------------------------------------------------------------
+# map_net_confidence
+# -----------------------------------------------------------------------------
+
+
+def test_map_net_confidence_pins_each_net_label_and_defaults_low():
+    assert map_net_confidence("B_RECONCILED") == {"label": "HIGH", "score": "0.95"}
+    assert map_net_confidence("D_ESTIMATED") == {"label": "MEDIUM", "score": "0.80"}
+    assert map_net_confidence("E_MISSING") == {"label": "LOW", "score": "0"}
+    # Defensive default for any unexpected/future label.
+    assert map_net_confidence("SOMETHING_NEW") == {"label": "LOW", "score": "0"}
