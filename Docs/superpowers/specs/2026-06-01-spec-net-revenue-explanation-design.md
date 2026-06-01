@@ -145,7 +145,24 @@ The third check is **net-metric-only** and mirrors the PR-2 net route exactly
 The gross metric keeps only the first two checks. Rationale: net explanations expose
 payment/deduction-derived provenance, so `VIEW_REVENUE` + `VIEW_CONFIDENCE` alone is too
 weak; `VIEW_FINALIZED_PAYMENTS` is the correct permission and `{GLOBAL, FINANCE_MONTH}` is
-its only valid scope-type set per `user_permissions.py:41`.
+its only valid *direct-grant* scope-type set per `user_permissions.py:41`.
+
+**Access boundary — intentional, NOT access-transparent.** This gate is identical to the
+already-merged PR-2 net-revenue route, so it adds no *new* boundary; it makes *explaining*
+net consistent with *reading* net. But it is **not** transparent to every principal who can
+read gross. `has_permission` authorizes a role assignment via
+`index.contains(assignment.scope, target_scope)` (`policy.py:36-41`) and does **not** clamp
+role-derived grants by `PERMISSION_SCOPE_TYPES` (that allowlist only validates *direct*
+grants, `user_permissions.py:399`). `FINANCE_VIEWER.allowed_scope_types=_ORG_SCOPES`
+(`roles.py:72`), so a company/sector/channel-scoped `FINANCE_VIEWER` holds
+`VIEW_FINALIZED_PAYMENTS` only at that **org** scope, and `OrgAccessIndex.contains` has no
+cross-type rule mapping an org grant to a `finance_month` target (`scopes.py:57-87`).
+Consequence: such a principal passes `VIEW_REVENUE@channel` (gross → `200`) but is
+**`403`'d on the net metric**. Net-explanation access therefore requires finalized-payment
+visibility at `GLOBAL` (role/grant assigned globally → `contains(GLOBAL, finance_month)`
+True) or a direct `FINANCE_MONTH(month)` grant — exactly as on the PR-2 net-revenue route.
+This is deliberate: the net number and its explanation share one access boundary. §8 pins
+both sides of it.
 
 ### 5.3 Audit envelope (net metric only)
 
@@ -194,10 +211,24 @@ def build_channel_month_revenue_explanation(
 
 The route gathers `account_allocations` from `compute_month_account_allocation(month=month,
 deduction_repository=..., revenue_repository=..., link_repository=...).lines` (month-wide
-basis, as PR-2 requires — single-channel allocation is not computable in isolation). The
-service filters/dedups to the channel via the net builder's own `_applicable_account_allocations`
-+ `component_key` logic; the **provenance component** (§5.5) is derived from that same applicable,
-deduped set — never the raw month-wide lines.
+basis, as PR-2 requires — single-channel allocation is not computable in isolation).
+
+**Shared provenance helpers (no copied logic — required).** The channel/source/net-applicable
+filter and `component_key` dedup the net builder uses today live in private functions
+(`net_revenue.py:_applicable_deduction_components:176`, `_applicable_account_allocations:196`,
+and the dedup at `:401`). This PR **extracts those into shared, importable helpers** that
+return the channel's applicable, deduped per-channel lines, and has BOTH
+`build_channel_net_revenue_summary` (to compute its totals) AND
+`_build_net_revenue_explanation` (to enumerate the provenance arrays) call the **same**
+helper. This is a behavior-preserving refactor of the net builder — its computed totals,
+statuses, and confidence are unchanged. The explanation builder MUST NOT re-implement or
+copy the filter/dedup; deriving provenance and total from one shared helper **guarantees no
+drift**: the explanation's `account_allocated_deduction_usd.value` is the sum of exactly the
+`allocations[]` it lists, which equals the summary's `account_allocated_deduction_amount_usd`.
+The same shared-helper rule applies to the channel-direct lines vs
+`channel_direct_deduction_amount_usd`. Provenance arrays are derived only from these shared
+helpers — never the raw month-wide lines, never a re-implemented copy. A test asserts the
+sum-identity on the COMPONENT_DERIVED path to lock the no-drift contract.
 
 `formula` strings:
 
@@ -248,13 +279,14 @@ COMPONENT_DERIVED path adds two deduction components:
   ] }
 ```
 
-- The `allocations` array is the channel's applicable, source-aligned, net-applicable,
-  `component_key`-deduped `AllocationLine`s — verbatim provenance from the dataclass
-  (`allocation.py:97-110`), nothing more. Sorted deterministically by
-  `(adsense_account_id, component_key)`.
-- The `channel_direct_deduction_usd.components` array uses the `DeductionComponent` fields
-  the net builder already consumes (exact field names verified at plan time:
-  `component_kind`, `source_system`, `component_key`, amount). Sorted deterministically by
+- The `allocations` array is the channel's applicable lines from the **shared helper**
+  (§5.4) — source-aligned, net-applicable, `component_key`-deduped `AllocationLine`s —
+  verbatim provenance from the dataclass (`allocation.py:97-110`), nothing more. Sorted
+  deterministically by `(adsense_account_id, component_key)`.
+- The `channel_direct_deduction_usd.components` array is the channel's applicable lines from
+  the **shared helper** (§5.4), using the `DeductionComponent` fields the net builder
+  already consumes (exact field names verified at plan time: `component_kind`,
+  `source_system`, `component_key`, amount). Sorted deterministically by
   `(source_system, component_key)`.
 - No raw payloads, no unrelated account/channel data, no month-wide rows.
 
@@ -315,9 +347,12 @@ keyed by `(tenant_id, month, "channel", channel_id, "net_revenue_usd")`. `compon
 - **PostgreSQL remains source of truth.** USD-only preserved.
 - **Authorization:** strictly *more* restrictive for the new metric
   (`+VIEW_FINALIZED_PAYMENTS@finance_month`); gross metric unchanged; no permission
-  weakened. Verified regression-free: every role with `VIEW_REVENUE` also holds
-  `VIEW_FINALIZED_PAYMENTS` (`seed.py`); a direct-grant principal lacking it is correctly
-  fail-closed (net metric is new).
+  weakened. **Not access-transparent (see §5.2):** an org-scoped (company/sector/channel)
+  `FINANCE_VIEWER` holds `VIEW_FINALIZED_PAYMENTS` only at that org scope, which cannot
+  contain a `finance_month` target — so they read gross but are intentionally `403`'d on
+  net, exactly as on the merged PR-2 net-revenue route (no *new* boundary). Net access
+  requires finalized-payment visibility at `GLOBAL` or a direct `FINANCE_MONTH(month)`
+  grant. Fail-closed throughout; both sides of the boundary are pinned by §8 tests.
 - **Audit:** net metric adds `PAYMENT_VIEWED` (more coverage, not less); response shape
   change is additive and net-metric-only.
 - **Finance results:** no change to computed numbers — this reuses PR-2's net builder
@@ -343,9 +378,15 @@ API (`tests/api/test_net_revenue_api.py` or the explain test module):
 
 - Net metric happy path returns `net_revenue_usd` value + provenance components + plural
   `audit_events = [REVENUE_VIEWED, PAYMENT_VIEWED]`, and persists one upserted row.
-- Auth: missing `VIEW_FINALIZED_PAYMENTS` (e.g. a direct-grant principal with only
-  `VIEW_REVENUE`+`VIEW_CONFIDENCE@channel`) → `403` on the net metric but `200` on the gross
-  metric; missing `VIEW_REVENUE` → `403`; fail-closed on a global finance viewer succeeds.
+- Auth — boundary pinned on BOTH sides:
+  (a) a principal with only `VIEW_REVENUE`+`VIEW_CONFIDENCE@channel` (no finalized-payment)
+  → `403` on net, `200` on gross;
+  (b) an **org-scoped (company/sector) `FINANCE_VIEWER`** — holds `VIEW_FINALIZED_PAYMENTS`
+  only at the org scope — → `403` on net, `200` on gross (documents the intentional
+  boundary from §5.2);
+  (c) a viewer holding `VIEW_FINALIZED_PAYMENTS` at `GLOBAL` or via a direct
+  `FINANCE_MONTH(month)` grant → `200` on net with full provenance + plural `audit_events`;
+  (d) missing `VIEW_REVENUE` → `403`; (e) disabled user → `403`. Fail-closed throughout.
 - Indeterminate net (no facts / missing source net) → `422`, nothing persisted.
 - Gross metric unchanged: singular `audit_event`, no `VIEW_FINALIZED_PAYMENTS` required.
 - Idempotency: two net-metric calls upsert one row; gross + net coexist as two rows.
@@ -359,6 +400,10 @@ Changed:
 - `backend/ums_smart_revenue/finance/explanations.py` — net metric branch, optional
   `deduction_components`/`account_allocations` params, `_build_net_revenue_explanation`,
   `map_net_confidence`, supported-metric set.
+- `backend/ums_smart_revenue/finance/net_revenue.py` — behavior-preserving extraction of the
+  applicable-filter + `component_key`-dedup logic into shared importable helpers consumed by
+  both the net builder and the explanation builder (§5.4). No change to computed totals,
+  statuses, or confidence.
 - `backend/ums_smart_revenue/api/revenue.py` — explain handler: inject deduction +
   channel↔account-link repositories (reuse PR-2's local providers), net-metric auth gate,
   gather inputs, plural `audit_events`, metric-conditional response.
@@ -369,7 +414,10 @@ Not changed:
 
 - Any Alembic migration / ORM schema (no migration).
 - The gross-revenue explanation path (auth, audit, components, response).
-- PR-2 net-revenue / allocation logic (reused, not modified).
+- PR-2 net-revenue / allocation *behavior* — totals, statuses, and confidence unchanged
+  (`net_revenue.py` gains only a behavior-preserving extraction of its existing
+  filter/dedup helpers for shared reuse; see §5.4). `allocation.py` /
+  `allocation_inputs.py` / `deduction_policy.py` reused unmodified.
 - CODEOWNERS / branch protection.
 
 ## 10. Validation gate
