@@ -76,6 +76,13 @@ evidence to the same missing-net path, exactly once.
 
 In scope for this PR (Spec 2b PR-2):
 
+0. **`finance/deduction_policy.py`** (new, preliminary) — relocate the two shared net-policy
+   constants `NET_APPLICABLE_COMPONENT_KINDS` and the **net_revenue**
+   `SOURCE_SYSTEM_TO_SOURCE_KIND` (the `str → str` map at `net_revenue.py:21,28`) into a
+   neutral leaf module, to break the import cycle this PR would otherwise create (§4.6).
+   `net_revenue.py`, `allocation.py`, and `api/revenue.py` re-import them from there. **Do not
+   touch** the identically-named but different `SOURCE_SYSTEM_TO_SOURCE_KIND` in
+   `google_source_normalizer.py:74` (a `str → RevenueFactSourceKind` map with its own tests).
 1. **`finance/allocation_inputs.py`** (new) — `compute_month_account_allocation(*, month,
    deduction_repository, revenue_repository, link_repository) -> AccountAllocationResult`,
    extracted verbatim-in-behavior from `api/allocation.py:167-191`. The PR-1 endpoint is
@@ -89,11 +96,15 @@ In scope for this PR (Spec 2b PR-2):
    allocations via the new service, passes them to the builder, adds
    `VIEW_FINALIZED_PAYMENTS@finance_month` + a `PAYMENT_VIEWED` audit, and applies the
    scoped-visibility pin (§5).
-4. **`api/exports.py`** — the finance-export source-summary path (`exports.py:1035`) passes
-   the same allocations to the builder (kills API/export drift); applies the same
-   scoped-visibility pin; and `PAYMENT_VIEWED` is recorded for **all** finance-artifact
-   exports, not only global ones (§5.3). Export **layouts** are unchanged this PR (totals
-   become correct; no new columns).
+4. **`api/exports.py`** — the finance-export source-summary path
+   (`_build_finance_source_summaries_for_export`, `exports.py:1035`) currently calls the
+   builder with **only `facts` + `manual_overrides`** — it passes **no** `deduction_components`
+   today, so it *already* drifts from the API on channel-direct (PR-B) components. To truly
+   kill drift, this PR makes exports fetch + pass **both** the same scoped channel-direct
+   net-applicable `deduction_components` as the API **and** the account allocations (§5.4).
+   Applies the same scoped-visibility pin; `PAYMENT_VIEWED` is recorded for **all**
+   finance-artifact exports, not only global ones (§5.3). Export **layouts** are unchanged this
+   PR (totals become correct; no new columns).
 5. **Docs** — `Docs/01_IMPLEMENTATION_PLAN.md` + `Docs/15_DELIVERY_BACKLOG.md` status.
 
 Allocation method remains `gross_revenue_proportional` (PR-1's only method).
@@ -256,10 +267,49 @@ NET_APPLICABLE_COMPONENT_KINDS`) — an account TAX/DEDUCTION that could not be 
 
 Per the §4.1 contract split: the **caller** applies the scope gate by passing
 `unallocated_account_issues=result.unallocated` for a global request or `None` for any scoped
-request (§5.2); the **builder** applies the net-applicable filter and serializes. When the
-caller passes `None` (scoped request), both month surface fields are `None` (omitted), **not**
-zero. When the caller passes the list for a global request with nothing unallocated, the total
-is `Decimal("0")` and the issues list is `[]`.
+request (§5.2); the **builder** applies the net-applicable filter and serializes.
+
+**Serialization (explicit `null`, not key omission — finding #3):** to match the existing
+`to_api()` style (`net_revenue.py:58-80,100-115`), which emits every key unconditionally, both
+fields are **always present** in `MonthNetRevenueSummary.to_api()`:
+
+- **Scoped request** (caller passed `None`) → `unallocated_account_deduction_total_usd: null`,
+  `unallocated_account_issues: null` (explicit JSON `null`, not an absent key).
+- **Global request, nothing unallocated** (caller passed the list, all filtered out or empty)
+  → `unallocated_account_deduction_total_usd: "0"`, `unallocated_account_issues: []`.
+- **Global request, with unallocated** → the summed total string + the issues array.
+
+So `null` distinguishes "scope withheld this surface" from `0`/`[]` "global, nothing
+unallocated." The dataclass fields are `Decimal | None` / `list[...] | None`; the route never
+relies on key omission.
+
+### 4.6 Import-cycle resolution (`finance/deduction_policy.py`)
+
+`net_revenue.py` cannot top-level-import `AllocationLine`/`UnallocatedIssue` from
+`allocation.py`, because `allocation.py:16-19` already imports `NET_APPLICABLE_COMPONENT_KINDS`
+and `SOURCE_SYSTEM_TO_SOURCE_KIND` **from `net_revenue.py`** — a direct cycle.
+
+**Resolution (Task 0, done first):** create a neutral leaf module `finance/deduction_policy.py`
+holding the two shared net-policy constants (moved verbatim from `net_revenue.py:21-28`):
+
+```python
+# finance/deduction_policy.py
+SOURCE_SYSTEM_TO_SOURCE_KIND: dict[str, str] = {
+    "adsense_management": "ADSENSE",
+    "youtube_reporting": "YOUTUBE_CMS",
+    "youtube_analytics": "YOUTUBE_ANALYTICS",
+}
+NET_APPLICABLE_COMPONENT_KINDS: frozenset[str] = frozenset({"TAX", "DEDUCTION"})
+```
+
+`net_revenue.py`, `allocation.py`, and `api/revenue.py` import both names from
+`finance.deduction_policy`. `deduction_policy` imports nothing from `net_revenue`/`allocation`,
+so the cycle is gone and `net_revenue` can import `AllocationLine`/`UnallocatedIssue` from
+`allocation` cleanly. **Leave `google_source_normalizer.py:74`'s identically-named
+`SOURCE_SYSTEM_TO_SOURCE_KIND` (a `str → RevenueFactSourceKind` map, different type, own tests)
+untouched.** `net_revenue.py` MAY re-export the two names so existing `from net_revenue import …`
+sites keep working; new code imports from `deduction_policy`. A test asserts the values are
+unchanged.
 
 ---
 
@@ -275,7 +325,17 @@ PR-2 **adds**, because net now embeds account-derived (finalized-payment) eviden
 - a second audit event `PAYMENT_VIEWED` (entity `monthly_net_revenue_summary`, scope
   `finance_month(month)`), alongside the existing `REVENUE_VIEWED`.
 
-`VIEW_REVENUE` + `VIEW_CONFIDENCE` target-scope checks are unchanged. Fail-closed throughout.
+`VIEW_REVENUE` + `VIEW_CONFIDENCE` target-scope checks are unchanged (the new
+`VIEW_FINALIZED_PAYMENTS` is gated on `finance_month(month)`, not the org `target_scope` —
+mirroring the payment-match read `revenue.py:748-751`). Fail-closed throughout.
+
+**Audit response-shape change (finding #4):** the net route today emits a singular
+`summary_api["audit_event"]` (`revenue.py:1117`). With two events it switches to the **plural
+`summary_api["audit_events"] = [revenue_record, payment_record]`** form — byte-for-byte the
+payment-match precedent (`revenue.py:798-801`). This is a **deliberate response-shape change**
+(`audit_event` → `audit_events`) for this endpoint; the plan updates the endpoint's existing
+tests and the backlog documents it so any consumer keying on `audit_event` is on notice. (The
+two other singular `audit_event` routes — `revenue.py:256,366` — are unrelated and untouched.)
 
 ### 5.2 Scoped-visibility pin (Correction 3 — global-only unallocated detail)
 
@@ -287,7 +347,8 @@ scoped channel subset. Therefore:
 
 > The unallocated-account surface (`unallocated_account_deduction_total_usd` +
 > `unallocated_account_issues`) is populated **only when `scope_type == "global"`**. For any
-> scoped request (sector/company/channel), both fields are **omitted (`None`)**, not zeroed.
+> scoped request (sector/company/channel), both fields serialize as explicit JSON **`null`**
+> (caller passes `None`; §4.5 finding #3) — never zeroed, and never an absent key.
 
 This is the **chosen** resolution (over "require a global permission for the detail"): one
 rule, no auth-shape change, zero cross-scope leakage. It applies identically to the API and
@@ -308,6 +369,47 @@ finance-artifact exports too**:
   rows, so actual bank exposure is unchanged (mirrors PR-1's "account evidence →
   `PAYMENT_VIEWED`, no bank audit" discipline and the deduction-components read's conditional
   bank audit).
+
+### 5.4 Exports data inputs — close the pre-existing channel-direct gap (finding #2)
+
+`_build_finance_source_summaries_for_export` (`exports.py:1035-1039`) currently calls
+`build_month_net_revenue_summary` with **only `facts` + `manual_overrides`** — it passes **no**
+`deduction_components` at all. So the export net **already** diverges from the API net (which
+passes channel-direct net-applicable components, `revenue.py:1079-1083`) for any month with
+channel-direct TAX/DEDUCTION on the missing-net path, *independent of* this PR. Passing only
+`account_allocations` would leave that channel-direct gap open and the "no drift" claim false.
+
+Therefore PR-2's export change fetches and passes **both** inputs, scoped to the export's
+`channel_ids`:
+
+```python
+deduction_components = SqlAlchemyDeductionComponentRepository(session).list_month_components(
+    month=export_job.month,
+    youtube_channel_ids=channel_ids,
+    component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
+)
+account_result = compute_month_account_allocation(
+    month=export_job.month,
+    deduction_repository=SqlAlchemyDeductionComponentRepository(session),
+    revenue_repository=revenue_repository,
+    link_repository=SqlAlchemyChannelAccountLinkRepository(session),
+)
+net_revenue = build_month_net_revenue_summary(
+    month=export_job.month,
+    facts=facts,
+    manual_overrides=manual_overrides,
+    deduction_components=deduction_components,
+    account_allocations=account_result.lines,
+    unallocated_account_issues=(
+        account_result.unallocated if export_job.scope_type == "global" else None
+    ),
+)
+```
+
+A test asserts the export net for a missing-net channel with channel-direct components equals
+the API net for the same month/scope (the regression this closes), and a second asserts parity
+once account allocations are added. (`channel_ids is None` for a global export, matching how
+the API's global path lists facts/components unscoped.)
 
 ---
 
@@ -374,7 +476,8 @@ auth or audit. It does **not** live in `net_revenue.py` (which stays repository-
 "account_allocated_deduction_amount_usd": "3.250000" | null
 ```
 
-`MonthNetRevenueSummary.to_api()` gains (global scope only; omitted on scoped requests):
+`MonthNetRevenueSummary.to_api()` gains (populated at global scope; explicit `null` on scoped
+requests — §4.5/§5.2):
 
 ```json
 "unallocated_account_deduction_total_usd": "40.000000" | null,
@@ -384,9 +487,13 @@ auth or audit. It does **not** live in `net_revenue.py` (which stays repository-
 ] | null
 ```
 
-All decimals via `decimal_to_api`; no secrets, no `raw_payload`. Totals
+All decimals via `decimal_to_api`; no secrets, no `raw_payload`. Both `unallocated_*` keys are
+**always present**: explicit `null` on scoped responses, `"0"`/`[]` on a global response with
+nothing unallocated, populated otherwise (§4.5, finding #3). Totals
 (`total_net_revenue_usd`, `total_deduction_amount_usd`) already aggregate per-channel values
-and now include account-allocated amounts on COMPONENT_DERIVED channels automatically.
+and now include account-allocated amounts on COMPONENT_DERIVED channels automatically. The
+net-revenue endpoint's audit envelope changes from singular `audit_event` to plural
+**`audit_events: [REVENUE_VIEWED, PAYMENT_VIEWED]`** (§5.1, finding #4).
 
 ---
 
@@ -450,21 +557,33 @@ migration/lock); SQLite for the route/export tests, no DB for the pure-builder t
   endpoint produced for equivalent fixtures (gross_basis keying, verified-channel map,
   account dedup).
 
+**Constant move (`tests/finance/test_deduction_policy.py`):**
+- `NET_APPLICABLE_COMPONENT_KINDS` and `SOURCE_SYSTEM_TO_SOURCE_KIND` in `deduction_policy`
+  equal their former values; `net_revenue`'s (re-exported) names are the same objects;
+  `google_source_normalizer.SOURCE_SYSTEM_TO_SOURCE_KIND` is unchanged (distinct map).
+- Importing `net_revenue` and `allocation` together raises no `ImportError` (cycle gone).
+
 **API (`tests/api/test_revenue_api.py` / net-revenue tests):**
 - `finance_viewer` (VIEW_REVENUE + VIEW_CONFIDENCE + VIEW_FINALIZED_PAYMENTS) at **global** →
-  200; response includes breakdown fields and (global) the unallocated surface; records
-  `REVENUE_VIEWED` + `PAYMENT_VIEWED`.
+  200; response includes breakdown fields and (global) the unallocated surface; envelope is
+  **`audit_events`** containing `REVENUE_VIEWED` + `PAYMENT_VIEWED`.
 - Missing `VIEW_FINALIZED_PAYMENTS` (otherwise-permitted viewer) → **403** (fail-closed; new
   gate enforced).
 - Scoped request (company/channel) with full perms → 200; net/deduction totals correct **but
-  the unallocated-account surface is omitted** (`None`), proving the §5.2 pin.
-- Existing net-revenue tests updated for the new auth requirement + additive keys.
+  the unallocated-account surface is explicit `null`** (both fields), proving the §5.2 pin and
+  the finding-#3 serialization rule.
+- Existing net-revenue tests updated for: the new auth requirement, the `audit_event` →
+  `audit_events` envelope change, and the additive keys.
 
 **Exports (`tests/api/test_exports_api.py`):**
-- Finance workbook/source-summary net equals the API net for the same month/scope (no drift).
+- **Channel-direct drift regression:** export net for a missing-net channel **with
+  channel-direct TAX/DEDUCTION** equals the API net for the same month/scope (fails on today's
+  code, which passes no `deduction_components` to the export builder).
+- Account-allocation parity: export net equals API net once account allocations are added.
 - `PAYMENT_VIEWED` is now recorded for a **scoped** finance-artifact export (previously only
   global); `BANK_RECONCILIATION_VIEWED` remains global-only.
-- Global vs scoped export: unallocated surface present only at global scope.
+- Global vs scoped export: unallocated surface present only at global scope (explicit `null`
+  when scoped).
 
 **Allocation endpoint regression (`tests/api/test_allocation_api.py`):** unchanged behavior
 after the orchestrator extraction (all PR-1 tests stay green).
@@ -476,29 +595,41 @@ after the orchestrator extraction (all PR-1 tests stay green).
 
 ## 10. Affected files (principal)
 
+- **Create** `backend/ums_smart_revenue/finance/deduction_policy.py` — neutral home for
+  `NET_APPLICABLE_COMPONENT_KINDS` + the net-policy `SOURCE_SYSTEM_TO_SOURCE_KIND` (Task 0,
+  breaks the import cycle, §4.6).
 - **Create** `backend/ums_smart_revenue/finance/allocation_inputs.py` —
   `compute_month_account_allocation`.
-- **Modify** `backend/ums_smart_revenue/finance/net_revenue.py` — new builder param, breakdown
-  fields, `_applicable_account_allocations`, `_account_allocations_by_channel`, the
-  COMPONENT_DERIVED application + dedup, unallocated surface, `to_api()` deltas.
+- **Modify** `backend/ums_smart_revenue/finance/net_revenue.py` — import the two constants from
+  `deduction_policy` (optionally re-export for back-compat); import `AllocationLine` +
+  `UnallocatedIssue` from `allocation`; new builder params (`account_allocations`,
+  `unallocated_account_issues`), breakdown fields, `_applicable_account_allocations`,
+  `_account_allocations_by_channel`, the COMPONENT_DERIVED application + dedup, unallocated
+  surface, `to_api()` deltas.
+- **Modify** `backend/ums_smart_revenue/finance/allocation.py` — import the two constants from
+  `deduction_policy` instead of `net_revenue` (removes the cycle edge).
 - **Modify** `backend/ums_smart_revenue/api/allocation.py` — refactor to call the new service
   (behavior-preserving).
 - **Modify** `backend/ums_smart_revenue/api/revenue.py` — net-revenue route: gather
-  allocations, pass to builder, add `VIEW_FINALIZED_PAYMENTS` gate + `PAYMENT_VIEWED` audit,
-  apply the scoped-visibility pin.
-- **Modify** `backend/ums_smart_revenue/api/exports.py` — pass allocations into the
-  source-summary builder; apply the scoped-visibility pin; emit `PAYMENT_VIEWED` for all
+  allocations, pass to builder, add `VIEW_FINALIZED_PAYMENTS@finance_month` gate +
+  `PAYMENT_VIEWED` audit, switch the envelope to plural `audit_events`, apply the
+  scoped-visibility pin; import `NET_APPLICABLE_COMPONENT_KINDS` from `deduction_policy`.
+- **Modify** `backend/ums_smart_revenue/api/exports.py` — fetch + pass the same scoped
+  channel-direct net-applicable `deduction_components` **and** account allocations into the
+  source-summary builder (§5.4); apply the scoped-visibility pin; emit `PAYMENT_VIEWED` for all
   finance-artifact exports (keep `BANK_RECONCILIATION_VIEWED` global-only).
-- **Create/extend tests**: `tests/finance/test_net_revenue.py`,
-  `tests/finance/test_allocation_inputs.py`, `tests/api/test_revenue_api.py`,
-  `tests/api/test_exports_api.py`; keep `tests/api/test_allocation_api.py` green.
-- **Modify** `Docs/01_IMPLEMENTATION_PLAN.md`, `Docs/15_DELIVERY_BACKLOG.md` — status.
+- **Create/extend tests**: `tests/finance/test_deduction_policy.py` (constant-parity),
+  `tests/finance/test_net_revenue.py`, `tests/finance/test_allocation_inputs.py`,
+  `tests/api/test_revenue_api.py`, `tests/api/test_exports_api.py`; keep
+  `tests/api/test_allocation_api.py` green.
+- **Modify** `Docs/01_IMPLEMENTATION_PLAN.md`, `Docs/15_DELIVERY_BACKLOG.md` — status
+  (incl. the `audit_event` → `audit_events` net-route response-shape note).
 
 Reused (no duplication): `AllocationLine`, `UnallocatedIssue`, `build_account_allocation`,
 `AccountAllocationResult` (PR-1); `NET_APPLICABLE_COMPONENT_KINDS`,
-`SOURCE_SYSTEM_TO_SOURCE_KIND` (net_revenue); `list_account_components`,
-`list_verified_adsense_account_channels`, `list_month_facts`; `AccessScope`, `Permission`,
-`AuditEventType`, `record_audit_event`.
+`SOURCE_SYSTEM_TO_SOURCE_KIND` (now from `deduction_policy`); `list_account_components`,
+`list_month_components`, `list_verified_adsense_account_channels`, `list_month_facts`;
+`AccessScope`, `Permission`, `AuditEventType`, `record_audit_event`.
 
 ---
 
@@ -528,6 +659,17 @@ Reused (no duplication): `AllocationLine`, `UnallocatedIssue`, `build_account_al
    finance-artifact exports (`BANK_RECONCILIATION_VIEWED` stays global-only).
 10. **DRY:** shared `compute_month_account_allocation` orchestrator; `net_revenue` stays
     repository-free.
+11. **Import cycle (review #1):** move the two shared net-policy constants to a neutral
+    `finance/deduction_policy.py` (Task 0) so `net_revenue` ↔ `allocation` don't form a cycle;
+    leave the normalizer's different same-named constant alone.
+12. **Export drift is pre-existing (review #2):** exports pass **no** `deduction_components`
+    today, so they already drift on channel-direct components. PR-2 fixes both — exports fetch
+    the same scoped channel-direct net-applicable components **and** account allocations — so
+    "no drift" is actually true.
+13. **Serialization (review #3):** scoped unallocated fields are explicit JSON `null` (not key
+    omission); global-with-nothing is `"0"`/`[]`. Matches the unconditional `to_api()` style.
+14. **Audit envelope (review #4):** the net route moves from singular `audit_event` to plural
+    `audit_events` (payment-match precedent) — a deliberate, documented response-shape change.
 
 ---
 
