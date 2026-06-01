@@ -209,6 +209,8 @@ def build_finance_workbook_xlsx(preview: FinanceWorkbookPreview) -> bytes:
             "adjusted_gross_revenue_usd",
             "net_revenue_usd",
             "deduction_amount_usd",
+            "channel_direct_deduction_amount_usd",
+            "account_allocated_deduction_amount_usd",
             "deduction_percentage",
             "confidence",
             "approved_manual_override_count",
@@ -225,6 +227,8 @@ def build_finance_workbook_xlsx(preview: FinanceWorkbookPreview) -> bytes:
                 _decimal_to_api(channel.adjusted_gross_revenue_usd),
                 _decimal_to_api(channel.net_revenue_usd),
                 _decimal_to_api(channel.deduction_amount_usd),
+                _decimal_to_api(channel.channel_direct_deduction_amount_usd),
+                _decimal_to_api(channel.account_allocated_deduction_amount_usd),
                 _decimal_to_api(channel.deduction_percentage),
                 channel.confidence,
                 channel.approved_manual_override_count,
@@ -240,6 +244,8 @@ def build_finance_workbook_xlsx(preview: FinanceWorkbookPreview) -> bytes:
             "adjusted_gross_revenue_usd",
             "net_revenue_usd",
             "deduction_amount_usd",
+            "channel_direct_deduction_amount_usd",
+            "account_allocated_deduction_amount_usd",
             "deduction_percentage",
             "approved_manual_override_total_usd",
         ],
@@ -249,6 +255,8 @@ def build_finance_workbook_xlsx(preview: FinanceWorkbookPreview) -> bytes:
                 _decimal_to_api(channel.adjusted_gross_revenue_usd),
                 _decimal_to_api(channel.net_revenue_usd),
                 _decimal_to_api(channel.deduction_amount_usd),
+                _decimal_to_api(channel.channel_direct_deduction_amount_usd),
+                _decimal_to_api(channel.account_allocated_deduction_amount_usd),
                 _decimal_to_api(channel.deduction_percentage),
                 _decimal_to_api(channel.approved_manual_override_total_usd),
             ]
@@ -363,6 +371,12 @@ def _executive_summary(
         "total_deduction_amount_usd": _decimal_to_api(
             net_revenue.total_deduction_amount_usd
         ),
+        "total_channel_direct_deduction_amount_usd": _decimal_to_api(
+            net_revenue.total_channel_direct_deduction_amount_usd
+        ),
+        "total_account_allocated_deduction_amount_usd": _decimal_to_api(
+            net_revenue.total_account_allocated_deduction_amount_usd
+        ),
         "payment_gap_usd": _decimal_to_api(payment_match.payment_gap_usd),
         "bank_gap_usd": _decimal_to_api(bank_reconciliation.bank_gap_usd),
         "channel_count": net_revenue.channel_count,
@@ -393,6 +407,12 @@ def _scope_breakdown(
         ),
         "total_deduction_amount_usd": _decimal_to_api(
             preview.net_revenue.total_deduction_amount_usd
+        ),
+        "total_channel_direct_deduction_amount_usd": _decimal_to_api(
+            preview.net_revenue.total_channel_direct_deduction_amount_usd
+        ),
+        "total_account_allocated_deduction_amount_usd": _decimal_to_api(
+            preview.net_revenue.total_account_allocated_deduction_amount_usd
         ),
     }
 
