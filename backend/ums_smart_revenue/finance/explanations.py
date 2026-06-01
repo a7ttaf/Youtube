@@ -156,7 +156,7 @@ def build_channel_month_revenue_explanation(
             deduction_components=deduction_components,
             account_allocations=account_allocations,
         )
-    if metric != ADJUSTED_GROSS_REVENUE_METRIC:
+    if metric not in SUPPORTED_METRICS:
         raise NumberExplanationValidationError(
             f"Unsupported explanation metric: {metric}"
         )
