@@ -252,6 +252,12 @@ def _executive_summary(
         "total_deduction_amount_usd": _decimal_to_api(
             net_revenue.total_deduction_amount_usd
         ),
+        "total_channel_direct_deduction_amount_usd": _decimal_to_api(
+            net_revenue.total_channel_direct_deduction_amount_usd
+        ),
+        "total_account_allocated_deduction_amount_usd": _decimal_to_api(
+            net_revenue.total_account_allocated_deduction_amount_usd
+        ),
         "payment_gap_usd": _decimal_to_api(payment_match.payment_gap_usd),
         "bank_gap_usd": _decimal_to_api(bank_reconciliation.bank_gap_usd),
         "channel_count": net_revenue.channel_count,
@@ -286,6 +292,12 @@ def _gross_net_table(report: ExecutivePdfReport) -> Table:
             ),
             "Total Deduction Amount USD": _decimal_to_api(
                 report.net_revenue.total_deduction_amount_usd
+            ),
+            "Channel-Direct Deduction USD": _decimal_to_api(
+                report.net_revenue.total_channel_direct_deduction_amount_usd
+            ),
+            "Account-Allocated Deduction USD": _decimal_to_api(
+                report.net_revenue.total_account_allocated_deduction_amount_usd
             ),
             "Payment Gap USD": _decimal_to_api(report.payment_match.payment_gap_usd),
             "Bank Gap USD": _decimal_to_api(report.bank_reconciliation.bank_gap_usd),

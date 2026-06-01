@@ -46,6 +46,8 @@ def test_executive_pdf_report_builds_section_manifest_from_source_summaries():
     assert payload["executive_summary"]["bank_reconciliation_status"] == (
         "BANK_CONFIRMED"
     )
+    assert payload["executive_summary"]["total_channel_direct_deduction_amount_usd"] == "0"
+    assert payload["executive_summary"]["total_account_allocated_deduction_amount_usd"] == "0"
 
 
 def test_executive_pdf_rejects_non_pdf_export_type():
@@ -243,3 +245,59 @@ def _smart_alert_summary() -> MonthlySmartAlertSummary:
         highest_severity=None,
         alerts=[],
     )
+
+
+def _net_revenue_summary_with_breakdown() -> MonthNetRevenueSummary:
+    """Build a summary with a COMPONENT_DERIVED channel carrying a real split."""
+    channel = ChannelNetRevenueSummary(
+        month="2026-03",
+        youtube_channel_id="channel-tv-a",
+        status="COMPONENT_DERIVED",
+        primary_source_kind="ADSENSE",
+        baseline_gross_revenue_usd=Decimal("1000.00"),
+        baseline_net_revenue_usd=None,
+        approved_manual_override_total_usd=Decimal("0.00"),
+        adjusted_gross_revenue_usd=Decimal("1000.00"),
+        net_revenue_usd=Decimal("870.00"),
+        deduction_amount_usd=Decimal("130.00"),
+        channel_direct_deduction_amount_usd=Decimal("30.00"),
+        account_allocated_deduction_amount_usd=Decimal("100.00"),
+        deduction_percentage=Decimal("13.0000"),
+        confidence="D_ESTIMATED",
+        approved_manual_override_count=0,
+        pending_manual_override_count=0,
+        issues=[],
+    )
+    return MonthNetRevenueSummary(
+        month="2026-03",
+        status="CALCULATED",
+        channel_count=1,
+        calculated_channel_count=1,
+        missing_net_source_count=0,
+        pending_manual_override_count=0,
+        total_adjusted_gross_revenue_usd=Decimal("1000.00"),
+        total_net_revenue_usd=Decimal("870.00"),
+        total_deduction_amount_usd=Decimal("130.00"),
+        total_channel_direct_deduction_amount_usd=Decimal("30.00"),
+        total_account_allocated_deduction_amount_usd=Decimal("100.00"),
+        unallocated_account_deduction_total_usd=None,
+        unallocated_account_issues=None,
+        channels=[channel],
+    )
+
+
+def test_executive_pdf_renders_deduction_breakdown_aggregate_rows():
+    """PDF gross-vs-net table shows the two month-level aggregate deduction rows."""
+    report = build_executive_pdf_report(
+        export_job=_export_job(export_type="EXECUTIVE_PDF"),
+        net_revenue=_net_revenue_summary_with_breakdown(),
+        payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
+        bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
+        smart_alerts=_smart_alert_summary(),
+    )
+    text = _extract_pdf_text(build_executive_pdf_bytes(report))
+
+    assert "Channel-Direct Deduction USD" in text
+    assert "Account-Allocated Deduction USD" in text
+    assert "30" in text
+    assert "100" in text
