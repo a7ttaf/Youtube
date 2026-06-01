@@ -323,8 +323,15 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   incomplete basis. Read-only `GET /revenue/months/{month}/account-allocations`
   (ACCOUNT-only query, `VIEW_REVENUE@global` + `VIEW_FINALIZED_PAYMENTS@finance_month`,
   REVENUE_VIEWED + PAYMENT_VIEWED). No persistence, no migration, no net-revenue change.
-  Remaining: net-revenue integration of net-applicable lines; PAYMENT-grain (needs a
-  payment→account hop); persisted/committed allocation; other allocation methods.
+  PR-2 shipped (this branch): net-revenue API + finance exports consume account-allocated
+  net-applicable (TAX/DEDUCTION) lines on the missing-net path (COMPONENT_DERIVED), with
+  per-channel channel_direct/account_allocated breakdown fields, a global-scope-only
+  unallocated-account surface, a VIEW_FINALIZED_PAYMENTS gate (on the route's org target_scope)
+  + PAYMENT_VIEWED audit on the net route, and PAYMENT_VIEWED on all finance-artifact exports.
+  Net-revenue audit envelope
+  changed from `audit_event` to `audit_events` (plural). Remaining: PAYMENT-grain (needs a
+  payment→account hop); persisted/committed allocation; other allocation methods; explain-path
+  provenance; export breakdown columns.
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed
   permissions). Month-close status UI remains unbuilt (Phase 5).
