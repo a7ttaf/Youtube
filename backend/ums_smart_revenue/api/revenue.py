@@ -1379,10 +1379,10 @@ def explain_channel_month_revenue_metric(
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
     is_net_metric = metric == NET_REVENUE_METRIC
     if is_net_metric:
-        # FIX: Net explanations expose finalized-payment-derived deduction
-        # provenance, so gate them at finance_month(month) exactly like the PR-2
-        # net-revenue route (revenue.py:1100-1102) -- finance_month is not an
-        # org-hierarchy scope, so no org_index is passed.
+        # Net explanations expose finalized-payment-derived deduction provenance,
+        # so gate them at finance_month(month) exactly like the PR-2 net-revenue
+        # route (revenue.py:1100-1102). finance_month is not an org-hierarchy
+        # scope, so no org_index is passed.
         _require_permission(
             user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month)
         )
