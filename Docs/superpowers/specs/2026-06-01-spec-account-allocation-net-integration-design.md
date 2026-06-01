@@ -93,8 +93,9 @@ In scope for this PR (Spec 2b PR-2):
    missing-net path; add the per-channel breakdown fields and the month-level unallocated
    surface (§4). No DB/repository import added to this module.
 3. **`api/revenue.py`** — the `GET /revenue/months/{month}/net-revenue` route gathers
-   allocations via the new service, passes them to the builder, adds
-   `VIEW_FINALIZED_PAYMENTS@finance_month` + a `PAYMENT_VIEWED` audit, and applies the
+   allocations via the new service, passes them to the builder, adds a
+   `VIEW_FINALIZED_PAYMENTS` gate on the route's **`target_scope`** (the org scope, co-scoped
+   with the existing checks — see §5.1) + a `PAYMENT_VIEWED` audit, and applies the
    scoped-visibility pin (§5).
 4. **`api/exports.py`** — the finance-export source-summary path
    (`_build_finance_source_summaries_for_export`, `exports.py:1035`) currently calls the
@@ -324,13 +325,22 @@ objects as the `deduction_policy` originals and that the values are unchanged (�
 `VIEW_REVENUE` + `VIEW_CONFIDENCE` on the target (org) scope and records `REVENUE_VIEWED`.
 PR-2 **adds**, because net now embeds account-derived (finalized-payment) evidence:
 
-- `_require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month), org_index)`
+- `_require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, target_scope, org_index)`
 - a second audit event `PAYMENT_VIEWED` (entity `monthly_net_revenue_summary`, scope
-  `finance_month(month)`), alongside the existing `REVENUE_VIEWED`.
+  `finance_month(month)` as audit metadata), alongside the existing `REVENUE_VIEWED`.
 
-`VIEW_REVENUE` + `VIEW_CONFIDENCE` target-scope checks are unchanged (the new
-`VIEW_FINALIZED_PAYMENTS` is gated on `finance_month(month)`, not the org `target_scope` —
-mirroring the payment-match read `revenue.py:748-751`). Fail-closed throughout.
+`VIEW_REVENUE` + `VIEW_CONFIDENCE` are already checked on `target_scope` (the org scope
+resolved from the `scope_type`/`scope_id` query params). The new `VIEW_FINALIZED_PAYMENTS`
+gate is checked on the **same `target_scope`**, not `finance_month(month)`. Rationale (a
+correction to the earlier draft, which mirrored the payment-match read): net-revenue is an
+**org-scoped** endpoint, unlike the global+month payment-match view. `OrgAccessIndex.contains`
+does not let a company/sector grant satisfy a `finance_month` target, so gating on
+`finance_month(month)` would 403 every existing company/sector-scoped `finance_viewer` who
+can read net-revenue today — an access regression on an already-shipped endpoint, beyond the
+new account-derived portion. Gating on `target_scope` keeps the finalized-payment requirement
+co-scoped with the revenue/confidence checks the caller already passes. (The `PAYMENT_VIEWED`
+audit event still records `finance_month(month)` as its scope — that is audit-trail metadata,
+not an authorization target.) Fail-closed throughout.
 
 **Audit response-shape change (finding #4):** the net route today emits a singular
 `summary_api["audit_event"]` (`revenue.py:1117`). With two events it switches to the **plural
@@ -513,9 +523,12 @@ net-revenue endpoint's audit envelope changes from singular `audit_event` to plu
 - **API/export consistency:** both call the same builder with the same allocations → **no
   net drift** between the API and finance workbooks/PDF/slides.
 - **Authorization:** net-revenue route becomes **more** restrictive (adds
-  `VIEW_FINALIZED_PAYMENTS@finance_month`); exports auth unchanged (already gated); audit
-  becomes **more** complete (adds `PAYMENT_VIEWED` to net route and to scoped finance
-  exports). Nothing weakened; fail-closed preserved.
+  `VIEW_FINALIZED_PAYMENTS` on the route's `target_scope`, co-scoped with the existing
+  revenue/confidence checks — §5.1); exports auth unchanged (already gated); audit becomes
+  **more** complete (adds `PAYMENT_VIEWED` to net route and to scoped finance exports).
+  Nothing weakened; fail-closed preserved. No access regression: roles that can read
+  net-revenue today (e.g. `finance_viewer` at their org scope) already hold
+  `VIEW_FINALIZED_PAYMENTS`, so the co-scoped gate does not lock them out.
 - **Neo4j / graph projection:** **No graph projection impact detected** — pure relational
   compute; no projection code imported or invoked; cannot mutate any source-of-truth row.
 - **Backward compatibility:** dataclasses gain optional fields (`None` defaults); the new
@@ -566,15 +579,18 @@ migration/lock); SQLite for the route/export tests, no DB for the pure-builder t
   `google_source_normalizer.SOURCE_SYSTEM_TO_SOURCE_KIND` is unchanged (distinct map).
 - Importing `net_revenue` and `allocation` together raises no `ImportError` (cycle gone).
 
-**API (`tests/api/test_revenue_api.py` / net-revenue tests):**
+**API (`tests/api/test_net_revenue_api.py` / net-revenue tests):**
 - `finance_viewer` (VIEW_REVENUE + VIEW_CONFIDENCE + VIEW_FINALIZED_PAYMENTS) at **global** →
   200; response includes breakdown fields and (global) the unallocated surface; envelope is
   **`audit_events`** containing `REVENUE_VIEWED` + `PAYMENT_VIEWED`.
-- Missing `VIEW_FINALIZED_PAYMENTS` (otherwise-permitted viewer) → **403** (fail-closed; new
-  gate enforced).
-- Scoped request (company/channel) with full perms → 200; net/deduction totals correct **but
-  the unallocated-account surface is explicit `null`** (both fields), proving the §5.2 pin and
-  the finding-#3 serialization rule.
+- Missing `VIEW_FINALIZED_PAYMENTS` (a custom principal holding VIEW_REVENUE + VIEW_CONFIDENCE
+  but not VIEW_FINALIZED_PAYMENTS, injected via `dependency_overrides`) → **403** (fail-closed;
+  new gate enforced) with detail `"Missing permission: finance.view_finalized_payments"`.
+- Scoped request (company) with `finance_viewer` (which holds VIEW_FINALIZED_PAYMENTS at its
+  org scope) → 200; net/deduction totals correct **but the unallocated-account surface is
+  explicit `null`** (both fields), proving the §5.2 pin and the finding-#3 serialization rule.
+  (This 200 is also the regression check that the `target_scope` gate does not lock out
+  org-scoped finance viewers — see §5.1.)
 - Existing net-revenue tests updated for: the new auth requirement, the `audit_event` →
   `audit_events` envelope change, and the additive keys.
 
@@ -655,8 +671,10 @@ Reused (no duplication): `AllocationLine`, `UnallocatedIssue`, `build_account_al
 6. **Scoped-visibility pin:** unallocated-account detail is **global-scope-only**; on scoped
    responses both fields serialize as explicit JSON `null` (not zeroed, not omitted); same
    rule for API and exports.
-7. **D3 — auth/audit:** keep VIEW_REVENUE + VIEW_CONFIDENCE target-scope; add
-   `VIEW_FINALIZED_PAYMENTS@finance_month` + `PAYMENT_VIEWED` on the net route.
+7. **D3 — auth/audit:** keep VIEW_REVENUE + VIEW_CONFIDENCE on `target_scope`; add
+   `VIEW_FINALIZED_PAYMENTS` on the **same `target_scope`** (NOT `finance_month` — that would
+   regress org-scoped viewers; see §5.1) + a `PAYMENT_VIEWED` audit (recording
+   `finance_month(month)` as audit metadata) on the net route.
 8. **D4 — explain provenance deferred.**
 9. **D5 — exports in-scope:** feed allocations into the export builder (totals correct, no
    drift), render existing fields only; same scoped pin; `PAYMENT_VIEWED` now on **all**

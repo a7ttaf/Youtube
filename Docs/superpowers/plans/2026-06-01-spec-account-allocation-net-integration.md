@@ -1081,12 +1081,13 @@ Add the dependency parameter to the handler signature (after `deduction_componen
     ],
 ```
 
-After the existing two permission checks (`:1067-1068`), add the finalized-payment gate (month-scoped):
+After the existing two permission checks (`:1067-1068`), add the finalized-payment gate on the
+**same `target_scope`** as those checks (NOT `finance_month` — net-revenue is org-scoped, and
+gating on `finance_month` would 403 every company/sector-scoped finance viewer that reads
+net-revenue today; see spec §5.1):
 
 ```python
-    _require_permission(
-        user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month), org_index
-    )
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, target_scope, org_index)
 ```
 
 In the input-gathering try-block (after `deduction_components = ...` at `:1079-1083`), compute allocations and pass them to the builder. Replace the `summary = build_month_net_revenue_summary(...)` call (`:1084-1089`) with:
@@ -1452,8 +1453,9 @@ to:
   PR-2 shipped (this branch): net-revenue API + finance exports consume account-allocated
   net-applicable (TAX/DEDUCTION) lines on the missing-net path (COMPONENT_DERIVED), with
   per-channel channel_direct/account_allocated breakdown fields, a global-scope-only
-  unallocated-account surface, VIEW_FINALIZED_PAYMENTS@finance_month + PAYMENT_VIEWED on the
-  net route, and PAYMENT_VIEWED on all finance-artifact exports. Net-revenue audit envelope
+  unallocated-account surface, a VIEW_FINALIZED_PAYMENTS gate (on the route's org target_scope)
+  + PAYMENT_VIEWED audit on the net route, and PAYMENT_VIEWED on all finance-artifact exports.
+  Net-revenue audit envelope
   changed from `audit_event` to `audit_events` (plural). Remaining: PAYMENT-grain (needs a
   payment→account hop); persisted/committed allocation; other allocation methods; explain-path
   provenance; export breakdown columns.

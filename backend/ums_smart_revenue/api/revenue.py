@@ -28,11 +28,15 @@ from ums_smart_revenue.finance.adsense_payments import (
     AdSensePaymentValidationError,
     SqlAlchemyAdSensePaymentRepository,
 )
+from ums_smart_revenue.finance.allocation_inputs import compute_month_account_allocation
 from ums_smart_revenue.finance.bank_reconciliation import (
     BankReconciliationLockedMonthError,
     BankReconciliationValidationError,
     SqlAlchemyBankReconciliationRepository,
     build_month_bank_reconciliation_summary,
+)
+from ums_smart_revenue.finance.channel_account_links import (
+    SqlAlchemyChannelAccountLinkRepository,
 )
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.deduction_ingestion import (
@@ -354,6 +358,18 @@ def current_deduction_component_repository(
 ) -> SqlAlchemyDeductionComponentRepository:
     """Build the tenant-aware deduction-component repository for a request."""
     return SqlAlchemyDeductionComponentRepository(session)
+
+
+def current_channel_account_link_repository(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyChannelAccountLinkRepository:
+    """Build the tenant-aware channel-account-link repository for a request.
+
+    Defined locally to avoid the api.channel_account_links → api.channels →
+    api.revenue circular import. The net-revenue route needs this dependency
+    to compute account allocations before building the summary.
+    """
+    return SqlAlchemyChannelAccountLinkRepository(session)
 
 
 def current_number_explanation_repository(
@@ -1053,6 +1069,10 @@ def get_month_net_revenue(
         SqlAlchemyDeductionComponentRepository,
         Depends(current_deduction_component_repository),
     ],
+    link_repository: Annotated[
+        SqlAlchemyChannelAccountLinkRepository,
+        Depends(current_channel_account_link_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     scope_type: Annotated[str, Query(min_length=1)] = "global",
     scope_id: str | None = None,
@@ -1066,6 +1086,7 @@ def get_month_net_revenue(
     )
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, target_scope, org_index)
     try:
         normalized_currency = normalize_net_revenue_currency(currency)
         facts = revenue_repository.list_month_facts(
@@ -1081,11 +1102,21 @@ def get_month_net_revenue(
             youtube_channel_ids=channel_ids,
             component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
         )
+        account_result = compute_month_account_allocation(
+            month=month,
+            deduction_repository=deduction_component_repository,
+            revenue_repository=revenue_repository,
+            link_repository=link_repository,
+        )
         summary = build_month_net_revenue_summary(
             month=month,
             facts=facts,
             manual_overrides=overrides,
             deduction_components=deduction_components,
+            account_allocations=account_result.lines,
+            unallocated_account_issues=(
+                account_result.unallocated if scope_type == "global" else None
+            ),
         )
     except (
         DeductionComponentValidationError,
@@ -1100,7 +1131,7 @@ def get_month_net_revenue(
 
     summary_api = summary.to_api()
     summary_api["currency"] = normalized_currency
-    record = record_audit_event(
+    revenue_record = record_audit_event(
         sink=audit_sink,
         actor=user,
         event_type=AuditEventType.REVENUE_VIEWED,
@@ -1114,7 +1145,22 @@ def get_month_net_revenue(
             "missing_net_source_count": summary.missing_net_source_count,
         },
     )
-    summary_api["audit_event"] = audit_record_to_api(record)
+    payment_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.PAYMENT_VIEWED,
+        entity_type="monthly_net_revenue_summary",
+        entity_id=f"{month}:{scope_type}:{scope_id or 'global'}",
+        scope=AccessScope.finance_month(month),
+        details={
+            "status": summary.status,
+            "channel_count": summary.channel_count,
+        },
+    )
+    summary_api["audit_events"] = [
+        audit_record_to_api(revenue_record),
+        audit_record_to_api(payment_record),
+    ]
     return summary_api
 
 

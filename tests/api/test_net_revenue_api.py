@@ -7,7 +7,11 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api import revenue as revenue_api
+from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
+from ums_smart_revenue.auth.permissions import Permission
+from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.db.finance_models import (
     DeductionComponentORM,
     FinanceBase,
@@ -150,7 +154,7 @@ def test_finance_viewer_reads_month_net_revenue_summary_with_audit(tmp_path):
 
     engine = create_engine(database_url)
     with Session(engine) as session:
-        audit_log = session.scalars(select(AuditLogORM)).one()
+        audit_kinds = {row.event_type for row in session.scalars(select(AuditLogORM)).all()}
 
     assert response.status_code == 200
     assert response.json()["status"] == "PARTIAL"
@@ -159,9 +163,11 @@ def test_finance_viewer_reads_month_net_revenue_summary_with_audit(tmp_path):
     assert response.json()["missing_net_source_count"] == 1
     assert response.json()["total_adjusted_gross_revenue_usd"] == "1250"
     assert response.json()["total_net_revenue_usd"] == "930"
-    assert response.json()["audit_event"]["event_type"] == "REVENUE_VIEWED"
-    assert audit_log.event_type == "REVENUE_VIEWED"
-    assert audit_log.sensitive is True
+    assert {e["event_type"] for e in response.json()["audit_events"]} == {
+        "REVENUE_VIEWED",
+        "PAYMENT_VIEWED",
+    }
+    assert audit_kinds == {"REVENUE_VIEWED", "PAYMENT_VIEWED"}
 
 
 def test_assistant_cannot_read_month_net_revenue_summary_by_default(tmp_path):
@@ -239,7 +245,10 @@ def test_net_revenue_endpoint_derives_component_net_for_missing_net_channel(tmp_
     assert channel_b["net_revenue_usd"] == "180"   # 200 - 20, trimmed
     assert channel_b["deduction_amount_usd"] == "20"
     assert body["missing_net_source_count"] == 0   # b is now derived, not missing
-    assert body["audit_event"]["event_type"] == "REVENUE_VIEWED"
+    assert {e["event_type"] for e in body["audit_events"]} == {
+        "REVENUE_VIEWED",
+        "PAYMENT_VIEWED",
+    }
 
 
 def test_net_revenue_endpoint_requests_only_net_applicable_components(tmp_path):
@@ -264,6 +273,10 @@ def test_net_revenue_endpoint_requests_only_net_applicable_components(tmp_path):
             self.component_kinds = component_kinds
             return []
 
+        def list_account_components(self, *, month, adsense_account_id=None):
+            """No ACCOUNT-grain rows; the allocation orchestrator needs this method."""
+            return []
+
     repository = RecordingDeductionComponentRepository()
     app = create_app(database_url=database_url)
     app.dependency_overrides[
@@ -278,3 +291,55 @@ def test_net_revenue_endpoint_requests_only_net_applicable_components(tmp_path):
 
     assert response.status_code == 200
     assert set(repository.component_kinds) == {"TAX", "DEDUCTION"}
+
+
+def test_net_revenue_forbidden_without_finalized_payment_permission(tmp_path):
+    """A principal with VIEW_REVENUE + VIEW_CONFIDENCE but NOT VIEW_FINALIZED_PAYMENTS
+    is rejected by the new gate (fail-closed)."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = lambda: UserPrincipal(
+        user_id=str(USER_ID),
+        email="revenue-no-payments@example.com",
+        direct_permissions=(
+            PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()),
+            PermissionGrant(Permission.VIEW_CONFIDENCE, AccessScope.global_scope()),
+            # deliberately NO VIEW_FINALIZED_PAYMENTS grant
+        ),
+    )
+    client = TestClient(app)
+    response = client.get("/revenue/months/2026-03/net-revenue?scope_type=global")
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_finalized_payments"
+
+
+def test_net_revenue_scoped_omits_unallocated_surface(tmp_path):
+    """A scoped (company) request serializes unallocated-account fields as null."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    response = client.get(
+        f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
+        headers=auth_headers("finance_viewer", "company", str(COMPANY_ID)),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["unallocated_account_deduction_total_usd"] is None
+    assert body["unallocated_account_issues"] is None
+
+
+def test_net_revenue_global_includes_unallocated_surface(tmp_path):
+    """A global request includes the unallocated-account surface (possibly empty)."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    response = client.get(
+        "/revenue/months/2026-03/net-revenue?scope_type=global",
+        headers=auth_headers("finance_viewer", "global"),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    # present (not None) at global scope — empty when nothing unallocated
+    assert body["unallocated_account_deduction_total_usd"] is not None
+    assert body["unallocated_account_issues"] is not None
