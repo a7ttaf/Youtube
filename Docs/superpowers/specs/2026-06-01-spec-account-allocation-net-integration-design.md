@@ -325,22 +325,14 @@ objects as the `deduction_policy` originals and that the values are unchanged (�
 `VIEW_REVENUE` + `VIEW_CONFIDENCE` on the target (org) scope and records `REVENUE_VIEWED`.
 PR-2 **adds**, because net now embeds account-derived (finalized-payment) evidence:
 
-- `_require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, target_scope, org_index)`
+- `_require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month), org_index)`
 - a second audit event `PAYMENT_VIEWED` (entity `monthly_net_revenue_summary`, scope
   `finance_month(month)` as audit metadata), alongside the existing `REVENUE_VIEWED`.
 
-`VIEW_REVENUE` + `VIEW_CONFIDENCE` are already checked on `target_scope` (the org scope
-resolved from the `scope_type`/`scope_id` query params). The new `VIEW_FINALIZED_PAYMENTS`
-gate is checked on the **same `target_scope`**, not `finance_month(month)`. Rationale (a
-correction to the earlier draft, which mirrored the payment-match read): net-revenue is an
-**org-scoped** endpoint, unlike the global+month payment-match view. `OrgAccessIndex.contains`
-does not let a company/sector grant satisfy a `finance_month` target, so gating on
-`finance_month(month)` would 403 every existing company/sector-scoped `finance_viewer` who
-can read net-revenue today — an access regression on an already-shipped endpoint, beyond the
-new account-derived portion. Gating on `target_scope` keeps the finalized-payment requirement
-co-scoped with the revenue/confidence checks the caller already passes. (The `PAYMENT_VIEWED`
-audit event still records `finance_month(month)` as its scope — that is audit-trail metadata,
-not an authorization target.) Fail-closed throughout.
+`VIEW_REVENUE` + `VIEW_CONFIDENCE` are checked on `target_scope` (the org scope resolved from
+the `scope_type`/`scope_id` query params). The new `VIEW_FINALIZED_PAYMENTS` gate is checked
+on **`AccessScope.finance_month(month)`**, aligning it with every other payment surface in
+`revenue.py` (lines 767, 852, 970). This matches the implementation shipped in commit e236545.
 
 **Audit response-shape change (finding #4):** the net route today emits a singular
 `summary_api["audit_event"]` (`revenue.py:1117`). With two events it switches to the **plural

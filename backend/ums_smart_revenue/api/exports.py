@@ -26,6 +26,7 @@ from ums_smart_revenue.finance.adsense_payments import (
     AdSensePaymentValidationError,
     SqlAlchemyAdSensePaymentRepository,
 )
+from ums_smart_revenue.finance.allocation import AllocationValidationError
 from ums_smart_revenue.finance.allocation_inputs import compute_month_account_allocation
 from ums_smart_revenue.finance.bank_reconciliation import (
     BankReconciliationValidationError,
@@ -37,6 +38,7 @@ from ums_smart_revenue.finance.channel_account_links import (
     SqlAlchemyChannelAccountLinkRepository,
 )
 from ums_smart_revenue.finance.deduction_ingestion import (
+    DeductionComponentValidationError,
     SqlAlchemyDeductionComponentRepository,
 )
 from ums_smart_revenue.finance.deduction_policy import NET_APPLICABLE_COMPONENT_KINDS
@@ -103,6 +105,8 @@ MAX_AUTHORIZED_EXPORT_JOB_SCAN_PAGES = 10
 
 @dataclass(frozen=True)
 class _FinanceExportSourceSummaries:
+    """Frozen bundle of finance source summaries resolved for a single export job."""
+
     net_revenue: MonthNetRevenueSummary
     payment_match: MonthlyPaymentMatchSummary
     bank_reconciliation: MonthBankReconciliationSummary
@@ -110,6 +114,8 @@ class _FinanceExportSourceSummaries:
 
 
 class ExportRequest(BaseModel):
+    """Pydantic request model for creating a new export job."""
+
     export_type: str = Field(min_length=1)
     scope_type: str = Field(min_length=1)
     scope_id: str | None = None
@@ -124,6 +130,7 @@ class ExportRequest(BaseModel):
     )
     @classmethod
     def strip_required_strings(cls, value):
+        """Strip whitespace and reject blank strings for required fields."""
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
@@ -134,6 +141,7 @@ class ExportRequest(BaseModel):
     @field_validator("scope_id", mode="before")
     @classmethod
     def strip_optional_string(cls, value):
+        """Strip whitespace from optional string fields and coerce blank to None."""
         if value is None:
             return None
         if isinstance(value, str):
@@ -145,10 +153,12 @@ class ExportRequest(BaseModel):
 def current_export_job_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyExportJobRepository:
+    """FastAPI dependency that returns a scoped export job repository."""
     return SqlAlchemyExportJobRepository(session)
 
 
 def current_export_artifact_store() -> FileSystemExportArtifactStore:
+    """FastAPI dependency that returns the configured export artifact store."""
     return FileSystemExportArtifactStore.from_environment()
 
 
@@ -165,6 +175,7 @@ def request_export(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Accept a new export request, authorize the caller, snapshot scope, and enqueue the job."""
     try:
         # Validate export_type at the trust boundary so a typo returns 422
         # ("Unknown export_type") instead of falling through to the analytics
@@ -278,6 +289,7 @@ def list_exports(
     limit: Annotated[int, Query(ge=1, le=MAX_EXPORT_JOB_PAGE_SIZE)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, object]:
+    """Return a paginated list of export jobs the caller is authorized to access."""
     if not _has_any_export_permission(user):
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
@@ -317,6 +329,7 @@ def get_export(
     ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Retrieve a single export job by ID and emit a scoped access audit event."""
     if not _has_any_export_permission(user):
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
@@ -389,6 +402,7 @@ def preview_finance_workbook(
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Return a JSON preview of the finance workbook data for a FINANCE_EXCEL export job."""
     if not _has_any_export_permission(user):
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
@@ -427,7 +441,9 @@ def preview_finance_workbook(
         ) from exc
     except (
         AdSensePaymentValidationError,
+        AllocationValidationError,
         BankReconciliationValidationError,
+        DeductionComponentValidationError,
         ExportJobValidationError,
         FinanceWorkbookPreviewValidationError,
         ManualOverrideValidationError,
@@ -469,6 +485,7 @@ def download_finance_workbook(
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> Response:
+    """Generate or serve the cached finance workbook XLSX file for a FINANCE_EXCEL export job."""
     if not _has_any_export_permission(user):
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
@@ -536,7 +553,9 @@ def download_finance_workbook(
         ) from exc
     except (
         AdSensePaymentValidationError,
+        AllocationValidationError,
         BankReconciliationValidationError,
+        DeductionComponentValidationError,
         ExportJobValidationError,
         FinanceWorkbookPreviewValidationError,
         ManualOverrideValidationError,
@@ -580,6 +599,7 @@ def download_executive_pdf(
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> Response:
+    """Generate or serve the cached executive summary PDF for an EXECUTIVE_PDF export job."""
     if not _has_any_export_permission(user):
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
@@ -652,7 +672,9 @@ def download_executive_pdf(
         ) from exc
     except (
         AdSensePaymentValidationError,
+        AllocationValidationError,
         BankReconciliationValidationError,
+        DeductionComponentValidationError,
         ExecutivePdfValidationError,
         ExportJobValidationError,
         ManualOverrideValidationError,
@@ -696,6 +718,7 @@ def download_branded_slide_pack(
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> Response:
+    """Generate or serve the cached branded slide pack PPTX for a BRANDED_SLIDE_PACK export job."""
     if not _has_any_export_permission(user):
         _raise_missing_permission(Permission.EXPORT_ANALYTICS_REPORT)
     try:
@@ -770,8 +793,10 @@ def download_branded_slide_pack(
         ) from exc
     except (
         AdSensePaymentValidationError,
+        AllocationValidationError,
         BankReconciliationValidationError,
         BrandedSlidePackValidationError,
+        DeductionComponentValidationError,
         ExportJobValidationError,
         ManualOverrideValidationError,
         NetRevenueValidationError,
@@ -804,6 +829,7 @@ def _build_finance_workbook_preview_for_export(
     org_index: OrgAccessIndex,
     group_registry: ChannelGroupRegistryStore,
 ) -> FinanceWorkbookPreview:
+    """Build the finance workbook preview model for the given export job."""
     source_summaries = _build_finance_source_summaries_for_export(
         export_job=export_job,
         session=session,
@@ -828,6 +854,7 @@ def _persist_generated_export_artifact(
     filename: str,
     content_type: str,
 ) -> tuple[ExportJobEntry | None, JSONResponse | None]:
+    """Save a generated artifact to the store and mark the export job as completed."""
     # ====================================================================
     # Purpose: First-time persistence of a generated export artifact. Jobs
     #   that are already in a terminal status keep their frozen metadata;
@@ -908,6 +935,7 @@ def _persist_generated_export_artifact(
 
 
 def _has_completed_artifact(export_job: ExportJobEntry) -> bool:
+    """Return True if the export job has a persisted COMPLETED artifact."""
     return export_job.status == "COMPLETED" and export_job.file_url is not None
 
 
@@ -929,6 +957,7 @@ def _serve_persisted_artifact_bytes(
     expected_export_type: str,
     artifact_store: FileSystemExportArtifactStore,
 ) -> tuple[bytes, str, str] | None:
+    """Return (bytes, filename, content_type) for a completed persisted artifact, or None."""
     # ====================================================================
     # Purpose: Return persisted bytes for a COMPLETED export so callers
     #   can short-circuit regenerating the workbook/PDF/PPTX on every
@@ -967,6 +996,7 @@ def _require_persisted_artifact_bytes(
     expected_export_type: str,
     artifact_store: FileSystemExportArtifactStore,
 ) -> tuple[bytes, str, str]:
+    """Return persisted artifact bytes or raise ExportArtifactStorageError if unavailable."""
     served = _serve_persisted_artifact_bytes(
         export_job=export_job,
         expected_export_type=expected_export_type,
@@ -978,6 +1008,7 @@ def _require_persisted_artifact_bytes(
 
 
 def _require_persisted_export_job(export_job: ExportJobEntry | None) -> ExportJobEntry:
+    """Return the export job or raise RuntimeError if persistence returned None."""
     if export_job is None:
         raise RuntimeError("_persist_generated_export_artifact returned no export job")
     return export_job
@@ -986,6 +1017,7 @@ def _require_persisted_export_job(export_job: ExportJobEntry | None) -> ExportJo
 def _discard_saved_artifact(
     *, artifact_store: FileSystemExportArtifactStore, file_url: str
 ) -> None:
+    """Delete a saved artifact file, logging a warning on storage failure without re-raising."""
     try:
         artifact_store.delete(file_url=file_url)
     except ExportArtifactStorageError:
@@ -999,6 +1031,7 @@ def _build_finance_source_summaries_for_export(
     org_index: OrgAccessIndex,
     group_registry: ChannelGroupRegistryStore,
 ) -> _FinanceExportSourceSummaries:
+    """Resolve all finance source summaries (net revenue, payments, bank, alerts) for an export."""
     # ====================================================================
     # Purpose: Resolve the YouTube channel set the export was issued for.
     #   Prefers the snapshot frozen on the export row so post-creation
@@ -1101,6 +1134,7 @@ def _record_finance_export_artifact_audit(
     artifact_type: str,
     include_download_event: bool,
 ):
+    """Emit revenue-viewed, payment-viewed, bank-reconciliation-viewed, and optional download audit events."""
     revenue_scopes = _audit_revenue_scopes_for_export(
         scope_type=export_job.scope_type,
         scope_id=export_job.scope_id,
@@ -1169,6 +1203,7 @@ def _record_finance_export_artifact_audit(
 
 
 def _artifact_metadata_audit_details(export_job: ExportJobEntry) -> dict[str, object]:
+    """Build the artifact metadata dict for inclusion in audit event details."""
     details: dict[str, object] = {}
     if export_job.file_url is not None:
         details["artifact_locator_redacted"] = True
@@ -1197,6 +1232,7 @@ def _audit_revenue_scopes_for_export(
     scope_channel_ids: tuple[str, ...] | None = None,
     export_id: str | None = None,
 ) -> tuple[AccessScope, ...]:
+    """Derive the revenue access scopes used to record audit events for an export read."""
     # ====================================================================
     # Purpose: Derive audit scopes for an export read/download. For any
     #   non-global scoped export we prefer the channel snapshot frozen on
@@ -1244,6 +1280,7 @@ def _require_export_permissions(
     group_registry: ChannelGroupRegistryStore,
     scope_channel_ids: tuple[str, ...] | None = None,
 ) -> None:
+    """Assert the caller holds the appropriate export and view permissions for the given scope."""
     finance_export = is_finance_export_type(export_type)
     export_permission = _audit_permission_for_export_type(export_type)
     view_permission = (
@@ -1262,6 +1299,7 @@ def _require_export_permissions(
 
 
 def _audit_permission_for_export_type(export_type: str) -> Permission:
+    """Return the export permission required for the given export type."""
     if is_finance_export_type(export_type):
         return Permission.EXPORT_REVENUE_REPORT
     return Permission.EXPORT_ANALYTICS_REPORT
@@ -1278,6 +1316,7 @@ def _require_export_access_permissions(
     group_registry: ChannelGroupRegistryStore,
     scope_channel_ids: tuple[str, ...] | None = None,
 ) -> None:
+    """Dispatch to finance or analytics permission checks based on the export type."""
     if is_finance_export_type(export_type):
         _require_finance_export_artifact_permissions(
             user=user,
@@ -1311,6 +1350,7 @@ def _require_export_scope_permissions(
     group_registry: ChannelGroupRegistryStore,
     scope_channel_ids: tuple[str, ...] | None = None,
 ) -> None:
+    """Enforce export and view permissions across all channels in the export scope."""
     # ====================================================================
     # Purpose: Authorize an export read or download against the frozen
     #   channel snapshot when one exists for any non-global scope. This
@@ -1366,6 +1406,7 @@ def _require_finance_export_artifact_permissions(
     group_registry: ChannelGroupRegistryStore,
     scope_channel_ids: tuple[str, ...] | None = None,
 ) -> None:
+    """Assert full finance artifact permissions including view-finalized-payments and bank-reconciliation."""
     _require_export_scope_permissions(
         user=user,
         export_permission=Permission.EXPORT_REVENUE_REPORT,
@@ -1397,6 +1438,7 @@ def _resolved_export_channel_ids(
     org_index: OrgAccessIndex,
     group_registry: ChannelGroupRegistryStore,
 ) -> set[str] | None:
+    """Return the channel ID set for the export, preferring the frozen snapshot over live lookup."""
     if export_job.scope_type == "global":
         return None
     snapshot = getattr(export_job, "scope_channel_ids", None)
@@ -1417,6 +1459,7 @@ def _channel_ids_for_export_scope(
     org_index: OrgAccessIndex,
     group_registry: ChannelGroupRegistryStore,
 ) -> set[str] | None:
+    """Resolve the live channel ID set for the given scope type and ID."""
     if scope_type == "global":
         return None
     if scope_type == "group":
@@ -1465,6 +1508,7 @@ def _channel_ids_for_export_scope(
 
 
 def _require_known_channel_scope(scope_id: str, org_index: OrgAccessIndex) -> None:
+    """Raise KeyError if the channel ID is not present in the org index."""
     if scope_id not in org_index.channel_company and scope_id not in org_index.channel_sector:
         raise KeyError(f"Channel not found: {scope_id}")
 
@@ -1472,6 +1516,7 @@ def _require_known_channel_scope(scope_id: str, org_index: OrgAccessIndex) -> No
 def _access_scope_from_export_scope(
     scope_type: str, scope_id: str | None
 ) -> AccessScope:
+    """Convert export scope_type and scope_id to an AccessScope object."""
     if scope_type == "global":
         if scope_id is not None:
             raise ExportJobValidationError(
@@ -1497,11 +1542,13 @@ def _require_permission(
     scope: AccessScope,
     org_index: OrgAccessIndex,
 ) -> None:
+    """Raise 403 if the user does not hold the given permission on the given scope."""
     if not has_permission(user, permission, scope, org_index):
         _raise_missing_permission(permission)
 
 
 def _raise_missing_permission(permission: Permission) -> None:
+    """Raise an HTTP 403 with a message identifying the missing permission."""
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail=f"Missing permission: {permission.value}",
@@ -1509,6 +1556,7 @@ def _raise_missing_permission(permission: Permission) -> None:
 
 
 def _has_any_export_permission(user: UserPrincipal) -> bool:
+    """Return True if the user holds at least one export permission (analytics or revenue)."""
     export_permissions = {
         Permission.EXPORT_ANALYTICS_REPORT,
         Permission.EXPORT_REVENUE_REPORT,
@@ -1523,6 +1571,7 @@ def _has_export_permission_assignment(
     user: UserPrincipal,
     permission: Permission,
 ) -> bool:
+    """Return True if the user has an active direct grant or role assignment for the permission."""
     if user.disabled:
         return False
     for grant in user.direct_permissions:
@@ -1547,6 +1596,7 @@ def _list_authorized_export_jobs(
     offset: int,
     max_scan_pages: int = MAX_AUTHORIZED_EXPORT_JOB_SCAN_PAGES,
 ) -> tuple[list[ExportJobEntry], bool]:
+    """Page through export jobs and return only those the caller is authorized to access."""
     if max_scan_pages < 1:
         raise ExportJobValidationError("max_scan_pages must be positive")
     items: list[ExportJobEntry] = []
@@ -1607,6 +1657,7 @@ def _can_access_export_job(
     org_index: OrgAccessIndex,
     group_registry: ChannelGroupRegistryStore,
 ) -> bool:
+    """Return True if the user passes access-permission checks for the export job."""
     try:
         _require_export_access_permissions(
             user=user,
@@ -1624,6 +1675,7 @@ def _can_access_export_job(
 
 
 def _previous_month(month: str) -> str:
+    """Return the YYYY-MM string for the calendar month immediately before the given month."""
     if not EXPORT_MONTH_PATTERN.fullmatch(month):
         raise RevenueFactValidationError(
             f"export month must use YYYY-MM with a calendar month from 01 to 12: {month!r}"

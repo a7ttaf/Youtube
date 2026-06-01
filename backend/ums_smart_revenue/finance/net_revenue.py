@@ -558,7 +558,11 @@ def build_month_net_revenue_summary(
     )
     allocations_by_channel = _account_allocations_by_channel(account_allocations)
 
-    channel_ids = sorted(set(facts_by_channel) | set(overrides_by_channel))
+    # FIX: include allocations_by_channel so channels with allocated deductions
+    # but no revenue facts or overrides are not silently dropped from the summary.
+    channel_ids = sorted(
+        set(facts_by_channel) | set(overrides_by_channel) | set(allocations_by_channel)
+    )
     channels = [
         build_channel_net_revenue_summary(
             facts=facts_by_channel[channel_id],

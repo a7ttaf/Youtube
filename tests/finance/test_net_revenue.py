@@ -13,6 +13,7 @@ def revenue_fact(
     confidence_score: str = "0.9800",
     youtube_channel_id: str = "channel-tv-a",
 ) -> RevenueFactEntry:
+    """Build a RevenueFactEntry for test scenarios."""
     return RevenueFactEntry(
         id=f"fact-{source_kind}-{youtube_channel_id}",
         month="2026-03",
@@ -36,6 +37,7 @@ def manual_override(
     status: str = "APPROVED",
     youtube_channel_id: str = "channel-tv-a",
 ) -> RevenueManualOverrideEntry:
+    """Build a RevenueManualOverrideEntry for test scenarios."""
     return RevenueManualOverrideEntry(
         id=f"override-{status}-{youtube_channel_id}",
         month="2026-03",
@@ -52,10 +54,12 @@ def manual_override(
 
 
 def net_revenue_module():
+    """Import and return the net_revenue module."""
     return import_module("ums_smart_revenue.finance.net_revenue")
 
 
 def test_channel_net_revenue_uses_official_net_and_approved_overrides():
+    """Channel net revenue reflects approved override on top of official net."""
     summary = net_revenue_module().build_channel_net_revenue_summary(
         facts=[revenue_fact()],
         manual_overrides=[manual_override()],
@@ -83,6 +87,7 @@ def test_channel_net_revenue_uses_official_net_and_approved_overrides():
 
 
 def test_channel_net_revenue_reports_missing_net_source_without_inventing_values():
+    """Missing net source is reported accurately without fabricating values."""
     summary = net_revenue_module().build_channel_net_revenue_summary(
         facts=[revenue_fact(net_revenue_usd=None)],
         manual_overrides=[],
@@ -105,6 +110,7 @@ def test_channel_net_revenue_reports_missing_net_source_without_inventing_values
 
 
 def test_month_net_revenue_summary_totals_calculated_channels_only():
+    """Month summary only includes channels with calculated net revenue."""
     summary = net_revenue_module().build_month_net_revenue_summary(
         month="2026-03",
         facts=[

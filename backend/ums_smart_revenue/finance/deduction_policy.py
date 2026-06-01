@@ -16,6 +16,10 @@ import cycle). Imports nothing from finance.* compute modules.
 # ============================================================================
 SOURCE_SYSTEM_TO_SOURCE_KIND: dict[str, str] = {
     "adsense_management": "ADSENSE",
+    # FIX: adsense_payment_gap resolves to ADSENSE; allocation._basis_source_kind
+    # already special-cased this, but _applicable_account_allocations and
+    # _applicable_deduction_components use this map directly and silently dropped it.
+    "adsense_payment_gap": "ADSENSE",
     "youtube_reporting": "YOUTUBE_CMS",
     "youtube_analytics": "YOUTUBE_ANALYTICS",
 }
