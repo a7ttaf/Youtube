@@ -1134,7 +1134,7 @@ def _record_finance_export_artifact_audit(
     artifact_type: str,
     include_download_event: bool,
 ):
-    """Emit revenue-viewed, payment-viewed, bank-reconciliation-viewed, and optional download audit events."""
+    """Emit revenue, payment, bank-reconciliation, and optional download audit events."""
     revenue_scopes = _audit_revenue_scopes_for_export(
         scope_type=export_job.scope_type,
         scope_id=export_job.scope_id,
@@ -1406,7 +1406,7 @@ def _require_finance_export_artifact_permissions(
     group_registry: ChannelGroupRegistryStore,
     scope_channel_ids: tuple[str, ...] | None = None,
 ) -> None:
-    """Assert full finance artifact permissions including view-finalized-payments and bank-reconciliation."""
+    """Assert full finance artifact permissions for payments and bank-reconciliation."""
     _require_export_scope_permissions(
         user=user,
         export_permission=Permission.EXPORT_REVENUE_REPORT,
