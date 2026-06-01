@@ -6,26 +6,18 @@ from typing import overload
 
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.deduction_components import DeductionComponent
+
+# Re-exported from the neutral deduction_policy module so existing
+# `from ums_smart_revenue.finance.net_revenue import NET_APPLICABLE_COMPONENT_KINDS`
+# (and SOURCE_SYSTEM_TO_SOURCE_KIND) call sites keep working unchanged, while
+# finance.allocation imports them from deduction_policy to avoid an import cycle.
+from ums_smart_revenue.finance.deduction_policy import (  # noqa: F401  (re-export)
+    NET_APPLICABLE_COMPONENT_KINDS,
+    SOURCE_SYSTEM_TO_SOURCE_KIND,
+)
 from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntry
 from ums_smart_revenue.finance.reconciliation import SOURCE_PRIORITY
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
-
-# ============================================================================
-# Purpose: Map a Google source_system to the RevenueFactSourceKind it backs, so
-#   a channel-scoped deduction component is only applied to a net derived from
-#   the SAME source (no cross-source mixing). Used only on the missing-net path.
-# Database/ORM: None.
-# Standards: explicit, closed map; unknown source_system -> no match -> ignored.
-# Blast Radius: Finance net-revenue derivation (missing-net path only).
-# ============================================================================
-SOURCE_SYSTEM_TO_SOURCE_KIND: dict[str, str] = {
-    "adsense_management": "ADSENSE",
-    "youtube_reporting": "YOUTUBE_CMS",
-    "youtube_analytics": "YOUTUBE_ANALYTICS",
-}
-# Only blind, source-labeled reductions reduce a component-derived net; signed
-# FX_VARIANCE / TRANSFER_FEE / UNRESOLVED_PAYMENT_GAP kinds never reduce net.
-NET_APPLICABLE_COMPONENT_KINDS: frozenset[str] = frozenset({"TAX", "DEDUCTION"})
 
 
 @dataclass(frozen=True)

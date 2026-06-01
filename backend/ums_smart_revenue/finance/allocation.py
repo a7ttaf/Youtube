@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from decimal import ROUND_FLOOR, Decimal
 
 from ums_smart_revenue.finance.deduction_components import DeductionComponent
-from ums_smart_revenue.finance.net_revenue import (
+from ums_smart_revenue.finance.deduction_policy import (
     NET_APPLICABLE_COMPONENT_KINDS,
     SOURCE_SYSTEM_TO_SOURCE_KIND,
 )
