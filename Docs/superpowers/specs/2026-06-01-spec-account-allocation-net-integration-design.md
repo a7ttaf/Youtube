@@ -630,9 +630,11 @@ after the orchestrator extraction (all PR-1 tests stay green).
 - **Modify** `backend/ums_smart_revenue/api/allocation.py` — refactor to call the new service
   (behavior-preserving).
 - **Modify** `backend/ums_smart_revenue/api/revenue.py` — net-revenue route: gather
-  allocations, pass to builder, add `VIEW_FINALIZED_PAYMENTS@finance_month` gate +
-  `PAYMENT_VIEWED` audit, switch the envelope to plural `audit_events`, apply the
-  scoped-visibility pin; import `NET_APPLICABLE_COMPONENT_KINDS` from `deduction_policy`.
+  allocations, pass to builder, add a `VIEW_FINALIZED_PAYMENTS` gate (on the route's
+  `target_scope`, co-scoped with the existing checks — see §5.1) + a `PAYMENT_VIEWED` audit
+  (recording `finance_month(month)` as audit metadata), switch the envelope to plural
+  `audit_events`, apply the scoped-visibility pin; import `NET_APPLICABLE_COMPONENT_KINDS`
+  from `deduction_policy`.
 - **Modify** `backend/ums_smart_revenue/api/exports.py` — fetch + pass the same scoped
   channel-direct net-applicable `deduction_components` **and** account allocations into the
   source-summary builder (§5.4); apply the scoped-visibility pin; emit `PAYMENT_VIEWED` for all
