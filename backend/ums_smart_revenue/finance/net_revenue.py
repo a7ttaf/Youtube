@@ -1,5 +1,5 @@
 from collections import defaultdict
-from collections.abc import Iterable
+from collections.abc import Collection, Iterable
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 from typing import overload
@@ -534,6 +534,40 @@ def _month_net_revenue_counts(
     return calculated, missing_count, pending_count
 
 
+# ============================================================================
+# Purpose: Restrict month-wide account-allocation lines to an authorized channel
+#   set so scoped net-revenue reads and finance exports never surface allocation
+#   rows (and totals) for channels outside the caller's scope.
+# Database/ORM: None (operates on already-loaded AllocationLine values).
+# Standards: Pure, typed boundary; fail-closed on scoped reads (only explicitly
+#   authorized channels survive); global reads (channel_ids is None) pass through.
+# Blast Radius: Finance numbers + authorization — prevents cross-scope leakage of
+#   account-allocated channels into scoped responses/exports.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/revenue.py -> net-revenue route scope.
+#   - File: backend/ums_smart_revenue/api/exports.py -> finance export scope.
+# ============================================================================
+def filter_account_allocations_to_scope(
+    account_allocations: Iterable[AllocationLine],
+    channel_ids: Collection[str] | None,
+) -> list[AllocationLine]:
+    """Restrict account-allocation lines to an authorized channel set.
+
+    ``compute_month_account_allocation`` always resolves month-wide, so a scoped
+    (company/sector/channel/group) read must drop lines for channels outside the
+    authorized set before they reach the summary builder; otherwise a caller
+    authorized for one scope could receive other channels' allocation-derived
+    rows and totals. ``channel_ids is None`` marks a global read and keeps every
+    line unchanged.
+    """
+    if channel_ids is None:
+        return list(account_allocations)
+    allowed = set(channel_ids)
+    return [
+        line for line in account_allocations if line.youtube_channel_id in allowed
+    ]
+
+
 def build_month_net_revenue_summary(
     *,
     month: str,
@@ -563,10 +597,15 @@ def build_month_net_revenue_summary(
     channel_ids = sorted(
         set(facts_by_channel) | set(overrides_by_channel) | set(allocations_by_channel)
     )
+    # FIX: use .get(channel_id, ()) for facts/overrides to match the sibling
+    # component/allocation lookups below and the declared dict return type;
+    # allocation-only channel_ids are absent from facts_by_channel/
+    # overrides_by_channel, so direct subscripting relied on an undocumented
+    # defaultdict side effect that a future plain-dict refactor would break.
     channels = [
         build_channel_net_revenue_summary(
-            facts=facts_by_channel[channel_id],
-            manual_overrides=overrides_by_channel[channel_id],
+            facts=facts_by_channel.get(channel_id, ()),
+            manual_overrides=overrides_by_channel.get(channel_id, ()),
             month=month,
             youtube_channel_id=channel_id,
             deduction_components=components_by_channel.get(channel_id, ()),

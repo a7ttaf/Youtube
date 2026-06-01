@@ -13,6 +13,8 @@ from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.db.finance_models import (
+    AdsenseContentOwnerLinkORM,
+    ContentOwnerChannelLinkORM,
     DeductionComponentORM,
     FinanceBase,
     MonthlyChannelRevenueFactORM,
@@ -23,8 +25,10 @@ from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, User
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-00000000c101")
 COMPANY_ID = UUID("00000000-0000-0000-0000-00000000c201")
+COMPANY_2_ID = UUID("00000000-0000-0000-0000-00000000c202")
 CHANNEL_A_ROW_ID = UUID("00000000-0000-0000-0000-00000000c301")
 CHANNEL_B_ROW_ID = UUID("00000000-0000-0000-0000-00000000c302")
+CHANNEL_C_ROW_ID = UUID("00000000-0000-0000-0000-00000000c303")
 USER_ID = UUID("00000000-0000-0000-0000-00000000c401")
 APPROVER_ID = UUID("00000000-0000-0000-0000-00000000c402")
 
@@ -386,3 +390,104 @@ def test_net_revenue_global_visibility_uses_normalized_scope_type(tmp_path):
         entity_ids = {row.entity_id for row in session.scalars(select(AuditLogORM)).all()}
 
     assert entity_ids == {"2026-03:global:global"}
+
+
+def _seed_out_of_scope_account_allocation(database_url: str) -> None:
+    """Add a second company + channel ("channel-tv-c") that has an ACCOUNT
+    deduction mapped via a VERIFIED link. It is outside COMPANY_ID and must not
+    appear in a COMPANY_ID-scoped net-revenue response.
+    """
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                OrgUnitORM(
+                    id=COMPANY_2_ID,
+                    parent_id=SECTOR_ID,
+                    type="COMPANY",
+                    name="Other Company",
+                    active=True,
+                ),
+                YouTubeChannelORM(
+                    id=CHANNEL_C_ROW_ID,
+                    youtube_channel_id="channel-tv-c",
+                    channel_name="TV C",
+                    primary_org_unit_id=COMPANY_2_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-tv-c",
+                    source_kind="ADSENSE",
+                    source_report_id="adsense-report-2026-03",
+                    gross_revenue_usd=Decimal("500.00"),
+                    net_revenue_usd=None,
+                    views=80000,
+                    watch_time_minutes=Decimal("2000.00"),
+                    confidence_score=Decimal("0.9600"),
+                    imported_by=USER_ID,
+                ),
+                AdsenseContentOwnerLinkORM(
+                    id=uuid4(),
+                    adsense_account_id="pub-9",
+                    content_owner_id="owner-9",
+                    verification_status="VERIFIED",
+                    provenance_kind="OPERATOR_ASSERTED",
+                    provenance_payload={},
+                    effective_month_start="2026-01",
+                ),
+                ContentOwnerChannelLinkORM(
+                    id=uuid4(),
+                    content_owner_id="owner-9",
+                    youtube_channel_id="channel-tv-c",
+                    provenance_kind="SOURCE_ROW",
+                    active=True,
+                    effective_month_start="2026-01",
+                ),
+                DeductionComponentORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    component_kind="DEDUCTION",
+                    scope_kind="ACCOUNT",
+                    scope_id="pub-9",
+                    amount_usd=Decimal("70.00"),
+                    amount_native=None,
+                    currency_code="USD",
+                    source_system="adsense_management",
+                    source_table="google_revenue_source_rows",
+                    source_id=None,
+                    source_key="k-c",
+                    source_report_id=None,
+                    raw_payload={"k": "v"},
+                    component_key="srcrow:adsense_management:k-c",
+                ),
+            ]
+        )
+        session.commit()
+
+
+def test_net_revenue_scoped_excludes_out_of_scope_account_allocation(tmp_path):
+    """Regression (PR #59 review): account allocations resolve month-wide, so a
+    COMPANY_ID-scoped request must not surface "channel-tv-c" (a different
+    company) just because it has an account-level deduction.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_out_of_scope_account_allocation(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
+    client = TestClient(app)
+
+    response = client.get(
+        f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}",
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    channel_ids = {c["youtube_channel_id"] for c in body["channels"]}
+    assert "channel-tv-c" not in channel_ids  # out-of-scope allocation filtered
+    assert channel_ids == {"channel-tv-a", "channel-tv-b"}
+    assert body["channel_count"] == 2

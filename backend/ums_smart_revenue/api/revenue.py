@@ -61,6 +61,7 @@ from ums_smart_revenue.finance.net_revenue import (
     NET_APPLICABLE_COMPONENT_KINDS,
     NetRevenueValidationError,
     build_month_net_revenue_summary,
+    filter_account_allocations_to_scope,
     normalize_net_revenue_currency,
 )
 from ums_smart_revenue.finance.payment_matching import (
@@ -1129,12 +1130,21 @@ def get_month_net_revenue(
             revenue_repository=revenue_repository,
             link_repository=link_repository,
         )
+        # FIX: compute_month_account_allocation resolves month-wide, so a scoped
+        # read must drop allocation lines for channels outside the resolved
+        # channel_ids before they reach the summary builder; otherwise a caller
+        # authorized for one company/sector/channel would receive other
+        # channels' allocation-derived rows and totals. channel_ids is None for
+        # global reads, which pass through unchanged.
+        scoped_account_lines = filter_account_allocations_to_scope(
+            account_result.lines, channel_ids
+        )
         summary = build_month_net_revenue_summary(
             month=month,
             facts=facts,
             manual_overrides=overrides,
             deduction_components=deduction_components,
-            account_allocations=account_result.lines,
+            account_allocations=scoped_account_lines,
             unallocated_account_issues=(
                 account_result.unallocated if is_global_scope else None
             ),

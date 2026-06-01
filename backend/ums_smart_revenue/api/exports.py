@@ -51,6 +51,7 @@ from ums_smart_revenue.finance.net_revenue import (
     MonthNetRevenueSummary,
     NetRevenueValidationError,
     build_month_net_revenue_summary,
+    filter_account_allocations_to_scope,
 )
 from ums_smart_revenue.finance.payment_matching import (
     MonthlyPaymentMatchSummary,
@@ -1087,12 +1088,20 @@ def _build_finance_source_summaries_for_export(
         revenue_repository=revenue_repository,
         link_repository=SqlAlchemyChannelAccountLinkRepository(session),
     )
+    # FIX: the allocation orchestrator resolves month-wide, but a non-global
+    # export must only contain its frozen channel set; filter allocation lines
+    # to channel_ids so a company/sector/group export can never include
+    # allocation rows or totals for channels outside the exported scope.
+    # channel_ids is None only for global exports, which pass through unchanged.
+    scoped_account_lines = filter_account_allocations_to_scope(
+        account_result.lines, channel_ids
+    )
     net_revenue = build_month_net_revenue_summary(
         month=export_job.month,
         facts=facts,
         manual_overrides=manual_overrides,
         deduction_components=deduction_components,
-        account_allocations=account_result.lines,
+        account_allocations=scoped_account_lines,
         unallocated_account_issues=(
             account_result.unallocated if export_job.scope_type == "global" else None
         ),

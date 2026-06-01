@@ -4,6 +4,7 @@ from ums_smart_revenue.finance.allocation import AllocationLine, UnallocatedIssu
 from ums_smart_revenue.finance.net_revenue import (
     build_channel_net_revenue_summary,
     build_month_net_revenue_summary,
+    filter_account_allocations_to_scope,
 )
 from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 
@@ -224,3 +225,43 @@ def test_default_no_allocations_is_unchanged_behavior():
     assert summary.channels[0].net_revenue_usd == Decimal("880.00")
     assert summary.unallocated_account_deduction_total_usd is None
     assert summary.unallocated_account_issues is None
+
+
+def test_allocation_only_channel_is_included_without_keyerror():
+    """A channel present only in allocations (no facts/overrides) is summarized
+    via .get(channel_id, ()) instead of crashing or being dropped.
+    """
+    # "chZ" has an account allocation but no revenue fact or override; "chA"
+    # has a fact only. Both must appear; the allocation-only channel must build.
+    summary = build_month_net_revenue_summary(
+        month=MONTH,
+        facts=[_fact(net="880.00", gross="1000.00", channel="chA")],
+        manual_overrides=[],
+        account_allocations=[_alloc(channel="chZ", amount="50.000000")],
+    )
+    ids = {channel.youtube_channel_id for channel in summary.channels}
+    assert ids == {"chA", "chZ"}
+    alloc_only = next(c for c in summary.channels if c.youtube_channel_id == "chZ")
+    # No facts -> NO_FACTS status, built via .get(channel_id, ()) without KeyError.
+    assert alloc_only.status == "NO_FACTS"
+
+
+def test_filter_account_allocations_global_keeps_all_lines():
+    """A global read (channel_ids is None) returns every allocation line."""
+    lines = [_alloc(channel="chA"), _alloc(channel="chB", key="k2")]
+    assert filter_account_allocations_to_scope(lines, None) == lines
+
+
+def test_filter_account_allocations_scoped_drops_out_of_scope_lines():
+    """A scoped read keeps only lines whose channel is inside the authorized set."""
+    in_scope = _alloc(channel="chA", key="k1")
+    out_of_scope = _alloc(channel="chB", key="k2")
+    filtered = filter_account_allocations_to_scope(
+        [in_scope, out_of_scope], {"chA"}
+    )
+    assert filtered == [in_scope]
+
+
+def test_filter_account_allocations_empty_scope_drops_everything():
+    """An empty authorized set is fail-closed: no allocation lines survive."""
+    assert filter_account_allocations_to_scope([_alloc(channel="chA")], set()) == []
