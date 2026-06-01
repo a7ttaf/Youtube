@@ -6,10 +6,7 @@ Consumes the account-level allocation built in **Spec 2b PR-1**
 net-applicable lines into the month/channel **net-revenue** figure, on both the API and
 the finance-export surfaces.
 
-**Status:** Designed 2026-06-01. Off `main` (`8a6df2a`, which has the MERGED Phase 4 PR-A
-deduction substrate/ingestion, PR-B channel-direct net consumption, Spec 2a channel↔account
-map, and Spec 2b PR-1 account-allocation compute + read endpoint). Branch
-`spec/account-allocation-net-integration`.
+**Status:** Shipped 2026-06-01, PR #59.
 
 **Goal:** Make per-channel net revenue reflect **account-allocated** TAX/DEDUCTION evidence
 — not just channel-direct components — so the Phase 4 "fully reconciled net" acceptance gate
@@ -94,9 +91,8 @@ In scope for this PR (Spec 2b PR-2):
    surface (§4). No DB/repository import added to this module.
 3. **`api/revenue.py`** — the `GET /revenue/months/{month}/net-revenue` route gathers
    allocations via the new service, passes them to the builder, adds a
-   `VIEW_FINALIZED_PAYMENTS` gate on the route's **`target_scope`** (the org scope, co-scoped
-   with the existing checks — see §5.1) + a `PAYMENT_VIEWED` audit, and applies the
-   scoped-visibility pin (§5).
+   `VIEW_FINALIZED_PAYMENTS` gate on **`AccessScope.finance_month(month)`** (see §5.1) + a
+   `PAYMENT_VIEWED` audit, and applies the scoped-visibility pin (§5).
 4. **`api/exports.py`** — the finance-export source-summary path
    (`_build_finance_source_summaries_for_export`, `exports.py:1035`) currently calls the
    builder with **only `facts` + `manual_overrides`** — it passes **no** `deduction_components`
@@ -515,8 +511,8 @@ net-revenue endpoint's audit envelope changes from singular `audit_event` to plu
 - **API/export consistency:** both call the same builder with the same allocations → **no
   net drift** between the API and finance workbooks/PDF/slides.
 - **Authorization:** net-revenue route becomes **more** restrictive (adds
-  `VIEW_FINALIZED_PAYMENTS` on the route's `target_scope`, co-scoped with the existing
-  revenue/confidence checks — §5.1); exports auth unchanged (already gated); audit becomes
+  `VIEW_FINALIZED_PAYMENTS` on `AccessScope.finance_month(month)` — §5.1); exports auth
+  unchanged (already gated); audit becomes
   **more** complete (adds `PAYMENT_VIEWED` to net route and to scoped finance exports).
   Nothing weakened; fail-closed preserved. No access regression: roles that can read
   net-revenue today (e.g. `finance_viewer` at their org scope) already hold
@@ -622,8 +618,8 @@ after the orchestrator extraction (all PR-1 tests stay green).
 - **Modify** `backend/ums_smart_revenue/api/allocation.py` — refactor to call the new service
   (behavior-preserving).
 - **Modify** `backend/ums_smart_revenue/api/revenue.py` — net-revenue route: gather
-  allocations, pass to builder, add a `VIEW_FINALIZED_PAYMENTS` gate (on the route's
-  `target_scope`, co-scoped with the existing checks — see §5.1) + a `PAYMENT_VIEWED` audit
+  allocations, pass to builder, add a `VIEW_FINALIZED_PAYMENTS` gate (on
+  `AccessScope.finance_month(month)` — see §5.1) + a `PAYMENT_VIEWED` audit
   (recording `finance_month(month)` as audit metadata), switch the envelope to plural
   `audit_events`, apply the scoped-visibility pin; import `NET_APPLICABLE_COMPONENT_KINDS`
   from `deduction_policy`.
