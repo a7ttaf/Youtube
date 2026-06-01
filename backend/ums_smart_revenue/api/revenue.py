@@ -28,6 +28,7 @@ from ums_smart_revenue.finance.adsense_payments import (
     AdSensePaymentValidationError,
     SqlAlchemyAdSensePaymentRepository,
 )
+from ums_smart_revenue.finance.allocation import AllocationLine
 from ums_smart_revenue.finance.allocation_inputs import compute_month_account_allocation
 from ums_smart_revenue.finance.bank_reconciliation import (
     BankReconciliationLockedMonthError,
@@ -39,11 +40,13 @@ from ums_smart_revenue.finance.channel_account_links import (
     SqlAlchemyChannelAccountLinkRepository,
 )
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
+from ums_smart_revenue.finance.deduction_components import DeductionComponent
 from ums_smart_revenue.finance.deduction_ingestion import (
     DeductionComponentValidationError,
     SqlAlchemyDeductionComponentRepository,
 )
 from ums_smart_revenue.finance.explanations import (
+    NET_REVENUE_METRIC,
     NumberExplanationValidationError,
     SqlAlchemyNumberExplanationRepository,
     build_channel_month_revenue_explanation,
@@ -1343,13 +1346,46 @@ def explain_channel_month_revenue_metric(
         SqlAlchemyNumberExplanationRepository,
         Depends(current_number_explanation_repository),
     ],
+    deduction_component_repository: Annotated[
+        SqlAlchemyDeductionComponentRepository,
+        Depends(current_deduction_component_repository),
+    ],
+    link_repository: Annotated[
+        SqlAlchemyChannelAccountLinkRepository,
+        Depends(current_channel_account_link_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     metric: str = "adjusted_gross_revenue_usd",
 ) -> dict[str, object]:
-    """Generate and persist a channel-month metric explanation."""
+    # ========================================================================
+    # Purpose: Generate and persist a channel-month metric explanation. Supports
+    #   the gross metric (byte-identical legacy path: VIEW_REVENUE+VIEW_CONFIDENCE
+    #   @channel, singular audit_event) and the net_revenue_usd metric (additional
+    #   VIEW_FINALIZED_PAYMENTS@finance_month gate, channel-direct + account-
+    #   allocated deduction provenance, plural audit_events [REVENUE, PAYMENT]).
+    # Database/ORM: NumberExplanationORM (write/upsert); reads RevenueFact,
+    #   RevenueManualOverride, DeductionComponent, ChannelAccount link tables.
+    # Standards: Thin route; auth fail-closed before any data access; typed
+    #   domain errors translated to 403/404/422; logic lives in finance services.
+    # Blast Radius: Authorization (net adds a stricter finalized-payment gate;
+    #   gross unchanged), audit (net adds PAYMENT_VIEWED), finance explanations.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/finance/explanations.py -> net builder.
+    #   - File: backend/ums_smart_revenue/finance/allocation_inputs.py -> month
+    #     allocation lines reused for account-allocated net provenance.
+    # ========================================================================
     target_scope = AccessScope.channel(channel_id)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    is_net_metric = metric == NET_REVENUE_METRIC
+    if is_net_metric:
+        # FIX: Net explanations expose finalized-payment-derived deduction
+        # provenance, so gate them at finance_month(month) exactly like the PR-2
+        # net-revenue route (revenue.py:1100-1102) -- finance_month is not an
+        # org-hierarchy scope, so no org_index is passed.
+        _require_permission(
+            user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month)
+        )
     try:
         facts = revenue_repository.list_channel_month_facts(
             month=month,
@@ -1359,17 +1395,36 @@ def explain_channel_month_revenue_metric(
             month=month,
             youtube_channel_id=channel_id,
         )
+        deduction_components: list[DeductionComponent] = []
+        account_allocations: list[AllocationLine] = []
+        if is_net_metric:
+            deduction_components = deduction_component_repository.list_month_components(
+                month=month,
+                youtube_channel_ids={channel_id},
+                component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
+            )
+            account_allocations = list(
+                compute_month_account_allocation(
+                    month=month,
+                    deduction_repository=deduction_component_repository,
+                    revenue_repository=revenue_repository,
+                    link_repository=link_repository,
+                ).lines
+            )
         explanation = build_channel_month_revenue_explanation(
             facts=facts,
             manual_overrides=overrides,
             month=month,
             youtube_channel_id=channel_id,
             metric=metric,
+            deduction_components=deduction_components,
+            account_allocations=account_allocations,
         )
         explanation_repository.record_explanation(explanation)
     except RevenueFactNotFoundError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc)) from exc
     except (
+        DeductionComponentValidationError,
         ManualOverrideValidationError,
         NumberExplanationValidationError,
         RevenueFactValidationError,
@@ -1378,6 +1433,32 @@ def explain_channel_month_revenue_metric(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
+
+    if is_net_metric:
+        revenue_record = record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.REVENUE_VIEWED,
+            entity_type="number_explanation",
+            entity_id=f"{channel_id}:{month}:{metric}",
+            scope=target_scope,
+            details={"metric": metric, "warning_count": len(explanation.warnings)},
+        )
+        payment_record = record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.PAYMENT_VIEWED,
+            entity_type="finance_month",
+            entity_id=month,
+            scope=AccessScope.finance_month(month),
+            details={"metric": metric},
+        )
+        response = explanation.to_api()
+        response["audit_events"] = [
+            audit_record_to_api(revenue_record),
+            audit_record_to_api(payment_record),
+        ]
+        return response
 
     record = record_audit_event(
         sink=audit_sink,
