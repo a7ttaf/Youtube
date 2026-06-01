@@ -169,8 +169,9 @@ passes `unallocated_account_issues=result.unallocated` only for a global request
 for any scoped request (§5.2). The **builder** owns the *finance filter* — it filters the
 issues it is given to `component_kind in NET_APPLICABLE_COMPONENT_KINDS`, sums the total, and
 serializes (single home for the net-applicable rule). `unallocated_account_issues=None` →
-both month surface fields are `None` (omitted). An empty iterable (global request, nothing
-unallocated) → total `Decimal("0")`, issues `[]`.
+both month surface fields serialize as explicit JSON `null` (not zeroed, not omitted; §4.5,
+finding #3). An empty iterable (global request, nothing unallocated) → total `Decimal("0")`,
+issues `[]`.
 
 ### 4.2 Source-alignment gate (identical to channel-direct)
 
@@ -307,9 +308,11 @@ NET_APPLICABLE_COMPONENT_KINDS: frozenset[str] = frozenset({"TAX", "DEDUCTION"})
 so the cycle is gone and `net_revenue` can import `AllocationLine`/`UnallocatedIssue` from
 `allocation` cleanly. **Leave `google_source_normalizer.py:74`'s identically-named
 `SOURCE_SYSTEM_TO_SOURCE_KIND` (a `str → RevenueFactSourceKind` map, different type, own tests)
-untouched.** `net_revenue.py` MAY re-export the two names so existing `from net_revenue import …`
-sites keep working; new code imports from `deduction_policy`. A test asserts the values are
-unchanged.
+untouched.** `net_revenue.py` **MUST re-export** the two names (`from finance.deduction_policy
+import NET_APPLICABLE_COMPONENT_KINDS, SOURCE_SYSTEM_TO_SOURCE_KIND`) so existing
+`from net_revenue import …` sites keep working unchanged; new code imports from
+`deduction_policy` directly. A test asserts the re-exported `net_revenue` names are the same
+objects as the `deduction_policy` originals and that the values are unchanged (§9).
 
 ---
 
@@ -649,8 +652,9 @@ Reused (no duplication): `AllocationLine`, `UnallocatedIssue`, `build_account_al
    provenance-only (with a defensive test).
 5. **D2 — net-applicable-only unallocated surface;** reconciliation kinds excluded from the
    net endpoint.
-6. **Scoped-visibility pin:** unallocated-account detail is **global-scope-only** (omitted,
-   not zeroed, on scoped responses); same rule for API and exports.
+6. **Scoped-visibility pin:** unallocated-account detail is **global-scope-only**; on scoped
+   responses both fields serialize as explicit JSON `null` (not zeroed, not omitted); same
+   rule for API and exports.
 7. **D3 — auth/audit:** keep VIEW_REVENUE + VIEW_CONFIDENCE target-scope; add
    `VIEW_FINALIZED_PAYMENTS@finance_month` + `PAYMENT_VIEWED` on the net route.
 8. **D4 — explain provenance deferred.**
