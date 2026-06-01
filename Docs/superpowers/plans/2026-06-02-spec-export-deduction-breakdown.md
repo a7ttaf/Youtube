@@ -24,12 +24,15 @@
 - XLSX headers use the full API field names (matching the existing `approved_manual_override_total_usd` header). PDF/PPTX use concise human labels.
 - `_decimal_to_api` normalizes: `Decimal("30.00")→"30"`, `Decimal("100.000000")→"100"`, `Decimal("130.000000")→"130"`, `Decimal("0.00")→"0"`.
 
+**Parity surfaces (each finance "executive summary" payload that exposes `total_deduction_amount_usd` also gains the two new fields, for serialization parity):** the XLSX `_executive_summary` + `_scope_breakdown`, the PDF `_executive_summary`, and the PPTX `_executive_summary`. The PDF `_summary_table` cherry-picks keys (Month, Total Net Revenue, statuses) and is **not** changed — the PDF's rendered split lives only in `_gross_net_table`; the PDF `_executive_summary` change is payload-only (it surfaces in `report.to_api()["executive_summary"]`).
+
 **Verified anchors (re-confirm with a quick read before editing — line numbers may drift):**
 - `backend/ums_smart_revenue/finance/net_revenue.py`: `MonthNetRevenueSummary` dataclass + `to_api()` (`84-122`); `build_month_net_revenue_summary` (`600-698`), with the `calculated` subset at `:557` and the `total_deduction_amount_usd=sum(...)` at `:691-693`; `_component_derived_channel_summary` (`216-252`). The `MonthNetRevenueSummary` field order is `month, status, channel_count, calculated_channel_count, missing_net_source_count, pending_manual_override_count, total_adjusted_gross_revenue_usd, total_net_revenue_usd, total_deduction_amount_usd, unallocated_account_deduction_total_usd, unallocated_account_issues, channels` — **no field has a default**. Import at `:13`: `from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api`.
 - `backend/ums_smart_revenue/reports/finance_workbook.py`: Channel Breakdown sheet (`200-235`), Deductions sheet (`236-257`), `_executive_summary` (`335-370`), `_scope_breakdown` (`373-397`) + Company/Sector call sites (`192-199`), Raw Appendix (`297-303`), `FinanceWorkbookPreview.to_api()` (`83-113`). Helpers: `_decimal_to_api` (imported), `_write_table_sheet` (`412-424`), `_write_key_value_sheet` (`400-409`).
-- `backend/ums_smart_revenue/reports/executive_pdf.py`: `_gross_net_table` (`277-293`), `_channel_ranking_table` (`313-335`, **leave unchanged**), `_executive_summary` (`226-259`), `build_executive_pdf_bytes` (`146-201`).
+- `backend/ums_smart_revenue/reports/executive_pdf.py`: `_gross_net_table` (`277-293`), `_summary_table` (`262-274`, cherry-picks — leave unchanged), `_channel_ranking_table` (`313-335`, **leave unchanged**), `_executive_summary` (`226-259`), `build_executive_pdf_bytes` (`146-201`).
 - `backend/ums_smart_revenue/reports/branded_slide_pack.py`: deduction slide (`229-238`), `_executive_summary` (`444-475`), `_add_content_slide` (`303-331`).
 - `backend/ums_smart_revenue/api/revenue.py`: month net-revenue endpoint returns `summary.to_api()` at `:1166`.
+- `tests/api/test_export_preview_api.py`: seed (`:83`) has only source-net channels (no `DeductionComponentORM`), so the preview's breakdown aggregates are `"0"`; the finance-admin preview test is `test_finance_admin_previews_finance_workbook_with_sensitive_audit` (`238-279`); the preview route returns the full `preview.to_api()` (so `payload["source_summaries"]["net_revenue"]` is present).
 
 **Validation commands (this repo uses `python -m`, not bare `pytest`):**
 - Targeted: `python -m pytest <files> -q`
@@ -47,12 +50,13 @@
 |---|---|---|
 | `backend/ums_smart_revenue/finance/net_revenue.py` | Finance-layer month summary | Add 2 aggregate fields + sum + `to_api` |
 | `backend/ums_smart_revenue/reports/finance_workbook.py` | XLSX builder | Per-channel columns (2 sheets) + aggregate rows (`_executive_summary`, `_scope_breakdown`) |
-| `backend/ums_smart_revenue/reports/executive_pdf.py` | PDF builder | Aggregate rows in `_gross_net_table` (ranking table untouched) |
+| `backend/ums_smart_revenue/reports/executive_pdf.py` | PDF builder | Aggregate rows in `_gross_net_table` + 2 fields in `_executive_summary` payload (ranking + summary tables untouched) |
 | `backend/ums_smart_revenue/reports/branded_slide_pack.py` | PPTX builder | 3-bullet deduction slide + `_executive_summary` payload |
 | `tests/finance/test_net_revenue_account_allocations.py` | Finance aggregate tests | New aggregate + mixed-invariant + coalescing tests |
 | `tests/api/test_net_revenue_api.py` | API additive-field test | Assert 2 new response fields |
+| `tests/api/test_export_preview_api.py` | Preview-contract parity test | Assert 2 fields in `executive_summary` + `source_summaries.net_revenue` |
 | `tests/reports/test_finance_workbook_preview.py` | XLSX tests | Fixture +2 fields; new breakdown test; updated exec-summary assertion |
-| `tests/reports/test_executive_pdf.py` | PDF tests | Fixture +2 fields; new aggregate-rows test |
+| `tests/reports/test_executive_pdf.py` | PDF tests | Fixture +2 fields; new aggregate-rows test; exec-summary payload assertions |
 | `tests/reports/test_branded_slide_pack.py` | PPTX tests | Fixture +2 fields; new bullets test |
 | `Docs/01_IMPLEMENTATION_PLAN.md`, `Docs/15_DELIVERY_BACKLOG.md` | Status | Mark export-breakdown shipped |
 
@@ -216,17 +220,17 @@ git commit -m "feat(finance): month-level channel-direct/account-allocated deduc
 
 ---
 
-## Task 2: XLSX workbook breakdown columns + aggregate rows
+## Task 2: XLSX workbook breakdown columns + aggregate rows + preview-contract parity
 
-Add per-channel breakdown columns to the Channel Breakdown and Deductions sheets, and the two aggregate rows to `_executive_summary` (Executive Summary sheet + preview JSON) and `_scope_breakdown` (Company/Sector breakdown sheets). The Raw Appendix auto-propagates via `to_api()`.
+Add per-channel breakdown columns to the Channel Breakdown and Deductions sheets, the two aggregate rows to `_executive_summary` (Executive Summary sheet + preview JSON) and `_scope_breakdown` (Company/Sector breakdown sheets), and direct preview-API assertions. The Raw Appendix auto-propagates via `to_api()`.
 
 **Files:**
 - Modify: `backend/ums_smart_revenue/reports/finance_workbook.py` (sheets `200-257`, `_executive_summary` `335-370`, `_scope_breakdown` `373-397`)
-- Test: `tests/reports/test_finance_workbook_preview.py`
+- Test: `tests/reports/test_finance_workbook_preview.py`, `tests/api/test_export_preview_api.py`
 
 - [ ] **Step 1: Write the failing tests**
 
-In `tests/reports/test_finance_workbook_preview.py`, first extend the existing exec-summary assertion in `test_finance_workbook_preview_builds_sheet_manifest_from_source_summaries` (`:44-62`) by adding the two new keys immediately after `"total_deduction_amount_usd": "120",`:
+**(a)** In `tests/reports/test_finance_workbook_preview.py`, extend the existing exec-summary assertion in `test_finance_workbook_preview_builds_sheet_manifest_from_source_summaries` (`:44-62`) by adding the two new keys immediately after `"total_deduction_amount_usd": "120",`:
 
 ```python
         "total_deduction_amount_usd": "120",
@@ -326,10 +330,22 @@ def test_finance_workbook_renders_deduction_breakdown_columns_and_rows():
     assert net_revenue_json["total_account_allocated_deduction_amount_usd"] == "100"
 ```
 
+**(b)** In `tests/api/test_export_preview_api.py`, inside `test_finance_admin_previews_finance_workbook_with_sensitive_audit` (`238-279`), add the preview-contract parity assertions immediately after the existing `assert payload["executive_summary"]["bank_reconciliation_status"] == ("BANK_CONFIRMED")` block:
+
+```python
+    assert payload["executive_summary"]["total_channel_direct_deduction_amount_usd"] == "0"
+    assert payload["executive_summary"]["total_account_allocated_deduction_amount_usd"] == "0"
+    net_revenue_summary = payload["source_summaries"]["net_revenue"]
+    assert net_revenue_summary["total_channel_direct_deduction_amount_usd"] == "0"
+    assert net_revenue_summary["total_account_allocated_deduction_amount_usd"] == "0"
+```
+
+(The preview seed has only source-net channels, so both aggregates are `"0"`; this directly asserts the FastAPI preview contract surfaces the two fields in both `executive_summary` and `source_summaries.net_revenue`.)
+
 - [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `python -m pytest tests/reports/test_finance_workbook_preview.py -q`
-Expected: FAIL — the manifest test fails on the missing exec-summary keys, and the new test fails because the columns/rows are not rendered yet (e.g. `assert channel_breakdown["J1"].value == "channel_direct_deduction_amount_usd"` gets `None`).
+Run: `python -m pytest tests/reports/test_finance_workbook_preview.py tests/api/test_export_preview_api.py::test_finance_admin_previews_finance_workbook_with_sensitive_audit -q`
+Expected: FAIL — the workbook manifest test fails on the missing exec-summary keys; the new workbook test fails because the columns/rows are not rendered yet; the preview-API test fails on the missing `executive_summary` keys (the `source_summaries.net_revenue` keys already exist from Task 1, but `executive_summary` does not until Step 3).
 
 - [ ] **Step 3: Implement the XLSX changes**
 
@@ -405,29 +421,39 @@ In `_scope_breakdown` (`373-397`) add the two entries after `"total_deduction_am
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
-Run: `python -m pytest tests/reports/test_finance_workbook_preview.py -q`
-Expected: PASS (both the updated manifest test and the new breakdown test).
+Run: `python -m pytest tests/reports/test_finance_workbook_preview.py tests/api/test_export_preview_api.py -q`
+Expected: PASS (updated manifest test, new workbook breakdown test, and the preview-API parity assertions all pass).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/ums_smart_revenue/reports/finance_workbook.py tests/reports/test_finance_workbook_preview.py
-git commit -m "feat(reports): XLSX deduction breakdown columns + month aggregate rows"
+git add backend/ums_smart_revenue/reports/finance_workbook.py tests/reports/test_finance_workbook_preview.py tests/api/test_export_preview_api.py
+git commit -m "feat(reports): XLSX deduction breakdown columns + month aggregate rows + preview parity"
 ```
 
 ---
 
-## Task 3: PDF gross-vs-net aggregate rows
+## Task 3: PDF gross-vs-net aggregate rows + executive-summary payload
 
-Add the two month-aggregate rows to the PDF gross-vs-net table. The 4-column channel-ranking table is **not** touched.
+Add the two month-aggregate rows to the PDF gross-vs-net table (rendered) and the two fields to the PDF `_executive_summary` payload (parity in `report.to_api()`). The 4-column channel-ranking table and the cherry-picking `_summary_table` are **not** touched.
 
 **Files:**
-- Modify: `backend/ums_smart_revenue/reports/executive_pdf.py` (`_gross_net_table` `277-293`)
+- Modify: `backend/ums_smart_revenue/reports/executive_pdf.py` (`_gross_net_table` `277-293`, `_executive_summary` `226-259`)
 - Test: `tests/reports/test_executive_pdf.py`
 
-- [ ] **Step 1: Write the failing test**
+- [ ] **Step 1: Write the failing tests**
 
-In `tests/reports/test_executive_pdf.py`, add a component-derived fixture and a test at the end of the file:
+**(a)** In `tests/reports/test_executive_pdf.py`, extend the existing manifest test `test_executive_pdf_report_builds_section_manifest_from_source_summaries` (`:44-48`) by adding payload-parity assertions after the `bank_reconciliation_status` assertion:
+
+```python
+    assert payload["executive_summary"]["bank_reconciliation_status"] == (
+        "BANK_CONFIRMED"
+    )
+    assert payload["executive_summary"]["total_channel_direct_deduction_amount_usd"] == "0"
+    assert payload["executive_summary"]["total_account_allocated_deduction_amount_usd"] == "0"
+```
+
+**(b)** Add a component-derived fixture and a rendered-aggregate test at the end of the file:
 
 ```python
 def _net_revenue_summary_with_breakdown() -> MonthNetRevenueSummary:
@@ -486,14 +512,14 @@ def test_executive_pdf_renders_deduction_breakdown_aggregate_rows():
     assert "100" in text
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [ ] **Step 2: Run the tests to verify they fail**
 
-Run: `python -m pytest tests/reports/test_executive_pdf.py::test_executive_pdf_renders_deduction_breakdown_aggregate_rows -q`
-Expected: FAIL with `assert "Channel-Direct Deduction USD" in text` (label not yet rendered).
+Run: `python -m pytest tests/reports/test_executive_pdf.py::test_executive_pdf_report_builds_section_manifest_from_source_summaries tests/reports/test_executive_pdf.py::test_executive_pdf_renders_deduction_breakdown_aggregate_rows -q`
+Expected: FAIL — the manifest test fails on the missing `executive_summary` keys; the rendered test fails on `assert "Channel-Direct Deduction USD" in text`.
 
-- [ ] **Step 3: Implement the PDF change**
+- [ ] **Step 3: Implement the PDF changes**
 
-In `backend/ums_smart_revenue/reports/executive_pdf.py`, in `_gross_net_table` (`277-293`) add the two rows after `"Total Deduction Amount USD"`:
+In `backend/ums_smart_revenue/reports/executive_pdf.py`, in `_gross_net_table` (`277-293`) add the two rendered rows after `"Total Deduction Amount USD"`:
 
 ```python
             "Total Deduction Amount USD": _decimal_to_api(
@@ -508,16 +534,31 @@ In `backend/ums_smart_revenue/reports/executive_pdf.py`, in `_gross_net_table` (
             "Payment Gap USD": _decimal_to_api(report.payment_match.payment_gap_usd),
 ```
 
-- [ ] **Step 4: Run the test to verify it passes**
+In `_executive_summary` (`226-259`) add the two payload entries after `"total_deduction_amount_usd"` (payload parity only — do **not** modify `_summary_table`, which cherry-picks keys and must not duplicate the gross-vs-net rows):
+
+```python
+        "total_deduction_amount_usd": _decimal_to_api(
+            net_revenue.total_deduction_amount_usd
+        ),
+        "total_channel_direct_deduction_amount_usd": _decimal_to_api(
+            net_revenue.total_channel_direct_deduction_amount_usd
+        ),
+        "total_account_allocated_deduction_amount_usd": _decimal_to_api(
+            net_revenue.total_account_allocated_deduction_amount_usd
+        ),
+        "payment_gap_usd": _decimal_to_api(payment_match.payment_gap_usd),
+```
+
+- [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `python -m pytest tests/reports/test_executive_pdf.py -q`
-Expected: PASS (the new test passes and the existing PDF tests stay green — the ranking table is unchanged).
+Expected: PASS (new tests pass; existing PDF tests stay green — the ranking and summary tables are unchanged).
 
 - [ ] **Step 5: Commit**
 
 ```bash
 git add backend/ums_smart_revenue/reports/executive_pdf.py tests/reports/test_executive_pdf.py
-git commit -m "feat(reports): PDF gross-vs-net deduction breakdown aggregate rows"
+git commit -m "feat(reports): PDF gross-vs-net deduction breakdown rows + summary payload parity"
 ```
 
 ---
@@ -733,8 +774,9 @@ Expected: ruff clean; targeted set green; full suite green (PG container running
 | §7.1 XLSX per-channel columns (both sheets) | Task 2 |
 | §7.1 XLSX Executive Summary + Company/Sector (`_scope_breakdown`) rows | Task 2 |
 | §7.1 Raw Appendix auto-propagation | Task 2 (asserted, no code) |
-| §6 preview parity (`executive_summary` + `source_summaries.net_revenue`) | Task 1 (to_api) + Task 2 (exec summary) |
-| §7.2 PDF gross-vs-net aggregate rows; ranking table unchanged | Task 3 |
+| §6 preview parity — `executive_summary` + `source_summaries.net_revenue` (preview API) | Task 2 (Step 1b, direct API assertion) |
+| §7.2 PDF gross-vs-net aggregate rows (rendered); ranking + summary tables unchanged | Task 3 |
+| §7.2 PDF `_executive_summary` payload parity | Task 3 (Step 1a + Step 3) |
 | §7.3 PPTX three bullets + `_executive_summary` payload | Task 4 |
 | §3/§10 net-revenue API additive fields | Task 1 (Step 5) |
 | §4 semantic invariant pinned by a mixed test | Task 1 (Step 1) |
@@ -746,4 +788,4 @@ No gaps.
 
 **2. Placeholder scan:** No TBD/TODO; every code step shows complete code; every run step shows the command + expected result. Task 5 Step 2 includes a fallback instruction in case the live `Remaining:` wording differs — this is a deliberate guard, not a placeholder (the concrete replacement text is given).
 
-**3. Type consistency:** The two field names `total_channel_direct_deduction_amount_usd` and `total_account_allocated_deduction_amount_usd` (typed `Decimal`, no default) are used identically in the dataclass, `to_api`, the builder sum, all three report builders, and every fixture/assertion. Rendered string forms (`"30"`, `"100"`, `"130"`, `"0"`) match `decimal_to_api` normalization. XLSX column letters (Channel Breakdown J/K after I; Deductions E/F after D) are consistent with the verified current header order.
+**3. Type consistency:** The two field names `total_channel_direct_deduction_amount_usd` and `total_account_allocated_deduction_amount_usd` (typed `Decimal`, no default) are used identically in the dataclass, `to_api`, the builder sum, all three report builders (gross-vs-net rendered + every `_executive_summary`/`_scope_breakdown` payload), and every fixture/assertion. Rendered string forms (`"30"`, `"100"`, `"130"`, `"0"`) match `decimal_to_api` normalization. XLSX column letters (Channel Breakdown J/K after I; Deductions E/F after D) are consistent with the verified current header order. The PDF `_summary_table` is deliberately left unchanged (cherry-picks keys); the PDF `_executive_summary` change is payload-only.
