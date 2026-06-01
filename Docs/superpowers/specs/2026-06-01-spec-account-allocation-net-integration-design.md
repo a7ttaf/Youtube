@@ -666,9 +666,9 @@ Reused (no duplication): `AllocationLine`, `UnallocatedIssue`, `build_account_al
    responses both fields serialize as explicit JSON `null` (not zeroed, not omitted); same
    rule for API and exports.
 7. **D3 — auth/audit:** keep VIEW_REVENUE + VIEW_CONFIDENCE on `target_scope`; add
-   `VIEW_FINALIZED_PAYMENTS` on the **same `target_scope`** (NOT `finance_month` — that would
-   regress org-scoped viewers; see §5.1) + a `PAYMENT_VIEWED` audit (recording
-   `finance_month(month)` as audit metadata) on the net route.
+   `VIEW_FINALIZED_PAYMENTS` on **`AccessScope.finance_month(month)`** (matching every other
+   payment surface in `revenue.py`; see §5.1 for the full rationale) + a `PAYMENT_VIEWED`
+   audit (recording `finance_month(month)` as audit metadata) on the net route.
 8. **D4 — explain provenance deferred.**
 9. **D5 — exports in-scope:** feed allocations into the export builder (totals correct, no
    drift), render existing fields only; same scoped pin; `PAYMENT_VIEWED` now on **all**
