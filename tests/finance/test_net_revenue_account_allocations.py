@@ -241,7 +241,10 @@ def test_allocation_only_channel_is_included_without_keyerror():
     )
     ids = {channel.youtube_channel_id for channel in summary.channels}
     assert ids == {"chA", "chZ"}
-    alloc_only = next(c for c in summary.channels if c.youtube_channel_id == "chZ")
+    alloc_only = next(
+        (c for c in summary.channels if c.youtube_channel_id == "chZ"), None
+    )
+    assert alloc_only is not None
     # No facts -> NO_FACTS status, built via .get(channel_id, ()) without KeyError.
     assert alloc_only.status == "NO_FACTS"
 
