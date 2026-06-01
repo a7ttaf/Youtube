@@ -64,74 +64,45 @@ Read `backend/ums_smart_revenue/finance/net_revenue.py:330-420` to confirm the e
 
 - [ ] **Step 1: Write the failing test for the shared helper + no-drift identity**
 
-Add to `tests/finance/test_net_revenue_account_allocations.py` (reuse the module's existing fixtures/builders for `DeductionComponent`, `AllocationLine`, `RevenueFactEntry`; match their current call shapes):
+Edit `tests/finance/test_net_revenue_account_allocations.py`. This file already provides `_fact(*, source_kind="ADSENSE", gross="1000.00", net=None, channel=CH)`, `_alloc(*, channel=CH, account="pub-1", kind="DEDUCTION", amount="100.000000", source_system="adsense_management", net_applicable=True, key="k1")`, with `MONTH="2026-04"`, `CH="chA"`. (1) Add `resolve_applicable_channel_deductions` to the existing `from ums_smart_revenue.finance.net_revenue import (...)` block (lines 4-8). (2) Add `from ums_smart_revenue.finance.deduction_components import DeductionComponent`. (3) Add a `_component` builder (the file has none) and the test:
 
 ```python
-from decimal import Decimal
-
-from ums_smart_revenue.finance.net_revenue import (
-    build_channel_net_revenue_summary,
-    resolve_applicable_channel_deductions,
-)
+def _component(*, key="cd-1", kind="TAX", amount="30.00",
+               source_system="adsense_management", channel=CH, month=MONTH):
+    """Build a CHANNEL-scoped DeductionComponent for test scenarios."""
+    return DeductionComponent(
+        id=f"dc-{key}", month=month, component_kind=kind, scope_kind="CHANNEL",
+        scope_id=channel, amount_usd=Decimal(amount), amount_native=None,
+        currency_code="USD", source_system=source_system,
+        source_table="deduction_components", source_id=None, source_key=None,
+        source_report_id=None, raw_payload={}, component_key=key,
+    )
 
 
 def test_resolve_applicable_channel_deductions_filters_dedups_and_matches_totals():
-    # A CHANNEL-direct TAX component and an ACCOUNT allocation, both ADSENSE-aligned,
-    # for the same channel/month; plus one cross-source line that must be excluded.
-    components = [
-        _deduction_component(
-            component_key="cd-1",
-            scope_kind="CHANNEL",
-            scope_id="channel-tv-a",
-            month="2026-03",
-            component_kind="TAX",
-            source_system="adsense_management",
-            amount_usd="30.00",
-        ),
-    ]
+    components = [_component(key="cd-1", kind="TAX", amount="30.00")]
     allocations = [
-        _allocation_line(
-            component_key="acct-1",
-            youtube_channel_id="channel-tv-a",
-            source_system="adsense_management",
-            allocated_amount_usd="100.00",
-            net_applicable=True,
-        ),
-        # dedup: shares a key already applied as channel-direct -> excluded
-        _allocation_line(
-            component_key="cd-1",
-            youtube_channel_id="channel-tv-a",
-            source_system="adsense_management",
-            allocated_amount_usd="999.00",
-            net_applicable=True,
-        ),
-        # wrong channel -> excluded
-        _allocation_line(
-            component_key="acct-2",
-            youtube_channel_id="channel-other",
-            source_system="adsense_management",
-            allocated_amount_usd="500.00",
-            net_applicable=True,
-        ),
+        _alloc(key="acct-1", amount="100.000000"),               # applies
+        _alloc(key="cd-1", amount="999.000000"),                 # dedup vs channel-direct key
+        _alloc(channel="ch-other", key="acct-2", amount="500.000000"),  # wrong channel
     ]
 
     channel_direct, account_allocated = resolve_applicable_channel_deductions(
         deduction_components=components,
         account_allocations=allocations,
-        month="2026-03",
-        youtube_channel_id="channel-tv-a",
+        month=MONTH,
+        youtube_channel_id=CH,
         primary_source_kind="ADSENSE",
     )
-
     assert [c.component_key for c in channel_direct] == ["cd-1"]
     assert [l.component_key for l in account_allocated] == ["acct-1"]
 
     # No-drift: the helper's sums equal the builder's COMPONENT_DERIVED breakdown.
     summary = build_channel_net_revenue_summary(
-        facts=[_fact_without_net(source_kind="ADSENSE", gross_revenue_usd="1000.00")],
+        facts=[_fact(net=None, gross="1000.00")],  # source_kind ADSENSE -> aligned
         manual_overrides=[],
-        month="2026-03",
-        youtube_channel_id="channel-tv-a",
+        month=MONTH,
+        youtube_channel_id=CH,
         deduction_components=components,
         account_allocations=allocations,
     )
@@ -143,8 +114,6 @@ def test_resolve_applicable_channel_deductions_filters_dedups_and_matches_totals
         (l.allocated_amount_usd for l in account_allocated), Decimal("0")
     )
 ```
-
-If the module lacks `_deduction_component` / `_allocation_line` / `_fact_without_net` builders, add minimal ones mirroring the existing test fixtures in this file (a fact with `net_revenue_usd=None` triggers the COMPONENT_DERIVED path).
 
 - [ ] **Step 2: Run it to verify it fails**
 
@@ -304,16 +273,59 @@ Read `explanations.py:100-185` (the current `build_channel_month_revenue_explana
 
 - [ ] **Step 1: Write failing unit tests (source-net, component-derived w/ provenance, indeterminate, gross regression)**
 
-Add to `tests/finance/test_explanations.py` (reuse this file's `revenue_fact` / `manual_override` fixtures; add small `deduction_component` / `allocation_line` builders mirroring `tests/finance/test_net_revenue_account_allocations.py`):
+Edit `tests/finance/test_explanations.py` (already imports `Decimal`, `pytest`, `NumberExplanationValidationError`, `build_channel_month_revenue_explanation`, `RevenueFactEntry`). Prep: add the `AllocationLine`/`DeductionComponent` imports, **extend** the existing `revenue_fact` fixture (it hardcodes `net_revenue_usd=None` at ≈line 66) to thread an optional net, and add `deduction_component`/`allocation_line` builders at module level above the tests:
 
 ```python
 import pytest
 
+from ums_smart_revenue.finance.allocation import AllocationLine
+from ums_smart_revenue.finance.deduction_components import DeductionComponent
 from ums_smart_revenue.finance.explanations import (
     NET_REVENUE_METRIC,
     NumberExplanationValidationError,
     build_channel_month_revenue_explanation,
 )
+
+
+# Extend the file's existing revenue_fact (currently hardcodes net_revenue_usd=None)
+# to thread an optional net value; Decimal + RevenueFactEntry are already imported.
+def revenue_fact(*, source_kind, gross_revenue_usd, confidence_score="0.9800",
+                 month="2026-03", youtube_channel_id="channel-tv-a",
+                 source_report_id=None, net_revenue_usd: str | None = None):
+    return RevenueFactEntry(
+        id=f"fact-{source_kind}", month=month, youtube_channel_id=youtube_channel_id,
+        source_kind=source_kind,
+        source_report_id=source_report_id or f"report-{source_kind}",
+        gross_revenue_usd=Decimal(gross_revenue_usd),
+        net_revenue_usd=(Decimal(net_revenue_usd) if net_revenue_usd is not None else None),
+        views=0, watch_time_minutes=Decimal("0"),
+        confidence_score=Decimal(confidence_score), imported_by=None,
+    )
+
+
+def deduction_component(*, component_key, amount_usd, component_kind="TAX",
+                        source_system="adsense_management",
+                        scope_id="channel-tv-a", month="2026-03"):
+    return DeductionComponent(
+        id=f"dc-{component_key}", month=month, component_kind=component_kind,
+        scope_kind="CHANNEL", scope_id=scope_id, amount_usd=Decimal(amount_usd),
+        amount_native=None, currency_code="USD", source_system=source_system,
+        source_table="deduction_components", source_id=None, source_key=None,
+        source_report_id=None, raw_payload={}, component_key=component_key,
+    )
+
+
+def allocation_line(*, component_key, allocated_amount_usd, adsense_account_id="pub-1",
+                    youtube_channel_id="channel-tv-a", component_kind="DEDUCTION",
+                    source_system="adsense_management", basis_source_kind="ADSENSE",
+                    basis_share="0.5", net_applicable=True):
+    return AllocationLine(
+        adsense_account_id=adsense_account_id, youtube_channel_id=youtube_channel_id,
+        component_kind=component_kind, source_system=source_system,
+        component_key=component_key, basis_source_kind=basis_source_kind,
+        basis_gross_usd=Decimal("1000.000000"), basis_share=Decimal(basis_share),
+        allocated_amount_usd=Decimal(allocated_amount_usd), net_applicable=net_applicable,
+    )
 
 
 def test_net_explanation_source_net_path_single_source_deduction_component():
@@ -335,13 +347,12 @@ def test_net_explanation_source_net_path_single_source_deduction_component():
     src = next(c for c in entry.components if c["key"] == "source_reported_deduction_usd")
     assert src["value"] == "100"  # 1000 - 900
     assert src["source_kind"] == "YOUTUBE_CMS"
+    baseline = next(c for c in entry.components if c["key"] == "baseline_gross_revenue_usd")
+    assert baseline["source_report_id"] == "report-YOUTUBE_CMS"  # §5.5 parity with gross
 
 
 def test_net_explanation_component_derived_path_with_full_provenance_and_sum_identity():
-    components = [deduction_component(component_key="cd-1", scope_kind="CHANNEL",
-                                      scope_id="channel-tv-a", month="2026-03",
-                                      component_kind="TAX",
-                                      source_system="adsense_management",
+    components = [deduction_component(component_key="cd-1", component_kind="TAX",
                                       amount_usd="30.00")]
     allocations = [allocation_line(component_key="acct-1",
                                    youtube_channel_id="channel-tv-a",
@@ -410,7 +421,7 @@ def test_gross_metric_unchanged_when_net_params_omitted():
     assert [c["key"] for c in entry.components][0] == "baseline_gross_revenue_usd"
 ```
 
-Match `revenue_fact` / `deduction_component` / `allocation_line` builder kwargs to the real fixtures; `revenue_fact` must support `net_revenue_usd=None` default (source-net vs missing).
+All builders above match the verified `RevenueFactEntry` / `DeductionComponent` / `AllocationLine` field names; `revenue_fact` is the file's existing fixture extended in-place to accept `net_revenue_usd`.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -502,13 +513,18 @@ def _build_net_revenue_explanation(
             f"net_revenue_usd is indeterminate for {youtube_channel_id} in {month} "
             f"(status {summary.status}); no net explanation is emitted."
         )
+    # Determinate net implies facts present, so _primary_fact is non-None here; it
+    # carries source_report_id (the summary exposes only primary_source_kind), which
+    # the baseline component must include per spec §5.5 (parity with the gross path).
+    primary_fact = _primary_fact(facts)
 
     components: list[dict[str, object]] = [
         {
             "key": "baseline_gross_revenue_usd",
             "label": "Baseline gross revenue",
             "value": _decimal_to_api(summary.baseline_gross_revenue_usd),
-            "source_kind": summary.primary_source_kind,
+            "source_kind": primary_fact.source_kind,
+            "source_report_id": primary_fact.source_report_id,
         },
         {
             "key": "approved_manual_override_total_usd",
@@ -583,7 +599,7 @@ def _build_net_revenue_explanation(
         )
 
     warnings: list[dict[str, object]] = [
-        {"code": issue.get("issue_type", "ISSUE"), "message": issue.get("detail", "")}
+        {"code": issue.get("issue_type", "ISSUE"), "message": issue.get("message", "")}
         for issue in summary.issues
     ]
     if summary.pending_manual_override_count:
@@ -609,7 +625,7 @@ def _build_net_revenue_explanation(
     )
 ```
 
-Adjust the `issues` warning mapping to the real `issues` dict keys confirmed in Step 0 (the summary `issues` entries use `issue_type` / `severity` / a message key — match them exactly; do not invent keys).
+The net-revenue summary `issues` entries use keys `issue_type` / `severity` / `message` (verified `net_revenue.py:285-290`); the mapping above reads `issue_type` and `message`. Persisted (B_RECONCILED/D_ESTIMATED) summaries carry `issues=[]`, so this mapping is defensive — do not invent keys.
 
 - [ ] **Step 4: Run to verify it passes**
 
@@ -715,7 +731,7 @@ def test_net_revenue_explanation_idempotent_upsert_coexists_with_gross(tmp_path)
     assert metrics == ["adjusted_gross_revenue_usd", "net_revenue_usd"]
 ```
 
-Implement `_finance_month_net_principal()` (a `UserPrincipal` with `VIEW_REVENUE`/`VIEW_CONFIDENCE@channel("channel-tv-a")` + `VIEW_FINALIZED_PAYMENTS@finance_month("2026-03")`) and `_post_net_explain(...)` (installs the principal via `app.dependency_overrides[current_principal_from_headers]` then POSTs `?metric=net_revenue_usd`), mirroring `test_net_revenue_api.py`. Then **fix** `test_revenue_explanation_rejects_unsupported_metric` (line ≈202) to use a genuinely-unsupported metric such as `"bogus_metric"` (NOT `net_revenue_usd`, which is now supported) and assert 422.
+Implement `_finance_month_net_principal()` — a `UserPrincipal` with `VIEW_REVENUE` + `VIEW_CONFIDENCE` at **`AccessScope.global_scope()`** (global org-read, so it authorizes ANY channel including `channel-with-no-facts`, letting that test reach the `422` instead of a `403`) plus `VIEW_FINALIZED_PAYMENTS` at `AccessScope.finance_month("2026-03")` — and `_post_net_explain(client, *, channel, month, principal)` (installs the principal via `app.dependency_overrides[current_principal_from_headers] = lambda: principal` then POSTs `?metric=net_revenue_usd`; clears the override after), mirroring `test_net_revenue_api.py`. NOTE: the org-scoped-403 boundary test deliberately does NOT use this helper — it uses `auth_headers("finance_viewer", scope_id=str(COMPANY_ID))` so the company-scoped role grant fails `VIEW_FINALIZED_PAYMENTS@finance_month`. Then **fix** `test_revenue_explanation_rejects_unsupported_metric` (line ≈202) to use a genuinely-unsupported metric such as `"bogus_metric"` (NOT `net_revenue_usd`, which is now supported) and assert 422.
 
 - [ ] **Step 2: Run to verify they fail**
 
@@ -801,8 +817,8 @@ Pass them through (the gross path leaves them empty so the call is unchanged in 
             sink=audit_sink,
             actor=user,
             event_type=AuditEventType.PAYMENT_VIEWED,
-            entity_type="number_explanation",
-            entity_id=f"{channel_id}:{month}:{metric}",
+            entity_type="finance_month",
+            entity_id=month,
             scope=AccessScope.finance_month(month),
             details={"metric": metric},
         )
@@ -827,7 +843,22 @@ Pass them through (the gross path leaves them empty so the call is unchanged in 
     return response
 ```
 
-Add module imports if missing: `NET_REVENUE_METRIC` from `finance.explanations`, `DeductionComponent`, `AllocationLine`.
+5. Extend the existing 422 `except` tuple (≈1371-1375) to also catch `DeductionComponentValidationError` (already imported in `revenue.py:43`), because the net-metric input gathering inside the `try` (`list_month_components` / `compute_month_account_allocation`) can raise it on a malformed month — mirroring the net route's catch (`revenue.py:1152-1155`). It must remain inside the same `try` that wraps the input gathering and the builder call:
+
+```python
+    except (
+        DeductionComponentValidationError,
+        ManualOverrideValidationError,
+        NumberExplanationValidationError,
+        RevenueFactValidationError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+```
+
+Add module imports if missing: `NET_REVENUE_METRIC` from `finance.explanations`, `DeductionComponent`, `AllocationLine`. `DeductionComponentValidationError` is already imported (`:43`).
 
 - [ ] **Step 4: Run to verify they pass**
 
@@ -869,7 +900,7 @@ git commit -m "docs(plan): mark Phase 4 Spec 2b PR-3 (net-revenue explanation) s
 
 ## Final validation gate (run before any push/PR — operator-gated)
 
-- [ ] `python -m ruff check backend tests`
+- [ ] `python -m ruff check backend tests scripts`
 - [ ] `python -m pytest -q` with `UMS_TEST_DATABASE_URL` (Postgres container) set — 0 failed, 0 errors.
 - [ ] `git diff --check`
 - [ ] `git log --format='%(trailers)' origin/main..HEAD` empty (no Co-Authored-By / Claude trailers on any commit).

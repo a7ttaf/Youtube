@@ -422,7 +422,7 @@ Not changed:
 
 ## 10. Validation gate
 
-- `python -m ruff check backend tests`
+- `python -m ruff check backend tests scripts`
 - `pytest -q` (with `UMS_TEST_DATABASE_URL` Postgres container)
 - targeted: `tests/finance/test_*explanation*` (new), `tests/api/test_net_revenue_api.py`,
   explain endpoint tests
