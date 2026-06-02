@@ -106,6 +106,22 @@ def test_commit_version_check_rejects_zero(tmp_path):
         session.commit()
 
 
+def test_idempotency_key_nonempty_check_rejects_empty(tmp_path):
+    """idempotency_key DB-level nonempty CHECK rejects "" (independent of Pydantic 422)."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session, pytest.raises(IntegrityError):
+        session.add(_run(idempotency_key=""))
+        session.commit()
+
+
+def test_reason_nonempty_check_rejects_empty(tmp_path):
+    """reason DB-level nonempty CHECK rejects "" (independent of Pydantic 422)."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session, pytest.raises(IntegrityError):
+        session.add(_run(reason=""))
+        session.commit()
+
+
 def test_month_format_check_rejects_bad_month(tmp_path):
     """month CHECK rejects malformed YYYY-MM."""
     engine = _engine(tmp_path)
@@ -168,3 +184,43 @@ def test_line_run_fk_cascade_delete(tmp_path):
         )
         session.commit()
         assert session.query(CommittedAllocationLineORM).count() == 0
+
+
+def test_all_children_cascade_on_run_delete(tmp_path):
+    """Deleting a run cascades to ALL three children (lines + notes + unallocated).
+
+    The line-only cascade is covered above; this pins the notes and unallocated
+    FK ondelete=CASCADE behaviorally too, so no orphan snapshot child survives a
+    run delete. Uses the same UUID-safe ORM delete (raw str(run_id) matches zero
+    rows on SQLite's dashless hex UUID storage — see the line-cascade FIX note).
+    """
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        run = _run()
+        session.add(run)
+        session.flush()
+        run_id = run.id
+        session.add(CommittedAllocationLineORM(
+            run_id=run_id, adsense_account_id="pub-1", youtube_channel_id="chA",
+            component_kind="DEDUCTION", source_system="adsense_management",
+            component_key="k1", basis_source_kind="ADSENSE",
+            basis_gross_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
+            allocated_amount_usd=Decimal("100.000000"), net_applicable=True,
+        ))
+        session.add(CommittedAllocationNoteORM(
+            run_id=run_id, note_code="CHANNEL_IN_MULTIPLE_ACCOUNTS",
+            youtube_channel_id="chA", detail="x",
+        ))
+        session.add(CommittedAllocationUnallocatedORM(
+            run_id=run_id, scope_id="chA", component_kind="DEDUCTION",
+            component_key="k1", amount_usd=Decimal("0"),
+            issue_code="UNALLOCATED", detail="x",
+        ))
+        session.commit()
+        session.query(CommittedAllocationRunORM).filter_by(id=run_id).delete(
+            synchronize_session=False
+        )
+        session.commit()
+        assert session.query(CommittedAllocationLineORM).count() == 0
+        assert session.query(CommittedAllocationNoteORM).count() == 0
+        assert session.query(CommittedAllocationUnallocatedORM).count() == 0
