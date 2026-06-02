@@ -1,6 +1,6 @@
 # Spec 2b — Export Deduction Breakdown Columns (Design)
 
-**Status:** In review — 2026-06-02 (not yet approved for planning)
+**Status:** Shipped — 2026-06-02 (PR `#61`, Spec 2b PR-4)
 **Branch:** `spec/export-deduction-breakdown` (off `main` `3d1916c` = Spec 2b PR-3 merged, #60)
 **Phase:** 4, Spec 2b (allocation engine), the read-surface follow-up after PR-1 (compute+read), PR-2 (net-revenue integration), PR-3 (net-revenue explanation).
 
