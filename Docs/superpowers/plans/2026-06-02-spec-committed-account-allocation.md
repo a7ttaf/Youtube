@@ -328,22 +328,22 @@ class CommittedAllocationRunORM(FinanceBase):
         CheckConstraint(
             "allocated_total_usd > '-Infinity'::numeric "
             "AND allocated_total_usd < 'Infinity'::numeric",
-            name="ck_committed_allocation_runs_allocated_total_finite",
+            name="ck_committed_allocation_runs_allocated_total_usd_finite",
         ).ddl_if(dialect="postgresql"),
         CheckConstraint(
             "unallocated_total_usd > '-Infinity'::numeric "
             "AND unallocated_total_usd < 'Infinity'::numeric",
-            name="ck_committed_allocation_runs_unallocated_total_finite",
+            name="ck_committed_allocation_runs_unallocated_total_usd_finite",
         ).ddl_if(dialect="postgresql"),
         CheckConstraint(
             "net_applicable_total_usd > '-Infinity'::numeric "
             "AND net_applicable_total_usd < 'Infinity'::numeric",
-            name="ck_committed_allocation_runs_net_applicable_total_finite",
+            name="ck_committed_allocation_runs_net_applicable_total_usd_finite",
         ).ddl_if(dialect="postgresql"),
         CheckConstraint(
             "reconciliation_total_usd > '-Infinity'::numeric "
             "AND reconciliation_total_usd < 'Infinity'::numeric",
-            name="ck_committed_allocation_runs_reconciliation_total_finite",
+            name="ck_committed_allocation_runs_reconciliation_total_usd_finite",
         ).ddl_if(dialect="postgresql"),
         Index("ix_committed_allocation_runs_tenant_month", "tenant_id", "month"),
     )
