@@ -1,4 +1,12 @@
-"""Create committed account-allocation snapshot tables (Phase 4 Spec 2b)."""
+"""Create committed account-allocation snapshot tables (Phase 4 Spec 2b).
+
+Revision ID: 20260602_0001
+Revises: 20260531_0001
+Create Date: 2026-06-02
+
+Spec: Docs/superpowers/specs/2026-06-02-spec-committed-account-allocation-design.md
+"""
+
 import sqlalchemy as sa
 from alembic import op
 
@@ -15,6 +23,22 @@ def _finite(column: str) -> str:
     return f"{column} > '-Infinity'::numeric AND {column} < 'Infinity'::numeric"
 
 
+# ============================================================================
+# Purpose: Create the four committed-allocation snapshot tables that persist a
+#   committed account-allocation run (runs header + lines + unallocated +
+#   notes) as an immutable point-in-time record.
+# Database/ORM: committed_allocation_runs / committed_allocation_lines /
+#   committed_allocation_unallocated / committed_allocation_notes
+#   (CommittedAllocation* ORM in finance_models.py).
+# Standards: finite NUMERIC CHECKs are Postgres-only (dialect guard), mirroring
+#   deduction_components / finance_models.py .ddl_if(dialect="postgresql").
+#   Downgrade drops indexes then tables (children before parent).
+# Blast Radius: Finance write -- 4 new committed-allocation snapshot tables,
+#   additive. No reader/auth/Neo4j schema impact. PostgreSQL source of truth.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/finance_models.py -> ORM contract.
+#   - File: Docs/superpowers/specs/2026-06-02-spec-committed-account-allocation-design.md
+# ============================================================================
 def upgrade() -> None:
     """Create the four committed-allocation tables with constraints + indexes."""
     op.create_table(
@@ -156,8 +180,28 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the four tables (children first for FK safety)."""
+    """Drop the four tables and their indexes (children first for FK safety)."""
+    op.drop_index(
+        "ix_committed_allocation_notes_run",
+        table_name="committed_allocation_notes",
+    )
     op.drop_table("committed_allocation_notes")
+    op.drop_index(
+        "ix_committed_allocation_unallocated_run",
+        table_name="committed_allocation_unallocated",
+    )
     op.drop_table("committed_allocation_unallocated")
+    op.drop_index(
+        "ix_committed_allocation_lines_run_channel",
+        table_name="committed_allocation_lines",
+    )
+    op.drop_index(
+        "ix_committed_allocation_lines_run",
+        table_name="committed_allocation_lines",
+    )
     op.drop_table("committed_allocation_lines")
+    op.drop_index(
+        "ix_committed_allocation_runs_tenant_month",
+        table_name="committed_allocation_runs",
+    )
     op.drop_table("committed_allocation_runs")
