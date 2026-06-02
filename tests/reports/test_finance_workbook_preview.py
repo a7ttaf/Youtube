@@ -47,16 +47,16 @@ def test_finance_workbook_preview_builds_sheet_manifest_from_source_summaries():
     # dedicated Deductions sheet.
     sheet_sources = {sheet["name"]: sheet["source"] for sheet in payload["sheets"]}
     assert sheet_sources["Deductions"] == (
-        "source_net_revenue_manual_overrides_and_account_allocations"
+        "source_net_revenue_manual_overrides_deduction_components_and_account_allocations"
     )
     assert sheet_sources["Channel Breakdown"] == (
-        "monthly_revenue_facts_and_account_allocations"
+        "monthly_revenue_facts_deduction_components_and_account_allocations"
     )
     assert sheet_sources["Company Breakdown"] == (
-        "monthly_revenue_facts_and_account_allocations"
+        "monthly_revenue_facts_deduction_components_and_account_allocations"
     )
     assert sheet_sources["Sector Breakdown"] == (
-        "channel_registry_revenue_facts_and_account_allocations"
+        "channel_registry_revenue_facts_deduction_components_and_account_allocations"
     )
     assert payload["executive_summary"] == {
         "month": "2026-03",

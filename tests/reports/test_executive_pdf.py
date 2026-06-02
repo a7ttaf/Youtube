@@ -50,10 +50,10 @@ def test_executive_pdf_report_builds_section_manifest_from_source_summaries():
         section["name"]: section["source"] for section in payload["sections"]
     }
     assert section_sources["Deductions Explanation"] == (
-        "source_net_revenue_manual_overrides_and_account_allocations"
+        "source_net_revenue_manual_overrides_deduction_components_and_account_allocations"
     )
     assert section_sources["Gross vs Net Revenue"] == (
-        "monthly_revenue_facts_manual_overrides_and_account_allocations"
+        "monthly_revenue_facts_manual_overrides_deduction_components_and_account_allocations"
     )
     assert payload["executive_summary"]["total_net_revenue_usd"] == "930"
     assert payload["executive_summary"]["payment_match_status"] == "PAYMENT_MATCHED"

@@ -44,7 +44,7 @@ def test_branded_slide_pack_report_builds_planned_slide_manifest():
     # account-allocation inputs.
     slide_sources = {slide["name"]: slide["source"] for slide in payload["slides"]}
     assert slide_sources["Revenue deduction explanation"] == (
-        "source_net_revenue_manual_overrides_and_account_allocations"
+        "source_net_revenue_manual_overrides_deduction_components_and_account_allocations"
     )
     assert payload["executive_summary"]["total_net_revenue_usd"] == "930"
     assert payload["executive_summary"]["payment_match_status"] == "PAYMENT_MATCHED"
@@ -306,18 +306,23 @@ def test_branded_slide_pack_renders_deduction_breakdown_bullets():
         bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
         smart_alerts=_smart_alert_summary(),
     )
-    combined_text = "\n".join(
-        _slide_texts(Presentation(BytesIO(build_branded_slide_pack_pptx(report))))
+    slide_texts = _slide_texts(
+        Presentation(BytesIO(build_branded_slide_pack_pptx(report)))
     )
+    combined_text = "\n".join(slide_texts)
+    deduction_slide_text = slide_texts[
+        BRANDED_SLIDE_NAMES.index("Revenue deduction explanation")
+    ]
 
     assert "Total deduction amount USD: 130" in combined_text
     assert "Channel-direct deduction USD: 30" in combined_text
     assert "Account-allocated deduction USD: 100" in combined_text
-    # Provenance accuracy: the slide must attribute each split portion to its
-    # true source — channel-direct to channel-level deduction components,
-    # account-allocated to account-level deduction allocations.
-    assert "channel-level deduction components" in combined_text
-    assert "account-level deduction allocations" in combined_text
+    # Provenance accuracy: assert against the specific deduction slide so the
+    # test fails if the wording moves off the intended slide. Channel-direct is
+    # sourced from channel-level deduction components, account-allocated from
+    # account-level deduction allocations.
+    assert "channel-level deduction components" in deduction_slide_text
+    assert "account-level deduction allocations" in deduction_slide_text
 
     payload = report.to_api()
     assert payload["executive_summary"]["total_channel_direct_deduction_amount_usd"] == "30"

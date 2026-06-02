@@ -36,7 +36,7 @@ _SLIDE_SOURCES = {
     "Sector comparison": "channel_registry_and_revenue_facts",
     "Company comparison": "channel_registry_and_revenue_facts",
     "Channel ranking": "monthly_revenue_facts",
-    "Revenue deduction explanation": "source_net_revenue_manual_overrides_and_account_allocations",
+    "Revenue deduction explanation": "source_net_revenue_manual_overrides_deduction_components_and_account_allocations",
     "Payment gap analysis": "adsense_payments_and_bank_reconciliation",
     "Outside-CMS issues": "channel_registry_and_smart_alerts",
     "Action items": "smart_alerts_and_reconciliation_status",
