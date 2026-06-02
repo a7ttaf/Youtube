@@ -45,13 +45,14 @@ Persist a durable, **versioned, audited snapshot** of the existing `gross_revenu
 
 ## 4. Architecture
 
-Thin route → service/repository. The commit endpoint:
-1. Validates the month + permissions.
-2. **Computes** the allocation live via `compute_month_account_allocation` (server-side — the client never supplies financial results).
-3. **Validates** the result (method, no-unallocated) — §8.
-4. **Persists** an append-only versioned run (header + lines + unallocated + notes) under the finance-month advisory lock, with idempotency-key dedup — §6, §7.
-5. **Audits** `ALLOCATION_COMMITTED` (summary-only) — §9.
-6. Returns the committed run.
+Thin route → repository. The commit endpoint, in order:
+1. Validates the month, then the permissions (§9).
+2. Opens one transaction and **acquires the finance-month advisory lock + close-row `FOR UPDATE`, held throughout** (§7).
+3. **Idempotency lookup** (§7) — replays an existing run (200) if the month-scoped key matches the same request.
+4. Open-month check, then **computes** the allocation **under the held lock** via `compute_month_account_allocation` (server-side — the client never supplies financial results), so inputs cannot change between compute and persist.
+5. **Validates** the computed result (method, reject-on-unallocated) — §8.
+6. **Persists** an append-only versioned run (header + lines + unallocated + notes), **audits** `ALLOCATION_COMMITTED` (summary-only, §9), and commits the transaction (releasing the lock).
+7. Returns the committed run (201) — or the replayed run (200).
 
 Readers are untouched (§2). The committed tables exist but drive no number this PR.
 
@@ -90,7 +91,7 @@ One migration, mirroring the `20260531_0001` / `20260529_0002` patterns (UUID PK
 
 Constraints/indexes:
 - `UniqueConstraint(tenant_id, month, commit_version)` → `uq_committed_allocation_runs_version` (one row per version).
-- `UniqueConstraint(tenant_id, idempotency_key)` → `uq_committed_allocation_runs_idempotency` (the idempotency guard — §7).
+- `UniqueConstraint(tenant_id, month, idempotency_key)` → `uq_committed_allocation_runs_idempotency` (the idempotency guard — §7; **month-scoped**, so the same key may be reused for a different month).
 - `Index(tenant_id, month)` → `ix_committed_allocation_runs_tenant_month` (latest-version lookup).
 - PG-only finite CHECKs on the four `*_total_usd` columns (`.ddl_if`/dialect guard).
 
@@ -107,10 +108,10 @@ Constraints/indexes:
 
 ## 7. Idempotency & versioning (RISK #1 — fingerprint contents)
 
-- **Versioned, append-only.** Each intentional commit for `(tenant_id, month)` gets `commit_version = max(existing) + 1`, computed **under the finance-month advisory lock** (`acquire_finance_month_advisory_lock`) + `SELECT ... FOR UPDATE` so two concurrent commits serialize (one gets vN, the other vN+1; no lost update). The **current** snapshot is the highest `commit_version`. Prior versions are retained (full audit trail). No content-dedup — an intentional re-commit with a new key is a real new version even if the numbers are identical.
-- **`idempotency_key`** is client-generated, **required** on the request, unique per `(tenant_id, idempotency_key)`. It is the HTTP-retry guard (the repo has `request_id` plumbing but no general server idempotency store, so the run table is the guard).
+- **Versioned, append-only.** Each intentional commit for `(tenant_id, month)` gets `commit_version = max(existing) + 1`. The finance-month advisory lock (`acquire_finance_month_advisory_lock`) + `SELECT ... FOR UPDATE` on the close row are acquired **first and held for the entire commit transaction** — across the idempotency lookup, the open-month check, the **compute** (`compute_month_account_allocation`), the unallocated/method validation, the row inserts, and the version assignment — so two concurrent commits serialize (one gets vN, the other vN+1; no lost update) **and the computed inputs cannot change between compute and persist**. The **current** snapshot is the highest `commit_version`. Prior versions are retained (full audit trail). No content-dedup — an intentional re-commit with a new key is a real new version even if the numbers are identical.
+- **`idempotency_key`** is client-generated, **required** on the request, unique per **`(tenant_id, month, idempotency_key)`** — month-scoped, so the same key reused for a *different* month is a distinct, allowed commit. It is the HTTP-retry guard (the repo has `request_id` plumbing but no general server idempotency store, so the run table is the guard).
 - **`request_fingerprint`** = a stable `blake2b(..., digest_size=16)` hex digest of the **canonicalized request payload** — exactly the client-controlled fields that define *what* is being committed: **`month` + `allocation_method` + `reason`** (sorted-key JSON, then hashed). It does **not** include the computed result (the key dedups the request, not the data state).
-- **Retry semantics** (matched on `(tenant_id, idempotency_key)`):
+- **Retry semantics** (matched on `(tenant_id, month, idempotency_key)`):
   - **No existing key** → compute + validate + persist new version → **201**.
   - **Existing key, same `request_fingerprint`** → return the existing run, **no recompute, no new rows, no second `ALLOCATION_COMMITTED` audit** → **200**.
   - **Existing key, different `request_fingerprint`** (key reused for a different month/method/reason) → **409**.
@@ -118,14 +119,15 @@ Constraints/indexes:
 
 ## 8. Validation gates & failure modes (RISK #2 — exact response shapes)
 
-Order inside the endpoint (after permission checks):
-1. `_validate_month(month)` malformed → **422** `{"detail": "..."}`.
-2. Acquire the finance-month advisory lock + load the close row `for_update` (serializes concurrent same-month / same-key commits).
-3. **Idempotency lookup** (§7), matched on `(tenant_id, idempotency_key)`: same-key + same `request_fingerprint` → **200** (return the existing run; no recompute, no new rows, no new audit) — **this succeeds even if the month is now LOCKED**, since it replays a prior commit; same-key + different `request_fingerprint` → **409** `{"detail": "idempotency key reused with a different request"}`.
-4. **(New commit only)** if `status == "LOCKED"` → **409** `{"detail": "Finance month is locked: <month>"}` (mirrors `record_allocation_rule`'s LOCKED→409).
-5. `allocation_method` (request, default `gross_revenue_proportional`) not `gross_revenue_proportional` → **422** `{"detail": "unsupported allocation method: <m>"}` (hard-fail, never silently persist a no-op method).
-6. Compute via `compute_month_account_allocation`. If `result.unallocated` is non-empty → **422** `{"detail": "cannot commit: <n> unallocated component(s)"}` (reject-on-unallocated; no draft state in v1).
-7. Persist run vN + children, emit audit → **201**.
+Order inside the endpoint:
+1. `_validate_month(month)` — malformed → **422** `{"detail": "..."}` — runs **first, before building scopes** (matches the existing `/allocate` route convention).
+2. **Permission checks** (§9): `VIEW_REVENUE@global` + `VIEW_FINALIZED_PAYMENTS@finance_month(month)` + `CHANGE_ALLOCATION_RULE@finance_month(month)`; missing any → **403**.
+3. Open one commit transaction and **acquire the finance-month advisory lock + load the close row `for_update`, held through steps 4–8** (§7; serializes concurrent same-month / same-key commits).
+4. **Idempotency lookup** (§7), matched on `(tenant_id, month, idempotency_key)`: same-key + same `request_fingerprint` → **200** (return the existing run; no recompute, no new rows, no new audit) — **this succeeds even if the month is now LOCKED**, since it replays a prior commit; same-key + different `request_fingerprint` → **409** `{"detail": "idempotency key reused with a different request"}`.
+5. **(New commit only)** if `status == "LOCKED"` → **409** `{"detail": "Finance month is locked: <month>"}` (mirrors `record_allocation_rule`'s LOCKED→409).
+6. `allocation_method` (request, default `gross_revenue_proportional`) not `gross_revenue_proportional` → **422** `{"detail": "unsupported allocation method: <m>"}` (hard-fail, never silently persist a no-op method).
+7. **Compute** via `compute_month_account_allocation` **under the held lock**. If `result.unallocated` is non-empty → **422** `{"detail": "cannot commit: <n> unallocated component(s)"}` (reject-on-unallocated; no draft state in v1).
+8. Persist run vN + children, then emit the `ALLOCATION_COMMITTED` audit, and commit the transaction → **201**.
 
 **Request body** `CommitAllocationRequest`: `{ "idempotency_key": str (required, non-empty), "reason": str (required, non-empty), "allocation_method": str = "gross_revenue_proportional" }`.
 
@@ -163,8 +165,8 @@ Order inside the endpoint (after permission checks):
 
 - **`backend/ums_smart_revenue/db/finance_models.py`** — four ORM models (§6), `FinanceBase`, mirroring the `DeductionComponentORM` / link-table conventions incl. `.ddl_if(dialect="postgresql")` CHECKs and the contract-block comment header.
 - **`backend/ums_smart_revenue/db/alembic/versions/<rev>_committed_account_allocation.py`** — the migration (§6), dialect-guarded PG-only CHECKs, `down_revision` = the current Alembic head (confirm at plan time; §14).
-- **`backend/ums_smart_revenue/finance/committed_allocation.py`** — `SqlAlchemyCommittedAllocationRepository` with `commit_allocation(*, month, result, allocation_method, idempotency_key, request_fingerprint, reason, committed_by) -> CommittedAllocationRun` (acquires advisory lock, OPEN-month guard, idempotency lookup, `commit_version = max+1`, inserts run+children in one transaction) + read helpers `get_latest_run(month)` / `get_run_by_idempotency_key(key)` (used by the endpoint's idempotency branch; NOT wired into net-revenue/exports). Typed errors: `CommittedAllocationLockedMonthError` (→409), `CommittedAllocationIdempotencyConflictError` (→409), `CommittedAllocationValidationError` (→422).
-- **`backend/ums_smart_revenue/api/allocation.py`** — add the `POST /revenue/months/{month}/account-allocations/commit` route to the existing allocation router (sibling of the read route), with the auth (§9), the validation order (§8), the `request_fingerprint` computation, the compute call, the repo call, the audit, and the typed response.
+- **`backend/ums_smart_revenue/finance/committed_allocation.py`** — `SqlAlchemyCommittedAllocationRepository` with `commit_allocation(*, month, allocation_method, idempotency_key, request_fingerprint, reason, committed_by, deduction_repository, revenue_repository, link_repository) -> CommitAllocationOutcome`. It does **not** accept a pre-computed result; it owns the whole locked unit on its own session: acquire the finance-month advisory lock + close-row `FOR UPDATE` → idempotency lookup (same fingerprint → return existing run as a *replay*; different fingerprint → conflict error) → OPEN-month guard → **call `compute_month_account_allocation(month, deduction_repository, revenue_repository, link_repository)` under the held lock** (the compute repos share the same session, so the lock protects the reads) → validate method + reject-on-unallocated → `commit_version = max+1` → insert run+children — all in one transaction (the `pg_advisory_xact_lock` is transaction-scoped, so it is held through persist and the route's audit). Returns a `CommitAllocationOutcome` carrying the run **plus a `created` flag** (so the route emits the audit only for a fresh commit, not a replay). Read helpers: `get_latest_run(month)` / `get_run_by_idempotency_key(month, idempotency_key)` — NOT wired into net-revenue/exports. Typed errors: `CommittedAllocationLockedMonthError` (→409), `CommittedAllocationIdempotencyConflictError` (→409), `CommittedAllocationValidationError` (→422, for unsupported method / unallocated present).
+- **`backend/ums_smart_revenue/api/allocation.py`** — add the `POST /revenue/months/{month}/account-allocations/commit` route to the existing allocation router (sibling of the read route): `_validate_month` → the three permission checks (§9) → compute the `request_fingerprint` → call `repository.commit_allocation(...)` (which computes under the held lock) → translate its typed errors to 409/422 → emit the `ALLOCATION_COMMITTED` audit only when the outcome's `created` flag is true (replays return **200** with `audit_event: null`) → return the typed response (§8). The route does **not** call `compute_month_account_allocation` itself — the compute is inside the locked repository unit.
 
 ## 11. Testing (RISK #4 — migration tests: Postgres constraints + SQLite compatibility)
 
@@ -173,9 +175,9 @@ Follow the established split (`tests/db/test_deduction_components_migration_post
 - **Postgres migration tests** (`tests/db/test_committed_allocation_migration_postgres.py`, `require_postgres_url()` + `fresh_engine` DROP/CREATE `public` + `command.upgrade(cfg, "head")`):
   - inspect all four tables' columns, FKs (the tenant FK `fk_committed_allocation_runs_tenant` → `tenants(id)` on the **runs** table only; the `run_id` FK → `committed_allocation_runs(id)` on each of the three child tables), unique constraints (`uq_committed_allocation_runs_version`, `uq_committed_allocation_runs_idempotency`), CHECKs (month format, method, `commit_version>=1`, finite amounts), and indexes.
   - round-trip `upgrade head → downgrade <prev> → upgrade head`.
-  - `IntegrityError` on: duplicate `(tenant_id, month, commit_version)`; duplicate `(tenant_id, idempotency_key)`; orphan tenant; malformed month; non-`gross_revenue_proportional` method (CHECK); and **`run_id` FK CASCADE** (deleting a run removes its lines/unallocated/notes).
+  - `IntegrityError` on: duplicate `(tenant_id, month, commit_version)`; duplicate `(tenant_id, month, idempotency_key)` — **and a positive case that the same `idempotency_key` in a *different* month inserts cleanly**; orphan tenant; malformed month; non-`gross_revenue_proportional` method (CHECK); and **`run_id` FK CASCADE** (deleting a run removes its lines/unallocated/notes).
 - **SQLite model tests** (`tests/db/test_committed_allocation_models.py`, in-memory `create_all`, `PRAGMA foreign_keys=ON` for the FK-cascade assertion): insert run + lines + notes; portable CHECK violations (month format, method, `commit_version>=1`, non-empty reason) raise `IntegrityError`. Note in a comment that the PG-only finite-amount CHECKs are **not** enforced on SQLite (by design).
-- **Repository tests** (`tests/finance/test_committed_allocation.py`): version increments (v1, v2); idempotency (same key+fingerprint → same run, no new row; same key+different fingerprint → conflict error); OPEN-month guard (LOCKED → `CommittedAllocationLockedMonthError`); reject-on-unallocated; method hard-fail; advisory-lock no-op on SQLite still produces correct versions.
+- **Repository tests** (`tests/finance/test_committed_allocation.py`): version increments (v1, v2); idempotency (same key+fingerprint → same run, no new row, `created=False`; same key+different fingerprint → conflict error; **same key in a different month → distinct run, allowed**); compute-under-lock (the result is computed inside `commit_allocation`, not passed in); OPEN-month guard (LOCKED → `CommittedAllocationLockedMonthError`); reject-on-unallocated; method hard-fail; advisory-lock no-op on SQLite still produces correct versions.
 - **API tests** (`tests/api/test_committed_allocation_api.py`): **201** happy path + `ALLOCATION_COMMITTED` audit (summary-only, reason present); **200** idempotent replay (identical body, **no second audit**, same `run_id`); **409** locked month; **409** idempotency conflict; **422** unallocated present; **422** malformed month; **422** unsupported method; **403** for each missing gate (no `CHANGE_ALLOCATION_RULE`; no `VIEW_REVENUE`; no `VIEW_FINALIZED_PAYMENTS`).
 - **Reader-untouched regression** (`tests/api/test_committed_allocation_api.py` or net-revenue test): assert the net-revenue endpoint response is **byte-identical before and after a commit** for the same month — proving no read-switch leaked in.
 
