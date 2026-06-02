@@ -42,14 +42,18 @@ def test_executive_pdf_report_builds_section_manifest_from_source_summaries():
     assert [section["name"] for section in payload["sections"]] == list(
         EXECUTIVE_PDF_SECTION_NAMES
     )
-    # Provenance: the Deductions Explanation section now reports an
-    # account-allocated split, so its manifest source must disclose the
-    # account-allocation inputs.
+    # Provenance: every section that surfaces the channel-direct /
+    # account-allocated deduction split must disclose the account-allocation
+    # inputs. The Gross vs Net section renders the split rows, and the
+    # Deductions Explanation section reports the aggregate split.
     section_sources = {
         section["name"]: section["source"] for section in payload["sections"]
     }
     assert section_sources["Deductions Explanation"] == (
         "source_net_revenue_manual_overrides_and_account_allocations"
+    )
+    assert section_sources["Gross vs Net Revenue"] == (
+        "monthly_revenue_facts_manual_overrides_and_account_allocations"
     )
     assert payload["executive_summary"]["total_net_revenue_usd"] == "930"
     assert payload["executive_summary"]["payment_match_status"] == "PAYMENT_MATCHED"

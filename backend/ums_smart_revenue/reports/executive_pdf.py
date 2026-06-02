@@ -30,7 +30,7 @@ EXECUTIVE_PDF_SECTION_NAMES = (
 _SECTION_SOURCES = {
     "Cover": "export_job_metadata",
     "Executive Summary": "computed_finance_summary",
-    "Gross vs Net Revenue": "monthly_revenue_facts_and_manual_overrides",
+    "Gross vs Net Revenue": "monthly_revenue_facts_manual_overrides_and_account_allocations",
     "Deductions Explanation": "source_net_revenue_manual_overrides_and_account_allocations",
     "Company Ranking": "channel_registry_and_revenue_facts",
     "Channel Ranking": "monthly_revenue_facts",
