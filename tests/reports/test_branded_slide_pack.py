@@ -42,12 +42,8 @@ def test_branded_slide_pack_report_builds_planned_slide_manifest():
     # Provenance: the deduction explanation slide now surfaces an
     # account-allocated split, so its manifest source must disclose the
     # account-allocation inputs.
-    deductions_slide = next(
-        slide
-        for slide in payload["slides"]
-        if slide["name"] == "Revenue deduction explanation"
-    )
-    assert deductions_slide["source"] == (
+    slide_sources = {slide["name"]: slide["source"] for slide in payload["slides"]}
+    assert slide_sources["Revenue deduction explanation"] == (
         "source_net_revenue_manual_overrides_and_account_allocations"
     )
     assert payload["executive_summary"]["total_net_revenue_usd"] == "930"

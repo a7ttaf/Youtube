@@ -45,12 +45,10 @@ def test_executive_pdf_report_builds_section_manifest_from_source_summaries():
     # Provenance: the Deductions Explanation section now reports an
     # account-allocated split, so its manifest source must disclose the
     # account-allocation inputs.
-    deductions_section = next(
-        section
-        for section in payload["sections"]
-        if section["name"] == "Deductions Explanation"
-    )
-    assert deductions_section["source"] == (
+    section_sources = {
+        section["name"]: section["source"] for section in payload["sections"]
+    }
+    assert section_sources["Deductions Explanation"] == (
         "source_net_revenue_manual_overrides_and_account_allocations"
     )
     assert payload["executive_summary"]["total_net_revenue_usd"] == "930"
