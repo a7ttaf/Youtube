@@ -89,20 +89,32 @@ from ums_smart_revenue.db.finance_models import (
     CommittedAllocationUnallocatedORM,
     FinanceBase,
 )
+from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 TENANT = UUID(UMS_TENANT_ID)
 
 
 def _engine(tmp_path):
-    """Fresh on-disk SQLite engine with the finance schema and FK enforcement on."""
+    """Fresh on-disk SQLite engine with the finance schema, the tenants parent
+    table + a tenant row, and FK enforcement on."""
     engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}")
 
     @event.listens_for(engine, "connect")
     def _fk_on(dbapi_conn, _rec):  # noqa: ANN001
         dbapi_conn.execute("PRAGMA foreign_keys=ON")
 
+    # committed_allocation_runs FKs tenant_id -> tenants.id; `tenants` lives on
+    # TenantBase (a separate base/metadata), so it must be created AND seeded with
+    # the parent row before any run is inserted under FK enforcement.
+    TenantBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(TenantORM(
+            id=TENANT, slug="ums", display_name="UMS",
+            primary_currency="USD", status="ACTIVE",
+        ))
+        session.commit()
     return engine
 
 
@@ -849,6 +861,7 @@ from ums_smart_revenue.db.finance_models import (
     MonthlyChannelRevenueFactORM,
 )
 from ums_smart_revenue.db.org_models import OrgBase, YouTubeChannelORM
+from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
 from ums_smart_revenue.finance.channel_account_links import (
     SqlAlchemyChannelAccountLinkRepository,
 )
@@ -877,11 +890,20 @@ def _session(tmp_path) -> Session:
     def _fk_on(dbapi_conn, _rec):  # noqa: ANN001
         dbapi_conn.execute("PRAGMA foreign_keys=ON")
 
-    # YouTubeChannelORM lives on OrgBase; the rest live on FinanceBase. The compute
-    # joins facts to the org channel table, so both schemas must exist.
+    # YouTubeChannelORM lives on OrgBase; the finance rows live on FinanceBase; and
+    # `tenants` (the FK parent for deduction/link rows) lives on TenantBase, a
+    # separate base. All three schemas must exist, and the tenant parent row must be
+    # inserted before any tenant-scoped row under FK enforcement.
+    TenantBase.metadata.create_all(engine)
     OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
-    return Session(engine)
+    session = Session(engine)
+    session.add(TenantORM(
+        id=TENANT, slug="ums", display_name="UMS",
+        primary_currency="USD", status="ACTIVE",
+    ))
+    session.commit()
+    return session
 
 
 def _seed_account_deduction(session, *, mapped: bool, status: str = "OPEN") -> None:
@@ -901,6 +923,11 @@ def _seed_account_deduction(session, *, mapped: bool, status: str = "OPEN") -> N
         id=uuid4(), tenant_id=TENANT, youtube_channel_id="chA",
         channel_name="A", active=True,
     ))
+    # Flush the channel before the fact: monthly_channel_revenue_facts has a
+    # composite FK (tenant_id, youtube_channel_id) -> youtube_channels that crosses
+    # the Org/Finance registries, so the unit-of-work does NOT order the channel
+    # insert before the dependent fact on its own. Required under FK enforcement.
+    session.flush()
     session.add(MonthlyChannelRevenueFactORM(
         id=uuid4(), tenant_id=TENANT, month=MONTH, youtube_channel_id="chA",
         source_kind="ADSENSE", gross_revenue_usd=Decimal("1000.00"),
@@ -1320,7 +1347,7 @@ git commit -m "feat(finance): committed allocation repository (lock-held compute
 
 - [ ] **Step 1: Write the API tests (failing)**
 
-Create `tests/api/test_committed_allocation_api.py`, modeled on the existing allocation/net-revenue API tests (`tests/api/test_allocations_api.py`, `tests/api/test_net_revenue_api.py`): build the app via `create_app(database_url=...)`, seed a fully-allocated month, and post to the commit route with a global finance principal. Cover: **201** + audit (summary-only), **200** idempotent replay (no second audit), **409** locked, **409** idempotency conflict, **422** unallocated, **422** malformed month, **422** unsupported method, **403** for each missing gate (parametrized), and the **reader-untouched regression** (net-revenue byte-identical before/after a commit).
+Create `tests/api/test_committed_allocation_api.py`, modeled on the existing allocation/net-revenue API tests (`tests/api/test_allocation_api.py`, `tests/api/test_net_revenue_api.py`): build the app via `create_app(database_url=...)`, seed a fully-allocated month, and post to the commit route with a global finance principal. Cover: **201** + audit (summary-only), **200** idempotent replay (no second audit), **409** locked, **409** idempotency conflict, **422** unallocated, **422** malformed month, **422** unsupported method, **403** for each missing gate (parametrized), and the **reader-untouched regression** (net-revenue byte-identical before/after a commit).
 
 ```python
 """API tests for POST /revenue/months/{month}/account-allocations/commit."""
@@ -1347,6 +1374,7 @@ from ums_smart_revenue.db.finance_models import (
 )
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 MONTH = "2026-03"
@@ -1373,11 +1401,20 @@ def _seed(database_url: str, *, mapped: bool = True, status: str = "OPEN") -> No
     (one UnallocatedIssue). `status` seeds the finance-month close row.
     """
     engine = create_engine(database_url)
+    # `tenants` (FK parent for deduction/link/run rows) lives on TenantBase, a
+    # separate base; create it alongside org/security/finance and seed the parent
+    # row so create_app's commit resolves the tenant FK regardless of its
+    # FK-enforcement setting.
+    TenantBase.metadata.create_all(engine)
     OrgBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
     with Session(engine) as session:
         session.add_all([
+            TenantORM(
+                id=TENANT, slug="ums", display_name="UMS",
+                primary_currency="USD", status="ACTIVE",
+            ),
             OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="S", active=True),
             OrgUnitORM(
                 id=COMPANY_ID, parent_id=SECTOR_ID, type="COMPANY", name="C", active=True,
@@ -1870,7 +1907,7 @@ git commit -m "docs(plan): mark Spec 2b persisted/committed allocation shipped"
 ```
 python -m ruff check backend tests scripts
 $env:UMS_TEST_DATABASE_URL='postgresql+psycopg://postgres:ums@localhost:55432/test_ums'
-python -m pytest tests/db/test_committed_allocation_models.py tests/db/test_committed_allocation_migration_postgres.py tests/finance/test_committed_allocation.py tests/api/test_committed_allocation_api.py tests/api/test_allocations_api.py tests/api/test_net_revenue_api.py -q
+python -m pytest tests/db/test_committed_allocation_models.py tests/db/test_committed_allocation_migration_postgres.py tests/finance/test_committed_allocation.py tests/api/test_committed_allocation_api.py tests/api/test_allocation_api.py tests/api/test_net_revenue_api.py -q
 python -m pytest -q
 git diff --check
 ```
@@ -1902,3 +1939,5 @@ No gaps.
 **2. Placeholder scan:** No placeholders remain. Task 2's seeding is a single executable `_seed_account_deduction(session, *, mapped, status)` helper (field-for-field the verified `_seed_missing_net_with_components` shape from `tests/api/test_exports_account_allocation.py`, reduced to one ACCOUNT component over chA: 1000 gross, 100 deduction), with `mapped=False` exercising the unallocated path and `status="LOCKED"` the locked path — no `NotImplementedError`, no "build as the cited module does" hand-waving. Task 3's API tests are nine complete, runnable functions (own `build_database_url` / `_seed` / `_principal` / `_client` helpers, modeled on the verified `tests/api/test_net_revenue_api.py` idioms — `create_app(database_url=...)` + `dependency_overrides[current_principal_from_headers]`), covering 201 + summary-only audit, 200 replay, 409 locked, 409 conflict, 422 unallocated/malformed/unsupported, parametrized 403 per gate, and the reader-untouched regression. Every production code block (ORM, migration, repository, audit, endpoint) is complete. The Task 4 doc edits include a fallback-wording note (a guard, not a placeholder).
 
 **3. Type consistency:** `CommitAllocationOutcome(run, lines, unallocated, notes, created)` is produced by `commit_allocation` (Task 2) and consumed by the route (Task 3). `commit_allocation(...)` keyword args match between the repo, the repo tests, and the route call. ORM class names (`CommittedAllocationRunORM`/`LineORM`/`UnallocatedORM`/`NoteORM`) are identical across the models, migration FK targets, repository, and tests. `request_fingerprint` over `{allocation_method, reason}` matches §7. Typed errors map to the documented status codes (Validation→422, Locked/IdempotencyConflict→409).
+
+**4. SQLite FK enforcement (verified by a live repro):** All three FK-on SQLite helpers (Task 1 `_engine`, Task 2 `_session`, Task 3 `_seed`) create `TenantBase.metadata` and insert a `TenantORM(id=TENANT, slug="ums", display_name="UMS", primary_currency="USD", status="ACTIVE")` parent row before any tenant-scoped row. This is required because `tenant_id`→`tenants.id` FKs exist on `DeductionComponentORM`, `AdsenseContentOwnerLinkORM`, `ContentOwnerChannelLinkORM`, and `CommittedAllocationRunORM`, and `tenants` lives on `TenantBase` — a base whose metadata neither `OrgBase`/`FinanceBase` (which share metadata) nor `SecurityBase` creates. Under `PRAGMA foreign_keys=ON`, omitting it raises `OperationalError: no such table: main.tenants` (Task 1/2) and the route's run insert would fail. Additionally, Task 2's `_seed_account_deduction` flushes the channel before adding the dependent fact: `monthly_channel_revenue_facts`'s composite FK `(tenant_id, youtube_channel_id)→youtube_channels` crosses the Org/Finance registries, so the unit-of-work does not order the channel insert first on its own. These bugs surface only here because these are the first seeds to enable FK enforcement (the existing `test_exports_account_allocation.py` seed runs FK-off, so SQLite silently ignores the FKs).
