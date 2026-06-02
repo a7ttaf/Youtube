@@ -44,8 +44,13 @@ def test_finance_workbook_preview_builds_sheet_manifest_from_source_summaries():
     )
     # Provenance: every sheet that surfaces the channel-direct / account-allocated
     # deduction split must disclose the account-allocation inputs, not just the
-    # dedicated Deductions sheet.
+    # dedicated Deductions sheet. The Executive Summary sheet writes the
+    # total_channel_direct/account_allocated split rows, so its source must
+    # disclose the same deduction-component + account-allocation provenance.
     sheet_sources = {sheet["name"]: sheet["source"] for sheet in payload["sheets"]}
+    assert sheet_sources["Executive Summary"] == (
+        "computed_finance_summary_deduction_components_and_account_allocations"
+    )
     assert sheet_sources["Deductions"] == (
         "source_net_revenue_manual_overrides_deduction_components_and_account_allocations"
     )

@@ -29,7 +29,9 @@ FINANCE_WORKBOOK_SHEET_NAMES = (
 )
 
 _SHEET_SOURCES = {
-    "Executive Summary": "computed_finance_summary",
+    "Executive Summary": (
+        "computed_finance_summary_deduction_components_and_account_allocations"
+    ),
     "Monthly Close": "finance_month_close",
     "Company Breakdown": "monthly_revenue_facts_deduction_components_and_account_allocations",
     "Sector Breakdown": (
