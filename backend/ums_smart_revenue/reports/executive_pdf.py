@@ -30,8 +30,12 @@ EXECUTIVE_PDF_SECTION_NAMES = (
 _SECTION_SOURCES = {
     "Cover": "export_job_metadata",
     "Executive Summary": "computed_finance_summary",
-    "Gross vs Net Revenue": "monthly_revenue_facts_and_manual_overrides",
-    "Deductions Explanation": "source_net_revenue_and_manual_overrides",
+    "Gross vs Net Revenue": (
+        "monthly_revenue_facts_manual_overrides_deduction_components_and_account_allocations"
+    ),
+    "Deductions Explanation": (
+        "source_net_revenue_manual_overrides_deduction_components_and_account_allocations"
+    ),
     "Company Ranking": "channel_registry_and_revenue_facts",
     "Channel Ranking": "monthly_revenue_facts",
     "Problem Summary": "smart_alerts_payment_and_bank_reconciliation",
@@ -181,7 +185,10 @@ def build_executive_pdf_bytes(report: ExecutivePdfReport) -> bytes:
         Paragraph("Deductions Explanation", styles["Heading2"]),
         Paragraph(
             "Deductions are calculated from SQL monthly revenue facts plus approved "
-            "manual overrides. Pending overrides are shown as risk, not revenue.",
+            "manual overrides. The channel-direct portion is sourced from "
+            "channel-level deduction components, and the account-allocated portion "
+            "from account-level deduction allocations. Pending overrides are shown "
+            "as risk, not revenue.",
             styles["BodyText"],
         ),
         Spacer(1, 10),
@@ -252,6 +259,15 @@ def _executive_summary(
         "total_deduction_amount_usd": _decimal_to_api(
             net_revenue.total_deduction_amount_usd
         ),
+        # Deduction-split export contract: the channel-direct and
+        # account-allocated totals SUPPLEMENT (never replace)
+        # total_deduction_amount_usd. See the _gross_net_table contract block.
+        "total_channel_direct_deduction_amount_usd": _decimal_to_api(
+            net_revenue.total_channel_direct_deduction_amount_usd
+        ),
+        "total_account_allocated_deduction_amount_usd": _decimal_to_api(
+            net_revenue.total_account_allocated_deduction_amount_usd
+        ),
         "payment_gap_usd": _decimal_to_api(payment_match.payment_gap_usd),
         "bank_gap_usd": _decimal_to_api(bank_reconciliation.bank_gap_usd),
         "channel_count": net_revenue.channel_count,
@@ -274,6 +290,23 @@ def _summary_table(report: ExecutivePdfReport) -> Table:
     )
 
 
+# ============================================================================
+# Purpose: Render the executive gross-vs-net table. Surfaces all three month
+#   deduction totals as distinct rows — total, channel-direct, and
+#   account-allocated — where the channel-direct + account-allocated split
+#   SUPPLEMENTS (does not replace) the overall total deduction figure.
+# Database/ORM: None (reads the already-computed MonthNetRevenueSummary).
+# Standards: Typed serialization via _decimal_to_api; a None split total
+#   renders as a blank cell, never a fabricated "0".
+# Blast Radius: Finance export presentation only — no source-of-truth, auth,
+#   audit, or Neo4j impact. Must stay numerically consistent with the XLSX
+#   workbook / PPTX deduction-breakdown surfaces and the net-revenue API.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/net_revenue.py -> Source of the
+#     total_*_deduction_amount_usd split aggregates rendered here.
+#   - File: backend/ums_smart_revenue/finance/decimal_formatting.py -> Shared
+#     decimal_to_api serialization contract (None -> blank).
+# ============================================================================
 def _gross_net_table(report: ExecutivePdfReport) -> Table:
     """Generate a table of gross and net revenue figures along with deductions and gaps."""
     return _key_value_table(
@@ -286,6 +319,12 @@ def _gross_net_table(report: ExecutivePdfReport) -> Table:
             ),
             "Total Deduction Amount USD": _decimal_to_api(
                 report.net_revenue.total_deduction_amount_usd
+            ),
+            "Channel-Direct Deduction USD": _decimal_to_api(
+                report.net_revenue.total_channel_direct_deduction_amount_usd
+            ),
+            "Account-Allocated Deduction USD": _decimal_to_api(
+                report.net_revenue.total_account_allocated_deduction_amount_usd
             ),
             "Payment Gap USD": _decimal_to_api(report.payment_match.payment_gap_usd),
             "Bank Gap USD": _decimal_to_api(report.bank_reconciliation.bank_gap_usd),

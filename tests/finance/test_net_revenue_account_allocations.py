@@ -315,3 +315,45 @@ def test_resolve_applicable_channel_deductions_filters_dedups_and_matches_totals
     assert summary.account_allocated_deduction_amount_usd == sum(
         (line.allocated_amount_usd for line in account_allocated), Decimal("0")
     )
+
+
+def test_month_aggregate_breakdown_totals_sum_component_split():
+    """Month aggregates sum the per-channel component-derived split."""
+    channel_direct = DeductionComponent(
+        id="dc-mixed", month=MONTH, component_kind="DEDUCTION", scope_kind="CHANNEL",
+        scope_id="chA", amount_usd=Decimal("30.00"), amount_native=None,
+        currency_code="USD", source_system="adsense_management",
+        source_table="google_revenue_source_rows", source_id=None,
+        source_key=None, source_report_id=None, raw_payload={}, component_key="cd-mixed",
+    )
+    summary = build_month_net_revenue_summary(
+        month=MONTH,
+        facts=[
+            _fact(channel="chA", net=None, gross="1000.00"),
+            _fact(channel="chB", net="880.00", gross="1000.00"),
+        ],
+        manual_overrides=[],
+        deduction_components=[channel_direct],
+        account_allocations=[_alloc(channel="chA", amount="100.000000")],
+    )
+    # chA -> COMPONENT_DERIVED: direct 30 + allocated 100 = 130 deduction.
+    # chB -> source-net CALCULATED: deduction 120, breakdown fields None.
+    assert summary.total_channel_direct_deduction_amount_usd == Decimal("30.00")
+    assert summary.total_account_allocated_deduction_amount_usd == Decimal("100.000000")
+    assert summary.total_deduction_amount_usd == Decimal("250.000000")  # 130 + 120
+    assert (
+        summary.total_deduction_amount_usd
+        > summary.total_channel_direct_deduction_amount_usd
+        + summary.total_account_allocated_deduction_amount_usd
+    )
+
+
+def test_month_aggregate_breakdown_coalesces_none_to_zero():
+    """An all-source-net month yields 0 aggregates, never None."""
+    summary = build_month_net_revenue_summary(
+        month=MONTH,
+        facts=[_fact(channel="chA", net="880.00", gross="1000.00")],
+        manual_overrides=[],
+    )
+    assert summary.total_channel_direct_deduction_amount_usd == Decimal("0")
+    assert summary.total_account_allocated_deduction_amount_usd == Decimal("0")

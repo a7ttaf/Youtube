@@ -36,7 +36,9 @@ _SLIDE_SOURCES = {
     "Sector comparison": "channel_registry_and_revenue_facts",
     "Company comparison": "channel_registry_and_revenue_facts",
     "Channel ranking": "monthly_revenue_facts",
-    "Revenue deduction explanation": "source_net_revenue_and_manual_overrides",
+    "Revenue deduction explanation": (
+        "source_net_revenue_manual_overrides_deduction_components_and_account_allocations"
+    ),
     "Payment gap analysis": "adsense_payments_and_bank_reconciliation",
     "Outside-CMS issues": "channel_registry_and_smart_alerts",
     "Action items": "smart_alerts_and_reconciliation_status",
@@ -226,13 +228,34 @@ def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
         ]
         or ["No channel revenue rows are available for this export scope."],
     )
+    # ========================================================================
+    # Purpose: Render the deduction-explanation slide, surfacing all three month
+    #   deduction figures — total, channel-direct, and account-allocated.
+    # Database/ORM: None (reads the already-computed MonthNetRevenueSummary).
+    # Standards: The channel-direct + account-allocated split SUPPLEMENTS (never
+    #   replaces) total_deduction_amount_usd; all three values must stay on the
+    #   slide. None values serialize via _decimal_to_api (blank, never "0").
+    # Blast Radius: PPTX presentation only — no allocation math, source-of-truth,
+    #   auth, audit, or Neo4j impact. Must stay numerically consistent with the
+    #   XLSX workbook / PDF deduction-breakdown surfaces and the net-revenue API.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/finance/net_revenue.py -> Source of the
+    #     total_*_deduction_amount_usd aggregates rendered here.
+    # ========================================================================
     _add_content_slide(
         presentation,
         "Revenue deduction explanation",
         [
             "Total deduction amount USD: "
             f"{_decimal_to_api(net_revenue.total_deduction_amount_usd)}",
-            "Deductions use SQL revenue facts plus approved manual overrides.",
+            "Channel-direct deduction USD: "
+            f"{_decimal_to_api(net_revenue.total_channel_direct_deduction_amount_usd)}",
+            "Account-allocated deduction USD: "
+            f"{_decimal_to_api(net_revenue.total_account_allocated_deduction_amount_usd)}",
+            "Deductions use SQL revenue facts plus approved manual overrides; "
+            "the channel-direct portion is sourced from channel-level deduction "
+            "components and the account-allocated portion from account-level "
+            "deduction allocations.",
             "Pending overrides are shown as risk and do not change net revenue.",
         ],
     )
@@ -467,6 +490,15 @@ def _executive_summary(
         "total_net_revenue_usd": _decimal_to_api(net_revenue.total_net_revenue_usd),
         "total_deduction_amount_usd": _decimal_to_api(
             net_revenue.total_deduction_amount_usd
+        ),
+        # Deduction-split totals SUPPLEMENT (never replace) total_deduction_amount_usd
+        # and are read-only projections of MonthNetRevenueSummary; see the
+        # deduction-slide contract block in build_branded_slide_pack_pptx.
+        "total_channel_direct_deduction_amount_usd": _decimal_to_api(
+            net_revenue.total_channel_direct_deduction_amount_usd
+        ),
+        "total_account_allocated_deduction_amount_usd": _decimal_to_api(
+            net_revenue.total_account_allocated_deduction_amount_usd
         ),
         "payment_gap_usd": _decimal_to_api(payment_match.payment_gap_usd),
         "bank_gap_usd": _decimal_to_api(bank_reconciliation.bank_gap_usd),

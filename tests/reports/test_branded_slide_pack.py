@@ -39,6 +39,13 @@ def test_branded_slide_pack_report_builds_planned_slide_manifest():
     assert payload["artifact_type"] == "BRANDED_FINANCE_SLIDE_PACK"
     assert payload["status"] == "READY_FOR_GENERATION"
     assert [slide["name"] for slide in payload["slides"]] == list(BRANDED_SLIDE_NAMES)
+    # Provenance: the deduction explanation slide now surfaces an
+    # account-allocated split, so its manifest source must disclose the
+    # account-allocation inputs.
+    slide_sources = {slide["name"]: slide["source"] for slide in payload["slides"]}
+    assert slide_sources["Revenue deduction explanation"] == (
+        "source_net_revenue_manual_overrides_deduction_components_and_account_allocations"
+    )
     assert payload["executive_summary"]["total_net_revenue_usd"] == "930"
     assert payload["executive_summary"]["payment_match_status"] == "PAYMENT_MATCHED"
     assert payload["executive_summary"]["bank_reconciliation_status"] == (
@@ -191,6 +198,8 @@ def _net_revenue_summary(
         total_adjusted_gross_revenue_usd=Decimal("1050.00"),
         total_net_revenue_usd=Decimal("930.00"),
         total_deduction_amount_usd=Decimal("120.00"),
+        total_channel_direct_deduction_amount_usd=Decimal("0.00"),
+        total_account_allocated_deduction_amount_usd=Decimal("0.00"),
         unallocated_account_deduction_total_usd=None,
         unallocated_account_issues=None,
         channels=channels,
@@ -247,3 +256,74 @@ def _smart_alert_summary() -> MonthlySmartAlertSummary:
         highest_severity=None,
         alerts=[],
     )
+
+
+def _net_revenue_summary_with_breakdown() -> MonthNetRevenueSummary:
+    """Build a summary with a COMPONENT_DERIVED channel carrying a real split."""
+    channel = ChannelNetRevenueSummary(
+        month="2026-03",
+        youtube_channel_id="channel-tv-a",
+        status="COMPONENT_DERIVED",
+        primary_source_kind="ADSENSE",
+        baseline_gross_revenue_usd=Decimal("1000.00"),
+        baseline_net_revenue_usd=None,
+        approved_manual_override_total_usd=Decimal("0.00"),
+        adjusted_gross_revenue_usd=Decimal("1000.00"),
+        net_revenue_usd=Decimal("870.00"),
+        deduction_amount_usd=Decimal("130.00"),
+        channel_direct_deduction_amount_usd=Decimal("30.00"),
+        account_allocated_deduction_amount_usd=Decimal("100.00"),
+        deduction_percentage=Decimal("13.0000"),
+        confidence="D_ESTIMATED",
+        approved_manual_override_count=0,
+        pending_manual_override_count=0,
+        issues=[],
+    )
+    return MonthNetRevenueSummary(
+        month="2026-03",
+        status="CALCULATED",
+        channel_count=1,
+        calculated_channel_count=1,
+        missing_net_source_count=0,
+        pending_manual_override_count=0,
+        total_adjusted_gross_revenue_usd=Decimal("1000.00"),
+        total_net_revenue_usd=Decimal("870.00"),
+        total_deduction_amount_usd=Decimal("130.00"),
+        total_channel_direct_deduction_amount_usd=Decimal("30.00"),
+        total_account_allocated_deduction_amount_usd=Decimal("100.00"),
+        unallocated_account_deduction_total_usd=None,
+        unallocated_account_issues=None,
+        channels=[channel],
+    )
+
+
+def test_branded_slide_pack_renders_deduction_breakdown_bullets():
+    """PPTX deduction slide shows total + channel-direct + account-allocated bullets."""
+    report = build_branded_slide_pack_report(
+        export_job=_export_job(export_type="BRANDED_SLIDE_PACK"),
+        net_revenue=_net_revenue_summary_with_breakdown(),
+        payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
+        bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
+        smart_alerts=_smart_alert_summary(),
+    )
+    slide_texts = _slide_texts(
+        Presentation(BytesIO(build_branded_slide_pack_pptx(report)))
+    )
+    combined_text = "\n".join(slide_texts)
+    deduction_slide_text = slide_texts[
+        BRANDED_SLIDE_NAMES.index("Revenue deduction explanation")
+    ]
+
+    assert "Total deduction amount USD: 130" in combined_text
+    assert "Channel-direct deduction USD: 30" in combined_text
+    assert "Account-allocated deduction USD: 100" in combined_text
+    # Provenance accuracy: assert against the specific deduction slide so the
+    # test fails if the wording moves off the intended slide. Channel-direct is
+    # sourced from channel-level deduction components, account-allocated from
+    # account-level deduction allocations.
+    assert "channel-level deduction components" in deduction_slide_text
+    assert "account-level deduction allocations" in deduction_slide_text
+
+    payload = report.to_api()
+    assert payload["executive_summary"]["total_channel_direct_deduction_amount_usd"] == "30"
+    assert payload["executive_summary"]["total_account_allocated_deduction_amount_usd"] == "100"

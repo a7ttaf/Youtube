@@ -260,6 +260,11 @@ def test_finance_admin_previews_finance_workbook_with_sensitive_audit(tmp_path):
     assert payload["executive_summary"]["bank_reconciliation_status"] == (
         "BANK_CONFIRMED"
     )
+    assert payload["executive_summary"]["total_channel_direct_deduction_amount_usd"] == "0"
+    assert payload["executive_summary"]["total_account_allocated_deduction_amount_usd"] == "0"
+    net_revenue_summary = payload["source_summaries"]["net_revenue"]
+    assert net_revenue_summary["total_channel_direct_deduction_amount_usd"] == "0"
+    assert net_revenue_summary["total_account_allocated_deduction_amount_usd"] == "0"
     assert [sheet["name"] for sheet in payload["sheets"]] == [
         "Executive Summary",
         "Monthly Close",
