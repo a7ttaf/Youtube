@@ -31,7 +31,7 @@ _SECTION_SOURCES = {
     "Cover": "export_job_metadata",
     "Executive Summary": "computed_finance_summary",
     "Gross vs Net Revenue": "monthly_revenue_facts_and_manual_overrides",
-    "Deductions Explanation": "source_net_revenue_and_manual_overrides",
+    "Deductions Explanation": "source_net_revenue_manual_overrides_and_account_allocations",
     "Company Ranking": "channel_registry_and_revenue_facts",
     "Channel Ranking": "monthly_revenue_facts",
     "Problem Summary": "smart_alerts_payment_and_bank_reconciliation",
@@ -181,7 +181,9 @@ def build_executive_pdf_bytes(report: ExecutivePdfReport) -> bytes:
         Paragraph("Deductions Explanation", styles["Heading2"]),
         Paragraph(
             "Deductions are calculated from SQL monthly revenue facts plus approved "
-            "manual overrides. Pending overrides are shown as risk, not revenue.",
+            "manual overrides. The account-allocated portion is sourced from "
+            "account-level deduction allocations and deduction components. Pending "
+            "overrides are shown as risk, not revenue.",
             styles["BodyText"],
         ),
         Spacer(1, 10),

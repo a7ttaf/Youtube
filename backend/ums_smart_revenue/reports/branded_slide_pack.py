@@ -36,7 +36,7 @@ _SLIDE_SOURCES = {
     "Sector comparison": "channel_registry_and_revenue_facts",
     "Company comparison": "channel_registry_and_revenue_facts",
     "Channel ranking": "monthly_revenue_facts",
-    "Revenue deduction explanation": "source_net_revenue_and_manual_overrides",
+    "Revenue deduction explanation": "source_net_revenue_manual_overrides_and_account_allocations",
     "Payment gap analysis": "adsense_payments_and_bank_reconciliation",
     "Outside-CMS issues": "channel_registry_and_smart_alerts",
     "Action items": "smart_alerts_and_reconciliation_status",
@@ -236,7 +236,9 @@ def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
             f"{_decimal_to_api(net_revenue.total_channel_direct_deduction_amount_usd)}",
             "Account-allocated deduction USD: "
             f"{_decimal_to_api(net_revenue.total_account_allocated_deduction_amount_usd)}",
-            "Deductions use SQL revenue facts plus approved manual overrides.",
+            "Deductions use SQL revenue facts plus approved manual overrides; "
+            "the account-allocated portion is sourced from account-level "
+            "deduction allocations and deduction components.",
             "Pending overrides are shown as risk and do not change net revenue.",
         ],
     )

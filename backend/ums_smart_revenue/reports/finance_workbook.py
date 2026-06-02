@@ -34,7 +34,7 @@ _SHEET_SOURCES = {
     "Company Breakdown": "monthly_revenue_facts",
     "Sector Breakdown": "channel_registry_and_revenue_facts",
     "Channel Breakdown": "monthly_revenue_facts",
-    "Deductions": "source_net_revenue_and_manual_overrides",
+    "Deductions": "source_net_revenue_manual_overrides_and_account_allocations",
     "Payment Gap": "adsense_payments_and_bank_reconciliation",
     "Confidence Notes": "confidence_and_smart_alerts",
     "Raw Appendix": "source_record_references",
