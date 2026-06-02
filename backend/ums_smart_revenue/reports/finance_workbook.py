@@ -201,6 +201,24 @@ def build_finance_workbook_xlsx(preview: FinanceWorkbookPreview) -> bytes:
         workbook.create_sheet("Sector Breakdown"),
         _scope_breakdown(preview, breakdown_type="sector"),
     )
+    # ========================================================================
+    # Purpose: Export per-channel deduction totals to the Channel Breakdown and
+    #   Deductions worksheets while preserving the channel-direct vs
+    #   account-allocated split alongside the overall deduction_amount_usd.
+    # Database/ORM: None (reads the already-computed MonthNetRevenueSummary).
+    # Standards: The split columns SUPPLEMENT deduction_amount_usd; they never
+    #   replace the total deduction column. Per-channel split values of None are
+    #   serialized via _decimal_to_api and must remain blank cells, never a
+    #   fabricated "0".
+    # Blast Radius: XLSX presentation only — no allocation math, source-of-truth,
+    #   auth, audit, or Neo4j impact. Must stay numerically consistent with the
+    #   PDF / PPTX deduction-breakdown surfaces and the net-revenue API.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/finance/net_revenue.py -> Source of the
+    #     per-channel deduction split aggregates rendered here.
+    #   - File: backend/ums_smart_revenue/finance/decimal_formatting.py -> Shared
+    #     decimal_to_api serialization contract (None -> blank).
+    # ========================================================================
     _write_table_sheet(
         workbook.create_sheet("Channel Breakdown"),
         [
@@ -344,6 +362,21 @@ def _validate_same_month(
         )
 
 
+# ============================================================================
+# Purpose: Surface the month-level deduction totals in the workbook summary and
+#   scope-breakdown views. _executive_summary and _scope_breakdown both emit
+#   total_channel_direct_deduction_amount_usd and
+#   total_account_allocated_deduction_amount_usd next to total_deduction_amount_usd.
+# Database/ORM: None (reads the already-computed MonthNetRevenueSummary).
+# Standards: These split totals SUPPLEMENT total_deduction_amount_usd; they are
+#   read-only projections of MonthNetRevenueSummary and must not be recomputed or
+#   mutated here. A None total serializes via _decimal_to_api as a blank value.
+# Blast Radius: Workbook preview / XLSX payload shape only — no allocation math,
+#   source-of-truth, auth, audit, or Neo4j impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/net_revenue.py -> Owns the
+#     total_*_deduction_amount_usd aggregates projected here.
+# ============================================================================
 def _executive_summary(
     *,
     export_job: ExportJobEntry,
@@ -412,6 +445,9 @@ def _scope_breakdown(
         "total_deduction_amount_usd": _decimal_to_api(
             preview.net_revenue.total_deduction_amount_usd
         ),
+        # Deduction-split totals SUPPLEMENT (never replace) total_deduction_amount_usd
+        # and are read-only projections of MonthNetRevenueSummary. See the
+        # _executive_summary contract block above.
         "total_channel_direct_deduction_amount_usd": _decimal_to_api(
             preview.net_revenue.total_channel_direct_deduction_amount_usd
         ),
