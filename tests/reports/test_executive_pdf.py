@@ -1,3 +1,4 @@
+import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from io import BytesIO
@@ -297,7 +298,7 @@ def test_executive_pdf_renders_deduction_breakdown_aggregate_rows():
     )
     text = _extract_pdf_text(build_executive_pdf_bytes(report))
 
-    assert "Channel-Direct Deduction USD" in text
-    assert "Account-Allocated Deduction USD" in text
-    assert "37" in text
-    assert "93" in text
+    # Row-specific: each label must be paired with its own value so the
+    # assertion stays load-bearing if a digit moves to another section.
+    assert re.search(r"Channel-Direct Deduction USD\s+37(?:\.0+)?", text)
+    assert re.search(r"Account-Allocated Deduction USD\s+93(?:\.0+)?", text)

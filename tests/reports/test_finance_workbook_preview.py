@@ -103,6 +103,13 @@ def test_finance_workbook_xlsx_contains_expected_sheets_and_source_values():
     channel_breakdown = workbook["Channel Breakdown"]
     assert channel_breakdown["A2"].value == "channel-tv-a"
     assert channel_breakdown["H2"].value == "930"
+    # The split columns exist, and a source-net channel that carries None for
+    # both split fields must render as blank cells (not "0", not a crash) —
+    # locks in the _decimal_to_api(None) -> blank coercion for the breakdown.
+    assert channel_breakdown["J1"].value == "channel_direct_deduction_amount_usd"
+    assert channel_breakdown["K1"].value == "account_allocated_deduction_amount_usd"
+    assert channel_breakdown["J2"].value is None
+    assert channel_breakdown["K2"].value is None
     payment_gap = workbook["Payment Gap"]
     assert payment_gap["A2"].value == "payment_match_status"
     assert payment_gap["B2"].value == "PAYMENT_MATCHED"
