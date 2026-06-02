@@ -236,6 +236,30 @@ def test_unsupported_method_rejected_422(tmp_path):
     assert resp.status_code == 422
 
 
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param({"idempotency_key": "k", "reason": ""}, id="empty_reason"),
+        pytest.param({"idempotency_key": "k", "reason": "   "}, id="whitespace_reason"),
+        pytest.param({"idempotency_key": "", "reason": "r"}, id="empty_idempotency_key"),
+        pytest.param(
+            {"idempotency_key": "   ", "reason": "r"}, id="whitespace_idempotency_key"
+        ),
+    ],
+)
+def test_blank_request_field_rejected_422(tmp_path, body):
+    """Empty/whitespace-only idempotency_key or reason is rejected at the Pydantic
+    boundary with 422 (before any DB write or audit call), not a DB-CHECK/ValueError
+    500. Matches every sibling write-request model's Field(min_length=1) + strip guard.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(COMMIT_PATH, json=body)
+    assert resp.status_code == 422
+    assert not _committed_audit_rows(db)  # no audit write on a rejected body
+
+
 @pytest.mark.parametrize("missing", ["revenue", "payments", "change"])
 def test_missing_permission_forbidden_403(tmp_path, missing):
     """Dropping any one of the three required gates yields 403."""

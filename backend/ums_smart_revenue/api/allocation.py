@@ -10,7 +10,7 @@ import json
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from pydantic import BaseModel
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channel_account_links import (
@@ -61,9 +61,20 @@ def current_committed_allocation_repository(
 class CommitAllocationRequest(BaseModel):
     """Body for a commit: a client idempotency key + a required reason."""
 
-    idempotency_key: str
-    reason: str
+    idempotency_key: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
     allocation_method: str = "gross_revenue_proportional"
+
+    @field_validator("idempotency_key", "reason", mode="before")
+    @classmethod
+    def _strip(cls, value):
+        """Strip whitespace so a blank/whitespace-only value fails min_length=1.
+
+        Pydantic rejects the stripped-to-empty result at the boundary (422)
+        before any DB write or audit call — the route contract promised 422,
+        not the IntegrityError/ValueError 500s a bare ``str`` produced.
+        """
+        return value.strip() if isinstance(value, str) else value
 
 
 class CommitAllocationResponse(BaseModel):
