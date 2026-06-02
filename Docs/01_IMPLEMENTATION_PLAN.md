@@ -442,7 +442,7 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   `GET /revenue/months/{month}/deduction-components`. This branch now consumes
   verified account→channel allocation for ACCOUNT-grain net-applicable evidence;
   remaining allocation work is PAYMENT-grain evidence plus persisted allocation state.
-- ⏳ Allocation rules (Spec 2b) — PR-1 SHIPPED + PR-2 SHIPPED + PR-3 SHIPPED (this branch): PR-2 folds
+- ⏳ Allocation rules (Spec 2b) — PR-1 SHIPPED + PR-2 SHIPPED + PR-3 SHIPPED + PR-4 SHIPPED (this branch): PR-2 folds
   account-allocated net-applicable lines into net-revenue (API + finance exports) on the
   missing-net path, read/compute only (no persistence, no migration). PR-3 adds a
   `net_revenue_usd` metric to `POST /revenue/channels/{channel_id}/months/{month}/explain`,
@@ -450,7 +450,10 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   channel-direct + account-allocated deduction breakdowns in the existing `number_explanations`
   components JSON (read + persist, no migration, no schema change), gated by
   VIEW_FINALIZED_PAYMENTS@finance_month(month) with dual REVENUE_VIEWED + PAYMENT_VIEWED audit.
-  Remaining: PAYMENT-grain, persisted/committed writes, other methods, export breakdown columns.
+  PR-4 SHIPPED (this branch): export deduction breakdown — XLSX/PDF/PPTX surface the
+  channel-direct vs account-allocated split plus two additive month aggregates on
+  MonthNetRevenueSummary; read-surface only.
+  Remaining: PAYMENT-grain, persisted/committed writes, other methods.
   Prerequisite SHIPPED
   (this branch): canonical channel↔account map — `adsense_content_owner_links`
   (operator-verified account↔owner) + `content_owner_channel_links` (derived from

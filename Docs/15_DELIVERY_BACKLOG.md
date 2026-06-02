@@ -314,7 +314,7 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
     unique key `uq_content_owner_channel_links_key` blocks inserting a fresh active
     row for the same start month — build the deactivate (N8) and reactivate (V8d)
     halves together.
-- ⏳ Allocation engine (Spec 2b) — PR-1 + PR-2 + PR-3 shipped (this branch): account-level
+- ⏳ Allocation engine (Spec 2b) — PR-1 + PR-2 + PR-3 + PR-4 shipped (this branch): account-level
   deduction allocation compute + read. `finance/allocation.py` distributes
   ACCOUNT-grain `deduction_components` across each account's verified channels
   (`list_verified_adsense_account_channels`) by source-aligned raw-gross-proportional
@@ -336,9 +336,14 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   account-allocated deduction provenance in the existing `number_explanations` components JSON
   (read + persist, no migration, no schema change), gated by
   VIEW_FINALIZED_PAYMENTS@finance_month(month) with dual REVENUE_VIEWED + PAYMENT_VIEWED audit.
+  PR-4 shipped (this branch): the channel-direct/account-allocated deduction split now
+  renders in all finance exports — per-channel columns in the XLSX Channel Breakdown +
+  Deductions sheets, month-level aggregate rows in the XLSX Executive Summary +
+  Company/Sector breakdown sheets, the PDF gross-vs-net table, and the PPTX deduction
+  slide — backed by two additive total_channel_direct/account_allocated aggregate fields
+  on MonthNetRevenueSummary (no migration, no auth/audit/allocation-math change).
   Remaining: PAYMENT-grain (needs a
-  payment→account hop); persisted/committed allocation; other allocation methods;
-  export breakdown columns.
+  payment→account hop); persisted/committed allocation; other allocation methods.
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed
   permissions). Month-close status UI remains unbuilt (Phase 5).
