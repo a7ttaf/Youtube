@@ -252,6 +252,9 @@ def _executive_summary(
         "total_deduction_amount_usd": _decimal_to_api(
             net_revenue.total_deduction_amount_usd
         ),
+        # Deduction-split export contract: the channel-direct and
+        # account-allocated totals SUPPLEMENT (never replace)
+        # total_deduction_amount_usd. See the _gross_net_table contract block.
         "total_channel_direct_deduction_amount_usd": _decimal_to_api(
             net_revenue.total_channel_direct_deduction_amount_usd
         ),
@@ -280,6 +283,23 @@ def _summary_table(report: ExecutivePdfReport) -> Table:
     )
 
 
+# ============================================================================
+# Purpose: Render the executive gross-vs-net table. Surfaces all three month
+#   deduction totals as distinct rows — total, channel-direct, and
+#   account-allocated — where the channel-direct + account-allocated split
+#   SUPPLEMENTS (does not replace) the overall total deduction figure.
+# Database/ORM: None (reads the already-computed MonthNetRevenueSummary).
+# Standards: Typed serialization via _decimal_to_api; a None split total
+#   renders as a blank cell, never a fabricated "0".
+# Blast Radius: Finance export presentation only — no source-of-truth, auth,
+#   audit, or Neo4j impact. Must stay numerically consistent with the XLSX
+#   workbook / PPTX deduction-breakdown surfaces and the net-revenue API.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/net_revenue.py -> Source of the
+#     total_*_deduction_amount_usd split aggregates rendered here.
+#   - File: backend/ums_smart_revenue/finance/decimal_formatting.py -> Shared
+#     decimal_to_api serialization contract (None -> blank).
+# ============================================================================
 def _gross_net_table(report: ExecutivePdfReport) -> Table:
     """Generate a table of gross and net revenue figures along with deductions and gaps."""
     return _key_value_table(
