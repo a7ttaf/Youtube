@@ -315,6 +315,8 @@ def test_executive_pdf_renders_deduction_breakdown_aggregate_rows():
     # assertion stays load-bearing if a digit moves to another section.
     assert re.search(r"Channel-Direct Deduction USD\s+37(?:\.0+)?", text)
     assert re.search(r"Account-Allocated Deduction USD\s+93(?:\.0+)?", text)
-    # Provenance accuracy: the adjacent explanation must disclose the
-    # account-allocation source for the account-allocated figure shown above.
+    # Provenance accuracy: the adjacent explanation must attribute each split
+    # portion to its true source — channel-direct to channel-level deduction
+    # components, account-allocated to account-level deduction allocations.
+    assert "channel-level deduction components" in text
     assert "account-level deduction allocations" in text

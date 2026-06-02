@@ -181,9 +181,10 @@ def build_executive_pdf_bytes(report: ExecutivePdfReport) -> bytes:
         Paragraph("Deductions Explanation", styles["Heading2"]),
         Paragraph(
             "Deductions are calculated from SQL monthly revenue facts plus approved "
-            "manual overrides. The account-allocated portion is sourced from "
-            "account-level deduction allocations and deduction components. Pending "
-            "overrides are shown as risk, not revenue.",
+            "manual overrides. The channel-direct portion is sourced from "
+            "channel-level deduction components, and the account-allocated portion "
+            "from account-level deduction allocations. Pending overrides are shown "
+            "as risk, not revenue.",
             styles["BodyText"],
         ),
         Spacer(1, 10),

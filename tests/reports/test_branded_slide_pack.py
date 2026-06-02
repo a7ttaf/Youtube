@@ -313,12 +313,11 @@ def test_branded_slide_pack_renders_deduction_breakdown_bullets():
     assert "Total deduction amount USD: 130" in combined_text
     assert "Channel-direct deduction USD: 30" in combined_text
     assert "Account-allocated deduction USD: 100" in combined_text
-    # Provenance accuracy: the slide must disclose the account-allocation source
-    # for the account-allocated deduction figure shown in the bullet above.
-    assert (
-        "account-level deduction allocations and deduction components"
-        in combined_text
-    )
+    # Provenance accuracy: the slide must attribute each split portion to its
+    # true source — channel-direct to channel-level deduction components,
+    # account-allocated to account-level deduction allocations.
+    assert "channel-level deduction components" in combined_text
+    assert "account-level deduction allocations" in combined_text
 
     payload = report.to_api()
     assert payload["executive_summary"]["total_channel_direct_deduction_amount_usd"] == "30"

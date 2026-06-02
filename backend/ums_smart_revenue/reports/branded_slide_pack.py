@@ -237,8 +237,9 @@ def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
             "Account-allocated deduction USD: "
             f"{_decimal_to_api(net_revenue.total_account_allocated_deduction_amount_usd)}",
             "Deductions use SQL revenue facts plus approved manual overrides; "
-            "the account-allocated portion is sourced from account-level "
-            "deduction allocations and deduction components.",
+            "the channel-direct portion is sourced from channel-level deduction "
+            "components and the account-allocated portion from account-level "
+            "deduction allocations.",
             "Pending overrides are shown as risk and do not change net revenue.",
         ],
     )
