@@ -22,11 +22,13 @@ TENANT = UUID(UMS_TENANT_ID)
 
 def _engine(tmp_path):
     """Fresh on-disk SQLite engine with the finance schema, the tenants parent
-    table + a tenant row, and FK enforcement on."""
+    table + a tenant row, and FK enforcement on.
+    """
     engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}")
 
     @event.listens_for(engine, "connect")
     def _fk_on(dbapi_conn, _rec):  # noqa: ANN001
+        """Enable SQLite FK enforcement on each new DBAPI connection."""
         dbapi_conn.execute("PRAGMA foreign_keys=ON")
 
     # committed_allocation_runs FKs tenant_id -> tenants.id; `tenants` lives on

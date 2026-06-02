@@ -44,7 +44,10 @@ def upgrade() -> None:
     op.create_table(
         "committed_allocation_runs",
         sa.Column("id", sa.Uuid(), primary_key=True, server_default=sa.text("gen_random_uuid()")),
-        sa.Column("tenant_id", sa.Uuid(), nullable=False, server_default=sa.text(f"'{UMS_TENANT_ID}'")),
+        sa.Column(
+            "tenant_id", sa.Uuid(), nullable=False,
+            server_default=sa.text(f"'{UMS_TENANT_ID}'"),
+        ),
         sa.Column("month", sa.Text(), nullable=False),
         sa.Column("commit_version", sa.Integer(), nullable=False),
         sa.Column("allocation_method", sa.Text(), nullable=False),
@@ -58,10 +61,19 @@ def upgrade() -> None:
         sa.Column("net_applicable_total_usd", sa.Numeric(20, 6), nullable=False),
         sa.Column("reconciliation_total_usd", sa.Numeric(20, 6), nullable=False),
         sa.Column("committed_by", sa.Uuid(), nullable=False),
-        sa.Column("committed_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "committed_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
         sa.Column("reason", sa.Text(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
-        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
+        sa.Column(
+            "updated_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
         sa.ForeignKeyConstraint(
             ["tenant_id"], ["tenants.id"],
             name="fk_committed_allocation_runs_tenant", ondelete="RESTRICT",
@@ -89,9 +101,18 @@ def upgrade() -> None:
             "allocation_method = 'gross_revenue_proportional'",
             name="ck_committed_allocation_runs_method",
         ),
-        sa.CheckConstraint("commit_version >= 1", name="ck_committed_allocation_runs_version_positive"),
-        sa.CheckConstraint("length(idempotency_key) >= 1", name="ck_committed_allocation_runs_idempotency_nonempty"),
-        sa.CheckConstraint("length(reason) >= 1", name="ck_committed_allocation_runs_reason_nonempty"),
+        sa.CheckConstraint(
+            "commit_version >= 1",
+            name="ck_committed_allocation_runs_version_positive",
+        ),
+        sa.CheckConstraint(
+            "length(idempotency_key) >= 1",
+            name="ck_committed_allocation_runs_idempotency_nonempty",
+        ),
+        sa.CheckConstraint(
+            "length(reason) >= 1",
+            name="ck_committed_allocation_runs_reason_nonempty",
+        ),
     )
     op.create_table(
         "committed_allocation_lines",
@@ -107,7 +128,10 @@ def upgrade() -> None:
         sa.Column("basis_share", sa.Numeric(20, 6), nullable=False),
         sa.Column("allocated_amount_usd", sa.Numeric(20, 6), nullable=False),
         sa.Column("net_applicable", sa.Boolean(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
         sa.ForeignKeyConstraint(
             ["run_id"], ["committed_allocation_runs.id"],
             name="fk_committed_allocation_lines_run", ondelete="CASCADE",
@@ -123,7 +147,10 @@ def upgrade() -> None:
         sa.Column("amount_usd", sa.Numeric(20, 6), nullable=False),
         sa.Column("issue_code", sa.Text(), nullable=False),
         sa.Column("detail", sa.Text(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
         sa.ForeignKeyConstraint(
             ["run_id"], ["committed_allocation_runs.id"],
             name="fk_committed_allocation_unallocated_run", ondelete="CASCADE",
@@ -136,7 +163,10 @@ def upgrade() -> None:
         sa.Column("note_code", sa.Text(), nullable=False),
         sa.Column("youtube_channel_id", sa.Text(), nullable=False),
         sa.Column("detail", sa.Text(), nullable=False),
-        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
+        sa.Column(
+            "created_at", sa.DateTime(timezone=True),
+            nullable=False, server_default=sa.func.now(),
+        ),
         sa.ForeignKeyConstraint(
             ["run_id"], ["committed_allocation_runs.id"],
             name="fk_committed_allocation_notes_run", ondelete="CASCADE",

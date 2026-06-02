@@ -51,6 +51,7 @@ _RUN_COLS = (
 
 
 def _insert_run_sql(**ov) -> tuple[str, dict]:
+    """Build the INSERT SQL + params for a committed_allocation_runs row (overridable)."""
     params = dict(
         tenant=UMS_TENANT_ID, month="2026-04", version=1,
         method="gross_revenue_proportional", key="k1", fp="fp1",

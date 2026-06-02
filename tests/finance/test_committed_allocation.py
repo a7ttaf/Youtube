@@ -42,6 +42,7 @@ def _session(tmp_path) -> Session:
 
     @event.listens_for(engine, "connect")
     def _fk_on(dbapi_conn, _rec):  # noqa: ANN001
+        """Enable SQLite FK enforcement on each new DBAPI connection."""
         dbapi_conn.execute("PRAGMA foreign_keys=ON")
 
     # YouTubeChannelORM lives on OrgBase; the finance rows live on FinanceBase; and
@@ -124,6 +125,7 @@ def _repos(session):
 
 def _commit(committed, ded, rev, link, *, key="k1", fp="fp1", reason="close",
             method="gross_revenue_proportional"):
+    """Invoke commit_allocation with the standard test wiring + overridable knobs."""
     return committed.commit_allocation(
         month=MONTH, allocation_method=method, idempotency_key=key,
         request_fingerprint=fp, reason=reason, committed_by=ACTOR,

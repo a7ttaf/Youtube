@@ -132,12 +132,14 @@ def _principal(*, revenue: bool = True, payments: bool = True, change: bool = Tr
 
 
 def _client(database_url: str, principal_factory) -> TestClient:
+    """TestClient with the principal dependency overridden by `principal_factory`."""
     app = create_app(database_url=database_url)
     app.dependency_overrides[current_principal_from_headers] = principal_factory
     return TestClient(app)
 
 
 def _committed_audit_rows(database_url: str):
+    """Return the ALLOCATION_COMMITTED audit rows persisted in the test database."""
     engine = create_engine(database_url)
     with Session(engine) as session:
         return [
@@ -265,7 +267,12 @@ def test_missing_permission_forbidden_403(tmp_path, missing):
     """Dropping any one of the three required gates yields 403."""
     db = build_database_url(tmp_path)
     _seed(db, mapped=True)
-    client = _client(db, lambda: _principal(**{missing: False}))
+
+    def _drop_one():
+        """Principal with exactly the parametrized `missing` gate dropped."""
+        return _principal(**{missing: False})
+
+    client = _client(db, _drop_one)
     resp = client.post(COMMIT_PATH, json={"idempotency_key": "k", "reason": "r"})
     assert resp.status_code == 403
 
@@ -288,6 +295,7 @@ def test_net_revenue_unchanged_by_commit(tmp_path):
     assert after.status_code == 200
 
     def _stable(payload: dict) -> dict:
+        """Drop the volatile `audit_events` block so two payloads compare equal."""
         return {k: v for k, v in payload.items() if k != "audit_events"}
 
     assert _stable(before.json()) == _stable(after.json())
