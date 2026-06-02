@@ -840,58 +840,99 @@ import pytest
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.finance_models import FinanceBase
+from ums_smart_revenue.db.finance_models import (
+    AdsenseContentOwnerLinkORM,
+    ContentOwnerChannelLinkORM,
+    DeductionComponentORM,
+    FinanceBase,
+    FinanceMonthCloseORM,
+    MonthlyChannelRevenueFactORM,
+)
+from ums_smart_revenue.db.org_models import OrgBase, YouTubeChannelORM
+from ums_smart_revenue.finance.channel_account_links import (
+    SqlAlchemyChannelAccountLinkRepository,
+)
 from ums_smart_revenue.finance.committed_allocation import (
     CommittedAllocationIdempotencyConflictError,
     CommittedAllocationLockedMonthError,
     CommittedAllocationValidationError,
     SqlAlchemyCommittedAllocationRepository,
 )
-from ums_smart_revenue.finance.month_close import SqlAlchemyFinanceMonthCloseRepository
+from ums_smart_revenue.finance.deduction_ingestion import (
+    SqlAlchemyDeductionComponentRepository,
+)
+from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 TENANT = UUID(UMS_TENANT_ID)
 MONTH = "2026-04"
+ACTOR = str(TENANT)  # any UUID-literal actor; the repo maps it via actor_identity_uuid
 
 
 def _session(tmp_path) -> Session:
+    """Fresh SQLite session with org + finance schema and FK enforcement on."""
     engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}")
 
     @event.listens_for(engine, "connect")
     def _fk_on(dbapi_conn, _rec):  # noqa: ANN001
         dbapi_conn.execute("PRAGMA foreign_keys=ON")
 
+    # YouTubeChannelORM lives on OrgBase; the rest live on FinanceBase. The compute
+    # joins facts to the org channel table, so both schemas must exist.
+    OrgBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
     return Session(engine)
 
 
-def _seed_fully_allocated(session) -> None:
-    """Seed one ACCOUNT DEDUCTION component + one verified channel + gross basis.
+def _seed_account_deduction(session, *, mapped: bool, status: str = "OPEN") -> None:
+    """Seed one ACCOUNT DEDUCTION (pub-1, 100.00) over channel chA (ADSENSE 1000.00).
 
-    Mirrors the seeding helpers in tests/finance/test_net_revenue_account_allocations.py
-    and tests/api/test_exports_account_allocation.py: an adsense_management ACCOUNT
-    component of 100.00 over a single verified channel with 1000.00 ADSENSE gross,
-    so compute_month_account_allocation returns exactly one fully-allocated line and
-    zero unallocated issues.
+    Field-for-field the shape of `_seed_missing_net_with_components` in
+    tests/api/test_exports_account_allocation.py, reduced to a single ACCOUNT
+    component. With mapped=True the account resolves to chA via a VERIFIED
+    Adsense->owner link plus an active owner->channel link, so the compute returns
+    exactly one fully-allocated line and zero unallocated issues. With mapped=False
+    the two link rows are omitted, so pub-1 resolves to no channel and the compute
+    yields one UnallocatedIssue. `status` seeds the finance-month close row
+    ("OPEN" or "LOCKED") so the OPEN-month guard can be exercised without going
+    through the month-close readiness path.
     """
-    # IMPLEMENTER: build this with the existing SqlAlchemyDeductionComponentRepository,
-    # SqlAlchemyRevenueFactRepository, and SqlAlchemyChannelAccountLinkRepository
-    # exactly as the two cited test modules do (same field values), committing the
-    # seed rows on `session` before calling commit_allocation. Keep it one account,
-    # one channel, one ACCOUNT-scope DEDUCTION component, fully allocated.
-    raise NotImplementedError  # replace with the concrete seeding (see cited tests)
+    session.add(YouTubeChannelORM(
+        id=uuid4(), tenant_id=TENANT, youtube_channel_id="chA",
+        channel_name="A", active=True,
+    ))
+    session.add(MonthlyChannelRevenueFactORM(
+        id=uuid4(), tenant_id=TENANT, month=MONTH, youtube_channel_id="chA",
+        source_kind="ADSENSE", gross_revenue_usd=Decimal("1000.00"),
+        net_revenue_usd=None,
+    ))
+    session.add(DeductionComponentORM(
+        id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind="DEDUCTION",
+        scope_kind="ACCOUNT", scope_id="pub-1", amount_usd=Decimal("100.00"),
+        currency_code="USD", source_system="adsense_management",
+        source_table="google_revenue_source_rows", component_key="ad-1",
+        raw_payload={},
+    ))
+    if mapped:
+        session.add(AdsenseContentOwnerLinkORM(
+            id=uuid4(), tenant_id=TENANT, adsense_account_id="pub-1",
+            content_owner_id="owner-1", verification_status="VERIFIED",
+            provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+            effective_month_start="2026-01",
+        ))
+        session.add(ContentOwnerChannelLinkORM(
+            id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
+            youtube_channel_id="chA", provenance_kind="SOURCE_ROW", active=True,
+            effective_month_start="2026-01",
+        ))
+    session.add(FinanceMonthCloseORM(
+        tenant_id=TENANT, month=MONTH, status=status, allocation_rule_payload={},
+    ))
+    session.commit()
 
 
 def _repos(session):
-    """Return (committed_repo, deduction_repo, revenue_repo, link_repo)."""
-    from ums_smart_revenue.finance.channel_account_links import (
-        SqlAlchemyChannelAccountLinkRepository,
-    )
-    from ums_smart_revenue.finance.deduction_ingestion import (
-        SqlAlchemyDeductionComponentRepository,
-    )
-    from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
-
+    """Return (committed_repo, deduction_repo, revenue_repo, link_repo) on `session`."""
     return (
         SqlAlchemyCommittedAllocationRepository(session),
         SqlAlchemyDeductionComponentRepository(session),
@@ -900,31 +941,32 @@ def _repos(session):
     )
 
 
-def _commit(committed_repo, ded, rev, link, *, key="k1", fp="fp1", reason="close"):
-    return committed_repo.commit_allocation(
-        month=MONTH, allocation_method="gross_revenue_proportional",
-        idempotency_key=key, request_fingerprint=fp, reason=reason,
-        committed_by=TENANT, deduction_repository=ded,
-        revenue_repository=rev, link_repository=link,
+def _commit(committed, ded, rev, link, *, key="k1", fp="fp1", reason="close",
+            method="gross_revenue_proportional"):
+    return committed.commit_allocation(
+        month=MONTH, allocation_method=method, idempotency_key=key,
+        request_fingerprint=fp, reason=reason, committed_by=ACTOR,
+        deduction_repository=ded, revenue_repository=rev, link_repository=link,
     )
 
 
 def test_first_commit_creates_version_1(tmp_path):
     """A fresh commit creates run v1 with created=True and persists the line."""
     session = _session(tmp_path)
-    _seed_fully_allocated(session)
+    _seed_account_deduction(session, mapped=True)
     committed, ded, rev, link = _repos(session)
     outcome = _commit(committed, ded, rev, link)
     assert outcome.created is True
     assert outcome.run.commit_version == 1
     assert outcome.run.allocated_total_usd == Decimal("100.000000")
     assert len(outcome.lines) == 1
+    assert outcome.lines[0].youtube_channel_id == "chA"
 
 
 def test_idempotent_replay_returns_same_run(tmp_path):
     """Same (month, key, fingerprint) returns the existing run, created=False."""
     session = _session(tmp_path)
-    _seed_fully_allocated(session)
+    _seed_account_deduction(session, mapped=True)
     committed, ded, rev, link = _repos(session)
     first = _commit(committed, ded, rev, link, key="dup", fp="same")
     replay = _commit(committed, ded, rev, link, key="dup", fp="same")
@@ -936,7 +978,7 @@ def test_idempotent_replay_returns_same_run(tmp_path):
 def test_same_key_different_fingerprint_conflicts(tmp_path):
     """Same (month, key) with a different fingerprint raises a conflict."""
     session = _session(tmp_path)
-    _seed_fully_allocated(session)
+    _seed_account_deduction(session, mapped=True)
     committed, ded, rev, link = _repos(session)
     _commit(committed, ded, rev, link, key="dup", fp="fp-a")
     with pytest.raises(CommittedAllocationIdempotencyConflictError):
@@ -946,7 +988,7 @@ def test_same_key_different_fingerprint_conflicts(tmp_path):
 def test_new_key_same_month_increments_version(tmp_path):
     """A new key in the same month creates the next commit_version."""
     session = _session(tmp_path)
-    _seed_fully_allocated(session)
+    _seed_account_deduction(session, mapped=True)
     committed, ded, rev, link = _repos(session)
     _commit(committed, ded, rev, link, key="k1", fp="f1")
     second = _commit(committed, ded, rev, link, key="k2", fp="f2")
@@ -957,10 +999,7 @@ def test_new_key_same_month_increments_version(tmp_path):
 def test_locked_month_rejected(tmp_path):
     """Committing a LOCKED month raises CommittedAllocationLockedMonthError."""
     session = _session(tmp_path)
-    _seed_fully_allocated(session)
-    close_repo = SqlAlchemyFinanceMonthCloseRepository(session)
-    close_repo.lock_month(month=MONTH, actor_user_id=str(TENANT))
-    session.flush()
+    _seed_account_deduction(session, mapped=True, status="LOCKED")
     committed, ded, rev, link = _repos(session)
     with pytest.raises(CommittedAllocationLockedMonthError):
         _commit(committed, ded, rev, link)
@@ -969,37 +1008,31 @@ def test_locked_month_rejected(tmp_path):
 def test_unsupported_method_rejected_before_compute(tmp_path):
     """A non-gross_revenue_proportional method is rejected (validation error)."""
     session = _session(tmp_path)
-    _seed_fully_allocated(session)
+    _seed_account_deduction(session, mapped=True)
     committed, ded, rev, link = _repos(session)
     with pytest.raises(CommittedAllocationValidationError):
-        committed.commit_allocation(
-            month=MONTH, allocation_method="company_level",
-            idempotency_key="k", request_fingerprint="f", reason="r",
-            committed_by=TENANT, deduction_repository=ded,
-            revenue_repository=rev, link_repository=link,
-        )
-```
+        _commit(committed, ded, rev, link, method="company_level")
 
-(If `lock_month` requires readiness, the implementer seeds the month so readiness passes, or directly sets the close row's `status = "LOCKED"` via `SqlAlchemyFinanceMonthCloseRepository` / a direct update — keep it minimal and faithful to `month_close.py`.)
 
-Add one more test for reject-on-unallocated: seed an ACCOUNT component whose account has **no** verified channel (so compute yields an `UnallocatedIssue`) and assert `commit_allocation` raises `CommittedAllocationValidationError`:
-
-```python
 def test_reject_on_unallocated(tmp_path):
-    """A component that cannot allocate (unmapped account) blocks the commit."""
+    """An unmapped account (no verified channel link) blocks the commit."""
     session = _session(tmp_path)
-    _seed_unallocatable(session)  # ACCOUNT component with no verified channel
+    _seed_account_deduction(session, mapped=False)
     committed, ded, rev, link = _repos(session)
     with pytest.raises(CommittedAllocationValidationError):
         _commit(committed, ded, rev, link)
 ```
 
-(`_seed_unallocatable` mirrors `_seed_fully_allocated` but omits the verified channel link — see `tests/finance/test_net_revenue_account_allocations.py` for the unmapped-account shape.)
+The seed sets the close row's `status` directly ("OPEN" / "LOCKED"), so the
+locked-month path is exercised without invoking the month-close readiness flow.
+For mapped=False the two link rows are omitted, so `pub-1` resolves to no channel
+and the compute yields one `UnallocatedIssue` (the fail-closed UNALLOCATED path),
+which `commit_allocation` rejects with `CommittedAllocationValidationError`.
 
 - [ ] **Step 2: Run to verify it fails**
 
 Run: `python -m pytest tests/finance/test_committed_allocation.py -q`
-Expected: FAIL at import (`cannot import name 'SqlAlchemyCommittedAllocationRepository'`). Implement the seeding helpers first (they reference existing repositories), then proceed.
+Expected: FAIL at collection/import (`cannot import name 'SqlAlchemyCommittedAllocationRepository' from 'ums_smart_revenue.finance.committed_allocation'` — the module does not exist yet). The seed helpers reference only existing repositories/ORMs, so the failure is the missing committed-allocation module, not the fixtures.
 
 - [ ] **Step 3: Implement the repository**
 
@@ -1023,6 +1056,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
 from ums_smart_revenue.db.finance_models import (
     CommittedAllocationLineORM,
     CommittedAllocationNoteORM,
@@ -1033,10 +1067,13 @@ from ums_smart_revenue.finance.allocation import ALLOCATION_METHOD, AccountAlloc
 from ums_smart_revenue.finance.allocation_inputs import compute_month_account_allocation
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
+
+_DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 
 class CommittedAllocationValidationError(ValueError):
-    """Unsupported method or unallocated components present (-> 422)."""
+    """Unsupported method, unallocated components, or invalid actor/tenant (-> 422)."""
 
 
 class CommittedAllocationLockedMonthError(RuntimeError):
@@ -1045,6 +1082,31 @@ class CommittedAllocationLockedMonthError(RuntimeError):
 
 class CommittedAllocationIdempotencyConflictError(RuntimeError):
     """The idempotency key was reused with a different request (-> 409)."""
+
+
+def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:
+    """Resolve explicit, ambient, or default tenant UUID for repository scoping."""
+    if isinstance(tenant_id, UUID):
+        return tenant_id
+    if tenant_id is None:
+        current_tenant = get_current_tenant()
+        if current_tenant is not None:
+            return current_tenant.id
+        return _DEFAULT_TENANT_UUID
+    try:
+        return UUID(str(tenant_id).strip())
+    except ValueError as exc:
+        raise CommittedAllocationValidationError(
+            f"invalid tenant_id: {tenant_id!r}"
+        ) from exc
+
+
+def _actor_identity_uuid(value: str) -> UUID:
+    """Parse/derive the committed_by UUID (UUID literal or gateway subject)."""
+    try:
+        return actor_identity_uuid(value)
+    except ValueError as exc:
+        raise CommittedAllocationValidationError(str(exc)) from exc
 
 
 @dataclass(frozen=True)
@@ -1061,8 +1123,9 @@ class CommitAllocationOutcome:
 class SqlAlchemyCommittedAllocationRepository:
     """Persist committed allocation runs on the shared request session."""
 
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, *, tenant_id: UUID | str | None = None) -> None:
         self._session = session
+        self._tenant_id = _resolve_tenant_id(tenant_id)
 
     # ========================================================================
     # Purpose: Commit a versioned snapshot of the gross_revenue_proportional
@@ -1070,7 +1133,7 @@ class SqlAlchemyCommittedAllocationRepository:
     # Database/ORM: committed_allocation_runs/_lines/_unallocated/_notes;
     #   reads FinanceMonthCloseORM (lock) via month_close helpers.
     # Standards: shared request session (no commit here); typed errors -> route
-    #   413/409/422; method-before-compute; reject-on-unallocated.
+    #   422/409; method-before-compute; reject-on-unallocated.
     # Blast Radius: Finance write; first allocation persistence. No reader change.
     # ========================================================================
     def commit_allocation(
@@ -1081,22 +1144,22 @@ class SqlAlchemyCommittedAllocationRepository:
         idempotency_key: str,
         request_fingerprint: str,
         reason: str,
-        committed_by: UUID,
+        committed_by: str,
         deduction_repository: object,
         revenue_repository: object,
         link_repository: object,
     ) -> CommitAllocationOutcome:
         """Compute + persist a committed run, or replay an idempotent retry."""
-        tenant_id = UUID(UMS_TENANT_ID)
+        committed_by_uuid = _actor_identity_uuid(committed_by)
         # Hold the finance-month advisory lock + close-row FOR UPDATE for the
         # whole unit (the lock is transaction-scoped on Postgres; no-op on SQLite).
         close_row = get_or_create_month_close_row(
-            self._session, month, tenant_id=tenant_id, for_update=True
+            self._session, month, tenant_id=self._tenant_id, for_update=True
         )
 
         existing = self._session.scalars(
             select(CommittedAllocationRunORM).where(
-                CommittedAllocationRunORM.tenant_id == tenant_id,
+                CommittedAllocationRunORM.tenant_id == self._tenant_id,
                 CommittedAllocationRunORM.month == month,
                 CommittedAllocationRunORM.idempotency_key == idempotency_key,
             )
@@ -1130,7 +1193,7 @@ class SqlAlchemyCommittedAllocationRepository:
         next_version = (
             self._session.scalars(
                 select(CommittedAllocationRunORM.commit_version).where(
-                    CommittedAllocationRunORM.tenant_id == tenant_id,
+                    CommittedAllocationRunORM.tenant_id == self._tenant_id,
                     CommittedAllocationRunORM.month == month,
                 ).order_by(CommittedAllocationRunORM.commit_version.desc())
             ).first()
@@ -1138,7 +1201,7 @@ class SqlAlchemyCommittedAllocationRepository:
         ) + 1
 
         run = CommittedAllocationRunORM(
-            tenant_id=tenant_id, month=month, commit_version=next_version,
+            tenant_id=self._tenant_id, month=month, commit_version=next_version,
             allocation_method=result.allocation_method,
             idempotency_key=idempotency_key, request_fingerprint=request_fingerprint,
             component_count=result.summary.component_count,
@@ -1148,7 +1211,7 @@ class SqlAlchemyCommittedAllocationRepository:
             unallocated_total_usd=result.summary.unallocated_total_usd,
             net_applicable_total_usd=result.summary.net_applicable_total_usd,
             reconciliation_total_usd=result.summary.reconciliation_total_usd,
-            committed_by=committed_by, reason=reason,
+            committed_by=committed_by_uuid, reason=reason,
         )
         self._session.add(run)
         self._session.flush()  # assign run.id
@@ -1214,7 +1277,7 @@ class SqlAlchemyCommittedAllocationRepository:
         """Return the highest-version run for a month (NOT wired into readers)."""
         return self._session.scalars(
             select(CommittedAllocationRunORM).where(
-                CommittedAllocationRunORM.tenant_id == UUID(UMS_TENANT_ID),
+                CommittedAllocationRunORM.tenant_id == self._tenant_id,
                 CommittedAllocationRunORM.month == month,
             ).order_by(CommittedAllocationRunORM.commit_version.desc())
         ).first()
@@ -1225,7 +1288,7 @@ class SqlAlchemyCommittedAllocationRepository:
         """Return the run for a month-scoped idempotency key, if any."""
         return self._session.scalars(
             select(CommittedAllocationRunORM).where(
-                CommittedAllocationRunORM.tenant_id == UUID(UMS_TENANT_ID),
+                CommittedAllocationRunORM.tenant_id == self._tenant_id,
                 CommittedAllocationRunORM.month == month,
                 CommittedAllocationRunORM.idempotency_key == idempotency_key,
             )
@@ -1261,44 +1324,264 @@ Create `tests/api/test_committed_allocation_api.py`, modeled on the existing all
 
 ```python
 """API tests for POST /revenue/months/{month}/account-allocations/commit."""
-# IMPLEMENTER: reuse the seed_database / build_database_url / auth_headers (or
-# dependency-override principal) helpers exactly as tests/api/test_net_revenue_api.py
-# does. Seed a month that allocates fully (one ACCOUNT component over one verified
-# channel) so the commit succeeds; seed a separate unmapped-account month for the
-# 422-unallocated case. The principal needs VIEW_REVENUE@global +
-# VIEW_FINALIZED_PAYMENTS@finance_month + CHANGE_ALLOCATION_RULE@finance_month.
+from decimal import Decimal
+from uuid import UUID, uuid4
 
-# Required test functions (each a full test, no placeholders):
-# - test_commit_creates_run_and_summary_only_audit:
-#     POST {idempotency_key, reason} -> 201; body.run.commit_version == 1;
-#     body.allocations non-empty, body.unallocated == []; body.audit_event has
-#     event_type ALLOCATION_COMMITTED; assert the persisted AuditLog detail
-#     contains run_id/commit_version/totals/counts but NOT a per-line list.
-# - test_idempotent_replay_returns_200_without_second_audit:
-#     POST twice with the same idempotency_key + identical body -> first 201,
-#     second 200 with audit_event is None and the same run_id; assert exactly one
-#     ALLOCATION_COMMITTED row in the audit log.
-# - test_same_key_different_reason_conflicts_409:
-#     same idempotency_key, different reason -> 409.
-# - test_locked_month_conflicts_409:
-#     lock the month, then POST -> 409.
-# - test_unallocated_month_rejected_422:
-#     seed an unmapped-account month -> POST -> 422.
-# - test_malformed_month_rejected_422:
-#     POST to /months/2026-13/... -> 422.
-# - test_unsupported_method_rejected_422:
-#     POST {allocation_method: "company_level"} -> 422.
-# - test_missing_permission_forbidden_403 (parametrized over the three gates):
-#     a principal lacking each of VIEW_REVENUE / VIEW_FINALIZED_PAYMENTS /
-#     CHANGE_ALLOCATION_RULE -> 403.
-# - test_net_revenue_unchanged_by_commit (READER-UNTOUCHED REGRESSION):
-#     GET /revenue/months/{m}/net-revenue, capture response.json(); POST commit;
-#     GET net-revenue again; assert the two JSON bodies are equal except for the
-#     audit_events block (which carries fresh event ids/timestamps). Proves the
-#     committed snapshot drives no reader number.
+import pytest
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine, select
+from sqlalchemy.orm import Session
+
+from ums_smart_revenue.api.dependencies import current_principal_from_headers
+from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
+from ums_smart_revenue.auth.permissions import Permission
+from ums_smart_revenue.auth.scopes import AccessScope
+from ums_smart_revenue.db.finance_models import (
+    AdsenseContentOwnerLinkORM,
+    ContentOwnerChannelLinkORM,
+    DeductionComponentORM,
+    FinanceBase,
+    FinanceMonthCloseORM,
+    MonthlyChannelRevenueFactORM,
+)
+from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
+from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
+MONTH = "2026-03"
+TENANT = UUID(UMS_TENANT_ID)
+SECTOR_ID = UUID("00000000-0000-0000-0000-0000000a0101")
+COMPANY_ID = UUID("00000000-0000-0000-0000-0000000a0201")
+CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-0000000a0301")
+USER_ID = UUID("00000000-0000-0000-0000-0000000a0401")
+COMMIT_PATH = f"/revenue/months/{MONTH}/account-allocations/commit"
+
+
+def build_database_url(tmp_path) -> str:
+    """Return a unique SQLite URL under pytest's temp path."""
+    return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
+
+
+def _seed(database_url: str, *, mapped: bool = True, status: str = "OPEN") -> None:
+    """Seed org/security/finance rows for the commit endpoint.
+
+    chA has ADSENSE gross 1000 and NO source net; an ACCOUNT DEDUCTION (pub-1, 100)
+    is the only deduction. mapped=True wires pub-1 -> chA via a VERIFIED Adsense
+    link plus an active owner->channel link, so the compute fully allocates with
+    zero unallocated. mapped=False omits the links, so pub-1 resolves to no channel
+    (one UnallocatedIssue). `status` seeds the finance-month close row.
+    """
+    engine = create_engine(database_url)
+    OrgBase.metadata.create_all(engine)
+    SecurityBase.metadata.create_all(engine)
+    FinanceBase.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add_all([
+            OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="S", active=True),
+            OrgUnitORM(
+                id=COMPANY_ID, parent_id=SECTOR_ID, type="COMPANY", name="C", active=True,
+            ),
+            YouTubeChannelORM(
+                id=CHANNEL_ROW_ID, tenant_id=TENANT, youtube_channel_id="chA",
+                channel_name="A", primary_org_unit_id=COMPANY_ID,
+                cms_status="INSIDE_CMS", revenue_required=True, active=True,
+            ),
+            MonthlyChannelRevenueFactORM(
+                id=uuid4(), tenant_id=TENANT, month=MONTH, youtube_channel_id="chA",
+                source_kind="ADSENSE", source_report_id=None,
+                gross_revenue_usd=Decimal("1000.00"), net_revenue_usd=None,
+                views=0, watch_time_minutes=Decimal("0"),
+                confidence_score=Decimal("0.95"), imported_by=USER_ID,
+            ),
+            DeductionComponentORM(
+                id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind="DEDUCTION",
+                scope_kind="ACCOUNT", scope_id="pub-1", amount_usd=Decimal("100.00"),
+                currency_code="USD", source_system="adsense_management",
+                source_table="google_revenue_source_rows", component_key="ad-1",
+                raw_payload={},
+            ),
+            UserORM(id=USER_ID, email="commit@example.com", display_name="Commit User"),
+            FinanceMonthCloseORM(
+                tenant_id=TENANT, month=MONTH, status=status, allocation_rule_payload={},
+            ),
+        ])
+        if mapped:
+            session.add_all([
+                AdsenseContentOwnerLinkORM(
+                    id=uuid4(), tenant_id=TENANT, adsense_account_id="pub-1",
+                    content_owner_id="owner-1", verification_status="VERIFIED",
+                    provenance_kind="OPERATOR_ASSERTED", provenance_payload={},
+                    effective_month_start="2026-01",
+                ),
+                ContentOwnerChannelLinkORM(
+                    id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
+                    youtube_channel_id="chA", provenance_kind="SOURCE_ROW",
+                    active=True, effective_month_start="2026-01",
+                ),
+            ])
+        session.commit()
+
+
+def _principal(*, revenue: bool = True, payments: bool = True, change: bool = True):
+    """Global finance principal; flags drop one gate at a time for the 403 cases."""
+    grants = []
+    if revenue:
+        grants.append(PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()))
+    if payments:
+        grants.append(
+            PermissionGrant(Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(MONTH))
+        )
+    if change:
+        grants.append(
+            PermissionGrant(Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(MONTH))
+        )
+    return UserPrincipal(
+        user_id=str(USER_ID), email="commit@example.com",
+        direct_permissions=tuple(grants),
+    )
+
+
+def _client(database_url: str, principal_factory) -> TestClient:
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = principal_factory
+    return TestClient(app)
+
+
+def _committed_audit_rows(database_url: str):
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        return [
+            row
+            for row in session.scalars(select(AuditLogORM)).all()
+            if row.event_type == "ALLOCATION_COMMITTED"
+        ]
+
+
+def test_commit_creates_run_and_summary_only_audit(tmp_path):
+    """First commit -> 201 with one allocation, summary-only audit, one audit row."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(COMMIT_PATH, json={"idempotency_key": "k1", "reason": "month close"})
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["run"]["commit_version"] == 1
+    assert body["allocations"]  # one fully-allocated line
+    assert body["unallocated"] == []
+    assert body["audit_event"]["event_type"] == "ALLOCATION_COMMITTED"
+    assert "details" not in body["audit_event"]  # API-surface audit is summary-only
+    rows = _committed_audit_rows(db)
+    assert len(rows) == 1
+    detail = rows[0].details
+    assert detail["run_id"] == body["run"]["run_id"]
+    assert detail["commit_version"] == 1
+    assert "allocated_total_usd" in detail
+    assert "allocations" not in detail and "lines" not in detail  # no per-line dump
+
+
+def test_idempotent_replay_returns_200_without_second_audit(tmp_path):
+    """Re-POST with the same key + identical body -> 200, no second audit row."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    payload = {"idempotency_key": "dup", "reason": "month close"}
+    first = client.post(COMMIT_PATH, json=payload)
+    second = client.post(COMMIT_PATH, json=payload)
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json()["audit_event"] is None
+    assert second.json()["run"]["run_id"] == first.json()["run"]["run_id"]
+    assert len(_committed_audit_rows(db)) == 1
+
+
+def test_same_key_different_reason_conflicts_409(tmp_path):
+    """Same key, different reason (different fingerprint) -> 409."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    client.post(COMMIT_PATH, json={"idempotency_key": "dup", "reason": "first"})
+    conflict = client.post(COMMIT_PATH, json={"idempotency_key": "dup", "reason": "second"})
+    assert conflict.status_code == 409
+
+
+def test_locked_month_conflicts_409(tmp_path):
+    """A LOCKED month rejects the commit with 409."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True, status="LOCKED")
+    client = _client(db, _principal)
+    resp = client.post(COMMIT_PATH, json={"idempotency_key": "k", "reason": "r"})
+    assert resp.status_code == 409
+
+
+def test_unallocated_month_rejected_422(tmp_path):
+    """An unmapped account (one unallocated issue) rejects the commit with 422."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=False)
+    client = _client(db, _principal)
+    resp = client.post(COMMIT_PATH, json={"idempotency_key": "k", "reason": "r"})
+    assert resp.status_code == 422
+
+
+def test_malformed_month_rejected_422(tmp_path):
+    """A malformed month path segment is rejected with 422 before any compute."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        "/revenue/months/2026-13/account-allocations/commit",
+        json={"idempotency_key": "k", "reason": "r"},
+    )
+    assert resp.status_code == 422
+
+
+def test_unsupported_method_rejected_422(tmp_path):
+    """A non-gross_revenue_proportional method is rejected with 422."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json={"idempotency_key": "k", "reason": "r", "allocation_method": "company_level"},
+    )
+    assert resp.status_code == 422
+
+
+@pytest.mark.parametrize("missing", ["revenue", "payments", "change"])
+def test_missing_permission_forbidden_403(tmp_path, missing):
+    """Dropping any one of the three required gates yields 403."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, lambda: _principal(**{missing: False}))
+    resp = client.post(COMMIT_PATH, json={"idempotency_key": "k", "reason": "r"})
+    assert resp.status_code == 403
+
+
+def test_net_revenue_unchanged_by_commit(tmp_path):
+    """READER-UNTOUCHED REGRESSION: live net-revenue is identical (modulo the
+    volatile audit_events block) before and after a commit; the snapshot drives no
+    reader number.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    net_path = f"/revenue/months/{MONTH}/net-revenue?scope_type=global"
+
+    before = client.get(net_path)
+    assert before.status_code == 200
+    commit = client.post(COMMIT_PATH, json={"idempotency_key": "k", "reason": "r"})
+    assert commit.status_code == 201
+    after = client.get(net_path)
+    assert after.status_code == 200
+
+    def _stable(payload: dict) -> dict:
+        return {k: v for k, v in payload.items() if k != "audit_events"}
+
+    assert _stable(before.json()) == _stable(after.json())
 ```
 
-The implementer writes each of the above as a complete function using the repo's existing API-test idioms. The reader-untouched test is mandatory.
+All nine functions above are complete and runnable against the implemented route;
+`test_net_revenue_unchanged_by_commit` (the reader-untouched regression) is mandatory.
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -1332,7 +1615,6 @@ In `backend/ums_smart_revenue/api/allocation.py`: add imports (`hashlib`, `json`
 ```python
 import hashlib
 import json
-from uuid import UUID
 
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
@@ -1446,7 +1728,7 @@ def commit_account_allocations(
         outcome = committed_repository.commit_allocation(
             month=month, allocation_method=payload.allocation_method,
             idempotency_key=payload.idempotency_key, request_fingerprint=fingerprint,
-            reason=payload.reason, committed_by=UUID(user.user_id),
+            reason=payload.reason, committed_by=user.user_id,  # str; repo -> UUID
             deduction_repository=deduction_repository,
             revenue_repository=revenue_repository, link_repository=link_repository,
         )
@@ -1617,6 +1899,6 @@ Expected: ruff clean; targeted set green; full suite green (PG container running
 
 No gaps.
 
-**2. Placeholder scan:** Task 2's `_seed_fully_allocated` / `_seed_unallocatable` and Task 3's API-test bodies are described as "build exactly as the cited existing test modules do" with the precise data shape (one ACCOUNT component / one verified channel / 1000 gross / 100 deduction) — they reference concrete existing seeders (`test_net_revenue_account_allocations.py`, `test_exports_account_allocation.py`, `test_net_revenue_api.py`) rather than inventing fixtures, because those seeders are the established, correct way to produce a valid `AccountAllocationResult` and duplicating ~40 lines of seeding verbatim would risk drift from the real fixtures. Every production code block (ORM, migration, repository, audit, endpoint) is complete. The Task 4 doc edits include a fallback-wording note (a guard, not a placeholder).
+**2. Placeholder scan:** No placeholders remain. Task 2's seeding is a single executable `_seed_account_deduction(session, *, mapped, status)` helper (field-for-field the verified `_seed_missing_net_with_components` shape from `tests/api/test_exports_account_allocation.py`, reduced to one ACCOUNT component over chA: 1000 gross, 100 deduction), with `mapped=False` exercising the unallocated path and `status="LOCKED"` the locked path — no `NotImplementedError`, no "build as the cited module does" hand-waving. Task 3's API tests are nine complete, runnable functions (own `build_database_url` / `_seed` / `_principal` / `_client` helpers, modeled on the verified `tests/api/test_net_revenue_api.py` idioms — `create_app(database_url=...)` + `dependency_overrides[current_principal_from_headers]`), covering 201 + summary-only audit, 200 replay, 409 locked, 409 conflict, 422 unallocated/malformed/unsupported, parametrized 403 per gate, and the reader-untouched regression. Every production code block (ORM, migration, repository, audit, endpoint) is complete. The Task 4 doc edits include a fallback-wording note (a guard, not a placeholder).
 
 **3. Type consistency:** `CommitAllocationOutcome(run, lines, unallocated, notes, created)` is produced by `commit_allocation` (Task 2) and consumed by the route (Task 3). `commit_allocation(...)` keyword args match between the repo, the repo tests, and the route call. ORM class names (`CommittedAllocationRunORM`/`LineORM`/`UnallocatedORM`/`NoteORM`) are identical across the models, migration FK targets, repository, and tests. `request_fingerprint` over `{allocation_method, reason}` matches §7. Typed errors map to the documented status codes (Validation→422, Locked/IdempotencyConflict→409).
