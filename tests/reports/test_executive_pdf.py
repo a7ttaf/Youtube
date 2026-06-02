@@ -42,6 +42,17 @@ def test_executive_pdf_report_builds_section_manifest_from_source_summaries():
     assert [section["name"] for section in payload["sections"]] == list(
         EXECUTIVE_PDF_SECTION_NAMES
     )
+    # Provenance: the Deductions Explanation section now reports an
+    # account-allocated split, so its manifest source must disclose the
+    # account-allocation inputs.
+    deductions_section = next(
+        section
+        for section in payload["sections"]
+        if section["name"] == "Deductions Explanation"
+    )
+    assert deductions_section["source"] == (
+        "source_net_revenue_manual_overrides_and_account_allocations"
+    )
     assert payload["executive_summary"]["total_net_revenue_usd"] == "930"
     assert payload["executive_summary"]["payment_match_status"] == "PAYMENT_MATCHED"
     assert payload["executive_summary"]["bank_reconciliation_status"] == (
@@ -302,3 +313,6 @@ def test_executive_pdf_renders_deduction_breakdown_aggregate_rows():
     # assertion stays load-bearing if a digit moves to another section.
     assert re.search(r"Channel-Direct Deduction USD\s+37(?:\.0+)?", text)
     assert re.search(r"Account-Allocated Deduction USD\s+93(?:\.0+)?", text)
+    # Provenance accuracy: the adjacent explanation must disclose the
+    # account-allocation source for the account-allocated figure shown above.
+    assert "account-level deduction allocations" in text

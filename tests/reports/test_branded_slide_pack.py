@@ -39,6 +39,17 @@ def test_branded_slide_pack_report_builds_planned_slide_manifest():
     assert payload["artifact_type"] == "BRANDED_FINANCE_SLIDE_PACK"
     assert payload["status"] == "READY_FOR_GENERATION"
     assert [slide["name"] for slide in payload["slides"]] == list(BRANDED_SLIDE_NAMES)
+    # Provenance: the deduction explanation slide now surfaces an
+    # account-allocated split, so its manifest source must disclose the
+    # account-allocation inputs.
+    deductions_slide = next(
+        slide
+        for slide in payload["slides"]
+        if slide["name"] == "Revenue deduction explanation"
+    )
+    assert deductions_slide["source"] == (
+        "source_net_revenue_manual_overrides_and_account_allocations"
+    )
     assert payload["executive_summary"]["total_net_revenue_usd"] == "930"
     assert payload["executive_summary"]["payment_match_status"] == "PAYMENT_MATCHED"
     assert payload["executive_summary"]["bank_reconciliation_status"] == (
@@ -306,6 +317,12 @@ def test_branded_slide_pack_renders_deduction_breakdown_bullets():
     assert "Total deduction amount USD: 130" in combined_text
     assert "Channel-direct deduction USD: 30" in combined_text
     assert "Account-allocated deduction USD: 100" in combined_text
+    # Provenance accuracy: the slide must disclose the account-allocation source
+    # for the account-allocated deduction figure shown in the bullet above.
+    assert (
+        "account-level deduction allocations and deduction components"
+        in combined_text
+    )
 
     payload = report.to_api()
     assert payload["executive_summary"]["total_channel_direct_deduction_amount_usd"] == "30"

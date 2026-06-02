@@ -42,6 +42,14 @@ def test_finance_workbook_preview_builds_sheet_manifest_from_source_summaries():
     assert [sheet["name"] for sheet in payload["sheets"]] == list(
         FINANCE_WORKBOOK_SHEET_NAMES
     )
+    # Provenance: the Deductions sheet now surfaces an account-allocated split,
+    # so its manifest source must disclose the account-allocation inputs.
+    deductions_sheet = next(
+        sheet for sheet in payload["sheets"] if sheet["name"] == "Deductions"
+    )
+    assert deductions_sheet["source"] == (
+        "source_net_revenue_manual_overrides_and_account_allocations"
+    )
     assert payload["executive_summary"] == {
         "month": "2026-03",
         "scope_type": "company",
