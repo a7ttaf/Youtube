@@ -86,6 +86,11 @@ class SqlAlchemyCommittedAllocationRepository:
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
+    @property
+    def tenant_id(self) -> UUID:
+        """The tenant UUID this repository is scoped to (read-only)."""
+        return self._tenant_id
+
     # ========================================================================
     # Purpose: Commit a versioned snapshot of the gross_revenue_proportional
     #   compute for one month, under the finance-month advisory lock.
@@ -211,22 +216,41 @@ class SqlAlchemyCommittedAllocationRepository:
             run=run, lines=lines, unallocated=unallocated, notes=notes, created=True
         )
 
+    # ========================================================================
+    # Purpose: Load an existing run's child rows for an idempotent replay or a
+    #   read-switch reconstruction. A stable ORDER BY on each child select makes
+    #   reconstructed reads deterministic: a SQL SELECT without ORDER BY may
+    #   return rows in any order (a PG seq-scan after updates/vacuum can reorder),
+    #   so two successive reads of the same snapshot could otherwise differ.
+    # Database/ORM: reads committed_allocation_lines/_unallocated/_notes.
+    # Standards: deterministic read ordering; reads never write.
+    # Blast Radius: Finance read-model only (snapshot reconstruction). No money
+    #   change — the lines/issues/notes set is identical; only emission order is
+    #   pinned. No auth/Neo4j.
+    # ========================================================================
     def _replay(self, run: CommittedAllocationRunORM) -> CommitAllocationOutcome:
-        """Load an existing run's children for an idempotent replay."""
+        """Load an existing run's children (deterministically ordered) for replay."""
         lines = tuple(self._session.scalars(
             select(CommittedAllocationLineORM).where(
                 CommittedAllocationLineORM.run_id == run.id
+            ).order_by(
+                CommittedAllocationLineORM.adsense_account_id,
+                CommittedAllocationLineORM.youtube_channel_id,
+                CommittedAllocationLineORM.component_key,
             )
         ).all())
         unallocated = tuple(self._session.scalars(
             select(CommittedAllocationUnallocatedORM).where(
                 CommittedAllocationUnallocatedORM.run_id == run.id
+            ).order_by(
+                CommittedAllocationUnallocatedORM.scope_id,
+                CommittedAllocationUnallocatedORM.component_key,
             )
         ).all())
         notes = tuple(self._session.scalars(
             select(CommittedAllocationNoteORM).where(
                 CommittedAllocationNoteORM.run_id == run.id
-            )
+            ).order_by(CommittedAllocationNoteORM.youtube_channel_id)
         ).all())
         return CommitAllocationOutcome(
             run=run, lines=lines, unallocated=unallocated, notes=notes, created=False
@@ -252,3 +276,8 @@ class SqlAlchemyCommittedAllocationRepository:
                 CommittedAllocationRunORM.idempotency_key == idempotency_key,
             )
         ).one_or_none()
+
+    def get_latest_committed(self, month: str) -> CommitAllocationOutcome | None:
+        """Return the highest-version committed run + its child rows for a month, or None."""
+        run = self.get_latest_run(month)
+        return None if run is None else self._replay(run)

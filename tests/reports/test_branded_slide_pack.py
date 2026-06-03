@@ -1,11 +1,12 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 from io import BytesIO
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pptx import Presentation
 
+from ums_smart_revenue.finance.account_allocation_read import AllocationProvenance
 from ums_smart_revenue.finance.bank_reconciliation import (
     MonthBankReconciliationSummary,
 )
@@ -327,3 +328,49 @@ def test_branded_slide_pack_renders_deduction_breakdown_bullets():
     payload = report.to_api()
     assert payload["executive_summary"]["total_channel_direct_deduction_amount_usd"] == "30"
     assert payload["executive_summary"]["total_account_allocated_deduction_amount_usd"] == "100"
+
+
+def _committed_provenance() -> AllocationProvenance:
+    """A committed-snapshot provenance with a fixed commit date for token assertions."""
+    return AllocationProvenance(
+        source="committed_snapshot", commit_version=1,
+        committed_at=datetime(2026, 4, 2, tzinfo=UTC), run_id=UUID(int=7),
+    )
+
+
+def test_branded_slide_pack_renders_committed_snapshot_disclosure_token():
+    """The deductions slide carries the allocation-source disclosure bullet."""
+    report = build_branded_slide_pack_report(
+        export_job=_export_job(export_type="BRANDED_SLIDE_PACK"),
+        net_revenue=_net_revenue_summary_with_breakdown(),
+        payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
+        bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
+        smart_alerts=_smart_alert_summary(),
+        account_allocation_provenance=_committed_provenance(),
+    )
+    slide_texts = _slide_texts(
+        Presentation(BytesIO(build_branded_slide_pack_pptx(report)))
+    )
+    deduction_slide_text = slide_texts[
+        BRANDED_SLIDE_NAMES.index("Revenue deduction explanation")
+    ]
+    assert "committed snapshot v1" in deduction_slide_text
+
+
+def test_branded_slide_pack_renders_live_fallback_disclosure_token():
+    """A LOCKED month with no committed run renders the live-fallback bullet."""
+    report = build_branded_slide_pack_report(
+        export_job=_export_job(export_type="BRANDED_SLIDE_PACK"),
+        net_revenue=_net_revenue_summary_with_breakdown(),
+        payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
+        bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
+        smart_alerts=_smart_alert_summary(),
+        account_allocation_provenance=AllocationProvenance(source="live_fallback"),
+    )
+    slide_texts = _slide_texts(
+        Presentation(BytesIO(build_branded_slide_pack_pptx(report)))
+    )
+    deduction_slide_text = slide_texts[
+        BRANDED_SLIDE_NAMES.index("Revenue deduction explanation")
+    ]
+    assert "Account allocation: live fallback" in deduction_slide_text

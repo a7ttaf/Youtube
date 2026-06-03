@@ -22,12 +22,15 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
+from ums_smart_revenue.finance.account_allocation_read import (
+    AllocationProvenance,
+    resolve_month_account_allocation,
+)
 from ums_smart_revenue.finance.adsense_payments import (
     AdSensePaymentValidationError,
     SqlAlchemyAdSensePaymentRepository,
 )
 from ums_smart_revenue.finance.allocation import AllocationValidationError
-from ums_smart_revenue.finance.allocation_inputs import compute_month_account_allocation
 from ums_smart_revenue.finance.bank_reconciliation import (
     BankReconciliationValidationError,
     MonthBankReconciliationSummary,
@@ -36,6 +39,9 @@ from ums_smart_revenue.finance.bank_reconciliation import (
 )
 from ums_smart_revenue.finance.channel_account_links import (
     SqlAlchemyChannelAccountLinkRepository,
+)
+from ums_smart_revenue.finance.committed_allocation import (
+    SqlAlchemyCommittedAllocationRepository,
 )
 from ums_smart_revenue.finance.deduction_ingestion import (
     DeductionComponentValidationError,
@@ -112,6 +118,7 @@ class _FinanceExportSourceSummaries:
     payment_match: MonthlyPaymentMatchSummary
     bank_reconciliation: MonthBankReconciliationSummary
     smart_alerts: MonthlySmartAlertSummary
+    account_allocation_provenance: AllocationProvenance
 
 
 class ExportRequest(BaseModel):
@@ -638,6 +645,9 @@ def download_executive_pdf(
                 payment_match=source_summaries.payment_match,
                 bank_reconciliation=source_summaries.bank_reconciliation,
                 smart_alerts=source_summaries.smart_alerts,
+                account_allocation_provenance=(
+                    source_summaries.account_allocation_provenance
+                ),
             )
             pdf_bytes = build_executive_pdf_bytes(report)
             filename = f"ums-executive-{export_job.month}-{export_job.scope_type}.pdf"
@@ -757,6 +767,9 @@ def download_branded_slide_pack(
                 payment_match=source_summaries.payment_match,
                 bank_reconciliation=source_summaries.bank_reconciliation,
                 smart_alerts=source_summaries.smart_alerts,
+                account_allocation_provenance=(
+                    source_summaries.account_allocation_provenance
+                ),
             )
             pptx_bytes = build_branded_slide_pack_pptx(report)
             filename = f"ums-branded-{export_job.month}-{export_job.scope_type}.pptx"
@@ -843,6 +856,7 @@ def _build_finance_workbook_preview_for_export(
         payment_match=source_summaries.payment_match,
         bank_reconciliation=source_summaries.bank_reconciliation,
         smart_alerts=source_summaries.smart_alerts,
+        account_allocation_provenance=source_summaries.account_allocation_provenance,
     )
 
 
@@ -1082,11 +1096,25 @@ def _build_finance_source_summaries_for_export(
         youtube_channel_ids=channel_ids,
         component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
     )
-    account_result = compute_month_account_allocation(
+    # ====================================================================
+    # Purpose: Resolve the month account allocation via the read-switch so a
+    #   LOCKED month serves the committed snapshot (lossless), an OPEN month
+    #   serves live compute, and a LOCKED month with no committed run falls
+    #   back to live — capturing the source provenance for export disclosure.
+    # Database/ORM: Reads the committed-allocation run + the finance month
+    #   close status; live compute reads deduction/revenue/link repositories.
+    # Standards: Finance number determinism; provenance is read-only and never
+    #   mutates the source of truth or the allocation math.
+    # Blast Radius: Finance export numbers + the account-allocation disclosure
+    #   token; no auth/audit/write-path change.
+    # ====================================================================
+    account_result, account_allocation_provenance = resolve_month_account_allocation(
         month=export_job.month,
+        session=session,
         deduction_repository=SqlAlchemyDeductionComponentRepository(session),
         revenue_repository=revenue_repository,
         link_repository=SqlAlchemyChannelAccountLinkRepository(session),
+        committed_repository=SqlAlchemyCommittedAllocationRepository(session),
     )
     # FIX: the allocation orchestrator resolves month-wide, but a non-global
     # export must only contain its frozen channel set; filter allocation lines
@@ -1131,6 +1159,7 @@ def _build_finance_source_summaries_for_export(
         payment_match=payment_match,
         bank_reconciliation=bank_reconciliation,
         smart_alerts=smart_alerts,
+        account_allocation_provenance=account_allocation_provenance,
     )
 
 

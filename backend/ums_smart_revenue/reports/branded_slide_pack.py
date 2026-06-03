@@ -7,6 +7,10 @@ from pptx.dml.color import RGBColor
 from pptx.enum.shapes import MSO_SHAPE
 from pptx.util import Inches, Pt
 
+from ums_smart_revenue.finance.account_allocation_read import (
+    AllocationProvenance,
+    account_allocation_disclosure_token,
+)
 from ums_smart_revenue.finance.bank_reconciliation import (
     MonthBankReconciliationSummary,
 )
@@ -89,6 +93,7 @@ class BrandedSlidePackReport:
     payment_match: MonthlyPaymentMatchSummary
     bank_reconciliation: MonthBankReconciliationSummary
     smart_alerts: MonthlySmartAlertSummary
+    account_allocation_provenance: AllocationProvenance
 
     def to_api(self) -> dict[str, object]:
         """Convert the BrandedSlidePackReport instance into a dictionary
@@ -122,6 +127,9 @@ def build_branded_slide_pack_report(
     payment_match: MonthlyPaymentMatchSummary,
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
+    account_allocation_provenance: AllocationProvenance = AllocationProvenance(
+        source="live_compute"
+    ),
 ) -> BrandedSlidePackReport:
     """
     Construct a BrandedSlidePackReport, validating that summary data matches the
@@ -162,6 +170,7 @@ def build_branded_slide_pack_report(
         payment_match=payment_match,
         bank_reconciliation=bank_reconciliation,
         smart_alerts=smart_alerts,
+        account_allocation_provenance=account_allocation_provenance,
     )
 
 
@@ -242,6 +251,11 @@ def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
     #   - File: backend/ums_smart_revenue/finance/net_revenue.py -> Source of the
     #     total_*_deduction_amount_usd aggregates rendered here.
     # ========================================================================
+    # The final bullet discloses the account-allocation source (committed
+    # snapshot vs live compute / fallback) from the read-switch provenance stored
+    # on the report. Read-only presentation; token text owned by
+    # account_allocation_disclosure_token. Mirrors the XLSX / PDF disclosure
+    # surfaces — no allocation recompute on this path.
     _add_content_slide(
         presentation,
         "Revenue deduction explanation",
@@ -257,6 +271,9 @@ def build_branded_slide_pack_pptx(report: BrandedSlidePackReport) -> bytes:
             "components and the account-allocated portion from account-level "
             "deduction allocations.",
             "Pending overrides are shown as risk and do not change net revenue.",
+            account_allocation_disclosure_token(
+                report.account_allocation_provenance
+            ),
         ],
     )
     _add_content_slide(

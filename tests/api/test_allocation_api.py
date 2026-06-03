@@ -11,10 +11,22 @@ from ums_smart_revenue.db.finance_models import (
     ContentOwnerChannelLinkORM,
     DeductionComponentORM,
     FinanceBase,
+    FinanceMonthCloseORM,
     MonthlyChannelRevenueFactORM,
 )
 from ums_smart_revenue.db.org_models import OrgBase, YouTubeChannelORM
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
+from ums_smart_revenue.finance.channel_account_links import (
+    SqlAlchemyChannelAccountLinkRepository,
+)
+from ums_smart_revenue.finance.committed_allocation import (
+    SqlAlchemyCommittedAllocationRepository,
+)
+from ums_smart_revenue.finance.deduction_ingestion import (
+    SqlAlchemyDeductionComponentRepository,
+)
+from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 MONTH = "2026-04"
@@ -124,6 +136,11 @@ def test_finance_viewer_gets_allocation(tmp_path):
     assert response.status_code == 200
     body = response.json()
     assert body["allocation_method"] == "gross_revenue_proportional"
+    # No FinanceMonthCloseORM is seeded, so the read-switch resolver treats the
+    # month as open and takes the live_compute branch (provenance parity with the
+    # other readers' OPEN-month surface).
+    assert body["allocation_source"] == "live_compute"
+    assert body["committed_run"] is None
     assert len(body["allocations"]) == 1
     line = body["allocations"][0]
     assert line["adsense_account_id"] == "pub-1"
@@ -226,3 +243,75 @@ def test_payment_grain_excluded_and_no_bank_audit(tmp_path):
         logs = {log.event_type for log in session.scalars(select(AuditLogORM)).all()}
     assert "BANK_RECONCILIATION_VIEWED" not in logs
     assert logs == {"REVENUE_VIEWED", "PAYMENT_VIEWED"}
+
+
+def _seed_tenant(database_url):
+    """Create the tenant base + the single UMS tenant row (commit FK parent)."""
+    engine = create_engine(database_url)
+    TenantBase.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(TenantORM(
+            id=TENANT, slug="ums", display_name="UMS",
+            primary_currency="USD", status="ACTIVE",
+        ))
+        session.commit()
+
+
+def _commit_snapshot(database_url):
+    """Commit one gross_revenue_proportional snapshot of MONTH directly via the repo."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        SqlAlchemyCommittedAllocationRepository(session).commit_allocation(
+            month=MONTH, allocation_method="gross_revenue_proportional",
+            idempotency_key="k1", request_fingerprint="fp1", reason="close",
+            committed_by=str(TENANT),
+            deduction_repository=SqlAlchemyDeductionComponentRepository(session),
+            revenue_repository=SqlAlchemyRevenueFactRepository(session),
+            link_repository=SqlAlchemyChannelAccountLinkRepository(session),
+        )
+        session.commit()
+
+
+def _lock(database_url):
+    """Mark MONTH LOCKED so the allocation GET reader prefers the committed snapshot.
+
+    The commit writer already created an OPEN close row, so update it rather than
+    insert a second (which would violate the (tenant_id, month) UNIQUE constraint).
+    """
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        row = session.scalars(
+            select(FinanceMonthCloseORM).where(
+                FinanceMonthCloseORM.tenant_id == TENANT,
+                FinanceMonthCloseORM.month == MONTH,
+            )
+        ).one_or_none()
+        if row is None:
+            session.add(FinanceMonthCloseORM(
+                tenant_id=TENANT, month=MONTH, status="LOCKED", allocation_rule_payload={},
+            ))
+        else:
+            row.status = "LOCKED"
+        session.commit()
+
+
+def test_locked_month_reports_committed_snapshot(tmp_path):
+    """A LOCKED month with a committed snapshot reports allocation_source=
+    committed_snapshot + a committed_run.commit_version (read-switch wiring).
+    """
+    database_url = build_database_url(tmp_path)
+    seed(database_url)
+    _seed_tenant(database_url)
+    _commit_snapshot(database_url)
+    _lock(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    response = client.get(
+        f"/revenue/months/{MONTH}/account-allocations",
+        headers=auth_headers("finance_viewer", "global"),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["allocation_source"] == "committed_snapshot"
+    assert body["committed_run"]["commit_version"] == 1
+    assert len(body["allocations"]) == 1
+    assert body["allocations"][0]["allocated_amount_usd"] == "100"

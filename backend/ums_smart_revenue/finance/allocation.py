@@ -294,6 +294,33 @@ def _allocate_component(
     return _ComponentOutcome(lines, None, True)
 
 
+def summarize_account_allocation(
+    *,
+    component_count: int,
+    allocated_component_count: int,
+    lines: Sequence[AllocationLine],
+    unallocated: Sequence[UnallocatedIssue],
+) -> AllocationSummary:
+    """Conserved roll-up over a set of allocation lines + unallocated issues."""
+    allocated_total = sum((ln.allocated_amount_usd for ln in lines), Decimal("0"))
+    unallocated_total = sum((iss.amount_usd for iss in unallocated), Decimal("0"))
+    net_total = sum(
+        (ln.allocated_amount_usd for ln in lines if ln.net_applicable), Decimal("0")
+    )
+    reconciliation_total = sum(
+        (ln.allocated_amount_usd for ln in lines if not ln.net_applicable), Decimal("0")
+    )
+    return AllocationSummary(
+        component_count=component_count,
+        allocated_component_count=allocated_component_count,
+        unallocated_component_count=len(unallocated),
+        allocated_total_usd=allocated_total,
+        unallocated_total_usd=unallocated_total,
+        net_applicable_total_usd=net_total,
+        reconciliation_total_usd=reconciliation_total,
+    )
+
+
 # ============================================================================
 # Purpose: Allocate ACCOUNT-grain deduction evidence across each account's
 #   verified channels by source-aligned raw-gross-proportional share. Fails
@@ -337,22 +364,11 @@ def build_account_allocation(
         if outcome.allocated:
             allocated_component_count += 1
 
-    allocated_total = sum((ln.allocated_amount_usd for ln in lines), Decimal("0"))
-    unallocated_total = sum((iss.amount_usd for iss in unallocated), Decimal("0"))
-    net_total = sum(
-        (ln.allocated_amount_usd for ln in lines if ln.net_applicable), Decimal("0")
-    )
-    reconciliation_total = sum(
-        (ln.allocated_amount_usd for ln in lines if not ln.net_applicable), Decimal("0")
-    )
-    summary = AllocationSummary(
+    summary = summarize_account_allocation(
         component_count=component_count,
         allocated_component_count=allocated_component_count,
-        unallocated_component_count=len(unallocated),
-        allocated_total_usd=allocated_total,
-        unallocated_total_usd=unallocated_total,
-        net_applicable_total_usd=net_total,
-        reconciliation_total_usd=reconciliation_total,
+        lines=lines,
+        unallocated=unallocated,
     )
     return AccountAllocationResult(
         month=month,

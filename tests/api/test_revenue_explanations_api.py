@@ -16,12 +16,28 @@ from ums_smart_revenue.db.explanation_models import (
     NumberExplanationORM,
 )
 from ums_smart_revenue.db.finance_models import (
+    AdsenseContentOwnerLinkORM,
+    ContentOwnerChannelLinkORM,
+    DeductionComponentORM,
     FinanceBase,
+    FinanceMonthCloseORM,
     MonthlyChannelRevenueFactORM,
     RevenueManualOverrideORM,
 )
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
+from ums_smart_revenue.finance.channel_account_links import (
+    SqlAlchemyChannelAccountLinkRepository,
+)
+from ums_smart_revenue.finance.committed_allocation import (
+    SqlAlchemyCommittedAllocationRepository,
+)
+from ums_smart_revenue.finance.deduction_ingestion import (
+    SqlAlchemyDeductionComponentRepository,
+)
+from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-000000011101")
 COMPANY_ID = UUID("00000000-0000-0000-0000-000000011201")
@@ -384,3 +400,203 @@ def test_net_revenue_explanation_idempotent_upsert_coexists_with_gross(tmp_path)
     with Session(engine) as session:
         metrics = sorted(session.scalars(select(NumberExplanationORM.metric)).all())
     assert metrics == ["adjusted_gross_revenue_usd", "net_revenue_usd"]
+
+
+CHANNEL_ALLOC_ROW_ID = UUID("00000000-0000-0000-0000-000000011303")
+
+
+def _seed_account_allocated_channel(database_url: str) -> None:
+    """Seed a missing-net ADSENSE channel mapped to one ACCOUNT deduction (pub-9).
+
+    channel-alloc is in-scope with a 2026-03 ADSENSE gross 500 and no source net,
+    so the account-allocated DEDUCTION (70.00, net-applicable) derives its net on the
+    COMPONENT_DERIVED path -> the explanation builds the account_allocated_deduction_usd
+    component. The Adsense->owner->channel links are VERIFIED with a source-aligned
+    (ADSENSE) basis, so a month-wide commit fully allocates pub-9.
+    """
+    engine = create_engine(database_url)
+    TenantBase.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                TenantORM(
+                    id=UUID(UMS_TENANT_ID),
+                    slug="ums",
+                    display_name="UMS",
+                    primary_currency="USD",
+                    status="ACTIVE",
+                ),
+                YouTubeChannelORM(
+                    id=CHANNEL_ALLOC_ROW_ID,
+                    youtube_channel_id="channel-alloc",
+                    channel_name="Alloc",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                MonthlyChannelRevenueFactORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    youtube_channel_id="channel-alloc",
+                    source_kind="ADSENSE",
+                    source_report_id="adsense-report-2026-03",
+                    gross_revenue_usd=Decimal("500.00"),
+                    net_revenue_usd=None,
+                    views=80000,
+                    watch_time_minutes=Decimal("2000.00"),
+                    confidence_score=Decimal("0.9600"),
+                    imported_by=CREATOR_ID,
+                ),
+                AdsenseContentOwnerLinkORM(
+                    id=uuid4(),
+                    adsense_account_id="pub-9",
+                    content_owner_id="owner-9",
+                    verification_status="VERIFIED",
+                    provenance_kind="OPERATOR_ASSERTED",
+                    provenance_payload={},
+                    effective_month_start="2026-01",
+                ),
+                ContentOwnerChannelLinkORM(
+                    id=uuid4(),
+                    content_owner_id="owner-9",
+                    youtube_channel_id="channel-alloc",
+                    provenance_kind="SOURCE_ROW",
+                    active=True,
+                    effective_month_start="2026-01",
+                ),
+                DeductionComponentORM(
+                    id=uuid4(),
+                    month="2026-03",
+                    component_kind="DEDUCTION",
+                    scope_kind="ACCOUNT",
+                    scope_id="pub-9",
+                    amount_usd=Decimal("70.00"),
+                    amount_native=None,
+                    currency_code="USD",
+                    source_system="adsense_management",
+                    source_table="google_revenue_source_rows",
+                    source_id=None,
+                    source_key="k-9",
+                    source_report_id=None,
+                    raw_payload={"k": "v"},
+                    component_key="srcrow:adsense_management:k-9",
+                ),
+            ]
+        )
+        session.commit()
+
+
+def _commit_account_snapshot(database_url: str, month: str) -> None:
+    """Commit one account-allocation snapshot for the month (creates an OPEN close row)."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        SqlAlchemyCommittedAllocationRepository(session).commit_allocation(
+            month=month,
+            allocation_method="gross_revenue_proportional",
+            idempotency_key="k1",
+            request_fingerprint="fp1",
+            reason="close",
+            committed_by=UMS_TENANT_ID,
+            deduction_repository=SqlAlchemyDeductionComponentRepository(session),
+            revenue_repository=SqlAlchemyRevenueFactRepository(session),
+            link_repository=SqlAlchemyChannelAccountLinkRepository(session),
+        )
+        session.commit()
+
+
+def _lock_month(database_url: str, month: str) -> None:
+    """Mark a finance month LOCKED so readers prefer the committed snapshot.
+
+    A committed snapshot already creates an OPEN close row, so update it in place
+    rather than insert a second (which would violate the (tenant_id, month) UNIQUE).
+    """
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        row = session.scalars(
+            select(FinanceMonthCloseORM).where(
+                FinanceMonthCloseORM.tenant_id == UUID(UMS_TENANT_ID),
+                FinanceMonthCloseORM.month == month,
+            )
+        ).one_or_none()
+        if row is None:
+            session.add(
+                FinanceMonthCloseORM(
+                    tenant_id=UUID(UMS_TENANT_ID),
+                    month=month,
+                    status="LOCKED",
+                    allocation_rule_payload={},
+                )
+            )
+        else:
+            row.status = "LOCKED"
+        session.commit()
+
+
+def _persisted_account_component(database_url: str, channel: str, month: str) -> dict:
+    """Read back the persisted net explanation's account_allocated_deduction_usd component."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        row = session.scalars(
+            select(NumberExplanationORM).where(
+                NumberExplanationORM.metric == "net_revenue_usd",
+                NumberExplanationORM.entity_id == channel,
+                NumberExplanationORM.month == month,
+            )
+        ).one()
+        components = list(row.components)
+    try:
+        return next(
+            component
+            for component in components
+            if component["key"] == "account_allocated_deduction_usd"
+        )
+    except StopIteration as exc:
+        raise ValueError("account_allocated_deduction_usd component not found") from exc
+
+
+def test_net_explanation_locked_month_records_committed_snapshot_provenance(tmp_path):
+    """A LOCKED month's persisted account component carries committed_snapshot provenance."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_account_allocated_channel(database_url)
+    _commit_account_snapshot(database_url, "2026-03")
+    _lock_month(database_url, "2026-03")
+    client = TestClient(create_app(database_url=database_url))
+
+    response = _post_net_explain(
+        client,
+        channel="channel-alloc",
+        month="2026-03",
+        principal=_finance_month_net_principal(),
+    )
+
+    assert response.status_code == 200
+    account_component = _persisted_account_component(
+        database_url, "channel-alloc", "2026-03"
+    )
+    assert account_component["allocation_source"] == "committed_snapshot"
+    assert account_component["committed_run"] is not None
+    assert account_component["committed_run"]["commit_version"] == 1
+
+
+def test_net_explanation_open_month_records_live_compute_provenance(tmp_path):
+    """An OPEN month's persisted account component carries live_compute provenance."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_account_allocated_channel(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = _post_net_explain(
+        client,
+        channel="channel-alloc",
+        month="2026-03",
+        principal=_finance_month_net_principal(),
+    )
+
+    assert response.status_code == 200
+    account_component = _persisted_account_component(
+        database_url, "channel-alloc", "2026-03"
+    )
+    assert account_component["allocation_source"] == "live_compute"
+    assert account_component["committed_run"] is None

@@ -2,11 +2,12 @@ import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from io import BytesIO
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from openpyxl import load_workbook
 
+from ums_smart_revenue.finance.account_allocation_read import AllocationProvenance
 from ums_smart_revenue.finance.bank_reconciliation import (
     MonthBankReconciliationSummary,
 )
@@ -328,3 +329,64 @@ def test_finance_workbook_renders_deduction_breakdown_columns_and_rows():
     net_revenue_json = json.loads(raw["net_revenue"])
     assert net_revenue_json["total_channel_direct_deduction_amount_usd"] == "30"
     assert net_revenue_json["total_account_allocated_deduction_amount_usd"] == "100"
+
+
+def _committed_provenance() -> AllocationProvenance:
+    """A committed-snapshot provenance with a fixed commit date for token assertions."""
+    return AllocationProvenance(
+        source="committed_snapshot", commit_version=1,
+        committed_at=datetime(2026, 4, 2, tzinfo=UTC), run_id=UUID(int=7),
+    )
+
+
+def _exec_summary_keys(workbook) -> dict[str, object]:
+    """Read the Executive Summary key/value sheet into a metric->value mapping."""
+    return {
+        row[0].value: row[1].value
+        for row in workbook["Executive Summary"].iter_rows()
+    }
+
+
+def test_finance_workbook_renders_committed_snapshot_disclosure_token():
+    """The Executive Summary sheet carries a labeled allocation-source disclosure row."""
+    preview = build_finance_workbook_preview(
+        export_job=_export_job(export_type="FINANCE_EXCEL"),
+        net_revenue=_net_revenue_summary_with_breakdown(),
+        payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
+        bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
+        smart_alerts=_smart_alert_summary(alert_count=0),
+        account_allocation_provenance=_committed_provenance(),
+    )
+    workbook = load_workbook(BytesIO(build_finance_workbook_xlsx(preview)), data_only=True)
+    keys = _exec_summary_keys(workbook)
+    assert "committed snapshot v1" in keys["Account allocation source"]
+
+
+def test_finance_workbook_renders_live_compute_disclosure_token():
+    """An OPEN-month live-compute provenance renders the live-compute token."""
+    preview = build_finance_workbook_preview(
+        export_job=_export_job(export_type="FINANCE_EXCEL"),
+        net_revenue=_net_revenue_summary_with_breakdown(),
+        payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
+        bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
+        smart_alerts=_smart_alert_summary(alert_count=0),
+        account_allocation_provenance=AllocationProvenance(source="live_compute"),
+    )
+    workbook = load_workbook(BytesIO(build_finance_workbook_xlsx(preview)), data_only=True)
+    keys = _exec_summary_keys(workbook)
+    assert keys["Account allocation source"] == "Account allocation: live compute"
+
+
+def test_finance_workbook_renders_live_fallback_disclosure_token():
+    """A LOCKED month with no committed run renders the live-fallback token."""
+    preview = build_finance_workbook_preview(
+        export_job=_export_job(export_type="FINANCE_EXCEL"),
+        net_revenue=_net_revenue_summary_with_breakdown(),
+        payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
+        bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
+        smart_alerts=_smart_alert_summary(alert_count=0),
+        account_allocation_provenance=AllocationProvenance(source="live_fallback"),
+    )
+    workbook = load_workbook(BytesIO(build_finance_workbook_xlsx(preview)), data_only=True)
+    keys = _exec_summary_keys(workbook)
+    assert keys["Account allocation source"] == "Account allocation: live fallback"

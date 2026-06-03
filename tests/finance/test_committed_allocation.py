@@ -204,3 +204,37 @@ def test_reject_on_unallocated(tmp_path):
     committed, ded, rev, link = _repos(session)
     with pytest.raises(CommittedAllocationValidationError):
         _commit(committed, ded, rev, link)
+
+
+def test_tenant_id_property_exposes_resolved_tenant(tmp_path):
+    """The repo exposes its resolved tenant for the read-switch single-tenant source."""
+    session = _session(tmp_path)
+    committed, _ded, _rev, _link = _repos(session)
+    assert committed.tenant_id == TENANT
+
+
+def test_get_latest_committed_returns_run_with_children(tmp_path):
+    """get_latest_committed returns the latest run + its child rows, or None."""
+    session = _session(tmp_path)
+    assert _repos(session)[0].get_latest_committed(MONTH) is None  # nothing committed yet
+    _seed_account_deduction(session, mapped=True)
+    committed, ded, rev, link = _repos(session)
+    outcome = _commit(committed, ded, rev, link)
+    latest = committed.get_latest_committed(MONTH)
+    assert latest is not None
+    assert latest.run.id == outcome.run.id
+    assert latest.run.commit_version == 1
+    assert len(latest.lines) == 1
+    assert latest.lines[0].youtube_channel_id == "chA"
+
+
+def test_get_latest_committed_returns_highest_version(tmp_path):
+    """With two commits, get_latest_committed returns the highest commit_version."""
+    session = _session(tmp_path)
+    _seed_account_deduction(session, mapped=True)
+    committed, ded, rev, link = _repos(session)
+    _commit(committed, ded, rev, link, key="k1", fp="f1")
+    second = _commit(committed, ded, rev, link, key="k2", fp="f2")
+    latest = committed.get_latest_committed(MONTH)
+    assert latest.run.id == second.run.id
+    assert latest.run.commit_version == 2

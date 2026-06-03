@@ -7,6 +7,11 @@ from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.worksheet.worksheet import Worksheet
 
+from ums_smart_revenue.finance.account_allocation_read import (
+    AllocationProvenance,
+    account_allocation_disclosure_token,
+    allocation_provenance_to_api,
+)
 from ums_smart_revenue.finance.bank_reconciliation import (
     MonthBankReconciliationSummary,
 )
@@ -85,6 +90,7 @@ class FinanceWorkbookPreview:
     payment_match: MonthlyPaymentMatchSummary
     bank_reconciliation: MonthBankReconciliationSummary
     smart_alerts: MonthlySmartAlertSummary
+    account_allocation_provenance: AllocationProvenance
 
     def to_api(self) -> dict[str, object]:
         """Convert this FinanceWorkbookPreview into a dictionary payload for API export."""
@@ -115,6 +121,9 @@ class FinanceWorkbookPreview:
                 "payment_match": self.payment_match.to_api(),
                 "bank_reconciliation": self.bank_reconciliation.to_api(),
                 "smart_alerts": self.smart_alerts.to_api(),
+                "account_allocation_provenance": allocation_provenance_to_api(
+                    self.account_allocation_provenance
+                ),
             },
         }
 
@@ -126,6 +135,9 @@ def build_finance_workbook_preview(
     payment_match: MonthlyPaymentMatchSummary,
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
+    account_allocation_provenance: AllocationProvenance = AllocationProvenance(
+        source="live_compute"
+    ),
 ) -> FinanceWorkbookPreview:
     """Build a finance workbook preview from export metadata and summaries."""
     if export_job.export_type != "FINANCE_EXCEL":
@@ -163,6 +175,7 @@ def build_finance_workbook_preview(
         payment_match=payment_match,
         bank_reconciliation=bank_reconciliation,
         smart_alerts=smart_alerts,
+        account_allocation_provenance=account_allocation_provenance,
     )
 
 
@@ -173,15 +186,32 @@ def build_finance_workbook_xlsx(preview: FinanceWorkbookPreview) -> bytes:
     summary_sheet = workbook.active
     summary_sheet.title = FINANCE_WORKBOOK_SHEET_NAMES[0]
 
+    # ========================================================================
+    # Purpose: Write the executive-summary key/value sheet, including a labeled
+    #   account-allocation source disclosure row sourced from the read-switch
+    #   provenance stored on the preview (committed snapshot vs live compute /
+    #   fallback). This sits adjacent to the channel-direct / account-allocated
+    #   split totals so a reader can see both the numbers and their source.
+    # Database/ORM: None (reads provenance already resolved upstream).
+    # Standards: The token text is owned by account_allocation_disclosure_token;
+    #   it is read-only presentation and must not recompute allocation.
+    # Blast Radius: XLSX presentation only — no allocation math, source-of-truth,
+    #   auth, audit, or Neo4j impact. Mirrors the PDF / PPTX disclosure surfaces.
+    # ========================================================================
     _write_key_value_sheet(
         summary_sheet,
-        _executive_summary(
-            export_job=preview.export_job,
-            net_revenue=preview.net_revenue,
-            payment_match=preview.payment_match,
-            bank_reconciliation=preview.bank_reconciliation,
-            smart_alerts=preview.smart_alerts,
-        ),
+        {
+            **_executive_summary(
+                export_job=preview.export_job,
+                net_revenue=preview.net_revenue,
+                payment_match=preview.payment_match,
+                bank_reconciliation=preview.bank_reconciliation,
+                smart_alerts=preview.smart_alerts,
+            ),
+            "Account allocation source": account_allocation_disclosure_token(
+                preview.account_allocation_provenance
+            ),
+        },
     )
     _write_key_value_sheet(
         workbook.create_sheet("Monthly Close"),

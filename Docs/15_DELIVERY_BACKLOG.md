@@ -349,8 +349,12 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   CHANGE_ALLOCATION_RULE gate + ALLOCATION_COMMITTED summary-only audit reusing
   CHANGE_ALLOCATION_RULE). Readers (net-revenue, allocation-read, exports) still compute
   live — read-switch deferred.
-  Remaining: read-switch to committed snapshots; PAYMENT-grain (needs a
-  payment→account hop); other allocation methods.
+  PR-6 shipped (this branch, 2026-06-03): read-switch — allocation GET, net-revenue,
+  explain, and exports prefer the committed snapshot for LOCKED months (lock-aware +
+  live fallback when no committed run; OPEN stays live), with lossless reconstruction and
+  full allocation_source/committed_run provenance on every surface plus an export
+  disclosure token. No migration / no auth / no write-path change.
+  Remaining: PAYMENT-grain (needs a payment→account hop); other allocation methods.
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed
   permissions). Month-close status UI remains unbuilt (Phase 5).

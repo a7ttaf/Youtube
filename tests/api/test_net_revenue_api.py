@@ -17,11 +17,24 @@ from ums_smart_revenue.db.finance_models import (
     ContentOwnerChannelLinkORM,
     DeductionComponentORM,
     FinanceBase,
+    FinanceMonthCloseORM,
     MonthlyChannelRevenueFactORM,
     RevenueManualOverrideORM,
 )
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
+from ums_smart_revenue.finance.channel_account_links import (
+    SqlAlchemyChannelAccountLinkRepository,
+)
+from ums_smart_revenue.finance.committed_allocation import (
+    SqlAlchemyCommittedAllocationRepository,
+)
+from ums_smart_revenue.finance.deduction_ingestion import (
+    SqlAlchemyDeductionComponentRepository,
+)
+from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 SECTOR_ID = UUID("00000000-0000-0000-0000-00000000c101")
 COMPANY_ID = UUID("00000000-0000-0000-0000-00000000c201")
@@ -493,3 +506,140 @@ def test_net_revenue_scoped_excludes_out_of_scope_account_allocation(tmp_path):
     assert "channel-tv-c" not in channel_ids  # out-of-scope allocation filtered
     assert channel_ids == {"channel-tv-a", "channel-tv-b"}
     assert body["channel_count"] == 2
+
+
+def _lock_month(database_url: str, month: str) -> None:
+    """Mark a finance month LOCKED so readers prefer the committed snapshot.
+
+    A committed snapshot already created an OPEN close row, so update it rather than
+    insert a second (which would violate the (tenant_id, month) UNIQUE constraint).
+    """
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        row = session.scalars(
+            select(FinanceMonthCloseORM).where(
+                FinanceMonthCloseORM.tenant_id == UUID(UMS_TENANT_ID),
+                FinanceMonthCloseORM.month == month,
+            )
+        ).one_or_none()
+        if row is None:
+            session.add(FinanceMonthCloseORM(
+                tenant_id=UUID(UMS_TENANT_ID), month=month, status="LOCKED",
+                allocation_rule_payload={},
+            ))
+        else:
+            row.status = "LOCKED"
+        session.commit()
+
+
+def test_net_revenue_open_month_reports_live_provenance(tmp_path):
+    """An OPEN month serves live compute and discloses allocation_source=live_compute."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
+    client = TestClient(app)
+    resp = client.get(f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}")
+    assert resp.status_code == 200
+    assert resp.json()["allocation_source"] == "live_compute"
+    assert resp.json()["committed_run"] is None
+
+
+CHANNEL_D_ROW_ID = UUID("00000000-0000-0000-0000-00000000c304")
+
+
+def _seed_in_scope_account_allocation(database_url: str) -> None:
+    """Map an ACCOUNT deduction (pub-7) to a new in-scope, missing-net ADSENSE channel.
+
+    channel-tv-d is in COMPANY_ID with a 2026-03 ADSENSE gross 500 and no source net,
+    so the account-allocated DEDUCTION (70.00, net-applicable) derives its net on the
+    missing-net path. The Adsense->owner->channel links are VERIFIED and the basis is
+    source-aligned (ADSENSE), so the month-wide commit fully allocates pub-7 with zero
+    unallocated.
+    """
+    engine = create_engine(database_url)
+    TenantBase.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add_all([
+            TenantORM(
+                id=UUID(UMS_TENANT_ID), slug="ums", display_name="UMS",
+                primary_currency="USD", status="ACTIVE",
+            ),
+            YouTubeChannelORM(
+                id=CHANNEL_D_ROW_ID, youtube_channel_id="channel-tv-d",
+                channel_name="TV D", primary_org_unit_id=COMPANY_ID,
+                cms_status="INSIDE_CMS", revenue_required=True, active=True,
+            ),
+            MonthlyChannelRevenueFactORM(
+                id=uuid4(), month="2026-03", youtube_channel_id="channel-tv-d",
+                source_kind="ADSENSE", source_report_id="adsense-report-2026-03",
+                gross_revenue_usd=Decimal("500.00"), net_revenue_usd=None,
+                views=80000, watch_time_minutes=Decimal("2000.00"),
+                confidence_score=Decimal("0.9600"), imported_by=USER_ID,
+            ),
+            AdsenseContentOwnerLinkORM(
+                id=uuid4(), adsense_account_id="pub-7", content_owner_id="owner-7",
+                verification_status="VERIFIED", provenance_kind="OPERATOR_ASSERTED",
+                provenance_payload={}, effective_month_start="2026-01",
+            ),
+            ContentOwnerChannelLinkORM(
+                id=uuid4(), content_owner_id="owner-7", youtube_channel_id="channel-tv-d",
+                provenance_kind="SOURCE_ROW", active=True, effective_month_start="2026-01",
+            ),
+            DeductionComponentORM(
+                id=uuid4(), month="2026-03", component_kind="DEDUCTION",
+                scope_kind="ACCOUNT", scope_id="pub-7", amount_usd=Decimal("70.00"),
+                amount_native=None, currency_code="USD",
+                source_system="adsense_management",
+                source_table="google_revenue_source_rows", source_id=None,
+                source_key="k-7", source_report_id=None, raw_payload={"k": "v"},
+                component_key="srcrow:adsense_management:k-7",
+            ),
+        ])
+        session.commit()
+
+
+def test_net_revenue_locked_month_serves_committed_snapshot(tmp_path):
+    """LOCKED month serves the committed snapshot, not live: the account-allocated
+    total reflects the PRE-mutation snapshot value even after the underlying
+    DEDUCTION row is mutated to a different amount.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_in_scope_account_allocation(database_url)
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        committed = SqlAlchemyCommittedAllocationRepository(session)
+        committed.commit_allocation(
+            month="2026-03", allocation_method="gross_revenue_proportional",
+            idempotency_key="k1", request_fingerprint="fp1", reason="close",
+            committed_by=UMS_TENANT_ID,
+            deduction_repository=SqlAlchemyDeductionComponentRepository(session),
+            revenue_repository=SqlAlchemyRevenueFactRepository(session),
+            link_repository=SqlAlchemyChannelAccountLinkRepository(session),
+        )
+        session.commit()
+
+    # Mutate the source DEDUCTION so live compute would differ from the snapshot.
+    with Session(engine) as session:
+        row = session.scalars(
+            select(DeductionComponentORM).where(
+                DeductionComponentORM.component_key == "srcrow:adsense_management:k-7"
+            )
+        ).one()
+        row.amount_usd = Decimal("999.00")
+        session.commit()
+
+    _lock_month(database_url, "2026-03")
+
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
+    client = TestClient(app)
+    resp = client.get(f"/revenue/months/2026-03/net-revenue?scope_type=company&scope_id={COMPANY_ID}")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["allocation_source"] == "committed_snapshot"
+    assert body["committed_run"]["commit_version"] == 1
+    # Snapshot froze pub-7's 70.00 allocation; live would now show 999.00.
+    assert body["total_account_allocated_deduction_amount_usd"] == "70"
