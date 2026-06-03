@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
@@ -290,6 +291,71 @@ def test_workbook_preview_payload_carries_allocation_provenance(tmp_path):
     provenance_api = preview.to_api()["source_summaries"]["account_allocation_provenance"]
     assert provenance_api["allocation_source"] == "committed_snapshot"
     assert provenance_api["committed_run"]["commit_version"] == 1
+
+
+def _commit_post_tax_snapshot_and_lock(session):
+    """Set chA's source net non-null, commit a post_tax snapshot, then lock.
+
+    post_tax_revenue_proportional weights the split by source net, so the seed's
+    null net is replaced first (else the commit fails closed on missing net). The
+    lock is applied afterwards so the read-switch resolver prefers the snapshot.
+    """
+    session.execute(
+        MonthlyChannelRevenueFactORM.__table__.update()
+        .where(MonthlyChannelRevenueFactORM.youtube_channel_id == "chA")
+        .values(net_revenue_usd=Decimal("800.00"))
+    )
+    session.commit()
+    committed = SqlAlchemyCommittedAllocationRepository(session)
+    committed.commit_allocation(
+        month=MONTH, allocation_method="post_tax_revenue_proportional",
+        idempotency_key="k-pt", request_fingerprint="fp-pt", reason="close",
+        committed_by=str(TENANT),
+        deduction_repository=SqlAlchemyDeductionComponentRepository(session),
+        revenue_repository=SqlAlchemyRevenueFactRepository(session),
+        link_repository=SqlAlchemyChannelAccountLinkRepository(session),
+    )
+    close = session.query(FinanceMonthCloseORM).filter_by(
+        tenant_id=TENANT, month=MONTH
+    ).one()
+    close.status = "LOCKED"
+    session.commit()
+
+
+def test_export_committed_post_tax_month_renders_only_disclosure_token(tmp_path):
+    """Rename regression: an export over a LOCKED, committed post_tax month carries
+    only the allocation-source disclosure token in its payload; no per-line basis
+    field (basis_amount_usd / the old basis_gross_usd) ever leaks into the export.
+    """
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed_missing_net_with_components(session)
+        _commit_post_tax_snapshot_and_lock(session)
+        summaries = _build_finance_source_summaries_for_export(
+            export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            session=session,
+            org_index=OrgAccessIndex(),
+            group_registry=ChannelGroupRegistry(),
+        )
+    # The committed post_tax snapshot is the resolved allocation source.
+    assert summaries.account_allocation_provenance.source == "committed_snapshot"
+    preview = build_finance_workbook_preview(
+        export_job=_export_job(scope_type="global", scope_channel_ids=None),
+        net_revenue=summaries.net_revenue,
+        payment_match=summaries.payment_match,
+        bank_reconciliation=summaries.bank_reconciliation,
+        smart_alerts=summaries.smart_alerts,
+        account_allocation_provenance=summaries.account_allocation_provenance,
+    )
+    payload = preview.to_api()
+    provenance_api = payload["source_summaries"]["account_allocation_provenance"]
+    # Only the allocation-source disclosure token is exposed (no committed run
+    # internals beyond the version stamp; no per-line basis whatsoever).
+    assert provenance_api["allocation_source"] == "committed_snapshot"
+    # No per-line basis field leaks into the full serialized export payload.
+    serialized = json.dumps(payload, default=str)
+    assert "basis_amount_usd" not in serialized
+    assert "basis_gross_usd" not in serialized
 
 
 def test_scoped_finance_export_records_payment_viewed():

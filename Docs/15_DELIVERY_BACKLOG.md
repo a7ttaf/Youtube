@@ -354,13 +354,22 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   live fallback when no committed run; OPEN stays live), with lossless reconstruction and
   full allocation_source/committed_run provenance on every surface plus an export
   disclosure token. No migration / no auth / no write-path change.
+  ✅ post_tax method shipped (this branch, 2026-06-04): `post_tax_revenue_proportional`
+  is now a second COMMITTABLE allocation method alongside `gross_revenue_proportional` —
+  the engine/orchestrator parameterize on `allocation_method` (gross weights by source
+  gross; post_tax weights by source net_revenue_usd, fail-closed omitting any
+  (channel, source_kind) key with a null-net fact), the commit path is un-gated to a
+  two-method allowlist (service + DB CHECK + migration 20260603_0001), the persisted basis
+  field was renamed `basis_gross_usd`→`basis_amount_usd`, and `/revenue/recalculate`'s
+  dry-run net check moved to (channel, source_kind) grain so READY can no longer be
+  reported while commit would go UNALLOCATED. Remaining allocation methods out:
+  `company_level`, `manual`, `no_allocation`.
   Remaining: PAYMENT-grain allocation is BLOCKED — pending live remittance/bank evidence
   + an operator-asserted (tenant_id, month, bank_reference)→account(s) receipt-assertion
   model (verified 2026-06-03: no deterministic bank_reference→account bridge exists in the
   data — see Docs/superpowers/specs/2026-06-03-spec-payment-account-modeling-design.md).
-  Also remaining: other allocation methods — a substantial chunk (committed allocation is
-  gross_revenue_proportional-gated in API/service/DB/tests and /revenue/recalculate rejects
-  committed writes).
+  Also remaining: the `company_level` / `manual` / `no_allocation` methods are not yet
+  committable (still rejected by the API/service/DB two-method allowlist).
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed
   permissions). Month-close status UI remains unbuilt (Phase 5).

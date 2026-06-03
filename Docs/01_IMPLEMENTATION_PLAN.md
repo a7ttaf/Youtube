@@ -468,12 +468,23 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   reconstruction; live fallback when no committed run; OPEN/no-close-row stays live), and emit
   full allocation_source/committed_run provenance on every surface plus an export disclosure
   token. No migration / no auth / no write-path change.
+  POST-TAX METHOD SHIPPED (this branch, 2026-06-04): allocation-method status —
+  `gross_revenue_proportional` AND `post_tax_revenue_proportional` are now BOTH committable.
+  The engine/orchestrator are parameterized on `allocation_method` (gross weights by source
+  gross; post_tax weights by source net_revenue_usd, fail-closed omitting any
+  (channel, source_kind) key with a null-net fact); the commit path is un-gated to a
+  two-method allowlist (service + DB `ck_committed_allocation_runs_method` CHECK + migration
+  20260603_0001); the persisted basis field was renamed `basis_gross_usd`→`basis_amount_usd`
+  (column + finite CHECK + migration); and `/revenue/recalculate`'s dry-run net check moved
+  from channel grain to (channel, source_kind) grain so a dry-run can no longer report READY
+  while the commit engine would go UNALLOCATED. Pending: the `company_level` / `manual` /
+  `no_allocation` methods are NOT yet committable (still rejected by the two-method allowlist),
+  and PAYMENT-grain allocation remains pending (below).
   Remaining: PAYMENT-grain allocation BLOCKED — pending live remittance/bank evidence + an
   operator-asserted (tenant_id, month, bank_reference)→account(s) receipt-assertion model
   (verified 2026-06-03, no deterministic bank_reference→account bridge — see
-  Docs/superpowers/specs/2026-06-03-spec-payment-account-modeling-design.md); plus other
-  allocation methods (substantial — gross_revenue_proportional-gated commit + /revenue/recalculate
-  rejects committed writes).
+  Docs/superpowers/specs/2026-06-03-spec-payment-account-modeling-design.md); plus the
+  remaining `company_level` / `manual` / `no_allocation` allocation methods.
   Prerequisite SHIPPED
   (this branch): canonical channel↔account map — `adsense_content_owner_links`
   (operator-verified account↔owner) + `content_owner_channel_links` (derived from
