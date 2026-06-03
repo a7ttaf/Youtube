@@ -144,8 +144,11 @@ If no GET-success test asserts on `allocations` yet, add a minimal one mirroring
 Create `backend/ums_smart_revenue/db/alembic/versions/20260603_0001_post_tax_allocation_method.py`. (The runs method CHECK expansion is appended in Task 4.)
 
 ```python
-"""Rename committed_allocation_lines.basis_gross_usd -> basis_amount_usd and
-expand the committed_allocation_runs method allowlist to post_tax.
+"""Rename committed_allocation_lines.basis_gross_usd -> basis_amount_usd.
+
+(Task 4 extends THIS migration to also expand the committed_allocation_runs
+method allowlist to post_tax; in Task 1 it renames the column only — keep the
+docstring's first line matching the migration's actual content at each step.)
 
 Revision ID: 20260603_0001
 Revises: 20260602_0001
@@ -305,6 +308,18 @@ def test_gross_zero_basis_still_emits_zero_gross_basis_code():
     )
     assert result.unallocated[0].issue_code == "ZERO_GROSS_BASIS"
     assert result.allocation_method == "gross_revenue_proportional"
+
+
+def test_unsupported_method_fails_closed():
+    """The engine fails closed for a method outside the {gross, post_tax} allowlist."""
+    with pytest.raises(allocation.AllocationValidationError):
+        build_account_allocation(
+            month="2026-04",
+            components=[_component(amount="10.00")],
+            verified_channels={"pub-1": ["chA"]},
+            basis={("chA", "ADSENSE"): Decimal("100")},
+            allocation_method="company_level",
+        )
 ```
 
 Also update EVERY existing call site in this file: replace the keyword `gross_basis=` with `basis=` at each `build_account_allocation(...)` call. Find them with Grep for `gross_basis=` in `tests/finance/test_allocation.py` (≈13 sites) rather than relying on line numbers, then update each — none should remain after this step.
@@ -457,6 +472,14 @@ def build_account_allocation(
     list_verified_adsense_account_channels guarantees this via .distinct());
     duplicates would double-count.
     """
+    # Fail closed for ALL callers (not only the public commit gate): an
+    # unsupported method must raise clearly here rather than mislabel the result
+    # or KeyError in the _ZERO_BASIS_ISSUE lookup. AllocationValidationError is
+    # already defined in this module (allocation.py:30); no import needed.
+    if allocation_method not in COMMITTABLE_ALLOCATION_METHODS:
+        raise AllocationValidationError(
+            f"unsupported allocation method: {allocation_method}"
+        )
     lines: list[AllocationLine] = []
     unallocated: list[UnallocatedIssue] = []
     notes = _multi_account_notes(verified_channels)
@@ -722,8 +745,8 @@ git commit -m "feat(finance): select gross vs source-net basis in allocation orc
 ## Task 4: Un-gate the commit path (service allowlist + pass method + DB CHECK + migration) + reconstruction round-trip
 
 **Files:**
-- Modify: `backend/ums_smart_revenue/finance/committed_allocation.py:25` (import), `:141-144` (gate), `:146-151` (compute call), `:95` + `:874-875,884` docstrings
-- Modify: `backend/ums_smart_revenue/db/finance_models.py:943-946` (runs method CHECK)
+- Modify: `backend/ums_smart_revenue/finance/committed_allocation.py:25` (import), `:141-144` (gate), `:146-151` (compute call), `:95` (commit_allocation contract comment)
+- Modify: `backend/ums_smart_revenue/db/finance_models.py:943-946` (runs method CHECK), `:874-875` + `:884` (CommittedAllocationRunORM docstring/comment wording)
 - Modify: `backend/ums_smart_revenue/db/alembic/versions/20260603_0001_post_tax_allocation_method.py` (append method-CHECK expansion to up/down)
 - Test: `tests/finance/test_committed_allocation.py`, `tests/api/test_committed_allocation_api.py`, `tests/db/test_committed_allocation_models.py`, `tests/db/test_committed_allocation_migration_postgres.py`, `tests/finance/test_account_allocation_read.py`
 
@@ -945,7 +968,16 @@ In `downgrade()`, at the START (before the lines rename-back block), add the rev
             "allocation_method = 'gross_revenue_proportional'",
         )
 ```
-Update the migration's module docstring + Purpose comment to mention both the column rename and the method-allowlist expansion (already drafted in the Task 1 docstring — confirm it reads correctly now that both halves exist).
+Now that this migration does BOTH halves, update its module docstring + Purpose comment to describe both. Replace the Task 1 rename-only first line and drop the "(Task 4 extends…)" parenthetical with the final wording, e.g.:
+```python
+"""Rename committed_allocation_lines.basis_gross_usd -> basis_amount_usd and
+expand the committed_allocation_runs method allowlist to post_tax.
+
+Revision ID: 20260603_0001
+...
+"""
+```
+and update the `# Purpose:` comment to mention the runs method-allowlist expansion alongside the column rename. The docstring must match the migration's actual content at this final state.
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
@@ -1124,16 +1156,18 @@ Read the file, update the allocation-methods status section: gross + post_tax ar
 python -m ruff check backend tests scripts
 git diff --check origin/main...HEAD
 ```
-Then the full suite with the Postgres container:
-```bash
+Then the full suite with the Postgres container. This repo is PowerShell-first; set the env var and run pytest in a SINGLE PowerShell invocation (shell state does not persist between separate invocations):
+```powershell
 # (container ums-mig-pg-test on :55432 must be running)
-UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/test_ums python -m pytest -q
+$env:UMS_TEST_DATABASE_URL = "postgresql+psycopg://postgres:ums@localhost:55432/test_ums"
+python -m pytest -q
 ```
+(Bash equivalent, if using the Bash tool: `UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/test_ums python -m pytest -q`.)
 Expected: ruff clean; `git diff --check` clean; full suite green.
 
-The authoritative up/down check is the in-process migration test `test_committed_allocation_migration_postgres.py` (it builds a fresh schema, runs `command.upgrade(..., "head")`, and exercises the new migration) — confirm it is green in the full-suite run above. As a supplementary CLI round-trip on the disposable container (only if `alembic.ini` resolves its URL from the environment in this repo — otherwise rely on the in-process test):
-```bash
-export UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/test_ums
+The authoritative up/down check is the in-process migration test `test_committed_allocation_migration_postgres.py` (it builds a fresh schema, runs `command.upgrade(..., "head")`, and exercises the new migration) — confirm it is green in the full-suite run above. As a supplementary CLI round-trip on the disposable container (only if `alembic.ini` resolves its URL from the environment in this repo — otherwise rely on the in-process test), run all lines in ONE PowerShell invocation:
+```powershell
+$env:UMS_TEST_DATABASE_URL = "postgresql+psycopg://postgres:ums@localhost:55432/test_ums"
 alembic -c alembic.ini upgrade head
 alembic -c alembic.ini downgrade -1
 alembic -c alembic.ini upgrade head
