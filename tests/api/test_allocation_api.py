@@ -136,6 +136,11 @@ def test_finance_viewer_gets_allocation(tmp_path):
     assert response.status_code == 200
     body = response.json()
     assert body["allocation_method"] == "gross_revenue_proportional"
+    # No FinanceMonthCloseORM is seeded, so the read-switch resolver treats the
+    # month as open and takes the live_compute branch (provenance parity with the
+    # other readers' OPEN-month surface).
+    assert body["allocation_source"] == "live_compute"
+    assert body["committed_run"] is None
     assert len(body["allocations"]) == 1
     line = body["allocations"][0]
     assert line["adsense_account_id"] == "pub-1"
