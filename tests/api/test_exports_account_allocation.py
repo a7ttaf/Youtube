@@ -21,8 +21,19 @@ from ums_smart_revenue.db.finance_models import (
     MonthlyChannelRevenueFactORM,
 )
 from ums_smart_revenue.db.org_models import OrgBase, YouTubeChannelORM
+from ums_smart_revenue.finance.channel_account_links import (
+    SqlAlchemyChannelAccountLinkRepository,
+)
+from ums_smart_revenue.finance.committed_allocation import (
+    SqlAlchemyCommittedAllocationRepository,
+)
+from ums_smart_revenue.finance.deduction_ingestion import (
+    SqlAlchemyDeductionComponentRepository,
+)
+from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
 from ums_smart_revenue.org.channel_groups import ChannelGroupRegistry
 from ums_smart_revenue.reports.exports import ExportJobEntry
+from ums_smart_revenue.reports.finance_workbook import build_finance_workbook_preview
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 MONTH = "2026-04"
@@ -197,6 +208,88 @@ def test_export_net_reflects_channel_direct_and_account_deductions(tmp_path):
     assert channel.net_revenue_usd == Decimal("870.000000")  # 1000 - 30 - 100
     assert channel.channel_direct_deduction_amount_usd == Decimal("30.00")
     assert channel.account_allocated_deduction_amount_usd == Decimal("100.000000")
+
+
+def _commit_snapshot_and_lock(session):
+    """Commit one account-allocation snapshot for MONTH, then lock the month.
+
+    The seed leaves the close row OPEN so the commit succeeds; the lock is applied
+    afterwards so the read-switch resolver prefers the committed snapshot.
+    """
+    committed = SqlAlchemyCommittedAllocationRepository(session)
+    committed.commit_allocation(
+        month=MONTH, allocation_method="gross_revenue_proportional",
+        idempotency_key="k1", request_fingerprint="fp1", reason="close",
+        committed_by=str(TENANT),
+        deduction_repository=SqlAlchemyDeductionComponentRepository(session),
+        revenue_repository=SqlAlchemyRevenueFactRepository(session),
+        link_repository=SqlAlchemyChannelAccountLinkRepository(session),
+    )
+    close = session.query(FinanceMonthCloseORM).filter_by(
+        tenant_id=TENANT, month=MONTH
+    ).one()
+    close.status = "LOCKED"
+    session.commit()
+
+
+def test_export_bundle_locked_month_uses_committed_snapshot_provenance(tmp_path):
+    """A LOCKED month with a committed run -> the export bundle carries
+    account_allocation_provenance.source == "committed_snapshot".
+    """
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed_missing_net_with_components(session)
+        _commit_snapshot_and_lock(session)
+        summaries = _build_finance_source_summaries_for_export(
+            export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            session=session,
+            org_index=OrgAccessIndex(),
+            group_registry=ChannelGroupRegistry(),
+        )
+    assert summaries.account_allocation_provenance.source == "committed_snapshot"
+    assert summaries.account_allocation_provenance.commit_version == 1
+
+
+def test_export_bundle_open_month_uses_live_compute_provenance(tmp_path):
+    """An OPEN month -> the export bundle reports live_compute (no committed run used)."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed_missing_net_with_components(session)
+        summaries = _build_finance_source_summaries_for_export(
+            export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            session=session,
+            org_index=OrgAccessIndex(),
+            group_registry=ChannelGroupRegistry(),
+        )
+    assert summaries.account_allocation_provenance.source == "live_compute"
+    assert summaries.account_allocation_provenance.commit_version is None
+
+
+def test_workbook_preview_payload_carries_allocation_provenance(tmp_path):
+    """The finance workbook preview to_api() surfaces the allocation provenance in
+    its source_summaries map for a committed-snapshot LOCKED month.
+    """
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed_missing_net_with_components(session)
+        _commit_snapshot_and_lock(session)
+        summaries = _build_finance_source_summaries_for_export(
+            export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            session=session,
+            org_index=OrgAccessIndex(),
+            group_registry=ChannelGroupRegistry(),
+        )
+    preview = build_finance_workbook_preview(
+        export_job=_export_job(scope_type="global", scope_channel_ids=None),
+        net_revenue=summaries.net_revenue,
+        payment_match=summaries.payment_match,
+        bank_reconciliation=summaries.bank_reconciliation,
+        smart_alerts=summaries.smart_alerts,
+        account_allocation_provenance=summaries.account_allocation_provenance,
+    )
+    provenance_api = preview.to_api()["source_summaries"]["account_allocation_provenance"]
+    assert provenance_api["allocation_source"] == "committed_snapshot"
+    assert provenance_api["committed_run"]["commit_version"] == 1
 
 
 def test_scoped_finance_export_records_payment_viewed():

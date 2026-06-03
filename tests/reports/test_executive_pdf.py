@@ -2,11 +2,12 @@ import re
 from datetime import UTC, datetime
 from decimal import Decimal
 from io import BytesIO
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from pypdf import PdfReader
 
+from ums_smart_revenue.finance.account_allocation_read import AllocationProvenance
 from ums_smart_revenue.finance.bank_reconciliation import (
     MonthBankReconciliationSummary,
 )
@@ -320,3 +321,40 @@ def test_executive_pdf_renders_deduction_breakdown_aggregate_rows():
     # components, account-allocated to account-level deduction allocations.
     assert "channel-level deduction components" in text
     assert "account-level deduction allocations" in text
+
+
+def _committed_provenance() -> AllocationProvenance:
+    """A committed-snapshot provenance with a fixed commit date for token assertions."""
+    return AllocationProvenance(
+        source="committed_snapshot", commit_version=1,
+        committed_at=datetime(2026, 4, 2, tzinfo=UTC), run_id=UUID(int=7),
+    )
+
+
+def test_executive_pdf_renders_committed_snapshot_disclosure_token():
+    """The executive-summary metadata block carries the allocation-source line."""
+    report = build_executive_pdf_report(
+        export_job=_export_job(export_type="EXECUTIVE_PDF"),
+        net_revenue=_net_revenue_summary_with_breakdown(),
+        payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
+        bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
+        smart_alerts=_smart_alert_summary(),
+        account_allocation_provenance=_committed_provenance(),
+    )
+    text = _extract_pdf_text(build_executive_pdf_bytes(report))
+    assert "Account allocation source:" in text
+    assert "committed snapshot v1" in text
+
+
+def test_executive_pdf_renders_live_fallback_disclosure_token():
+    """A LOCKED month with no committed run renders the live-fallback token line."""
+    report = build_executive_pdf_report(
+        export_job=_export_job(export_type="EXECUTIVE_PDF"),
+        net_revenue=_net_revenue_summary_with_breakdown(),
+        payment_match=_payment_match_summary(status="PAYMENT_MATCHED"),
+        bank_reconciliation=_bank_summary(status="BANK_CONFIRMED"),
+        smart_alerts=_smart_alert_summary(),
+        account_allocation_provenance=AllocationProvenance(source="live_fallback"),
+    )
+    text = _extract_pdf_text(build_executive_pdf_bytes(report))
+    assert "Account allocation: live fallback" in text

@@ -7,6 +7,10 @@ from reportlab.lib.pagesizes import LETTER
 from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
 from reportlab.platypus import Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle
 
+from ums_smart_revenue.finance.account_allocation_read import (
+    AllocationProvenance,
+    account_allocation_disclosure_token,
+)
 from ums_smart_revenue.finance.bank_reconciliation import (
     MonthBankReconciliationSummary,
 )
@@ -78,6 +82,7 @@ class ExecutivePdfReport:
     payment_match: MonthlyPaymentMatchSummary
     bank_reconciliation: MonthBankReconciliationSummary
     smart_alerts: MonthlySmartAlertSummary
+    account_allocation_provenance: AllocationProvenance
 
     def to_api(self) -> dict[str, object]:
         """Convert the ExecutivePdfReport instance into an API payload dictionary."""
@@ -109,6 +114,9 @@ def build_executive_pdf_report(
     payment_match: MonthlyPaymentMatchSummary,
     bank_reconciliation: MonthBankReconciliationSummary,
     smart_alerts: MonthlySmartAlertSummary,
+    account_allocation_provenance: AllocationProvenance = AllocationProvenance(
+        source="live_compute"
+    ),
 ) -> ExecutivePdfReport:
     """Build and validate an ExecutivePdfReport object from given summaries and export job."""
     if export_job.export_type != "EXECUTIVE_PDF":
@@ -144,6 +152,7 @@ def build_executive_pdf_report(
         payment_match=payment_match,
         bank_reconciliation=bank_reconciliation,
         smart_alerts=smart_alerts,
+        account_allocation_provenance=account_allocation_provenance,
     )
 
 
@@ -178,6 +187,21 @@ def build_executive_pdf_bytes(report: ExecutivePdfReport) -> bytes:
         Spacer(1, 16),
         Paragraph("Executive Summary", styles["Heading2"]),
         _summary_table(report),
+        Spacer(1, 6),
+        # ====================================================================
+        # Purpose: Disclose the account-allocation source (committed snapshot vs
+        #   live compute / fallback) directly under the executive-summary table,
+        #   alongside the gross/net split, sourced from the read-switch
+        #   provenance stored on the report.
+        # Standards: Token text owned by account_allocation_disclosure_token;
+        #   read-only presentation, no allocation recompute.
+        # Blast Radius: PDF presentation only — mirrors the XLSX / PPTX surfaces.
+        # ====================================================================
+        Paragraph(
+            f"Account allocation source: "
+            f"{account_allocation_disclosure_token(report.account_allocation_provenance)}",
+            styles["Small"],
+        ),
         Spacer(1, 14),
         Paragraph("Gross vs Net Revenue", styles["Heading2"]),
         _gross_net_table(report),
