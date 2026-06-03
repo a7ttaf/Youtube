@@ -123,6 +123,11 @@ def test_upgrade_creates_tables_constraints_indexes(alembic_config, fresh_engine
     assert "ck_committed_allocation_runs_unallocated_total_usd_finite" in checks
     assert "ck_committed_allocation_runs_net_applicable_total_usd_finite" in checks
     assert "ck_committed_allocation_runs_reconciliation_total_usd_finite" in checks
+    # The 20260603_0001 migration renames the line basis column to the
+    # method-neutral basis_amount_usd; assert the head schema reflects the rename.
+    columns = {c["name"] for c in inspector.get_columns("committed_allocation_lines")}
+    assert "basis_amount_usd" in columns
+    assert "basis_gross_usd" not in columns
     line_checks = {
         c["name"] for c in inspector.get_check_constraints("committed_allocation_lines")
     }
@@ -229,7 +234,7 @@ def test_run_delete_cascades_to_lines(alembic_config, fresh_engine):
             text(
                 "INSERT INTO committed_allocation_lines "
                 "(run_id, adsense_account_id, youtube_channel_id, component_kind, "
-                "source_system, component_key, basis_source_kind, basis_gross_usd, "
+                "source_system, component_key, basis_source_kind, basis_amount_usd, "
                 "basis_share, allocated_amount_usd, net_applicable) VALUES "
                 "(:rid, 'pub-1', 'chA', 'DEDUCTION', 'adsense_management', 'k1', "
                 "'ADSENSE', 1000.000000, 1.000000, 100.000000, true)"
@@ -259,7 +264,7 @@ def _insert_line_sql(allocated_amount: str = "100.000000", **ov) -> tuple[str, d
     sql = text(
         "INSERT INTO committed_allocation_lines "
         "(run_id, adsense_account_id, youtube_channel_id, component_kind, "
-        "source_system, component_key, basis_source_kind, basis_gross_usd, "
+        "source_system, component_key, basis_source_kind, basis_amount_usd, "
         "basis_share, allocated_amount_usd, net_applicable) VALUES "
         "(:rid, 'pub-1', 'chA', 'DEDUCTION', 'adsense_management', 'k1', 'ADSENSE', "
         f"{cols['basis_gross']}::numeric, {cols['basis_share']}::numeric, "
@@ -309,7 +314,7 @@ def test_runs_total_infinity_rejected_by_numeric_type(alembic_config, fresh_engi
 
 
 def test_lines_amount_nan_rejected_by_finite_check(alembic_config, fresh_engine):
-    """A line INSERT with basis_gross_usd = NaN under a valid run is rejected.
+    """A line INSERT with basis_amount_usd = NaN under a valid run is rejected.
 
     The runs row is committed first so the line FK is satisfied; the NaN then
     trips the PG-only amounts finite CHECK on the lines table (raw-SQL path).
@@ -378,7 +383,7 @@ def test_line_empty_component_key_rejected_by_nonempty_check(alembic_config, fre
     line_sql = text(
         "INSERT INTO committed_allocation_lines "
         "(run_id, adsense_account_id, youtube_channel_id, component_kind, "
-        "source_system, component_key, basis_source_kind, basis_gross_usd, "
+        "source_system, component_key, basis_source_kind, basis_amount_usd, "
         "basis_share, allocated_amount_usd, net_applicable) VALUES "
         "(:rid, 'pub-1', 'chA', 'DEDUCTION', 'adsense_management', '', "
         "'ADSENSE', 1000.000000, 1.000000, 100.000000, true)"

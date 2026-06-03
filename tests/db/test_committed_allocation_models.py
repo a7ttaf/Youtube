@@ -72,7 +72,7 @@ def test_run_and_children_persist(tmp_path):
             run_id=run.id, adsense_account_id="pub-1", youtube_channel_id="chA",
             component_kind="DEDUCTION", source_system="adsense_management",
             component_key="k1", basis_source_kind="ADSENSE",
-            basis_gross_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
+            basis_amount_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
             allocated_amount_usd=Decimal("100.000000"), net_applicable=True,
         ))
         session.add(CommittedAllocationNoteORM(
@@ -171,7 +171,7 @@ def test_line_run_fk_cascade_delete(tmp_path):
             run_id=run_id, adsense_account_id="pub-1", youtube_channel_id="chA",
             component_kind="DEDUCTION", source_system="adsense_management",
             component_key="k1", basis_source_kind="ADSENSE",
-            basis_gross_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
+            basis_amount_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
             allocated_amount_usd=Decimal("100.000000"), net_applicable=True,
         ))
         session.commit()
@@ -206,7 +206,7 @@ def test_all_children_cascade_on_run_delete(tmp_path):
             run_id=run_id, adsense_account_id="pub-1", youtube_channel_id="chA",
             component_kind="DEDUCTION", source_system="adsense_management",
             component_key="k1", basis_source_kind="ADSENSE",
-            basis_gross_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
+            basis_amount_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
             allocated_amount_usd=Decimal("100.000000"), net_applicable=True,
         ))
         session.add(CommittedAllocationNoteORM(
@@ -240,7 +240,7 @@ def test_line_identity_nonempty_check_rejects_empty(tmp_path, field):
         adsense_account_id="pub-1", youtube_channel_id="chA",
         component_kind="DEDUCTION", source_system="adsense_management",
         component_key="k1", basis_source_kind="ADSENSE",
-        basis_gross_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
+        basis_amount_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
         allocated_amount_usd=Decimal("100.000000"), net_applicable=True,
     )
     line_kwargs[field] = ""

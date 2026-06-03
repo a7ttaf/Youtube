@@ -58,7 +58,7 @@ def rebuild_result_from_run(outcome: CommitAllocationOutcome) -> AccountAllocati
             source_system=row.source_system,
             component_key=row.component_key,
             basis_source_kind=row.basis_source_kind,
-            basis_gross_usd=row.basis_gross_usd,
+            basis_amount_usd=row.basis_amount_usd,
             basis_share=row.basis_share,
             allocated_amount_usd=row.allocated_amount_usd,
             net_applicable=row.net_applicable,

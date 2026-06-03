@@ -994,7 +994,7 @@ class CommittedAllocationLineORM(FinanceBase):
     source_system: Mapped[str] = mapped_column(Text, nullable=False)
     component_key: Mapped[str] = mapped_column(Text, nullable=False)
     basis_source_kind: Mapped[str] = mapped_column(Text, nullable=False)
-    basis_gross_usd: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    basis_amount_usd: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
     basis_share: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
     allocated_amount_usd: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
     net_applicable: Mapped[bool] = mapped_column(Boolean, nullable=False)
@@ -1008,8 +1008,8 @@ class CommittedAllocationLineORM(FinanceBase):
             name="fk_committed_allocation_lines_run", ondelete="CASCADE",
         ),
         CheckConstraint(
-            "basis_gross_usd > '-Infinity'::numeric "
-            "AND basis_gross_usd < 'Infinity'::numeric "
+            "basis_amount_usd > '-Infinity'::numeric "
+            "AND basis_amount_usd < 'Infinity'::numeric "
             "AND basis_share > '-Infinity'::numeric "
             "AND basis_share < 'Infinity'::numeric "
             "AND allocated_amount_usd > '-Infinity'::numeric "

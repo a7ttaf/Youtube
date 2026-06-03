@@ -104,7 +104,7 @@ class AllocationLine:
     source_system: str
     component_key: str
     basis_source_kind: str
-    basis_gross_usd: Decimal
+    basis_amount_usd: Decimal
     basis_share: Decimal
     allocated_amount_usd: Decimal
     net_applicable: bool
@@ -284,7 +284,7 @@ def _allocate_component(
             source_system=component.source_system,
             component_key=component.component_key,
             basis_source_kind=source_kind,
-            basis_gross_usd=gross,
+            basis_amount_usd=gross,
             basis_share=(gross / basis_total).quantize(_SCALE),
             allocated_amount_usd=allocated[channel_id],
             net_applicable=net_applicable,

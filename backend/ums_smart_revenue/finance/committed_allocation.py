@@ -186,7 +186,7 @@ class SqlAlchemyCommittedAllocationRepository:
                 youtube_channel_id=ln.youtube_channel_id,
                 component_kind=ln.component_kind, source_system=ln.source_system,
                 component_key=ln.component_key, basis_source_kind=ln.basis_source_kind,
-                basis_gross_usd=ln.basis_gross_usd, basis_share=ln.basis_share,
+                basis_amount_usd=ln.basis_amount_usd, basis_share=ln.basis_share,
                 allocated_amount_usd=ln.allocated_amount_usd,
                 net_applicable=ln.net_applicable,
             )
