@@ -441,7 +441,8 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   (anti-double-count, anti-cross-source), plus read-only
   `GET /revenue/months/{month}/deduction-components`. This branch now consumes
   verified account→channel allocation for ACCOUNT-grain net-applicable evidence;
-  remaining allocation work is PAYMENT-grain evidence plus persisted allocation state.
+  persisted/committed allocation state shipped (PR-5 + PR-6); remaining allocation work is
+  PAYMENT-grain evidence — BLOCKED pending remittance/bank data + the operator receipt→account model.
 - ⏳ Allocation rules (Spec 2b) — PR-1 SHIPPED + PR-2 SHIPPED + PR-3 SHIPPED + PR-4 SHIPPED + PR-5 SHIPPED + PR-6 SHIPPED (this branch): PR-2 folds
   account-allocated net-applicable lines into net-revenue (API + finance exports) on the
   missing-net path, read/compute only (no persistence, no migration). PR-3 adds a
@@ -467,7 +468,12 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   reconstruction; live fallback when no committed run; OPEN/no-close-row stays live), and emit
   full allocation_source/committed_run provenance on every surface plus an export disclosure
   token. No migration / no auth / no write-path change.
-  Remaining: PAYMENT-grain; other methods.
+  Remaining: PAYMENT-grain allocation BLOCKED — pending live remittance/bank evidence + an
+  operator-asserted (tenant_id, month, bank_reference)→account(s) receipt-assertion model
+  (verified 2026-06-03, no deterministic bank_reference→account bridge — see
+  Docs/superpowers/specs/2026-06-03-spec-payment-account-modeling-design.md); plus other
+  allocation methods (substantial — gross_revenue_proportional-gated commit + /revenue/recalculate
+  rejects committed writes).
   Prerequisite SHIPPED
   (this branch): canonical channel↔account map — `adsense_content_owner_links`
   (operator-verified account↔owner) + `content_owner_channel_links` (derived from
@@ -495,7 +501,8 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   deduction figures now include channel-direct and account-allocated
   net-applicable components on missing-source-net rows. Committed/persisted
   allocation state shipped (PR-5 write path + PR-6 lock-aware read-switch);
-  remaining is PAYMENT-grain allocation plus other allocation methods.
+  remaining is PAYMENT-grain allocation (BLOCKED — pending remittance/bank evidence + the
+  operator receipt→account assertion model) plus other allocation methods.
 
 ### Acceptance gate
 
@@ -504,7 +511,8 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   per-channel table today and includes channel-direct/account-allocated
   deductions on the missing-source-net path; committed/persisted allocation state
   shipped (PR-5 write path + PR-6 read-switch), so full reconciled net now awaits
-  only PAYMENT-grain allocation.
+  only PAYMENT-grain allocation — BLOCKED pending remittance/bank evidence + the operator
+  receipt→account assertion model (see the 2026-06-03 payment-account-modeling design).
 
 ### Status (2026-06-01)
 
@@ -528,7 +536,9 @@ migration), gated by `VIEW_FINALIZED_PAYMENTS@finance_month(month)` with dual
 persisted/committed allocation WRITE path and PR-6 the lock-aware read-switch
 (readers prefer committed snapshots for LOCKED months); the allocation engine's
 remaining work is PAYMENT-grain distribution — the largest blocker to a fully
-reconciled net figure — plus other allocation methods.
+reconciled net figure, itself BLOCKED pending live remittance/bank evidence + an
+operator-asserted (tenant_id, month, bank_reference)→account(s) receipt model
+(verified 2026-06-03) — plus other allocation methods.
 
 ---
 

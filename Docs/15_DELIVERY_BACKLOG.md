@@ -354,7 +354,13 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   live fallback when no committed run; OPEN stays live), with lossless reconstruction and
   full allocation_source/committed_run provenance on every surface plus an export
   disclosure token. No migration / no auth / no write-path change.
-  Remaining: PAYMENT-grain (needs a payment→account hop); other allocation methods.
+  Remaining: PAYMENT-grain allocation is BLOCKED — pending live remittance/bank evidence
+  + an operator-asserted (tenant_id, month, bank_reference)→account(s) receipt-assertion
+  model (verified 2026-06-03: no deterministic bank_reference→account bridge exists in the
+  data — see Docs/superpowers/specs/2026-06-03-spec-payment-account-modeling-design.md).
+  Also remaining: other allocation methods — a substantial chunk (committed allocation is
+  gross_revenue_proportional-gated in API/service/DB/tests and /revenue/recalculate rejects
+  committed writes).
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed
   permissions). Month-close status UI remains unbuilt (Phase 5).
