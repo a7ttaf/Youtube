@@ -303,7 +303,16 @@ Validation gate: `python -m ruff check backend tests scripts`; targeted pytest f
 reader test modules + the new resolver module; full `python -m pytest -q` with the Postgres
 container; `git diff --check`.
 
-## 10. File inventory (all `backend/ums_smart_revenue/`)
+## 10. Alternatives considered
+
+| Alternative | Reason rejected |
+|---|---|
+| **Always-live compute** (no snapshot read) | Defeats the purpose of committing. A locked month whose live inputs change (row edit, backfill) would silently return a different result on every read, breaking auditability and export consistency. |
+| **Strict committed-only** (error if no snapshot) | Too aggressive for an OPEN month. Forcing a commit before any read is unergonomic; teams view allocation numbers before locking. Also breaks the export flow when a month is still in review. |
+| **Committed-only for LOCKED, error on missing** | Locks can theoretically be set before a snapshot is committed (e.g. migration of historical months). `live_fallback` is safer than a hard error in that edge case, with provenance recorded so downstream callers can detect the gap. |
+| **Per-reader switch logic** | Scatters the LOCKED/OPEN decision across four readers. A policy change (e.g. different fallback behaviour) would require four co-ordinated edits. The single `resolve_month_account_allocation` function is the single decision point. |
+
+## 11. File inventory (all `backend/ums_smart_revenue/`)
 
 Create: `finance/account_allocation_read.py`. Modify: `finance/committed_allocation.py`
 (`get_latest_committed` + public `tenant_id` property), `finance/allocation.py` (extract

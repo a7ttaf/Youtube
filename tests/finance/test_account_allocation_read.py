@@ -44,10 +44,12 @@ ACTOR = str(TENANT)
 
 
 def _session(tmp_path) -> Session:
+    """Create a single-use in-memory SQLite session with FK enforcement for one test."""
     engine = create_engine(f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}")
 
     @event.listens_for(engine, "connect")
     def _fk_on(dbapi_conn, _rec):  # noqa: ANN001
+        """Enable SQLite FK enforcement on every new connection."""
         dbapi_conn.execute("PRAGMA foreign_keys=ON")
 
     TenantBase.metadata.create_all(engine)
@@ -131,6 +133,7 @@ def _add_account_deduction(session, *, account, deduction, component_key=None,
 
 
 def _close(session, status):
+    """Set the finance-month close status, updating the existing row if already created."""
     # commit_allocation() auto-creates an OPEN finance_month_close row via
     # get_or_create_month_close_row, so after a snapshot commit the (tenant, month)
     # row already exists. Update it in place rather than blindly inserting (the
@@ -148,6 +151,7 @@ def _close(session, status):
 
 
 def _repos(session):
+    """Return (committed, deduction, revenue, link) repositories bound to session."""
     return (
         SqlAlchemyCommittedAllocationRepository(session),
         SqlAlchemyDeductionComponentRepository(session),
@@ -171,6 +175,7 @@ def _commit(session, *, status_after="OPEN"):
 
 
 def _resolve(session, *, adsense_account_id=None):
+    """Call resolve_month_account_allocation for MONTH using all repos from session."""
     committed, ded, rev, link = _repos(session)
     return resolve_month_account_allocation(
         month=MONTH, session=session, deduction_repository=ded, revenue_repository=rev,
@@ -226,7 +231,7 @@ def test_reconstruction_equals_live_for_locked(tmp_path):
     session = _session(tmp_path)
     _commit(session, status_after="LOCKED")
     snap, _prov = _resolve(session)
-    committed, ded, rev, link = _repos(session)
+    _committed, ded, rev, link = _repos(session)
     live = compute_month_account_allocation(
         month=MONTH, deduction_repository=ded, revenue_repository=rev, link_repository=link,
     )

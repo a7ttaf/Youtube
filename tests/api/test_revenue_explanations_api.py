@@ -545,11 +545,14 @@ def _persisted_account_component(database_url: str, channel: str, month: str) ->
             )
         ).one()
         components = list(row.components)
-    return next(
-        component
-        for component in components
-        if component["key"] == "account_allocated_deduction_usd"
-    )
+    try:
+        return next(
+            component
+            for component in components
+            if component["key"] == "account_allocated_deduction_usd"
+        )
+    except StopIteration as exc:
+        raise ValueError("account_allocated_deduction_usd component not found") from exc
 
 
 def test_net_explanation_locked_month_records_committed_snapshot_provenance(tmp_path):

@@ -164,18 +164,15 @@ def resolve_month_account_allocation(
                 run_id=outcome.run.id,
             )
             return result, provenance
-        result = compute_month_account_allocation(
-            month=month, deduction_repository=deduction_repository,
-            revenue_repository=revenue_repository, link_repository=link_repository,
-            adsense_account_id=adsense_account_id,
-        )
-        return result, AllocationProvenance(source="live_fallback")
+        source = "live_fallback"
+    else:
+        source = "live_compute"
     result = compute_month_account_allocation(
         month=month, deduction_repository=deduction_repository,
         revenue_repository=revenue_repository, link_repository=link_repository,
         adsense_account_id=adsense_account_id,
     )
-    return result, AllocationProvenance(source="live_compute")
+    return result, AllocationProvenance(source=source)
 
 
 def allocation_provenance_to_api(provenance: AllocationProvenance) -> dict[str, object]:

@@ -623,9 +623,8 @@ def test_net_revenue_locked_month_serves_committed_snapshot(tmp_path):
 
     # Mutate the source DEDUCTION so live compute would differ from the snapshot.
     with Session(engine) as session:
-        from sqlalchemy import select as _select
         row = session.scalars(
-            _select(DeductionComponentORM).where(
+            select(DeductionComponentORM).where(
                 DeductionComponentORM.component_key == "srcrow:adsense_management:k-7"
             )
         ).one()
