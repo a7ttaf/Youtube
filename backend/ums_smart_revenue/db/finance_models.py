@@ -1016,6 +1016,21 @@ class CommittedAllocationLineORM(FinanceBase):
             "AND allocated_amount_usd < 'Infinity'::numeric",
             name="ck_committed_allocation_lines_amounts_finite",
         ).ddl_if(dialect="postgresql"),
+        # Non-empty identity guards on the line's account/channel/component key so a
+        # committed snapshot line always carries a usable business key (SQLite + PG),
+        # mirroring deduction_components' non-empty identifier CHECKs.
+        CheckConstraint(
+            "length(adsense_account_id) >= 1",
+            name="ck_committed_allocation_lines_adsense_account_id_nonempty",
+        ),
+        CheckConstraint(
+            "length(youtube_channel_id) >= 1",
+            name="ck_committed_allocation_lines_youtube_channel_id_nonempty",
+        ),
+        CheckConstraint(
+            "length(component_key) >= 1",
+            name="ck_committed_allocation_lines_component_key_nonempty",
+        ),
         Index("ix_committed_allocation_lines_run", "run_id"),
         Index(
             "ix_committed_allocation_lines_run_channel",
@@ -1049,6 +1064,23 @@ class CommittedAllocationUnallocatedORM(FinanceBase):
             ["run_id"], ["committed_allocation_runs.id"],
             name="fk_committed_allocation_unallocated_run", ondelete="CASCADE",
         ),
+        # Non-empty identity guards (scope_id + component_key) mirror the source
+        # deduction_components non-empty CHECKs, so a snapshot row can never carry a
+        # blank business key on a direct-SQL/backfill path (SQLite + PostgreSQL).
+        CheckConstraint(
+            "length(scope_id) >= 1",
+            name="ck_committed_allocation_unallocated_scope_id_nonempty",
+        ),
+        CheckConstraint(
+            "length(component_key) >= 1",
+            name="ck_committed_allocation_unallocated_component_key_nonempty",
+        ),
+        # PG-only finite guard on the persisted unallocated USD amount: NUMERIC can
+        # store NaN, so mirror the runs/lines/deduction_components finite CHECKs.
+        CheckConstraint(
+            "amount_usd > '-Infinity'::numeric AND amount_usd < 'Infinity'::numeric",
+            name="ck_committed_allocation_unallocated_amount_usd_finite",
+        ).ddl_if(dialect="postgresql"),
         Index("ix_committed_allocation_unallocated_run", "run_id"),
     )
 
@@ -1074,6 +1106,12 @@ class CommittedAllocationNoteORM(FinanceBase):
         ForeignKeyConstraint(
             ["run_id"], ["committed_allocation_runs.id"],
             name="fk_committed_allocation_notes_run", ondelete="CASCADE",
+        ),
+        # Non-empty channel-id guard: a snapshot note must point at a real channel
+        # (SQLite + PG), mirroring deduction_components' non-empty identifier CHECKs.
+        CheckConstraint(
+            "length(youtube_channel_id) >= 1",
+            name="ck_committed_allocation_notes_youtube_channel_id_nonempty",
         ),
         Index("ix_committed_allocation_notes_run", "run_id"),
     )

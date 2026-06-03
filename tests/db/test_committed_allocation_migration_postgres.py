@@ -127,6 +127,26 @@ def test_upgrade_creates_tables_constraints_indexes(alembic_config, fresh_engine
         c["name"] for c in inspector.get_check_constraints("committed_allocation_lines")
     }
     assert "ck_committed_allocation_lines_amounts_finite" in line_checks
+    # Non-empty identity guards on the line identifier columns (account/channel/
+    # component key), mirroring deduction_components' non-empty identifier CHECKs.
+    assert "ck_committed_allocation_lines_adsense_account_id_nonempty" in line_checks
+    assert "ck_committed_allocation_lines_youtube_channel_id_nonempty" in line_checks
+    assert "ck_committed_allocation_lines_component_key_nonempty" in line_checks
+    unallocated_checks = {
+        c["name"]
+        for c in inspector.get_check_constraints("committed_allocation_unallocated")
+    }
+    # PG-only finite guard + non-empty identity guards on the unallocated table.
+    assert "ck_committed_allocation_unallocated_amount_usd_finite" in unallocated_checks
+    assert "ck_committed_allocation_unallocated_scope_id_nonempty" in unallocated_checks
+    assert (
+        "ck_committed_allocation_unallocated_component_key_nonempty"
+        in unallocated_checks
+    )
+    notes_checks = {
+        c["name"] for c in inspector.get_check_constraints("committed_allocation_notes")
+    }
+    assert "ck_committed_allocation_notes_youtube_channel_id_nonempty" in notes_checks
     # Explicit indexes created by the migration (one per table, plus the
     # composite run+channel index on lines). PK-backed indexes are not asserted.
     runs_indexes = {c["name"] for c in inspector.get_indexes("committed_allocation_runs")}
@@ -317,4 +337,51 @@ def test_lines_amount_infinity_rejected_by_numeric_type(alembic_config, fresh_en
         ).scalar_one()
     line_sql, _ = _insert_line_sql(basis_gross="'Infinity'")
     with pytest.raises(DataError), fresh_engine.begin() as conn:
+        conn.execute(line_sql, {"rid": run_id})
+
+
+def _seed_run(fresh_engine, key: str):
+    """Insert one valid run and return its id (FK parent for child-row tests)."""
+    run_sql, run_params = _insert_run_sql(key=key)
+    with fresh_engine.begin() as conn:
+        conn.execute(run_sql, run_params)
+        return conn.execute(
+            text("SELECT id FROM committed_allocation_runs LIMIT 1")
+        ).scalar_one()
+
+
+def test_unallocated_amount_nan_rejected_by_finite_check(alembic_config, fresh_engine):
+    """An unallocated INSERT with amount_usd = NaN under a valid run is rejected.
+
+    NaN IS storable in NUMERIC(20,6); the PG-only finite CHECK on the unallocated
+    table rejects it on the raw-SQL path that bypasses the repository guard.
+    """
+    command.upgrade(alembic_config, "head")
+    run_id = _seed_run(fresh_engine, key="unalloc-nan")
+    # Bare 'NaN'::numeric literal (parameter binding would coerce the Python float).
+    sql = text(
+        "INSERT INTO committed_allocation_unallocated "
+        "(run_id, scope_id, component_kind, component_key, amount_usd, "
+        "issue_code, detail) VALUES "
+        "(:rid, 'chA', 'DEDUCTION', 'k1', 'NaN'::numeric, 'UNALLOCATED', 'x')"
+    )
+    with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
+        conn.execute(sql, {"rid": run_id})
+
+
+def test_line_empty_component_key_rejected_by_nonempty_check(alembic_config, fresh_engine):
+    """A line INSERT with an empty component_key is rejected by the migration's
+    non-empty CHECK (mirrors deduction_components' non-empty identifier guard).
+    """
+    command.upgrade(alembic_config, "head")
+    run_id = _seed_run(fresh_engine, key="line-empty-key")
+    line_sql = text(
+        "INSERT INTO committed_allocation_lines "
+        "(run_id, adsense_account_id, youtube_channel_id, component_kind, "
+        "source_system, component_key, basis_source_kind, basis_gross_usd, "
+        "basis_share, allocated_amount_usd, net_applicable) VALUES "
+        "(:rid, 'pub-1', 'chA', 'DEDUCTION', 'adsense_management', '', "
+        "'ADSENSE', 1000.000000, 1.000000, 100.000000, true)"
+    )
+    with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
         conn.execute(line_sql, {"rid": run_id})

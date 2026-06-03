@@ -305,6 +305,23 @@ def get_account_allocations(
 @router.post(
     "/months/{month}/account-allocations/commit",
     response_model=CommitAllocationResponse,
+    status_code=status.HTTP_201_CREATED,
+    responses={
+        status.HTTP_200_OK: {
+            "model": CommitAllocationResponse,
+            "description": (
+                "Idempotent replay: the existing committed run for this "
+                "(month, idempotency_key) is returned unchanged and NO new "
+                "ALLOCATION_COMMITTED audit event is recorded."
+            ),
+        },
+        status.HTTP_201_CREATED: {
+            "description": (
+                "A new versioned snapshot was committed and an "
+                "ALLOCATION_COMMITTED audit event was recorded."
+            ),
+        },
+    },
 )
 def commit_account_allocations(
     month: str,
@@ -381,7 +398,12 @@ def commit_account_allocations(
                 },
             )
         )
-        response.status_code = status.HTTP_201_CREATED
+    # The decorator declares 201 as the default success status. A fresh commit
+    # keeps 201 (new snapshot + audit); an idempotent replay returns the existing
+    # run with 200 and no second audit -- matching the documented OpenAPI responses.
+    response.status_code = (
+        status.HTTP_201_CREATED if outcome.created else status.HTTP_200_OK
+    )
 
     return CommitAllocationResponse(
         run=_run_to_api(outcome.run),

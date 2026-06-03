@@ -226,3 +226,64 @@ def test_all_children_cascade_on_run_delete(tmp_path):
         assert session.query(CommittedAllocationLineORM).count() == 0
         assert session.query(CommittedAllocationNoteORM).count() == 0
         assert session.query(CommittedAllocationUnallocatedORM).count() == 0
+
+
+@pytest.mark.parametrize(
+    "field", ["adsense_account_id", "youtube_channel_id", "component_key"]
+)
+def test_line_identity_nonempty_check_rejects_empty(tmp_path, field):
+    """Each committed line identity key (account/channel/component) rejects "" at
+    the DB level, mirroring deduction_components' non-empty identifier CHECKs.
+    """
+    engine = _engine(tmp_path)
+    line_kwargs = dict(
+        adsense_account_id="pub-1", youtube_channel_id="chA",
+        component_kind="DEDUCTION", source_system="adsense_management",
+        component_key="k1", basis_source_kind="ADSENSE",
+        basis_gross_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
+        allocated_amount_usd=Decimal("100.000000"), net_applicable=True,
+    )
+    line_kwargs[field] = ""
+    with Session(engine) as session, pytest.raises(IntegrityError):
+        run = _run()
+        session.add(run)
+        session.flush()
+        session.add(CommittedAllocationLineORM(run_id=run.id, **line_kwargs))
+        session.commit()
+
+
+@pytest.mark.parametrize("field", ["scope_id", "component_key"])
+def test_unallocated_identity_nonempty_check_rejects_empty(tmp_path, field):
+    """Committed unallocated identity keys (scope_id, component_key) reject "" at
+    the DB level, mirroring deduction_components' non-empty identifier CHECKs.
+    """
+    engine = _engine(tmp_path)
+    unallocated_kwargs = dict(
+        scope_id="chA", component_kind="DEDUCTION", component_key="k1",
+        amount_usd=Decimal("0"), issue_code="UNALLOCATED", detail="x",
+    )
+    unallocated_kwargs[field] = ""
+    with Session(engine) as session, pytest.raises(IntegrityError):
+        run = _run()
+        session.add(run)
+        session.flush()
+        session.add(
+            CommittedAllocationUnallocatedORM(run_id=run.id, **unallocated_kwargs)
+        )
+        session.commit()
+
+
+def test_note_channel_nonempty_check_rejects_empty(tmp_path):
+    """A committed note's youtube_channel_id rejects "" at the DB level, mirroring
+    deduction_components' non-empty identifier CHECKs.
+    """
+    engine = _engine(tmp_path)
+    with Session(engine) as session, pytest.raises(IntegrityError):
+        run = _run()
+        session.add(run)
+        session.flush()
+        session.add(CommittedAllocationNoteORM(
+            run_id=run.id, note_code="CHANNEL_IN_MULTIPLE_ACCOUNTS",
+            youtube_channel_id="", detail="x",
+        ))
+        session.commit()

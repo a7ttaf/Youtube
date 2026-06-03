@@ -136,6 +136,18 @@ def upgrade() -> None:
             ["run_id"], ["committed_allocation_runs.id"],
             name="fk_committed_allocation_lines_run", ondelete="CASCADE",
         ),
+        sa.CheckConstraint(
+            "length(adsense_account_id) >= 1",
+            name="ck_committed_allocation_lines_adsense_account_id_nonempty",
+        ),
+        sa.CheckConstraint(
+            "length(youtube_channel_id) >= 1",
+            name="ck_committed_allocation_lines_youtube_channel_id_nonempty",
+        ),
+        sa.CheckConstraint(
+            "length(component_key) >= 1",
+            name="ck_committed_allocation_lines_component_key_nonempty",
+        ),
     )
     op.create_table(
         "committed_allocation_unallocated",
@@ -155,6 +167,14 @@ def upgrade() -> None:
             ["run_id"], ["committed_allocation_runs.id"],
             name="fk_committed_allocation_unallocated_run", ondelete="CASCADE",
         ),
+        sa.CheckConstraint(
+            "length(scope_id) >= 1",
+            name="ck_committed_allocation_unallocated_scope_id_nonempty",
+        ),
+        sa.CheckConstraint(
+            "length(component_key) >= 1",
+            name="ck_committed_allocation_unallocated_component_key_nonempty",
+        ),
     )
     op.create_table(
         "committed_allocation_notes",
@@ -170,6 +190,10 @@ def upgrade() -> None:
         sa.ForeignKeyConstraint(
             ["run_id"], ["committed_allocation_runs.id"],
             name="fk_committed_allocation_notes_run", ondelete="CASCADE",
+        ),
+        sa.CheckConstraint(
+            "length(youtube_channel_id) >= 1",
+            name="ck_committed_allocation_notes_youtube_channel_id_nonempty",
         ),
     )
     # Postgres-only finite guards (invalid SQLite CREATE syntax), mirroring the
@@ -188,6 +212,10 @@ def upgrade() -> None:
             "committed_allocation_lines",
             f"{_finite('basis_gross_usd')} AND {_finite('basis_share')} "
             f"AND {_finite('allocated_amount_usd')}",
+        )
+        op.create_check_constraint(
+            "ck_committed_allocation_unallocated_amount_usd_finite",
+            "committed_allocation_unallocated", _finite("amount_usd"),
         )
     op.create_index(
         "ix_committed_allocation_runs_tenant_month",

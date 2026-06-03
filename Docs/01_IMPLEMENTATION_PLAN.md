@@ -456,6 +456,11 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   PR-5 SHIPPED (this branch): persisted/committed allocation — write-only versioned
   snapshot endpoint (POST /revenue/months/{month}/account-allocations/commit) over the
   gross_revenue_proportional compute + 4 tables + ALLOCATION_COMMITTED audit; readers unchanged.
+  Post-review hardening (Codex): finite (non-NaN, non-Infinity) CHECK on
+  committed_allocation_unallocated.amount_usd + non-empty (length>=1) CHECKs on the snapshot
+  identity columns (lines account/channel/component key; unallocated scope_id/component_key;
+  notes channel) mirroring deduction_components; the commit OpenAPI contract now documents both
+  201 (new snapshot) and 200 (idempotent replay).
   Remaining: read-switch to committed snapshots; PAYMENT-grain; other methods.
   Prerequisite SHIPPED
   (this branch): canonical channel↔account map — `adsense_content_owner_links`

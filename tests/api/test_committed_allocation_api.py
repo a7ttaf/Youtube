@@ -171,6 +171,19 @@ def test_commit_creates_run_and_summary_only_audit(tmp_path):
     assert "allocations" not in detail and "lines" not in detail  # no per-line dump
 
 
+def test_commit_openapi_documents_both_success_statuses(tmp_path):
+    """The published OpenAPI contract advertises BOTH commit success statuses --
+    201 (a fresh versioned snapshot) and 200 (idempotent replay) -- so clients
+    generated from the schema see the create response, matching runtime behavior.
+    """
+    client = _client(build_database_url(tmp_path), _principal)
+    schema = client.get("/openapi.json").json()
+    path_template = "/revenue/months/{month}/account-allocations/commit"
+    responses = schema["paths"][path_template]["post"]["responses"]
+    assert "201" in responses, "commit must document the 201 create response"
+    assert "200" in responses, "commit must document the 200 idempotent-replay response"
+
+
 def test_idempotent_replay_returns_200_without_second_audit(tmp_path):
     """Re-POST with the same key + identical body -> 200, no second audit row."""
     db = build_database_url(tmp_path)
