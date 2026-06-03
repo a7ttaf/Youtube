@@ -67,7 +67,7 @@ The ORM model (`finance_models.py`) is updated to the final state — `basis_amo
 
 ## 7. The `basis_gross_usd` → `basis_amount_usd` rename (active code; no alias)
 
-The persisted basis field stores *the weight that drove this line's split*; for a post_tax line that weight is net, so `basis_gross_usd` becomes a misleading number-source label (rule #4). Renamed everywhere it is an **active** identifier — **9 active-code occurrences across 6 files** (verified inventory):
+The persisted basis field stores *the weight that drove this line's split*; for a post_tax line that weight is net, so `basis_gross_usd` becomes a misleading number-source label (rule #4). Renamed everywhere it is an **active** identifier — **9 active-code line hits across 5 files** (verified inventory; all counts in §7–§8 are ripgrep line hits for the `basis_gross_usd` identifier — a line counts once even if it contains the token twice — and exclude this new spec):
 
 | File | Lines | Role |
 |------|-------|------|
@@ -89,10 +89,10 @@ So the renamed field is consumed in output only by the two account-allocation AP
 
 The `basis_gross_usd` identifier also appears in non-active artifacts that this PR **deliberately does not rewrite**:
 
-- **The merged migration `20260602_0001` (2 occurrences, lines 127, 213):** not edited — per the explicit directive, the new migration (§6) performs the rename forward; the merged migration accurately records the column it originally created.
-- **Historical planning docs/specs (16 occurrences across 7 files):** the `2026-05-31` / `2026-06-01` / `2026-06-02` / `2026-06-03` allocation specs and plans are point-in-time records of already-merged PRs (#58–66). They are **not** rewritten — doing so would falsify the historical record and violate CLAUDE.md rule #12 ("never remove planning docs … unless the operator explicitly asks"). They remain accurate as descriptions of what those PRs shipped at the time.
+- **The merged migration `20260602_0001` (2 line hits, lines 127, 213):** not edited — per the explicit directive, the new migration (§6) performs the rename forward; the merged migration accurately records the column it originally created.
+- **Historical planning docs/specs (21 line hits across 7 files — 4 in 2 specs, 17 in 5 plans):** the `2026-05-31` / `2026-06-01` / `2026-06-02` allocation specs and plans are point-in-time records of already-merged PRs (#58–66). They are **not** rewritten — doing so would falsify the historical record and violate CLAUDE.md rule #12 ("never remove planning docs … unless the operator explicitly asks"). They remain accurate as descriptions of what those PRs shipped at the time.
 
-**Scope statement:** this PR updates `basis_gross_usd` → `basis_amount_usd` in **active backend code + active tests** only, plus this new spec, the new plan, and the new migration. Historical docs/plans and the merged migration keep their original text. No memory files reference the identifier.
+**Scope statement.** Counts above are ripgrep line hits for the `basis_gross_usd` identifier over the repo and **exclude this new spec** (which references the old name only to describe the rename). The identifier currently appears in: active backend code (9 hits / 5 files, §7), active tests (10 hits / 4 files: `test_committed_allocation_models.py`, `test_committed_allocation_migration_postgres.py`, `test_net_revenue_account_allocations.py`, `test_explanations.py`), the merged migration (2 hits / 1 file), and historical docs/plans (21 hits / 7 files). This PR renames the identifier only in **active code, active tests, and the new migration**; historical docs/plans and the merged migration keep their original text. The broader rename reaches more test files via the `gross_basis`→`basis` parameter rename and new post_tax behavior — see the full 12-file set in §10. No memory files reference the identifier.
 
 ## 9. No public live-read method selector (redline wording)
 
