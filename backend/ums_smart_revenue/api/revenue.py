@@ -24,6 +24,10 @@ from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.finance.account_allocation_read import (
+    allocation_provenance_to_api,
+    resolve_month_account_allocation,
+)
 from ums_smart_revenue.finance.adsense_payments import (
     AdSensePaymentValidationError,
     SqlAlchemyAdSensePaymentRepository,
@@ -38,6 +42,9 @@ from ums_smart_revenue.finance.bank_reconciliation import (
 )
 from ums_smart_revenue.finance.channel_account_links import (
     SqlAlchemyChannelAccountLinkRepository,
+)
+from ums_smart_revenue.finance.committed_allocation import (
+    SqlAlchemyCommittedAllocationRepository,
 )
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.deduction_components import DeductionComponent
@@ -374,6 +381,19 @@ def current_channel_account_link_repository(
     to compute account allocations before building the summary.
     """
     return SqlAlchemyChannelAccountLinkRepository(session)
+
+
+def current_committed_allocation_repository(
+    session: Annotated[Session, Depends(current_db_session)],
+) -> SqlAlchemyCommittedAllocationRepository:
+    """Build the committed-allocation repository bound to the request session.
+
+    Defined here (beside the other finance repo providers) so the read-switch
+    resolver can be wired from both api.revenue (net-revenue/explain) and
+    api.allocation (the GET + the POST commit route, which imports this symbol)
+    without the api.revenue -> api.allocation -> api.revenue import cycle.
+    """
+    return SqlAlchemyCommittedAllocationRepository(session)
 
 
 def current_number_explanation_repository(
@@ -1087,6 +1107,11 @@ def get_month_net_revenue(
         SqlAlchemyChannelAccountLinkRepository,
         Depends(current_channel_account_link_repository),
     ],
+    committed_repository: Annotated[
+        SqlAlchemyCommittedAllocationRepository,
+        Depends(current_committed_allocation_repository),
+    ],
+    session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     scope_type: Annotated[str, Query(min_length=1)] = "global",
     scope_id: str | None = None,
@@ -1127,18 +1152,20 @@ def get_month_net_revenue(
             youtube_channel_ids=channel_ids,
             component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
         )
-        account_result = compute_month_account_allocation(
+        account_result, allocation_provenance = resolve_month_account_allocation(
             month=month,
+            session=session,
             deduction_repository=deduction_component_repository,
             revenue_repository=revenue_repository,
             link_repository=link_repository,
+            committed_repository=committed_repository,
         )
-        # FIX: compute_month_account_allocation resolves month-wide, so a scoped
-        # read must drop allocation lines for channels outside the resolved
-        # channel_ids before they reach the summary builder; otherwise a caller
-        # authorized for one company/sector/channel would receive other
-        # channels' allocation-derived rows and totals. channel_ids is None for
-        # global reads, which pass through unchanged.
+        # FIX: the account allocation resolves month-wide (live compute or the
+        # committed snapshot), so a scoped read must drop allocation lines for
+        # channels outside the resolved channel_ids before they reach the summary
+        # builder; otherwise a caller authorized for one company/sector/channel
+        # would receive other channels' allocation-derived rows and totals.
+        # channel_ids is None for global reads, which pass through unchanged.
         scoped_account_lines = filter_account_allocations_to_scope(
             account_result.lines, channel_ids
         )
@@ -1165,6 +1192,7 @@ def get_month_net_revenue(
 
     summary_api = summary.to_api()
     summary_api["currency"] = normalized_currency
+    summary_api.update(allocation_provenance_to_api(allocation_provenance))
     revenue_record = record_audit_event(
         sink=audit_sink,
         actor=user,

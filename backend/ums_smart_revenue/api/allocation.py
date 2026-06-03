@@ -22,6 +22,7 @@ from ums_smart_revenue.api.dependencies import (
     current_principal_from_headers,
 )
 from ums_smart_revenue.api.revenue import (
+    current_committed_allocation_repository,
     current_deduction_component_repository,
     current_revenue_fact_repository,
 )
@@ -31,8 +32,11 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope
+from ums_smart_revenue.finance.account_allocation_read import (
+    allocation_provenance_to_api,
+    resolve_month_account_allocation,
+)
 from ums_smart_revenue.finance.allocation import AccountAllocationResult
-from ums_smart_revenue.finance.allocation_inputs import compute_month_account_allocation
 from ums_smart_revenue.finance.channel_account_links import (
     SqlAlchemyChannelAccountLinkRepository,
 )
@@ -49,13 +53,6 @@ from ums_smart_revenue.finance.deduction_ingestion import (
 from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
 
 router = APIRouter(prefix="/revenue", tags=["account-allocations"])
-
-
-def current_committed_allocation_repository(
-    session: Annotated[Session, Depends(current_db_session)],
-) -> SqlAlchemyCommittedAllocationRepository:
-    """Build the committed-allocation repository bound to the request session."""
-    return SqlAlchemyCommittedAllocationRepository(session)
 
 
 class CommitAllocationRequest(BaseModel):
@@ -233,6 +230,11 @@ def get_account_allocations(
     revenue_repository: Annotated[
         SqlAlchemyRevenueFactRepository, Depends(current_revenue_fact_repository)
     ],
+    committed_repository: Annotated[
+        SqlAlchemyCommittedAllocationRepository,
+        Depends(current_committed_allocation_repository),
+    ],
+    session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
     adsense_account_id: Annotated[str | None, Query(min_length=1)] = None,
 ) -> dict[str, object]:
@@ -244,12 +246,16 @@ def get_account_allocations(
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, payment_scope)
 
     # _require_valid_month is the single 422 boundary gate; the same month is
-    # passed to the orchestrator, so repo-level month validation is unreachable.
-    result = compute_month_account_allocation(
+    # passed to the resolver, so repo-level month validation is unreachable. The
+    # read-switch resolver prefers the committed snapshot for a LOCKED month
+    # (live_fallback if none committed); OPEN / no close row stays live_compute.
+    result, allocation_provenance = resolve_month_account_allocation(
         month=month,
+        session=session,
         deduction_repository=deduction_repository,
         revenue_repository=revenue_repository,
         link_repository=link_repository,
+        committed_repository=committed_repository,
         adsense_account_id=adsense_account_id,
     )
 
@@ -279,6 +285,7 @@ def get_account_allocations(
     ]
 
     payload = _result_to_api(result)
+    payload.update(allocation_provenance_to_api(allocation_provenance))
     payload["audit_events"] = audit_events
     return payload
 
