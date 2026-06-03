@@ -442,7 +442,7 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   `GET /revenue/months/{month}/deduction-components`. This branch now consumes
   verified account→channel allocation for ACCOUNT-grain net-applicable evidence;
   remaining allocation work is PAYMENT-grain evidence plus persisted allocation state.
-- ⏳ Allocation rules (Spec 2b) — PR-1 SHIPPED + PR-2 SHIPPED + PR-3 SHIPPED + PR-4 SHIPPED + PR-5 SHIPPED (this branch): PR-2 folds
+- ⏳ Allocation rules (Spec 2b) — PR-1 SHIPPED + PR-2 SHIPPED + PR-3 SHIPPED + PR-4 SHIPPED + PR-5 SHIPPED + PR-6 SHIPPED (this branch): PR-2 folds
   account-allocated net-applicable lines into net-revenue (API + finance exports) on the
   missing-net path, read/compute only (no persistence, no migration). PR-3 adds a
   `net_revenue_usd` metric to `POST /revenue/channels/{channel_id}/months/{month}/explain`,
@@ -461,7 +461,13 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   identity columns (lines account/channel/component key; unallocated scope_id/component_key;
   notes channel) mirroring deduction_components; the commit OpenAPI contract now documents both
   201 (new snapshot) and 200 (idempotent replay).
-  Remaining: read-switch to committed snapshots; PAYMENT-grain; other methods.
+  PR-6 SHIPPED (this branch, 2026-06-03): read-switch — a central lock-aware
+  resolve_month_account_allocation now backs all four readers (allocation GET, net-revenue,
+  explain, exports), which prefer the latest committed snapshot for LOCKED months (lossless
+  reconstruction; live fallback when no committed run; OPEN/no-close-row stays live), and emit
+  full allocation_source/committed_run provenance on every surface plus an export disclosure
+  token. No migration / no auth / no write-path change.
+  Remaining: PAYMENT-grain; other methods.
   Prerequisite SHIPPED
   (this branch): canonical channel↔account map — `adsense_content_owner_links`
   (operator-verified account↔owner) + `content_owner_channel_links` (derived from
