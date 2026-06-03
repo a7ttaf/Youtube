@@ -19,7 +19,7 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "google_cloud_storage": "3.10.1",
         "pytest": "9.0.3",
         "httpx": "0.28.1",
-        "pypdf": "6.12.1",
+        "pypdf": "6.12.2",
     },
     "datastores": {
         "postgresql": "18.3",
