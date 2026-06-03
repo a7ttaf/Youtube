@@ -64,5 +64,5 @@ def compute_month_account_allocation(
         month=month,
         components=components,
         verified_channels=verified_channels,
-        gross_basis=gross_basis,
+        basis=gross_basis,
     )
