@@ -11,6 +11,8 @@ from decimal import Decimal
 from uuid import UUID
 
 from ums_smart_revenue.finance.allocation import (
+    ALLOCATION_METHOD,
+    POST_TAX_ALLOCATION_METHOD,
     AccountAllocationResult,
     build_account_allocation,
 )
@@ -20,13 +22,51 @@ from ums_smart_revenue.finance.channel_account_links import (
 from ums_smart_revenue.finance.deduction_ingestion import (
     SqlAlchemyDeductionComponentRepository,
 )
-from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
+from ums_smart_revenue.finance.revenue_facts import (
+    RevenueFactEntry,
+    SqlAlchemyRevenueFactRepository,
+)
+
+
+def _build_gross_basis(
+    facts: list[RevenueFactEntry],
+) -> dict[tuple[str, str], Decimal]:
+    """Sum gross_revenue_usd per (channel, source_kind)."""
+    basis: dict[tuple[str, str], Decimal] = {}
+    for fact in facts:
+        key = (fact.youtube_channel_id, fact.source_kind)
+        basis[key] = basis.get(key, Decimal("0")) + fact.gross_revenue_usd
+    return basis
+
+
+def _build_net_basis(
+    facts: list[RevenueFactEntry],
+) -> dict[tuple[str, str], Decimal]:
+    """Sum source net_revenue_usd per (channel, source_kind), fail-closed.
+
+    A (channel, source_kind) key is OMITTED entirely if ANY fact in that group
+    has null net_revenue_usd -- never a silent partial-net sum. The downstream
+    engine then treats those channels as missing basis (BASIS_MISSING/INCOMPLETE).
+    Uses source net only; never derived/allocated net (which would be circular).
+    """
+    null_net_keys: set[tuple[str, str]] = set()
+    net_basis: dict[tuple[str, str], Decimal] = {}
+    for fact in facts:
+        key = (fact.youtube_channel_id, fact.source_kind)
+        if fact.net_revenue_usd is None:
+            null_net_keys.add(key)
+        else:
+            net_basis[key] = net_basis.get(key, Decimal("0")) + fact.net_revenue_usd
+    for key in null_net_keys:
+        net_basis.pop(key, None)
+    return net_basis
 
 
 # ============================================================================
 # Purpose: Resolve ACCOUNT components, the source-aligned (channel, source_kind)
-#   raw-gross basis, and the verified account->channels map for a month, then
-#   run build_account_allocation. Single source of allocation orchestration.
+#   basis (gross or post-tax net), and the verified account->channels map for a
+#   month, then run build_account_allocation. Single source of allocation
+#   orchestration.
 # Database/ORM: Reads via the three injected repositories only.
 # Standards: pure orchestration; no auth, no audit, no writes; deterministic.
 # Blast Radius: Finance read-model (account allocation). No mutation, no Neo4j.
@@ -42,16 +82,17 @@ def compute_month_account_allocation(
     revenue_repository: SqlAlchemyRevenueFactRepository,
     link_repository: SqlAlchemyChannelAccountLinkRepository,
     adsense_account_id: str | None = None,
+    allocation_method: str = ALLOCATION_METHOD,
 ) -> AccountAllocationResult:
     """Gather inputs and run the account allocation for one finance month."""
     components = deduction_repository.list_account_components(
         month=month, adsense_account_id=adsense_account_id
     )
     facts = revenue_repository.list_month_facts(month=month)
-    gross_basis: dict[tuple[str, str], Decimal] = {}
-    for fact in facts:
-        key = (fact.youtube_channel_id, fact.source_kind)
-        gross_basis[key] = gross_basis.get(key, Decimal("0")) + fact.gross_revenue_usd
+    if allocation_method == POST_TAX_ALLOCATION_METHOD:
+        basis = _build_net_basis(facts)
+    else:
+        basis = _build_gross_basis(facts)
     tenant_id: UUID = link_repository.tenant_id
     accounts = sorted({component.scope_id for component in components})
     verified_channels = {
@@ -64,5 +105,6 @@ def compute_month_account_allocation(
         month=month,
         components=components,
         verified_channels=verified_channels,
-        basis=gross_basis,
+        basis=basis,
+        allocation_method=allocation_method,
     )

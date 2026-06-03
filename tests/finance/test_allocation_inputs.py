@@ -96,3 +96,65 @@ def test_compute_month_account_allocation_matches_endpoint_inputs(tmp_path):
     assert line.allocated_amount_usd == Decimal("100.000000")
     assert line.net_applicable is True
     assert result.unallocated == ()
+
+
+def test_post_tax_uses_source_net_basis(tmp_path):
+    """post_tax weights the split by source net_revenue_usd, not gross."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed(session)
+        # Add a second verified channel (chB) + facts so the split is observable.
+        session.add(
+            YouTubeChannelORM(
+                id=uuid4(), tenant_id=TENANT, youtube_channel_id="chB",
+                channel_name="B", active=True,
+            )
+        )
+        session.add(
+            ContentOwnerChannelLinkORM(
+                id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
+                youtube_channel_id="chB", provenance_kind="SOURCE_ROW",
+                active=True, effective_month_start="2026-01",
+            )
+        )
+        # chA: gross 500 / net 300; chB: gross 500 / net 100 -> net split 75/25.
+        session.execute(
+            MonthlyChannelRevenueFactORM.__table__.update()
+            .where(MonthlyChannelRevenueFactORM.youtube_channel_id == "chA")
+            .values(net_revenue_usd=Decimal("300.00"))
+        )
+        session.add(
+            MonthlyChannelRevenueFactORM(
+                id=uuid4(), tenant_id=TENANT, month=MONTH,
+                youtube_channel_id="chB", source_kind="ADSENSE",
+                gross_revenue_usd=Decimal("500.00"), net_revenue_usd=Decimal("100.00"),
+            )
+        )
+        session.commit()
+        result = compute_month_account_allocation(
+            month=MONTH,
+            deduction_repository=SqlAlchemyDeductionComponentRepository(session),
+            revenue_repository=SqlAlchemyRevenueFactRepository(session),
+            link_repository=SqlAlchemyChannelAccountLinkRepository(session),
+            allocation_method="post_tax_revenue_proportional",
+        )
+    assert result.allocation_method == "post_tax_revenue_proportional"
+    by_channel = {ln.youtube_channel_id: ln.allocated_amount_usd for ln in result.lines}
+    # $100 deduction split by net 300:100 -> 75 / 25 (NOT the 50/50 gross split).
+    assert by_channel == {"chA": Decimal("75.000000"), "chB": Decimal("25.000000")}
+
+
+def test_post_tax_omits_key_with_any_null_net(tmp_path):
+    """A (channel, source_kind) with any null-net fact is dropped -> fail closed."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed(session)  # chA fact has net_revenue_usd = None (not set in _seed)
+        result = compute_month_account_allocation(
+            month=MONTH,
+            deduction_repository=SqlAlchemyDeductionComponentRepository(session),
+            revenue_repository=SqlAlchemyRevenueFactRepository(session),
+            link_repository=SqlAlchemyChannelAccountLinkRepository(session),
+            allocation_method="post_tax_revenue_proportional",
+        )
+    assert result.lines == ()
+    assert result.unallocated[0].issue_code == "BASIS_MISSING"
