@@ -342,8 +342,15 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   Company/Sector breakdown sheets, the PDF gross-vs-net table, and the PPTX deduction
   slide — backed by two additive total_channel_direct/account_allocated aggregate fields
   on MonthNetRevenueSummary (no migration, no auth/audit/allocation-math change).
-  Remaining: PAYMENT-grain (needs a
-  payment→account hop); persisted/committed allocation; other allocation methods.
+  PR-5 shipped (this branch): persisted/committed allocation — a versioned, audited
+  POST /revenue/months/{month}/account-allocations/commit writes a snapshot of the
+  gross_revenue_proportional compute (4 new tables: committed_allocation_runs/lines/
+  unallocated/notes; month-scoped idempotency; lock-held compute; reject-on-unallocated;
+  CHANGE_ALLOCATION_RULE gate + ALLOCATION_COMMITTED summary-only audit reusing
+  CHANGE_ALLOCATION_RULE). Readers (net-revenue, allocation-read, exports) still compute
+  live — read-switch deferred.
+  Remaining: read-switch to committed snapshots; PAYMENT-grain (needs a
+  payment→account hop); other allocation methods.
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed
   permissions). Month-close status UI remains unbuilt (Phase 5).

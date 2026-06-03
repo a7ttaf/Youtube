@@ -11,6 +11,7 @@ from sqlalchemy import (
     DateTime,
     ForeignKeyConstraint,
     Index,
+    Integer,
     Numeric,
     PrimaryKeyConstraint,
     Text,
@@ -867,4 +868,250 @@ class ContentOwnerChannelLinkORM(FinanceBase):
             "ix_content_owner_channel_links_owner",
             "tenant_id", "content_owner_id", "effective_month_start",
         ),
+    )
+
+
+class CommittedAllocationRunORM(FinanceBase):
+    """Versioned, audited snapshot header of one gross_revenue_proportional commit."""
+
+    # ========================================================================
+    # Purpose: One committed account-allocation run (header) for a month — the
+    #   durable, versioned snapshot of compute_month_account_allocation output.
+    # Database/ORM: committed_allocation_runs (FinanceBase). Tenant-scoped;
+    #   month-scoped idempotency on (tenant_id, month, idempotency_key);
+    #   versioned on (tenant_id, month, commit_version).
+    # Standards: append-only; finite USD totals (PG NaN/Inf-guarded via ddl_if);
+    #   USD-only gross_revenue_proportional method.
+    # Blast Radius: Finance write substrate (new table; additive). Drives no
+    #   reader number yet (read-switch deferred). No auth/Neo4j.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/finance/committed_allocation.py -> writer.
+    #   - File: Docs/superpowers/specs/2026-06-02-spec-committed-account-allocation-design.md
+    # ========================================================================
+    __tablename__ = "committed_allocation_runs"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True,
+        default=uuid4, server_default=text("gen_random_uuid()"),
+    )
+    tenant_id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), nullable=False,
+        default=_TENANT_ID_DEFAULT_VALUE, server_default=_TENANT_ID_DEFAULT,
+    )
+    month: Mapped[str] = mapped_column(Text, nullable=False)
+    commit_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    allocation_method: Mapped[str] = mapped_column(Text, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(Text, nullable=False)
+    request_fingerprint: Mapped[str] = mapped_column(Text, nullable=False)
+    component_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    allocated_component_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    unallocated_component_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    allocated_total_usd: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    unallocated_total_usd: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    net_applicable_total_usd: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    reconciliation_total_usd: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    committed_by: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    committed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False,
+        server_default=func.now(), onupdate=func.now(),
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["tenant_id"], [TenantORM.id],
+            name="fk_committed_allocation_runs_tenant", ondelete="RESTRICT",
+        ),
+        UniqueConstraint(
+            "tenant_id", "month", "commit_version",
+            name="uq_committed_allocation_runs_version",
+        ),
+        UniqueConstraint(
+            "tenant_id", "month", "idempotency_key",
+            name="uq_committed_allocation_runs_idempotency",
+        ),
+        CheckConstraint(
+            _month_format_check("month"),
+            name="ck_committed_allocation_runs_month_format",
+        ),
+        CheckConstraint(
+            "allocation_method = 'gross_revenue_proportional'",
+            name="ck_committed_allocation_runs_method",
+        ),
+        CheckConstraint(
+            "commit_version >= 1", name="ck_committed_allocation_runs_version_positive"
+        ),
+        CheckConstraint(
+            "length(idempotency_key) >= 1",
+            name="ck_committed_allocation_runs_idempotency_nonempty",
+        ),
+        CheckConstraint(
+            "length(reason) >= 1", name="ck_committed_allocation_runs_reason_nonempty"
+        ),
+        CheckConstraint(
+            "allocated_total_usd > '-Infinity'::numeric "
+            "AND allocated_total_usd < 'Infinity'::numeric",
+            name="ck_committed_allocation_runs_allocated_total_usd_finite",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "unallocated_total_usd > '-Infinity'::numeric "
+            "AND unallocated_total_usd < 'Infinity'::numeric",
+            name="ck_committed_allocation_runs_unallocated_total_usd_finite",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "net_applicable_total_usd > '-Infinity'::numeric "
+            "AND net_applicable_total_usd < 'Infinity'::numeric",
+            name="ck_committed_allocation_runs_net_applicable_total_usd_finite",
+        ).ddl_if(dialect="postgresql"),
+        CheckConstraint(
+            "reconciliation_total_usd > '-Infinity'::numeric "
+            "AND reconciliation_total_usd < 'Infinity'::numeric",
+            name="ck_committed_allocation_runs_reconciliation_total_usd_finite",
+        ).ddl_if(dialect="postgresql"),
+        Index("ix_committed_allocation_runs_tenant_month", "tenant_id", "month"),
+    )
+
+
+class CommittedAllocationLineORM(FinanceBase):
+    """One persisted AllocationLine belonging to a committed run."""
+
+    __tablename__ = "committed_allocation_lines"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True,
+        default=uuid4, server_default=text("gen_random_uuid()"),
+    )
+    run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    adsense_account_id: Mapped[str] = mapped_column(Text, nullable=False)
+    youtube_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    component_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    source_system: Mapped[str] = mapped_column(Text, nullable=False)
+    component_key: Mapped[str] = mapped_column(Text, nullable=False)
+    basis_source_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    basis_gross_usd: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    basis_share: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    allocated_amount_usd: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    net_applicable: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["run_id"], ["committed_allocation_runs.id"],
+            name="fk_committed_allocation_lines_run", ondelete="CASCADE",
+        ),
+        CheckConstraint(
+            "basis_gross_usd > '-Infinity'::numeric "
+            "AND basis_gross_usd < 'Infinity'::numeric "
+            "AND basis_share > '-Infinity'::numeric "
+            "AND basis_share < 'Infinity'::numeric "
+            "AND allocated_amount_usd > '-Infinity'::numeric "
+            "AND allocated_amount_usd < 'Infinity'::numeric",
+            name="ck_committed_allocation_lines_amounts_finite",
+        ).ddl_if(dialect="postgresql"),
+        # Non-empty identity guards on the line's account/channel/component key so a
+        # committed snapshot line always carries a usable business key (SQLite + PG),
+        # mirroring deduction_components' non-empty identifier CHECKs.
+        CheckConstraint(
+            "length(adsense_account_id) >= 1",
+            name="ck_committed_allocation_lines_adsense_account_id_nonempty",
+        ),
+        CheckConstraint(
+            "length(youtube_channel_id) >= 1",
+            name="ck_committed_allocation_lines_youtube_channel_id_nonempty",
+        ),
+        CheckConstraint(
+            "length(component_key) >= 1",
+            name="ck_committed_allocation_lines_component_key_nonempty",
+        ),
+        Index("ix_committed_allocation_lines_run", "run_id"),
+        Index(
+            "ix_committed_allocation_lines_run_channel",
+            "run_id", "youtube_channel_id",
+        ),
+    )
+
+
+class CommittedAllocationUnallocatedORM(FinanceBase):
+    """One persisted UnallocatedIssue belonging to a committed run (empty in v1)."""
+
+    __tablename__ = "committed_allocation_unallocated"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True,
+        default=uuid4, server_default=text("gen_random_uuid()"),
+    )
+    run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    scope_id: Mapped[str] = mapped_column(Text, nullable=False)
+    component_kind: Mapped[str] = mapped_column(Text, nullable=False)
+    component_key: Mapped[str] = mapped_column(Text, nullable=False)
+    amount_usd: Mapped[Decimal] = mapped_column(Numeric(20, 6), nullable=False)
+    issue_code: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["run_id"], ["committed_allocation_runs.id"],
+            name="fk_committed_allocation_unallocated_run", ondelete="CASCADE",
+        ),
+        # Non-empty identity guards (scope_id + component_key) mirror the source
+        # deduction_components non-empty CHECKs, so a snapshot row can never carry a
+        # blank business key on a direct-SQL/backfill path (SQLite + PostgreSQL).
+        CheckConstraint(
+            "length(scope_id) >= 1",
+            name="ck_committed_allocation_unallocated_scope_id_nonempty",
+        ),
+        CheckConstraint(
+            "length(component_key) >= 1",
+            name="ck_committed_allocation_unallocated_component_key_nonempty",
+        ),
+        # PG-only finite guard on the persisted unallocated USD amount: NUMERIC can
+        # store NaN, so mirror the runs/lines/deduction_components finite CHECKs.
+        CheckConstraint(
+            "amount_usd > '-Infinity'::numeric AND amount_usd < 'Infinity'::numeric",
+            name="ck_committed_allocation_unallocated_amount_usd_finite",
+        ).ddl_if(dialect="postgresql"),
+        Index("ix_committed_allocation_unallocated_run", "run_id"),
+    )
+
+
+class CommittedAllocationNoteORM(FinanceBase):
+    """One persisted AllocationNote belonging to a committed run."""
+
+    __tablename__ = "committed_allocation_notes"
+
+    id: Mapped[UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True,
+        default=uuid4, server_default=text("gen_random_uuid()"),
+    )
+    run_id: Mapped[UUID] = mapped_column(Uuid(as_uuid=True), nullable=False)
+    note_code: Mapped[str] = mapped_column(Text, nullable=False)
+    youtube_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    detail: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["run_id"], ["committed_allocation_runs.id"],
+            name="fk_committed_allocation_notes_run", ondelete="CASCADE",
+        ),
+        # Non-empty channel-id guard: a snapshot note must point at a real channel
+        # (SQLite + PG), mirroring deduction_components' non-empty identifier CHECKs.
+        CheckConstraint(
+            "length(youtube_channel_id) >= 1",
+            name="ck_committed_allocation_notes_youtube_channel_id_nonempty",
+        ),
+        Index("ix_committed_allocation_notes_run", "run_id"),
     )

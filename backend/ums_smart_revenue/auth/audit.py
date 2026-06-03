@@ -22,6 +22,7 @@ class AuditEventType(StrEnum):
     MANUAL_OVERRIDE_CREATED = "MANUAL_OVERRIDE_CREATED"
     MANUAL_OVERRIDE_APPROVED = "MANUAL_OVERRIDE_APPROVED"
     ALLOCATION_RULE_CHANGED = "ALLOCATION_RULE_CHANGED"
+    ALLOCATION_COMMITTED = "ALLOCATION_COMMITTED"
     RECALCULATION_REQUESTED = "RECALCULATION_REQUESTED"
     EXPORT_CREATED = "EXPORT_CREATED"
     EXPORT_VIEWED = "EXPORT_VIEWED"
@@ -95,6 +96,11 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     ),
     AuditEventType.ALLOCATION_RULE_CHANGED: AuditEventDefinition(
         AuditEventType.ALLOCATION_RULE_CHANGED,
+        reason_required=True,
+        permission=Permission.CHANGE_ALLOCATION_RULE,
+    ),
+    AuditEventType.ALLOCATION_COMMITTED: AuditEventDefinition(
+        AuditEventType.ALLOCATION_COMMITTED,
         reason_required=True,
         permission=Permission.CHANGE_ALLOCATION_RULE,
     ),
