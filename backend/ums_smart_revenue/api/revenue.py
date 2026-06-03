@@ -33,7 +33,6 @@ from ums_smart_revenue.finance.adsense_payments import (
     SqlAlchemyAdSensePaymentRepository,
 )
 from ums_smart_revenue.finance.allocation import AllocationLine
-from ums_smart_revenue.finance.allocation_inputs import compute_month_account_allocation
 from ums_smart_revenue.finance.bank_reconciliation import (
     BankReconciliationLockedMonthError,
     BankReconciliationValidationError,
@@ -1382,6 +1381,11 @@ def explain_channel_month_revenue_metric(
         SqlAlchemyChannelAccountLinkRepository,
         Depends(current_channel_account_link_repository),
     ],
+    committed_repository: Annotated[
+        SqlAlchemyCommittedAllocationRepository,
+        Depends(current_committed_allocation_repository),
+    ],
+    session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
     metric: str = "adjusted_gross_revenue_usd",
 ) -> dict[str, object]:
@@ -1426,20 +1430,22 @@ def explain_channel_month_revenue_metric(
         )
         deduction_components: list[DeductionComponent] = []
         account_allocations: list[AllocationLine] = []
+        account_allocation_provenance = None
         if is_net_metric:
             deduction_components = deduction_component_repository.list_month_components(
                 month=month,
                 youtube_channel_ids={channel_id},
                 component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
             )
-            account_allocations = list(
-                compute_month_account_allocation(
-                    month=month,
-                    deduction_repository=deduction_component_repository,
-                    revenue_repository=revenue_repository,
-                    link_repository=link_repository,
-                ).lines
+            account_result, account_allocation_provenance = resolve_month_account_allocation(
+                month=month,
+                session=session,
+                deduction_repository=deduction_component_repository,
+                revenue_repository=revenue_repository,
+                link_repository=link_repository,
+                committed_repository=committed_repository,
             )
+            account_allocations = list(account_result.lines)
         explanation = build_channel_month_revenue_explanation(
             facts=facts,
             manual_overrides=overrides,
@@ -1448,6 +1454,7 @@ def explain_channel_month_revenue_metric(
             metric=metric,
             deduction_components=deduction_components,
             account_allocations=account_allocations,
+            account_allocation_provenance=account_allocation_provenance,
         )
         explanation_repository.record_explanation(explanation)
     except RevenueFactNotFoundError as exc:

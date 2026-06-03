@@ -8,6 +8,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.explanation_models import NumberExplanationORM
+from ums_smart_revenue.finance.account_allocation_read import (
+    AllocationProvenance,
+    allocation_provenance_to_api,
+)
 from ums_smart_revenue.finance.allocation import AllocationLine
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
 from ums_smart_revenue.finance.deduction_components import DeductionComponent
@@ -146,6 +150,7 @@ def build_channel_month_revenue_explanation(
     metric: str,
     deduction_components: Iterable[DeductionComponent] = (),
     account_allocations: Iterable[AllocationLine] = (),
+    account_allocation_provenance: AllocationProvenance | None = None,
 ) -> NumberExplanationEntry:
     """Build an adjusted-gross-revenue or net-revenue explanation for one channel month."""
     if metric == NET_REVENUE_METRIC:
@@ -156,6 +161,7 @@ def build_channel_month_revenue_explanation(
             youtube_channel_id=youtube_channel_id,
             deduction_components=deduction_components,
             account_allocations=account_allocations,
+            account_allocation_provenance=account_allocation_provenance,
         )
     if metric not in SUPPORTED_METRICS:
         raise NumberExplanationValidationError(
@@ -234,6 +240,7 @@ def _build_net_revenue_explanation(
     youtube_channel_id: str,
     deduction_components: Iterable[DeductionComponent],
     account_allocations: Iterable[AllocationLine],
+    account_allocation_provenance: AllocationProvenance | None = None,
 ) -> NumberExplanationEntry:
     """Explain net_revenue_usd for one channel-month with deduction provenance.
 
@@ -320,7 +327,7 @@ def _build_net_revenue_explanation(
                 for component in channel_direct
             ],
         })
-        components.append({
+        account_component = {
             "key": "account_allocated_deduction_usd",
             "label": "Account-allocated deductions",
             "value": _decimal_to_api(summary.account_allocated_deduction_amount_usd),
@@ -337,7 +344,12 @@ def _build_net_revenue_explanation(
                 }
                 for line in account_allocated
             ],
-        })
+        }
+        if account_allocation_provenance is not None:
+            account_component.update(
+                allocation_provenance_to_api(account_allocation_provenance)
+            )
+        components.append(account_component)
         formula = (
             "net_revenue_usd = adjusted_gross_revenue_usd "
             "- channel_direct_deduction_amount_usd "
