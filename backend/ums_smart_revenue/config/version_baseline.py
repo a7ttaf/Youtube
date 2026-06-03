@@ -11,7 +11,7 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "alembic": "1.18.4",
         "psycopg": "3.3.4",
         "celery": "5.6.3",
-        "redis": "7.4.0",
+        "redis": "8.0.0",
         "openpyxl": "3.1.5",
         "reportlab": "4.5.1",
         "python_pptx": "1.0.2",

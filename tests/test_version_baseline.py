@@ -21,7 +21,7 @@ def test_backend_dependencies_are_pinned_to_checked_latest_stable_versions():
         "psycopg[binary]==3.3.4",
         "httpx==0.28.1",
         "celery==5.6.3",
-        "redis==7.4.0",
+        "redis==8.0.0",
         "openpyxl==3.1.5",
         "reportlab==4.5.1",
         "python-pptx==1.0.2",
