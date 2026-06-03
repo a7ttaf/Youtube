@@ -348,6 +348,9 @@ def test_provenance_api_and_token(tmp_path):
     assert account_allocation_disclosure_token(AllocationProvenance(source="live_compute")) == (
         "Account allocation: live compute"
     )
+    assert account_allocation_disclosure_token(AllocationProvenance(source="live_fallback")) == (
+        "Account allocation: live fallback"
+    )
     assert "committed snapshot v3" in account_allocation_disclosure_token(committed)
 ```
 
@@ -604,14 +607,14 @@ def account_allocation_disclosure_token(provenance: AllocationProvenance) -> str
         stamp = provenance.committed_at.date().isoformat() if provenance.committed_at else "?"
         return f"Account allocation: committed snapshot v{provenance.commit_version} ({stamp})"
     if provenance.source == "live_fallback":
-        return "Account allocation: live (fallback — no committed snapshot)"
+        return "Account allocation: live fallback"
     return "Account allocation: live compute"
 ```
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `python -m pytest tests/finance/test_account_allocation_read.py tests/finance/test_account_allocation.py -q`
-(Substitute the existing allocation test module name if different — confirm `build_account_allocation` tests stay green after the extraction.)
+Run: `python -m pytest tests/finance/test_account_allocation_read.py tests/finance/test_allocation.py -q`
+(`tests/finance/test_allocation.py` covers `build_account_allocation` — confirm it stays green after the extraction.)
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
@@ -637,12 +640,17 @@ In `tests/api/test_net_revenue_api.py` (reuses its `build_database_url`/`seed_da
 ```python
 def _lock_month(database_url: str, month: str) -> None:
     """Mark a finance month LOCKED so readers prefer the committed snapshot."""
+    from uuid import UUID
     from sqlalchemy import create_engine
     from sqlalchemy.orm import Session
     from ums_smart_revenue.db.finance_models import FinanceMonthCloseORM
+    from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
     engine = create_engine(database_url)
     with Session(engine) as session:
-        session.add(FinanceMonthCloseORM(month=month, status="LOCKED", allocation_rule_payload={}))
+        session.add(FinanceMonthCloseORM(
+            tenant_id=UUID(UMS_TENANT_ID), month=month, status="LOCKED",
+            allocation_rule_payload={},
+        ))
         session.commit()
 
 
@@ -658,6 +666,8 @@ def test_net_revenue_open_month_reports_live_provenance(tmp_path):
     assert resp.json()["allocation_source"] == "live_compute"
     assert resp.json()["committed_run"] is None
 ```
+
+`test_net_revenue_locked_month_serves_committed_snapshot` (LOCKED snapshot proof — show that live is NOT used): reuse the module's missing-net + ACCOUNT-deduction seed (as in `test_net_revenue_endpoint_derives_component_net_for_missing_net_channel`); commit a snapshot via `SqlAlchemyCommittedAllocationRepository.commit_allocation(...)`; **mutate** the ACCOUNT `DeductionComponentORM.amount_usd` in the DB so live compute would differ; `_lock_month(database_url, "2026-03")`; GET net-revenue and assert `allocation_source == "committed_snapshot"`, `committed_run["commit_version"]` is present, and the account-allocated total reflects the **pre-mutation** snapshot value (proving the committed snapshot, not live, drove the number).
 
 In `tests/api/test_allocation_api.py`, add a test that a LOCKED month with a committed snapshot reports `allocation_source == "committed_snapshot"` with a `committed_run.commit_version` (seed a mapped month, POST the commit route, lock the month, then GET the allocation endpoint; reuse that module's existing app/seed/principal/commit helpers).
 
@@ -783,7 +793,7 @@ git commit -m "feat(api): read-switch wiring for allocation GET + net-revenue (p
 **Files:**
 - Modify: `backend/ums_smart_revenue/api/revenue.py` (explain route `:1407-1423`)
 - Modify: `backend/ums_smart_revenue/finance/explanations.py` (`build_channel_month_revenue_explanation` `:140`, `_build_net_revenue_explanation` `:229`, account component dict `:323-340`)
-- Test: the explain test module (e.g. `tests/api/test_revenue_explain_api.py` — use the actual current path) and/or `tests/finance/test_explanations.py`
+- Test: `tests/api/test_revenue_explanations_api.py` and/or `tests/finance/test_explanations.py`
 
 - [ ] **Step 1: Write the failing test**
 
@@ -791,7 +801,7 @@ Add a test asserting that for a **LOCKED** month a net explanation's persisted a
 
 - [ ] **Step 2: Run to verify it fails**
 
-Run: `python -m pytest <explain test module> -q`
+Run: `python -m pytest tests/api/test_revenue_explanations_api.py -q`
 Expected: FAIL — the account component dict has no `allocation_source` key.
 
 - [ ] **Step 3a: Thread provenance through the explanation builders**
@@ -866,13 +876,13 @@ In `backend/ums_smart_revenue/api/revenue.py` explain route, add the DI params `
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `python -m pytest <explain test module> tests/finance/test_explanations.py -q`
+Run: `python -m pytest tests/api/test_revenue_explanations_api.py tests/finance/test_explanations.py -q`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/ums_smart_revenue/api/revenue.py backend/ums_smart_revenue/finance/explanations.py <explain test module>
+git add backend/ums_smart_revenue/api/revenue.py backend/ums_smart_revenue/finance/explanations.py tests/api/test_revenue_explanations_api.py
 git commit -m "feat(finance): explain net-metric records account-allocation source provenance"
 ```
 
@@ -885,11 +895,17 @@ git commit -m "feat(finance): explain net-metric records account-allocation sour
 - Modify: `backend/ums_smart_revenue/reports/finance_workbook.py` (`FinanceWorkbookPreview` dataclass + `to_api` `:113`; `build_finance_workbook_preview` `:122`; `build_finance_workbook_xlsx` `:169`)
 - Modify: `backend/ums_smart_revenue/reports/executive_pdf.py` (`ExecutivePdfReport` dataclass; `build_executive_pdf_report` `:105`; `build_executive_pdf_bytes`)
 - Modify: `backend/ums_smart_revenue/reports/branded_slide_pack.py` (`BrandedSlidePackReport` dataclass; `build_branded_slide_pack_report` `:118`; `build_branded_slide_pack_pptx`)
-- Test: `tests/api/test_exports_account_allocation.py` (+ the report-builder test modules)
+- Test: `tests/api/test_exports_account_allocation.py`, `tests/reports/test_finance_workbook_preview.py`, `tests/reports/test_executive_pdf.py`, `tests/reports/test_branded_slide_pack.py` (all exist — extend them)
 
 - [ ] **Step 1: Write the failing tests**
 
-In `tests/api/test_exports_account_allocation.py` (reuses its `_engine`/seed helpers), add: seed a mapped month, commit a snapshot, lock the month, build the source bundle via `_build_finance_source_summaries_for_export`, and assert `summaries.account_allocation_provenance.source == "committed_snapshot"`. Add a builder-level test asserting `build_finance_workbook_preview(...).to_api()["source_summaries"]["account_allocation_provenance"]["allocation_source"] == "committed_snapshot"`, and that the XLSX/PDF/PPTX bytes contain the token substring `committed snapshot v1` for a locked snapshot vs `live compute` for an open month (assert on the rendered text — for XLSX load the workbook and read the disclosure cell; for PDF/PPTX assert the token bytes/text are present).
+In `tests/api/test_exports_account_allocation.py` (reuses its `_engine`/seed helpers): seed a mapped month, commit a snapshot, lock the month, build the source bundle via `_build_finance_source_summaries_for_export`, and assert `summaries.account_allocation_provenance.source == "committed_snapshot"`; also assert `build_finance_workbook_preview(...).to_api()["source_summaries"]["account_allocation_provenance"]["allocation_source"] == "committed_snapshot"`.
+
+In the three existing report-builder test modules, assert the rendered disclosure token using the repo's existing artifact-extraction patterns (NOT raw-byte substring):
+- `tests/reports/test_finance_workbook_preview.py` — `load_workbook(BytesIO(build_finance_workbook_xlsx(preview)), data_only=True)` (as at its `:299`), read the disclosure cell, assert it contains `committed snapshot v1` for a locked snapshot and `live compute` for an open month.
+- `tests/reports/test_executive_pdf.py` — `PdfReader(BytesIO(build_executive_pdf_bytes(report)))` text extraction (as at its `:123-124`), assert the token line is present.
+- `tests/reports/test_branded_slide_pack.py` — `Presentation(BytesIO(build_branded_slide_pack_pptx(report)))` shape-text extraction (as at its `:83`), assert the token bullet is present.
+Include a `live_fallback` case (LOCKED month, no committed run → token `Account allocation: live fallback`).
 
 - [ ] **Step 2: Run to verify it fails**
 
@@ -928,13 +944,13 @@ For each report builder, add `account_allocation_provenance: AllocationProvenanc
 
 - [ ] **Step 4: Run to verify it passes**
 
-Run: `python -m pytest tests/api/test_exports_account_allocation.py -q`
+Run: `python -m pytest tests/api/test_exports_account_allocation.py tests/reports/test_finance_workbook_preview.py tests/reports/test_executive_pdf.py tests/reports/test_branded_slide_pack.py -q`
 Expected: PASS.
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add backend/ums_smart_revenue/api/exports.py backend/ums_smart_revenue/reports/finance_workbook.py backend/ums_smart_revenue/reports/executive_pdf.py backend/ums_smart_revenue/reports/branded_slide_pack.py tests/api/test_exports_account_allocation.py
+git add backend/ums_smart_revenue/api/exports.py backend/ums_smart_revenue/reports/finance_workbook.py backend/ums_smart_revenue/reports/executive_pdf.py backend/ums_smart_revenue/reports/branded_slide_pack.py tests/api/test_exports_account_allocation.py tests/reports/test_finance_workbook_preview.py tests/reports/test_executive_pdf.py tests/reports/test_branded_slide_pack.py
 git commit -m "feat(reports): exports prefer committed snapshot + render allocation-source disclosure token"
 ```
 
@@ -974,7 +990,7 @@ git commit -m "docs(plan): mark Spec 2b read-switch shipped"
 ```
 python -m ruff check backend tests scripts
 $env:UMS_TEST_DATABASE_URL='postgresql+psycopg://postgres:ums@localhost:55432/test_ums'
-python -m pytest tests/finance/test_account_allocation_read.py tests/finance/test_committed_allocation.py tests/api/test_allocation_api.py tests/api/test_net_revenue_api.py tests/api/test_committed_allocation_api.py tests/api/test_exports_account_allocation.py -q
+python -m pytest tests/finance/test_account_allocation_read.py tests/finance/test_allocation.py tests/finance/test_committed_allocation.py tests/finance/test_explanations.py tests/api/test_allocation_api.py tests/api/test_net_revenue_api.py tests/api/test_committed_allocation_api.py tests/api/test_revenue_explanations_api.py tests/api/test_exports_account_allocation.py tests/reports/test_finance_workbook_preview.py tests/reports/test_executive_pdf.py tests/reports/test_branded_slide_pack.py -q
 python -m pytest -q
 git diff --check
 ```
