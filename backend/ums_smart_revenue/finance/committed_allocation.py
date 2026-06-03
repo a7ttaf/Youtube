@@ -86,6 +86,11 @@ class SqlAlchemyCommittedAllocationRepository:
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
+    @property
+    def tenant_id(self) -> UUID:
+        """The tenant UUID this repository is scoped to (read-only)."""
+        return self._tenant_id
+
     # ========================================================================
     # Purpose: Commit a versioned snapshot of the gross_revenue_proportional
     #   compute for one month, under the finance-month advisory lock.
@@ -252,3 +257,8 @@ class SqlAlchemyCommittedAllocationRepository:
                 CommittedAllocationRunORM.idempotency_key == idempotency_key,
             )
         ).one_or_none()
+
+    def get_latest_committed(self, month: str) -> CommitAllocationOutcome | None:
+        """Return the highest-version committed run + its child rows for a month, or None."""
+        run = self.get_latest_run(month)
+        return None if run is None else self._replay(run)
