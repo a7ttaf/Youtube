@@ -221,6 +221,17 @@ def test_bad_method_rejected(alembic_config, fresh_engine):
         conn.execute(sql, params)
 
 
+def test_runs_method_check_accepts_post_tax_rejects_third(alembic_config, fresh_engine):
+    """After upgrade to head, the runs method CHECK allows post_tax and rejects a third."""
+    command.upgrade(alembic_config, "head")
+    ok_sql, ok_params = _insert_run_sql(method="post_tax_revenue_proportional", key="k-pt")
+    with fresh_engine.begin() as conn:
+        conn.execute(ok_sql, ok_params)  # post_tax is allowlisted -> succeeds
+    bad_sql, bad_params = _insert_run_sql(method="company_level", key="k-bad")
+    with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
+        conn.execute(bad_sql, bad_params)  # violates ck_committed_allocation_runs_method
+
+
 def test_run_delete_cascades_to_lines(alembic_config, fresh_engine):
     """Deleting a run cascades to its lines."""
     command.upgrade(alembic_config, "head")

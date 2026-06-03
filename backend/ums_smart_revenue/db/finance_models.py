@@ -872,7 +872,8 @@ class ContentOwnerChannelLinkORM(FinanceBase):
 
 
 class CommittedAllocationRunORM(FinanceBase):
-    """Versioned, audited snapshot header of one gross_revenue_proportional commit."""
+    """Versioned, audited snapshot header of one account-allocation commit
+    (gross or post-tax, allowlisted)."""
 
     # ========================================================================
     # Purpose: One committed account-allocation run (header) for a month — the
@@ -881,7 +882,7 @@ class CommittedAllocationRunORM(FinanceBase):
     #   month-scoped idempotency on (tenant_id, month, idempotency_key);
     #   versioned on (tenant_id, month, commit_version).
     # Standards: append-only; finite USD totals (PG NaN/Inf-guarded via ddl_if);
-    #   USD-only gross_revenue_proportional method.
+    #   USD-only; gross or post-tax (allowlisted) method.
     # Blast Radius: Finance write substrate (new table; additive). Drives no
     #   reader number yet (read-switch deferred). No auth/Neo4j.
     # Connections:
@@ -941,7 +942,8 @@ class CommittedAllocationRunORM(FinanceBase):
             name="ck_committed_allocation_runs_month_format",
         ),
         CheckConstraint(
-            "allocation_method = 'gross_revenue_proportional'",
+            "allocation_method IN "
+            "('gross_revenue_proportional', 'post_tax_revenue_proportional')",
             name="ck_committed_allocation_runs_method",
         ),
         CheckConstraint(

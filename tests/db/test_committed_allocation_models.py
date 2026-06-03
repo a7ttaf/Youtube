@@ -93,11 +93,22 @@ def test_run_and_children_persist(tmp_path):
 
 
 def test_method_check_rejects_other_method(tmp_path):
-    """allocation_method CHECK rejects anything but gross_revenue_proportional."""
+    """allocation_method CHECK rejects a method outside the {gross, post_tax} allowlist."""
     engine = _engine(tmp_path)
     with Session(engine) as session, pytest.raises(IntegrityError):
         session.add(_run(allocation_method="company_level"))
         session.commit()
+
+
+def test_method_check_accepts_post_tax(tmp_path):
+    """allocation_method CHECK accepts post_tax_revenue_proportional."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        session.add(_run(
+            allocation_method="post_tax_revenue_proportional", idempotency_key="key-pt"
+        ))
+        session.commit()
+        assert session.query(CommittedAllocationRunORM).count() == 1
 
 
 def test_commit_version_check_rejects_zero(tmp_path):
