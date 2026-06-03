@@ -35,7 +35,8 @@ The resolver reads finance-month close status with the existing pure-read
 lock, never mutates close state):
 
 ```
-status = get_month_close_status(session, month, tenant_id)
+tenant_id = committed_repository.tenant_id            # single tenant source (see §4)
+status = get_month_close_status(session, month, tenant_id=tenant_id)
 if status == "LOCKED":
     outcome = committed_repository.get_latest_committed(month)   # highest commit_version
     if outcome is not None:
@@ -66,7 +67,6 @@ def resolve_month_account_allocation(
     *,
     month: str,
     session: Session,
-    tenant_id: UUID | str | None,
     deduction_repository: SqlAlchemyDeductionComponentRepository,
     revenue_repository: SqlAlchemyRevenueFactRepository,
     link_repository: SqlAlchemyChannelAccountLinkRepository,
@@ -80,6 +80,13 @@ The resolver is the single decision point; all four readers call it instead of
 `compute_month_account_allocation`. Live compute is delegated unchanged (the `adsense_account_id`
 is forwarded so the live path filters components exactly as today). Snapshot reconstruction is
 below.
+
+**Single tenant source (Redline #2-clarify):** the resolver takes **no** separate `tenant_id`
+parameter. It derives the one tenant from `committed_repository.tenant_id` (a new public
+property, §4.3) and passes that exact value to `get_month_close_status(session, month,
+tenant_id=...)`, so the close-status read and the committed-run lookup can never diverge
+cross-tenant. The deduction/revenue/link repos are constructed with the same request tenant by
+their DI providers.
 
 ### 4.1 Reconstruction — `rebuild_result_from_run(outcome) -> AccountAllocationResult`
 
@@ -137,10 +144,16 @@ proven, not assumed.
 
 ### 4.3 Repository addition — `backend/ums_smart_revenue/finance/committed_allocation.py`
 
-Add one public read method (reuses the existing `get_latest_run` at `:235` and the private
-child-loaders in `_replay` at `:214`):
+Add a public read method (reuses the existing `get_latest_run` at `:235` and the private
+child-loaders in `_replay` at `:214`) plus a public tenant accessor (mirrors
+`finance/channel_account_links.py:206`, the single-tenant source for §3/§4):
 
 ```python
+@property
+def tenant_id(self) -> UUID:
+    """The tenant UUID this repository is scoped to (read-only)."""
+    return self._tenant_id
+
 def get_latest_committed(self, month: str) -> CommitAllocationOutcome | None:
     run = self.get_latest_run(month)
     return None if run is None else self._replay(run)  # created flag is irrelevant for reads
@@ -151,9 +164,14 @@ No schema change.
 ## 5. Reader integrations (each swaps its direct compute call for the resolver)
 
 All readers already hold `session` (`current_db_session`) and the three repos; they additionally
-resolve `committed_repository` via the existing `current_committed_allocation_repository` provider
-(`api/allocation.py`, added in PR-5) — re-exported / imported where needed by `api/revenue.py` and
-`api/exports.py` (no duplicate provider).
+resolve `committed_repository`. **Import-cycle fix (Redline #1):** `api/allocation.py:24` already
+imports the tenant-aware repo providers FROM `api/revenue.py`, so the committed-repo provider must
+not stay in `allocation.py` (a reader in `revenue.py` importing it would create
+`revenue.py → allocation.py → revenue.py`). **Relocate** `current_committed_allocation_repository`
+from `api/allocation.py:54` to `api/revenue.py` beside the existing repo providers (~`:360`), and
+import it from `revenue.py` in `api/allocation.py` (for both the existing POST commit route at
+`:332` and the new GET resolver call) and in `api/exports.py`. One definition, no duplicate
+provider, no cycle.
 
 1. **Allocation GET** (`api/allocation.py:248`): call resolver (forwarding `adsense_account_id`);
    `_result_to_api(result)` (`api/allocation.py:150`) gains a provenance block (§6.1).
@@ -213,15 +231,19 @@ The export source bundle `_FinanceExportSourceSummaries` (`api/exports.py:107-11
 - **Bundle field:** add `account_allocation_provenance: AllocationProvenance` to
   `_FinanceExportSourceSummaries`; set it from the resolver in
   `_build_finance_source_summaries_for_export`.
-- **Builder params:** add `account_allocation_provenance: AllocationProvenance` as a keyword to
-  the four report builders — `build_finance_workbook_preview`
-  (`reports/finance_workbook.py:122`), `build_finance_workbook_xlsx`,
-  `build_executive_pdf_report` (`reports/executive_pdf.py:105`), and
-  `build_branded_slide_pack_report` (`reports/branded_slide_pack.py:118`) — passed from the
-  bundle at the four call sites (`api/exports.py:637-640/756-759/840-845` and the preview at
-  `:840`).
+- **Builder params (Redline #3):** `build_finance_workbook_xlsx(preview)`
+  (`reports/finance_workbook.py:169`) takes ONLY the preview — it gets **no** new kwarg. Instead
+  add `account_allocation_provenance: AllocationProvenance` as a keyword to
+  `build_finance_workbook_preview` (`reports/finance_workbook.py:122`) and **store it on the
+  returned `FinanceWorkbookPreview`**; `build_finance_workbook_xlsx` reads
+  `preview.account_allocation_provenance`. Add the same keyword to `build_executive_pdf_report`
+  (`reports/executive_pdf.py:105`) and `build_branded_slide_pack_report`
+  (`reports/branded_slide_pack.py:118`), passed from the bundle at the export builder call sites —
+  PDF at `api/exports.py:635`, PPTX at `api/exports.py:754`, workbook preview at
+  `api/exports.py:840`.
 - **Preview API payload:** add `"account_allocation_provenance"` (the §6 dict) to the
-  `source_summaries` map in `FinanceWorkbookPreview.to_api` (`reports/finance_workbook.py:113`).
+  `source_summaries` map in `FinanceWorkbookPreview.to_api` (`reports/finance_workbook.py:113`),
+  read from the provenance stored on the preview.
 - **Rendered artifact fields** (a single human-readable disclosure token
   `Account allocation: committed snapshot v{n} ({YYYY-MM-DD})` / `… live compute` /
   `… live fallback`, formatted by a shared `account_allocation_disclosure_token(p)` helper):
@@ -284,7 +306,9 @@ container; `git diff --check`.
 ## 10. File inventory (all `backend/ums_smart_revenue/`)
 
 Create: `finance/account_allocation_read.py`. Modify: `finance/committed_allocation.py`
-(`get_latest_committed`), `finance/allocation.py` (extract `summarize_account_allocation`),
-`api/allocation.py`, `api/revenue.py`, `api/exports.py`, `finance/explanations.py`,
+(`get_latest_committed` + public `tenant_id` property), `finance/allocation.py` (extract
+`summarize_account_allocation`), `api/revenue.py` (host the relocated
+`current_committed_allocation_repository` + resolver call), `api/allocation.py` (import the
+provider from `revenue.py`; resolver call), `api/exports.py`, `finance/explanations.py`,
 `reports/finance_workbook.py`, `reports/executive_pdf.py`, `reports/branded_slide_pack.py`.
 Tests under `tests/finance/`, `tests/api/`. Docs/01 + Docs/15 status (final task).
