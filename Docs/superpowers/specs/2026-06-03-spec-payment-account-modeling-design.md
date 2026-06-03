@@ -12,10 +12,10 @@ Confirmed by reading current `main` (`c6de90e`):
 
 - **Bank entries carry no account identity.** `BankReconciliationEntryORM` (`backend/ums_smart_revenue/db/finance_models.py:316-408`) has only `bank_reference`, dates, amounts (native + USD), `transfer_fee_usd`, `fx_difference_usd`, `notes`, `source_report_id`, `recorded_by`, `tenant_id`. No `source_account_id`, no payee/counterparty/memo-structured field. Its uniqueness key is `(tenant_id, month, bank_reference)` (`:370-375`).
 - **AdSense payments carry no bank reference.** `AdSensePaymentORM` (`:411-501`) has `source_account_id` (`:423`) but no `bank_reference` / settlement-reference column; its key is `(tenant_id, source_account_id, month, payment_name)`.
-- **PAYMENT components are bank-reference-scoped only.** `_bank_component` (`backend/ums_smart_revenue/finance/deduction_components.py:169-191`) creates them as `scope_kind="PAYMENT"`, `scope_id=entry.bank_reference`, `raw_payload={"bank_reference", "kind"}`, `source_id=entry.id`. No account-identifying field is present or derivable.
+- **PAYMENT components are bank-reference-scoped only.** `_bank_component` (`backend/ums_smart_revenue/finance/deduction_components.py:169-191`) creates them as `scope_kind="PAYMENT"`, `scope_id=entry.bank_reference`, `raw_payload={"bank_reference": entry.bank_reference, "kind": kind}`, `source_id=entry.id`. No account-identifying field is present or derivable.
 - **Reconciliation is aggregate / month-level.** `build_month_bank_reconciliation_summary` (`backend/ums_smart_revenue/finance/bank_reconciliation.py:341-458`) and `build_monthly_payment_match_summary` (`backend/ums_smart_revenue/finance/payment_matching.py:78-200`) compare month-level **sums** (total PAID payments vs total bank receipts / YouTube revenue). There is **no per-line** payment↔bank match, so they establish no `bank_reference ↔ source_account_id` correspondence.
 - **No resolver exists.** A repo-wide search found no `bank_reference → account/channel` lookup, mapping, or resolver.
-- **Allocation only consumes ACCOUNT scope.** `list_account_components` (`backend/ums_smart_revenue/finance/deduction_ingestion.py:413-450`) deliberately filters to `scope_kind == "ACCOUNT"`; PAYMENT/CHANNEL rows are never fed to `compute_month_account_allocation` (`backend/ums_smart_revenue/finance/allocation_inputs.py:38-68`).
+- **Allocation only consumes ACCOUNT scope.** `list_account_components` (`backend/ums_smart_revenue/finance/deduction_ingestion.py:423-441`) deliberately filters to `scope_kind == "ACCOUNT"`; PAYMENT/CHANNEL rows are never fed to `compute_month_account_allocation` (`backend/ums_smart_revenue/finance/allocation_inputs.py:38-68`).
 
 **Conclusion:** the first hop (`bank_reference → account`) does not exist in the data and cannot be derived. It requires an explicit modeling layer.
 
@@ -30,7 +30,7 @@ So **only the first hop is missing**; once an account (or accounts) is known for
 
 ## 4. Cardinality is UNVERIFIED
 
-It is **not** established whether one bank receipt (one `(tenant_id, month, bank_reference)`) settles exactly one AdSense account (1:1) or bundles several (1:N). The repo cannot answer this — bank entries hold no account linkage, and reconciliation is aggregate. Confirming the real shape requires live AdSense remittance + bank data (the B2 connector, still remaining per Docs/15). **The future model must therefore tolerate both 1:1 and 1:N** until real remittance/bank evidence proves the actual shape; no cardinality assumption is baked in.
+It is **not** established whether one bank receipt (one `(tenant_id, month, bank_reference)`) settles exactly one AdSense account (1:1) or bundles several (1:N). The repo cannot answer this — bank entries hold no account linkage, and reconciliation is aggregate. Confirming the real shape requires real live AdSense payment/remittance output plus matching bank receipt evidence. **The future model must therefore tolerate both 1:1 and 1:N** until real remittance/bank evidence proves the actual shape; no cardinality assumption is baked in.
 
 ## 5. Recommended future model (NOT built in this PR)
 
@@ -44,7 +44,7 @@ A **shares-capable, operator-asserted receipt → account(s) assertion**, analog
 
 ## 6. Prerequisites before building
 
-1. **Live AdSense remittance + bank evidence** (the B2 connector) to (a) confirm the real receipt↔account cardinality and (b) give operators the data to assert mappings.
+1. **Real live AdSense payment/remittance output plus matching bank receipt evidence** to (a) confirm the real receipt↔account cardinality and (b) give operators the data to assert mappings.
 2. A confirmation pass on whether the live remittance payload carries any settlement↔account signal that ingestion could capture directly (which would reduce or remove the operator-assertion burden) — today's `AdSensePaymentORM.raw_payload` is opaque test data; this can only be checked against real connector output.
 
 ## 7. Separately: "other allocation methods" is its own substantial chunk (not a quick pivot)
