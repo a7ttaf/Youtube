@@ -1,8 +1,10 @@
 """Read-only account-level deduction allocation endpoint (Phase 4 Spec 2b PR-1).
 
 The commit endpoint (Phase 4 Spec 2b PR-5) is the first allocation WRITE path: a
-versioned, audited snapshot of the same gross_revenue_proportional compute. It is
-write-only; readers (net-revenue, this module's GET, exports) keep computing live.
+versioned, audited snapshot of the same gross_revenue_proportional compute. Phase 4
+Spec 2b PR-6 (read-switch) then makes this module's GET, net-revenue, explain, and
+exports prefer that committed snapshot for LOCKED months (lock-aware; OPEN stays
+live) via resolve_month_account_allocation.
 """
 
 import hashlib
@@ -294,8 +296,8 @@ def get_account_allocations(
 # Purpose: Commit a versioned, audited snapshot of the month's account
 #   allocation (gross_revenue_proportional). Re-runs the same live compute under
 #   the finance-month advisory lock and persists the result; an idempotent
-#   replay returns the existing run without a second audit. This is a WRITE path
-#   that drives NO reader number (net-revenue/exports keep computing live).
+#   replay returns the existing run without a second audit. This is the WRITE path;
+#   readers prefer the committed snapshot for LOCKED months via the PR-6 read-switch.
 # Database/ORM: writes committed_allocation_runs/_lines/_unallocated/_notes via
 #   the committed-allocation repository; reads deduction_components, the verified
 #   account->channel map, monthly_channel_revenue_facts for the compute.
@@ -304,7 +306,8 @@ def get_account_allocations(
 #   CHANGE_ALLOCATION_RULE@finance_month); typed errors -> 422/409; sensitive
 #   summary-only audit (no per-line dump in API or audit detail); no secrets.
 # Blast Radius: Finance write; first allocation persistence. Reuses existing
-#   read gates; no reader change (regression-proven). No Neo4j impact.
+#   read gates; OPEN-month reads still compute live (PR-5 regression-proven),
+#   LOCKED-month reads consume this snapshot (PR-6 read-switch). No Neo4j impact.
 # Connections:
 #   - File: backend/ums_smart_revenue/finance/committed_allocation.py -> writer.
 #   - File: Docs/superpowers/specs/2026-06-02-spec-committed-account-allocation-design.md

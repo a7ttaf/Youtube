@@ -493,16 +493,18 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   Unresolved gap / Confidence rating — gross, net, unresolved payment gap, and
   confidence labels ARE produced (net-revenue + payment-match + explain APIs);
   deduction figures now include channel-direct and account-allocated
-  net-applicable components on missing-source-net rows. Remaining is
-  PAYMENT-grain allocation plus committed/persisted allocation state.
+  net-applicable components on missing-source-net rows. Committed/persisted
+  allocation state shipped (PR-5 write path + PR-6 lock-aware read-switch);
+  remaining is PAYMENT-grain allocation plus other allocation methods.
 
 ### Acceptance gate
 
 - ⏳ Finance can generate a channel-level net revenue table for a selected
   month — partially met: GET /revenue/months/{month}/net-revenue produces the
   per-channel table today and includes channel-direct/account-allocated
-  deductions on the missing-source-net path; full reconciled net awaits
-  PAYMENT-grain allocation and committed/persisted allocation state.
+  deductions on the missing-source-net path; committed/persisted allocation state
+  shipped (PR-5 write path + PR-6 read-switch), so full reconciled net now awaits
+  only PAYMENT-grain allocation.
 
 ### Status (2026-06-01)
 
@@ -522,9 +524,11 @@ endpoint with a `net_revenue_usd` metric that reuses the PR-2 net builder and a
 shared no-drift provenance helper to surface channel-direct + account-allocated
 deduction breakdowns in the persisted `number_explanations` components JSON (no
 migration), gated by `VIEW_FINALIZED_PAYMENTS@finance_month(month)` with dual
-`REVENUE_VIEWED` + `PAYMENT_VIEWED` audit. The allocation engine's remaining work —
-PAYMENT-grain distribution and persisted/committed writes — remains the largest
-blocker to a fully reconciled net figure.
+`REVENUE_VIEWED` + `PAYMENT_VIEWED` audit. Spec 2b PR-5 then shipped the
+persisted/committed allocation WRITE path and PR-6 the lock-aware read-switch
+(readers prefer committed snapshots for LOCKED months); the allocation engine's
+remaining work is PAYMENT-grain distribution — the largest blocker to a fully
+reconciled net figure — plus other allocation methods.
 
 ---
 
