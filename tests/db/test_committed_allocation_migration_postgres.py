@@ -342,6 +342,24 @@ def test_lines_amount_nan_rejected_by_finite_check(alembic_config, fresh_engine)
         conn.execute(line_sql, {"rid": run_id})
 
 
+def test_downgrade_blocked_by_post_tax_rows(alembic_config, fresh_engine):
+    """Downgrade from head raises RuntimeError before any DDL when post_tax rows exist.
+
+    The pre-check in 20260603_0001.downgrade() prevents PostgreSQL from emitting a
+    cryptic constraint-violation error; the schema stays at the upgraded state.
+    """
+    command.upgrade(alembic_config, "head")
+    sql, params = _insert_run_sql(method="post_tax_revenue_proportional", key="pt-block")
+    with fresh_engine.begin() as conn:
+        conn.execute(sql, params)
+    with pytest.raises(RuntimeError, match="post_tax_revenue_proportional"):
+        command.downgrade(alembic_config, "20260602_0001")
+    # Schema must still reflect the upgraded state (column rename was NOT reverted).
+    cols = {c["name"] for c in inspect(fresh_engine).get_columns("committed_allocation_lines")}
+    assert "basis_amount_usd" in cols
+    assert "basis_gross_usd" not in cols
+
+
 def test_lines_amount_infinity_rejected_by_numeric_type(alembic_config, fresh_engine):
     """+Infinity in a line amount is rejected by the NUMERIC(20,6) type."""
     command.upgrade(alembic_config, "head")

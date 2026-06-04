@@ -81,6 +81,21 @@ def downgrade() -> None:
     the downgrade to abort. This migration is therefore irreversible on databases
     that have accepted post_tax commits.
     """
+    is_pg = op.get_bind().dialect.name == "postgresql"
+    if is_pg:
+        # Fail fast before any DDL: a cryptic constraint-violation from PostgreSQL
+        # is harder to diagnose than this explicit message.
+        count = op.get_bind().execute(
+            sa.text(
+                "SELECT COUNT(*) FROM committed_allocation_runs "
+                "WHERE allocation_method = 'post_tax_revenue_proportional'"
+            )
+        ).scalar()
+        if count:
+            raise RuntimeError(
+                f"Cannot downgrade 20260603_0001: {count} committed_allocation_runs "
+                "row(s) use post_tax_revenue_proportional. Remove them first."
+            )
     # Restore the gross-only method CHECK.
     with op.batch_alter_table("committed_allocation_runs") as batch:
         batch.drop_constraint("ck_committed_allocation_runs_method", type_="check")
@@ -88,7 +103,6 @@ def downgrade() -> None:
             "ck_committed_allocation_runs_method",
             "allocation_method = 'gross_revenue_proportional'",
         )
-    is_pg = op.get_bind().dialect.name == "postgresql"
     if is_pg:
         op.drop_constraint(
             "ck_committed_allocation_lines_amounts_finite",
