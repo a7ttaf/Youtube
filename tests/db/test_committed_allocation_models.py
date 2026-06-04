@@ -72,7 +72,7 @@ def test_run_and_children_persist(tmp_path):
             run_id=run.id, adsense_account_id="pub-1", youtube_channel_id="chA",
             component_kind="DEDUCTION", source_system="adsense_management",
             component_key="k1", basis_source_kind="ADSENSE",
-            basis_gross_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
+            basis_amount_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
             allocated_amount_usd=Decimal("100.000000"), net_applicable=True,
         ))
         session.add(CommittedAllocationNoteORM(
@@ -93,11 +93,22 @@ def test_run_and_children_persist(tmp_path):
 
 
 def test_method_check_rejects_other_method(tmp_path):
-    """allocation_method CHECK rejects anything but gross_revenue_proportional."""
+    """allocation_method CHECK rejects a method outside the {gross, post_tax} allowlist."""
     engine = _engine(tmp_path)
     with Session(engine) as session, pytest.raises(IntegrityError):
         session.add(_run(allocation_method="company_level"))
         session.commit()
+
+
+def test_method_check_accepts_post_tax(tmp_path):
+    """allocation_method CHECK accepts post_tax_revenue_proportional."""
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        session.add(_run(
+            allocation_method="post_tax_revenue_proportional", idempotency_key="key-pt"
+        ))
+        session.commit()
+        assert session.query(CommittedAllocationRunORM).count() == 1
 
 
 def test_commit_version_check_rejects_zero(tmp_path):
@@ -171,7 +182,7 @@ def test_line_run_fk_cascade_delete(tmp_path):
             run_id=run_id, adsense_account_id="pub-1", youtube_channel_id="chA",
             component_kind="DEDUCTION", source_system="adsense_management",
             component_key="k1", basis_source_kind="ADSENSE",
-            basis_gross_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
+            basis_amount_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
             allocated_amount_usd=Decimal("100.000000"), net_applicable=True,
         ))
         session.commit()
@@ -206,7 +217,7 @@ def test_all_children_cascade_on_run_delete(tmp_path):
             run_id=run_id, adsense_account_id="pub-1", youtube_channel_id="chA",
             component_kind="DEDUCTION", source_system="adsense_management",
             component_key="k1", basis_source_kind="ADSENSE",
-            basis_gross_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
+            basis_amount_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
             allocated_amount_usd=Decimal("100.000000"), net_applicable=True,
         ))
         session.add(CommittedAllocationNoteORM(
@@ -240,7 +251,7 @@ def test_line_identity_nonempty_check_rejects_empty(tmp_path, field):
         adsense_account_id="pub-1", youtube_channel_id="chA",
         component_kind="DEDUCTION", source_system="adsense_management",
         component_key="k1", basis_source_kind="ADSENSE",
-        basis_gross_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
+        basis_amount_usd=Decimal("1000.000000"), basis_share=Decimal("1.000000"),
         allocated_amount_usd=Decimal("100.000000"), net_applicable=True,
     )
     line_kwargs[field] = ""

@@ -251,6 +251,35 @@ def test_unsupported_method_rejected_422(tmp_path):
     assert resp.status_code == 422
 
 
+def test_commit_post_tax_returns_201_with_basis_amount(tmp_path):
+    """POST commit with post_tax persists the method + the renamed basis key."""
+    database_url = build_database_url(tmp_path)
+    _seed(database_url, mapped=True)
+    # post_tax needs non-null source net (the seed leaves chA net = None).
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.execute(
+            MonthlyChannelRevenueFactORM.__table__.update()
+            .where(MonthlyChannelRevenueFactORM.youtube_channel_id == "chA")
+            .values(net_revenue_usd=Decimal("800.00"))
+        )
+        session.commit()
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _principal
+    client = TestClient(app)
+    response = client.post(
+        COMMIT_PATH,
+        json={"idempotency_key": "k-pt", "reason": "post-tax close",
+              "allocation_method": "post_tax_revenue_proportional"},
+    )
+    assert response.status_code == 201
+    body = response.json()
+    assert body["run"]["allocation_method"] == "post_tax_revenue_proportional"
+    assert body["allocations"]
+    assert all("basis_amount_usd" in a for a in body["allocations"])
+    assert all("basis_gross_usd" not in a for a in body["allocations"])
+
+
 @pytest.mark.parametrize(
     "body",
     [

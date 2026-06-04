@@ -142,6 +142,9 @@ def test_finance_viewer_gets_allocation(tmp_path):
     assert body["allocation_source"] == "live_compute"
     assert body["committed_run"] is None
     assert len(body["allocations"]) == 1
+    assert body["allocations"]
+    assert all("basis_amount_usd" in a for a in body["allocations"])
+    assert all("basis_gross_usd" not in a for a in body["allocations"])
     line = body["allocations"][0]
     assert line["adsense_account_id"] == "pub-1"
     assert line["youtube_channel_id"] == "chA"

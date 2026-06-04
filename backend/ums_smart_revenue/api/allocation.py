@@ -159,7 +159,7 @@ def _result_to_api(result: AccountAllocationResult) -> dict[str, object]:
                 "source_system": ln.source_system,
                 "component_key": ln.component_key,
                 "basis_source_kind": ln.basis_source_kind,
-                "basis_gross_usd": decimal_to_api(ln.basis_gross_usd),
+                "basis_amount_usd": decimal_to_api(ln.basis_amount_usd),
                 "basis_share": decimal_to_api(ln.basis_share),
                 "allocated_amount_usd": decimal_to_api(ln.allocated_amount_usd),
                 "net_applicable": ln.net_applicable,
@@ -202,11 +202,13 @@ def _result_to_api(result: AccountAllocationResult) -> dict[str, object]:
 
 
 # ============================================================================
-# Purpose: Read-only month endpoint that allocates ACCOUNT-grain deduction
-#   evidence to channels via the verified map (source-aligned raw gross). It
-#   reads ACCOUNT-only components (no bank-grain rows fetched), resolves each
-#   account's verified channels, builds the source-aligned gross basis, and
-#   returns allocations + unallocated blocking issues + a conserved summary.
+# Purpose: Read-only month endpoint returning the ACCOUNT-grain deduction
+#   allocation to channels. Via the read-switch resolver: a LOCKED month with a
+#   committed snapshot returns it (gross OR post_tax, reconstructed); otherwise it
+#   computes live (source-aligned gross). It reads ACCOUNT-only components (no
+#   bank-grain rows fetched), resolves each account's verified channels, and
+#   returns allocations + unallocated blocking issues + a conserved summary +
+#   allocation-source provenance.
 # Database/ORM: Reads deduction_components, adsense_content_owner_links +
 #   content_owner_channel_links (via the map contract), monthly_channel_revenue_facts.
 # Standards: thin route; 422 on malformed month before scope checks; fail-closed
@@ -423,7 +425,7 @@ def commit_account_allocations(
                 "youtube_channel_id": ln.youtube_channel_id,
                 "component_kind": ln.component_kind, "source_system": ln.source_system,
                 "component_key": ln.component_key, "basis_source_kind": ln.basis_source_kind,
-                "basis_gross_usd": decimal_to_api(ln.basis_gross_usd),
+                "basis_amount_usd": decimal_to_api(ln.basis_amount_usd),
                 "basis_share": decimal_to_api(ln.basis_share),
                 "allocated_amount_usd": decimal_to_api(ln.allocated_amount_usd),
                 "net_applicable": ln.net_applicable,

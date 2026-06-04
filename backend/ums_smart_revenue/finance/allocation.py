@@ -1,8 +1,8 @@
 """Pure account-level deduction allocation (Phase 4 Spec 2b PR-1).
 
 Distributes ACCOUNT-grain deduction components across the verified
-channel↔account map by source-aligned raw-gross-proportional share. No
-database access: the caller resolves every input. See
+channel↔account map by source-aligned proportional (gross or post-tax net)
+share. No database access: the caller resolves every input. See
 Docs/superpowers/specs/2026-05-31-spec-account-allocation-design.md.
 """
 
@@ -19,6 +19,23 @@ from ums_smart_revenue.finance.deduction_policy import (
 )
 
 ALLOCATION_METHOD = "gross_revenue_proportional"
+POST_TAX_ALLOCATION_METHOD = "post_tax_revenue_proportional"
+COMMITTABLE_ALLOCATION_METHODS = frozenset(
+    {ALLOCATION_METHOD, POST_TAX_ALLOCATION_METHOD}
+)
+
+# Method-aware zero-basis issue (code, detail). Net is non-negative (DB CHECK +
+# validator), so the post_tax trigger is a zero total, not a negative one.
+_ZERO_BASIS_ISSUE: dict[str, tuple[str, str]] = {
+    ALLOCATION_METHOD: (
+        "ZERO_GROSS_BASIS",
+        "verified channels have zero or negative source-aligned gross",
+    ),
+    POST_TAX_ALLOCATION_METHOD: (
+        "ZERO_NET_BASIS",
+        "verified channels have zero source-aligned net",
+    ),
+}
 _SCALE = Decimal("0.000001")  # 6dp, matches deduction_components.amount_usd
 _PAYMENT_GAP_SOURCE_SYSTEM = "adsense_payment_gap"
 
@@ -32,7 +49,7 @@ class AllocationValidationError(AllocationError):
 
 
 def _basis_source_kind(source_system: str) -> str | None:
-    """Resolve the raw-gross source kind that weights this component's split.
+    """Resolve the source-aligned source kind that weights this component's split.
 
     Mirrors net_revenue's source alignment; the AdSense payment-gap source has
     no entry in the map and is special-cased to ADSENSE. Returns None when the
@@ -104,7 +121,7 @@ class AllocationLine:
     source_system: str
     component_key: str
     basis_source_kind: str
-    basis_gross_usd: Decimal
+    basis_amount_usd: Decimal
     basis_share: Decimal
     allocated_amount_usd: Decimal
     net_applicable: bool
@@ -173,7 +190,7 @@ def _multi_account_notes(
     """Emit one informational note per channel reachable from >1 account.
 
     Non-blocking: allocation still runs under each account independently; the
-    note flags that the channel's gross is weighted separately per account.
+    note flags that the channel's basis is weighted separately per account.
     """
     accounts_by_channel: dict[str, set[str]] = {}
     for account, channels in verified_channels.items():
@@ -192,12 +209,13 @@ def _multi_account_notes(
 
 # ============================================================================
 # Purpose: Allocate ONE ACCOUNT-grain deduction component across its verified
-#   channels by source-aligned raw-gross-proportional share. Fails closed with a
-#   typed UnallocatedIssue on every blocking condition (non-ACCOUNT scope,
-#   unmapped account, unresolved/missing/incomplete basis, non-positive gross);
-#   never substitutes a different basis. Extracted from build_account_allocation
-#   so each function keeps a maintainable branching budget (DeepSource PY-R1000).
-# Database/ORM: None (caller resolves the verified map and gross basis).
+#   channels by source-aligned proportional (gross or post-tax net) share. Fails
+#   closed with a typed UnallocatedIssue on every blocking condition (non-ACCOUNT
+#   scope, unmapped account, unresolved/missing/incomplete basis, non-positive
+#   basis total); never substitutes a different basis. Extracted from
+#   build_account_allocation so each function keeps a maintainable branching
+#   budget (DeepSource PY-R1000).
+# Database/ORM: None (caller resolves the verified map and the basis).
 # Standards: Decimal arithmetic; exact per-component conservation via
 #   _proportional_allocation; net_applicable from NET_APPLICABLE_COMPONENT_KINDS.
 # Blast Radius: Finance read-model only. No persistence, no auth, no Neo4j.
@@ -205,7 +223,8 @@ def _multi_account_notes(
 def _allocate_component(
     component: DeductionComponent,
     verified_channels: Mapping[str, Sequence[str]],
-    gross_basis: Mapping[tuple[str, str], Decimal],
+    basis: Mapping[tuple[str, str], Decimal],
+    allocation_method: str,
 ) -> _ComponentOutcome:
     """Return the allocation outcome for a single component (pure compute)."""
     if component.scope_kind != "ACCOUNT":
@@ -246,31 +265,31 @@ def _allocate_component(
         )
 
     present = [
-        (channel_id, gross_basis[(channel_id, source_kind)])
+        (channel_id, basis[(channel_id, source_kind)])
         for channel_id in channels
-        if (channel_id, source_kind) in gross_basis
+        if (channel_id, source_kind) in basis
     ]
     if not present:
         return _ComponentOutcome(
             (),
             _issue(component, "BASIS_MISSING",
-                   "no source-aligned gross for any verified channel"),
+                   "no source-aligned basis for any verified channel"),
             False,
         )
     if len(present) != len(channels):
         return _ComponentOutcome(
             (),
             _issue(component, "BASIS_INCOMPLETE",
-                   "some verified channels missing source-aligned gross"),
+                   "some verified channels missing source-aligned basis"),
             False,
         )
 
-    basis_total = sum((gross for _, gross in present), Decimal("0"))
+    basis_total = sum((weight for _, weight in present), Decimal("0"))
     if basis_total <= 0:
+        zero_code, zero_detail = _ZERO_BASIS_ISSUE[allocation_method]
         return _ComponentOutcome(
             (),
-            _issue(component, "ZERO_GROSS_BASIS",
-                   "verified channels have zero or negative source-aligned gross"),
+            _issue(component, zero_code, zero_detail),
             False,
         )
 
@@ -284,12 +303,12 @@ def _allocate_component(
             source_system=component.source_system,
             component_key=component.component_key,
             basis_source_kind=source_kind,
-            basis_gross_usd=gross,
-            basis_share=(gross / basis_total).quantize(_SCALE),
+            basis_amount_usd=weight,
+            basis_share=(weight / basis_total).quantize(_SCALE),
             allocated_amount_usd=allocated[channel_id],
             net_applicable=net_applicable,
         )
-        for channel_id, gross in present
+        for channel_id, weight in present
     )
     return _ComponentOutcome(lines, None, True)
 
@@ -323,10 +342,10 @@ def summarize_account_allocation(
 
 # ============================================================================
 # Purpose: Allocate ACCOUNT-grain deduction evidence across each account's
-#   verified channels by source-aligned raw-gross-proportional share. Fails
-#   closed (UNALLOCATED) on unmapped accounts or missing/incomplete basis;
-#   never substitutes a different basis. Pure compute — no DB access.
-# Database/ORM: None (caller resolves components, map, and gross basis).
+#   verified channels by source-aligned proportional (gross or post-tax net)
+#   share. Fails closed (UNALLOCATED) on unmapped accounts or missing/incomplete
+#   basis; never substitutes a different basis. Pure compute — no DB access.
+# Database/ORM: None (caller resolves components, map, and the basis).
 # Standards: Decimal arithmetic; exact per-component + aggregate conservation;
 #   net_applicable from net_revenue's NET_APPLICABLE_COMPONENT_KINDS.
 # Blast Radius: Finance read-model only. No persistence, no net_revenue change,
@@ -340,7 +359,8 @@ def build_account_allocation(
     month: str,
     components: Iterable[DeductionComponent],
     verified_channels: Mapping[str, Sequence[str]],
-    gross_basis: Mapping[tuple[str, str], Decimal],
+    basis: Mapping[tuple[str, str], Decimal],
+    allocation_method: str = ALLOCATION_METHOD,
 ) -> AccountAllocationResult:
     """Compute per-channel allocation + unallocated issues for one month.
 
@@ -348,7 +368,19 @@ def build_account_allocation(
     DISTINCT channel ids (the Spec 2a read contract
     list_verified_adsense_account_channels guarantees this via .distinct());
     duplicates would double-count.
+
+    Raises:
+        AllocationValidationError: If allocation_method is not in
+            COMMITTABLE_ALLOCATION_METHODS.
     """
+    # Fail closed for ALL callers (not only the public commit gate): an
+    # unsupported method must raise clearly here rather than mislabel the result
+    # or KeyError in the _ZERO_BASIS_ISSUE lookup. AllocationValidationError is
+    # already defined in this module (allocation.py:30); no import needed.
+    if allocation_method not in COMMITTABLE_ALLOCATION_METHODS:
+        raise AllocationValidationError(
+            f"unsupported allocation method: {allocation_method}"
+        )
     lines: list[AllocationLine] = []
     unallocated: list[UnallocatedIssue] = []
     notes = _multi_account_notes(verified_channels)
@@ -357,7 +389,9 @@ def build_account_allocation(
     allocated_component_count = 0
     for component in components:
         component_count += 1
-        outcome = _allocate_component(component, verified_channels, gross_basis)
+        outcome = _allocate_component(
+            component, verified_channels, basis, allocation_method
+        )
         lines.extend(outcome.lines)
         if outcome.issue is not None:
             unallocated.append(outcome.issue)
@@ -372,7 +406,7 @@ def build_account_allocation(
     )
     return AccountAllocationResult(
         month=month,
-        allocation_method=ALLOCATION_METHOD,
+        allocation_method=allocation_method,
         lines=tuple(lines),
         unallocated=tuple(unallocated),
         notes=tuple(notes),

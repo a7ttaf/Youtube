@@ -2,7 +2,7 @@
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.finance_models import (
@@ -450,6 +450,48 @@ def test_rebuild_maps_unallocated_fields_from_a_synthetic_run():
     assert iss.issue_code == "ACCOUNT_UNMAPPED_OR_UNVERIFIED"
     assert iss.detail == "no verified channels"
     assert result.summary.unallocated_total_usd == Decimal("9.50")
+
+
+def test_resolve_serves_committed_post_tax_snapshot_for_locked_month(tmp_path):
+    """LOCKED month -> committed post_tax snapshot (reconstructed losslessly)."""
+    session = _session(tmp_path)
+    _add_account(
+        session, account="pub-1", channel="chA",
+        gross="1000.00", deduction="100.00", mapped=True,
+    )
+    session.execute(
+        MonthlyChannelRevenueFactORM.__table__.update()
+        .where(MonthlyChannelRevenueFactORM.youtube_channel_id == "chA")
+        .values(net_revenue_usd=Decimal("800.00"))
+    )
+    session.commit()
+    committed = SqlAlchemyCommittedAllocationRepository(session)
+    ded = SqlAlchemyDeductionComponentRepository(session)
+    rev = SqlAlchemyRevenueFactRepository(session)
+    link = SqlAlchemyChannelAccountLinkRepository(session)
+    committed.commit_allocation(
+        month=MONTH, allocation_method="post_tax_revenue_proportional",
+        idempotency_key="k-pt", request_fingerprint="fp-pt", reason="close",
+        committed_by=ACTOR, deduction_repository=ded, revenue_repository=rev,
+        link_repository=link,
+    )
+    # commit_allocation auto-created the OPEN close row; lock it so the
+    # read-switch prefers the committed snapshot.
+    close = session.scalars(
+        select(FinanceMonthCloseORM).where(
+            FinanceMonthCloseORM.tenant_id == TENANT,
+            FinanceMonthCloseORM.month == MONTH,
+        )
+    ).one()
+    close.status = "LOCKED"
+    session.commit()
+    result, provenance = resolve_month_account_allocation(
+        month=MONTH, session=session, deduction_repository=ded,
+        revenue_repository=rev, link_repository=link, committed_repository=committed,
+    )
+    assert provenance.source == "committed_snapshot"
+    assert result.allocation_method == "post_tax_revenue_proportional"
+    assert result.lines[0].basis_amount_usd == Decimal("800.000000")
 
 
 def test_provenance_api_and_token(tmp_path):

@@ -1,11 +1,11 @@
 """Committed account-allocation write path (Phase 4 Spec 2b).
 
-Persists a versioned, audited snapshot of the gross_revenue_proportional
-compute. Runs on the shared request session and holds the finance-month
-advisory lock across idempotency lookup, OPEN-month guard, method validation,
-compute, reject-on-unallocated, version assignment, and the row inserts. It
-NEVER opens or commits its own session/transaction — the FastAPI session
-dependency commits after the route returns.
+Persists a versioned, audited snapshot of the account-allocation compute
+(gross or post-tax, allowlisted). Runs on the shared request session and holds
+the finance-month advisory lock across idempotency lookup, OPEN-month guard,
+method validation, compute, reject-on-unallocated, version assignment, and the
+row inserts. It NEVER opens or commits its own session/transaction — the FastAPI
+session dependency commits after the route returns.
 """
 from __future__ import annotations
 
@@ -22,7 +22,10 @@ from ums_smart_revenue.db.finance_models import (
     CommittedAllocationRunORM,
     CommittedAllocationUnallocatedORM,
 )
-from ums_smart_revenue.finance.allocation import ALLOCATION_METHOD, AccountAllocationResult
+from ums_smart_revenue.finance.allocation import (
+    COMMITTABLE_ALLOCATION_METHODS,
+    AccountAllocationResult,
+)
 from ums_smart_revenue.finance.allocation_inputs import compute_month_account_allocation
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
@@ -92,8 +95,9 @@ class SqlAlchemyCommittedAllocationRepository:
         return self._tenant_id
 
     # ========================================================================
-    # Purpose: Commit a versioned snapshot of the gross_revenue_proportional
-    #   compute for one month, under the finance-month advisory lock.
+    # Purpose: Commit a versioned snapshot of the account-allocation compute
+    #   (gross or post-tax, allowlisted) for one month, under the finance-month
+    #   advisory lock.
     # Database/ORM: committed_allocation_runs/_lines/_unallocated/_notes;
     #   reads FinanceMonthCloseORM (lock) via month_close helpers.
     # Standards: shared request session (no commit here); typed errors -> route
@@ -138,7 +142,7 @@ class SqlAlchemyCommittedAllocationRepository:
         if close_row.status == "LOCKED":
             raise CommittedAllocationLockedMonthError(f"Finance month is locked: {month}")
 
-        if allocation_method != ALLOCATION_METHOD:
+        if allocation_method not in COMMITTABLE_ALLOCATION_METHODS:
             raise CommittedAllocationValidationError(
                 f"unsupported allocation method: {allocation_method}"
             )
@@ -148,6 +152,7 @@ class SqlAlchemyCommittedAllocationRepository:
             deduction_repository=deduction_repository,
             revenue_repository=revenue_repository,
             link_repository=link_repository,
+            allocation_method=allocation_method,
         )
         if result.unallocated:
             raise CommittedAllocationValidationError(
@@ -186,7 +191,7 @@ class SqlAlchemyCommittedAllocationRepository:
                 youtube_channel_id=ln.youtube_channel_id,
                 component_kind=ln.component_kind, source_system=ln.source_system,
                 component_key=ln.component_key, basis_source_kind=ln.basis_source_kind,
-                basis_gross_usd=ln.basis_gross_usd, basis_share=ln.basis_share,
+                basis_amount_usd=ln.basis_amount_usd, basis_share=ln.basis_share,
                 allocated_amount_usd=ln.allocated_amount_usd,
                 net_applicable=ln.net_applicable,
             )

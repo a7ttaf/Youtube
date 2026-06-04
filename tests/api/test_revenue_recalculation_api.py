@@ -27,6 +27,7 @@ def auth_headers(
     scope_type: str = "global",
     scope_id: str | None = None,
 ) -> dict[str, str]:
+    """Return request headers for the given role and optional scope."""
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "recalculation@example.com",
@@ -40,10 +41,12 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """Return a unique SQLite URL under pytest's tmp_path."""
     return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
+    """Seed org/security/finance rows for recalculation tests."""
     engine = create_engine(database_url)
     OrgBase.metadata.create_all(engine)
     SecurityBase.metadata.create_all(engine)
@@ -149,6 +152,7 @@ def seed_database(database_url: str) -> None:
 
 
 def recalculation_payload(**overrides) -> dict[str, object]:
+    """Return a default recalculation request payload with optional overrides."""
     payload: dict[str, object] = {
         "month": "2026-03",
         "scope_type": "company",
@@ -163,6 +167,7 @@ def recalculation_payload(**overrides) -> dict[str, object]:
 
 
 def test_finance_admin_requests_recalculation_preview_with_audit(tmp_path):
+    """finance_admin dry-run returns 200 + READY_FOR_REVIEW and writes one audit row."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -205,6 +210,7 @@ def test_finance_admin_requests_recalculation_preview_with_audit(tmp_path):
 
 
 def test_finance_viewer_cannot_request_recalculation(tmp_path):
+    """finance_viewer is rejected with 403."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -222,6 +228,7 @@ def test_finance_viewer_cannot_request_recalculation(tmp_path):
 
 
 def test_recalculation_rejects_committed_writes_until_engine_is_enabled(tmp_path):
+    """dry_run=False raises 422 before any audit write."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -246,6 +253,7 @@ def test_recalculation_rejects_committed_writes_until_engine_is_enabled(tmp_path
 
 
 def test_recalculation_rejects_unknown_allocation_method(tmp_path):
+    """An unknown allocation method is rejected with 422."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -262,3 +270,65 @@ def test_recalculation_rejects_unknown_allocation_method(tmp_path):
         "Allowed methods: company_level, gross_revenue_proportional, manual, "
         "no_allocation, post_tax_revenue_proportional"
     )
+
+
+def _seed_two_source_kinds(database_url: str) -> None:
+    """One channel with YOUTUBE_CMS net=880 and ADSENSE net=None (grain isolation)."""
+    engine = create_engine(database_url)
+    OrgBase.metadata.create_all(engine)
+    SecurityBase.metadata.create_all(engine)
+    FinanceBase.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add_all([
+            OrgUnitORM(id=SECTOR_ID, parent_id=None, type="SECTOR", name="TV", active=True),
+            OrgUnitORM(id=COMPANY_ID, parent_id=SECTOR_ID, type="COMPANY",
+                       name="TV Company", active=True),
+            YouTubeChannelORM(
+                id=CHANNEL_A_ROW_ID, youtube_channel_id="channel-tv-a", channel_name="TV A",
+                primary_org_unit_id=COMPANY_ID, cms_status="INSIDE_CMS",
+                revenue_required=True, active=True,
+            ),
+            MonthlyChannelRevenueFactORM(
+                id=uuid4(), month="2026-03", youtube_channel_id="channel-tv-a",
+                source_kind="YOUTUBE_CMS", source_report_id="cms-1",
+                gross_revenue_usd=Decimal("1000.00"), net_revenue_usd=Decimal("880.00"),
+                views=1, watch_time_minutes=Decimal("1"),
+                confidence_score=Decimal("0.95"), imported_by=USER_ID,
+            ),
+            MonthlyChannelRevenueFactORM(
+                id=uuid4(), month="2026-03", youtube_channel_id="channel-tv-a",
+                source_kind="ADSENSE", source_report_id="ad-1",
+                gross_revenue_usd=Decimal("500.00"), net_revenue_usd=None,
+                views=1, watch_time_minutes=Decimal("1"),
+                confidence_score=Decimal("0.95"), imported_by=USER_ID,
+            ),
+            UserORM(id=USER_ID, email="recalculation@example.com",
+                    display_name="Recalculation User"),
+        ])
+        session.commit()
+
+
+def test_post_tax_dry_run_blocks_on_missing_source_kind_net(tmp_path):
+    """A channel with net for YOUTUBE_CMS but null net for ADSENSE blocks post_tax
+    under the (channel, source_kind) grain (channel grain would have passed).
+    """
+    database_url = build_database_url(tmp_path)
+    _seed_two_source_kinds(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(
+            scope_type="global", scope_id=None,
+            allocation_method="post_tax_revenue_proportional",
+        ),
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "BLOCKED"
+    assert any(
+        i["issue_type"] == "NET_REVENUE_SOURCE_MISSING"
+        for i in body["blocking_issues"]
+    )
+    assert body["source_summary"]["net_revenue_source_count"] == 1
+    assert body["source_summary"]["missing_net_revenue_source_count"] == 1

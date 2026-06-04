@@ -81,7 +81,7 @@ def test_allocates_by_source_aligned_gross_and_conserves():
         month="2026-04",
         components=[_component(amount="100.00")],
         verified_channels={"pub-1": ["chA", "chB"]},
-        gross_basis={("chA", "ADSENSE"): Decimal("700"), ("chB", "ADSENSE"): Decimal("300")},
+        basis={("chA", "ADSENSE"): Decimal("700"), ("chB", "ADSENSE"): Decimal("300")},
     )
     by_channel = {ln.youtube_channel_id: ln.allocated_amount_usd for ln in result.lines}
     assert by_channel == {"chA": Decimal("70.000000"), "chB": Decimal("30.000000")}
@@ -96,7 +96,7 @@ def test_single_channel_gets_full_amount():
         month="2026-04",
         components=[_component(amount="42.50")],
         verified_channels={"pub-1": ["only"]},
-        gross_basis={("only", "ADSENSE"): Decimal("5")},
+        basis={("only", "ADSENSE"): Decimal("5")},
     )
     assert result.lines[0].allocated_amount_usd == Decimal("42.500000")
 
@@ -107,7 +107,7 @@ def test_source_alignment_ignores_other_source_kind_gross():
         month="2026-04",
         components=[_component(amount="10.00", source_system="adsense_management")],
         verified_channels={"pub-1": ["chA"]},
-        gross_basis={("chA", "YOUTUBE_CMS"): Decimal("999")},  # wrong source kind
+        basis={("chA", "YOUTUBE_CMS"): Decimal("999")},  # wrong source kind
     )
     assert result.lines == ()
     assert result.unallocated[0].issue_code == "BASIS_MISSING"
@@ -125,7 +125,7 @@ def test_net_applicable_buckets_split_correctly():
             ),
         ],
         verified_channels={"pub-1": ["chA"]},
-        gross_basis={("chA", "ADSENSE"): Decimal("100")},
+        basis={("chA", "ADSENSE"): Decimal("100")},
     )
     assert result.summary.net_applicable_total_usd == Decimal("10.000000")
     assert result.summary.reconciliation_total_usd == Decimal("4.000000")
@@ -142,7 +142,7 @@ def test_zero_amount_component_allocated_with_no_lines():
         month="2026-04",
         components=[_component(amount="0.00")],
         verified_channels={"pub-1": ["chA"]},
-        gross_basis={("chA", "ADSENSE"): Decimal("100")},
+        basis={("chA", "ADSENSE"): Decimal("100")},
     )
     assert result.lines == ()
     assert result.summary.allocated_component_count == 1
@@ -155,7 +155,7 @@ def test_unmapped_account_is_unallocated():
         month="2026-04",
         components=[_component(amount="10.00", scope_id="pub-x")],
         verified_channels={},
-        gross_basis={},
+        basis={},
     )
     assert result.unallocated[0].issue_code == "ACCOUNT_UNMAPPED_OR_UNVERIFIED"
     assert result.summary.unallocated_total_usd == Decimal("10.000000")
@@ -167,7 +167,7 @@ def test_incomplete_basis_fails_closed():
         month="2026-04",
         components=[_component(amount="10.00")],
         verified_channels={"pub-1": ["chA", "chB"]},
-        gross_basis={("chA", "ADSENSE"): Decimal("100")},  # chB absent
+        basis={("chA", "ADSENSE"): Decimal("100")},  # chB absent
     )
     assert result.lines == ()
     assert result.unallocated[0].issue_code == "BASIS_INCOMPLETE"
@@ -179,7 +179,7 @@ def test_present_zero_basis_is_valid_when_total_positive():
         month="2026-04",
         components=[_component(amount="10.00")],
         verified_channels={"pub-1": ["chA", "chB"]},
-        gross_basis={("chA", "ADSENSE"): Decimal("100"), ("chB", "ADSENSE"): Decimal("0")},
+        basis={("chA", "ADSENSE"): Decimal("100"), ("chB", "ADSENSE"): Decimal("0")},
     )
     by_channel = {ln.youtube_channel_id: ln.allocated_amount_usd for ln in result.lines}
     assert by_channel == {"chA": Decimal("10.000000"), "chB": Decimal("0.000000")}
@@ -191,7 +191,7 @@ def test_zero_total_basis_is_unallocated():
         month="2026-04",
         components=[_component(amount="10.00")],
         verified_channels={"pub-1": ["chA"]},
-        gross_basis={("chA", "ADSENSE"): Decimal("0")},
+        basis={("chA", "ADSENSE"): Decimal("0")},
     )
     assert result.unallocated[0].issue_code == "ZERO_GROSS_BASIS"
 
@@ -202,7 +202,7 @@ def test_unsupported_scope_is_guarded():
         month="2026-04",
         components=[_component(scope_kind="PAYMENT", scope_id="BANK-1", amount="5.00")],
         verified_channels={},
-        gross_basis={},
+        basis={},
     )
     assert result.unallocated[0].issue_code == "UNSUPPORTED_SCOPE"
     assert result.summary.unallocated_total_usd == Decimal("5.000000")
@@ -214,7 +214,7 @@ def test_channel_in_multiple_accounts_emits_informational_note():
         month="2026-04",
         components=[_component(amount="10.00", scope_id="pub-1", key="a")],
         verified_channels={"pub-1": ["shared"], "pub-2": ["shared"]},
-        gross_basis={("shared", "ADSENSE"): Decimal("100")},
+        basis={("shared", "ADSENSE"): Decimal("100")},
     )
     assert any(n.note_code == "CHANNEL_IN_MULTIPLE_ACCOUNTS" for n in result.notes)
     # allocation still proceeds for pub-1
@@ -231,7 +231,7 @@ def test_aggregate_conservation_across_components():
             _component(amount="3.00", scope_id="pub-x", key="c"),  # unmapped
         ],
         verified_channels={"pub-1": ["chA", "chB"], "pub-2": ["chC"]},
-        gross_basis={
+        basis={
             ("chA", "ADSENSE"): Decimal("1"),
             ("chB", "ADSENSE"): Decimal("1"),
             ("chC", "ADSENSE"): Decimal("9"),
@@ -272,7 +272,7 @@ def test_negative_total_basis_is_unallocated():
         month="2026-04",
         components=[_component(amount="5.00")],
         verified_channels={"pub-1": ["chA"]},
-        gross_basis={("chA", "ADSENSE"): Decimal("-5")},
+        basis={("chA", "ADSENSE"): Decimal("-5")},
     )
     assert result.unallocated[0].issue_code == "ZERO_GROSS_BASIS"
 
@@ -288,10 +288,61 @@ def test_allocates_negative_amount_preserving_sign_and_conservation():
             )
         ],
         verified_channels={"pub-1": ["chA", "chB"]},
-        gross_basis={("chA", "ADSENSE"): Decimal("2"), ("chB", "ADSENSE"): Decimal("1")},
+        basis={("chA", "ADSENSE"): Decimal("2"), ("chB", "ADSENSE"): Decimal("1")},
     )
     by_channel = {ln.youtube_channel_id: ln.allocated_amount_usd for ln in result.lines}
     assert by_channel == {"chA": Decimal("-6.000000"), "chB": Decimal("-3.000000")}
     assert sum(by_channel.values()) == Decimal("-9.000000")
     assert all(not ln.net_applicable for ln in result.lines)  # reconciliation bucket
     assert result.summary.reconciliation_total_usd == Decimal("-9.000000")
+
+
+def test_post_tax_method_labels_result_and_lines():
+    """post_tax method threads through to the result method label."""
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(amount="100.00")],
+        verified_channels={"pub-1": ["chA", "chB"]},
+        basis={("chA", "ADSENSE"): Decimal("700"), ("chB", "ADSENSE"): Decimal("300")},
+        allocation_method="post_tax_revenue_proportional",
+    )
+    assert result.allocation_method == "post_tax_revenue_proportional"
+    by_channel = {ln.youtube_channel_id: ln.allocated_amount_usd for ln in result.lines}
+    assert by_channel == {"chA": Decimal("70.000000"), "chB": Decimal("30.000000")}
+
+
+def test_post_tax_zero_basis_emits_zero_net_basis_code():
+    """A zero net basis total fails closed with ZERO_NET_BASIS for post_tax."""
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(amount="10.00")],
+        verified_channels={"pub-1": ["chA"]},
+        basis={("chA", "ADSENSE"): Decimal("0")},
+        allocation_method="post_tax_revenue_proportional",
+    )
+    assert result.lines == ()
+    assert result.unallocated[0].issue_code == "ZERO_NET_BASIS"
+
+
+def test_gross_zero_basis_still_emits_zero_gross_basis_code():
+    """The gross path keeps ZERO_GROSS_BASIS (default method unchanged)."""
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(amount="10.00")],
+        verified_channels={"pub-1": ["chA"]},
+        basis={("chA", "ADSENSE"): Decimal("0")},
+    )
+    assert result.unallocated[0].issue_code == "ZERO_GROSS_BASIS"
+    assert result.allocation_method == "gross_revenue_proportional"
+
+
+def test_unsupported_method_fails_closed():
+    """The engine fails closed for a method outside the {gross, post_tax} allowlist."""
+    with pytest.raises(allocation.AllocationValidationError):
+        build_account_allocation(
+            month="2026-04",
+            components=[_component(amount="10.00")],
+            verified_channels={"pub-1": ["chA"]},
+            basis={("chA", "ADSENSE"): Decimal("100")},
+            allocation_method="company_level",
+        )

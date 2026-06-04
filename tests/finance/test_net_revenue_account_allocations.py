@@ -41,7 +41,7 @@ def _alloc(*, channel=CH, account="pub-1", kind="DEDUCTION", amount="100.000000"
         source_system=source_system,
         component_key=key,
         basis_source_kind="ADSENSE",
-        basis_gross_usd=Decimal("1000.000000"),
+        basis_amount_usd=Decimal("1000.000000"),
         basis_share=Decimal("1.000000"),
         allocated_amount_usd=Decimal(amount),
         net_applicable=net_applicable,

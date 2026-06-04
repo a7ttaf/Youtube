@@ -197,6 +197,39 @@ def test_unsupported_method_rejected_before_compute(tmp_path):
         _commit(committed, ded, rev, link, method="company_level")
 
 
+def test_commit_post_tax_persists_method_and_basis_amount(tmp_path):
+    """A post_tax commit persists allocation_method + basis_amount_usd."""
+    session = _session(tmp_path)
+    _seed_account_deduction(session, mapped=True)
+    # post_tax needs non-null source net for chA/ADSENSE (the seed leaves it None).
+    session.execute(
+        MonthlyChannelRevenueFactORM.__table__.update()
+        .where(MonthlyChannelRevenueFactORM.youtube_channel_id == "chA")
+        .values(net_revenue_usd=Decimal("800.00"))
+    )
+    session.commit()
+    committed, ded, rev, link = _repos(session)
+    outcome = _commit(
+        committed, ded, rev, link, key="k-pt", fp="fp-pt",
+        method="post_tax_revenue_proportional",
+    )
+    assert outcome.created is True
+    assert outcome.run.allocation_method == "post_tax_revenue_proportional"
+    assert outcome.lines[0].basis_amount_usd == Decimal("800.000000")
+
+
+def test_commit_rejects_unsupported_method(tmp_path):
+    """A method outside the {gross, post_tax} allowlist is rejected (company_level)."""
+    session = _session(tmp_path)
+    _seed_account_deduction(session, mapped=True)
+    committed, ded, rev, link = _repos(session)
+    with pytest.raises(CommittedAllocationValidationError):
+        _commit(
+            committed, ded, rev, link, key="k-bad", fp="fp-bad",
+            method="company_level",
+        )
+
+
 def test_reject_on_unallocated(tmp_path):
     """An unmapped account (no verified channel link) blocks the commit."""
     session = _session(tmp_path)

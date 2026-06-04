@@ -130,7 +130,7 @@ def allocation_line(
         source_system=source_system,
         component_key=component_key,
         basis_source_kind=basis_source_kind,
-        basis_gross_usd=Decimal("1000.000000"),
+        basis_amount_usd=Decimal("1000.000000"),
         basis_share=Decimal(basis_share),
         allocated_amount_usd=Decimal(allocated_amount_usd),
         net_applicable=net_applicable,
