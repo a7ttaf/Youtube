@@ -96,3 +96,67 @@ export type NetRevenueResponse = {
   committed_run: CommittedRun | null;
   audit_events: NetRevenueAuditEvent[];
 };
+
+// ============================================================================
+// Purpose: TypeScript mirror of the backend finance month-close JSON contract
+//   consumed by the Month-Close screen. Fields are matched 1:1 against the
+//   backend serializers (not guessed); nullable fields serialize as null.
+// Standards: Read-only typed boundary at the API surface; no logic here. The
+//   lock/unlock POST responses reuse FinanceMonthCloseStatus and additionally
+//   carry an `audit_event` object (kept loosely typed — the screen does not
+//   render it).
+// Connections:
+//   - File: backend/ums_smart_revenue/finance/month_close.py
+//       FinanceMonthCloseEntry.to_api()        (lines 31-42) -> FinanceMonthCloseStatus
+//   - File: backend/ums_smart_revenue/finance/month_close_readiness.py
+//       FinanceCloseReadiness.to_api()          (lines 56-62) -> FinanceCloseReadinessResponse
+//       FinanceCloseBlocker.to_api()            (lines 34-41) -> FinanceCloseBlocker
+//       FinanceCloseReadiness.to_lock_error_detail() (lines 64-69) -> FinanceCloseLockErrorDetail
+//   - File: backend/ums_smart_revenue/api/finance_close.py
+//       get_finance_month_close()               (lines 75-98)   -> GET /finance-close/{month}
+//       get_finance_close_readiness()           (lines 101-129) -> GET /finance-close/{month}/readiness
+//       lock_finance_month()/unlock_finance_month() (lines 132-194) -> POST lock/unlock (+ audit_event)
+// ============================================================================
+
+// GET /finance-close/{month}
+// Source: FinanceMonthCloseEntry.to_api() (month_close.py:31-42).
+export type FinanceMonthCloseStatus = {
+  month: string;
+  status: string; // "OPEN" | "LOCKED"
+  allocation_method: string | null;
+  allocation_rule_payload: Record<string, unknown>;
+  locked_by: string | null;
+  locked_at: string | null; // ISO-8601 datetime
+  unlocked_by: string | null;
+  unlocked_at: string | null; // ISO-8601 datetime
+};
+
+// One unresolved condition blocking a month close.
+// Source: FinanceCloseBlocker.to_api() (month_close_readiness.py:34-41).
+export type FinanceCloseBlocker = {
+  blocker_type: string;
+  severity: string;
+  count: number;
+  message: string;
+};
+
+// GET /finance-close/{month}/readiness
+// Source: FinanceCloseReadiness.to_api() (month_close_readiness.py:56-62).
+export type FinanceCloseReadinessResponse = {
+  month: string;
+  ready: boolean;
+  blockers: FinanceCloseBlocker[];
+};
+
+// HTTP 409 detail returned by POST /finance-close/{month}/lock when blockers
+// remain. Source: FinanceCloseReadiness.to_lock_error_detail() (lines 64-69).
+export type FinanceCloseLockErrorDetail = {
+  message: string;
+  blockers: FinanceCloseBlocker[];
+};
+
+// POST /finance-close/{month}/lock and /unlock response: the close status plus
+// the recorded audit event. Source: _with_audit_event() (finance_close.py:313-316).
+export type FinanceMonthCloseMutationResponse = FinanceMonthCloseStatus & {
+  audit_event: Record<string, unknown>;
+};

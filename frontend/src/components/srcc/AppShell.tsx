@@ -6,9 +6,6 @@ import { useTenant } from "@/contexts/TenantContext";
 import {
   AUDIT_EVENTS,
   AUDIT_SUMMARY,
-  CLOSE_CHECKPOINTS,
-  CLOSE_DETAILS,
-  CLOSE_SUMMARY,
   CONNECTORS_SUMMARY,
   CONNECTOR_HEALTH,
   CONNECTOR_JOBS,
@@ -18,7 +15,6 @@ import {
   EXPORTS_SUMMARY,
   EXPORT_META,
   NAV_GROUPS,
-  RECON_NOTES,
   REGISTRY_CONTROLS,
   REGISTRY_ROWS,
   REGISTRY_SUMMARY,
@@ -31,6 +27,7 @@ import {
 } from "@/lib/mock/data";
 import type { Role, ViewKey } from "@/lib/mock/data";
 import { BrandIcon, NAV_ICONS, RefreshIcon } from "./icons";
+import CloseView from "./views/CloseView";
 import CommandView from "./views/CommandView";
 import {
   Badge,
@@ -525,113 +522,9 @@ function RegistryView({ permissions }: { permissions: AccessPermissions }) {
 
 /* ------------------------------------------------------------------ close */
 
-function CloseView({ permissions }: { permissions: AccessPermissions }) {
-  const { canCloseMonth, canViewFinance } = permissions;
-  return (
-    <section className="view-page" aria-labelledby="closeViewTitle">
-      <div className="view-summary" aria-label="Month close summary">
-        {CLOSE_SUMMARY.map((s) => (
-          <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
-        ))}
-      </div>
-
-      <div className="view-grid">
-        <section className="panel">
-          <div className="panel-header">
-            <div className="panel-title">
-              <strong id="closeViewTitle">Month Close Workbench</strong>
-              <span>Deterministic workflow from report ingestion to locked exports</span>
-            </div>
-            <Badge tone={canCloseMonth ? "amber" : "red"}>
-              {canCloseMonth ? "Finance Admin" : "Restricted"}
-            </Badge>
-          </div>
-          <div className="detail-grid">
-            {CLOSE_DETAILS.map((d) => (
-              <div key={d.label} className="detail-cell">
-                <span>{d.label}</span>
-                <strong>{d.value}</strong>
-              </div>
-            ))}
-          </div>
-          <div className="table-wrap">
-            <table aria-label="Month close checkpoints">
-              <thead>
-                <tr><th>Checkpoint</th><th>Owner</th><th>Evidence</th><th>Sensitive Action</th><th>State</th><th>Next</th></tr>
-              </thead>
-              <tbody>
-                {CLOSE_CHECKPOINTS.map((c) => (
-                  <tr key={c.name}>
-                    <td>{c.name}</td>
-                    <td>{c.owner}</td>
-                    <td><span className="code-chip">{c.evidence}</span></td>
-                    <td>{c.action}</td>
-                    <td><Badge tone={c.state.tone}>{c.state.text}</Badge></td>
-                    <td>
-                      <button className="mini-button" type="button" disabled={!canCloseMonth}>
-                        {c.next}
-                      </button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <aside className="view-stack">
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong>Lock Controls</strong>
-                <span>Actions stay disabled until blockers are cleared</span>
-              </div>
-              <Badge tone={canCloseMonth ? "amber" : "red"}>
-                {canCloseMonth ? "Finance Admin" : "Restricted"}
-              </Badge>
-            </div>
-            <div className="form-grid">
-              <div className="field-row">
-                <label htmlFor="closeMonth">Month</label>
-                <select id="closeMonth" disabled={!canCloseMonth}><option>Mar 2026</option><option>Feb 2026</option></select>
-              </div>
-              <div className="field-row">
-                <label htmlFor="closeReason">Reason</label>
-                <input id="closeReason" defaultValue="Export blockers remain open" disabled={!canCloseMonth} />
-              </div>
-              <div className="field-row">
-                <label htmlFor="closeApprover">Approver</label>
-                <select id="closeApprover" disabled={!canCloseMonth}><option>Finance Admin required</option><option>Corporate Admin co-approval</option></select>
-              </div>
-            </div>
-            <div className="action-row">
-              <button className="danger-button" type="button" disabled={!canCloseMonth}>Request Unlock</button>
-              <button className="primary-button" type="button" disabled={!canCloseMonth}>Lock Month</button>
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong>Reconciliation Equation</strong>
-                <span>Displayed as explanation, not editable revenue logic</span>
-              </div>
-            </div>
-            <div className="formula" style={{ margin: 13 }}>
-              gross_reported - official_tax - payment_fees - allocation_gap + approved_overrides = locked_net
-            </div>
-            <div className="issue-list" role="list">
-              {RECON_NOTES.map((n) => (
-                <ItemRow key={n.title} tone={n.tone} title={n.title} sub={n.sub}
-                  trailing={<Badge tone={n.badge.tone}>{n.badge.text}</Badge>} />
-              ))}
-            </div>
-          </section>
-        </aside>
-      </div>
-    </section>
-  );
-}
+// CloseView is the wired Month-Close view; it lives in ./views/CloseView.tsx
+// and reads GET /finance-close/{month} (+ /readiness) and posts lock/unlock
+// via the useMonthClose hooks.
 
 /* ------------------------------------------------------------------ trace */
 
