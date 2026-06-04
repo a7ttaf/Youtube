@@ -68,17 +68,17 @@ const SMART_ALERTS_CLEAR: SmartAlertsSummary = {
   audit_events: [],
 };
 
-function jsonResponse(body: unknown, status = 200) {
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
 // Route each fetch by URL and return a FRESH Response per call (a Response body
 // can only be read once, so the net-revenue + smart-alerts requests cannot share
 // one). net-revenue is driven by the test; smart-alerts defaults to CLEAR.
-function routeFetch(netRevenue: () => Response, smartAlerts?: () => Response) {
+const routeFetch = (netRevenue: () => Response, smartAlerts?: () => Response) => {
   (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
     (input: RequestInfo | URL) => {
       const url = String(input);
@@ -90,15 +90,15 @@ function routeFetch(netRevenue: () => Response, smartAlerts?: () => Response) {
       return Promise.resolve(netRevenue());
     },
   );
-}
+};
 
-function renderCommandView(canViewFinance: boolean) {
+const renderCommandView = (canViewFinance: boolean) => {
   return render(
     <TenantProvider initialSlug="ums">
       <CommandView canViewFinance={canViewFinance} />
     </TenantProvider>,
   );
-}
+};
 
 describe("CommandView wired to net-revenue", () => {
   it("renders real-shaped totals formatted as USD when finance is visible", async () => {

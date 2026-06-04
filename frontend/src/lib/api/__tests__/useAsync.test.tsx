@@ -6,7 +6,7 @@ import { ApiError } from "@/lib/api/client";
 import { useAsync } from "@/lib/api/useAsync";
 
 /** Resolve/reject a promise from outside, for ordering deferred fetches. */
-function deferred<T>() {
+const deferred = <T>() => {
   let resolve!: (value: T) => void;
   let reject!: (reason: unknown) => void;
   const promise = new Promise<T>((res, rej) => {
@@ -14,7 +14,7 @@ function deferred<T>() {
     reject = rej;
   });
   return { promise, resolve, reject };
-}
+};
 
 type Result = { id: string };
 
@@ -23,14 +23,14 @@ type Result = { id: string };
  * (useAsync requires a stable reference). Each fetch pops the next deferred so a
  * test can control mount vs. reload resolution order independently.
  */
-function useQueuedAsync(queue: Array<ReturnType<typeof deferred<Result>>>) {
+const useQueuedAsync = (queue: Array<ReturnType<typeof deferred<Result>>>) => {
   const run = useCallback(() => {
     const next = queue.shift();
     if (!next) throw new Error("queue exhausted: no deferred for this fetch");
     return next.promise;
   }, [queue]);
   return useAsync(run);
-}
+};
 
 describe("useAsync", () => {
   it("clears stale data on reload: data is null while the next fetch is in flight", async () => {

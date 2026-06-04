@@ -65,33 +65,33 @@ const EMPTY_PAYMENTS: AdsensePaymentListResponse = {
   audit_event: {},
 };
 
-function jsonResponse(body: unknown, status = 200) {
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
-function urlOf(input: unknown): string {
+const urlOf = (input: unknown): string => {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
-}
+};
 
-function methodOf(init: unknown): string {
+const methodOf = (init: unknown): string => {
   return ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
-}
+};
 
-function fetchMock() {
+const fetchMock = () => {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-}
+};
 
 // Route the two auto-fetch GETs (credentials + payments) to fixed bodies and let
 // callers override individual routes via the supplied responder.
-function routeBoth(
+const routeBoth = (
   responder: (url: string, init: unknown) => Response | null,
-) {
+) => {
   return (input: unknown, init?: unknown) => {
     const url = urlOf(input);
     const custom = responder(url, init);
@@ -104,9 +104,9 @@ function routeBoth(
     }
     return Promise.resolve(jsonResponse({}, 200));
   };
-}
+};
 
-function renderConnectorsView(canRunConnectors = true, canViewFinance = true) {
+const renderConnectorsView = (canRunConnectors = true, canViewFinance = true) => {
   return render(
     <TenantProvider initialSlug="ums">
       <ConnectorsView
@@ -115,7 +115,7 @@ function renderConnectorsView(canRunConnectors = true, canViewFinance = true) {
       />
     </TenantProvider>,
   );
-}
+};
 
 describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
   it("renders the configured data sources (credentials) list", async () => {

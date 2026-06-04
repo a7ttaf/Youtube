@@ -3,9 +3,9 @@ import type { ReactNode } from "react";
 
 import { TenantProvider, useTenant } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: ReactNode }) {
+const wrapper = ({ children }: { children: ReactNode }) => {
   return <TenantProvider>{children}</TenantProvider>;
-}
+};
 
 describe("TenantContext", () => {
   it("seeds with an empty slug and null id/displayName so bootstrap is not pinned", () => {
@@ -39,7 +39,7 @@ describe("TenantContext", () => {
   });
 
   it("throws when useTenant is called outside <TenantProvider>", () => {
-    const consoleSpy = vi.spyOn(console, "error").mockReturnValue(undefined);
+    const consoleSpy = vi.spyOn(console, "error").mockReturnValue();
     expect(() => renderHook(() => useTenant())).toThrow(
       /useTenant must be used within <TenantProvider>/,
     );

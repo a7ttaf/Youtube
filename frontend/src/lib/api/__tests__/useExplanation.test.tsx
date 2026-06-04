@@ -5,9 +5,9 @@ import type { NumberExplanation } from "@/lib/api/types";
 import { useExplanation } from "@/lib/api/useExplanation";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: React.ReactNode }) {
+const wrapper = ({ children }: { children: React.ReactNode }) => {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
-}
+};
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -63,29 +63,29 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
-function fetchMock() {
+const fetchMock = () => {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-}
+};
 
-function lastFetchArgs() {
+const lastFetchArgs = () => {
   return fetchMock().mock.calls.at(-1);
-}
+};
 
 /** Narrow the last fetch args away from `undefined`, failing the test if none. */
-function requireFetchArgs() {
+const requireFetchArgs = () => {
   const args = lastFetchArgs();
   if (!args) throw new Error("expected fetch to have been called");
   return args;
-}
+};
 
 /** Resolve a promise from outside via a deferred, for ordering concurrent calls. */
-function deferred<T>() {
+const deferred = <T>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
     resolve = res;
   });
   return { promise, resolve };
-}
+};
 
 describe("useExplanation", () => {
   it("starts idle (no data, no loading, no error) before run()", () => {

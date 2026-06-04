@@ -66,57 +66,60 @@ const READINESS_BLOCKED: FinanceCloseReadinessResponse = {
   ],
 };
 
-function jsonResponse(body: unknown, status = 200) {
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
-function urlOf(input: unknown): string {
+const urlOf = (input: unknown): string => {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
-}
+};
 
 // Route the two CloseView GETs (status vs /readiness) to separate responders.
-function routeFetch(opts: {
+const routeFetch = (opts: {
   status: () => Response;
   readiness: () => Response;
   lock?: () => Response;
   unlock?: () => Response;
-}) {
+}) => {
   return (input: unknown) => {
     const url = urlOf(input);
-    if (url.endsWith("/readiness")) return Promise.resolve(opts.readiness());
-    if (url.endsWith("/lock") && opts.lock) return Promise.resolve(opts.lock());
-    if (url.endsWith("/unlock") && opts.unlock)
-      return Promise.resolve(opts.unlock());
-    return Promise.resolve(opts.status());
+    const actions: Record<string, () => unknown> = {
+      '/readiness': () => opts.readiness(),
+      '/lock': () => (opts.lock ? opts.lock() : opts.status()),
+      '/unlock': () => (opts.unlock ? opts.unlock() : opts.status()),
+    };
+    const suffix = url.substring(url.lastIndexOf('/'));
+    const result = (actions[suffix] ?? (() => opts.status()))();
+    return Promise.resolve(result);
   };
-}
+};
 
-function fetchMock() {
+export function fetchMock() {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
 }
 
 /** Resolve a promise from outside via a deferred, to keep a fetch pending. */
-function deferred<T>() {
+const deferred = function <T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
     resolve = res;
   });
   return { promise, resolve };
-}
+};
 
-function renderCloseView(canCloseMonth = true) {
+const renderCloseView = (canCloseMonth = true) => {
   return render(
     <TenantProvider initialSlug="ums">
       <CloseView permissions={{ canCloseMonth }} />
     </TenantProvider>,
   );
-}
+};
 
 describe("CloseView wired to finance-close", () => {
   it("shows a loading state before the responses resolve", () => {

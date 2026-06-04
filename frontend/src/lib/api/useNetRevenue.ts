@@ -36,7 +36,7 @@ export function useNetRevenue(query: NetRevenueQuery): AsyncState<NetRevenueResp
     if (scopeId) params.set("scope_id", scopeId);
     if (currency) params.set("currency", currency);
     const qs = params.toString();
-    const path = `/revenue/months/${encodeURIComponent(month)}/net-revenue${
+    const path = `/revenue/months/${encodeURIComponent(month)}/net-revenue`${
       qs ? `?${qs}` : ""
     }`;
     return client.get<NetRevenueResponse>(path);
