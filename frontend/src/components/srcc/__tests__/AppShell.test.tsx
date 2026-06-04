@@ -23,14 +23,64 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
+// Minimal real-shaped net-revenue body so the wired CommandView can render
+// without errors while these tests focus on the tenant bootstrap behavior.
+const NET_REVENUE_BODY = {
+  month: "2026-03",
+  status: "CALCULATED",
+  channel_count: 0,
+  calculated_channel_count: 0,
+  missing_net_source_count: 0,
+  pending_manual_override_count: 0,
+  total_adjusted_gross_revenue_usd: "0",
+  total_net_revenue_usd: "0",
+  total_deduction_amount_usd: "0",
+  total_channel_direct_deduction_amount_usd: "0",
+  total_account_allocated_deduction_amount_usd: "0",
+  unallocated_account_deduction_total_usd: null,
+  unallocated_account_issues: null,
+  channels: [],
+  currency: "USD",
+  allocation_source: "live_compute",
+  committed_run: null,
+  audit_events: [],
+};
+
+function urlOf(input: unknown): string {
+  if (typeof input === "string") return input;
+  if (input instanceof URL) return input.toString();
+  if (input instanceof Request) return input.url;
+  return String(input);
+}
+
+function isTenantCall(input: unknown): boolean {
+  return urlOf(input).includes("/tenants/me");
+}
+
+// Route fetch by URL: /tenants/me -> the provided tenant responder, everything
+// else (the wired CommandView net-revenue call) -> a neutral net-revenue body.
+function routeFetch(tenantResponder: () => Response) {
+  return (input: unknown) =>
+    Promise.resolve(
+      isTenantCall(input) ? tenantResponder() : jsonResponse(NET_REVENUE_BODY),
+    );
+}
+
+function tenantFetchCalls() {
+  const mock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+  return mock.mock.calls.filter(([input]) => isTenantCall(input));
+}
+
 describe("AppShell tenant proof tag", () => {
   it("hydrates the tenant and shows UMS (ums) on the dev-only tag", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({
-        id: "00000000-0000-0000-0000-000000000001",
-        slug: "ums",
-        display_name: "UMS",
-      }),
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetch(() =>
+        jsonResponse({
+          id: "00000000-0000-0000-0000-000000000001",
+          slug: "ums",
+          display_name: "UMS",
+        }),
+      ),
     );
     render(
       <TenantProvider initialSlug="ums">
@@ -43,8 +93,8 @@ describe("AppShell tenant proof tag", () => {
   });
 
   it("shows the typed ApiError message on 503", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({ detail: "Tenant registry unavailable" }, 503),
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetch(() => jsonResponse({ detail: "Tenant registry unavailable" }, 503)),
     );
     render(
       <TenantProvider initialSlug="ums">
@@ -56,8 +106,8 @@ describe("AppShell tenant proof tag", () => {
   });
 
   it("appends the JSON body.detail string to the proof tag when present", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse({ detail: "Tenant registry unavailable" }, 503),
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetch(() => jsonResponse({ detail: "Tenant registry unavailable" }, 503)),
     );
     render(
       <TenantProvider initialSlug="ums">
@@ -68,14 +118,16 @@ describe("AppShell tenant proof tag", () => {
     expect(tag.textContent).toContain("Tenant registry unavailable");
   });
 
-  it("fires fetch exactly once under <StrictMode> (re-entry guard)", async () => {
+  it("fires the bootstrap /tenants/me fetch exactly once under <StrictMode> (re-entry guard)", async () => {
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
-    fetchMock.mockResolvedValue(
-      jsonResponse({
-        id: "00000000-0000-0000-0000-000000000001",
-        slug: "ums",
-        display_name: "UMS",
-      }),
+    fetchMock.mockImplementation(
+      routeFetch(() =>
+        jsonResponse({
+          id: "00000000-0000-0000-0000-000000000001",
+          slug: "ums",
+          display_name: "UMS",
+        }),
+      ),
     );
     render(
       <StrictMode>
@@ -85,20 +137,28 @@ describe("AppShell tenant proof tag", () => {
       </StrictMode>,
     );
     await screen.findByTestId("tenant-proof");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    // The wired CommandView fires its own net-revenue call; the re-entry guard
+    // is specifically about the single /tenants/me bootstrap call.
+    expect(tenantFetchCalls()).toHaveLength(1);
   });
 
   it("clears stale tenantError on successful retry after an earlier failure (outside-diff CodeRabbit regression)", async () => {
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
-    fetchMock
-      .mockResolvedValueOnce(jsonResponse({ detail: "transient 503" }, 503))
-      .mockResolvedValueOnce(
-        jsonResponse({
-          id: "00000000-0000-0000-0000-000000000001",
-          slug: "ums",
-          display_name: "UMS",
-        }),
-      );
+    // First /tenants/me call fails (503); the next succeeds. Net-revenue calls
+    // are routed separately so they do not consume the tenant responders.
+    let tenantCallCount = 0;
+    fetchMock.mockImplementation(
+      routeFetch(() => {
+        tenantCallCount += 1;
+        return tenantCallCount === 1
+          ? jsonResponse({ detail: "transient 503" }, 503)
+          : jsonResponse({
+              id: "00000000-0000-0000-0000-000000000001",
+              slug: "ums",
+              display_name: "UMS",
+            });
+      }),
+    );
     render(
       <TenantProvider initialSlug="ums">
         <AppShell />
@@ -121,12 +181,14 @@ describe("AppShell tenant proof tag", () => {
 
   it("fires the bootstrap /tenants/me call without X-UMS-Tenant so the gateway is the tenant authority", async () => {
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
-    fetchMock.mockResolvedValue(
-      jsonResponse({
-        id: "00000000-0000-0000-0000-0000000000ac",
-        slug: "acme",
-        display_name: "Acme Holdings",
-      }),
+    fetchMock.mockImplementation(
+      routeFetch(() =>
+        jsonResponse({
+          id: "00000000-0000-0000-0000-0000000000ac",
+          slug: "acme",
+          display_name: "Acme Holdings",
+        }),
+      ),
     );
     render(
       <TenantProvider>
@@ -135,8 +197,9 @@ describe("AppShell tenant proof tag", () => {
     );
     const tag = await screen.findByTestId("tenant-proof");
     expect(tag.textContent).toContain("Acme Holdings (acme)");
-    expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [, init] = fetchMock.mock.calls.at(-1)!;
+    const tenantCalls = tenantFetchCalls();
+    expect(tenantCalls).toHaveLength(1);
+    const [, init] = tenantCalls.at(-1)!;
     const sentHeaders = new Headers((init as RequestInit | undefined)?.headers);
     expect(sentHeaders.has("X-UMS-Tenant")).toBe(false);
   });

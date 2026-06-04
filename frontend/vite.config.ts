@@ -5,7 +5,20 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv } from "vite";
 
-const TENANT_SCOPED_ROUTES = ["/tenants"];
+// Every backend API prefix the dashboard calls in dev must be proxied with the
+// same injected trusted-principal headers as /tenants, so the browser bundle
+// never holds the gateway secret and the backend's
+// current_principal_from_headers dependency succeeds. Mirrors the production
+// reverse-proxy model where the trusted gateway injects principal identity.
+const TENANT_SCOPED_ROUTES = [
+  "/tenants",
+  "/revenue",
+  "/finance-close",
+  "/exports",
+  "/connectors",
+  "/adsense",
+  "/channels",
+];
 
 // Repo root is one level above this file (frontend/vite.config.ts -> ..).
 // Resolving relative to import.meta.url (not process.cwd()) makes the env

@@ -6,10 +6,8 @@ import { useTenant } from "@/contexts/TenantContext";
 import {
   AUDIT_EVENTS,
   AUDIT_SUMMARY,
-  CHANNELS,
   CLOSE_CHECKPOINTS,
   CLOSE_DETAILS,
-  CLOSE_STEPS,
   CLOSE_SUMMARY,
   CONNECTORS_SUMMARY,
   CONNECTOR_HEALTH,
@@ -19,9 +17,6 @@ import {
   EXPORTS_ROWS,
   EXPORTS_SUMMARY,
   EXPORT_META,
-  EXPORT_READINESS,
-  ISSUES,
-  KPIS,
   NAV_GROUPS,
   RECON_NOTES,
   REGISTRY_CONTROLS,
@@ -34,8 +29,17 @@ import {
   VIEW_COPY,
   WORKFLOW_STEPS,
 } from "@/lib/mock/data";
-import type { Role, Severity, ViewKey, WorkflowTone } from "@/lib/mock/data";
-import { BrandIcon, LockIcon, NAV_ICONS, RefreshIcon } from "./icons";
+import type { Role, ViewKey } from "@/lib/mock/data";
+import { BrandIcon, NAV_ICONS, RefreshIcon } from "./icons";
+import CommandView from "./views/CommandView";
+import {
+  Badge,
+  Dot,
+  ItemRow,
+  RESTRICTED_FINANCE_VALUE,
+  SummaryTile,
+  workflowDotTone,
+} from "./shared";
 
 /* ------------------------------------------------------------------ shared */
 
@@ -61,51 +65,7 @@ type AccessPermissions = {
   canViewAudit: boolean;
 };
 
-const REVENUE_TABS = ["Net", "Gross", "Allocated"] as const;
-type RevenueTab = (typeof REVENUE_TABS)[number];
-type ChannelAmountKey = "gross" | "tax" | "deductions" | "net";
 type ExportScope = (typeof EXPORTS_ROWS)[number]["scope"];
-
-const REVENUE_TAB_CONFIG: Record<
-  RevenueTab,
-  {
-    amountKey: ChannelAmountKey;
-    tableLabel: string;
-    kpiLabel: string;
-    kpiNote: string;
-    explanationTitle: string;
-    formula: string;
-    rowOrder: ChannelAmountKey[];
-  }
-> = {
-  Net: {
-    amountKey: "net",
-    tableLabel: "Net focus",
-    kpiLabel: "Selected net",
-    kpiNote: "After tax and allocation",
-    explanationTitle: "Net revenue explanation",
-    formula: "net = gross + adjustments - tax - allocated_deductions + manual_adjustments",
-    rowOrder: ["gross", "tax", "deductions", "net"],
-  },
-  Gross: {
-    amountKey: "gross",
-    tableLabel: "Gross focus",
-    kpiLabel: "Selected gross",
-    kpiNote: "Before tax and allocation",
-    explanationTitle: "Gross revenue explanation",
-    formula: "gross = source revenue before tax withholding and shared deductions",
-    rowOrder: ["gross", "tax", "deductions", "net"],
-  },
-  Allocated: {
-    amountKey: "deductions",
-    tableLabel: "Allocated focus",
-    kpiLabel: "Selected allocation",
-    kpiNote: "Shared deductions applied",
-    explanationTitle: "Allocation explanation",
-    formula: "allocated_deductions = payment_gap_share + channel_adjustments",
-    rowOrder: ["deductions", "gross", "tax", "net"],
-  },
-};
 
 // In production this value is hydrated from the server-authenticated session claim.
 const SERVER_AUTHENTICATED_SESSION: AuthenticatedSession = {};
@@ -113,36 +73,6 @@ const SERVER_AUTHENTICATED_SESSION: AuthenticatedSession = {};
 const CAN_PREVIEW_ROLES =
   import.meta.env.DEV || import.meta.env.VITE_ENABLE_ROLE_PREVIEW === "true";
 const DEFAULT_PREVIEW_ROLE: Role = "assistant";
-
-const RESTRICTED_FINANCE_VALUE = "Restricted";
-
-type ChannelRow = (typeof CHANNELS)[number];
-
-const FALLBACK_CHANNEL: ChannelRow = {
-  id: "unavailable",
-  avatar: "--",
-  name: "No channel selected",
-  code: "No channel",
-  company: "No company scope",
-  cms: { text: "No data", tone: "red" as Severity },
-  gross: RESTRICTED_FINANCE_VALUE,
-  tax: RESTRICTED_FINANCE_VALUE,
-  deductions: RESTRICTED_FINANCE_VALUE,
-  net: RESTRICTED_FINANCE_VALUE,
-  confidence: { text: "Restricted", tone: "red" as Severity },
-  issue: null,
-};
-
-function restrictChannelFinance(channel: ChannelRow): ChannelRow {
-  return {
-    ...channel,
-    gross: RESTRICTED_FINANCE_VALUE,
-    tax: RESTRICTED_FINANCE_VALUE,
-    deductions: RESTRICTED_FINANCE_VALUE,
-    net: RESTRICTED_FINANCE_VALUE,
-    confidence: { text: "Restricted", tone: "red" as Severity },
-  };
-}
 
 function permissionsForRole(role: Role): AccessPermissions {
   const finance = role === "finance";
@@ -174,111 +104,6 @@ function canCreateExportScope(permissions: AccessPermissions, scope: ExportScope
   return permissions.canRequestRawExports;
 }
 
-function explainRowsForChannel(
-  channel: ChannelRow,
-  revenueTab: RevenueTab,
-  canViewFinance: boolean,
-) {
-  const rows: Record<
-    ChannelAmountKey,
-    { key: ChannelAmountKey; tone: Severity; title: string; sub: string; value: string }
-  > = {
-    gross: {
-      key: "gross",
-      tone: channel.cms.tone,
-      title: "Gross revenue",
-      sub: `${channel.cms.text} source`,
-      value: channel.gross,
-    },
-    tax: {
-      key: "tax",
-      tone: "green",
-      title: "Tax withholding",
-      sub: "Official tax report",
-      value: channel.tax,
-    },
-    deductions: {
-      key: "deductions",
-      tone: channel.issue ? "amber" : "green",
-      title: "Allocated deductions",
-      sub: revenueTab === "Allocated" ? "Focused allocation view" : "Payment gap allocation",
-      value: channel.deductions,
-    },
-    net: {
-      key: "net",
-      tone: channel.confidence.tone,
-      title: "Net value",
-      sub: "Locked result row",
-      value: channel.net,
-    },
-  };
-
-  return REVENUE_TAB_CONFIG[revenueTab].rowOrder.map((key) => {
-    const row = rows[key];
-    return canViewFinance ? row : { ...row, value: RESTRICTED_FINANCE_VALUE };
-  });
-}
-
-function Badge({ tone, children }: { tone: Severity; children: React.ReactNode }) {
-  return <span className={`badge ${tone}`}>{children}</span>;
-}
-
-function Dot({ tone }: { tone?: Severity }) {
-  return <span className={`dot${tone ? ` ${tone}` : ""}`} aria-hidden="true" />;
-}
-
-function workflowDotTone(tone: WorkflowTone): Severity | undefined {
-  return tone === "primary" ? undefined : tone;
-}
-
-function ItemRow({
-  tone,
-  title,
-  sub,
-  trailing,
-  className = "issue-item",
-}: {
-  tone: Severity;
-  title: string;
-  sub: string;
-  trailing: React.ReactNode;
-  className?: string;
-}) {
-  return (
-    <div className={className} role="listitem">
-      <Dot tone={tone} />
-      <span>
-        <span className="item-title">{title}</span>
-        <span className="item-sub">{sub}</span>
-      </span>
-      {trailing}
-    </div>
-  );
-}
-
-function SummaryTile({
-  label,
-  value,
-  note,
-  finance,
-  canViewFinance = true,
-}: {
-  label: string;
-  value: string;
-  note: string;
-  finance?: boolean;
-  canViewFinance?: boolean;
-}) {
-  const displayValue = finance && !canViewFinance ? RESTRICTED_FINANCE_VALUE : value;
-  return (
-    <article className="summary-tile">
-      <span>{label}</span>
-      <strong className={finance ? "finance-data" : undefined}>{displayValue}</strong>
-      <small>{note}</small>
-    </article>
-  );
-}
-
 function AccessDeniedState() {
   return (
     <div className="app">
@@ -305,8 +130,6 @@ export default function AppShell() {
   const [previewRole, setPreviewRole] = useState<Role>(
     authenticatedRole ?? DEFAULT_PREVIEW_ROLE,
   );
-  const [selected, setSelected] = useState<string>("UMS Drama");
-  const [revenueTab, setRevenueTab] = useState<RevenueTab>("Net");
   const [traceTab, setTraceTab] = useState<"Revenue Flow" | "Issues" | "Ownership">(
     "Revenue Flow",
   );
@@ -522,15 +345,7 @@ export default function AppShell() {
           </div>
         </header>
 
-        {view === "command" && (
-          <CommandView
-            selected={selected}
-            setSelected={setSelected}
-            revenueTab={revenueTab}
-            setRevenueTab={setRevenueTab}
-            canViewFinance={canViewFinance}
-          />
-        )}
+        {view === "command" && <CommandView canViewFinance={canViewFinance} />}
         {view === "registry" && <RegistryView permissions={permissions} />}
         {view === "close" && <CloseView permissions={permissions} />}
         {view === "trace" && (
@@ -553,279 +368,8 @@ export default function AppShell() {
 
 /* ------------------------------------------------------------------ command */
 
-function CommandView({
-  selected,
-  setSelected,
-  revenueTab,
-  setRevenueTab,
-  canViewFinance,
-}: {
-  selected: string;
-  setSelected: (s: string) => void;
-  revenueTab: RevenueTab;
-  setRevenueTab: (t: RevenueTab) => void;
-  canViewFinance: boolean;
-}) {
-  const visibleChannels = canViewFinance
-    ? CHANNELS
-    : CHANNELS.map((channel) => restrictChannelFinance(channel));
-  const selectedChannel =
-    visibleChannels.find((c) => c.name === selected) ?? visibleChannels[0] ?? FALLBACK_CHANNEL;
-  const revenueConfig = REVENUE_TAB_CONFIG[revenueTab];
-  const visibleKpis = KPIS.map((k) => {
-    const metric =
-      k.id === "net"
-        ? {
-            ...k,
-            label: revenueConfig.kpiLabel,
-            value: selectedChannel[revenueConfig.amountKey],
-            badge: selectedChannel.confidence,
-            note: [selectedChannel.name, revenueConfig.kpiNote],
-          }
-        : k;
-    return metric.finance && !canViewFinance
-      ? { ...metric, value: RESTRICTED_FINANCE_VALUE, note: ["Finance role required", "Server filtered"] }
-      : metric;
-  });
-  const visibleExplainRows = explainRowsForChannel(selectedChannel, revenueTab, canViewFinance);
-
-  return (
-    <>
-      {/* status strip */}
-      <section className="status-strip" aria-label="Revenue summary">
-        {visibleKpis.map((k) => (
-          <article key={k.id} className={`metric ${k.tone}`}>
-            <header>
-              <span className="metric-label">{k.label}</span>
-              <Badge tone={k.badge.tone}>{k.badge.text}</Badge>
-            </header>
-            <div className={`metric-value${k.finance ? " finance-data" : ""}`}>{k.value}</div>
-            <div className="metric-note">
-              <span>{k.note[0]}</span>
-              {k.id === "close" ? (
-                <span className="locked">
-                  <LockIcon />
-                  {k.note[1]}
-                </span>
-              ) : (
-                <span>{k.note[1]}</span>
-              )}
-            </div>
-          </article>
-        ))}
-      </section>
-
-      <section className="workspace" aria-label="Command workspace">
-        <div className="work-left">
-          {/* channel revenue table */}
-          <section className="panel channel-table" aria-labelledby="channelTableTitle">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong id="channelTableTitle">Channel Revenue Table</strong>
-                <span>Money values are source-linked and permission-gated</span>
-              </div>
-              <div className="segmented" role="tablist" aria-label="Revenue type">
-                {REVENUE_TABS.map((t) => (
-                  <button
-                    key={t}
-                    type="button"
-                    role="tab"
-                    aria-selected={revenueTab === t}
-                    className={revenueTab === t ? "is-active" : undefined}
-                    onClick={() => setRevenueTab(t)}
-                  >
-                    {t}
-                  </button>
-                ))}
-              </div>
-            </div>
-            <div className="table-wrap">
-              <table role="grid" aria-label="Channel revenue">
-                <thead>
-                  <tr>
-                    <th scope="col">Channel</th>
-                    <th scope="col">Company</th>
-                    <th scope="col">CMS</th>
-                    <th scope="col">{revenueConfig.tableLabel}</th>
-                    <th scope="col">Gross</th>
-                    <th scope="col">Tax</th>
-                    <th scope="col">Deductions</th>
-                    <th scope="col">Net</th>
-                    <th scope="col">Confidence</th>
-                    <th scope="col">Issues</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {visibleChannels.map((c) => {
-                    const isSel = c.name === selected;
-                    return (
-                      <tr
-                        key={c.id}
-                        role="row"
-                        tabIndex={0}
-                        aria-selected={isSel}
-                        className={isSel ? "is-selected" : undefined}
-                        onClick={() => setSelected(c.name)}
-                        onKeyDown={(e) => {
-                          if (e.target !== e.currentTarget) return;
-                          if (e.key === "Enter" || e.key === " ") {
-                            e.preventDefault();
-                            setSelected(c.name);
-                          }
-                        }}
-                      >
-                        <td>
-                          <span className="channel-cell">
-                            <span className="avatar">{c.avatar}</span>
-                            <span className="channel-copy">
-                              <span className="channel-name">{c.name}</span>
-                              <span className="channel-id">{c.code}</span>
-                              <button
-                                type="button"
-                                className="mini-button inline-explain"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setSelected(c.name);
-                                }}
-                              >
-                                Explain
-                              </button>
-                            </span>
-                          </span>
-                        </td>
-                        <td>{c.company}</td>
-                        <td>
-                          <Badge tone={c.cms.tone}>{c.cms.text}</Badge>
-                        </td>
-                        <td className="money finance-data">{c[revenueConfig.amountKey]}</td>
-                        <td className="money finance-data">{c.gross}</td>
-                        <td className="money finance-data">{c.tax}</td>
-                        <td className="money finance-data">{c.deductions}</td>
-                        <td className="money finance-data">{c.net}</td>
-                        <td>
-                          <Badge tone={c.confidence.tone}>{c.confidence.text}</Badge>
-                        </td>
-                        <td>
-                          {c.issue ? (
-                            <Badge tone={c.issue.tone}>{c.issue.text}</Badge>
-                          ) : (
-                            <span className="muted">None</span>
-                          )}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
-          </section>
-
-          {/* issue + close split */}
-          <div className="layout-split">
-            <section className="panel" aria-labelledby="issuesTitle">
-              <div className="panel-header">
-                <div className="panel-title">
-                  <strong id="issuesTitle">Issue Queue</strong>
-                  <span>Alerts block export until resolved or accepted</span>
-                </div>
-                <Badge tone="red">26 open</Badge>
-              </div>
-              <div className="issue-list" role="list">
-                {ISSUES.map((i) => (
-                  <ItemRow
-                    key={i.title}
-                    tone={i.tone}
-                    title={i.title}
-                    sub={i.sub}
-                    trailing={<Badge tone={i.badge.tone}>{i.badge.text}</Badge>}
-                  />
-                ))}
-              </div>
-            </section>
-
-            <section className="panel" aria-labelledby="closeTitle">
-              <div className="panel-header">
-                <div className="panel-title">
-                  <strong id="closeTitle">Month Close Controls</strong>
-                  <span>Restricted actions are audited</span>
-                </div>
-                <Badge tone="blue">Step 6</Badge>
-              </div>
-              <div className="close-list" role="list">
-                {CLOSE_STEPS.map((s) => (
-                  <ItemRow
-                    key={s.title}
-                    tone={s.tone}
-                    title={s.title}
-                    sub={s.sub}
-                    className="close-item"
-                    trailing={
-                      s.badge ? (
-                        <Badge tone={s.badge.tone}>{s.badge.text}</Badge>
-                      ) : (
-                        <button className="mini-button" type="button">
-                          {s.action}
-                        </button>
-                      )
-                    }
-                  />
-                ))}
-              </div>
-            </section>
-          </div>
-        </div>
-
-        {/* explain + readiness */}
-        <aside className="side-stack" aria-label="Explanation and readiness">
-          <section className="panel explain-card">
-            <div className="explain-head">
-              <div>
-                <h2>{selectedChannel.name}</h2>
-                <p>{revenueConfig.explanationTitle}, March 2026</p>
-              </div>
-              <Badge tone={selectedChannel.confidence.tone}>{selectedChannel.confidence.text}</Badge>
-            </div>
-            <div className="formula" role="text" aria-label="Revenue formula">
-              {revenueConfig.formula}
-            </div>
-            <div className="explain-list" role="list">
-              {visibleExplainRows.map((r) => (
-                <ItemRow
-                  key={r.key}
-                  tone={r.tone}
-                  title={r.title}
-                  sub={r.sub}
-                  className="explain-row"
-                  trailing={<span className="money finance-data">{r.value}</span>}
-                />
-              ))}
-            </div>
-          </section>
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong>Export Readiness</strong>
-                <span>Finance workbook, PDF, slide pack</span>
-              </div>
-              <Badge tone="amber">2 blockers</Badge>
-            </div>
-            <div className="issue-list" role="list">
-              {EXPORT_READINESS.map((r) => (
-                <ItemRow
-                  key={r.title}
-                  tone={r.tone}
-                  title={r.title}
-                  sub={r.sub}
-                  trailing={<Badge tone={r.badge.tone}>{r.badge.text}</Badge>}
-                />
-              ))}
-            </div>
-          </section>
-        </aside>
-      </section>
-    </>
-  );
-}
+// CommandView is the first REAL-data view; it lives in ./views/CommandView.tsx
+// and is wired to GET /revenue/months/{month}/net-revenue via useNetRevenue.
 
 function WorkflowRail() {
   return (
