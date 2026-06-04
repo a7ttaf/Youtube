@@ -314,7 +314,7 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
     unique key `uq_content_owner_channel_links_key` blocks inserting a fresh active
     row for the same start month — build the deactivate (N8) and reactivate (V8d)
     halves together.
-- ⏳ Allocation engine (Spec 2b) — PR-1 + PR-2 + PR-3 + PR-4 shipped (this branch): account-level
+- ✅ Allocation engine (Spec 2b) — FULLY SHIPPED (squash 06749d0, #67, 2026-06-04): PR-1 through PR-7 merged to main. account-level
   deduction allocation compute + read. `finance/allocation.py` distributes
   ACCOUNT-grain `deduction_components` across each account's verified channels
   (`list_verified_adsense_account_channels`) by source-aligned raw-gross-proportional
@@ -354,7 +354,7 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   live fallback when no committed run; OPEN stays live), with lossless reconstruction and
   full allocation_source/committed_run provenance on every surface plus an export
   disclosure token. No migration / no auth / no write-path change.
-  ✅ post_tax method shipped (this branch, 2026-06-04): `post_tax_revenue_proportional`
+  ✅ post_tax method shipped (squash 06749d0, #67, 2026-06-04): `post_tax_revenue_proportional`
   is now a second COMMITTABLE allocation method alongside `gross_revenue_proportional` —
   the engine/orchestrator parameterize on `allocation_method` (gross weights by source
   gross; post_tax weights by source net_revenue_usd, fail-closed omitting any

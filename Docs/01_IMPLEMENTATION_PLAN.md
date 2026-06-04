@@ -462,13 +462,13 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   identity columns (lines account/channel/component key; unallocated scope_id/component_key;
   notes channel) mirroring deduction_components; the commit OpenAPI contract now documents both
   201 (new snapshot) and 200 (idempotent replay).
-  PR-6 SHIPPED (this branch, 2026-06-03): read-switch — a central lock-aware
+  PR-6 SHIPPED (squash c6de90e, #65, 2026-06-03): read-switch — a central lock-aware
   resolve_month_account_allocation now backs all four readers (allocation GET, net-revenue,
   explain, exports), which prefer the latest committed snapshot for LOCKED months (lossless
   reconstruction; live fallback when no committed run; OPEN/no-close-row stays live), and emit
   full allocation_source/committed_run provenance on every surface plus an export disclosure
   token. No migration / no auth / no write-path change.
-  POST-TAX METHOD SHIPPED (this branch, 2026-06-04): allocation-method status —
+  POST-TAX METHOD SHIPPED (squash 06749d0, #67, 2026-06-04): allocation-method status —
   `gross_revenue_proportional` AND `post_tax_revenue_proportional` are now BOTH committable.
   The engine/orchestrator are parameterized on `allocation_method` (gross weights by source
   gross; post_tax weights by source net_revenue_usd, fail-closed omitting any
@@ -486,7 +486,7 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   Docs/superpowers/specs/2026-06-03-spec-payment-account-modeling-design.md); plus the
   remaining `company_level` / `manual` / `no_allocation` allocation methods.
   Prerequisite SHIPPED
-  (this branch): canonical channel↔account map — `adsense_content_owner_links`
+  (squash 714fde8, #57, 2026-05-31): canonical channel↔account map — `adsense_content_owner_links`
   (operator-verified account↔owner) + `content_owner_channel_links` (derived from
   source-row co-occurrence) + Alembic migration + audited propose/verify/reject
   API (dual MANAGE_ORG_MAPPING + CHANGE_ALLOCATION_RULE gate, per-account
