@@ -233,6 +233,52 @@ describe("useExplanation", () => {
     expect(result.current.loading).toBe(false);
   });
 
+  it("reset() discards an in-flight result (stays null) and does not stick the latch", async () => {
+    const inFlight = deferred<Response>();
+    // First call hangs (deferred); the post-reset call resolves immediately.
+    fetchMock()
+      .mockReturnValueOnce(inFlight.promise)
+      .mockImplementation(() => jsonResponse({ ...GROSS_EXPLANATION, value: "777.77" }));
+    const { result } = renderHook(() => useExplanation(), { wrapper });
+
+    // Start a request and leave it in flight.
+    let inFlightRun!: Promise<NumberExplanation | null>;
+    act(() => {
+      inFlightRun = result.current
+        .run({
+          channelId: "demo-channel-alpha",
+          month: "2026-03",
+          metric: "adjusted_gross_revenue_usd",
+        })
+        .catch(() => null);
+    });
+
+    // The operator changes filters: reset() abandons the in-flight request.
+    act(() => {
+      result.current.reset();
+    });
+
+    // The old request settles AFTER reset(): its token is now stale, so it must
+    // be discarded and must NOT commit data.
+    await act(async () => {
+      inFlight.resolve(jsonResponse({ ...GROSS_EXPLANATION, value: "111.11" }));
+      await inFlightRun;
+    });
+    expect(result.current.data).toBeNull();
+    expect(result.current.loading).toBe(false);
+
+    // The latch was cleared by reset(): a subsequent run() is not blocked.
+    await act(async () => {
+      await result.current.run({
+        channelId: "demo-channel-beta",
+        month: "2026-03",
+        metric: "adjusted_gross_revenue_usd",
+      });
+    });
+    expect(result.current.data?.value).toBe("777.77");
+    expect(fetchMock()).toHaveBeenCalledTimes(2);
+  });
+
   it("allows a fresh Explain after the in-flight request settles", async () => {
     // A fresh Response per call: a Response body can only be read once.
     fetchMock().mockImplementation(() => jsonResponse(GROSS_EXPLANATION));

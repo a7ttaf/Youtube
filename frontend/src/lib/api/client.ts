@@ -15,7 +15,17 @@ export class ApiError extends Error {
   }
 }
 
-function resolveUrl(path: string): string {
+/**
+ * Resolve a request path against the configured API origin.
+ *
+ * An already-absolute http(s) URL is returned untouched. Otherwise the path is
+ * prefixed with VITE_API_BASE_URL (trailing slashes stripped); when no base is
+ * configured this returns the original relative path unchanged, so same-origin
+ * deployments keep byte-identical relative URLs. Exported so non-JSON surfaces
+ * (e.g. binary download anchors) can target the same API origin the JSON client
+ * uses instead of hard-coding a relative href against the frontend origin.
+ */
+export function resolveUrl(path: string): string {
   if (/^https?:\/\//i.test(path)) return path;
   const raw = import.meta.env.VITE_API_BASE_URL ?? "";
   const base = raw.replace(/\/+$/, "");

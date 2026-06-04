@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import TraceView from "@/components/srcc/views/TraceView";
@@ -158,6 +158,15 @@ function fetchMock() {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
 }
 
+/** Resolve a Response from outside, so an explain POST can be held in flight. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 function renderTraceView(canViewFinance = true) {
   return render(
     <TenantProvider initialSlug="ums">
@@ -311,6 +320,48 @@ describe("TraceView wired to the explain endpoint", () => {
     await waitFor(() =>
       expect(screen.getByText("No permission")).toBeInTheDocument(),
     );
+  });
+
+  it("discards a stale explanation when the metric changes while the explain POST is in flight", async () => {
+    // The channel list resolves immediately; the explain POST is held open via a
+    // deferred so we can change a filter BEFORE the old response arrives.
+    const inFlight = deferred<Response>();
+    fetchMock().mockImplementation((input: unknown) => {
+      if (urlOf(input).includes("/explain")) return inFlight.promise;
+      return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
+    });
+    renderTraceView();
+
+    // Explain the default (gross) metric; the POST stays in flight.
+    const explainButton = await screen.findByRole("button", { name: /^explain$/i });
+    await waitFor(() => expect(explainButton).not.toBeDisabled());
+    fireEvent.click(explainButton);
+    await waitFor(() =>
+      expect(screen.getByText("Generating explanation…")).toBeInTheDocument(),
+    );
+
+    // The operator changes the metric while the gross explain is still pending.
+    // This is an explain input, so the reset effect must abandon the in-flight
+    // request and clear the rendered state.
+    fireEvent.change(screen.getByLabelText("Metric"), {
+      target: { value: "net_revenue_usd" },
+    });
+
+    // The OLD (gross) explanation now resolves — under the new metric filter. It
+    // must be discarded: its breakdown must NOT render.
+    await act(async () => {
+      inFlight.resolve(jsonResponse(NET_EXPLANATION));
+      await Promise.resolve();
+    });
+
+    // Back to the idle prompt (state cleared), not the stale breakdown.
+    await waitFor(() =>
+      expect(
+        screen.getByText(/select Explain to generate the source-linked breakdown/i),
+      ).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("Baseline gross revenue")).not.toBeInTheDocument();
+    expect(screen.queryByText("Channel-direct deductions")).not.toBeInTheDocument();
   });
 
   it("surfaces a channel-list load error without crashing the screen", async () => {

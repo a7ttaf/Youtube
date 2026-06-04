@@ -296,6 +296,49 @@ def _seed_and_build_app(
     """
     os.environ["UMS_TRUSTED_GATEWAY_TOKEN"] = _SMOKE_GATEWAY_TOKEN
 
+    # Imported here (not at module top) because _ensure_backend_path() puts the
+    # backend package on sys.path only inside main(), which runs first.
+    from ums_smart_revenue.config.settings import (
+        AUTHZ_SOURCE_ENV,
+        AUTHZ_SOURCE_HEADERS,
+    )
+
+    # FIX: pin header-based authz for THIS smoke process around app construction
+    # so the run stays hermetic under an ambient UMS_AUTHZ_SOURCE=database. The
+    # harness sends only trusted-gateway demo headers (no X-UMS-Tenant; the demo
+    # user is tenant-scoped), so an inherited database authz mode would break
+    # principal loading. The explicit create_app(authz_source=...) below is not
+    # enough on its own: ums_smart_revenue.app builds a module-level default app
+    # via create_app() AT IMPORT time, which reads UMS_AUTHZ_SOURCE from settings
+    # and raises before the smoke's own pinned call runs. So the env var is set
+    # (and the settings cache cleared) BEFORE that import, then restored after,
+    # never weakening the real header-auth gate.
+    previous_authz_source = os.environ.get(AUTHZ_SOURCE_ENV)
+    os.environ[AUTHZ_SOURCE_ENV] = AUTHZ_SOURCE_HEADERS
+    try:
+        return _seed_and_build_app_pinned(month, database_path, database_url)
+    finally:
+        if previous_authz_source is None:
+            os.environ.pop(AUTHZ_SOURCE_ENV, None)
+        else:
+            os.environ[AUTHZ_SOURCE_ENV] = previous_authz_source
+
+
+def _seed_and_build_app_pinned(
+    month: str, database_path: str, database_url: str
+) -> _SmokeContext:
+    """Seed + build the app with header-authz already pinned in the env.
+
+    Split out so the caller owns the env set/restore lifetime; this body runs
+    while UMS_AUTHZ_SOURCE is pinned to ``headers`` (see _seed_and_build_app).
+    """
+    from ums_smart_revenue.config import settings as settings_module
+    from ums_smart_revenue.config.settings import AUTHZ_SOURCE_HEADERS
+
+    # The settings loader is lru_cached; clear it so the gateway token AND the
+    # pinned header-authz source set above are read on the next load.
+    settings_module.load_app_settings.cache_clear()
+
     import scripts.seed_demo_month as seed
 
     # --demo-lock-bypass: the smoke exercises the production lock gate (which
@@ -310,16 +353,17 @@ def _seed_and_build_app(
     if seed_rc != 0:
         raise RuntimeError(f"seed_demo_month exited non-zero ({seed_rc})")
 
-    from ums_smart_revenue.config import settings as settings_module
-
-    # The settings loader is lru_cached; clear it so the token set above is read.
-    settings_module.load_app_settings.cache_clear()
-
     from fastapi.testclient import TestClient
 
+    # Importing this module builds its module-level default app via create_app();
+    # the env pin above keeps that import-time instantiation in header-auth mode.
     from ums_smart_revenue.app import create_app
 
-    app = create_app(database_url=database_url)
+    # The explicit authz_source also documents intent + defends the smoke's own
+    # app against any future settings drift, independent of the env pin.
+    app = create_app(
+        database_url=database_url, authz_source=AUTHZ_SOURCE_HEADERS
+    )
     return _SmokeContext(
         database_path=database_path,
         database_url=database_url,

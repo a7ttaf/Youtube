@@ -1,6 +1,6 @@
 import { useState } from "react";
 
-import { ApiError } from "@/lib/api/client";
+import { ApiError, resolveUrl } from "@/lib/api/client";
 import type {
   ExportJob,
   ExportRequestBody,
@@ -26,8 +26,10 @@ import { describeError } from "./CommandView";
 //   fills a request form (report type + scope + month + currency + reason),
 //   "Generate" POSTs to /exports (creating a QUEUED job + audit event), and the
 //   jobs table reloads from GET /exports. Each COMPLETED job exposes a DOWNLOAD
-//   link — a plain browser anchor pointing at the proxied binary path (the Vite
-//   dev proxy injects the trusted-gateway + X-UMS-Tenant headers) because the
+//   link — a plain browser anchor whose href is resolved against the same API
+//   origin the JSON client uses (resolveUrl): relative (proxied) when no base is
+//   configured so the Vite dev proxy injects the trusted-gateway + X-UMS-Tenant
+//   headers, or the configured VITE_API_BASE_URL origin otherwise — because the
 //   JSON-strict useApiClient cannot fetch binary. Loading / error / 403 states
 //   mirror CommandView and TraceView. The Export Guardrails side panel stays as
 //   static role context (it is descriptive, not API data).
@@ -99,23 +101,36 @@ const SCOPE_TYPE_OPTIONS: Array<{ value: ExportScopeType; label: string }> = [
 //   analytics CSV has no GET download endpoint yet, so it returns null and no
 //   link shows. The action verb (Download vs Generate) is derived from job
 //   status by the caller; this returns the route and the format suffix only.
-// Standards: The path is the proxied route — the Vite dev proxy injects the
-//   trusted-gateway + X-UMS-Tenant headers, so a plain <a download> works
-//   without the browser ever holding the gateway secret. Never fetched through
-//   useApiClient (JSON-strict; cannot read binary).
+// Standards: The href is resolved through the SAME base-URL logic the JSON
+//   client uses (resolveUrl), so when VITE_API_BASE_URL points at a separate API
+//   origin the download anchor targets that origin instead of the frontend's.
+//   With no base configured the href stays relative (byte-identical to before),
+//   so the Vite dev proxy still injects the trusted-gateway + X-UMS-Tenant
+//   headers and a plain <a download> works without the browser ever holding the
+//   gateway secret. Never fetched through useApiClient (JSON-strict; cannot read
+//   binary).
 // ============================================================================
-/** Returns the binary download route and artifact format for a job, or null if the type has no GET route. */
+/**
+ * Returns the binary download route (resolved against the configured API origin)
+ * and artifact format for a job, or null if the type has no GET route.
+ */
 function downloadFor(
   job: ExportJob,
 ): { href: string; format: string } | null {
   const id = encodeURIComponent(job.id);
   switch (job.export_type) {
     case "FINANCE_EXCEL":
-      return { href: `/exports/${id}/finance-workbook.xlsx`, format: "XLSX" };
+      return {
+        href: resolveUrl(`/exports/${id}/finance-workbook.xlsx`),
+        format: "XLSX",
+      };
     case "EXECUTIVE_PDF":
-      return { href: `/exports/${id}/executive.pdf`, format: "PDF" };
+      return { href: resolveUrl(`/exports/${id}/executive.pdf`), format: "PDF" };
     case "BRANDED_SLIDE_PACK":
-      return { href: `/exports/${id}/branded-slide-pack.pptx`, format: "PPTX" };
+      return {
+        href: resolveUrl(`/exports/${id}/branded-slide-pack.pptx`),
+        format: "PPTX",
+      };
     default:
       return null;
   }
@@ -695,10 +710,12 @@ function ExportJobRow({ job }: { job: ExportJob }) {
 function ExportDownloadCell({ job }: { job: ExportJob }) {
   const download = downloadFor(job);
   if (isDownloadable(job) && download) {
-    // Plain anchor: the proxied path lets the browser stream the binary with the
-    // dev proxy's injected trusted-gateway + X-UMS-Tenant headers. NOT fetched
-    // via useApiClient (which is JSON-strict and cannot read binary). A QUEUED
-    // job triggers server-side generation on the first click.
+    // Plain anchor: the href is resolved against the configured API origin
+    // (resolveUrl). When no base is set it stays relative so the dev proxy
+    // injects the trusted-gateway + X-UMS-Tenant headers; with VITE_API_BASE_URL
+    // it targets that API origin. NOT fetched via useApiClient (which is
+    // JSON-strict and cannot read binary). A QUEUED job triggers server-side
+    // generation on the first click.
     return (
       <a className="mini-button" href={download.href} download>
         {`${downloadVerb(job)} ${download.format}`}

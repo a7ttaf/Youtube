@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { ApiError } from "@/lib/api/client";
 import type {
@@ -162,6 +162,16 @@ export default function TraceView({
         /* The hook stored the error in state; nothing else to do here. */
       });
   };
+
+  // Clear the rendered explanation whenever the explain inputs change so a
+  // result that was in flight under the previous channel/month/metric cannot
+  // commit and render under the new filters. reset() also abandons that in-flight
+  // request (token bump) so it is discarded when it settles. The first render is
+  // a no-op (state already empty); the latch clear keeps the next Explain free.
+  const explanationReset = explanation.reset;
+  useEffect(() => {
+    explanationReset();
+  }, [effectiveChannelId, month, metric, explanationReset]);
 
   const permissionDetails = PERMISSION_DETAILS[role];
 

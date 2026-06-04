@@ -14,6 +14,9 @@ beforeEach(() => {
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
   vi.restoreAllMocks();
+  // The base-URL tests stub VITE_API_BASE_URL; unstub so it never leaks into a
+  // later test that expects the default (relative) href.
+  vi.unstubAllEnvs();
 });
 
 const READY_JOB: ExportJob = {
@@ -162,6 +165,34 @@ describe("ExportsView wired to the exports endpoint", () => {
       "/exports/11111111-1111-1111-1111-111111111111/finance-workbook.xlsx",
     );
     expect(link).toHaveAttribute("download");
+  });
+
+  it("keeps the download href relative when VITE_API_BASE_URL is unset", async () => {
+    // Explicitly empty base: the href must stay byte-identical to the
+    // same-origin (proxied) relative path so the dev proxy injects the headers.
+    vi.stubEnv("VITE_API_BASE_URL", "");
+    fetchMock().mockResolvedValue(jsonResponse(POPULATED_LIST));
+    renderExportsView();
+
+    const link = await screen.findByRole("link", { name: /download xlsx/i });
+    expect(link).toHaveAttribute(
+      "href",
+      "/exports/11111111-1111-1111-1111-111111111111/finance-workbook.xlsx",
+    );
+  });
+
+  it("targets the configured API origin in the download href when VITE_API_BASE_URL is set", async () => {
+    // With a separate API origin, the binary anchor must point at THAT origin —
+    // not the frontend origin — matching the base-URL logic the JSON client uses.
+    vi.stubEnv("VITE_API_BASE_URL", "https://api.example.com/");
+    fetchMock().mockResolvedValue(jsonResponse(POPULATED_LIST));
+    renderExportsView();
+
+    const link = await screen.findByRole("link", { name: /download xlsx/i });
+    expect(link).toHaveAttribute(
+      "href",
+      "https://api.example.com/exports/11111111-1111-1111-1111-111111111111/finance-workbook.xlsx",
+    );
   });
 
   it("does NOT fetch the binary through the api client (download is a plain anchor only)", async () => {

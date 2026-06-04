@@ -17,6 +17,9 @@ export type UseExplanationState = {
   // `null` when a same-tick duplicate Explain is dropped by the in-flight guard
   // (no POST fired), or rejects with the typed error already captured in `error`.
   run: (params: ExplanationParams) => Promise<NumberExplanation | null>;
+  // Clear {data, error} and abandon any in-flight request so a result cannot
+  // commit under filters it no longer matches; the next run() is not blocked.
+  reset: () => void;
 };
 
 // ============================================================================
@@ -53,6 +56,15 @@ export type UseExplanationState = {
 //   clicks read the same stale loading=false). The dropped call resolves with
 //   null (it is dropped, NOT queued); the ref clears in finally so the next
 //   user-initiated Explain proceeds.
+// Reset: supersession only discards a request superseded by a LATER run(); it
+//   does NOT cover the case where the operator changes month/channel/metric while
+//   an explain is in flight WITHOUT re-running, leaving the old response to commit
+//   and render under the new filters. reset() closes that gap: it clears
+//   {data,error}, bumps requestIdRef.current (so an in-flight resolution then
+//   fails its `requestIdRef.current === token` guard and is discarded, never
+//   committing), and clears the inFlightRef latch (so the bump does not strand
+//   the latch and block the next run()). Callers invoke it from an effect keyed
+//   on the explain inputs.
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() POST + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> NumberExplanation contract.
@@ -116,5 +128,22 @@ export function useExplanation(): UseExplanationState {
     [client],
   );
 
-  return { data, loading, error, run };
+  // ==========================================================================
+  // Purpose: Abandon any in-flight explanation and clear the rendered result so
+  //   a response cannot commit under filters it no longer matches. Bumping
+  //   requestIdRef.current makes an in-flight resolution fail its token guard
+  //   (discarded, never setData), and clearing inFlightRef releases the latch so
+  //   the bump does not block the next run(). Stable identity (no deps) so it can
+  //   sit in an effect dependency list without re-firing.
+  // Standards: state setters only; no fetch, no auth, no finance math.
+  // ==========================================================================
+  const reset = useCallback(() => {
+    requestIdRef.current += 1;
+    inFlightRef.current = false;
+    setData(null);
+    setError(null);
+    setLoading(false);
+  }, []);
+
+  return { data, loading, error, run, reset };
 }
