@@ -796,13 +796,20 @@ def _lock_month(session: Any, *, month: str, tenant_id: UUID, committer_user_id:
         }
 
 
-def _demo_principal_headers(*, committer_user_id: str, gateway_token: str | None) -> dict[str, str]:
+def _demo_principal_headers(
+    *, committer_user_id: str, gateway_token: str | None, tenant_slug: str,
+) -> dict[str, str]:
     """Return the trusted-gateway headers an operator/Vite proxy would send."""
+    # FIX: include X-UMS-Tenant so the printed headers work for non-default
+    # tenants (--tenant flag); missing this header causes the tenant resolver to
+    # reject the request in database-auth mode or bind the wrong tenant in
+    # header-auth mode.
     return {
         "X-User-Id": committer_user_id,
         "X-User-Email": _DEMO_COMMITTER_EMAIL,
         "X-Role": "finance_admin",
         "X-Scope-Type": "global",
+        "X-UMS-Tenant": tenant_slug,
         "X-UMS-Trusted-Gateway-Token": gateway_token or _DEMO_GATEWAY_TOKEN,
     }
 
@@ -1034,6 +1041,7 @@ def main(argv: list[str] | None = None) -> int:
     headers = _demo_principal_headers(
         committer_user_id=seed_summary["committer_user_id"],
         gateway_token=settings.trusted_gateway_token,
+        tenant_slug=tenant_slug,
     )
     _print_summary(
         database_url=database_url, month=args.month, tenant_id=tenant_id, tenant_slug=tenant_slug,

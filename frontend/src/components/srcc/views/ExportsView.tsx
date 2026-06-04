@@ -266,11 +266,17 @@ export default function ExportsView({ // skipcq: JS-0067, JS-R1005
       include_manual_override_notes: true,
     };
     // On success refetch the list so the new QUEUED job appears.
+    // FIX: gate side effects on a non-null result — requestExport() resolves
+    // with null when a same-tick duplicate is dropped by the in-flight guard
+    // (no POST fired); clearing the reason before the real in-flight POST
+    // settles would discard the operator's audit reason if that request fails.
     actions
       .requestExport(body)
-      .then(() => {
-        setReason("");
-        reload();
+      .then((created) => {
+        if (created !== null) {
+          setReason("");
+          reload();
+        }
       })
       .catch(() => {
         // The hook captures its own error state (actions.error), which the form

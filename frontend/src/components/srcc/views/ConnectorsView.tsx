@@ -839,9 +839,16 @@ function AdsenseSyncForm({ // skipcq: JS-0067, JS-R1005
           },
         ],
       })
-      .then(() => {
-        setReason("");
-        onSynced();
+      // FIX: gate side effects on a non-null result — syncPayments() resolves
+      // with null when a same-tick duplicate is dropped by the in-flight guard
+      // (no POST fired); clearing the reason and calling onSynced() before the
+      // real in-flight POST settles would refresh the list and discard the
+      // operator's audit reason if that surviving request then fails.
+      .then((synced) => {
+        if (synced !== null) {
+          setReason("");
+          onSynced();
+        }
       })
       .catch(() => {
         // The hook already captured the typed error in actions.error and
