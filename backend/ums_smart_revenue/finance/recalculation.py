@@ -17,16 +17,19 @@ NET_REVENUE_REQUIRED_METHODS = frozenset({"post_tax_revenue_proportional"})
 
 
 class RevenueRecalculationValidationError(ValueError):
-    pass
+    """Raised when recalculation input fails validation."""
 
 
 @dataclass(frozen=True)
 class RecalculationIssue:
+    """A blocking or informational issue found during recalculation preview."""
+
     issue_type: str
     severity: str
     message: str
 
     def to_api(self) -> dict[str, str]:
+        """Serialize to API dict."""
         return {
             "issue_type": self.issue_type,
             "severity": self.severity,
@@ -36,6 +39,8 @@ class RecalculationIssue:
 
 @dataclass(frozen=True)
 class RecalculationSourceSummary:
+    """Counts of revenue sources and overrides for one month's recalculation."""
+
     revenue_fact_count: int
     source_channel_count: int
     manual_override_count: int
@@ -44,6 +49,7 @@ class RecalculationSourceSummary:
     missing_net_revenue_source_count: int
 
     def to_api(self) -> dict[str, int]:
+        """Serialize to API dict."""
         return {
             "revenue_fact_count": self.revenue_fact_count,
             "source_channel_count": self.source_channel_count,
@@ -56,6 +62,8 @@ class RecalculationSourceSummary:
 
 @dataclass(frozen=True)
 class RevenueRecalculationPreview:
+    """Immutable result of a recalculation dry run."""
+
     month: str
     allocation_method: str
     scope_type: str
@@ -69,6 +77,7 @@ class RevenueRecalculationPreview:
     blocking_issues: tuple[RecalculationIssue, ...]
 
     def to_api(self) -> dict[str, object]:
+        """Serialize to API response dict."""
         return {
             "month": self.month,
             "allocation_method": self.allocation_method,
@@ -99,6 +108,7 @@ def build_recalculation_preview(
     facts: Iterable[RevenueFactEntry],
     manual_overrides: Iterable[RevenueManualOverrideEntry],
 ) -> RevenueRecalculationPreview:
+    """Build a dry-run recalculation preview for one month + scope."""
     normalized_method = normalize_allocation_method(allocation_method)
     normalized_currency = normalize_recalculation_currency(currency)
     if not dry_run:
@@ -164,6 +174,7 @@ def build_recalculation_preview(
 
 
 def normalize_allocation_method(value: str) -> str:
+    """Validate and normalize the allocation method string."""
     normalized = value.strip().lower()
     if normalized not in ALLOCATION_METHODS:
         allowed = ", ".join(sorted(ALLOCATION_METHODS))
@@ -174,6 +185,7 @@ def normalize_allocation_method(value: str) -> str:
 
 
 def normalize_recalculation_currency(value: str) -> str:
+    """Validate and normalize the currency to USD."""
     normalized = value.strip().upper()
     if normalized != "USD":
         raise RevenueRecalculationValidationError(
@@ -189,6 +201,7 @@ def _build_blocking_issues(
     source_channel_count: int,
     missing_net_revenue_source_count: int,
 ) -> list[RecalculationIssue]:
+    """Collect blocking RecalculationIssues for the given method and source counts."""
     issues: list[RecalculationIssue] = []
     if source_channel_count == 0:
         issues.append(
