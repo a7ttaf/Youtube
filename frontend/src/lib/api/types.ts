@@ -160,3 +160,113 @@ export type FinanceCloseLockErrorDetail = {
 export type FinanceMonthCloseMutationResponse = FinanceMonthCloseStatus & {
   audit_event: Record<string, unknown>;
 };
+
+// ============================================================================
+// Purpose: TypeScript mirror of the backend number-explanation JSON contract
+//   consumed by the Trace / Explain-Number screen. Fields are matched 1:1
+//   against NumberExplanationEntry.to_api() and the route-level audit additions
+//   (not guessed); money values stay STRINGS (decimal_to_api) and nullable
+//   fields serialize as null. Component shapes differ by metric: the gross
+//   metric emits baseline + override rows; the net metric emits those plus a
+//   deduction breakdown (channel-direct + account-allocated, OR a single
+//   source-reported deduction row) — so component fields beyond {key,label,
+//   value} are modelled as optional and read defensively by the view.
+// Standards: Read-only typed boundary at the API surface; no logic here.
+// Connections:
+//   - File: backend/ums_smart_revenue/finance/explanations.py
+//       NumberExplanationEntry.to_api()              (lines 71-84)   -> NumberExplanation
+//       SUPPORTED_METRICS                            (lines 29-31)   -> ExplanationMetric
+//       build_channel_month_revenue_explanation()    (lines 144-232) -> gross components
+//       _build_net_revenue_explanation()             (lines 235-400) -> net components
+//   - File: backend/ums_smart_revenue/api/revenue.py
+//       explain_channel_month_revenue_metric()       (lines 1358-1510) -> POST endpoint;
+//         adds audit_event (gross) or audit_events[] (net) to to_api().
+//       audit_record_to_api()                        (lines 1850-1860) -> NetRevenueAuditEvent
+// ============================================================================
+
+// The two metrics the explain endpoint accepts (SUPPORTED_METRICS). The query
+// param defaults to adjusted_gross_revenue_usd on the backend.
+export type ExplanationMetric =
+  | "adjusted_gross_revenue_usd"
+  | "net_revenue_usd";
+
+// Confidence block: {label: "HIGH"|"MEDIUM"|"LOW", score: decimal-as-string}.
+// Source: _confidence()/map_net_confidence() (explanations.py:34-53, 413-430).
+export type ExplanationConfidence = {
+  label: string;
+  score: string;
+};
+
+// One nested channel-direct deduction inside the net "channel_direct_deduction_usd"
+// component. Source: _build_net_revenue_explanation() (explanations.py:320-328).
+export type ExplanationDirectDeduction = {
+  component_kind: string;
+  source_system: string;
+  component_key: string;
+  amount_usd: MoneyString;
+};
+
+// One nested account-allocated deduction line inside the net
+// "account_allocated_deduction_usd" component.
+// Source: _build_net_revenue_explanation() (explanations.py:335-346).
+export type ExplanationAllocatedDeduction = {
+  adsense_account_id: string;
+  component_kind: string;
+  source_system: string;
+  component_key: string;
+  basis_source_kind: string | null;
+  basis_share: MoneyString;
+  allocated_amount_usd: MoneyString;
+};
+
+// One explanation component row. {key,label,value} are always present; the
+// remaining fields appear only on the component that carries them (gross
+// baseline source attribution, override/deduction counts, the net deduction
+// breakdown arrays, and the optional committed-allocation provenance merged in
+// via allocation_provenance_to_api). Read defensively in the view.
+export type ExplanationComponent = {
+  key: string;
+  label: string;
+  value: MoneyString;
+  // Gross baseline + net source-reported deduction rows.
+  source_kind?: string | null;
+  source_report_id?: string | null;
+  // Override + deduction breakdown row counts.
+  count?: number;
+  // Net channel-direct deduction breakdown.
+  components?: ExplanationDirectDeduction[];
+  // Net account-allocated deduction breakdown.
+  allocations?: ExplanationAllocatedDeduction[];
+  // Optional committed-allocation provenance (merged onto the account-allocated
+  // component only). Shape mirrors allocation_provenance_to_api().
+  allocation_source?: AllocationSource;
+  committed_run?: CommittedRun | null;
+};
+
+// One explanation warning (pending overrides, missing facts, net issues, …).
+// Source: warnings list in both builders (e.g. explanations.py:198-219, 376-387).
+export type ExplanationWarning = {
+  code: string;
+  message: string;
+};
+
+// POST /revenue/channels/{channel_id}/months/{month}/explain?metric={metric}
+// Source: NumberExplanationEntry.to_api() (explanations.py:71-84) plus the
+// route-level audit addition (revenue.py:1492-1497 net / 1508-1509 gross).
+export type NumberExplanation = {
+  month: string;
+  entity_type: string; // "channel"
+  entity_id: string; // youtube_channel_id
+  metric: string;
+  value: MoneyString;
+  currency: string;
+  formula: string;
+  confidence: ExplanationConfidence;
+  components: ExplanationComponent[];
+  warnings: ExplanationWarning[];
+  // Route-level additions: the gross path returns a single audit_event; the net
+  // path returns audit_events[] (REVENUE_VIEWED + PAYMENT_VIEWED). The screen
+  // does not render these but keeps them typed for completeness.
+  audit_event?: NetRevenueAuditEvent;
+  audit_events?: NetRevenueAuditEvent[];
+};

@@ -18,10 +18,6 @@ import {
   REGISTRY_CONTROLS,
   REGISTRY_ROWS,
   REGISTRY_SUMMARY,
-  TRACE_EVENTS,
-  TRACE_LINES_LARGE,
-  TRACE_NODES_LARGE,
-  TRACE_SUMMARY,
   VIEW_COPY,
   WORKFLOW_STEPS,
 } from "@/lib/mock/data";
@@ -29,6 +25,7 @@ import type { Role, ViewKey } from "@/lib/mock/data";
 import { BrandIcon, NAV_ICONS, RefreshIcon } from "./icons";
 import CloseView from "./views/CloseView";
 import CommandView from "./views/CommandView";
+import TraceView from "./views/TraceView";
 import {
   Badge,
   Dot,
@@ -126,9 +123,6 @@ export default function AppShell() {
   const authenticatedRole = SERVER_AUTHENTICATED_SESSION.role;
   const [previewRole, setPreviewRole] = useState<Role>(
     authenticatedRole ?? DEFAULT_PREVIEW_ROLE,
-  );
-  const [traceTab, setTraceTab] = useState<"Revenue Flow" | "Issues" | "Ownership">(
-    "Revenue Flow",
   );
 
   // ============================================================================
@@ -346,12 +340,7 @@ export default function AppShell() {
         {view === "registry" && <RegistryView permissions={permissions} />}
         {view === "close" && <CloseView permissions={permissions} />}
         {view === "trace" && (
-          <TraceView
-            traceTab={traceTab}
-            setTraceTab={setTraceTab}
-            canViewFinance={canViewFinance}
-            role={displayedRole}
-          />
+          <TraceView canViewFinance={canViewFinance} role={displayedRole} />
         )}
         {view === "exports" && <ExportsView permissions={permissions} />}
         {view === "connectors" && <ConnectorsView permissions={permissions} />}
@@ -528,128 +517,9 @@ function RegistryView({ permissions }: { permissions: AccessPermissions }) {
 
 /* ------------------------------------------------------------------ trace */
 
-function TraceView({
-  traceTab,
-  setTraceTab,
-  canViewFinance,
-  role,
-}: {
-  traceTab: "Revenue Flow" | "Issues" | "Ownership";
-  setTraceTab: (t: "Revenue Flow" | "Issues" | "Ownership") => void;
-  canViewFinance: boolean;
-  role: Role;
-}) {
-  const permissionDetails =
-    role === "finance"
-      ? [
-          { label: "Role", value: "Finance Admin" },
-          { label: "Scope", value: "Global finance month" },
-          { label: "Companies", value: "All allowed" },
-          { label: "Raw files", value: "Hidden unless explicitly granted" },
-        ]
-      : role === "assistant"
-        ? [
-            { label: "Role", value: "Assistant Analyst" },
-            { label: "Scope", value: "Assigned non-finance work" },
-            { label: "Companies", value: "Visible without money cells" },
-            { label: "Raw files", value: "Hidden unless explicitly granted" },
-          ]
-        : [
-            { label: "Role", value: "Company Manager" },
-            { label: "Scope", value: "Assigned company only" },
-            { label: "Companies", value: "Company-scoped" },
-            { label: "Raw files", value: "Hidden unless explicitly granted" },
-          ];
-
-  return (
-    <section className="view-page" aria-labelledby="traceViewTitle">
-      <div className="view-summary" aria-label="Trace summary">
-        {TRACE_SUMMARY.map((s) => (
-          <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
-        ))}
-      </div>
-
-      <div className="view-grid wide-side">
-        <section className="panel">
-          <div className="panel-header">
-            <div className="panel-title">
-              <strong id="traceViewTitle">Trace Explorer</strong>
-              <span>Ownership, source, issue, and payment relationships filtered by application permissions</span>
-            </div>
-            <div className="segmented" role="tablist" aria-label="Trace mode">
-              {(["Revenue Flow", "Issues", "Ownership"] as const).map((t) => (
-                <button
-                  key={t}
-                  type="button"
-                  role="tab"
-                  aria-selected={traceTab === t}
-                  className={traceTab === t ? "is-active" : undefined}
-                  onClick={() => setTraceTab(t)}
-                >
-                  {t}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div style={{ padding: 13 }}>
-            <div className="trace-canvas large" aria-label="SQL-scoped lineage mockup">
-              {TRACE_LINES_LARGE.map((l) => (
-                <span key={l.id} className="trace-line"
-                  style={{ left: l.left, top: l.top, width: l.width, transform: `rotate(${l.rotate}deg)` }} />
-              ))}
-              {TRACE_NODES_LARGE.map((n) => (
-                <span key={n.id}
-                  className={`trace-node${n.finance ? " finance" : ""}`}
-                  style={{ left: n.x, top: n.y }}>
-                  {n.text}
-                </span>
-              ))}
-              <span className="trace-note">
-                Dashboard users read SQL-backed lineage only. The app resolves scopes first,
-                then applies allowed company, channel, month, and revenue permissions before
-                trace data is returned.
-              </span>
-            </div>
-          </div>
-        </section>
-
-        <aside className="view-stack">
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong>Permission Filter</strong>
-                <span>Applied before SQL trace query construction</span>
-              </div>
-              <Badge tone="violet">Scoped trace</Badge>
-            </div>
-            <div className="detail-grid">
-              {permissionDetails.map((d) => (
-                <div key={d.label} className="detail-cell">
-                  <span>{d.label}</span><strong>{d.value}</strong>
-                </div>
-              ))}
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong>Trace Selection</strong>
-                <span>Issue path selected from SQL-backed reconciliation state</span>
-              </div>
-            </div>
-            <div className="issue-list" role="list">
-              {TRACE_EVENTS.map((t) => (
-                <ItemRow key={t.title} tone={t.tone} title={t.title} sub={t.sub}
-                  trailing={<Badge tone={t.badge.tone}>{t.badge.text}</Badge>} />
-              ))}
-            </div>
-          </section>
-        </aside>
-      </div>
-    </section>
-  );
-}
+// TraceView is the wired Explain-Number view; it lives in ./views/TraceView.tsx
+// and POSTs /revenue/channels/{channel}/months/{month}/explain?metric={metric}
+// via the useExplanation hook (reusing useNetRevenue for the channel dropdown).
 
 /* ------------------------------------------------------------------ exports */
 
