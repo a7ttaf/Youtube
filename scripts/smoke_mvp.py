@@ -40,9 +40,11 @@ _DEFAULT_MONTH = "2026-03"
 # and sends the same value in the demo headers, so the real trusted-gateway
 # check (compare_digest) is exercised without weakening anything.
 _SMOKE_GATEWAY_TOKEN = "smoke-mvp-trusted-gateway-token"
-# The seed's deterministic committer user id (uuid5 of the demo namespace). The
-# demo principal rides this identity through the trusted-gateway header path.
-_DEMO_USER_ID = "9e813633-675f-546a-be22-0c4d827229da"
+# The seed's deterministic committer user id, derived from the demo namespace
+# AND the default UMS tenant id via _demo_tenant_uuid so it matches the row the
+# seed inserts after the multi-tenant UUID fix (commit 9369d91):
+#   uuid5(NS, UMS_TENANT_ID.hex + "|user|committer") == fc3d2f68-…
+_DEMO_USER_ID = "fc3d2f68-a0e5-5525-b821-c372313c11eb"
 _DEMO_USER_EMAIL = "demo-seed@ums.local"
 # super_owner (global, all permissions) so the smoke proves EVERY screen's
 # endpoint returns 200 in one pass — including GET /connectors/credentials,
@@ -129,6 +131,13 @@ def _validate_finance_close(body: Any) -> str:
             f"unexpected close status: {body.get('status')!r}",
         )
     )
+
+
+def _validate_lock_refused(body: Any) -> str:
+    """Assert a readiness-refused lock returns a FastAPI 409 detail envelope."""
+    if not isinstance(body, Mapping):
+        return "response is not a JSON object"
+    return _require("detail" in body, "expected 'detail' key in 409 body")
 
 
 def _validate_readiness(body: Any) -> str:
@@ -270,7 +279,10 @@ def _build_checks(month: str) -> list[_Check]:
             f"/adsense/payments?month={month}",
             _validate_adsense_payments,
         ),
-        # Write-path smoke: unlock → create export job → re-lock (leaves month LOCKED).
+        # Write-path smoke: unlock → create export job → re-lock attempt (409 expected).
+        # The demo month uses single-source channels so lock_month() always hits the
+        # INSUFFICIENT_SOURCES readiness gate and returns 409 CONFLICT via the
+        # production route; the --demo-lock-bypass flag is only available in the seed.
         _Check(
             "Month Close",
             "unlock month (write)",
@@ -295,10 +307,11 @@ def _build_checks(month: str) -> list[_Check]:
         ),
         _Check(
             "Month Close",
-            "re-lock month (write)",
+            "re-lock month refused (write)",
             "POST",
             f"/finance-close/{month}/lock",
-            _validate_finance_close,
+            _validate_lock_refused,
+            expected_status=409,
             json_body={"reason": "smoke-re-lock"},
         ),
     ]
