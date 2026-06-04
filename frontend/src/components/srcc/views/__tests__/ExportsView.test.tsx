@@ -399,4 +399,18 @@ describe("ExportsView wired to the exports endpoint", () => {
     // The default selection is the first finance option.
     expect(reportType.value).toBe("FINANCE_EXCEL");
   });
+
+  it("offers only USD as the export currency until exchange-rate support ships", async () => {
+    fetchMock().mockResolvedValue(jsonResponse(EMPTY_LIST));
+    renderExportsView(true);
+
+    await waitFor(() =>
+      expect(screen.getByText(/No export jobs yet/i)).toBeInTheDocument(),
+    );
+
+    // The backend 422s every non-USD currency (_normalize_currency), so the
+    // form must not offer choices that are guaranteed to fail.
+    const currency = screen.getByLabelText("Currency") as HTMLSelectElement;
+    expect(Array.from(currency.options).map((o) => o.value)).toEqual(["USD"]);
+  });
 });

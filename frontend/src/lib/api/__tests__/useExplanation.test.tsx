@@ -279,6 +279,69 @@ describe("useExplanation", () => {
     expect(fetchMock()).toHaveBeenCalledTimes(2);
   });
 
+  it("a stale completion cannot unlock the latch a newer Explain owns", async () => {
+    // Race: run A -> reset() releases the latch -> run B reclaims it -> A
+    // settles late. A's finally must NOT release B's latch, so a same-tick
+    // duplicate of B is still dropped (no third POST / duplicate audit event).
+    const requestA = deferred<Response>();
+    const requestB = deferred<Response>();
+    fetchMock()
+      .mockReturnValueOnce(requestA.promise)
+      .mockReturnValueOnce(requestB.promise)
+      .mockImplementation(() => jsonResponse(GROSS_EXPLANATION));
+    const { result } = renderHook(() => useExplanation(), { wrapper });
+
+    // A starts and stays in flight.
+    let runA!: Promise<NumberExplanation | null>;
+    act(() => {
+      runA = result.current
+        .run({
+          channelId: "demo-channel-alpha",
+          month: "2026-03",
+          metric: "adjusted_gross_revenue_usd",
+        })
+        .catch(() => null);
+    });
+    // Filters change: reset() abandons A and releases the latch.
+    act(() => {
+      result.current.reset();
+    });
+    // B starts and now OWNS the latch.
+    let runB!: Promise<NumberExplanation | null>;
+    act(() => {
+      runB = result.current
+        .run({
+          channelId: "demo-channel-beta",
+          month: "2026-03",
+          metric: "adjusted_gross_revenue_usd",
+        })
+        .catch(() => null);
+    });
+    // A settles late while B is still in flight: it must not unlock B's latch.
+    await act(async () => {
+      requestA.resolve(jsonResponse({ ...GROSS_EXPLANATION, value: "111.11" }));
+      await runA;
+    });
+    // A same-tick duplicate of B must still be dropped (latch intact).
+    let duplicateOfB!: Promise<NumberExplanation | null>;
+    act(() => {
+      duplicateOfB = result.current.run({
+        channelId: "demo-channel-beta",
+        month: "2026-03",
+        metric: "adjusted_gross_revenue_usd",
+      });
+    });
+    await act(async () => {
+      await expect(duplicateOfB).resolves.toBeNull();
+      requestB.resolve(jsonResponse({ ...GROSS_EXPLANATION, value: "222.22" }));
+      await runB;
+    });
+
+    // Exactly two POSTs (A and B); the duplicate never fired.
+    expect(fetchMock()).toHaveBeenCalledTimes(2);
+    expect(result.current.data?.value).toBe("222.22");
+  });
+
   it("allows a fresh Explain after the in-flight request settles", async () => {
     // A fresh Response per call: a Response body can only be read once.
     fetchMock().mockImplementation(() => jsonResponse(GROSS_EXPLANATION));

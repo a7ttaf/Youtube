@@ -51,7 +51,12 @@ import { describeError } from "./CommandView";
 //   - File: backend/ums_smart_revenue/api/exports.py:173 request_export / :287 list.
 // ============================================================================
 
-const CURRENCY_OPTIONS = ["USD", "EGP", "AED"];
+// FIX: USD only — the backend rejects every non-USD export currency
+// (reports/exports.py::_normalize_currency raises "currency must be USD until
+// exchange-rate support is implemented"), so offering EGP/AED produced a
+// valid-looking form whose submission was guaranteed to 422. Re-add display
+// currencies once backend exchange-rate support ships (Docs/18).
+const CURRENCY_OPTIONS = ["USD"];
 
 // Honest empty-state copy when the caller's permissions leave zero creatable
 // export types (e.g. an analytics-only viewer, since the CSV is held back below).

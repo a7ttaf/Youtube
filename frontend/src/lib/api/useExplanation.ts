@@ -54,8 +54,11 @@ export type UseExplanationState = {
 //   useExportActions / useConnectors / useAdsense) drops a same-tick duplicate
 //   BEFORE its POST fires; the state-based `loading` guard cannot catch it (both
 //   clicks read the same stale loading=false). The dropped call resolves with
-//   null (it is dropped, NOT queued); the ref clears in finally so the next
-//   user-initiated Explain proceeds.
+//   null (it is dropped, NOT queued). Unlike the sibling hooks, this latch
+//   stores the OWNING token (not a boolean): reset() can release the latch and
+//   a newer Explain can reclaim it while the old request is still settling, so
+//   finally releases the latch only when this request still owns it — a stale
+//   completion must never unlock a newer in-flight request.
 // Reset: supersession only discards a request superseded by a LATER run(); it
 //   does NOT cover the case where the operator changes month/channel/metric while
 //   an explain is in flight WITHOUT re-running, leaving the old response to commit
@@ -77,9 +80,10 @@ export function useExplanation(): UseExplanationState {
   const [error, setError] = useState<ApiError | Error | null>(null);
   // Monotonic counter so only the latest run() is allowed to commit state.
   const requestIdRef = useRef(0);
-  // Synchronous in-flight latch so a same-tick duplicate Explain is dropped
-  // before its POST fires (the state `loading` guard cannot see it in time).
-  const inFlightRef = useRef(false);
+  // Synchronous in-flight latch storing the OWNING request token (null = idle)
+  // so a same-tick duplicate Explain is dropped before its POST fires and a
+  // STALE completion can never release a latch a newer request now owns.
+  const inFlightRef = useRef<number | null>(null);
 
   const run = useCallback(
     (params: ExplanationParams): Promise<NumberExplanation | null> => {
@@ -87,8 +91,7 @@ export function useExplanation(): UseExplanationState {
       // double-click before re-render would otherwise pass the stale state
       // `loading` guard twice and write duplicate REVENUE_VIEWED / PAYMENT_VIEWED
       // audit events (each explain POST upserts + audits server-side).
-      if (inFlightRef.current) return Promise.resolve(null);
-      inFlightRef.current = true;
+      if (inFlightRef.current !== null) return Promise.resolve(null);
       const { channelId, month, metric } = params;
       const path =
         `/revenue/channels/${encodeURIComponent(channelId)}` +
@@ -99,6 +102,7 @@ export function useExplanation(): UseExplanationState {
       // the render closure handed both the same token, letting a slow earlier
       // response overwrite a newer one.
       const token = ++requestIdRef.current;
+      inFlightRef.current = token;
       setLoading(true);
       setError(null);
       return client
@@ -122,7 +126,14 @@ export function useExplanation(): UseExplanationState {
           throw typed;
         })
         .finally(() => {
-          inFlightRef.current = false;
+          // FIX: only the request that still OWNS the latch may release it.
+          // After reset() cleared the latch and a newer Explain reclaimed it,
+          // this stale completion's unconditional `= false` used to unlock the
+          // newer in-flight request, letting a double-click duplicate its POST
+          // and audit events. Token ownership closes that window.
+          if (inFlightRef.current === token) {
+            inFlightRef.current = null;
+          }
         });
     },
     [client],
@@ -139,7 +150,7 @@ export function useExplanation(): UseExplanationState {
   // ==========================================================================
   const reset = useCallback(() => {
     requestIdRef.current += 1;
-    inFlightRef.current = false;
+    inFlightRef.current = null;
     setData(null);
     setError(null);
     setLoading(false);
