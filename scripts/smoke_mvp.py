@@ -4,8 +4,11 @@
 Proves that ONE seeded demo month flows through every backend endpoint the six
 wired dashboard screens consume. It:
 
-1. Seeds a fully-populated, LOCKED demo month (scripts/seed_demo_month.py) into a
-   throwaway SQLite file with ``--create-schema``.
+1. Seeds a fully-populated demo month (scripts/seed_demo_month.py) into a
+   throwaway SQLite file with ``--create-schema``. The seed exercises the real
+   production lock gate first (which refuses on the single-source demo month)
+   and reports its blockers, then ``--demo-lock-bypass`` forces the demo LOCKED
+   state so the LOCKED-month read paths are covered.
 2. Spins the FastAPI app up IN-PROCESS via TestClient (no live uvicorn), behind
    the real trusted-gateway header auth path (the demo principal headers an
    operator / Vite dev proxy would inject).
@@ -295,8 +298,14 @@ def _seed_and_build_app(
 
     import scripts.seed_demo_month as seed
 
+    # --demo-lock-bypass: the smoke exercises the production lock gate (which
+    # refuses on the single-source demo month) and then forces the demo LOCKED
+    # state so the LOCKED-month read paths are covered. Disposable SQLite only.
     seed_rc = seed.main(
-        ["--database-url", database_url, "--create-schema", "--month", month]
+        [
+            "--database-url", database_url, "--create-schema",
+            "--month", month, "--demo-lock-bypass",
+        ]
     )
     if seed_rc != 0:
         raise RuntimeError(f"seed_demo_month exited non-zero ({seed_rc})")
@@ -396,9 +405,10 @@ def _dispose_engine(database_url: str) -> None:
         from ums_smart_revenue.db import session as session_module
     except ImportError:
         return
-    engine = session_module._engine_cache.pop(database_url, None)
-    if engine is not None:
-        engine.dispose()
+    # FIX: Use the public dispose_cached_engine helper instead of reaching into
+    # the module-private _engine_cache, so cleanup no longer depends on backend
+    # internals (the helper disposes AND evicts under the cache lock).
+    session_module.dispose_cached_engine(database_url)
 
 
 def _cleanup(database_path: str, database_url: str | None = None) -> None:
@@ -440,7 +450,8 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
 # Blast Radius: None on real data — disposable SQLite, read-mostly probes. No
 #   finance math, no schema/migration change, no Neo4j.
 # Connections:
-#   - File: scripts/seed_demo_month.py -> seeds the LOCKED demo month.
+#   - File: scripts/seed_demo_month.py -> seeds the demo month; the production
+#     lock gate is exercised + reported, then --demo-lock-bypass forces LOCKED.
 #   - File: backend/ums_smart_revenue/app.py -> create_app (in-process).
 #   - File: frontend/src/lib/api/types.ts -> the contract fields asserted here.
 # ============================================================================

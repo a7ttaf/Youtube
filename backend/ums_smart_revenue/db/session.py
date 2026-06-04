@@ -25,6 +25,24 @@ def build_session_factory(
     return sessionmaker(bind=engine, autoflush=True, expire_on_commit=False)
 
 
+# ============================================================================
+# Purpose: Dispose AND evict the cached engine for one database_url so its
+#   connection pool is released (e.g. so SQLite frees a throwaway file handle on
+#   Windows before the file is deleted). No-op when no engine is cached.
+# Database/ORM: SQLAlchemy Engine cached in _engine_cache (no ORM models).
+# Standards: typed; thread-safe under _engine_cache_lock; no error swallowing.
+# Blast Radius: Engine lifecycle only. No auth, finance, audit, Neo4j, exports.
+# Connections:
+#   - File: scripts/smoke_mvp.py -> calls this before deleting the throwaway db.
+# ============================================================================
+def dispose_cached_engine(database_url: str) -> None:
+    """Dispose and evict the cached engine for ``database_url`` (no-op if absent)."""
+    with _engine_cache_lock:
+        engine = _engine_cache.pop(database_url, None)
+    if engine is not None:
+        engine.dispose()
+
+
 def session_dependency(
     session_factory: SessionFactory,
 ) -> Callable[[], Iterator[Session]]:
