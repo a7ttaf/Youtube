@@ -105,9 +105,9 @@ const SCOPE_TYPE_OPTIONS: Array<{ value: ExportScopeType; label: string }> = [
 //   useApiClient (JSON-strict; cannot read binary).
 // ============================================================================
 /** Returns the binary download route and artifact format for a job, or null if the type has no GET route. */
-const downloadFor = (
+function downloadFor(
   job: ExportJob,
-): { href: string; format: string } | null => {
+): { href: string; format: string } | null {
   const id = encodeURIComponent(job.id);
   switch (job.export_type) {
     case "FINANCE_EXCEL":
@@ -119,19 +119,19 @@ const downloadFor = (
     default:
       return null;
   }
-};
+}
 
 // ============================================================================
 // Purpose: The action verb for a downloadable job's link. A QUEUED job triggers
 //   server-side generation on first click; a COMPLETED job serves cached bytes.
 // ============================================================================
 /** Returns "Generate" for QUEUED jobs (generate-on-demand) and "Download" otherwise. */
-const downloadVerb = (job: ExportJob): string => {
+function downloadVerb(job: ExportJob): string {
   return job.status.toUpperCase() === "QUEUED" ? "Generate" : "Download";
-};
+}
 
 /** Maps an export-job status to its Severity badge tone. */
-const statusTone = (status: string): Severity => {
+function statusTone(status: string): Severity {
   switch (status.toUpperCase()) {
     case "COMPLETED":
       return "green";
@@ -144,7 +144,7 @@ const statusTone = (status: string): Severity => {
     default:
       return "blue";
   }
-};
+}
 
 // FIX: The backend download routes generate-on-demand: for a QUEUED job with no
 // persisted artifact they build + persist + stream the bytes (exports.py
@@ -158,17 +158,17 @@ const statusTone = (status: string): Severity => {
  * (generate-on-demand) and COMPLETED (cached) are downloadable; FAILED and
  * CANCELLED are not.
  */
-const isDownloadable = (job: ExportJob): boolean => {
+function isDownloadable(job: ExportJob): boolean {
   const status = job.status.toUpperCase();
   return status === "QUEUED" || status === "COMPLETED";
-};
+}
 
 /** Builds a human-readable scope label (e.g. "company · company-a"). */
-const scopeLabelMap: { [key: string]: string } = { global: "Global" };
-const scopeLabel = (job: ExportJob): string => {
+function scopeLabel(job: ExportJob): string {
+  if (job.scope_type === "global") return "Global";
   if (job.scope_id) return `${job.scope_type} · ${job.scope_id}`;
-  return scopeLabelMap[job.scope_type] ?? job.scope_type;
-};
+  return job.scope_type;
+}
 
 /**
  * The wired Exports screen: a permission-filtered request form plus the export
@@ -305,7 +305,7 @@ export default function ExportsView({
 }
 
 /** The Export Center panel header (title, description, and audited badge). */
-export function ExportCenterHeader() {
+function ExportCenterHeader() {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -321,7 +321,7 @@ export function ExportCenterHeader() {
 }
 
 /** Static side panel listing the export guardrails (descriptive role context). */
-export function ExportGuardrailsPanel() {
+function ExportGuardrailsPanel() {
   return (
     <aside className="view-stack">
       <section className="panel">
@@ -363,7 +363,7 @@ function GuardrailsHeader() {
  * an enabled form with no options. The label is kept by the parent so the field
  * stays accessible by name in both states.
  */
-export function ReportTypeField({
+function ReportTypeField({
   exportType,
   onExportType,
   reportTypeOptions,
@@ -400,7 +400,7 @@ export function ReportTypeField({
 }
 
 /** The export request form: report type, scope, month, currency, and reason. */
-export function RequestExportForm({
+function RequestExportForm({
   exportType,
   onExportType,
   reportTypeOptions,
@@ -533,7 +533,7 @@ export function RequestExportForm({
 }
 
 /** Inline alert banner shown when an export request POST fails. */
-export function RequestError({ error }: { error: ApiError | Error }) {
+function RequestError({ error }: { error: ApiError | Error }) {
   const { title, detail } = describeError(error);
   return (
     <div className="permission-band" role="alert" style={{ margin: 13 }}>
@@ -562,7 +562,7 @@ function RequestSuccess({ job }: { job: ExportJob }) {
 }
 
 /** The export jobs section: header with a refresh control plus the jobs body. */
-export function ExportJobsTable({
+function ExportJobsTable({
   jobs,
   loading,
   error,
@@ -596,7 +596,7 @@ export function ExportJobsTable({
 }
 
 /** Renders the export jobs table, or the error / loading / empty placeholder. */
-export function ExportJobsTableBody({
+function ExportJobsTableBody({
   jobs,
   loading,
   error,
@@ -621,7 +621,7 @@ export function ExportJobsTableBody({
     return (
       <div className="table-wrap" aria-busy="true">
         <div style={{ padding: 16 }} className="item-sub">
-          Loading export jobs…
+          Loading export jobs…
         </div>
       </div>
     );
@@ -652,7 +652,7 @@ export function ExportJobsTableBody({
 }
 
 /** The export jobs table header row (column labels). */
-const ExportJobsTableHead = () => {
+function ExportJobsTableHead() {
   return (
     <thead>
       <tr>
@@ -666,10 +666,10 @@ const ExportJobsTableHead = () => {
       </tr>
     </thead>
   );
-};
+}
 
 /** A single export-job table row, including its status badge and download cell. */
-export function ExportJobRow({ job }: { job: ExportJob }) {
+function ExportJobRow({ job }: { job: ExportJob }) {
   return (
     <tr>
       <td>{job.export_type}</td>
@@ -692,7 +692,7 @@ export function ExportJobRow({ job }: { job: ExportJob }) {
  * COMPLETED) when the type has a route, otherwise a failure reason or
  * not-ready note.
  */
-export function ExportDownloadCell({ job }: { job: ExportJob }) {
+function ExportDownloadCell({ job }: { job: ExportJob }) {
   const download = downloadFor(job);
   if (isDownloadable(job) && download) {
     // Plain anchor: the proxied path lets the browser stream the binary with the

@@ -55,7 +55,7 @@ const METRIC_OPTIONS: Array<{ value: ExplanationMetric; label: string }> = [
 ];
 
 /** Map a confidence label (HIGH/MEDIUM/LOW) to the badge tone, blue otherwise. */
-const confidenceTone = (label: string | undefined): Severity => {
+function confidenceTone(label: string | undefined): Severity {
   switch ((label ?? "").toUpperCase()) {
     case "HIGH":
       return "green";
@@ -66,15 +66,15 @@ const confidenceTone = (label: string | undefined): Severity => {
     default:
       return "blue";
   }
-};
+}
 
 // Component breakdown tone: the value row (positive contribution) is green,
 // deductions/overrides amber/blue; falls back to blue for unknown keys.
-const componentTone = (key: string): Severity => {
+function componentTone(key: string): Severity {
   if (key.includes("deduction")) return "amber";
   if (key.includes("override")) return "blue";
   return "green";
-};
+}
 
 /**
  * Static role -> permission-filter detail rows shown in the side panel. A closed
@@ -202,7 +202,7 @@ export default function TraceView({
 }
 
 /** Title block for the Explain Number panel. */
-const TraceHeader = () => {
+function TraceHeader() {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -215,10 +215,10 @@ const TraceHeader = () => {
       <Badge tone="violet">Audited read</Badge>
     </div>
   );
-};
+}
 
 /** Month / channel / metric selectors plus the Explain trigger for the trace screen. */
-const ExplanationFilters = ({
+function ExplanationFilters({
   month,
   onMonthChange,
   effectiveChannelId,
@@ -240,7 +240,7 @@ const ExplanationFilters = ({
   onMetricChange: (value: ExplanationMetric) => void;
   explaining: boolean;
   onExplain: () => void;
-}) => {
+}) {
   return (
     <div
       className="control-row"
@@ -293,7 +293,7 @@ const ExplanationFilters = ({
 }
 
 /** Option list for the channel selector: a placeholder when empty, otherwise rows. */
-export function ChannelOptions({
+function ChannelOptions({
   channels,
   channelsLoading,
 }: {
@@ -319,7 +319,7 @@ export function ChannelOptions({
 }
 
 /** Static role-context side panel describing the scope applied before authorization. */
-export function PermissionFilterPanel({
+function PermissionFilterPanel({
   details,
 }: {
   details: Array<{ label: string; value: string }>;
@@ -339,7 +339,7 @@ export function PermissionFilterPanel({
 }
 
 /** Title block for the permission-filter side panel. */
-export function PermissionFilterHeader() {
+function PermissionFilterHeader() {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -352,7 +352,7 @@ export function PermissionFilterHeader() {
 }
 
 /** A single label/value cell in the permission-filter detail grid. */
-export function PermissionDetailCell({
+function PermissionDetailCell({
   label,
   value,
 }: {
@@ -368,7 +368,7 @@ export function PermissionDetailCell({
 }
 
 /** Error band shown when the channel directory (net-revenue summary) fails to load. */
-export function ChannelLoadError({ error }: { error: ApiError | Error }) {
+function ChannelLoadError({ error }: { error: ApiError | Error }) {
   const { title, detail } = describeError(error);
   return (
     <div
@@ -387,7 +387,7 @@ export function ChannelLoadError({ error }: { error: ApiError | Error }) {
 }
 
 /** Render the explain hook's state: error, loading, idle prompt, or the result. */
-export function ExplanationPanel({
+function ExplanationPanel({
   state,
   canViewFinance,
   currency,
@@ -519,7 +519,7 @@ function ExplanationResult({
 }
 
 /** Build a component row subtitle from its source kind/report, item count, or key. */
-const componentSubtitle = (component: ExplanationComponent): string => {
+function componentSubtitle(component: ExplanationComponent): string {
   if (component.source_kind) {
     return component.source_report_id
       ? `${component.source_kind} · ${component.source_report_id}`
@@ -530,10 +530,10 @@ const componentSubtitle = (component: ExplanationComponent): string => {
     return `${component.count} ${items}`;
   }
   return component.key;
-};
+}
 
 /** One explanation component row with a permission-gated money cell. */
-export function ComponentRow({
+function ComponentRow({
   component,
   canViewFinance,
   currency,

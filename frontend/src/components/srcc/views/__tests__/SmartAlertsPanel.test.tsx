@@ -91,20 +91,20 @@ const SMART_ALERTS_CLEAR: SmartAlertsSummary = {
   audit_events: [],
 };
 
-const jsonResponse = (body: unknown, status = 200) => {
+function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-};
+}
 
 // Route each fetch by URL so the smart-alerts panel and the net-revenue content
 // can be driven with different responses in the same render — the core proof
 // that the panel fails independently.
-const routeFetch = (opts: {
+function routeFetch(opts: {
   netRevenue?: () => Response;
   smartAlerts?: () => Response;
-}) => {
+}) {
   (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
     (input: RequestInfo | URL) => {
       const url = String(input);
@@ -121,15 +121,15 @@ const routeFetch = (opts: {
       return Promise.resolve(jsonResponse({}, 404));
     },
   );
-};
+}
 
-const renderCommandView = (canViewFinance = true) => {
+function renderCommandView(canViewFinance = true) {
   return render(
     <TenantProvider initialSlug="ums">
       <CommandView canViewFinance={canViewFinance} />
     </TenantProvider>,
   );
-};
+}
 
 describe("SmartAlertsPanel in CommandView", () => {
   it("shows a loading state before the smart-alerts response resolves", async () => {

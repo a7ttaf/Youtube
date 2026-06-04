@@ -66,26 +66,16 @@ const ALLOCATION_SOURCE_COPY: Record<
   live_fallback: { label: "Live fallback", tone: "amber" },
 };
 
-const STATUS_TONE_MAP: Record<string, Severity> = {
-  LOCK: "green",
-  OK: "green",
-  CALCULATED: "green",
-  MISSING: "amber",
-  PENDING: "amber",
-  ERROR: "red",
-  BLOCK: "red",
-};
-
 /** Map a month/channel status string to a design-system badge tone. */
-const statusTone = (status: string): Severity => {
+function statusTone(status: string): Severity {
   const normalized = status.toUpperCase();
-  for (const [key, tone] of Object.entries(STATUS_TONE_MAP)) {
-    if (normalized.includes(key)) {
-      return tone;
-    }
+  if (normalized.includes("LOCK") || normalized === "OK" || normalized === "CALCULATED") {
+    return "green";
   }
+  if (normalized.includes("MISSING") || normalized.includes("PENDING")) return "amber";
+  if (normalized.includes("ERROR") || normalized.includes("BLOCK")) return "red";
   return "blue";
-};
+}
 
 // Map an alert severity to a design-system badge tone (HIGH -> red, MEDIUM ->
 // amber, LOW -> blue). Unknown severities fall back to blue.
@@ -103,15 +93,15 @@ function severityTone(severity: SmartAlertSeverity | string): Severity {
 }
 
 /** Human-facing label for a channel row (its YouTube channel id for now). */
-const channelDisplayName = (channel: ChannelNetRevenue): string => {
+function channelDisplayName(channel: ChannelNetRevenue): string {
   return channel.youtube_channel_id;
-};
+}
 
 /** Two-letter avatar initials derived from a channel's id. */
-const channelAvatar = (channel: ChannelNetRevenue): string => {
+function channelAvatar(channel: ChannelNetRevenue): string {
   const id = channel.youtube_channel_id.replace(/[^a-zA-Z0-9]/g, "");
   return (id.slice(-2) || "--").toUpperCase();
-};
+}
 
 /**
  * Command Center screen: month/scope filters, the real net-revenue status strip
@@ -200,6 +190,7 @@ export default function CommandView({
         canViewFinance={canViewFinance}
         currency={currency}
       />
+
       {/* smart-alerts / problem panel — REAL data, fails independently */}
       <SmartAlertsPanel month={month} />
 
@@ -224,7 +215,7 @@ export default function CommandView({
  * close, explanation, and export-readiness panels. Splits into named panels so
  * each JSX subtree stays shallow.
  */
-const CommandWorkspace = ({
+function CommandWorkspace({
   data,
   loading,
   error,
@@ -246,7 +237,7 @@ const CommandWorkspace = ({
   selectedChannelId: string | null;
   month: string;
   onSelect: (id: string) => void;
-}) => {
+}) {
   return (
     <section className="workspace" aria-label="Command workspace">
       <div className="work-left">
@@ -284,7 +275,7 @@ const CommandWorkspace = ({
 }
 
 /** Channel Revenue Table panel: header badge plus the real net-revenue table. */
-export function ChannelRevenuePanel({
+function ChannelRevenuePanel({
   data,
   loading,
   error,
@@ -326,7 +317,7 @@ export function ChannelRevenuePanel({
 }
 
 /** Mock Issue Queue panel (not yet wired to the API). */
-export function IssueQueuePanel() {
+function IssueQueuePanel() {
   return (
     <section className="panel" aria-labelledby="issuesTitle">
       <div className="panel-header">
@@ -352,7 +343,7 @@ export function IssueQueuePanel() {
 }
 
 /** Mock Month Close Controls panel (not yet wired to the API). */
-export function MonthCloseControlsPanel() {
+function MonthCloseControlsPanel() {
   return (
     <section className="panel" aria-labelledby="closeTitle">
       <div className="panel-header">
@@ -379,7 +370,7 @@ export function MonthCloseControlsPanel() {
 }
 
 /** Trailing control for a close step: a status badge or an action button. */
-export function CloseStepAction({ step }: { step: (typeof CLOSE_STEPS)[number] }) {
+function CloseStepAction({ step }: { step: (typeof CLOSE_STEPS)[number] }) {
   if (step.badge) {
     return <Badge tone={step.badge.tone}>{step.badge.text}</Badge>;
   }
@@ -391,7 +382,7 @@ export function CloseStepAction({ step }: { step: (typeof CLOSE_STEPS)[number] }
 }
 
 /** Net-revenue explanation card for the selected channel (or an empty state). */
-export function ExplainCard({
+function ExplainCard({
   selectedChannel,
   canViewFinance,
   currency,
@@ -442,7 +433,7 @@ export function ExplainCard({
 }
 
 /** Mock Export Readiness panel (not yet wired to the API). */
-export function ExportReadinessPanel() {
+function ExportReadinessPanel() {
   return (
     <section className="panel">
       <div className="panel-header">
@@ -472,12 +463,14 @@ export function ExportReadinessPanel() {
 //   message (matches the finance fail-closed model); other ApiError -> the
 //   typed status + message; non-ApiError -> generic network failure.
 // ============================================================================
-const apiErrorHandlers: Record<number | 'default', (error: ApiError) => { title: string; detail: string }> = {
-  403: () => ({
-    title: "No permission",
-    detail: "Your role cannot view net revenue for this month or scope.",
-  }),
-  default: (error) => {
+function describeError(error: ApiError | Error): { title: string; detail: string } {
+  if (error instanceof ApiError) {
+    if (error.status === 403) {
+      return {
+        title: "No permission",
+        detail: "Your role cannot view net revenue for this month or scope.",
+      };
+    }
     const detail =
       typeof error.body === "object" &&
       error.body !== null &&
@@ -485,19 +478,12 @@ const apiErrorHandlers: Record<number | 'default', (error: ApiError) => { title:
         ? (error.body as { detail: string }).detail
         : error.message;
     return { title: `Request failed (${error.status})`, detail };
-  },
-};
-
-const describeError = (error: ApiError | Error): { title: string; detail: string } => {
-  if (!(error instanceof ApiError)) {
-    return {
-      title: "Network error",
-      detail: error.message || "Could not reach the revenue service.",
-    };
   }
-  const handler = apiErrorHandlers[error.status] || apiErrorHandlers.default;
-  return handler(error);
-};
+  return {
+    title: "Network error",
+    detail: error.message || "Could not reach the revenue service.",
+  };
+}
 
 // ============================================================================
 // Purpose: Smart Alerts / Problem Panel for the Command Center. Fetches the
@@ -519,7 +505,7 @@ const describeError = (error: ApiError | Error): { title: string; detail: string
 //   - File: frontend/src/lib/api/types.ts -> SmartAlertsSummary contract.
 //   - File: backend/ums_smart_revenue/api/revenue.py:844 get_month_smart_alerts.
 // ============================================================================
-const SmartAlertsPanel = ({ month }: { month: string }) => {
+function SmartAlertsPanel({ month }: { month: string }) {
   const { data, loading, error, reload } = useSmartAlerts({ month });
 
   return (
@@ -543,7 +529,7 @@ const SmartAlertsPanel = ({ month }: { month: string }) => {
       <SmartAlertsBody data={data} loading={loading} error={error} />
     </section>
   );
-};
+}
 
 // Header badge: surfaces the overall status + highest severity at a glance, and
 // degrades to Loading / Error / No permission without breaking the panel header.
@@ -560,19 +546,20 @@ function SmartAlertsHeaderBadge({
     const isForbidden = error instanceof ApiError && error.status === 403;
     return <Badge tone={isForbidden ? "blue" : "red"}>{isForbidden ? "No permission" : "Error"}</Badge>;
   }
-
-  const key = loading && !data ? "loading" : !data ? "empty" : data.status === "CLEAR" ? "clear" : "severity";
-  const badgeMap = {
-    loading: { tone: "blue", label: "Loading" },
-    empty: { tone: "amber", label: "Empty" },
-    clear: { tone: "green", label: "Clear" },
-    severity: {
-      tone: data?.highest_severity ? severityTone(data.highest_severity) : "amber",
-      label: data?.highest_severity ?? "Attention",
-    },
-  };
-  const { tone, label } = badgeMap[key];
-  return <Badge tone={tone}>{label}</Badge>;
+  if (loading && !data) {
+    return <Badge tone="blue">Loading</Badge>;
+  }
+  if (!data) {
+    return <Badge tone="amber">Empty</Badge>;
+  }
+  if (data.status === "CLEAR") {
+    return <Badge tone="green">Clear</Badge>;
+  }
+  return (
+    <Badge tone={data.highest_severity ? severityTone(data.highest_severity) : "amber"}>
+      {data.highest_severity ?? "Attention"}
+    </Badge>
+  );
 }
 
 /** Body of the smart-alerts panel: error, loading, empty, and alert-row states. */
@@ -648,7 +635,7 @@ function SmartAlertsBody({
 }
 
 /** Top metric strip summarising the month's gross, net, deductions, and allocation source. */
-export function NetRevenueStatusStrip({
+function NetRevenueStatusStrip({
   data,
   loading,
   error,
@@ -809,7 +796,7 @@ export function NetRevenueStatusStrip({
 }
 
 /** Selectable per-channel revenue table with error, loading, and empty states. */
-export function NetRevenueChannelTable({
+function NetRevenueChannelTable({
   data,
   loading,
   error,
@@ -873,7 +860,7 @@ export function NetRevenueChannelTable({
               selected={c.youtube_channel_id === selectedChannelId}
               onSelect={onSelect}
             />
-          }))
+          ))}
         </tbody>
       </table>
     </div>
@@ -881,7 +868,7 @@ export function NetRevenueChannelTable({
 }
 
 /** Static header row for the channel revenue table. */
-const ChannelTableHead = () => {
+function ChannelTableHead() {
   return (
     <thead>
       <tr>
@@ -895,10 +882,10 @@ const ChannelTableHead = () => {
       </tr>
     </thead>
   );
-};
+}
 
 /** Single selectable channel row: name, status, permission-gated money, and issues. */
-const ChannelRow = ({
+function ChannelRow({
   channel,
   canViewFinance,
   currency,
@@ -910,7 +897,7 @@ const ChannelRow = ({
   currency: string;
   selected: boolean;
   onSelect: (id: string) => void;
-}) => {
+}) {
   return (
     <tr
       role="row"
@@ -923,6 +910,7 @@ const ChannelRow = ({
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           onSelect(channel.youtube_channel_id);
+        }
       }}
     >
       <td>
@@ -955,18 +943,20 @@ const ChannelRow = ({
 }
 
 /** Avatar + name + source-kind cell for a channel row. */
-const ChannelNameCell = ({ channel }: { channel: ChannelNetRevenue }) => (
-  <span className="channel-cell">
-    <span className="avatar">{channelAvatar(channel)}</span>
-    <span className="channel-copy">
-      <span className="channel-name">{channelDisplayName(channel)}</span>
-      <span className="channel-id">{channel.primary_source_kind ?? "no source"}</span>
+function ChannelNameCell({ channel }: { channel: ChannelNetRevenue }) {
+  return (
+    <span className="channel-cell">
+      <span className="avatar">{channelAvatar(channel)}</span>
+      <span className="channel-copy">
+        <span className="channel-name">{channelDisplayName(channel)}</span>
+        <span className="channel-id">{channel.primary_source_kind ?? "no source"}</span>
+      </span>
     </span>
-  </span>
-);
+  );
+}
 
 /** Explanation rows for the selected channel: gross, deductions, and resulting net. */
-const ChannelExplainRows = ({
+function ChannelExplainRows({
   channel,
   canViewFinance,
   currency,
@@ -974,7 +964,7 @@ const ChannelExplainRows = ({
   channel: ChannelNetRevenue;
   canViewFinance: boolean;
   currency: string;
-}) => {
+}) {
   const rows: Array<{ key: string; tone: Severity; title: string; sub: string; value: string | null }> = [
     {
       key: "gross",
