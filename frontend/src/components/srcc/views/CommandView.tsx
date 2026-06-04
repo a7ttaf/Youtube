@@ -66,14 +66,23 @@ const ALLOCATION_SOURCE_COPY: Record<
   live_fallback: { label: "Live fallback", tone: "amber" },
 };
 
+/** Keyword → tone dispatch table; first matching keyword wins. */
+const STATUS_KEYWORD_TONE: Record<string, Severity> = {
+  LOCK: "green",
+  OK: "green",
+  CALCULATED: "green",
+  MISSING: "amber",
+  PENDING: "amber",
+  ERROR: "red",
+  BLOCK: "red",
+};
+
 /** Map a month/channel status string to a design-system badge tone. */
 function statusTone(status: string): Severity { // skipcq: JS-0067, JS-R1005
   const normalized = status.toUpperCase();
-  if (normalized.includes("LOCK") || normalized === "OK" || normalized === "CALCULATED") {
-    return "green";
+  for (const [keyword, tone] of Object.entries(STATUS_KEYWORD_TONE)) {
+    if (normalized.includes(keyword)) return tone;
   }
-  if (normalized.includes("MISSING") || normalized.includes("PENDING")) return "amber";
-  if (normalized.includes("ERROR") || normalized.includes("BLOCK")) return "red";
   return "blue";
 }
 
