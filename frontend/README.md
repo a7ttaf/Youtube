@@ -45,8 +45,8 @@ The Vite dev proxy reads it in Node and injects it server-side.
 
 ### 2. Seed one demo month
 
-Seeds a fully-populated, **LOCKED** demo month (3 channels, an account-level
-deduction, a committed allocation snapshot) — idempotent, safe to re-run:
+Seeds a fully-populated demo month (3 channels, an account-level deduction, a
+committed allocation snapshot) — idempotent, safe to re-run:
 
 ```bash
 # From the repo root. Default DB is UMS_DATABASE_URL; for a throwaway SQLite:
@@ -54,6 +54,25 @@ python scripts/seed_demo_month.py \
   --database-url "sqlite+pysqlite:///./demo.db" \
   --create-schema --month 2026-03
 ```
+
+**Lock behavior.** By default the seed asks the production lock service to close
+the month. A minimal demo month has single-source channels, so the real
+lock-time readiness recheck legitimately refuses (an `INSUFFICIENT_SOURCES`
+reconciliation blocker); the seed then leaves the month **OPEN**, prints the
+blocker types, and still exits 0 — it never forges a LOCKED status the
+production gate would reject. To force the demo LOCKED state on a disposable
+database, add `--demo-lock-bypass`:
+
+```bash
+python scripts/seed_demo_month.py \
+  --database-url "sqlite+pysqlite:///./demo.db" \
+  --create-schema --month 2026-03 --demo-lock-bypass
+```
+
+That flip writes **no audit event** and bypasses the production readiness gate —
+demo databases only. Trying the lock from the UI on this demo data therefore
+demonstrates the real readiness refusal: `POST /finance-close/{m}/lock` returns
+**409** with the blockers, which is exactly what the Month Close screen surfaces.
 
 The seed prints the demo principal headers and the committed-allocation summary.
 The default demo month is `2026-03` (the month every screen's selector defaults
@@ -113,6 +132,12 @@ additionally needs `MANAGE_CONNECTORS` (carried by `super_owner` /
 `connector_admin`), so under `finance_admin` that one table reports a no-permission
 state — expected, and shown honestly by the screen.
 
+The Connectors **job-sync** and **AdSense-sync** actions need `RUN_CONNECTOR_JOBS`.
+No in-shell preview role maps to a backend role that holds it (`finance_admin`
+would 403), so those two controls render **disabled for every preview role** with
+the hint "Requires a connector-operations role." — the read surface still loads;
+only the write actions are gated.
+
 There is also an in-shell role preview (top-left role switcher) when running in
 `DEV`, so you can flip between `finance` / `assistant` / `company` to demo the
 permission gating without restarting.
@@ -122,10 +147,10 @@ permission gating without restarting.
 | Screen (nav)        | Backend endpoint(s)                                              |
 | ------------------- | --------------------------------------------------------------- |
 | Command Center      | `GET /revenue/months/{m}/net-revenue` (status strip, channel table, explain rail) + `GET /revenue/months/{m}/smart-alerts` (problem panel) |
-| Month Close         | `GET /finance-close/{m}` + `GET /finance-close/{m}/readiness`; `POST /finance-close/{m}/lock` and `/unlock` |
+| Month Close         | `GET /finance-close/{m}` + `GET /finance-close/{m}/readiness`; `POST /finance-close/{m}/lock` and `/unlock` (inline **Reason (required, audited)** input + arm/confirm two-step — no browser prompts) |
 | Trace / Explain     | `POST /revenue/channels/{ch}/months/{m}/explain?metric=...` (channel list reused from net-revenue) |
-| Exports             | `GET /exports` (job list) + `POST /exports` (request); COMPLETED jobs download the binary over the proxied path |
-| Connectors          | `GET /connectors/credentials` + `GET /adsense/payments`; `POST /connectors/jobs` and `POST /adsense/sync-payments` |
+| Exports             | `GET /exports` (job list) + `POST /exports` (request); QUEUED jobs show a **Generate** link that triggers on-demand generation via the `GET` download route, COMPLETED jobs re-serve the persisted artifact over that same route. `ANALYTICS_SUMMARY_CSV` has no binary route (computed inline, no Generate/download link) |
+| Connectors          | `GET /connectors/credentials` + `GET /adsense/payments`; `POST /connectors/jobs` and `POST /adsense/sync-payments`. The job-sync and AdSense-sync controls render **disabled for every preview role** (hint: "Requires a connector-operations role.") and use an inline reason field — no browser prompts |
 | Registry / Audit    | Mock data only (not wired to the API yet — clearly labelled in-app) |
 
 Money values are backend decimal **strings** and are formatted for display only
