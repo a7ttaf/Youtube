@@ -5,9 +5,9 @@ import type { ExportJobCreated, ExportRequestBody } from "@/lib/api/types";
 import { useExportActions } from "@/lib/api/useExportActions";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-const wrapper = ({ children }: { children: React.ReactNode }) => {
+function wrapper({ children }: { children: React.ReactNode }) {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
-};
+}
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -55,36 +55,36 @@ const REQUEST_BODY: ExportRequestBody = {
   include_manual_override_notes: true,
 };
 
-const jsonResponse = (body: unknown, status = 200) => {
+function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-};
+}
 
-const fetchMock = () => {
+function fetchMock() {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-};
+}
 
-const lastFetchArgs = () => {
+function lastFetchArgs() {
   return fetchMock().mock.calls.at(-1);
-};
+}
 
 /** Narrow the last fetch args away from `undefined`, failing the test if none. */
-const requireFetchArgs = () => {
+function requireFetchArgs() {
   const args = lastFetchArgs();
   if (!args) throw new Error("expected fetch to have been called");
   return args;
-};
+}
 
 /** Resolve a promise from outside via a deferred, for ordering concurrent calls. */
-const deferred = function <T>() {
+function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
     resolve = res;
   });
   return { promise, resolve };
-};
+}
 
 describe("useExportActions", () => {
   it("starts idle (no data, no loading, no error) before requestExport()", () => {

@@ -93,37 +93,35 @@ const POPULATED_LIST: ExportListResponse = {
   pagination: { limit: 50, offset: 0, returned: 1, has_more: false },
 };
 
-(function() {
-  function jsonResponse(body: unknown, status = 200) {
-    return new Response(JSON.stringify(body), {
-      status,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
-})();
+function jsonResponse(body: unknown, status = 200) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
+}
 
-const urlOf = (input: unknown): string => {
+function urlOf(input: unknown): string {
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
-};
+}
 
-const methodOf = (init: unknown): string => {
+function methodOf(init: unknown): string {
   return ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
-};
+}
 
-const fetchMock = () => {
+function fetchMock() {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-};
+}
 
-const renderExportsView = (
+function renderExportsView(
   canCreateExport = true,
   {
     canExportFinance = true,
     canExportAnalytics = true,
   }: { canExportFinance?: boolean; canExportAnalytics?: boolean } = {},
-) => {
+) {
   return render(
     <TenantProvider initialSlug="ums">
       <ExportsView
@@ -133,7 +131,7 @@ const renderExportsView = (
       />
     </TenantProvider>,
   );
-};
+}
 
 describe("ExportsView wired to the exports endpoint", () => {
   it("renders the empty state when no export jobs exist", async () => {

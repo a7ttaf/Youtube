@@ -12,9 +12,9 @@ import {
 } from "@/lib/api/useMonthClose";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-const wrapper = ({ children }: { children: React.ReactNode }) => {
+function wrapper({ children }: { children: React.ReactNode }) {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
-};
+}
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -52,27 +52,27 @@ const READINESS_BLOCKED: FinanceCloseReadinessResponse = {
   ],
 };
 
-const jsonResponse = (body: unknown, status = 200) => {
+function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-};
+}
 
-const fetchMock = () => {
+function fetchMock() {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-};
+}
 
-const lastFetchArgs = () => {
+function lastFetchArgs() {
   return fetchMock().mock.calls.at(-1);
-};
+}
 
 /** Narrow the last fetch args away from `undefined`, failing the test if none. */
-const requireFetchArgs = () => {
+function requireFetchArgs() {
   const args = lastFetchArgs();
   if (!args) throw new Error("expected fetch to have been called");
   return args;
-};
+}
 
 describe("useMonthClose", () => {
   it("requests GET /finance-close/{month} and returns the parsed status", async () => {

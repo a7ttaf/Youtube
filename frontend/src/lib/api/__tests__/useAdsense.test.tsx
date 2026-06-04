@@ -11,9 +11,9 @@ import {
 } from "@/lib/api/useAdsense";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-const wrapper = ({ children }: { children: React.ReactNode }) => {
+function wrapper({ children }: { children: React.ReactNode }) {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
-};
+}
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -58,13 +58,13 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
-const fetchMock = () => {
+function fetchMock() {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-};
+}
 
-const lastFetchArgs = () => {
+function lastFetchArgs() {
   return fetchMock().mock.calls.at(-1);
-};
+}
 
 /** Narrow the last fetch args away from `undefined`, failing the test if none. */
 function requireFetchArgs() {
@@ -74,17 +74,17 @@ function requireFetchArgs() {
 }
 
 /** Resolve a promise from outside via a deferred, for ordering concurrent calls. */
-const deferred = function<T>() {
+function deferred<T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
     resolve = res;
   });
   return { promise, resolve };
-};
+}
 
-const methodOf = (init: unknown): string => {
+function methodOf(init: unknown): string {
   return ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
-};
+}
 
 describe("useAdsensePayments", () => {
   it("auto-fetches GET /adsense/payments with the month filter and returns items", async () => {

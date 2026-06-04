@@ -52,18 +52,15 @@ export function formatMoney(
   options: { currency?: string; placeholder?: string } = {},
 ): string {
   const { currency, placeholder = "—" } = options;
-  const isEmpty = value === null || value === undefined || value === "";
-  if (isEmpty) return placeholder;
+  if (value === null || value === undefined || value === "") return placeholder;
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return value;
-  const formatters: Record<string, (n: number, c?: string) => string> = {
-    USD: (n) => USD_FORMATTER.format(n),
+  if (currency && currency !== "USD") {
     // Only USD is backend-supported today; show the raw amount + code rather
     // than mislabel a non-USD value with a USD symbol.
-    nonUSD: (n, c) => `${n.toLocaleString("en-US", { maximumFractionDigits: 2 })} ${c}`,
-  };
-  const key = currency && currency !== "USD" ? "nonUSD" : "USD";
-  return formatters[key](parsed, currency);
+    return `${parsed.toLocaleString("en-US", { maximumFractionDigits: 2 })} ${currency}`;
+  }
+  return USD_FORMATTER.format(parsed);
 }
 
 // ============================================================================

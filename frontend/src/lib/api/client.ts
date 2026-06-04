@@ -5,14 +5,6 @@ import { useTenant } from "@/contexts/TenantContext";
 
 export class ApiError extends Error {
   readonly name = "ApiError";
-
-  /**
-   * Creates a new instance of ApiError representing an API request failure.
-   * @param message - The error message describing the failure.
-   * @param status - The HTTP status code returned by the API.
-   * @param body - The response body returned by the API.
-   * @param url - The URL of the API request that triggered the error.
-   */
   constructor(
     message: string,
     public readonly status: number,
@@ -41,20 +33,11 @@ export function resolveUrl(path: string): string {
   return `${base}${normalisedPath}`;
 }
 
-/**
- * Builds HTTP headers for a request, setting default Accept and Content-Type headers
- * and injecting tenant information when available.
- *
- * @param init - Initial HeadersInit object or undefined to start from scratch.
- * @param tenantSlug - Tenant identifier to include in the X-UMS-Tenant header.
- * @param hasJsonBody - Whether the request has a JSON body; sets Content-Type to application/json if true.
- * @returns Constructed Headers object with appropriate defaults and tenant header.
- */
-const buildHeaders = (
+function buildHeaders(
   init: HeadersInit | undefined,
   tenantSlug: string,
   hasJsonBody: boolean,
-): Headers => {
+): Headers {
   const headers = new Headers(init);
   if (!headers.has("Accept")) {
     headers.set("Accept", "application/json");
@@ -87,17 +70,8 @@ type ParseBodyOptions = {
   strictJson?: boolean;
 };
 
-/**
- * Represents an error that occurs when parsing JSON text fails.
- */
 class JsonParseError extends Error {
   readonly name = "JsonParseError";
-  /**
-   * Constructs a new JsonParseError.
-   *
-   * @param message - The error message.
-   * @param rawText - The raw JSON text that caused the parse error.
-   */
   constructor(
     message: string,
     public readonly rawText: string,
@@ -106,29 +80,17 @@ class JsonParseError extends Error {
   }
 }
 
-/**
- * Parses the body of an HTTP response.
- *
- * @param res The HTTP response to parse.
- * @param options Options for parsing the response body.
- * @returns A promise resolving to the parsed JSON object, raw text, or undefined.
- */
 async function parseBody(
   res: Response,
   options: ParseBodyOptions = {},
 ): Promise<unknown> {
-  const noContentStatuses = new Set([204, 205, 304]);
-  if (noContentStatuses.has(res.status)) {
+  if (res.status === 204 || res.status === 205 || res.status === 304) {
     return undefined;
   }
   const contentType = res.headers.get("Content-Type") ?? "";
   const text = await res.text();
-  if (!contentType.includes("application/json")) {
-    return text;
-  }
-  if (text.length === 0) {
-    return undefined;
-  }
+  if (!contentType.includes("application/json")) return text;
+  if (text.length === 0) return undefined;
   try {
     return JSON.parse(text);
   } catch (parseError) {
@@ -142,42 +104,28 @@ async function parseBody(
 
 type RequestOptions = RequestInit & { bodyIsJson?: boolean };
 
-/**
- * Prepares a RequestInit object by attaching the body as JSON or raw and flags if it's JSON.
- *
- * @param body The request body, which can be undefined, FormData, or a JSON-serializable object.
- * @param init Optional RequestInit to merge in additional request options.
- * @returns A RequestInit object including the serialized body and a bodyIsJson flag.
- */
-export function withJsonBody<T>(body: T, init: RequestInit = {}): RequestOptions {
-  if (body === undefined) {
-    return { ...init, body: body as BodyInit, bodyIsJson: false };
-  }
-  const rawTypes = [FormData, URLSearchParams, Blob, ArrayBuffer];
-  const isRaw = typeof body === "string" || rawTypes.some(t => body instanceof t) || ArrayBuffer.isView(body);
-  if (isRaw) {
+function withJsonBody(
+  body: unknown,
+  init: RequestInit = {},
+): RequestOptions {
+  if (body === undefined) return init;
+  if (
+    typeof body === "string" ||
+    body instanceof FormData ||
+    body instanceof URLSearchParams ||
+    body instanceof Blob ||
+    body instanceof ArrayBuffer ||
+    ArrayBuffer.isView(body)
+  ) {
     return { ...init, body: body as BodyInit, bodyIsJson: false };
   }
   return { ...init, body: JSON.stringify(body), bodyIsJson: true };
 }
 
-/**
- * Creates and returns an API client hook with a request method for making HTTP requests.
- *
- * @returns An object containing the request function to perform HTTP requests.
- */
 export function useApiClient() {
   const { tenantSlug } = useTenant();
 
   return useMemo(() => {
-    /**
-     * Performs an HTTP request using the API client.
-     *
-     * @param method The HTTP method to use (e.g., "GET", "POST").
-     * @param path The request path or URL.
-     * @param init Request initialization options, including headers and body.
-     * @returns A promise resolving to the response data of type T.
-     */
     async function request<T>(
       method: string,
       path: string,

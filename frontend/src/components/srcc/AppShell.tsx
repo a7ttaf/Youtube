@@ -72,7 +72,7 @@ const DEFAULT_PREVIEW_ROLE: Role = "assistant";
  * Resolve the boolean access permissions for a preview role so each view gates
  * finance visibility, registry editing, exports, connectors, and audit consistently.
  */
-const permissionsForRole = (role: Role): AccessPermissions => {
+function permissionsForRole(role: Role): AccessPermissions {
   const finance = role === "finance";
   const company = role === "company";
   return {
@@ -93,22 +93,22 @@ const permissionsForRole = (role: Role): AccessPermissions => {
     canRunConnectors: false,
     canViewAudit: finance,
   };
-};
+}
 
 /**
  * Report whether the viewer may create any export variant (global, scoped, or
  * raw), used to enable the header Create Export action.
  */
-const canCreateAnyExport = (permissions: AccessPermissions) => {
+function canCreateAnyExport(permissions: AccessPermissions) {
   return (
     permissions.canCreateGlobalExports ||
     permissions.canCreateScopedExports ||
     permissions.canRequestRawExports
   );
-};
+}
 
 /** Render the fallback panel shown when no authenticated session role is present. */
-export function AccessDeniedState() {
+function AccessDeniedState() {
   return (
     <div className="app">
       <main className="main" aria-labelledby="accessDeniedTitle">
@@ -121,7 +121,7 @@ export function AccessDeniedState() {
 }
 
 /** Panel header for the access-denied state, kept flat to limit JSX nesting. */
-const AccessDeniedHeader = () => {
+function AccessDeniedHeader() {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -131,7 +131,7 @@ const AccessDeniedHeader = () => {
       <Badge tone="red">No session role</Badge>
     </div>
   );
-};
+}
 
 /* ------------------------------------------------------------------ tenant bootstrap */
 
@@ -160,7 +160,7 @@ type TenantBootstrap = {
  * Bootstrap the active tenant from /tenants/me, hydrating TenantContext and
  * exposing the dev-only proof label that reflects success or the typed error.
  */
-export function useTenantBootstrap(displayedRole: Role | undefined): TenantBootstrap {
+function useTenantBootstrap(displayedRole: Role | undefined): TenantBootstrap {
   const tenant = useTenant();
   const client = useApiClient();
   const hasRequestedTenantRef = useRef(false);
@@ -197,15 +197,14 @@ export function useTenantBootstrap(displayedRole: Role | undefined): TenantBoots
  * Extract the trimmed `detail` string from a typed ApiError JSON body, or null
  * when the body has no usable detail message.
  */
-export function apiErrorDetail(error: ApiError | Error | null): string | null {
-  const checks = {
-    isApiError: error instanceof ApiError,
-    hasBodyObject: typeof error.body === "object" && error.body !== null,
-    hasDetail: typeof (error.body as { detail?: unknown }).detail === "string",
-    hasDetailValue: (error.body as { detail: string }).detail.trim().length > 0,
-  };
-
-  if (Object.values(checks).every(Boolean)) {
+function apiErrorDetail(error: ApiError | Error | null): string | null {
+  if (
+    error instanceof ApiError &&
+    typeof error.body === "object" &&
+    error.body !== null &&
+    typeof (error.body as { detail?: unknown }).detail === "string" &&
+    (error.body as { detail: string }).detail.trim().length > 0
+  ) {
     return (error.body as { detail: string }).detail;
   }
   return null;
@@ -215,10 +214,10 @@ export function apiErrorDetail(error: ApiError | Error | null): string | null {
  * Build the dev-only tenant proof label from the hydrated tenant context and
  * any bootstrap error, covering the loading, success, and failure states.
  */
-const tenantProofLabel = (
+function tenantProofLabel(
   tenant: ReturnType<typeof useTenant>,
   tenantError: ApiError | Error | null,
-): string => {
+): string {
   // Pre-hydration the slug is intentionally empty — show a sentinel rather
   // than a stray space so the dev proof tag stays readable.
   const displaySlug = tenant.tenantSlug || "(resolving…)";
@@ -232,7 +231,7 @@ const tenantProofLabel = (
     return `Tenant: ${tenant.displayName} (${tenant.tenantSlug}) — id ${tenant.id}`;
   }
   return `Tenant: ${displaySlug} (loading…)`;
-};
+}
 
 /* ------------------------------------------------------------------ shell */
 
@@ -258,18 +257,9 @@ export default function AppShell() {
   const canViewFinance = permissions.canViewFinance;
   const copy = VIEW_COPY[view];
 
-  const envComponentMap = {
-    true: <TenantProofTag label={proofLabel} />, 
-    false: null,
-  };
-
-  const viewComponentMap: Record<ViewKey, JSX.Element | null> = {
-    command: <WorkflowRail />,
-  };
-
   return (
     <div className="app">
-      {envComponentMap[import.meta.env.DEV]}
+      {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
       <Sidebar
         view={view}
         onSelectView={setView}
@@ -291,14 +281,14 @@ export default function AppShell() {
           canViewFinance={canViewFinance}
           displayedRole={displayedRole}
         />
-        {viewComponentMap[view]}
+        {view === "command" && <WorkflowRail />}
       </main>
     </div>
   );
 }
 
 /** Dev-only fixed-position tag that proves which tenant the shell resolved. */
-export function TenantProofTag({ label }: { label: string }) {
+function TenantProofTag({ label }: { label: string }) {
   return (
     <small
       data-testid="tenant-proof"
@@ -324,7 +314,7 @@ export function TenantProofTag({ label }: { label: string }) {
 /* ------------------------------------------------------------------ sidebar */
 
 /** Primary navigation sidebar: brand mark, nav groups, and the role card. */
-export function Sidebar({
+function Sidebar({
   view,
   onSelectView,
   previewRole,
@@ -371,7 +361,7 @@ export function Sidebar({
 }
 
 /** Render a single labelled navigation group with its selectable items. */
-export function NavSection({
+function NavSection({
   group,
   view,
   onSelectView,
@@ -404,7 +394,7 @@ export function NavSection({
 }
 
 /** Role selector (preview) plus the finance-visibility permission indicators. */
-export function RoleCard({
+function RoleCard({
   previewRole,
   onSelectPreviewRole,
   displayedRole,
@@ -458,7 +448,7 @@ export function RoleCard({
  * preview role does. The hint makes that explicit so a demo viewer does not read
  * the switcher as a real privilege change.
  */
-export function RolePreviewHint() {
+function RolePreviewHint() {
   return (
     <small className="role-preview-hint" data-testid="role-preview-hint">
       Presentation preview only — API permissions come from the dev gateway role.
@@ -469,7 +459,7 @@ export function RolePreviewHint() {
 /* ------------------------------------------------------------------ topbar */
 
 /** Page header: title, operational cues, and the report filter / export controls. */
-export function Topbar({
+function Topbar({
   title,
   subtitle,
   canViewFinance,
@@ -522,7 +512,7 @@ export function Topbar({
  * trace). Extracted so the Topbar JSX tree stays shallow; the bank-gap value is
  * gated behind canViewFinance so non-finance roles see the restricted sentinel.
  */
-export function OperationalCues({ canViewFinance }: { canViewFinance: boolean }) {
+function OperationalCues({ canViewFinance }: { canViewFinance: boolean }) {
   return (
     <div className="operational-cues" aria-label="Operational status">
       <span className="cue green">
@@ -544,7 +534,7 @@ export function OperationalCues({ canViewFinance }: { canViewFinance: boolean })
 /* ------------------------------------------------------------------ view router */
 
 /** Route the active view key to its wired or mock view with the right props. */
-export function ViewRouter({
+function ViewRouter({
   view,
   permissions,
   canViewFinance,
@@ -555,27 +545,30 @@ export function ViewRouter({
   canViewFinance: boolean;
   displayedRole: Role;
 }) {
-  const viewMap: Record<ViewKey, JSX.Element> = {
-    command: <CommandView canViewFinance={canViewFinance} />,
-    registry: <RegistryView permissions={permissions} />,
-    close: <CloseView permissions={permissions} />,
-    trace: <TraceView canViewFinance={canViewFinance} role={displayedRole} />,
-    exports: (
-      <ExportsView
-        canCreateExport={canCreateAnyExport(permissions)}
-        canExportFinance={permissions.canExportFinanceReports}
-        canExportAnalytics={permissions.canExportAnalyticsReports}
-      />
-    ),
-    connectors: (
-      <ConnectorsView
-        canRunConnectors={permissions.canRunConnectors}
-        canViewFinance={permissions.canViewFinance}
-      />
-    ),
-    audit: <AuditView permissions={permissions} />,  };
-
-  return viewMap[view] || null;
+  return (
+    <>
+      {view === "command" && <CommandView canViewFinance={canViewFinance} />}
+      {view === "registry" && <RegistryView permissions={permissions} />}
+      {view === "close" && <CloseView permissions={permissions} />}
+      {view === "trace" && (
+        <TraceView canViewFinance={canViewFinance} role={displayedRole} />
+      )}
+      {view === "exports" && (
+        <ExportsView
+          canCreateExport={canCreateAnyExport(permissions)}
+          canExportFinance={permissions.canExportFinanceReports}
+          canExportAnalytics={permissions.canExportAnalyticsReports}
+        />
+      )}
+      {view === "connectors" && (
+        <ConnectorsView
+          canRunConnectors={permissions.canRunConnectors}
+          canViewFinance={permissions.canViewFinance}
+        />
+      )}
+      {view === "audit" && <AuditView permissions={permissions} />}
+    </>
+  );
 }
 
 /* ------------------------------------------------------------------ command */
@@ -584,7 +577,7 @@ export function ViewRouter({
 // and is wired to GET /revenue/months/{month}/net-revenue via useNetRevenue.
 
 /** Month-close workflow rail shown beneath the Command view. */
-const WorkflowRail = () => {
+function WorkflowRail() {
   return (
     <footer className="workflow" aria-label="Month close workflow">
       <div className="workflow-label">
@@ -601,12 +594,12 @@ const WorkflowRail = () => {
       <button className="primary-button">Open Close</button>
     </footer>
   );
-};
+}
 
 /* ------------------------------------------------------------------ registry */
 
 /** Mock Channel Registry view: summary tiles, registry table, and side panels. */
-export function RegistryView({ permissions }: { permissions: AccessPermissions }) {
+function RegistryView({ permissions }: { permissions: AccessPermissions }) {
   const { canManageRegistry, canViewFinance } = permissions;
   return (
     <section className="view-page" aria-labelledby="registryTitle">
@@ -630,7 +623,7 @@ export function RegistryView({ permissions }: { permissions: AccessPermissions }
  * finance-visible mapping band, and the registry table. Extracted so the
  * RegistryView JSX tree stays shallow (JSX nesting).
  */
-export function RegistryMainPanel({ canManageRegistry }: { canManageRegistry: boolean }) {
+function RegistryMainPanel({ canManageRegistry }: { canManageRegistry: boolean }) {
   return (
     <section className="panel">
       <RegistryPanelHeader canManageRegistry={canManageRegistry} />
@@ -641,7 +634,7 @@ export function RegistryMainPanel({ canManageRegistry }: { canManageRegistry: bo
 }
 
 /** Registry panel header: title/subtitle and the bulk-import / mapping-change actions. */
-export function RegistryPanelHeader({ canManageRegistry }: { canManageRegistry: boolean }) {
+function RegistryPanelHeader({ canManageRegistry }: { canManageRegistry: boolean }) {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -661,7 +654,7 @@ export function RegistryPanelHeader({ canManageRegistry }: { canManageRegistry: 
 }
 
 /** Finance-visible mapping band; the scope badge reflects registry-edit access. */
-export const RegistryMappingBand = ({ canManageRegistry }: { canManageRegistry: boolean }) => {
+function RegistryMappingBand({ canManageRegistry }: { canManageRegistry: boolean }) {
   return (
     <div className="permission-band">
       <Dot tone="green" />
@@ -674,10 +667,10 @@ export const RegistryMappingBand = ({ canManageRegistry }: { canManageRegistry: 
       </Badge>
     </div>
   );
-};
+}
 
 /** The channel registry table column header row. Extracted to keep nesting shallow. */
-export function RegistryTableHead() {
+function RegistryTableHead() {
   return (
     <thead>
       <tr>
@@ -705,7 +698,7 @@ function RegistryTable({ canManageRegistry }: { canManageRegistry: boolean }) {
 }
 
 /** A single channel registry row; the action button is gated by registry access. */
-export function RegistryRow({
+function RegistryRow({
   row,
   canManageRegistry,
 }: {
@@ -735,7 +728,7 @@ export function RegistryRow({
 }
 
 /** The avatar + name/id identity cell for one registry row. Extracted to keep nesting shallow. */
-export function RegistryChannelCell({
+function RegistryChannelCell({
   name,
   code,
   avatar,
@@ -758,21 +751,21 @@ export function RegistryChannelCell({
 }
 
 /** Registry side panels: the mapping-change request form and registry controls. */
-const RegistrySidePanels = ({ canManageRegistry }: { canManageRegistry: boolean }) => {
+function RegistrySidePanels({ canManageRegistry }: { canManageRegistry: boolean }) {
   return (
     <aside className="view-stack" aria-label="Registry side panels">
       <MappingChangeRequestPanel canManageRegistry={canManageRegistry} />
       <RegistryControlsPanel />
     </aside>
   );
-};
+}
 
 /**
  * The mapping-change request panel: an audited form (channel, company, reason,
  * effective month) plus save/submit actions. Extracted with a shallow form so
  * the registry side-panel JSX tree stays within the nesting limit.
  */
-export function MappingChangeRequestPanel({ canManageRegistry }: { canManageRegistry: boolean }) {
+function MappingChangeRequestPanel({ canManageRegistry }: { canManageRegistry: boolean }) {
   return (
     <section className="panel">
       <div className="panel-header">
@@ -817,7 +810,7 @@ export function MappingChangeRequestPanel({ canManageRegistry }: { canManageRegi
 }
 
 /** A labelled mapping-form select row that owns its own options. Keeps the form tree shallow. */
-const MappingSelectRow = ({
+function MappingSelectRow({
   htmlFor,
   label,
   options,
@@ -827,19 +820,21 @@ const MappingSelectRow = ({
   label: string;
   options: string[];
   disabled: boolean;
-}) => (
-  <div className="field-row">
-    <label htmlFor={htmlFor}>{label}</label>
-    <select id={htmlFor} disabled={disabled}>
-      {options.map((option) => (
-        <option key={option}>{option}</option>
-      ))}
-    </select>
-  </div>
-);
+}) {
+  return (
+    <div className="field-row">
+      <label htmlFor={htmlFor}>{label}</label>
+      <select id={htmlFor} disabled={disabled}>
+        {options.map((option) => (
+          <option key={option}>{option}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
 
 /** A labelled mapping-form text input row. Keeps the form tree shallow. */
-export function MappingInputRow({
+function MappingInputRow({
   htmlFor,
   label,
   defaultValue,
@@ -859,7 +854,7 @@ export function MappingInputRow({
 }
 
 /** The registry-controls panel listing the expected production behaviors. */
-export function RegistryControlsPanel() {
+function RegistryControlsPanel() {
   return (
     <section className="panel">
       <div className="panel-header">
@@ -908,7 +903,7 @@ export function RegistryControlsPanel() {
 /* ------------------------------------------------------------------ audit */
 
 /** Mock Audit Log view: summary tiles, the audit timeline, and coverage panel. */
-export function AuditView({ permissions }: { permissions: AccessPermissions }) {
+function AuditView({ permissions }: { permissions: AccessPermissions }) {
   const { canViewAudit, canViewFinance } = permissions;
   return (
     <section className="view-page" aria-labelledby="auditTitle">
@@ -930,7 +925,7 @@ export function AuditView({ permissions }: { permissions: AccessPermissions }) {
  * The audit-log main panel: header (title + severity filter / download actions)
  * and the audit timeline. Extracted so the AuditView JSX tree stays shallow.
  */
-export function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) {
+function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) {
   return (
     <section className="panel">
       <AuditLogPanelHeader canViewAudit={canViewAudit} />
@@ -940,7 +935,7 @@ export function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) {
 }
 
 /** Audit-log panel header: title/subtitle and the severity filter + download actions. */
-const AuditLogPanelHeader = ({ canViewAudit }: { canViewAudit: boolean }) => {
+function AuditLogPanelHeader({ canViewAudit }: { canViewAudit: boolean }) {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -955,10 +950,10 @@ const AuditLogPanelHeader = ({ canViewAudit }: { canViewAudit: boolean }) => {
       </div>
     </div>
   );
-};
+}
 
 /** Audit event timeline; non-audit roles see a single restricted placeholder row. */
-const AuditTimeline = ({ canViewAudit }: { canViewAudit: boolean }) => {
+function AuditTimeline({ canViewAudit }: { canViewAudit: boolean }) {
   if (!canViewAudit) {
     return (
       <div className="timeline" role="list">
@@ -981,10 +976,10 @@ const AuditTimeline = ({ canViewAudit }: { canViewAudit: boolean }) => {
       ))}
     </div>
   );
-};
+}
 
 /** A single audit timeline entry: timestamp, tone dot, title/subtitle, and badge. */
-export function AuditTimelineItem({ event }: { event: (typeof AUDIT_EVENTS)[number] }) {
+function AuditTimelineItem({ event }: { event: (typeof AUDIT_EVENTS)[number] }) {
   return (
     <div className="timeline-item" role="listitem">
       <span className="timeline-time">{event.time}</span>
@@ -999,7 +994,7 @@ export function AuditTimelineItem({ event }: { event: (typeof AUDIT_EVENTS)[numb
 }
 
 /** Static audit coverage panel listing the always-audited sensitive surfaces. */
-export function AuditCoveragePanel() {
+function AuditCoveragePanel() {
   return (
     <aside className="view-stack">
       <section className="panel">
@@ -1018,7 +1013,7 @@ export function AuditCoveragePanel() {
 }
 
 /** Audit coverage panel header (title + subtitle). Extracted to keep nesting shallow. */
-export const AuditCoverageHeader = () => {
+function AuditCoverageHeader() {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -1027,4 +1022,4 @@ export const AuditCoverageHeader = () => {
       </div>
     </div>
   );
-};
+}

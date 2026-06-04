@@ -5,9 +5,9 @@ import type { ExportListResponse } from "@/lib/api/types";
 import { useExports } from "@/lib/api/useExports";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-const wrapper = ({ children }: { children: React.ReactNode }) => {
+function wrapper({ children }: { children: React.ReactNode }) {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
-};
+}
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -49,27 +49,27 @@ const LIST_BODY: ExportListResponse = {
   pagination: { limit: 50, offset: 0, returned: 1, has_more: false },
 };
 
-const jsonResponse = (body: unknown, status = 200) => {
+function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-};
+}
 
-const fetchMock = () => {
+function fetchMock() {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-};
+}
 
-const lastFetchArgs = () => {
+function lastFetchArgs() {
   return fetchMock().mock.calls.at(-1);
-};
+}
 
 /** Narrow the last fetch args away from `undefined`, failing the test if none. */
-const requireFetchArgs = () => {
+function requireFetchArgs() {
   const args = lastFetchArgs();
   if (!args) throw new Error("expected fetch to have been called");
   return args;
-};
+}
 
 describe("useExports", () => {
   it("auto-fetches GET /exports on mount and returns the items", async () => {

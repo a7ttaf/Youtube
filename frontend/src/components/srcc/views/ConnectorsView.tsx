@@ -62,20 +62,24 @@ const CONNECTOR_ROLE_HINT = "Requires a connector-operations role.";
 
 /** Map a connector credential status to a tone for its display badge. */
 function credentialStatusTone(status: string): Severity {
-  const statusToneMap: Record<string, Severity> = {
-    ACTIVE: "green",
-    CONNECTED: "green",
-    OK: "green",
-    DISABLED: "red",
-    REVOKED: "red",
-    ERROR: "red",
-    PENDING: "amber"
-  };
-  return statusToneMap[status.toUpperCase()] || "blue";
+  switch (status.toUpperCase()) {
+    case "ACTIVE":
+    case "CONNECTED":
+    case "OK":
+      return "green";
+    case "DISABLED":
+    case "REVOKED":
+    case "ERROR":
+      return "red";
+    case "PENDING":
+      return "amber";
+    default:
+      return "blue";
+  }
 }
 
 /** Map an AdSense payment status to a tone for its display badge. */
-const paymentStatusTone = (status: string): Severity => {
+function paymentStatusTone(status: string): Severity {
   switch (status.toUpperCase()) {
     case "PAID":
       return "green";
@@ -88,7 +92,7 @@ const paymentStatusTone = (status: string): Severity => {
     default:
       return "blue";
   }
-};
+}
 
 /** Format an ISO date string for display; echoes the raw value if unparsable. */
 function formatDate(value: string): string {
@@ -298,7 +302,7 @@ function DataSourcesPanel({
  * uses; the reason is recorded on the audit event. When the viewer cannot run
  * connectors the field is disabled and shows the connector-operations hint.
  */
-export function SyncReasonField({
+function SyncReasonField({
   canRunConnectors,
   reason,
   onReason,
@@ -330,7 +334,7 @@ export function SyncReasonField({
  * Right column of the Connectors screen: the AdSense payment-sync form panel and
  * the run-history honesty note. Extracted to keep the root JSX tree shallow.
  */
-export function ConnectorSidebar({
+function ConnectorSidebar({
   month,
   canRunConnectors,
   syncActions,
@@ -363,7 +367,7 @@ export function ConnectorSidebar({
  * restricted badge. Extracted so the sidebar JSX tree stays within the nesting
  * limit; the badge reflects whether the viewer may run connector jobs.
  */
-export function AdsenseSyncHeader({ canRunConnectors }: { canRunConnectors: boolean }) {
+function AdsenseSyncHeader({ canRunConnectors }: { canRunConnectors: boolean }) {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -411,7 +415,7 @@ function RunHistoryNote() {
 }
 
 /** Banner shown when a connector job-request POST fails (nothing was recorded). */
-export function RequestJobError({ error }: { error: ApiError | Error }) {
+function RequestJobError({ error }: { error: ApiError | Error }) {
   const { title, detail } = describeError(error);
   return (
     <div className="permission-band" role="alert" style={{ margin: 13 }}>
@@ -425,7 +429,7 @@ export function RequestJobError({ error }: { error: ApiError | Error }) {
   );
 }
 
-export function RequestJobSuccess({ result }: { result: ConnectorJobResponse }) {
+function RequestJobSuccess({ result }: { result: ConnectorJobResponse }) {
   // The backend records but does NOT execute the job; surface that honestly so
   // an operator never assumes data was pulled.
   const recordedOnly = result.execution_status === "recorded_not_executed";
@@ -454,7 +458,7 @@ export function RequestJobSuccess({ result }: { result: ConnectorJobResponse }) 
  * "Request sync" button. Each button is disabled while the viewer cannot run
  * connectors, the typed sync reason is empty, or a request is already in flight.
  */
-export function ConnectorCredentialsTable({
+function ConnectorCredentialsTable({
   credentials,
   loading,
   error,
@@ -480,8 +484,6 @@ export function ConnectorCredentialsTable({
           <p className="item-sub">{detail}</p>
         </div>
       </div>
-    );
-  }
     );
   }
 
@@ -532,7 +534,7 @@ export function ConnectorCredentialsTable({
 }
 
 /** Column header row for the connector data-sources table. Extracted to keep nesting shallow. */
-export function ConnectorCredentialsTableHead() {
+function ConnectorCredentialsTableHead() {
   return (
     <thead>
       <tr>
@@ -551,7 +553,7 @@ export function ConnectorCredentialsTableHead() {
  * secret-configured badge, and the per-row audited "Request sync" button. The
  * button shows the connector-operations hint when the viewer lacks the role.
  */
-export function ConnectorCredentialRow({
+function ConnectorCredentialRow({
   credential,
   canRunConnectors,
   requestDisabled,
@@ -598,7 +600,7 @@ export function ConnectorCredentialRow({
 }
 
 /** Render the secret-status badge for a credential row. */
-export function CredentialSecretBadge({ hasSecretRef }: { hasSecretRef: boolean }) {
+function CredentialSecretBadge({ hasSecretRef }: { hasSecretRef: boolean }) {
   return hasSecretRef ? (
     <Badge tone="green">Configured</Badge>
   ) : (
@@ -610,7 +612,7 @@ export function CredentialSecretBadge({ hasSecretRef }: { hasSecretRef: boolean 
  * The synced-AdSense-payments section: a month selector + refresh control above
  * the payments table for the selected month.
  */
-export function AdsensePaymentsSection({
+function AdsensePaymentsSection({
   month,
   onMonth,
   payments,
@@ -736,7 +738,7 @@ function AdsensePaymentsTable({
 }
 
 /** Column header row for the AdSense payments table. Extracted to keep nesting shallow. */
-export function AdsensePaymentsTableHead() {
+function AdsensePaymentsTableHead() {
   return (
     <thead>
       <tr>
@@ -755,13 +757,13 @@ export function AdsensePaymentsTableHead() {
  * string rendered for display only (no float math) and gated via financeDisplay,
  * so a non-finance viewer sees the Restricted sentinel rather than the value.
  */
-const AdsensePaymentRow = ({
+function AdsensePaymentRow({
   payment,
   canViewFinance,
 }: {
   payment: AdsensePayment;
   canViewFinance: boolean;
-}) => {
+}) {
   return (
     <tr>
       <td>{payment.source_account_id}</td>
@@ -779,7 +781,7 @@ const AdsensePaymentRow = ({
       </td>
     </tr>
   );
-};
+}
 
 /**
  * The AdSense payment-sync form: collects one payment row plus an audited reason
@@ -787,7 +789,7 @@ const AdsensePaymentRow = ({
  * when the viewer cannot run connectors; the submit button stays disabled until
  * every required field (and the reason) is filled.
  */
-const AdsenseSyncForm = ({
+function AdsenseSyncForm({
   defaultMonth,
   canRunConnectors,
   actions,
@@ -797,7 +799,7 @@ const AdsenseSyncForm = ({
   canRunConnectors: boolean;
   actions: ReturnType<typeof useAdsenseSyncActions>;
   onSynced: () => void;
-}) => {
+}) {
   const [accountId, setAccountId] = useState<string>("");
   const [paymentName, setPaymentName] = useState<string>("");
   const [paymentDate, setPaymentDate] = useState<string>("");
@@ -805,11 +807,14 @@ const AdsenseSyncForm = ({
   const [currency, setCurrency] = useState<string>("USD");
   const [reason, setReason] = useState<string>("");
 
-  const requiredFields = { accountId, paymentName, paymentDate, amount, reason };
-  const allFieldsFilled = Object.values(requiredFields).every((value) =>
-    value.trim().length > 0
-  );
-  const canSubmit = canRunConnectors && !actions.loading && allFieldsFilled;
+  const canSubmit =
+    canRunConnectors &&
+    !actions.loading &&
+    accountId.trim().length > 0 &&
+    paymentName.trim().length > 0 &&
+    paymentDate.trim().length > 0 &&
+    amount.trim().length > 0 &&
+    reason.trim().length > 0;
 
   /** Submit the single entered payment row for audited upsert into finance. */
   const onSubmit = () => {
@@ -931,7 +936,7 @@ const AdsenseSyncForm = ({
 }
 
 /** Banner shown when the AdSense payment-sync POST fails (nothing was synced). */
-export function SyncError({ error }: { error: ApiError | Error }) {
+function SyncError({ error }: { error: ApiError | Error }) {
   const { title, detail } = describeError(error);
   return (
     <div className="permission-band" role="alert">
