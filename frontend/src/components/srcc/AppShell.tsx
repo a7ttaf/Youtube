@@ -10,10 +10,6 @@ import {
   CONNECTOR_HEALTH,
   CONNECTOR_JOBS,
   CREDENTIAL_CONTROLS,
-  EXPORTS_GUARDRAILS,
-  EXPORTS_ROWS,
-  EXPORTS_SUMMARY,
-  EXPORT_META,
   NAV_GROUPS,
   REGISTRY_CONTROLS,
   REGISTRY_ROWS,
@@ -25,6 +21,7 @@ import type { Role, ViewKey } from "@/lib/mock/data";
 import { BrandIcon, NAV_ICONS, RefreshIcon } from "./icons";
 import CloseView from "./views/CloseView";
 import CommandView from "./views/CommandView";
+import ExportsView from "./views/ExportsView";
 import TraceView from "./views/TraceView";
 import {
   Badge,
@@ -59,8 +56,6 @@ type AccessPermissions = {
   canViewAudit: boolean;
 };
 
-type ExportScope = (typeof EXPORTS_ROWS)[number]["scope"];
-
 // In production this value is hydrated from the server-authenticated session claim.
 const SERVER_AUTHENTICATED_SESSION: AuthenticatedSession = {};
 
@@ -90,12 +85,6 @@ function canCreateAnyExport(permissions: AccessPermissions) {
     permissions.canCreateScopedExports ||
     permissions.canRequestRawExports
   );
-}
-
-function canCreateExportScope(permissions: AccessPermissions, scope: ExportScope) {
-  if (scope === "global") return permissions.canCreateGlobalExports;
-  if (scope === "scoped") return permissions.canCreateScopedExports;
-  return permissions.canRequestRawExports;
 }
 
 function AccessDeniedState() {
@@ -342,7 +331,9 @@ export default function AppShell() {
         {view === "trace" && (
           <TraceView canViewFinance={canViewFinance} role={displayedRole} />
         )}
-        {view === "exports" && <ExportsView permissions={permissions} />}
+        {view === "exports" && (
+          <ExportsView canCreateExport={canCreateAnyExport(permissions)} />
+        )}
         {view === "connectors" && <ConnectorsView permissions={permissions} />}
         {view === "audit" && <AuditView permissions={permissions} />}
 
@@ -523,101 +514,10 @@ function RegistryView({ permissions }: { permissions: AccessPermissions }) {
 
 /* ------------------------------------------------------------------ exports */
 
-function ExportsView({ permissions }: { permissions: AccessPermissions }) {
-  const { canViewFinance } = permissions;
-  const canCreateExport = canCreateAnyExport(permissions);
-  return (
-    <section className="view-page" aria-labelledby="exportsTitle">
-      <div className="view-summary" aria-label="Export summary">
-        {EXPORTS_SUMMARY.map((s) => (
-          <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
-        ))}
-      </div>
-
-      <div className="view-grid">
-        <section className="panel">
-          <div className="panel-header">
-            <div className="panel-title">
-              <strong id="exportsTitle">Export Center</strong>
-              <span>Permission-controlled packages with locked month and audit requirements</span>
-            </div>
-            <button className="primary-button" type="button" disabled={!canCreateExport}>
-              Create Export Job
-            </button>
-          </div>
-          <div className="table-wrap">
-            <table aria-label="Exports">
-              <thead>
-                <tr><th>Package</th><th>Audience</th><th>Contains Money</th><th>Requires</th><th>Status</th><th>Action</th></tr>
-              </thead>
-              <tbody>
-                {EXPORTS_ROWS.map((r) => {
-                  const canCreatePackage = canCreateExportScope(permissions, r.scope);
-                  return (
-                    <tr key={r.name}>
-                      <td>{r.name}</td>
-                      <td>{r.audience}</td>
-                      <td><Badge tone={r.money.tone}>{r.money.text}</Badge></td>
-                      <td>{r.requires}</td>
-                      <td><Badge tone={r.status.tone}>{r.status.text}</Badge></td>
-                      <td>
-                        <button className="mini-button" type="button" disabled={!canCreatePackage}>
-                          {r.action}
-                        </button>
-                      </td>
-                    </tr>
-                  );
-                })}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <aside className="view-stack">
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong>Export Guardrails</strong>
-                <span>Every package records scope, filters, checksum, and actor</span>
-              </div>
-            </div>
-            <div className="issue-list" role="list">
-              {EXPORTS_GUARDRAILS.map((g) => (
-                <ItemRow key={g.title} tone={g.tone} title={g.title} sub={g.sub}
-                  trailing={<Badge tone={g.badge.tone}>{g.badge.text}</Badge>} />
-              ))}
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong>Export Metadata</strong>
-                <span>UI-facing fields that must come from backend jobs</span>
-              </div>
-            </div>
-            <div className="detail-grid">
-              {EXPORT_META.map((m) => (
-                <div key={m.label} className="detail-cell">
-                  <span>{m.label}</span>
-                  <strong>
-                    {m.chip ? (
-                      <span className="code-chip">
-                        {canCreateExport ? m.chip : RESTRICTED_FINANCE_VALUE}
-                      </span>
-                    ) : (
-                      m.value
-                    )}
-                  </strong>
-                </div>
-              ))}
-            </div>
-          </section>
-        </aside>
-      </div>
-    </section>
-  );
-}
+// ExportsView is the wired Exports screen; it lives in ./views/ExportsView.tsx
+// and reads GET /exports (job list) + POSTs /exports (request a job) via the
+// useExports / useExportActions hooks, with plain-anchor binary downloads of
+// the generated artifacts for COMPLETED jobs.
 
 /* ------------------------------------------------------------------ connectors */
 

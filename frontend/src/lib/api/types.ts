@@ -270,3 +270,109 @@ export type NumberExplanation = {
   audit_event?: NetRevenueAuditEvent;
   audit_events?: NetRevenueAuditEvent[];
 };
+
+// ============================================================================
+// Purpose: TypeScript mirror of the backend export-job JSON contract consumed by
+//   the Exports screen. Fields are matched 1:1 against the backend serializers
+//   (not guessed); nullable fields serialize as null. An export is requested
+//   (POST), tracked through its lifecycle (QUEUED -> COMPLETED | FAILED |
+//   CANCELLED), and — once COMPLETED — its artifact is downloaded over a plain
+//   browser anchor (binary, NOT through the JSON-strict useApiClient).
+// Standards: Read-only typed boundary at the API surface; no logic here. Money
+//   is not a concern on these shapes (jobs carry currency code + month, not
+//   amounts); artifact_byte_size is an integer.
+// Connections:
+//   - File: backend/ums_smart_revenue/reports/exports.py
+//       ExportJobEntry.to_api()        (lines 59-87)   -> ExportJob
+//       ALLOWED_EXPORT_TYPES           (lines 16-20)   -> ExportType
+//       request_export() status="QUEUED" (line 175)    -> initial status
+//   - File: backend/ums_smart_revenue/api/exports.py
+//       request_export()               (lines 173-284) -> POST /exports (202) + audit_event
+//       list_exports()                 (lines 287-324) -> GET /exports {items, pagination}
+//       get_export()                   (lines 327-396) -> GET /exports/{id} + audit_event
+//       download_finance_workbook()    (line 479)      -> /exports/{id}/finance-workbook.xlsx
+//       download_executive_pdf()       (line 593)      -> /exports/{id}/executive.pdf
+//       download_branded_slide_pack()  (line 715)      -> /exports/{id}/branded-slide-pack.pptx
+//       preview_finance_workbook()     (line 399)      -> /exports/{id}/finance-workbook-preview
+// ============================================================================
+
+// The four accepted export_type enum values (ALLOWED_EXPORT_TYPES). The first
+// three are finance exports (EXPORT_REVENUE_REPORT); the CSV is analytics.
+export type ExportType =
+  | "FINANCE_EXCEL"
+  | "EXECUTIVE_PDF"
+  | "BRANDED_SLIDE_PACK"
+  | "ANALYTICS_SUMMARY_CSV";
+
+// Lifecycle status of an export job. Created as QUEUED; terminal states are
+// COMPLETED (artifact ready to download), FAILED, and CANCELLED.
+// Source: request_export() status="QUEUED"; _TERMINAL_EXPORT_JOB_STATUSES.
+export type ExportJobStatus =
+  | "QUEUED"
+  | "COMPLETED"
+  | "FAILED"
+  | "CANCELLED";
+
+// The accepted scope_type values (ALLOWED_EXPORT_SCOPE_TYPES, exports.py:21-23).
+export type ExportScopeType =
+  | "global"
+  | "sector"
+  | "company"
+  | "channel"
+  | "group";
+
+// One export-job row, returned by POST /exports (202), GET /exports items[], and
+// GET /exports/{id}. Source: ExportJobEntry.to_api() (exports.py:59-87).
+export type ExportJob = {
+  id: string;
+  export_type: string;
+  scope_type: string;
+  scope_id: string | null;
+  scope_channel_ids: string[] | null;
+  month: string;
+  currency: string;
+  requested_by: string;
+  status: string;
+  file_url: string | null;
+  artifact_filename: string | null;
+  artifact_content_type: string | null;
+  artifact_byte_size: number | null;
+  artifact_checksum_sha256: string | null;
+  failure_reason: string | null;
+  month_lock_status: string;
+  include_confidence_notes: boolean;
+  include_manual_override_notes: boolean;
+  created_at: string; // ISO-8601 datetime
+  completed_at: string | null; // ISO-8601 datetime
+};
+
+// POST /exports response: the created job plus the recorded audit event.
+// Source: request_export() response = export_job.to_api(); response["audit_event"].
+export type ExportJobCreated = ExportJob & {
+  audit_event: Record<string, unknown>;
+};
+
+// GET /exports response. Source: list_exports() (exports.py:316-324).
+export type ExportListResponse = {
+  items: ExportJob[];
+  pagination: {
+    limit: number;
+    offset: number;
+    returned: number;
+    has_more: boolean;
+  };
+};
+
+// POST /exports request body. Source: ExportRequest (exports.py:124-158).
+// reason is REQUIRED (min_length=1) — it is recorded on the EXPORT_CREATED audit
+// event. include_* default to true on the backend and the UI sends both.
+export type ExportRequestBody = {
+  export_type: ExportType;
+  scope_type: ExportScopeType;
+  scope_id: string | null;
+  month: string;
+  currency: string;
+  reason: string;
+  include_confidence_notes: boolean;
+  include_manual_override_notes: boolean;
+};
