@@ -1,8 +1,15 @@
 import { useMemo, useState } from "react";
 
 import { ApiError } from "@/lib/api/client";
-import type { ChannelNetRevenue, NetRevenueResponse } from "@/lib/api/types";
+import type {
+  ChannelNetRevenue,
+  NetRevenueResponse,
+  SmartAlert,
+  SmartAlertSeverity,
+  SmartAlertsSummary,
+} from "@/lib/api/types";
 import { useNetRevenue } from "@/lib/api/useNetRevenue";
+import { useSmartAlerts } from "@/lib/api/useSmartAlerts";
 import {
   CLOSE_STEPS,
   EXPORT_READINESS,
@@ -78,6 +85,21 @@ function statusTone(status: string): Severity {
   if (normalized.includes("MISSING") || normalized.includes("PENDING")) return "amber";
   if (normalized.includes("ERROR") || normalized.includes("BLOCK")) return "red";
   return "blue";
+}
+
+// Map an alert severity to a design-system badge tone (HIGH -> red, MEDIUM ->
+// amber, LOW -> blue). Unknown severities fall back to blue.
+function severityTone(severity: SmartAlertSeverity | string): Severity {
+  switch (severity) {
+    case "HIGH":
+      return "red";
+    case "MEDIUM":
+      return "amber";
+    case "LOW":
+      return "blue";
+    default:
+      return "blue";
+  }
 }
 
 function channelDisplayName(channel: ChannelNetRevenue): string {
@@ -165,6 +187,9 @@ export default function CommandView({
         canViewFinance={canViewFinance}
         currency={currency}
       />
+
+      {/* smart-alerts / problem panel — REAL data, fails independently */}
+      <SmartAlertsPanel month={month} />
 
       <section className="workspace" aria-label="Command workspace">
         <div className="work-left">
@@ -331,6 +356,154 @@ function describeError(error: ApiError | Error): { title: string; detail: string
     title: "Network error",
     detail: error.message || "Could not reach the revenue service.",
   };
+}
+
+// ============================================================================
+// Purpose: Smart Alerts / Problem Panel for the Command Center. Fetches the
+//   monthly smart-alerts summary (overall status + highest severity + the
+//   prioritized alert rows) via its OWN useSmartAlerts hook so it fails
+//   INDEPENDENTLY of the net-revenue content: a 403 (the panel is gated behind
+//   four finance-month permissions the net-revenue read does not all require) or
+//   any other error renders inside this card only — the channel table, status
+//   strip, and explain panel keep rendering. Loading / error / 403 / empty
+//   states mirror the rest of CommandView and reuse describeError.
+// Database/ORM: None (frontend) — consumes GET /revenue/months/{month}/smart-alerts.
+// Standards: No money is rendered here (alerts carry messages, not gated finance
+//   cells), so no canViewFinance gating is needed; severity drives the badge
+//   tone only. Read-only — no mutation.
+// Blast Radius: None detected (read-only finance health display). The panel does
+//   NOT block the surrounding net-revenue render on its own 403/error.
+// Connections:
+//   - File: frontend/src/lib/api/useSmartAlerts.ts -> the fetch hook.
+//   - File: frontend/src/lib/api/types.ts -> SmartAlertsSummary contract.
+//   - File: backend/ums_smart_revenue/api/revenue.py:844 get_month_smart_alerts.
+// ============================================================================
+function SmartAlertsPanel({ month }: { month: string }) {
+  const { data, loading, error, reload } = useSmartAlerts({ month });
+
+  return (
+    <section className="panel" aria-labelledby="smartAlertsTitle" style={{ marginBottom: 16 }}>
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong id="smartAlertsTitle">Smart Alerts / Problem Panel</strong>
+          <span>Cross-domain finance health signals for {month}</span>
+        </div>
+        <SmartAlertsHeaderBadge data={data} loading={loading} error={error} />
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="Refresh smart alerts"
+          title="Refresh smart alerts"
+          onClick={reload}
+        >
+          ↻
+        </button>
+      </div>
+      <SmartAlertsBody data={data} loading={loading} error={error} />
+    </section>
+  );
+}
+
+// Header badge: surfaces the overall status + highest severity at a glance, and
+// degrades to Loading / Error / No permission without breaking the panel header.
+function SmartAlertsHeaderBadge({
+  data,
+  loading,
+  error,
+}: {
+  data: SmartAlertsSummary | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+}) {
+  if (error) {
+    const isForbidden = error instanceof ApiError && error.status === 403;
+    return <Badge tone={isForbidden ? "blue" : "red"}>{isForbidden ? "No permission" : "Error"}</Badge>;
+  }
+  if (loading && !data) {
+    return <Badge tone="blue">Loading</Badge>;
+  }
+  if (!data) {
+    return <Badge tone="amber">Empty</Badge>;
+  }
+  if (data.status === "CLEAR") {
+    return <Badge tone="green">Clear</Badge>;
+  }
+  return (
+    <Badge tone={data.highest_severity ? severityTone(data.highest_severity) : "amber"}>
+      {data.highest_severity ?? "Attention"}
+    </Badge>
+  );
+}
+
+function SmartAlertsBody({
+  data,
+  loading,
+  error,
+}: {
+  data: SmartAlertsSummary | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+}) {
+  if (error) {
+    const { title, detail } = describeError(error);
+    return (
+      <div className="issue-list" role="alert">
+        <ItemRow
+          tone="blue"
+          title={title}
+          sub={detail}
+          trailing={<Badge tone="blue">—</Badge>}
+        />
+      </div>
+    );
+  }
+
+  if (loading && !data) {
+    return (
+      <div className="issue-list" role="list" aria-busy="true">
+        <ItemRow
+          tone="blue"
+          title="Loading smart alerts…"
+          sub="Aggregating payment, bank, lock, and override signals"
+          trailing={<Badge tone="blue">Loading</Badge>}
+        />
+      </div>
+    );
+  }
+
+  // Read alerts defensively: a missing/non-array field (e.g. an unexpected body
+  // shape) is treated as "no alerts" rather than throwing inside the panel.
+  const alerts = Array.isArray(data?.alerts) ? data.alerts : [];
+  if (!data || alerts.length === 0) {
+    return (
+      <div className="issue-list" role="list">
+        <ItemRow
+          tone="green"
+          title="No active alerts"
+          sub={
+            data
+              ? `Status ${data.status} — nothing needs attention for ${data.month}.`
+              : "No smart-alert data returned."
+          }
+          trailing={<Badge tone="green">Clear</Badge>}
+        />
+      </div>
+    );
+  }
+
+  return (
+    <div className="issue-list" role="list">
+      {alerts.map((alert: SmartAlert) => (
+        <ItemRow
+          key={alert.code}
+          tone={severityTone(alert.severity)}
+          title={alert.message}
+          sub={`${alert.source} · ${alert.code}`}
+          trailing={<Badge tone={severityTone(alert.severity)}>{alert.severity}</Badge>}
+        />
+      ))}
+    </div>
+  );
 }
 
 function NetRevenueStatusStrip({

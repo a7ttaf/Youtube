@@ -2,7 +2,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import CommandView from "@/components/srcc/views/CommandView";
-import type { NetRevenueResponse } from "@/lib/api/types";
+import type { NetRevenueResponse, SmartAlertsSummary } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
 
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -56,11 +56,40 @@ const NET_REVENUE_BODY: NetRevenueResponse = {
   audit_events: [],
 };
 
+// CommandView now fires a SECOND request for the smart-alerts panel. Default it
+// to a CLEAR (no-alert) summary so it never interferes with the net-revenue
+// assertions below; the panel's own behaviour is covered in SmartAlertsPanel.test.
+const SMART_ALERTS_CLEAR: SmartAlertsSummary = {
+  month: "2026-03",
+  status: "CLEAR",
+  highest_severity: null,
+  alert_count: 0,
+  alerts: [],
+  audit_events: [],
+};
+
 function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+// Route each fetch by URL and return a FRESH Response per call (a Response body
+// can only be read once, so the net-revenue + smart-alerts requests cannot share
+// one). net-revenue is driven by the test; smart-alerts defaults to CLEAR.
+function routeFetch(netRevenue: () => Response, smartAlerts?: () => Response) {
+  (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+    (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/smart-alerts")) {
+        return Promise.resolve(
+          (smartAlerts ?? (() => jsonResponse(SMART_ALERTS_CLEAR)))(),
+        );
+      }
+      return Promise.resolve(netRevenue());
+    },
+  );
 }
 
 function renderCommandView(canViewFinance: boolean) {
@@ -73,9 +102,7 @@ function renderCommandView(canViewFinance: boolean) {
 
 describe("CommandView wired to net-revenue", () => {
   it("renders real-shaped totals formatted as USD when finance is visible", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse(NET_REVENUE_BODY),
-    );
+    routeFetch(() => jsonResponse(NET_REVENUE_BODY));
     renderCommandView(true);
 
     // Net total formatted from the "1000" string into USD. The same total
@@ -92,9 +119,7 @@ describe("CommandView wired to net-revenue", () => {
   });
 
   it("withholds money cells as Restricted when finance is not visible", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
-      jsonResponse(NET_REVENUE_BODY),
-    );
+    routeFetch(() => jsonResponse(NET_REVENUE_BODY));
     renderCommandView(false);
 
     await waitFor(() =>
@@ -106,7 +131,9 @@ describe("CommandView wired to net-revenue", () => {
   });
 
   it("shows a no-permission message on a 403 ApiError", async () => {
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
+    // Net-revenue 403; smart-alerts stays CLEAR so this asserts net-revenue's
+    // own no-permission rendering (not the panel's).
+    routeFetch(() =>
       jsonResponse({ detail: "missing permission view:revenue" }, 403),
     );
     renderCommandView(true);
@@ -121,18 +148,24 @@ describe("CommandView wired to net-revenue", () => {
   });
 
   it("shows a loading state before the response resolves", async () => {
-    let resolveFetch: ((value: Response) => void) | undefined;
-    (globalThis.fetch as ReturnType<typeof vi.fn>).mockReturnValue(
-      new Promise<Response>((resolve) => {
-        resolveFetch = resolve;
-      }),
+    let resolveNetRevenue: ((value: Response) => void) | undefined;
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/smart-alerts")) {
+          return Promise.resolve(jsonResponse(SMART_ALERTS_CLEAR));
+        }
+        return new Promise<Response>((resolve) => {
+          resolveNetRevenue = resolve;
+        });
+      },
     );
     renderCommandView(true);
 
-    // Loading badges render while the request is in flight.
+    // Loading badges render while the net-revenue request is in flight.
     expect(screen.getAllByText("Loading").length).toBeGreaterThan(0);
 
-    resolveFetch?.(jsonResponse(NET_REVENUE_BODY));
+    resolveNetRevenue?.(jsonResponse(NET_REVENUE_BODY));
     await waitFor(() =>
       expect(screen.getAllByText("$1,000.00").length).toBeGreaterThan(0),
     );

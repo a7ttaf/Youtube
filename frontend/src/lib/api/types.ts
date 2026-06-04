@@ -495,3 +495,59 @@ export type AdsenseSyncResponse = {
   items: AdsensePayment[];
   audit_event: Record<string, unknown>;
 };
+
+// ============================================================================
+// Purpose: TypeScript mirror of the backend monthly smart-alerts JSON contract
+//   consumed by the Command Center problem panel. Fields are matched 1:1 against
+//   the backend serializers (not guessed); nullable fields serialize as null.
+//   The endpoint aggregates cross-domain finance health signals (payment match,
+//   bank reconciliation, month lock, manual overrides, revenue trend) into a
+//   prioritized alert list with an overall status + highest severity. The panel
+//   is read-only and fails independently of the rest of the Command Center.
+// Standards: Read-only typed boundary at the API surface; no logic here. The
+//   alert `details` object is intentionally loosely typed (Record) because its
+//   keys vary per alert code; the panel renders the typed fields and does not
+//   depend on details shape.
+// Connections:
+//   - File: backend/ums_smart_revenue/finance/smart_alerts.py
+//       MonthlySmartAlert.to_api()         (lines 30-39) -> SmartAlert
+//       MonthlySmartAlertSummary.to_api()  (lines 51-59) -> SmartAlertsSummary
+//   - File: backend/ums_smart_revenue/api/revenue.py
+//       get_month_smart_alerts()           (lines 844-955) -> GET endpoint;
+//         four-permission finance-month auth; adds audit_events[] to to_api().
+//       audit_record_to_api()              (lines 1850-1860) -> NetRevenueAuditEvent
+// ============================================================================
+
+// Overall status of the smart-alert summary.
+// Source: MonthlySmartAlertSummary.status ("ATTENTION_REQUIRED" if alerts else
+// "CLEAR", smart_alerts.py:209).
+export type SmartAlertStatus = "ATTENTION_REQUIRED" | "CLEAR";
+
+// Severity of a single alert, ordered LOW < MEDIUM < HIGH (_SEVERITY_RANK).
+// highest_severity is one of these or null when there are no alerts.
+export type SmartAlertSeverity = "LOW" | "MEDIUM" | "HIGH";
+
+// One smart alert row. Source: MonthlySmartAlert.to_api() (smart_alerts.py:30-39).
+// `details` keys vary per code (e.g. payment_gap_usd, close_status, channels[]);
+// money values inside details are decimal-as-STRINGS (decimal_to_api).
+export type SmartAlert = {
+  code: string;
+  severity: SmartAlertSeverity;
+  message: string;
+  source: string;
+  confidence: string;
+  details: Record<string, unknown>;
+};
+
+// GET /revenue/months/{month}/smart-alerts
+// Source: MonthlySmartAlertSummary.to_api() (smart_alerts.py:51-59) plus the
+// route-level audit addition (revenue.py:950-954). audit_events[] is kept typed
+// for completeness but not rendered by the panel.
+export type SmartAlertsSummary = {
+  month: string;
+  status: SmartAlertStatus;
+  highest_severity: SmartAlertSeverity | null;
+  alert_count: number;
+  alerts: SmartAlert[];
+  audit_events?: NetRevenueAuditEvent[];
+};
