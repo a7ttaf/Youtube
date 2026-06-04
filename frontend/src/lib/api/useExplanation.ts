@@ -133,6 +133,7 @@ export function useExplanation(): UseExplanationState {
           // and audit events. Token ownership closes that window.
           if (inFlightRef.current === token) {
             inFlightRef.current = null;
+            setLoading(false);
           }
         });
     },

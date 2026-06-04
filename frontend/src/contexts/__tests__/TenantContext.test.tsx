@@ -39,7 +39,7 @@ describe("TenantContext", () => {
   });
 
   it("throws when useTenant is called outside <TenantProvider>", () => {
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleSpy = vi.spyOn(console, "error").mockReturnValue(undefined);
     expect(() => renderHook(() => useTenant())).toThrow(
       /useTenant must be used within <TenantProvider>/,
     );

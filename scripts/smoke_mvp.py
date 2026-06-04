@@ -85,6 +85,8 @@ class _Check:
     # Returns "" on success or a human-readable failure reason on a contract miss.
     validate: Callable[[Any], str]
     expected_status: int = 200
+    # Optional JSON body for POST checks; None sends no body.
+    json_body: dict[str, Any] | None = None
 
 
 def _require(condition: bool, message: str) -> str:
@@ -201,6 +203,13 @@ def _validate_adsense_payments(body: Any) -> str:
     )
 
 
+def _validate_export_created(body: Any) -> str:
+    """Assert the 202 export creation response carries an id and export_type."""
+    if not isinstance(body, Mapping):
+        return "response is not a JSON object"
+    return _require(isinstance(body.get("id"), str), "missing id on export job")
+
+
 def _build_checks(month: str) -> list[_Check]:
     """Build the per-screen endpoint checks for the seeded demo month."""
     return [
@@ -260,6 +269,37 @@ def _build_checks(month: str) -> list[_Check]:
             "GET",
             f"/adsense/payments?month={month}",
             _validate_adsense_payments,
+        ),
+        # Write-path smoke: unlock → create export job → re-lock (leaves month LOCKED).
+        _Check(
+            "Month Close",
+            "unlock month (write)",
+            "POST",
+            f"/finance-close/{month}/unlock",
+            _validate_finance_close,
+            json_body={"reason": "smoke-unlock"},
+        ),
+        _Check(
+            "Exports",
+            "create export job (write)",
+            "POST",
+            "/exports",
+            _validate_export_created,
+            expected_status=202,
+            json_body={
+                "export_type": "FINANCE_EXCEL",
+                "scope_type": "global",
+                "month": month,
+                "reason": "smoke-export-test",
+            },
+        ),
+        _Check(
+            "Month Close",
+            "re-lock month (write)",
+            "POST",
+            f"/finance-close/{month}/lock",
+            _validate_finance_close,
+            json_body={"reason": "smoke-re-lock"},
         ),
     ]
 
@@ -384,7 +424,9 @@ def _run_check(context: _SmokeContext, check: _Check) -> _CheckResult:
         if check.method == "GET":
             response = context.client.get(check.path, headers=context.headers)
         elif check.method == "POST":
-            response = context.client.post(check.path, headers=context.headers)
+            response = context.client.post(
+                check.path, headers=context.headers, json=check.json_body
+            )
         else:
             result.detail = f"unsupported method {check.method}"
             return result

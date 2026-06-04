@@ -163,12 +163,12 @@ describe("SmartAlertsPanel in CommandView", () => {
     routeFetch({});
     renderCommandView();
 
-    // The panel title is present and the alert messages + severities render.
+    // Wait for async data before asserting synchronous siblings.
     expect(
-      await screen.findByText("Smart Alerts / Problem Panel"),
+      await screen.findByText("AdSense payment is not matched for 2026-03."),
     ).toBeInTheDocument();
     expect(
-      screen.getByText("AdSense payment is not matched for 2026-03."),
+      screen.getByText("Smart Alerts / Problem Panel"),
     ).toBeInTheDocument();
     expect(
       screen.getByText("Finance month 2026-03 is not locked."),
