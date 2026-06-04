@@ -11,12 +11,14 @@ _engine_cache_lock = Lock()
 
 
 def build_engine(database_url: str) -> Engine:
+    """Create a connection-pooled SQLAlchemy Engine for ``database_url``."""
     return create_engine(database_url, pool_pre_ping=True)
 
 
 def build_session_factory(
     database_url: str, engine: Engine | None = None
 ) -> SessionFactory:
+    """Return a sessionmaker bound to a per-URL cached engine (or the given one)."""
     if engine is None:
         with _engine_cache_lock:
             if database_url not in _engine_cache:
@@ -46,7 +48,10 @@ def dispose_cached_engine(database_url: str) -> None:
 def session_dependency(
     session_factory: SessionFactory,
 ) -> Callable[[], Iterator[Session]]:
+    """Build a FastAPI dependency that yields a request-scoped, auto-committed session."""
+
     def dependency() -> Iterator[Session]:
+        """Yield one session, committing on success and rolling back on any error."""
         with session_factory() as session:
             try:
                 yield session

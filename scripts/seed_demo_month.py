@@ -19,8 +19,23 @@ bypasses the production readiness gate, so it is for demo databases only.
 Effective-month boundaries: the AdSense owner link and owner->channel links use
 the requested ``--month`` as their effective_month_start so seeding an earlier
 month stays allocatable (the link repo filters effective_month_start <= month).
-Demo databases seeded by an OLDER version of this script (which hardcoded a
-2026-01 effective_month_start) should be recreated fresh.
+Both link kinds also fold ``--month`` into their deterministic row id, so the
+same database can be seeded for MULTIPLE months without a duplicate-PK collision
+while same-month re-runs remain idempotent. Demo databases seeded by an OLDER
+version of this script (which hardcoded a 2026-01 effective_month_start, or used
+a month-free link id) should be recreated fresh.
+
+Allocation method on a FRESH vs EXISTING database: both advertised methods seed
+on a FRESH database. Under the default gross method the demo deliberately leaves
+one channel with NO source net (it exercises the account-allocated missing-net
+derivation). Under ``--allocation-method post_tax_revenue_proportional`` that
+channel is seeded WITH a derived source net, because the post-tax net basis omits
+any null-net (channel, source) pair and an incomplete basis would reject the
+commit. Switching methods on an EXISTING database is NOT supported: the seed
+never rewrites already-persisted finance facts to fit a different method, so a
+gross-seeded database re-run under post_tax fails the commit (incomplete net
+basis -> unallocated). That case exits non-zero with a clear message to recreate
+the demo database fresh for the requested method.
 
 The script orchestrates the existing service/repository layer; it never opens
 its own engine/transaction semantics beyond the app's own
@@ -123,6 +138,7 @@ def _load_dependencies() -> dict[str, Any]:
         SqlAlchemyChannelAccountLinkRepository,
     )
     from ums_smart_revenue.finance.committed_allocation import (
+        CommittedAllocationLockedMonthError,
         CommittedAllocationValidationError,
         SqlAlchemyCommittedAllocationRepository,
     )
@@ -157,6 +173,7 @@ def _load_dependencies() -> dict[str, Any]:
         "SqlAlchemyChannelAccountLinkRepository": SqlAlchemyChannelAccountLinkRepository,
         "SqlAlchemyCommittedAllocationRepository": SqlAlchemyCommittedAllocationRepository,
         "CommittedAllocationValidationError": CommittedAllocationValidationError,
+        "CommittedAllocationLockedMonthError": CommittedAllocationLockedMonthError,
         "SqlAlchemyDeductionComponentRepository": SqlAlchemyDeductionComponentRepository,
         "SqlAlchemyRevenueFactRepository": SqlAlchemyRevenueFactRepository,
         "SqlAlchemyFinanceMonthCloseRepository": SqlAlchemyFinanceMonthCloseRepository,
@@ -168,6 +185,34 @@ def _load_dependencies() -> dict[str, Any]:
 def _demo_uuid(*parts: str) -> UUID:
     """Return a deterministic UUID for a logical seed row identity."""
     return uuid5(_DEMO_NAMESPACE, "|".join(parts))
+
+
+def _redact_database_url(database_url: str) -> str:
+    """Return ``database_url`` with any password in the userinfo masked.
+
+    A PostgreSQL URL (``postgresql+psycopg://user:secret@host:5432/db``) carries
+    a real password in its userinfo, so echoing it verbatim in the operator
+    summary leaks a credential. This keeps scheme, host, port, path, query, and
+    the username intact while replacing the password with ``***``. SQLite URLs
+    (and any URL without a password) are returned unchanged.
+    """
+    # FIX: The operator summary echoed the full database_url, leaking the
+    # PostgreSQL password in its userinfo. Rebuild the URL via urllib.parse with
+    # the password masked so the printed value is safe to share.
+    from urllib.parse import urlsplit, urlunsplit
+
+    parts = urlsplit(database_url)
+    if parts.password is None:
+        return database_url
+    username = parts.username or ""
+    host = parts.hostname or ""
+    userinfo = f"{username}:***"
+    netloc = f"{userinfo}@{host}" if host else f"{userinfo}@"
+    if parts.port is not None:
+        netloc = f"{netloc}:{parts.port}"
+    return urlunsplit(
+        (parts.scheme, netloc, parts.path, parts.query, parts.fragment)
+    )
 
 
 def _create_schema(engine: Any, deps: dict[str, Any]) -> None:
@@ -289,7 +334,7 @@ def _seed_org_hierarchy(
     if session.get(org_orm, sector_id) is None:
         session.add(
             org_orm(
-                id=sector_id, parent_id=None, type="SECTOR",
+                id=sector_id, tenant_id=tenant_id, parent_id=None, type="SECTOR",
                 name="Demo Sector", active=True,
             )
         )
@@ -300,7 +345,7 @@ def _seed_org_hierarchy(
     if session.get(org_orm, company_id) is None:
         session.add(
             org_orm(
-                id=company_id, parent_id=sector_id, type="COMPANY",
+                id=company_id, tenant_id=tenant_id, parent_id=sector_id, type="COMPANY",
                 name="Demo Company", active=True,
             )
         )
@@ -433,8 +478,10 @@ def _seed_account_links(
     Both link kinds set effective_month_start to the requested ``month`` so the
     link repo (which filters effective_month_start <= month) can still resolve
     them when seeding a month earlier than the old hardcoded 2026-01. The same
-    ``month`` is used in the uniqueness filters so re-runs stay idempotent per
-    month. Demo DBs seeded by the old 2026-01 version should be recreated fresh.
+    ``month`` is used both in the uniqueness filters AND in each row's
+    deterministic id, so re-runs stay idempotent per month while seeding a
+    SECOND month allocates a distinct PK (no duplicate-PK collision). Demo DBs
+    seeded by the old 2026-01 version should be recreated fresh.
     """
     # Verified account->owner link (the money-gating trust decision).
     adsense_link_orm = deps["AdsenseContentOwnerLinkORM"]
@@ -444,7 +491,12 @@ def _seed_account_links(
     ):
         session.add(
             adsense_link_orm(
-                id=_demo_uuid("adsense-link", _ACCOUNT_ID, _CONTENT_OWNER_ID),
+                # FIX: Include ``month`` in the deterministic id. The existence
+                # check is month-scoped (effective_month_start == month) but the
+                # id was not, so seeding a SECOND month re-used the SAME PK and
+                # raised a duplicate-PK error before allocation. Each month's
+                # link now owns a distinct id; same-month re-runs stay idempotent.
+                id=_demo_uuid("adsense-link", month, _ACCOUNT_ID, _CONTENT_OWNER_ID),
                 tenant_id=tenant_id, adsense_account_id=_ACCOUNT_ID,
                 content_owner_id=_CONTENT_OWNER_ID, verification_status="VERIFIED",
                 provenance_kind="OPERATOR_ASSERTED", provenance_payload={"demo": True},
@@ -467,7 +519,10 @@ def _seed_account_links(
             continue
         session.add(
             owner_link_orm(
-                id=_demo_uuid("owner-link", _CONTENT_OWNER_ID, spec.youtube_channel_id),
+                # FIX: Same month-scoping mismatch as the adsense link above —
+                # include ``month`` so each effective_month_start gets a distinct
+                # deterministic id and multi-month seeding cannot collide on the PK.
+                id=_demo_uuid("owner-link", month, _CONTENT_OWNER_ID, spec.youtube_channel_id),
                 tenant_id=tenant_id, content_owner_id=_CONTENT_OWNER_ID,
                 youtube_channel_id=spec.youtube_channel_id, provenance_kind="SOURCE_ROW",
                 active=True, effective_month_start=month,
@@ -680,11 +735,18 @@ def _print_summary(
     seed_summary: dict[str, Any], commit_summary: dict[str, Any],
     lock_summary: dict[str, Any], headers: dict[str, str], gateway_token_set: bool,
 ) -> None:
-    """Print a clear, operator-facing summary of the seeded demo month."""
+    """Print a clear, operator-facing summary of the seeded demo month.
+
+    The database_url is printed through ``_redact_database_url`` so a PostgreSQL
+    password never appears in the summary; the trusted-gateway token is shown as
+    ``<redacted>``.
+    """
     print("=" * 72)
     print("UMS Smart Revenue — demo month seed complete")
     print("=" * 72)
-    print(f"database_url        : {database_url}")
+    # FIX: Redact any password in the database_url userinfo before printing — a
+    # PostgreSQL URL carries a real credential that must not land in the summary.
+    print(f"database_url        : {_redact_database_url(database_url)}")
     print(f"tenant_id           : {tenant_id}")
     print(f"tenant_slug         : {tenant_slug}")
     print(f"month               : {month}")
@@ -826,7 +888,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.create_schema:
         _create_schema(engine, deps)
 
-    print(f"Seeding demo month {args.month} into {database_url} (tenant {tenant_id})...")
+    safe_database_url = _redact_database_url(database_url)
+    print(f"Seeding demo month {args.month} into {safe_database_url} (tenant {tenant_id})...")
 
     try:
         with session_factory() as session:
@@ -846,9 +909,47 @@ def main(argv: list[str] | None = None) -> int:
             )
             session.commit()
     except deps["CommittedAllocationValidationError"] as exc:
-        # The compute rejected the snapshot (e.g. an unmapped account). Roll back
-        # is automatic (session context manager); surface a stable operator error.
+        # FIX: The compute rejected the snapshot. The dominant operator cause is
+        # a method-switch on an EXISTING demo DB: facts seeded under one method
+        # carry a net shape the requested method's basis cannot fully cover (e.g.
+        # the gross-seeded missing-net channel leaves the post_tax net basis
+        # INCOMPLETE -> unallocated -> rejected). We never silently rewrite
+        # already-seeded finance facts to fit the new method; instead we surface
+        # an actionable message telling the operator to recreate the demo DB
+        # fresh for the requested method. Roll back is automatic (session context
+        # manager). Exit 2 matches this script's operator-error convention.
         print(f"CommittedAllocationValidationError: {exc!s}", file=sys.stderr)
+        print(
+            "This demo database's finance facts are incompatible with"
+            f" --allocation-method {args.allocation_method}.",
+            file=sys.stderr,
+        )
+        print(
+            "The seed does NOT mutate already-seeded finance facts to fit a"
+            " different method. Recreate the demo database fresh for this method"
+            " (a new SQLite file, or a fresh --create-schema target) and re-run.",
+            file=sys.stderr,
+        )
+        return 2
+    except deps["CommittedAllocationLockedMonthError"] as exc:
+        # FIX: A method-switch on a demo DB whose month is ALREADY LOCKED produces
+        # a new (method-scoped) idempotency key, so the commit cannot replay the
+        # existing run and the locked-month guard rejects it. Previously this
+        # raised an unhandled traceback; catch the typed rejection and tell the
+        # operator to recreate the demo DB fresh for the requested method. Exit 2
+        # matches this script's operator-error convention.
+        print(f"CommittedAllocationLockedMonthError: {exc!s}", file=sys.stderr)
+        print(
+            f"Finance month {args.month} is already LOCKED under a previous"
+            f" commit, so --allocation-method {args.allocation_method} cannot be"
+            " committed on this database.",
+            file=sys.stderr,
+        )
+        print(
+            "Recreate the demo database fresh for this method (a new SQLite file,"
+            " or a fresh --create-schema target) and re-run.",
+            file=sys.stderr,
+        )
         return 2
 
     headers = _demo_principal_headers(
