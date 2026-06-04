@@ -50,8 +50,10 @@ of this is required for any phase below to work end-to-end.
 - ✅ PR #7: User access read APIs.
 - ✅ PR #8: Block month-close on missing required revenue facts.
 - ✅ PR #9: Guarded finance export artifacts (Excel scaffolding).
-- ⏳ PR #10: Frontend preview shell — remaining: real dashboard pages, API
-  client, `X-UMS-Tenant` header wiring.
+- ✅ PR #10: Frontend preview shell — follow-through shipped: API client +
+  `X-UMS-Tenant` header wiring (PR #41); real dashboard pages wired to live
+  APIs (PR #69: Command Center + smart alerts, Close, Trace/Explain, Exports,
+  Connectors; Registry/Audit remain mock-labelled).
 
 ### S1 — Governance, infra, scope freeze (2026-05-16)
 
@@ -81,11 +83,12 @@ of this is required for any phase below to work end-to-end.
   tests; plus full ruff cleanup (PR #27, 652 → 0) and gitignore backport
   (PR #28).
 - ✅ PR #35: S2 integration plan + recovery spec + execution plan documents.
-- ⏳ PR #36: S2 stack merged onto `main` (commit `96dbe73`) with resolver
+- ✅ PR #36: S2 stack merged onto `main` (commit `96dbe73`) with resolver
   admission control, trusted-gateway tenant middleware, bootstrap UMS
   tenant, cross-tenant principal binding hardened, and tenant-scoped
-  export jobs. Remaining: frontend `X-UMS-Tenant` header wiring +
-  tenant-aware API client (tracked as S2 spec Phase 5; not started).
+  export jobs. The remaining frontend `X-UMS-Tenant` header wiring +
+  tenant-aware API client shipped in PR #41 and is consumed by the wired
+  dashboard pages in PR #69.
 
 ### S0/S1 catch-up (2026-05-22)
 
@@ -557,35 +560,44 @@ operator-asserted (tenant_id, month, bank_reference)→account(s) receipt model
 
 ### Build
 
-- ⏳ Revenue command center — remaining: frontend preview shell only
-  (PR #10); pages not built; no API client.
-- ⏳ Explain-number drawer — remaining: number explanation backend
-  (PR #31); drawer not built.
-- ⏳ Smart problem panel — remaining: smart-alerts BACKEND ships (GET
-  /revenue/months/{month}/smart-alerts, build_monthly_smart_alert_summary);
-  problem-panel UI not built.
+- ✅ Revenue command center — shipped (PR #69): CommandView wired to the
+  live net-revenue API (month selector, status strip, channel table with
+  the channel-direct vs account-allocated deduction split).
+- ✅ Explain-number screen — shipped (PR #69): TraceView wired to
+  POST /revenue/channels/{ch}/months/{m}/explain (metric selector, source +
+  formula + confidence provenance). (Planned as a drawer; shipped as the
+  Trace/Explain page.)
+- ✅ Smart problem panel — shipped (PR #69): smart-alerts problem panel
+  wired into the Command Center from GET
+  /revenue/months/{month}/smart-alerts.
 - ⏳ Company/sector/channel ranking — remaining: not started.
 - ⏳ Outside-CMS issue monitor — remaining: not started.
-- ⏳ Month-close status — remaining: close-gate backend (PR #8); UI not
-  built.
+- ✅ Month-close status — shipped (PR #69): CloseView wired to
+  GET/POST /finance-close (status, readiness checklist, lock/unlock with
+  audited reason).
 
 ### Outputs
 
-- ⏳ Internal decision dashboard / Smart alerts / Management-ready
-  summaries — none shipped (no real UI pages).
+- ⏳ Internal decision dashboard / Smart alerts — shipped as live UI
+  (PR #69). Management-ready summaries remain export-driven (Phase 6
+  artifacts); Registry/Audit pages are still mock-labelled.
 
 ### Acceptance gate
 
 - ⏳ A user can select month + group and receive source-backed gross,
-  deduction, net, currency, and explanation — not yet met. Optional display
-  conversion is later work and must be labeled non-official unless it is the
-  currency reported by Google/AdSense.
+  deduction, net, currency, and explanation — partially met by PR #69
+  (month + channel selection with source-backed gross/deduction/net and
+  explanations); group/sector rollup selection is not built. Optional
+  display conversion is later work and must be labeled non-official unless
+  it is the currency reported by Google/AdSense.
 
-### Status (2026-05-22)
+### Status (2026-06-04)
 
-Frontend is a sparse Vite/React shell. Building the dashboard requires
-both (a) a real API client (with `X-UMS-Tenant` header per S2) and (b) the
-allocation engine (Phase 4) producing real numbers to render.
+Six screens are wired to live APIs on the June-14 MVP branch (PR #69):
+Command Center + smart alerts, Close, Trace/Explain, Exports, Connectors —
+plus a demo-month seed (`scripts/seed_demo_month.py`), an end-to-end smoke
+(`scripts/smoke_mvp.py`), and the demo runbook (`frontend/README.md`).
+Registry and Audit remain mock-only and are labelled as such in-app.
 
 ---
 

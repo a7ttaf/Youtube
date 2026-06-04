@@ -372,7 +372,8 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   committable (still rejected by the API/service/DB two-method allowlist).
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed
-  permissions). Month-close status UI remains unbuilt (Phase 5).
+  permissions). Month-close status UI shipped in PR #69 (CloseView wired to
+  status + readiness + lock/unlock with audited reason).
 - ✅ Manual override approval — shipped: POST /revenue/manual-overrides +
   /manual-overrides/{id}/approve (create + approve flow, locked-month guard,
   APPROVE_MANUAL_OVERRIDE scope, audited).
@@ -448,6 +449,17 @@ single P-tier above.
   `mockups/ums-smart-revenue-command-center.html`, referenced from
   `Docs/09_SMART_DASHBOARD_UI.md` — PR #39.
 - ✅ Frontend tenant-header foundation: `TenantContext`, `useApiClient`, `GET /tenants/me`, Vite dev gateway proxy, Vitest framework + validation-gate integration — PR #41.
+- ✅ June-14 MVP dashboard wiring: six screens wired to live APIs
+  (Command Center + smart-alerts problem panel, Close, Trace/Explain,
+  Exports, Connectors; Registry/Audit stay mock-labelled), demo-month seed
+  (`scripts/seed_demo_month.py`), end-to-end smoke (`scripts/smoke_mvp.py`),
+  demo runbook (`frontend/README.md`) — PR #69.
+- ⏳ Production session role hydration — remaining: the dashboard shell is
+  dev/preview-gated (`VITE_ENABLE_ROLE_PREVIEW`); a production build renders
+  the fail-closed access-denied state because no backend endpoint exposes the
+  authenticated principal's role to the SPA (only `GET /tenants/me` exists).
+  Needs a session/principal read endpoint plus AppShell hydration before any
+  production deployment (raised by Codex review on PR #69).
 - ⏳ Google source-reported revenue ingestion foundation: `currencies`
   reference table, tenant-scoped `google_revenue_source_rows` with idempotent
   source-row keys (full 64-char SHA-256 hex), storage repository, synthetic-
@@ -495,6 +507,8 @@ single P-tier above.
    currency effects without treating public FX rates as official revenue.
 5. ⏳ Confidence labels that finance trusts — remaining: computation rules
    exist (net-revenue B_RECONCILED/D_ESTIMATED/E_MISSING + explain confidence
-   label); remaining is finance-trusted surfacing in the dashboard UI.
+   label) and PR #69 surfaces the explain confidence label + score in the
+   Trace/Explain screen; remaining is finance adoption/validation of those
+   labels across the rest of the dashboard.
 6. ✅ Flexible grouping without hardcoded UMS structure — channel group
    registry (PR #25 + tests in PR #30).

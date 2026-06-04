@@ -5,7 +5,20 @@ import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
 import { defineConfig, loadEnv } from "vite";
 
-const TENANT_SCOPED_ROUTES = ["/tenants"];
+// Every backend API prefix the dashboard calls in dev must be proxied with the
+// same injected trusted-principal headers as /tenants, so the browser bundle
+// never holds the gateway secret and the backend's
+// current_principal_from_headers dependency succeeds. Mirrors the production
+// reverse-proxy model where the trusted gateway injects principal identity.
+const TENANT_SCOPED_ROUTES = [
+  "/tenants",
+  "/revenue",
+  "/finance-close",
+  "/exports",
+  "/connectors",
+  "/adsense",
+  "/channels",
+];
 
 // Repo root is one level above this file (frontend/vite.config.ts -> ..).
 // Resolving relative to import.meta.url (not process.cwd()) makes the env
@@ -19,7 +32,7 @@ const REPO_ROOT = path.resolve(
   "..",
 );
 
-export default defineConfig(({ mode }) => {
+export default defineConfig(({ mode }) => { // skipcq: JS-R1005
   // ============================================================================
   // Purpose: Load env from the repository root in Node only. VITE_-prefixed
   //          names are EXPOSED to the client bundle via import.meta.env, so
@@ -52,6 +65,8 @@ export default defineConfig(({ mode }) => {
   // the browser bundle. Server-only names (UMS_TRUSTED_GATEWAY_TOKEN) stay
   // confined to Node and never reach the browser.
   const gatewayToken = env.UMS_TRUSTED_GATEWAY_TOKEN ?? "";
+  // Optional scope ID for non-global dev identities; empty string = omit.
+  const gatewayScopeId = env.VITE_DEV_GATEWAY_SCOPE_ID ?? "";
 
   if (mode === "development" && !gatewayToken) {
     // Surface a single startup hint so missing trusted-gateway secrets do not
@@ -81,7 +96,7 @@ export default defineConfig(({ mode }) => {
             target: backendTarget,
             changeOrigin: true,
             configure(proxy) {
-              proxy.on("proxyReq", (proxyReq) => {
+              proxy.on("proxyReq", (proxyReq) => { // skipcq: JS-R1005
                 // Inject the full trusted-principal header set so the backend
                 // current_principal_from_headers dependency succeeds in the
                 // default UMS_AUTHZ_SOURCE=headers mode (it requires X-User-ID,
@@ -101,6 +116,10 @@ export default defineConfig(({ mode }) => {
                 // gateway contract.
                 if (gatewayTenantSlug)
                   proxyReq.setHeader("X-UMS-Tenant", gatewayTenantSlug);
+                // Inject X-Scope-ID when a non-global scope identity is
+                // configured; omitting it is safe for global-scope dev.
+                if (gatewayScopeId)
+                  proxyReq.setHeader("X-Scope-ID", gatewayScopeId);
               });
             },
           },

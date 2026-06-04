@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 
 import { TenantProvider, useTenant } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: ReactNode }) {
+function wrapper({ children }: { children: ReactNode }) { // skipcq: JS-0067
   return <TenantProvider>{children}</TenantProvider>;
 }
 
@@ -39,7 +39,7 @@ describe("TenantContext", () => {
   });
 
   it("throws when useTenant is called outside <TenantProvider>", () => {
-    const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleSpy = vi.spyOn(console, "error").mockReturnValue();
     expect(() => renderHook(() => useTenant())).toThrow(
       /useTenant must be used within <TenantProvider>/,
     );
