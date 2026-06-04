@@ -11,9 +11,9 @@ import {
 } from "@/lib/api/useConnectors";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: React.ReactNode }) {
+const wrapper = ({ children }: { children: React.ReactNode }) => {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
-}
+};
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -45,40 +45,40 @@ const JOB_RESULT: ConnectorJobResponse = {
   audit_event: {},
 };
 
-function jsonResponse(body: unknown, status = 200) {
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
-function fetchMock() {
+const fetchMock = () => {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
-}
+};
 
-function lastFetchArgs() {
+const lastFetchArgs = () => {
   return fetchMock().mock.calls.at(-1);
-}
+};
 
 /** Narrow the last fetch args away from `undefined`, failing the test if none. */
-function requireFetchArgs() {
+const requireFetchArgs = () => {
   const args = lastFetchArgs();
   if (!args) throw new Error("expected fetch to have been called");
   return args;
-}
+};
 
 /** Resolve a promise from outside via a deferred, for ordering concurrent calls. */
-function deferred<T>() {
+const deferred = function <T>() {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
     resolve = res;
   });
   return { promise, resolve };
-}
+};
 
-function methodOf(init: unknown): string {
+const methodOf = (init: unknown): string => {
   return ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
-}
+};
 
 describe("useConnectorCredentials", () => {
   it("auto-fetches GET /connectors/credentials on mount and returns the items", async () => {

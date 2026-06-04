@@ -99,21 +99,22 @@ export default defineConfig(({ mode }) => {
                 // current_principal_from_headers dependency succeeds in the
                 // default UMS_AUTHZ_SOURCE=headers mode (it requires X-User-ID,
                 // X-User-Email, X-Role, X-Scope-Type, and the gateway token).
-                if (gatewayUserId) proxyReq.setHeader("X-User-ID", gatewayUserId);
-                if (gatewayUserEmail)
-                  proxyReq.setHeader("X-User-Email", gatewayUserEmail);
-                if (gatewayRole) proxyReq.setHeader("X-Role", gatewayRole);
-                if (gatewayScopeType)
-                  proxyReq.setHeader("X-Scope-Type", gatewayScopeType);
-                if (gatewayToken)
-                  proxyReq.setHeader("X-UMS-Trusted-Gateway-Token", gatewayToken);
+                const headersMap = {
+                  "X-User-ID": gatewayUserId,
+                  "X-User-Email": gatewayUserEmail,
+                  "X-Role": gatewayRole,
+                  "X-Scope-Type": gatewayScopeType,
+                  "X-UMS-Trusted-Gateway-Token": gatewayToken,
+                  "X-UMS-Tenant": gatewayTenantSlug
+                };
+                Object.entries(headersMap).forEach(([header, value]) => {
+                  if (value) proxyReq.setHeader(header, value);
+                });
                 // Override or supply X-UMS-Tenant from the proxy. The
                 // bootstrap call from <TenantProvider> ships with no slug,
                 // and downstream calls may carry a stale "ums" — the proxy
                 // is the authority during dev, matching the production
                 // gateway contract.
-                if (gatewayTenantSlug)
-                  proxyReq.setHeader("X-UMS-Tenant", gatewayTenantSlug);
               });
             },
           },

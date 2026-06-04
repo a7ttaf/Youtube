@@ -5,9 +5,9 @@ import { useNetRevenue } from "@/lib/api/useNetRevenue";
 import type { NetRevenueResponse } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: React.ReactNode }) {
+const wrapper = ({ children }: { children: React.ReactNode }) => {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
-}
+};
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -69,16 +69,16 @@ function jsonResponse(body: unknown, status = 200) {
   });
 }
 
-function lastFetchArgs() {
+const lastFetchArgs = () => {
   return (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1);
-}
+};
 
 /** Narrow the last fetch args away from `undefined`, failing the test if none. */
-function requireFetchArgs() {
+const requireFetchArgs = () => {
   const args = lastFetchArgs();
   if (!args) throw new Error("expected fetch to have been called");
   return args;
-}
+};
 
 describe("useNetRevenue", () => {
   it("requests the net-revenue endpoint with the month path and scope query params", async () => {

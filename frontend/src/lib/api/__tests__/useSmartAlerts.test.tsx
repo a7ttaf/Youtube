@@ -5,9 +5,9 @@ import { useSmartAlerts } from "@/lib/api/useSmartAlerts";
 import type { SmartAlertsSummary } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: React.ReactNode }) {
+const wrapper = ({ children }: { children: React.ReactNode }) => {
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
-}
+};
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
@@ -48,16 +48,16 @@ const SMART_ALERTS_BODY: SmartAlertsSummary = {
   audit_events: [],
 };
 
-function jsonResponse(body: unknown, status = 200) {
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
-function lastFetchArgs() {
+const lastFetchArgs = () => {
   return (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1);
-}
+};
 
 /** Narrow the last fetch args away from `undefined`, failing the test if none. */
 function requireFetchArgs() {

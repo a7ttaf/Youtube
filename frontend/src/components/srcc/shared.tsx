@@ -55,12 +55,14 @@ export function formatMoney(
   if (value === null || value === undefined || value === "") return placeholder;
   const parsed = Number(value);
   if (!Number.isFinite(parsed)) return value;
-  if (currency && currency !== "USD") {
-    // Only USD is backend-supported today; show the raw amount + code rather
-    // than mislabel a non-USD value with a USD symbol.
-    return `${parsed.toLocaleString("en-US", { maximumFractionDigits: 2 })} ${currency}`;
-  }
-  return USD_FORMATTER.format(parsed);
+
+  const formatterMap: Record<string, (p: number) => string> = {
+    USD: (p) => USD_FORMATTER.format(p),
+    DEFAULT: (p) => `${p.toLocaleString("en-US", { maximumFractionDigits: 2 })} ${currency}`,
+  };
+
+  const key = currency && currency !== "USD" ? "DEFAULT" : "USD";
+  return formatterMap[key](parsed);
 }
 
 // ============================================================================
