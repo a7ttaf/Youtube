@@ -95,20 +95,16 @@ function formatDate(value: string): string {
   // FIX: parse YYYY-MM-DD components directly so new Date() does not treat the
   // string as UTC midnight and shift the displayed day in negative-offset
   // timezones (e.g. "2026-03-01" shows as "Feb 28" for US/Americas users).
+  let date: Date;
   const isoDate = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
   if (isoDate) {
     const [, y, m, d] = isoDate;
-    const local = new Date(Number(y), Number(m) - 1, Number(d));
-    if (!Number.isNaN(local.getTime()))
-      return local.toLocaleDateString("en-US", {
-        year: "numeric",
-        month: "short",
-        day: "2-digit",
-      });
+    date = new Date(Number(y), Number(m) - 1, Number(d));
+  } else {
+    date = new Date(value);
   }
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleDateString("en-US", {
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleDateString("en-US", {
     year: "numeric",
     month: "short",
     day: "2-digit",
