@@ -202,11 +202,13 @@ def _result_to_api(result: AccountAllocationResult) -> dict[str, object]:
 
 
 # ============================================================================
-# Purpose: Read-only month endpoint that allocates ACCOUNT-grain deduction
-#   evidence to channels via the verified map (source-aligned raw gross). It
-#   reads ACCOUNT-only components (no bank-grain rows fetched), resolves each
-#   account's verified channels, builds the source-aligned gross basis, and
-#   returns allocations + unallocated blocking issues + a conserved summary.
+# Purpose: Read-only month endpoint returning the ACCOUNT-grain deduction
+#   allocation to channels. Via the read-switch resolver: a LOCKED month with a
+#   committed snapshot returns it (gross OR post_tax, reconstructed); otherwise it
+#   computes live (source-aligned gross). It reads ACCOUNT-only components (no
+#   bank-grain rows fetched), resolves each account's verified channels, and
+#   returns allocations + unallocated blocking issues + a conserved summary +
+#   allocation-source provenance.
 # Database/ORM: Reads deduction_components, adsense_content_owner_links +
 #   content_owner_channel_links (via the map contract), monthly_channel_revenue_facts.
 # Standards: thin route; 422 on malformed month before scope checks; fail-closed

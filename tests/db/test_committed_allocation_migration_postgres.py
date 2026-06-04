@@ -268,7 +268,7 @@ def _insert_line_sql(allocated_amount: str = "100.000000", **ov) -> tuple[str, d
     can be exercised on the raw-SQL path that bypasses the repository guards).
     """
     cols = dict(
-        basis_gross="1000.000000", basis_share="1.000000",
+        basis_amount="1000.000000", basis_share="1.000000",
         allocated_amount=allocated_amount,
     )
     cols.update(ov)
@@ -278,7 +278,7 @@ def _insert_line_sql(allocated_amount: str = "100.000000", **ov) -> tuple[str, d
         "source_system, component_key, basis_source_kind, basis_amount_usd, "
         "basis_share, allocated_amount_usd, net_applicable) VALUES "
         "(:rid, 'pub-1', 'chA', 'DEDUCTION', 'adsense_management', 'k1', 'ADSENSE', "
-        f"{cols['basis_gross']}::numeric, {cols['basis_share']}::numeric, "
+        f"{cols['basis_amount']}::numeric, {cols['basis_share']}::numeric, "
         f"{cols['allocated_amount']}::numeric, true)"
     )
     return sql, {}
@@ -337,7 +337,7 @@ def test_lines_amount_nan_rejected_by_finite_check(alembic_config, fresh_engine)
         run_id = conn.execute(
             text("SELECT id FROM committed_allocation_runs LIMIT 1")
         ).scalar_one()
-    line_sql, _ = _insert_line_sql(basis_gross="'NaN'")
+    line_sql, _ = _insert_line_sql(basis_amount="'NaN'")
     with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
         conn.execute(line_sql, {"rid": run_id})
 
@@ -351,7 +351,7 @@ def test_lines_amount_infinity_rejected_by_numeric_type(alembic_config, fresh_en
         run_id = conn.execute(
             text("SELECT id FROM committed_allocation_runs LIMIT 1")
         ).scalar_one()
-    line_sql, _ = _insert_line_sql(basis_gross="'Infinity'")
+    line_sql, _ = _insert_line_sql(basis_amount="'Infinity'")
     with pytest.raises(DataError), fresh_engine.begin() as conn:
         conn.execute(line_sql, {"rid": run_id})
 
