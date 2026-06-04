@@ -35,9 +35,9 @@ export type AdsensePaymentsQuery = {
 //   - File: frontend/src/lib/api/types.ts -> AdsensePaymentListResponse.
 //   - File: backend/ums_smart_revenue/api/adsense.py:204 list_adsense_payments.
 // ============================================================================
-export function useAdsensePayments(
+export const useAdsensePayments = (
   query: AdsensePaymentsQuery = {},
-): AsyncState<AdsensePaymentListResponse> {
+): AsyncState<AdsensePaymentListResponse> => {
   const client = useApiClient();
   const { month, limit, offset } = query;
 
@@ -53,7 +53,7 @@ export function useAdsensePayments(
   }, [client, month, limit, offset]);
 
   return useAsync(run);
-}
+};
 
 export type UseAdsenseSyncActionsState = {
   // The most recent sync result (cleared while a new sync is in flight).

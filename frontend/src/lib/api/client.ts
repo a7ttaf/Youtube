@@ -7,6 +7,10 @@ export class ApiError extends Error {
   readonly name = "ApiError";
 
   /**
+   * Represents an error returned from an API request.
+   * Contains the HTTP status code, response body, and request URL.
+   */
+  /**
    * Creates a new instance of ApiError representing an API request failure.
    * @param message - The error message describing the failure.
    * @param status - The HTTP status code returned by the API.
@@ -123,24 +127,30 @@ async function parseBody(
   }
   const contentType = res.headers.get("Content-Type") ?? "";
   const text = await res.text();
-  if (!contentType.includes("application/json")) {
-    return text;
-  }
-  if (text.length === 0) {
-    return undefined;
-  }
-  try {
-    return JSON.parse(text);
-  } catch (parseError) {
-    if (options.strictJson) {
-      const reason = parseError instanceof Error ? parseError.message : "parse failed";
-      throw new JsonParseError(reason, text);
-    }
-    return text;
-  }
+  const parsers: Record<string, () => unknown | Promise<unknown>> = {
+    "application/json": async () => {
+      if (text.length === 0) {
+        return undefined;
+      }
+      try {
+        return JSON.parse(text);
+      } catch (parseError) {
+        if (options.strictJson) {
+          const reason = parseError instanceof Error ? parseError.message : "parse failed";
+          throw new JsonParseError(reason, text);
+        }
+        return text;
+      }
+    },
+    default: () => text,
+  };
+  const parserKey =
+    Object.keys(parsers).find((key) => contentType.includes(key)) ?? "default";
+  return await parsers[parserKey]();
 }
 
 type RequestOptions = RequestInit & { bodyIsJson?: boolean };
+
 
 /**
  * Prepares a RequestInit object by attaching the body as JSON or raw and flags if it's JSON.

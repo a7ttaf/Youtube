@@ -94,12 +94,6 @@ const POPULATED_LIST: ExportListResponse = {
 };
 
 (function() {
-  function jsonResponse(body: unknown, status = 200) {
-    return new Response(JSON.stringify(body), {
-      status,
-      headers: { "Content-Type": "application/json" },
-    });
-  }
 })();
 
 const urlOf = (input: unknown): string => {

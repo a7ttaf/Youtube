@@ -123,13 +123,13 @@ const routeFetch = (opts: {
   );
 };
 
-function renderCommandView(canViewFinance = true) {
+const renderCommandView = (canViewFinance = true) => {
   return render(
     <TenantProvider initialSlug="ums">
       <CommandView canViewFinance={canViewFinance} />
     </TenantProvider>,
   );
-}
+};
 
 describe("SmartAlertsPanel in CommandView", () => {
   it("shows a loading state before the smart-alerts response resolves", async () => {

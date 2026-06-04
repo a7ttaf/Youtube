@@ -159,7 +159,7 @@ const fetchMock = () => {
 };
 
 /** Resolve a Response from outside, so an explain POST can be held in flight. */
-const deferred = <T>() => {
+const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
     resolve = res;

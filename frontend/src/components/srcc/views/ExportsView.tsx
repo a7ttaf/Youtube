@@ -638,6 +638,23 @@ function ExportJobsTableBody({
     );
   }
 
+  /** The export jobs table header row (column labels). */
+  const ExportJobsTableHead = () => {
+    return (
+      <thead>
+        <tr>
+          <th scope="col">Type</th>
+          <th scope="col">Scope</th>
+          <th scope="col">Month</th>
+          <th scope="col">Status</th>
+          <th scope="col">Created</th>
+          <th scope="col">Completed</th>
+          <th scope="col">Download</th>
+        </tr>
+      </thead>
+    );
+  }
+
   if (loading && jobs.length === 0) {
     return (
       <div className="table-wrap" aria-busy="true">
@@ -671,22 +688,6 @@ function ExportJobsTableBody({
     </div>
   );
 }
-
-/** The export jobs table header row (column labels). */
-const ExportJobsTableHead = () => {
-  return (
-    <thead>
-      <tr>
-        <th scope="col">Type</th>
-        <th scope="col">Scope</th>
-        <th scope="col">Month</th>
-        <th scope="col">Status</th>
-        <th scope="col">Created</th>
-        <th scope="col">Completed</th>
-        <th scope="col">Download</th>
-      </tr>
-    </thead>
-  );
 };
 
 /** A single export-job table row, including its status badge and download cell. */

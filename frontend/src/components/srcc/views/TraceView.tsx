@@ -175,6 +175,22 @@ export default function TraceView({
 
   const permissionDetails = PERMISSION_DETAILS[role];
 
+  /** Title block for the Explain Number panel. */
+  const TraceHeader = () => {
+    return (
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong id="traceViewTitle">Explain Number</strong>
+          <span>
+            Generate the source-linked breakdown of a channel-month metric from
+            SQL-backed finance data
+          </span>
+        </div>
+        <Badge tone="violet">Audited read</Badge>
+      </div>
+    );
+  };
+
   return (
     <section className="view-page" aria-labelledby="traceViewTitle">
       <div className="view-grid wide-side">
@@ -210,20 +226,6 @@ export default function TraceView({
     </section>
   );
 }
-
-/** Title block for the Explain Number panel. */
-const TraceHeader = () => {
-  return (
-    <div className="panel-header">
-      <div className="panel-title">
-        <strong id="traceViewTitle">Explain Number</strong>
-        <span>
-          Generate the source-linked breakdown of a channel-month metric from
-          SQL-backed finance data
-        </span>
-      </div>
-      <Badge tone="violet">Audited read</Badge>
-    </div>
   );
 };
 
@@ -339,9 +341,13 @@ export function PermissionFilterPanel({
       <section className="panel">
         <PermissionFilterHeader />
         <div className="detail-grid">
-          {details.map((d) => (
-            <PermissionDetailCell key={d.label} label={d.label} value={d.value} />
-          ))}
+          function PermissionDetailCell({ label, value }: { label: string; value: any }) {
+            return <ItemRow label={label} value={value} />;
+          }
+
+                    {details.map((d) => (
+                      <PermissionDetailCell key={d.label} label={d.label} value={d.value} />
+                    ))}
         </div>
       </section>
     </aside>
@@ -417,6 +423,25 @@ const ExplanationPanel = ({
           <p className="item-sub">{detail}</p>
         </div>
       </div>
+/** Render a returned explanation: value, confidence, formula, components, warnings. */
+const ExplanationResult = ({
+  explanation,
+  canViewFinance,
+  currency,
+}: {
+  explanation: NumberExplanation;
+  canViewFinance: boolean;
+  currency: string;
+}) => {
+  const displayCurrency = explanation.currency || currency;
+
+  return (
+    <div style={{ padding: 13 }}>
+      <div className="explain-head">
+        <div>
+          <h2>{explanation.entity_id}</h2>
+          <p>
+
     );
   }
 
@@ -448,26 +473,6 @@ const ExplanationPanel = ({
       currency={currency}
     />
   );
-}
-
-/** Render a returned explanation: value, confidence, formula, components, warnings. */
-const ExplanationResult = ({
-  explanation,
-  canViewFinance,
-  currency,
-}: {
-  explanation: NumberExplanation;
-  canViewFinance: boolean;
-  currency: string;
-}) => {
-  const displayCurrency = explanation.currency || currency;
-
-  return (
-    <div style={{ padding: 13 }}>
-      <div className="explain-head">
-        <div>
-          <h2>{explanation.entity_id}</h2>
-          <p>
             {explanation.metric} · {explanation.month}
           </p>
         </div>

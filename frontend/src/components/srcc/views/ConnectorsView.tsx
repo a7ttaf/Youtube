@@ -458,7 +458,7 @@ export function RequestJobSuccess({ result }: { result: ConnectorJobResponse }) 
  * "Request sync" button. Each button is disabled while the viewer cannot run
  * connectors, the typed sync reason is empty, or a request is already in flight.
  */
-export function ConnectorCredentialsTable({
+export const ConnectorCredentialsTable = ({
   credentials,
   loading,
   error,
@@ -469,12 +469,12 @@ export function ConnectorCredentialsTable({
 }: {
   credentials: ConnectorCredential[];
   loading: boolean;
-  error: ApiError | Error | null;
+  error: ApiFailure | Error | null;
   canRunConnectors: boolean;
   reason: string;
   requestingJob: boolean;
   onRequestSync: (credential: ConnectorCredential) => void;
-}) {
+}) => {
   if (error) {
     const { title, detail } = describeError(error);
     return (
@@ -486,8 +486,7 @@ export function ConnectorCredentialsTable({
       </div>
     );
   }
-    );
-  }
+}
 
   if (loading && credentials.length === 0) {
     return (

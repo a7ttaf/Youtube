@@ -110,6 +110,7 @@ const describeActionError = (error: unknown): string => {
   }
   return describeError(error);
 };
+    const describeError = (error: unknown) => {
       return "Your role cannot lock or unlock this finance month.";
     }
     const { detail } = describeError(error);

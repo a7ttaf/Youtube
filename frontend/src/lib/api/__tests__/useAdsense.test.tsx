@@ -51,12 +51,12 @@ const SYNC_RESULT: AdsenseSyncResponse = {
   audit_event: {},
 };
 
-function jsonResponse(body: unknown, status = 200) {
+const jsonResponse = (body: unknown, status = 200) => {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
+};
 
 const fetchMock = () => {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
@@ -67,11 +67,11 @@ const lastFetchArgs = () => {
 };
 
 /** Narrow the last fetch args away from `undefined`, failing the test if none. */
-function requireFetchArgs() {
+const requireFetchArgs = () => {
   const args = lastFetchArgs();
   if (!args) throw new Error("expected fetch to have been called");
   return args;
-}
+};
 
 /** Resolve a promise from outside via a deferred, for ordering concurrent calls. */
 const deferred = function<T>() {

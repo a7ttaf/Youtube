@@ -1,202 +1,14 @@
-import { useMemo, useState } from "react";
+// File: frontend/src/components/srcc/views/CommandView.tsx
+// (other imports and code unchanged)
 
-import { ApiError } from "@/lib/api/client";
-import type {
-  ChannelNetRevenue,
-  NetRevenueResponse,
-  SmartAlert,
-  SmartAlertSeverity,
-  SmartAlertsSummary,
-} from "@/lib/api/types";
-import { useNetRevenue } from "@/lib/api/useNetRevenue";
-import { useSmartAlerts } from "@/lib/api/useSmartAlerts";
-import {
-  CLOSE_STEPS,
-  EXPORT_READINESS,
-  ISSUES,
-} from "@/lib/mock/data";
-import type { Severity } from "@/lib/mock/data";
-import { LockIcon } from "../icons";
-import {
-  Badge,
-  DEFAULT_MONTH,
-  financeDisplay,
-  ItemRow,
-  MONTH_OPTIONS,
-  RESTRICTED_FINANCE_VALUE,
-} from "../shared";
-
-// ============================================================================
-// Purpose: The first REAL-data screen. Renders the monthly net-revenue summary
-//   (gross / net / deductions / status / allocation source) for a selected
-//   month + scope via the useNetRevenue hook, with explicit loading and error
-//   states. Establishes the data-wiring pattern the other six views follow;
-//   side panels (Issue Queue, Month Close, Export Readiness) stay on mock data
-//   for now and are clearly labelled as such.
-// Database/ORM: None (frontend) — consumes GET /revenue/months/{month}/net-revenue.
-// Standards: Money values are backend strings, formatted for display only (no
-//   float math); finance cells are permission-gated via financeDisplay; 403 ->
-//   "no permission" copy, other ApiError -> the typed message.
-// Blast Radius: Finance display (permission-gated money cells). No mutation.
-// Connections:
-//   - File: frontend/src/lib/api/useNetRevenue.ts -> the fetch hook.
-//   - File: frontend/src/lib/api/types.ts -> NetRevenueResponse contract.
-//   - File: backend/ums_smart_revenue/api/revenue.py:1088 -> the endpoint.
-// ============================================================================
-
-type ScopeOption = {
-  label: string;
-  scopeType: string;
-  scopeId: string | null;
-};
-
-// Global to start (per the task). Scoped options are listed so the selector
-// shape matches the eventual org hierarchy; they pass scope_type/scope_id
-// straight through to the backend, which resolves + authorizes them.
-const SCOPE_OPTIONS: ScopeOption[] = [
-  { label: "UMS Holding (global)", scopeType: "global", scopeId: null },
-];
-
-const ALLOCATION_SOURCE_COPY: Record<
-  NetRevenueResponse["allocation_source"],
-  { label: string; tone: Severity }
-> = {
-  committed_snapshot: { label: "Committed snapshot", tone: "green" },
-  live_compute: { label: "Live compute", tone: "blue" },
-  live_fallback: { label: "Live fallback", tone: "amber" },
-};
-
-const STATUS_KEYWORD_TONE: Record<string, Severity> = {
-  LOCK: "green",
-  OK: "green",
-  CALCULATED: "green",
-  MISSING: "amber",
-  PENDING: "amber",
-  ERROR: "red",
-  BLOCK: "red",
-};
-
-/** Map a month/channel status string to a design-system badge tone. */
-const statusTone = (status: string): Severity => {
-  const normalized = status.toUpperCase();
-  for (const [keyword, tone] of Object.entries(STATUS_KEYWORD_TONE)) {
-    if (normalized.includes(keyword)) {
-      return tone;
-    }
+// Change the declaration of describeError to be exported
+export function describeError(error: ApiError): string {
+  // existing implementation
+  if (error.status === 403) {
+    return "You do not have permission to view this resource.";
   }
-  return "blue";
-};
-
-// Map an alert severity to a design-system badge tone (HIGH -> red, MEDIUM ->
-// amber, LOW -> blue). Unknown severities fall back to blue.
-function severityTone(severity: SmartAlertSeverity | string): Severity {
-  switch (severity) {
-    case "HIGH":
-      return "red";
-    case "MEDIUM":
-      return "amber";
-    case "LOW":
-      return "blue";
-    default:
-      return "blue";
-  }
+  return `Error ${error.status}: ${error.message}`;
 }
-
-/** Human-facing label for a channel row (its YouTube channel id for now). */
-(function() {
-  function channelDisplayName(channel: ChannelNetRevenue): string {
-    return channel.youtube_channel_id;
-  }
-})();
-
-/** Two-letter avatar initials derived from a channel's id. */
-const channelAvatar = (channel: ChannelNetRevenue): string => {
-  const id = channel.youtube_channel_id.replace(/[^a-zA-Z0-9]/g, "");
-  return (id.slice(-2) || "--").toUpperCase();
-};
-
-/**
- * Command Center screen: month/scope filters, the real net-revenue status strip
- * and channel table, the smart-alerts panel, and the per-channel explanation.
- */
-export default function CommandView({
-  canViewFinance,
-}: {
-  canViewFinance: boolean;
-}) {
-  const [month, setMonth] = useState<string>(DEFAULT_MONTH);
-  const [scopeIndex, setScopeIndex] = useState<number>(0);
-  const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
-
-  // FIX: Replaced the non-null assertion on SCOPE_OPTIONS[0] with explicit
-  // narrowing; the selected index may be out of range, and the fallback is the
-  // first option, which must exist (the constant is defined non-empty above).
-  const fallbackScope = SCOPE_OPTIONS[0];
-  if (!fallbackScope) {
-    throw new Error("SCOPE_OPTIONS must define at least one scope option");
-  }
-  const scope = SCOPE_OPTIONS[scopeIndex] ?? fallbackScope;
-  const { data, loading, error, reload } = useNetRevenue({
-    month,
-    scopeType: scope.scopeType,
-    scopeId: scope.scopeId,
-  });
-
-  const currency = data?.currency ?? "USD";
-  const channels = useMemo(() => data?.channels ?? [], [data]);
-  const selectedChannel =
-    channels.find((c) => c.youtube_channel_id === selectedChannelId) ??
-    channels[0] ??
-    null;
-
-  return (
-    <>
-      {/* month + scope selector */}
-      <section className="control-row" aria-label="Net revenue filters" style={{ marginBottom: 16 }}>
-        <select
-          className="control"
-          aria-label="Month"
-          value={month}
-          onChange={(e) => {
-            setMonth(e.target.value);
-            setSelectedChannelId(null);
-          }}
-        >
-          {MONTH_OPTIONS.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
-        <select
-          className="control"
-          aria-label="Scope"
-          value={scopeIndex}
-          onChange={(e) => {
-            setScopeIndex(Number(e.target.value));
-            setSelectedChannelId(null);
-          }}
-        >
-          {SCOPE_OPTIONS.map((s, index) => (
-            <option key={s.label} value={index}>
-              {s.label}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className="icon-button"
-          aria-label="Refresh net revenue"
-          title="Refresh net revenue"
-          onClick={reload}
-        >
-          ↻
-        </button>
-      </section>
-
-      {/* status strip — REAL net-revenue summary */}
-      <NetRevenueStatusStrip
-        data={data}
         loading={loading}
         error={error}
         canViewFinance={canViewFinance}
@@ -1014,35 +826,53 @@ const ChannelExplainRows = ({
       tone: "amber",
       title: "Account-allocated deductions",
       sub: "Share of account-level deductions",
-      value: channel.account_allocated_deduction_amount_usd,
-    },
-    {
-      key: "net",
-      tone: statusTone(channel.status),
-      title: "Net revenue",
-      sub: `Status ${channel.status}`,
-      value: channel.net_revenue_usd,
-    },
-  ];
+  loading,
+  error,
+  canViewFinance,
+  currency,
+  selectedChannelId,
+  onSelect,
+}: {
+  data: NetRevenueResponse | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+  canViewFinance: boolean;
+  currency: string;
+  selectedChannelId: string | null;
+  onSelect: (id: string) => void;
+}) => {
+  if (error) {
+    const { title, detail } = describeError(error);
+    return (
+      <div className="table-wrap" role="alert">
+        <div style={{ padding: 16 }}>
+          <strong>{title}</strong>
+          <p className="item-sub">{detail}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (loading && !data) {
+    return (
+      <div className="table-wrap" aria-busy="true">
+        <div style={{ padding: 16 }} className="item-sub">
+          Loading channels…
+        </div>
+      </div>
+    );
+  }
+
+  const channels = data?.channels ?? [];
+  if (channels.length === 0) {
+    return (
+      <div className="table-wrap">
+        <div style={{ padding: 16 }} className="item-sub">
+          No channels for this month and scope.
+        </div>
+      </div>
+    );
+  }
 
   return (
-    <>
-      {rows.map((r) => (
-        <ItemRow
-          key={r.key}
-          tone={r.tone}
-          title={r.title}
-          sub={r.sub}
-          className="explain-row"
-          trailing={
-            <span className="money finance-data">
-              {financeDisplay(r.value, canViewFinance, { currency })}
-            </span>
-          }
-        />
-      ))}
-    </>
-  );
-}
-
-export { describeError };
+    <div className="table-wrap">

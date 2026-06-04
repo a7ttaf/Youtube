@@ -68,7 +68,7 @@ const requireFetchArgs = () => {
 };
 
 /** Resolve a promise from outside via a deferred, for ordering concurrent calls. */
-const deferred = <T>() => {
+const deferred = <T,>() => {
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
     resolve = res;

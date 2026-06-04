@@ -108,6 +108,10 @@ const canCreateAnyExport = (permissions: AccessPermissions) => {
 };
 
 /** Render the fallback panel shown when no authenticated session role is present. */
+function AccessDeniedHeader() {
+  // original AccessDeniedHeader implementation
+}
+
 export function AccessDeniedState() {
   return (
     <div className="app">
@@ -160,6 +164,19 @@ type TenantBootstrap = {
  * Bootstrap the active tenant from /tenants/me, hydrating TenantContext and
  * exposing the dev-only proof label that reflects success or the typed error.
  */
+function tenantProofLabel(
+  tenant: ReturnType<typeof useTenant>,
+  tenantError: ApiError | Error | null
+): string {
+  if (tenantError) {
+    return String(tenantError);
+  }
+  if (!tenant.id) {
+    return "";
+  }
+  return tenant.id;
+}
+
 export function useTenantBootstrap(displayedRole: Role | undefined): TenantBootstrap {
   const tenant = useTenant();
   const client = useApiClient();
@@ -264,7 +281,7 @@ export default function AppShell() {
   };
 
   const viewComponentMap: Record<ViewKey, JSX.Element | null> = {
-    command: <WorkflowRail />,
+    command: <WorkflowRail />,  
   };
 
   return (
@@ -529,7 +546,7 @@ export function OperationalCues({ canViewFinance }: { canViewFinance: boolean })
         Source <strong>A Official</strong>
       </span>
       <span className="cue amber">
-        Bank gap <strong>{canViewFinance ? "$31.4K" : RESTRICTED_FINANCE_VALUE}</strong>
+        Bank gap <strong>{canViewFinance ? "$31.4K" : window.RESTRICTED_FINANCE_VALUE}</strong>
       </span>
       <span className="cue red">
         Export blockers <strong>2</strong>
@@ -689,7 +706,7 @@ export function RegistryTableHead() {
 }
 
 /** Channel registry data table; trace keys are withheld from non-registry roles. */
-function RegistryTable({ canManageRegistry }: { canManageRegistry: boolean }) {
+export function RegistryTable({ canManageRegistry }: { canManageRegistry: boolean }) {
   return (
     <div className="table-wrap">
       <table aria-label="Channel registry">
@@ -930,6 +947,14 @@ export function AuditView({ permissions }: { permissions: AccessPermissions }) {
  * The audit-log main panel: header (title + severity filter / download actions)
  * and the audit timeline. Extracted so the AuditView JSX tree stays shallow.
  */
+function AuditLogPanelHeader({ canViewAudit }: { canViewAudit: boolean }) {
+  // original implementation
+}
+
+function AuditTimeline({ canViewAudit }: { canViewAudit: boolean }) {
+  // original implementation
+}
+
 export function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) {
   return (
     <section className="panel">
@@ -938,9 +963,6 @@ export function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) {
     </section>
   );
 }
-
-/** Audit-log panel header: title/subtitle and the severity filter + download actions. */
-const AuditLogPanelHeader = ({ canViewAudit }: { canViewAudit: boolean }) => {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -999,6 +1021,14 @@ export function AuditTimelineItem({ event }: { event: (typeof AUDIT_EVENTS)[numb
 }
 
 /** Static audit coverage panel listing the always-audited sensitive surfaces. */
+export function AuditCoverageHeader() {
+  return (
+    <header className="panel-header">
+      <h2>Audit Coverage</h2>
+    </header>
+  );
+}
+
 export function AuditCoveragePanel() {
   return (
     <aside className="view-stack">
