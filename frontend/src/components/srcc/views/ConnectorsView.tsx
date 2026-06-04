@@ -338,15 +338,7 @@ function ConnectorSidebar({
   return (
     <aside className="view-stack">
       <section className="panel">
-        <div className="panel-header">
-          <div className="panel-title">
-            <strong>AdSense Payment Sync</strong>
-            <span>Supply a payment row to upsert into the finance source</span>
-          </div>
-          <Badge tone={canRunConnectors ? "amber" : "red"}>
-            {canRunConnectors ? "Connector job" : "Restricted"}
-          </Badge>
-        </div>
+        <AdsenseSyncHeader canRunConnectors={canRunConnectors} />
         <AdsenseSyncForm
           defaultMonth={month}
           canRunConnectors={canRunConnectors}
@@ -357,6 +349,25 @@ function ConnectorSidebar({
 
       <RunHistoryNote />
     </aside>
+  );
+}
+
+/**
+ * The AdSense Payment Sync panel header: title/subtitle and the connector-job /
+ * restricted badge. Extracted so the sidebar JSX tree stays within the nesting
+ * limit; the badge reflects whether the viewer may run connector jobs.
+ */
+function AdsenseSyncHeader({ canRunConnectors }: { canRunConnectors: boolean }) {
+  return (
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong>AdSense Payment Sync</strong>
+        <span>Supply a payment row to upsert into the finance source</span>
+      </div>
+      <Badge tone={canRunConnectors ? "amber" : "red"}>
+        {canRunConnectors ? "Connector job" : "Restricted"}
+      </Badge>
+    </div>
   );
 }
 
@@ -494,15 +505,7 @@ function ConnectorCredentialsTable({
   return (
     <div className="table-wrap">
       <table aria-label="Connector data sources">
-        <thead>
-          <tr>
-            <th scope="col">Connector</th>
-            <th scope="col">Account</th>
-            <th scope="col">Status</th>
-            <th scope="col">Secret</th>
-            <th scope="col">Action</th>
-          </tr>
-        </thead>
+        <ConnectorCredentialsTableHead />
         <tbody>
           {credentials.map((credential) => (
             <ConnectorCredentialRow
@@ -517,6 +520,21 @@ function ConnectorCredentialsTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** Column header row for the connector data-sources table. Extracted to keep nesting shallow. */
+function ConnectorCredentialsTableHead() {
+  return (
+    <thead>
+      <tr>
+        <th scope="col">Connector</th>
+        <th scope="col">Account</th>
+        <th scope="col">Status</th>
+        <th scope="col">Secret</th>
+        <th scope="col">Action</th>
+      </tr>
+    </thead>
   );
 }
 
@@ -694,15 +712,7 @@ function AdsensePaymentsTable({
   return (
     <div className="table-wrap">
       <table aria-label="AdSense payments">
-        <thead>
-          <tr>
-            <th scope="col">Account</th>
-            <th scope="col">Payment</th>
-            <th scope="col">Date</th>
-            <th scope="col">Amount</th>
-            <th scope="col">Status</th>
-          </tr>
-        </thead>
+        <AdsensePaymentsTableHead />
         <tbody>
           {payments.map((payment) => (
             <AdsensePaymentRow
@@ -714,6 +724,21 @@ function AdsensePaymentsTable({
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** Column header row for the AdSense payments table. Extracted to keep nesting shallow. */
+function AdsensePaymentsTableHead() {
+  return (
+    <thead>
+      <tr>
+        <th scope="col">Account</th>
+        <th scope="col">Payment</th>
+        <th scope="col">Date</th>
+        <th scope="col">Amount</th>
+        <th scope="col">Status</th>
+      </tr>
+    </thead>
   );
 }
 

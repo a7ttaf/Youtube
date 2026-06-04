@@ -55,7 +55,13 @@ type AccessPermissions = {
   canViewAudit: boolean;
 };
 
-// In production this value is hydrated from the server-authenticated session claim.
+// FIX: The previous comment claimed this value "is hydrated from the
+// server-authenticated session claim", but no hydration exists yet — the
+// backend exposes no principal/role endpoint (only GET /tenants/me). It is an
+// intentionally empty placeholder: a production build without
+// VITE_ENABLE_ROLE_PREVIEW renders <AccessDeniedState/> (fail-closed) until a
+// backend session endpoint ships. Tracked in Docs/15_DELIVERY_BACKLOG.md
+// ("Production session role hydration").
 const SERVER_AUTHENTICATED_SESSION: AuthenticatedSession = {};
 
 const CAN_PREVIEW_ROLES =
@@ -452,20 +458,7 @@ function Topbar({
           <h1>{title}</h1>
         </div>
         <p>{subtitle}</p>
-        <div className="operational-cues" aria-label="Operational status">
-          <span className="cue green">
-            Source <strong>A Official</strong>
-          </span>
-          <span className="cue amber">
-            Bank gap <strong>{canViewFinance ? "$31.4K" : RESTRICTED_FINANCE_VALUE}</strong>
-          </span>
-          <span className="cue red">
-            Export blockers <strong>2</strong>
-          </span>
-          <span className="cue violet">
-            Trace <strong>SQL scoped</strong>
-          </span>
-        </div>
+        <OperationalCues canViewFinance={canViewFinance} />
       </div>
       <div className="control-row" aria-label="Report filters">
         <select className="control" aria-label="Month" defaultValue="Mar 2026">
@@ -492,6 +485,30 @@ function Topbar({
         </button>
       </div>
     </header>
+  );
+}
+
+/**
+ * Operational status cues for the top bar (source, bank gap, export blockers,
+ * trace). Extracted so the Topbar JSX tree stays shallow; the bank-gap value is
+ * gated behind canViewFinance so non-finance roles see the restricted sentinel.
+ */
+function OperationalCues({ canViewFinance }: { canViewFinance: boolean }) {
+  return (
+    <div className="operational-cues" aria-label="Operational status">
+      <span className="cue green">
+        Source <strong>A Official</strong>
+      </span>
+      <span className="cue amber">
+        Bank gap <strong>{canViewFinance ? "$31.4K" : RESTRICTED_FINANCE_VALUE}</strong>
+      </span>
+      <span className="cue red">
+        Export blockers <strong>2</strong>
+      </span>
+      <span className="cue violet">
+        Trace <strong>SQL scoped</strong>
+      </span>
+    </div>
   );
 }
 
@@ -574,37 +591,74 @@ function RegistryView({ permissions }: { permissions: AccessPermissions }) {
       </div>
 
       <div className="view-grid wide-side">
-        <section className="panel">
-          <div className="panel-header">
-            <div className="panel-title">
-              <strong id="registryTitle">Channel Registry</strong>
-              <span>Ownership, CMS status, revenue scope, and SQL lineage identity</span>
-            </div>
-            <div className="view-actions">
-              <button className="ghost-button" type="button" disabled={!canManageRegistry}>
-                Bulk Import
-              </button>
-              <button className="primary-button" type="button" disabled={!canManageRegistry}>
-                Request Mapping Change
-              </button>
-            </div>
-          </div>
-          <div className="permission-band">
-            <Dot tone="green" />
-            <span>
-              <strong>Finance-visible mapping layer</strong>
-              <span>Company managers see only assigned companies; sector managers see assigned sectors; every mapping change writes an audit event.</span>
-            </span>
-            <Badge tone={canManageRegistry ? "blue" : "red"}>
-              {canManageRegistry ? "Scoped" : "Read only"}
-            </Badge>
-          </div>
-          <RegistryTable canManageRegistry={canManageRegistry} />
-        </section>
+        <RegistryMainPanel canManageRegistry={canManageRegistry} />
 
         <RegistrySidePanels canManageRegistry={canManageRegistry} />
       </div>
     </section>
+  );
+}
+
+/**
+ * The registry main panel: header (title + bulk/mapping actions), the
+ * finance-visible mapping band, and the registry table. Extracted so the
+ * RegistryView JSX tree stays shallow (JSX nesting).
+ */
+function RegistryMainPanel({ canManageRegistry }: { canManageRegistry: boolean }) {
+  return (
+    <section className="panel">
+      <RegistryPanelHeader canManageRegistry={canManageRegistry} />
+      <RegistryMappingBand canManageRegistry={canManageRegistry} />
+      <RegistryTable canManageRegistry={canManageRegistry} />
+    </section>
+  );
+}
+
+/** Registry panel header: title/subtitle and the bulk-import / mapping-change actions. */
+function RegistryPanelHeader({ canManageRegistry }: { canManageRegistry: boolean }) {
+  return (
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong id="registryTitle">Channel Registry</strong>
+        <span>Ownership, CMS status, revenue scope, and SQL lineage identity</span>
+      </div>
+      <div className="view-actions">
+        <button className="ghost-button" type="button" disabled={!canManageRegistry}>
+          Bulk Import
+        </button>
+        <button className="primary-button" type="button" disabled={!canManageRegistry}>
+          Request Mapping Change
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/** Finance-visible mapping band; the scope badge reflects registry-edit access. */
+function RegistryMappingBand({ canManageRegistry }: { canManageRegistry: boolean }) {
+  return (
+    <div className="permission-band">
+      <Dot tone="green" />
+      <span>
+        <strong>Finance-visible mapping layer</strong>
+        <span>Company managers see only assigned companies; sector managers see assigned sectors; every mapping change writes an audit event.</span>
+      </span>
+      <Badge tone={canManageRegistry ? "blue" : "red"}>
+        {canManageRegistry ? "Scoped" : "Read only"}
+      </Badge>
+    </div>
+  );
+}
+
+/** The channel registry table column header row. Extracted to keep nesting shallow. */
+function RegistryTableHead() {
+  return (
+    <thead>
+      <tr>
+        <th>Channel</th><th>Company</th><th>Sector</th><th>CMS</th>
+        <th>Revenue Source</th><th>Trace Key</th><th>State</th><th>Action</th>
+      </tr>
+    </thead>
   );
 }
 
@@ -613,12 +667,7 @@ function RegistryTable({ canManageRegistry }: { canManageRegistry: boolean }) {
   return (
     <div className="table-wrap">
       <table aria-label="Channel registry">
-        <thead>
-          <tr>
-            <th>Channel</th><th>Company</th><th>Sector</th><th>CMS</th>
-            <th>Revenue Source</th><th>Trace Key</th><th>State</th><th>Action</th>
-          </tr>
-        </thead>
+        <RegistryTableHead />
         <tbody>
           {REGISTRY_ROWS.map((r) => (
             <RegistryRow key={r.code} row={r} canManageRegistry={canManageRegistry} />
@@ -639,15 +688,7 @@ function RegistryRow({
 }) {
   return (
     <tr>
-      <td>
-        <span className="channel-cell">
-          <span className="avatar">{row.avatar}</span>
-          <span>
-            <span className="channel-name">{row.name}</span>
-            <span className="channel-id">{row.code}</span>
-          </span>
-        </span>
-      </td>
+      <RegistryChannelCell name={row.name} code={row.code} avatar={row.avatar} />
       <td>{row.company}</td>
       <td>{row.sector}</td>
       <td><Badge tone={row.cms.tone}>{row.cms.text}</Badge></td>
@@ -667,57 +708,149 @@ function RegistryRow({
   );
 }
 
+/** The avatar + name/id identity cell for one registry row. Extracted to keep nesting shallow. */
+function RegistryChannelCell({
+  name,
+  code,
+  avatar,
+}: {
+  name: string;
+  code: string;
+  avatar: string;
+}) {
+  return (
+    <td>
+      <span className="channel-cell">
+        <span className="avatar">{avatar}</span>
+        <span>
+          <span className="channel-name">{name}</span>
+          <span className="channel-id">{code}</span>
+        </span>
+      </span>
+    </td>
+  );
+}
+
 /** Registry side panels: the mapping-change request form and registry controls. */
 function RegistrySidePanels({ canManageRegistry }: { canManageRegistry: boolean }) {
   return (
     <aside className="view-stack" aria-label="Registry side panels">
-      <section className="panel">
-        <div className="panel-header">
-          <div className="panel-title">
-            <strong>Mapping Change Request</strong>
-            <span>Restricted to registry admins and corporate finance approvers</span>
-          </div>
-          <Badge tone="amber">Audit required</Badge>
-        </div>
-        <div className="form-grid">
-          <div className="field-row">
-            <label htmlFor="registryChannel">Channel</label>
-            <select id="registryChannel" disabled={!canManageRegistry}><option>Sports Extra</option><option>Music Stage</option></select>
-          </div>
-          <div className="field-row">
-            <label htmlFor="registryCompany">Company</label>
-            <select id="registryCompany" disabled={!canManageRegistry}><option>TV Sector</option><option>Catalog Media</option></select>
-          </div>
-          <div className="field-row">
-            <label htmlFor="registryReason">Reason</label>
-            <input id="registryReason" defaultValue="March source evidence received" disabled={!canManageRegistry} />
-          </div>
-          <div className="field-row">
-            <label htmlFor="registryEffective">Effective month</label>
-            <select id="registryEffective" disabled={!canManageRegistry}><option>Mar 2026</option><option>Apr 2026</option></select>
-          </div>
-        </div>
-        <div className="action-row">
-          <button className="ghost-button" type="button" disabled={!canManageRegistry}>Save Draft</button>
-          <button className="primary-button" type="button" disabled={!canManageRegistry}>Submit Approval</button>
-        </div>
-      </section>
-
-      <section className="panel">
-        <div className="panel-header">
-          <div className="panel-title">
-            <strong>Registry Controls</strong>
-            <span>Production behavior expected from the backend foundation</span>
-          </div>
-        </div>
-        <div className="issue-list" role="list">
-          {REGISTRY_CONTROLS.map((c) => (
-            <ItemRow key={c.title} tone={c.tone} title={c.title} sub={c.sub}
-              trailing={<Badge tone={c.badge.tone}>{c.badge.text}</Badge>} />
-          ))}
-        </div>
-      </section>
+      <MappingChangeRequestPanel canManageRegistry={canManageRegistry} />
+      <RegistryControlsPanel />
     </aside>
+  );
+}
+
+/**
+ * The mapping-change request panel: an audited form (channel, company, reason,
+ * effective month) plus save/submit actions. Extracted with a shallow form so
+ * the registry side-panel JSX tree stays within the nesting limit.
+ */
+function MappingChangeRequestPanel({ canManageRegistry }: { canManageRegistry: boolean }) {
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong>Mapping Change Request</strong>
+          <span>Restricted to registry admins and corporate finance approvers</span>
+        </div>
+        <Badge tone="amber">Audit required</Badge>
+      </div>
+      <div className="form-grid">
+        <MappingSelectRow
+          htmlFor="registryChannel"
+          label="Channel"
+          options={["Sports Extra", "Music Stage"]}
+          disabled={!canManageRegistry}
+        />
+        <MappingSelectRow
+          htmlFor="registryCompany"
+          label="Company"
+          options={["TV Sector", "Catalog Media"]}
+          disabled={!canManageRegistry}
+        />
+        <MappingInputRow
+          htmlFor="registryReason"
+          label="Reason"
+          defaultValue="March source evidence received"
+          disabled={!canManageRegistry}
+        />
+        <MappingSelectRow
+          htmlFor="registryEffective"
+          label="Effective month"
+          options={["Mar 2026", "Apr 2026"]}
+          disabled={!canManageRegistry}
+        />
+      </div>
+      <div className="action-row">
+        <button className="ghost-button" type="button" disabled={!canManageRegistry}>Save Draft</button>
+        <button className="primary-button" type="button" disabled={!canManageRegistry}>Submit Approval</button>
+      </div>
+    </section>
+  );
+}
+
+/** A labelled mapping-form select row that owns its own options. Keeps the form tree shallow. */
+function MappingSelectRow({
+  htmlFor,
+  label,
+  options,
+  disabled,
+}: {
+  htmlFor: string;
+  label: string;
+  options: string[];
+  disabled: boolean;
+}) {
+  return (
+    <div className="field-row">
+      <label htmlFor={htmlFor}>{label}</label>
+      <select id={htmlFor} disabled={disabled}>
+        {options.map((option) => (
+          <option key={option}>{option}</option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+/** A labelled mapping-form text input row. Keeps the form tree shallow. */
+function MappingInputRow({
+  htmlFor,
+  label,
+  defaultValue,
+  disabled,
+}: {
+  htmlFor: string;
+  label: string;
+  defaultValue: string;
+  disabled: boolean;
+}) {
+  return (
+    <div className="field-row">
+      <label htmlFor={htmlFor}>{label}</label>
+      <input id={htmlFor} defaultValue={defaultValue} disabled={disabled} />
+    </div>
+  );
+}
+
+/** The registry-controls panel listing the expected production behaviors. */
+function RegistryControlsPanel() {
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong>Registry Controls</strong>
+          <span>Production behavior expected from the backend foundation</span>
+        </div>
+      </div>
+      <div className="issue-list" role="list">
+        {REGISTRY_CONTROLS.map((c) => (
+          <ItemRow key={c.title} tone={c.tone} title={c.title} sub={c.sub}
+            trailing={<Badge tone={c.badge.tone}>{c.badge.text}</Badge>} />
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -762,25 +895,41 @@ function AuditView({ permissions }: { permissions: AccessPermissions }) {
       </div>
 
       <div className="view-grid">
-        <section className="panel">
-          <div className="panel-header">
-            <div className="panel-title">
-              <strong id="auditTitle">Audit Log</strong>
-              <span>Every sensitive action records actor, permission, scope, target, and result</span>
-            </div>
-            <div className="view-actions">
-              <select className="control" aria-label="Audit severity" disabled={!canViewAudit}>
-                <option>All sensitive</option><option>Denied</option><option>Exports</option>
-              </select>
-              <button className="ghost-button" type="button" disabled={!canViewAudit}>Download Audit View</button>
-            </div>
-          </div>
-          <AuditTimeline canViewAudit={canViewAudit} />
-        </section>
-
+        <AuditLogPanel canViewAudit={canViewAudit} />
         <AuditCoveragePanel />
       </div>
     </section>
+  );
+}
+
+/**
+ * The audit-log main panel: header (title + severity filter / download actions)
+ * and the audit timeline. Extracted so the AuditView JSX tree stays shallow.
+ */
+function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) {
+  return (
+    <section className="panel">
+      <AuditLogPanelHeader canViewAudit={canViewAudit} />
+      <AuditTimeline canViewAudit={canViewAudit} />
+    </section>
+  );
+}
+
+/** Audit-log panel header: title/subtitle and the severity filter + download actions. */
+function AuditLogPanelHeader({ canViewAudit }: { canViewAudit: boolean }) {
+  return (
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong id="auditTitle">Audit Log</strong>
+        <span>Every sensitive action records actor, permission, scope, target, and result</span>
+      </div>
+      <div className="view-actions">
+        <select className="control" aria-label="Audit severity" disabled={!canViewAudit}>
+          <option>All sensitive</option><option>Denied</option><option>Exports</option>
+        </select>
+        <button className="ghost-button" type="button" disabled={!canViewAudit}>Download Audit View</button>
+      </div>
+    </div>
   );
 }
 
@@ -830,12 +979,7 @@ function AuditCoveragePanel() {
   return (
     <aside className="view-stack">
       <section className="panel">
-        <div className="panel-header">
-          <div className="panel-title">
-            <strong>Audit Coverage</strong>
-            <span>Required to be present for every sensitive surface</span>
-          </div>
-        </div>
+        <AuditCoverageHeader />
         <div className="issue-list" role="list">
           <ItemRow tone="green" title="Revenue reads" sub="Every money cell view emits an audit row"
             trailing={<Badge tone="green">On</Badge>} />
@@ -846,5 +990,17 @@ function AuditCoveragePanel() {
         </div>
       </section>
     </aside>
+  );
+}
+
+/** Audit coverage panel header (title + subtitle). Extracted to keep nesting shallow. */
+function AuditCoverageHeader() {
+  return (
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong>Audit Coverage</strong>
+        <span>Required to be present for every sensitive surface</span>
+      </div>
+    </div>
   );
 }

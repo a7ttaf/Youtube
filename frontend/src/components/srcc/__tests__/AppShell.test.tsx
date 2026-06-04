@@ -88,7 +88,10 @@ describe("AppShell tenant proof tag", () => {
       </TenantProvider>,
     );
     const tag = await screen.findByTestId("tenant-proof");
-    expect(tag.textContent).toContain("UMS (ums)");
+    // findByTestId only waits for the element; the tag first renders the
+    // "(resolving…) (loading…)" placeholder, so wait for the resolved text before
+    // asserting (mirrors the other async tenant assertions in this file).
+    await waitFor(() => expect(tag.textContent).toContain("UMS (ums)"));
     expect(tag.textContent).toContain("00000000-0000-0000-0000-000000000001");
   });
 
@@ -102,7 +105,9 @@ describe("AppShell tenant proof tag", () => {
       </TenantProvider>,
     );
     const tag = await screen.findByTestId("tenant-proof");
-    expect(tag.textContent).toMatch(/503/);
+    // The tag first renders the "(loading…)" placeholder; wait for the rejected
+    // /tenants/me promise to settle and surface the 503 before asserting.
+    await waitFor(() => expect(tag.textContent).toMatch(/503/));
   });
 
   it("appends the JSON body.detail string to the proof tag when present", async () => {
@@ -201,7 +206,11 @@ describe("AppShell tenant proof tag", () => {
       </TenantProvider>,
     );
     const tag = await screen.findByTestId("tenant-proof");
-    expect(tag.textContent).toContain("Acme Holdings (acme)");
+    // findByTestId only waits for the element; wait for the resolved tenant text
+    // so the assertion never reads the initial "(resolving…) (loading…)" placeholder.
+    await waitFor(() =>
+      expect(tag.textContent).toContain("Acme Holdings (acme)"),
+    );
     const tenantCalls = tenantFetchCalls();
     expect(tenantCalls).toHaveLength(1);
     const lastCall = tenantCalls.at(-1);

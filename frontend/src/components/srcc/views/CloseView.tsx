@@ -14,8 +14,30 @@ import {
 } from "@/lib/api/useMonthClose";
 import type { Severity } from "@/lib/mock/data";
 import { RECON_NOTES } from "@/lib/mock/data";
-import { Badge, DEFAULT_MONTH, Dot, ItemRow, MONTH_OPTIONS } from "../shared";
+import {
+  Badge,
+  DEFAULT_MONTH,
+  Dot,
+  formatTimestamp,
+  ItemRow,
+  MONTH_OPTIONS,
+} from "../shared";
 import { describeError } from "./CommandView";
+
+// The locale-format options the close screen renders its lock/unlock timestamps
+// with. Passed to the shared formatTimestamp so the rendered strings are
+// identical to the close screen's previous local helper.
+const CLOSE_TIMESTAMP_OPTIONS: Intl.DateTimeFormatOptions = {
+  year: "numeric",
+  month: "short",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+};
+
+/** Format a lock/unlock ISO timestamp for the close screen (en-US, short date + time). */
+const formatCloseTimestamp = (value: string | null | undefined): string =>
+  formatTimestamp(value, CLOSE_TIMESTAMP_OPTIONS);
 
 // ============================================================================
 // Purpose: The REAL-data Month-Close screen, extracted from AppShell. Renders a
@@ -62,20 +84,6 @@ function statusTone(status: string | undefined): Severity {
 /** Map a blocker severity to a badge tone: red for HIGH, amber otherwise. */
 function blockerTone(severity: string): Severity {
   return severity.toUpperCase() === "HIGH" ? "red" : "amber";
-}
-
-// Render an ISO timestamp without float math; fall back to a dash when absent.
-function formatTimestamp(value: string | null | undefined): string {
-  if (!value) return "—";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString("en-US", {
-    year: "numeric",
-    month: "short",
-    day: "2-digit",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
 }
 
 // ============================================================================
@@ -346,6 +354,103 @@ function ActionFailedBand({ message }: { message: string }) {
 }
 
 /**
+ * Compute the label for one lock/unlock action button: "Working…" while that
+ * action is in flight, "Confirm lock/unlock {month}" once armed, otherwise the
+ * default verb label. Behaviour-identical to the previous inline ternary chain.
+ */
+function lockActionLabel(
+  kind: LockAction,
+  month: string,
+  busy: boolean,
+  isArmed: boolean,
+): string {
+  if (busy && isArmed) return "Working…";
+  if (isArmed) {
+    return kind === "unlock" ? `Confirm unlock ${month}` : `Confirm lock ${month}`;
+  }
+  return kind === "unlock" ? "Unlock Month" : "Lock Month";
+}
+
+/**
+ * Derive whether a lock/unlock action button is disabled. Both actions share the
+ * no-permission / busy / empty-reason guards; lock additionally requires the
+ * month to be OPEN and unlock requires it LOCKED.
+ */
+function lockActionDisabled(
+  kind: LockAction,
+  canCloseMonth: boolean,
+  busy: boolean,
+  isLocked: boolean,
+  reasonEmpty: boolean,
+): boolean {
+  const shared = !canCloseMonth || busy || reasonEmpty;
+  return kind === "unlock" ? shared || !isLocked : shared || isLocked;
+}
+
+/**
+ * One arm/confirm lock or unlock button. Owns its own label + disabled derivation
+ * so the parent panel stays low-complexity; calls back with its action kind on click.
+ */
+function LockActionButton({
+  kind,
+  month,
+  canCloseMonth,
+  isLocked,
+  busy,
+  reasonEmpty,
+  isArmed,
+  onActionClick,
+}: {
+  kind: LockAction;
+  month: string;
+  canCloseMonth: boolean;
+  isLocked: boolean;
+  busy: boolean;
+  reasonEmpty: boolean;
+  isArmed: boolean;
+  onActionClick: (kind: LockAction) => void;
+}) {
+  const className = kind === "unlock" ? "danger-button" : "primary-button";
+  return (
+    <button
+      className={className}
+      type="button"
+      disabled={lockActionDisabled(kind, canCloseMonth, busy, isLocked, reasonEmpty)}
+      onClick={() => onActionClick(kind)}
+    >
+      {lockActionLabel(kind, month, busy, isArmed)}
+    </button>
+  );
+}
+
+/**
+ * The lock/unlock actor + timestamp detail grid. Extracted so the Lock Controls
+ * panel stays low-complexity and its JSX tree stays shallow.
+ */
+function LockDetailGrid({ status }: { status: FinanceMonthCloseStatus | null }) {
+  return (
+    <div className="detail-grid">
+      <div className="detail-cell">
+        <span>Locked by</span>
+        <strong>{status?.locked_by ?? "—"}</strong>
+      </div>
+      <div className="detail-cell">
+        <span>Locked at</span>
+        <strong>{formatCloseTimestamp(status?.locked_at)}</strong>
+      </div>
+      <div className="detail-cell">
+        <span>Unlocked by</span>
+        <strong>{status?.unlocked_by ?? "—"}</strong>
+      </div>
+      <div className="detail-cell">
+        <span>Unlocked at</span>
+        <strong>{formatCloseTimestamp(status?.unlocked_at)}</strong>
+      </div>
+    </div>
+  );
+}
+
+/**
  * Lock Controls panel: status badge, lock/unlock actor + timestamp grid, the
  * audited reason input, and the two-step arm/confirm lock & unlock buttons. The
  * parent owns all state; this component is presentational and calls back on intent.
@@ -374,8 +479,6 @@ function LockControlsPanel({
   onCancel: () => void;
 }) {
   const reasonEmpty = reason.trim().length === 0;
-  const unlockArmed = armed === "unlock";
-  const lockArmed = armed === "lock";
 
   return (
     <section className="panel">
@@ -386,24 +489,7 @@ function LockControlsPanel({
         </div>
         <Badge tone={statusTone(status?.status)}>{status?.status ?? "—"}</Badge>
       </div>
-      <div className="detail-grid">
-        <div className="detail-cell">
-          <span>Locked by</span>
-          <strong>{status?.locked_by ?? "—"}</strong>
-        </div>
-        <div className="detail-cell">
-          <span>Locked at</span>
-          <strong>{formatTimestamp(status?.locked_at)}</strong>
-        </div>
-        <div className="detail-cell">
-          <span>Unlocked by</span>
-          <strong>{status?.unlocked_by ?? "—"}</strong>
-        </div>
-        <div className="detail-cell">
-          <span>Unlocked at</span>
-          <strong>{formatTimestamp(status?.unlocked_at)}</strong>
-        </div>
-      </div>
+      <LockDetailGrid status={status} />
       <div className="control-row" style={{ marginTop: 8 }}>
         <label className="field-label" htmlFor="closeReason">
           Reason (required, audited)
@@ -420,30 +506,26 @@ function LockControlsPanel({
       </div>
       {lockState.error ? <ActionFailedBand message={lockState.error} /> : null}
       <div className="action-row">
-        <button
-          className="danger-button"
-          type="button"
-          disabled={!canCloseMonth || lockState.busy || !isLocked || reasonEmpty}
-          onClick={() => onActionClick("unlock")}
-        >
-          {lockState.busy && unlockArmed
-            ? "Working…"
-            : unlockArmed
-              ? `Confirm unlock ${month}`
-              : "Unlock Month"}
-        </button>
-        <button
-          className="primary-button"
-          type="button"
-          disabled={!canCloseMonth || lockState.busy || isLocked || reasonEmpty}
-          onClick={() => onActionClick("lock")}
-        >
-          {lockState.busy && lockArmed
-            ? "Working…"
-            : lockArmed
-              ? `Confirm lock ${month}`
-              : "Lock Month"}
-        </button>
+        <LockActionButton
+          kind="unlock"
+          month={month}
+          canCloseMonth={canCloseMonth}
+          isLocked={isLocked}
+          busy={lockState.busy}
+          reasonEmpty={reasonEmpty}
+          isArmed={armed === "unlock"}
+          onActionClick={onActionClick}
+        />
+        <LockActionButton
+          kind="lock"
+          month={month}
+          canCloseMonth={canCloseMonth}
+          isLocked={isLocked}
+          busy={lockState.busy}
+          reasonEmpty={reasonEmpty}
+          isArmed={armed === "lock"}
+          onActionClick={onActionClick}
+        />
         {armed ? (
           <button
             className="ghost-button"

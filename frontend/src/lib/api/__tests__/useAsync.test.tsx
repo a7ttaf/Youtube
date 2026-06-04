@@ -39,9 +39,11 @@ describe("useAsync", () => {
     const queue = [fetchA, fetchB];
     const { result } = renderHook(() => useQueuedAsync(queue));
 
-    // Mount fetch A resolves -> data is A.
+    // Mount fetch A resolves -> data is A. Await the settled promise inside act
+    // so React flushes the resulting state update before assertions run.
     await act(async () => {
       fetchA.resolve({ id: "A" });
+      await fetchA.promise;
     });
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.data?.id).toBe("A");
@@ -54,9 +56,11 @@ describe("useAsync", () => {
     expect(result.current.loading).toBe(true);
     expect(result.current.data).toBeNull();
 
-    // B resolves -> data is B.
+    // B resolves -> data is B. Await the settled promise inside act so the state
+    // update from the resolved fetch is flushed before assertions run.
     await act(async () => {
       fetchB.resolve({ id: "B" });
+      await fetchB.promise;
     });
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.data?.id).toBe("B");
@@ -71,8 +75,11 @@ describe("useAsync", () => {
     expect(result.current.loading).toBe(true);
     expect(result.current.data).toBeNull();
 
+    // Await the settled promise inside act so the resolved-fetch state update is
+    // flushed before assertions run.
     await act(async () => {
       fetchA.resolve({ id: "A" });
+      await fetchA.promise;
     });
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.data?.id).toBe("A");
@@ -83,10 +90,14 @@ describe("useAsync", () => {
     const queue = [fetchA];
     const { result } = renderHook(() => useQueuedAsync(queue));
 
+    // Reject the in-flight fetch, then await its settlement inside act (swallowing
+    // the expected rejection here — the hook owns surfacing it) so the resulting
+    // error-state update is flushed before assertions run.
     await act(async () => {
       fetchA.reject(
         new ApiError("forbidden", 403, { detail: "nope" }, "/test"),
       );
+      await fetchA.promise.catch(() => undefined);
     });
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.data).toBeNull();

@@ -329,7 +329,7 @@ describe("ExportsView wired to the exports endpoint", () => {
     expect(screen.getByText("Not ready")).toBeInTheDocument();
   });
 
-  it("hides the finance report types and defaults to the CSV when finance export is not permitted", async () => {
+  it("shows the no-creatable-types state for an analytics-only viewer (CSV is held back until a download route exists)", async () => {
     fetchMock().mockResolvedValue(jsonResponse(EMPTY_LIST));
     renderExportsView(true, { canExportFinance: false, canExportAnalytics: true });
 
@@ -337,11 +337,20 @@ describe("ExportsView wired to the exports endpoint", () => {
       expect(screen.getByText(/No export jobs yet/i)).toBeInTheDocument(),
     );
 
+    // The CSV is never OFFERED in the create form (no GET download route yet), so
+    // an analytics-only viewer has zero creatable types and sees the honest
+    // disabled empty state instead of an enabled form defaulting to the CSV.
     const reportType = screen.getByLabelText("Report type") as HTMLSelectElement;
+    expect(reportType).toBeDisabled();
     const optionLabels = Array.from(reportType.options).map((o) => o.textContent);
-    expect(optionLabels).toEqual(["Analytics summary (CSV)"]);
-    // The default selection falls back to the first allowed option.
-    expect(reportType.value).toBe("ANALYTICS_SUMMARY_CSV");
+    expect(optionLabels).toEqual([
+      "No export types are currently available for your role.",
+    ]);
+    // With no creatable type, Generate cannot submit even once a reason is typed.
+    fireEvent.change(screen.getByLabelText("Reason"), {
+      target: { value: "Need it" },
+    });
+    expect(screen.getByRole("button", { name: /^generate$/i })).toBeDisabled();
   });
 
   it("hides the analytics CSV when analytics export is not permitted", async () => {

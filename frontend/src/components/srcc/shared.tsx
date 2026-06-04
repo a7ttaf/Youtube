@@ -63,6 +63,33 @@ export function formatMoney(
   return USD_FORMATTER.format(parsed);
 }
 
+// ============================================================================
+// Purpose: Render an ISO timestamp string for display WITHOUT float/epoch math
+//   for any business purpose. Returns a dash for an absent value and echoes the
+//   raw string when it is unparsable, rather than rendering "Invalid Date". When
+//   `options` is supplied the locale-aware format is pinned to "en-US" so the
+//   rendered string is deterministic; with no `options` it uses the runtime's
+//   default `toLocaleString()` (the legacy ExportsView format). Each caller
+//   passes the options it needs so the previously-rendered strings are unchanged.
+// Standards: Display-only — never feed the parsed Date back into a calculation
+//   that affects a stored/exported number. Shared from here so CloseView and
+//   ExportsView stop maintaining near-identical local copies.
+// ============================================================================
+/**
+ * Format an ISO timestamp for display: "—" when absent, the raw value when
+ * unparsable, otherwise a locale string. With `options` the format is pinned to
+ * "en-US" for determinism; without it the runtime default locale is used.
+ */
+export function formatTimestamp(
+  value: string | null | undefined,
+  options?: Intl.DateTimeFormatOptions,
+): string {
+  if (!value) return "—";
+  const parsed = new Date(value);
+  if (Number.isNaN(parsed.getTime())) return value;
+  return options ? parsed.toLocaleString("en-US", options) : parsed.toLocaleString();
+}
+
 /**
  * Format a money value for display, returning the RESTRICTED_FINANCE_VALUE
  * sentinel when the viewer lacks finance permission so no view leaks amounts.

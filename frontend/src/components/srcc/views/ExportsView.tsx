@@ -11,7 +11,14 @@ import { useExportActions } from "@/lib/api/useExportActions";
 import { useExports } from "@/lib/api/useExports";
 import { EXPORTS_GUARDRAILS } from "@/lib/mock/data";
 import type { Severity } from "@/lib/mock/data";
-import { Badge, DEFAULT_MONTH, Dot, ItemRow, MONTH_OPTIONS } from "../shared";
+import {
+  Badge,
+  DEFAULT_MONTH,
+  Dot,
+  formatTimestamp,
+  ItemRow,
+  MONTH_OPTIONS,
+} from "../shared";
 import { describeError } from "./CommandView";
 
 // ============================================================================
@@ -44,13 +51,36 @@ import { describeError } from "./CommandView";
 
 const CURRENCY_OPTIONS = ["USD", "EGP", "AED"];
 
-// The real accepted export_type enum values (ALLOWED_EXPORT_TYPES). The first
-// three are finance exports; the CSV is analytics. The label is UI-only.
-const REPORT_TYPE_OPTIONS: Array<{ value: ExportType; label: string }> = [
-  { value: "FINANCE_EXCEL", label: "Finance workbook (XLSX)" },
-  { value: "EXECUTIVE_PDF", label: "Executive summary (PDF)" },
-  { value: "BRANDED_SLIDE_PACK", label: "Branded slide pack (PPTX)" },
-  { value: "ANALYTICS_SUMMARY_CSV", label: "Analytics summary (CSV)" },
+// Honest empty-state copy when the caller's permissions leave zero creatable
+// export types (e.g. an analytics-only viewer, since the CSV is held back below).
+const NO_CREATABLE_TYPES_MESSAGE =
+  "No export types are currently available for your role.";
+
+// ============================================================================
+// Purpose: The real accepted export_type enum values (ALLOWED_EXPORT_TYPES), each
+//   tagged with the per-type capability it needs and whether the create form may
+//   currently OFFER it. The first three are finance exports; the CSV is analytics.
+//   ANALYTICS_SUMMARY_CSV is `creatable: false` because the backend has NO GET
+//   download route for it yet — offering it would let a user queue a CSV job that
+//   shows "Not ready" forever (downloadFor() returns null for it). Existing CSV
+//   jobs still render in the list; we only refuse to CREATE new ones. The
+//   `capability` flag stays wired to canExportAnalytics so analytics gating
+//   becomes meaningful again the moment a CSV download route ships and the type
+//   is flipped back to `creatable: true`. The label is UI-only.
+// ============================================================================
+type ReportTypeOption = {
+  value: ExportType;
+  label: string;
+  capability: "finance" | "analytics";
+  creatable: boolean;
+};
+
+const REPORT_TYPE_OPTIONS: ReportTypeOption[] = [
+  { value: "FINANCE_EXCEL", label: "Finance workbook (XLSX)", capability: "finance", creatable: true },
+  { value: "EXECUTIVE_PDF", label: "Executive summary (PDF)", capability: "finance", creatable: true },
+  { value: "BRANDED_SLIDE_PACK", label: "Branded slide pack (PPTX)", capability: "finance", creatable: true },
+  // Held back from the create form until a CSV GET download route exists.
+  { value: "ANALYTICS_SUMMARY_CSV", label: "Analytics summary (CSV)", capability: "analytics", creatable: false },
 ];
 
 // The real accepted scope_type enum values (ALLOWED_EXPORT_SCOPE_TYPES). Global
@@ -140,14 +170,6 @@ function scopeLabel(job: ExportJob): string {
   return job.scope_type;
 }
 
-/** Formats an ISO timestamp for display, falling back to a dash or the raw value. */
-function formatTimestamp(value: string | null): string {
-  if (!value) return "—";
-  const parsed = new Date(value);
-  if (Number.isNaN(parsed.getTime())) return value;
-  return parsed.toLocaleString();
-}
-
 /**
  * The wired Exports screen: a permission-filtered request form plus the export
  * jobs table. Finance and analytics report types are offered only when the
@@ -163,12 +185,18 @@ export default function ExportsView({
   canExportFinance: boolean;
   canExportAnalytics: boolean;
 }) {
-  // Filter the report-type options to the caller's per-type export permissions.
-  // The first three options are finance exports; the CSV is analytics.
+  // Offer a report type only when it is currently creatable AND the caller holds
+  // its per-type capability. The capability check stays wired to
+  // canExportFinance/canExportAnalytics so analytics gating is meaningful the
+  // moment the CSV type flips back to creatable; the `creatable` check is what
+  // holds the CSV out of the form today (no GET download route yet — see
+  // REPORT_TYPE_OPTIONS). An analytics-only viewer therefore gets zero options.
   const reportTypeOptions = REPORT_TYPE_OPTIONS.filter((option) => {
-    if (option.value === "ANALYTICS_SUMMARY_CSV") return canExportAnalytics;
-    return canExportFinance;
+    const hasCapability =
+      option.capability === "analytics" ? canExportAnalytics : canExportFinance;
+    return option.creatable && hasCapability;
   });
+  const hasCreatableType = reportTypeOptions.length > 0;
   const defaultExportType = reportTypeOptions[0]?.value ?? "FINANCE_EXCEL";
 
   const [exportType, setExportType] = useState<ExportType>(defaultExportType);
@@ -193,7 +221,11 @@ export default function ExportsView({
   const reasonProvided = reason.trim().length > 0;
   const scopeIdProvided = !requiresScopeId || scopeId.trim().length > 0;
   const canSubmit =
-    canCreateExport && reasonProvided && scopeIdProvided && !actions.loading;
+    canCreateExport &&
+    hasCreatableType &&
+    reasonProvided &&
+    scopeIdProvided &&
+    !actions.loading;
 
   /**
    * Validates and POSTs the request form, then refetches the list on success.
@@ -237,6 +269,7 @@ export default function ExportsView({
             exportType={effectiveExportType}
             onExportType={setExportType}
             reportTypeOptions={reportTypeOptions}
+            hasCreatableType={hasCreatableType}
             scopeType={scopeType}
             onScopeType={setScopeType}
             scopeId={scopeId}
@@ -322,11 +355,56 @@ function GuardrailsHeader() {
   );
 }
 
+/**
+ * The Report type field. Renders the creatable-type <select> when at least one
+ * type is offered; otherwise it shows an honest disabled state (a single
+ * non-selectable option carrying NO_CREATABLE_TYPES_MESSAGE) so a viewer with no
+ * creatable types — e.g. analytics-only, since the CSV is held back — never sees
+ * an enabled form with no options. The label is kept by the parent so the field
+ * stays accessible by name in both states.
+ */
+function ReportTypeField({
+  exportType,
+  onExportType,
+  reportTypeOptions,
+  hasCreatableType,
+  canCreateExport,
+}: {
+  exportType: ExportType;
+  onExportType: (value: ExportType) => void;
+  reportTypeOptions: ReportTypeOption[];
+  hasCreatableType: boolean;
+  canCreateExport: boolean;
+}) {
+  if (!hasCreatableType) {
+    return (
+      <select id="exportReportType" disabled>
+        <option>{NO_CREATABLE_TYPES_MESSAGE}</option>
+      </select>
+    );
+  }
+  return (
+    <select
+      id="exportReportType"
+      value={exportType}
+      disabled={!canCreateExport}
+      onChange={(e) => onExportType(e.target.value as ExportType)}
+    >
+      {reportTypeOptions.map((o) => (
+        <option key={o.value} value={o.value}>
+          {o.label}
+        </option>
+      ))}
+    </select>
+  );
+}
+
 /** The export request form: report type, scope, month, currency, and reason. */
 function RequestExportForm({
   exportType,
   onExportType,
   reportTypeOptions,
+  hasCreatableType,
   scopeType,
   onScopeType,
   scopeId,
@@ -345,7 +423,8 @@ function RequestExportForm({
 }: {
   exportType: ExportType;
   onExportType: (value: ExportType) => void;
-  reportTypeOptions: Array<{ value: ExportType; label: string }>;
+  reportTypeOptions: ReportTypeOption[];
+  hasCreatableType: boolean;
   scopeType: ExportScopeType;
   onScopeType: (value: ExportScopeType) => void;
   scopeId: string;
@@ -366,18 +445,13 @@ function RequestExportForm({
     <div className="form-grid" aria-label="Request export" style={{ margin: 13 }}>
       <div className="field-row">
         <label htmlFor="exportReportType">Report type</label>
-        <select
-          id="exportReportType"
-          value={exportType}
-          disabled={!canCreateExport}
-          onChange={(e) => onExportType(e.target.value as ExportType)}
-        >
-          {reportTypeOptions.map((o) => (
-            <option key={o.value} value={o.value}>
-              {o.label}
-            </option>
-          ))}
-        </select>
+        <ReportTypeField
+          exportType={exportType}
+          onExportType={onExportType}
+          reportTypeOptions={reportTypeOptions}
+          hasCreatableType={hasCreatableType}
+          canCreateExport={canCreateExport}
+        />
       </div>
       <div className="field-row">
         <label htmlFor="exportScopeType">Scope type</label>
