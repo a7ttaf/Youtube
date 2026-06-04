@@ -6,10 +6,6 @@ import { useTenant } from "@/contexts/TenantContext";
 import {
   AUDIT_EVENTS,
   AUDIT_SUMMARY,
-  CONNECTORS_SUMMARY,
-  CONNECTOR_HEALTH,
-  CONNECTOR_JOBS,
-  CREDENTIAL_CONTROLS,
   NAV_GROUPS,
   REGISTRY_CONTROLS,
   REGISTRY_ROWS,
@@ -21,6 +17,7 @@ import type { Role, ViewKey } from "@/lib/mock/data";
 import { BrandIcon, NAV_ICONS, RefreshIcon } from "./icons";
 import CloseView from "./views/CloseView";
 import CommandView from "./views/CommandView";
+import ConnectorsView from "./views/ConnectorsView";
 import ExportsView from "./views/ExportsView";
 import TraceView from "./views/TraceView";
 import {
@@ -334,7 +331,9 @@ export default function AppShell() {
         {view === "exports" && (
           <ExportsView canCreateExport={canCreateAnyExport(permissions)} />
         )}
-        {view === "connectors" && <ConnectorsView permissions={permissions} />}
+        {view === "connectors" && (
+          <ConnectorsView canRunConnectors={permissions.canRunConnectors} />
+        )}
         {view === "audit" && <AuditView permissions={permissions} />}
 
         {view === "command" && <WorkflowRail />}
@@ -521,88 +520,11 @@ function RegistryView({ permissions }: { permissions: AccessPermissions }) {
 
 /* ------------------------------------------------------------------ connectors */
 
-function ConnectorsView({ permissions }: { permissions: AccessPermissions }) {
-  const { canRunConnectors, canViewFinance } = permissions;
-  return (
-    <section className="view-page" aria-labelledby="connectorsTitle">
-      <div className="view-summary" aria-label="Connector summary">
-        {CONNECTORS_SUMMARY.map((s) => (
-          <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
-        ))}
-      </div>
-
-      <div className="view-grid">
-        <section className="panel">
-          <div className="panel-header">
-            <div className="panel-title">
-              <strong id="connectorsTitle">Connector Operations</strong>
-              <span>OAuth credentials, API jobs, raw files, and ingestion windows</span>
-            </div>
-            <button className="primary-button" type="button" disabled={!canRunConnectors}>
-              Run Approved Job
-            </button>
-          </div>
-          <div className="connector-health" aria-label="Connector health">
-            {CONNECTOR_HEALTH.map((h) => (
-              <div key={h.name} className="health-block">
-                <strong>{h.name}</strong>
-                <span>{h.note}</span>
-                <Badge tone={h.badge.tone}>{h.badge.text}</Badge>
-              </div>
-            ))}
-          </div>
-          <div className="table-wrap">
-            <table aria-label="Connector jobs">
-              <thead>
-                <tr><th>Job</th><th>Credential</th><th>Last Run</th><th>Raw File</th><th>Sensitive Action</th><th>State</th></tr>
-              </thead>
-              <tbody>
-                {CONNECTOR_JOBS.map((j) => (
-                  <tr key={j.job}>
-                    <td>{j.job}</td>
-                    <td>
-                      <span className="code-chip">
-                        {canRunConnectors ? j.credential : RESTRICTED_FINANCE_VALUE}
-                      </span>
-                    </td>
-                    <td>{j.lastRun}</td>
-                    <td>
-                      <span className="code-chip">
-                        {canRunConnectors ? j.rawFile : RESTRICTED_FINANCE_VALUE}
-                      </span>
-                    </td>
-                    <td>{canRunConnectors ? j.action : RESTRICTED_FINANCE_VALUE}</td>
-                    <td><Badge tone={j.state.tone}>{j.state.text}</Badge></td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </section>
-
-        <aside className="view-stack">
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong>Credential Controls</strong>
-                <span>No Google passwords stored; OAuth grants only</span>
-              </div>
-              <Badge tone={canRunConnectors ? "amber" : "red"}>
-                {canRunConnectors ? "Admin" : "Restricted"}
-              </Badge>
-            </div>
-            <div className="issue-list" role="list">
-              {CREDENTIAL_CONTROLS.map((c) => (
-                <ItemRow key={c.title} tone={c.tone} title={c.title} sub={c.sub}
-                  trailing={<Badge tone={c.badge.tone}>{c.badge.text}</Badge>} />
-              ))}
-            </div>
-          </section>
-        </aside>
-      </div>
-    </section>
-  );
-}
+// ConnectorsView is the wired Connectors / data-source screen; it lives in
+// ./views/ConnectorsView.tsx and reads GET /connectors/credentials (data
+// sources) + GET /adsense/payments (synced payments) and POSTs /connectors/jobs
+// (request sync) + /adsense/sync-payments via the useConnectors / useAdsense
+// hooks. It states the run-history gap honestly (no connector-runs read route).
 
 /* ------------------------------------------------------------------ audit */
 

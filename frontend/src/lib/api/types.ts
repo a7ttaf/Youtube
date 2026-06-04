@@ -376,3 +376,122 @@ export type ExportRequestBody = {
   include_confidence_notes: boolean;
   include_manual_override_notes: boolean;
 };
+
+// ============================================================================
+// Purpose: TypeScript mirror of the backend connector + AdSense data-source JSON
+//   contracts consumed by the Connectors screen. Fields are matched 1:1 against
+//   the backend serializers (not guessed); nullable fields serialize as null and
+//   money values stay STRINGS (decimal_to_api). The screen reads the configured
+//   connector credentials and the synced AdSense payments, and triggers two
+//   write actions (request a connector job, sync AdSense payments) — all via the
+//   backend's own guarded, audited routes (no client-side authorization).
+// Standards: Read-only typed boundary at the API surface; no logic here.
+// Connections:
+//   - File: backend/ums_smart_revenue/connectors/credentials.py
+//       ConnectorCredentialEntry.to_api()  (lines 35-42) -> ConnectorCredential
+//   - File: backend/ums_smart_revenue/api/connectors.py
+//       list_connector_credentials()       (lines 58-81) -> ConnectorCredentialListResponse
+//       request_connector_job()            (lines 122-144) -> ConnectorJobRequestBody / ConnectorJobResponse
+//   - File: backend/ums_smart_revenue/finance/adsense_payments.py
+//       AdSensePaymentEntry.to_api()       (lines 60-74) -> AdsensePayment
+//   - File: backend/ums_smart_revenue/api/adsense.py
+//       list_adsense_payments()            (lines 204-264) -> AdsensePaymentListResponse
+//       sync_adsense_payments()            (lines 133-201) -> AdsenseSyncRequestBody / AdsenseSyncResponse
+// ============================================================================
+
+// Shared pagination envelope returned by the connector + AdSense list routes
+// (same {limit, offset, returned, has_more} shape as the export list).
+export type PaginationMeta = {
+  limit: number;
+  offset: number;
+  returned: number;
+  has_more: boolean;
+};
+
+// One configured connector credential row ("data source").
+// Source: ConnectorCredentialEntry.to_api() (credentials.py:35-42). The secret
+// itself is NEVER serialized — only a has_secret_ref boolean is exposed.
+export type ConnectorCredential = {
+  id: string;
+  connector_key: string;
+  account_id: string;
+  status: string;
+  has_secret_ref: boolean;
+};
+
+// GET /connectors/credentials. Source: list_connector_credentials() (connectors.py:73-81).
+export type ConnectorCredentialListResponse = {
+  items: ConnectorCredential[];
+  pagination: PaginationMeta;
+};
+
+// POST /connectors/jobs request body. Source: ConnectorJobRequest (connectors.py:46-49).
+// reason is REQUIRED (min_length=1) — recorded on the CONNECTOR_JOB_RUN audit event.
+export type ConnectorJobRequestBody = {
+  connector_key: string;
+  account_id: string;
+  reason: string;
+};
+
+// POST /connectors/jobs response (202). Source: request_connector_job() (connectors.py:139-144).
+// execution_status is "recorded_not_executed": the request is audited but the
+// connector run is NOT yet executed (no execution backend wired today).
+export type ConnectorJobResponse = {
+  connector_key: string;
+  account_id: string;
+  execution_status: string;
+  audit_event: Record<string, unknown>;
+};
+
+// One synced AdSense payment row. Source: AdSensePaymentEntry.to_api()
+// (adsense_payments.py:60-74). payment_amount is a decimal-as-STRING; payment_date
+// is an ISO date; raw_payload is the connector's opaque source payload.
+export type AdsensePayment = {
+  id: string;
+  source_account_id: string;
+  month: string;
+  payment_name: string;
+  payment_date: string; // ISO-8601 date
+  payment_amount: MoneyString;
+  payment_currency: string;
+  payment_status: string; // PAID | PENDING | UNPAID | CANCELLED
+  raw_payload: Record<string, unknown>;
+  source_report_id: string | null;
+  imported_by: string | null;
+};
+
+// GET /adsense/payments. Source: list_adsense_payments() (adsense.py:255-264).
+// Carries the reused PAYMENT_VIEWED audit_event (kept loosely typed; not rendered).
+export type AdsensePaymentListResponse = {
+  items: AdsensePayment[];
+  pagination: PaginationMeta;
+  audit_event: Record<string, unknown>;
+};
+
+// POST /adsense/sync-payments request body. Source: AdSensePaymentSyncRequest
+// (adsense.py:100-123). The Connectors screen surfaces only the AdSense payment
+// LIST + a re-sync trigger; it does not author new payment rows, so it sends an
+// empty connector-scoped resync intent? No — the backend requires >=1 payment.
+// This type is the full shape so a future "add payment" form can reuse it.
+export type AdsenseSyncRequestBody = {
+  connector_key: string;
+  source_report_id: string | null;
+  reason: string;
+  payments: Array<{
+    source_account_id: string;
+    month: string;
+    payment_name: string;
+    payment_date: string; // ISO-8601 date
+    payment_amount: MoneyString;
+    payment_currency: string;
+    payment_status: string;
+    raw_payload: Record<string, unknown>;
+  }>;
+};
+
+// POST /adsense/sync-payments response. Source: sync_adsense_payments() (adsense.py:197-201).
+export type AdsenseSyncResponse = {
+  synced_count: number;
+  items: AdsensePayment[];
+  audit_event: Record<string, unknown>;
+};
