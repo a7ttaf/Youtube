@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api/client";
 import type {
@@ -145,6 +145,10 @@ export default function CloseView({
   // Audited free-text reason and the two-step arm latch for the pending action.
   const [reason, setReason] = useState<string>("");
   const [armed, setArmed] = useState<LockAction | null>(null);
+  // Synchronous in-flight latch so a same-tick double-click on the armed confirm
+  // button cannot fire two lock/unlock POSTs (the state `busy` guard cannot see
+  // the second click in time — both read the same stale busy=false render).
+  const runInFlightRef = useRef(false);
 
   const {
     data: status,
@@ -169,6 +173,12 @@ export default function CloseView({
   //   both status and readiness so the UI reflects the new state; on failure it
   //   surfaces the typed 409/403/other message inline and leaves the data and the
   //   armed action untouched so the operator can retry.
+  // Dedupe: a synchronous runInFlightRef latch drops a same-tick double-click on
+  //   the armed Confirm button BEFORE a second POST fires. Without it both clicks
+  //   read the same stale busy=false render and enter runAction, so the first
+  //   POST succeeds and the second 409s — surfacing a misleading "Action failed"
+  //   banner for what was really a duplicate click. The ref clears in finally so
+  //   a later, non-overlapping action proceeds.
   // ==========================================================================
   const runAction = useCallback(
     async (kind: LockAction) => {
@@ -177,6 +187,11 @@ export default function CloseView({
         setLockState({ busy: false, error: "A reason is required." });
         return;
       }
+      // FIX: drop a same-tick duplicate confirm click before the POST fires; the
+      // state `busy` guard cannot catch it (both clicks read the same stale
+      // busy=false render), so without this the second click POSTs and 409s.
+      if (runInFlightRef.current) return;
+      runInFlightRef.current = true;
       setLockState({ busy: true, error: null });
       try {
         await actions[kind](trimmed);
@@ -187,6 +202,8 @@ export default function CloseView({
         reloadReadiness();
       } catch (caught) {
         setLockState({ busy: false, error: describeActionError(caught) });
+      } finally {
+        runInFlightRef.current = false;
       }
     },
     [actions, reason, reloadReadiness, reloadStatus],

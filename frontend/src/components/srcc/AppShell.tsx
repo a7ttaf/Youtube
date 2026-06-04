@@ -409,17 +409,20 @@ function RoleCard({
     <div className="role-card">
       <label htmlFor="roleSelect">Current role</label>
       {CAN_PREVIEW_ROLES ? (
-        <select
-          id="roleSelect"
-          value={previewRole}
-          onChange={(e) => onSelectPreviewRole(e.target.value as Role)}
-        >
-          {(Object.entries(ROLE_LABELS) as [Role, string][]).map(([value, label]) => (
-            <option key={value} value={value}>
-              {label}
-            </option>
-          ))}
-        </select>
+        <>
+          <select
+            id="roleSelect"
+            value={previewRole}
+            onChange={(e) => onSelectPreviewRole(e.target.value as Role)}
+          >
+            {(Object.entries(ROLE_LABELS) as [Role, string][]).map(([value, label]) => (
+              <option key={value} value={value}>
+                {label}
+              </option>
+            ))}
+          </select>
+          <RolePreviewHint />
+        </>
       ) : (
         <output id="roleSelect">{ROLE_LABELS[displayedRole]}</output>
       )}
@@ -434,6 +437,22 @@ function RoleCard({
         </span>
       </div>
     </div>
+  );
+}
+
+/**
+ * Presentation-only disclaimer rendered beneath the dev role switcher. The
+ * switcher only changes the UI's permission MODELLING; every API request still
+ * carries the fixed dev-proxy identity (VITE_DEV_GATEWAY_ROLE, injected
+ * server-side at proxy start), so backend authorization does not change when the
+ * preview role does. The hint makes that explicit so a demo viewer does not read
+ * the switcher as a real privilege change.
+ */
+function RolePreviewHint() {
+  return (
+    <small className="role-preview-hint" data-testid="role-preview-hint">
+      Presentation preview only — API permissions come from the dev gateway role.
+    </small>
   );
 }
 

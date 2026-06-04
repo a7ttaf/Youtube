@@ -189,6 +189,32 @@ describe("AppShell tenant proof tag", () => {
     expect(tag.textContent).not.toContain("transient 503");
   });
 
+  it("renders the presentation-only hint beside the role preview switcher", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetch(() =>
+        jsonResponse({
+          id: "00000000-0000-0000-0000-000000000001",
+          slug: "ums",
+          display_name: "UMS",
+        }),
+      ),
+    );
+    render(
+      <TenantProvider initialSlug="ums">
+        <AppShell />
+      </TenantProvider>,
+    );
+    // The preview switcher is shown (vitest runs with import.meta.env.DEV), so
+    // the disclaimer that the role preview does not change backend authorization
+    // must render alongside it.
+    const switcher = await screen.findByLabelText(/current role/i);
+    expect(switcher.tagName).toBe("SELECT");
+    const hint = screen.getByTestId("role-preview-hint");
+    expect(hint).toBeInTheDocument();
+    expect(hint.textContent).toMatch(/presentation preview only/i);
+    expect(hint.textContent).toMatch(/api permissions come from the dev gateway role/i);
+  });
+
   it("fires the bootstrap /tenants/me call without X-UMS-Tenant so the gateway is the tenant authority", async () => {
     const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
     fetchMock.mockImplementation(

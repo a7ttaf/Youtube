@@ -187,6 +187,50 @@ def _demo_uuid(*parts: str) -> UUID:
     return uuid5(_DEMO_NAMESPACE, "|".join(parts))
 
 
+def _demo_tenant_uuid(tenant_id: UUID, *parts: str) -> UUID:
+    """Return a deterministic, TENANT-SCOPED UUID for a per-tenant seed row.
+
+    The bare ``_demo_uuid`` derives an id from the logical parts ONLY, so two
+    tenants seeded into the SAME database produced identical ids for their
+    channels, org units, facts, deductions, links, committer user, and commit
+    fingerprint — colliding on the (global) primary keys. Folding the tenant id
+    into the derivation gives each tenant its own deterministic id space while
+    same-tenant re-runs stay idempotent.
+    """
+    # FIX: per-tenant demo rows used tenant-independent ids, so seeding a second
+    # --tenant into an already-seeded database raised a UNIQUE/PK IntegrityError
+    # (e.g. monthly_channel_revenue_facts.id). The tenant id now discriminates the
+    # id, so multiple tenants coexist in one demo database without collision.
+    return _demo_uuid(tenant_id.hex, *parts)
+
+
+# ============================================================================
+# Purpose: Resolve the tenant slug the seed writes for a given tenant id so a
+#   non-default tenant never collides with the bootstrap UMS tenant's "ums" slug.
+# Database/ORM: tenants (slug; uq_tenants_slug UNIQUE + ck_tenants_slug_lower
+#   require slug == lower(slug)).
+# Standards: pure, typed; no DB access. Returns an all-lowercase slug.
+# Blast Radius: Demo/seed data only — the slug value a new tenant row receives.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/tenant_models.py -> TenantORM slug
+#     constraints (uq_tenants_slug, ck_tenants_slug_lower).
+#   - File: backend/ums_smart_revenue/tenancy/constants.py -> UMS_TENANT_ID.
+# ============================================================================
+def _tenant_slug_for(tenant_id: UUID, *, default_tenant_id: UUID) -> str:
+    """Return the slug to seed for ``tenant_id``.
+
+    The foundation migration already seeds the default UMS tenant with slug
+    ``"ums"``, so re-using that slug for any OTHER tenant id violates
+    ``uq_tenants_slug``. The default tenant keeps ``"ums"``; every non-default
+    tenant gets a deterministic, tenant-specific slug ``demo-<first-8-uuid-hex>``
+    (all lowercase hex, satisfying ``ck_tenants_slug_lower``) so a custom
+    ``--tenant`` on an already-migrated database inserts a distinct slug.
+    """
+    if tenant_id == default_tenant_id:
+        return "ums"
+    return f"demo-{tenant_id.hex[:8]}"
+
+
 def _redact_database_url(database_url: str) -> str:
     """Return ``database_url`` with any password in the userinfo masked.
 
@@ -257,9 +301,15 @@ def _create_schema(engine: Any, deps: dict[str, Any]) -> None:
 #   - File: tests/api/test_committed_allocation_api.py -> proven _seed pattern.
 # ============================================================================
 def _seed_substrate(
-    session: Any, *, month: str, tenant_id: UUID, allocation_method: str, deps: dict[str, Any]
+    session: Any, *, month: str, tenant_id: UUID, tenant_slug: str,
+    allocation_method: str, deps: dict[str, Any],
 ) -> dict[str, Any]:
     """Insert (idempotently) the tenant, org, channels, facts, deduction, map, user, close row.
+
+    ``tenant_slug`` is the (already-resolved) slug to seed for ``tenant_id`` —
+    ``"ums"`` for the default tenant, a tenant-specific ``demo-<hex>`` slug
+    otherwise — so a custom ``--tenant`` cannot collide with the bootstrap UMS
+    tenant's ``"ums"`` slug.
 
     ``allocation_method`` controls the missing-net channel: under the default
     gross method, Charlie keeps NO source net so the demo exercises the
@@ -275,9 +325,9 @@ def _seed_substrate(
     summary: dict[str, Any] = {"created": [], "reused": []}
     mark = _summary_marker(summary)
 
-    _seed_tenant(session, deps, mark, tenant_id=tenant_id)
+    _seed_tenant(session, deps, mark, tenant_id=tenant_id, tenant_slug=tenant_slug)
     company_id = _seed_org_hierarchy(session, deps, mark, tenant_id=tenant_id)
-    user_id = _seed_committer_user(session, deps, mark)
+    user_id = _seed_committer_user(session, deps, mark, tenant_id=tenant_id)
     seeded_channels = _seed_channels(
         session, deps, mark, tenant_id=tenant_id, company_id=company_id
     )
@@ -306,14 +356,27 @@ def _summary_marker(summary: dict[str, Any]) -> Callable[[str, bool], None]:
 
 def _seed_tenant(
     session: Any, deps: dict[str, Any], mark: Callable[[str, bool], None],
-    *, tenant_id: UUID,
+    *, tenant_id: UUID, tenant_slug: str,
 ) -> None:
-    """Insert the tenant FK parent (idempotent) and flush."""
+    """Insert the tenant FK parent (idempotent) and flush.
+
+    The lookup is by primary key, so re-running with the SAME ``tenant_id``
+    reuses the existing row (idempotent). ``tenant_slug`` is seeded only when a
+    new row is created and, for a non-default tenant, is a tenant-specific
+    ``demo-<hex>`` value (see ``_tenant_slug_for``) so a custom ``--tenant`` on an
+    already-migrated database does not collide with the bootstrap UMS tenant's
+    ``"ums"`` slug under ``uq_tenants_slug``.
+    """
+    # FIX: the slug was hardcoded to "ums" for EVERY tenant id. On an
+    # already-migrated database the foundation migration already owns the "ums"
+    # slug, so a non-default --tenant inserted a second row with the same slug and
+    # raised an IntegrityError on uq_tenants_slug. The slug is now derived per
+    # tenant id (default -> "ums", otherwise demo-<first-8-uuid-hex>).
     tenant_orm = deps["TenantORM"]
     if session.get(tenant_orm, tenant_id) is None:
         session.add(
             tenant_orm(
-                id=tenant_id, slug="ums", display_name="UMS",
+                id=tenant_id, slug=tenant_slug, display_name="UMS",
                 primary_currency="USD", status="ACTIVE",
             )
         )
@@ -329,8 +392,8 @@ def _seed_org_hierarchy(
 ) -> UUID:
     """Insert the SECTOR -> COMPANY org units (idempotent); return the company id."""
     org_orm = deps["OrgUnitORM"]
-    sector_id = _demo_uuid("org", "sector")
-    company_id = _demo_uuid("org", "company")
+    sector_id = _demo_tenant_uuid(tenant_id, "org", "sector")
+    company_id = _demo_tenant_uuid(tenant_id, "org", "company")
     if session.get(org_orm, sector_id) is None:
         session.add(
             org_orm(
@@ -358,13 +421,23 @@ def _seed_org_hierarchy(
 
 def _seed_committer_user(
     session: Any, deps: dict[str, Any], mark: Callable[[str, bool], None],
+    *, tenant_id: UUID,
 ) -> UUID:
-    """Insert the committer user (committed_by / imported_by); return its id."""
+    """Insert the committer user (committed_by / imported_by); return its id.
+
+    The user id is tenant-scoped so seeding a second tenant into the same demo
+    database does not collide on the (global) users primary key. The email index
+    (``uq_users_email_lower``) is already tenant-scoped, so the per-tenant user
+    keeps the shared demo email without collision.
+    """
     user_orm = deps["UserORM"]
-    user_id = _demo_uuid("user", "committer")
+    user_id = _demo_tenant_uuid(tenant_id, "user", "committer")
     if session.get(user_orm, user_id) is None:
         session.add(
-            user_orm(id=user_id, email=_DEMO_COMMITTER_EMAIL, display_name="Demo Seed Committer")
+            user_orm(
+                id=user_id, tenant_id=tenant_id,
+                email=_DEMO_COMMITTER_EMAIL, display_name="Demo Seed Committer",
+            )
         )
         mark("user", True)
     else:
@@ -384,7 +457,7 @@ def _seed_channels(
     channel_orm = deps["YouTubeChannelORM"]
     seeded_channels: list[str] = []
     for spec in _CHANNELS:
-        row_id = _demo_uuid("channel", spec.youtube_channel_id)
+        row_id = _demo_tenant_uuid(tenant_id, "channel", spec.youtube_channel_id)
         if session.get(channel_orm, row_id) is None:
             session.add(
                 channel_orm(
@@ -428,7 +501,7 @@ def _seed_revenue_facts(
             continue
         session.add(
             fact_orm(
-                id=_demo_uuid("fact", month, spec.youtube_channel_id, "ADSENSE"),
+                id=_demo_tenant_uuid(tenant_id, "fact", month, spec.youtube_channel_id, "ADSENSE"),
                 tenant_id=tenant_id, month=month,
                 youtube_channel_id=spec.youtube_channel_id, source_kind="ADSENSE",
                 source_report_id=f"demo-adsense-{month}",
@@ -454,7 +527,7 @@ def _seed_account_deduction(
     ):
         session.add(
             deduction_orm(
-                id=_demo_uuid("deduction", month, _ACCOUNT_ID),
+                id=_demo_tenant_uuid(tenant_id, "deduction", month, _ACCOUNT_ID),
                 tenant_id=tenant_id, month=month, component_kind="DEDUCTION",
                 scope_kind="ACCOUNT", scope_id=_ACCOUNT_ID,
                 amount_usd=_ACCOUNT_DEDUCTION_USD, amount_native=None, currency_code="USD",
@@ -496,7 +569,9 @@ def _seed_account_links(
                 # id was not, so seeding a SECOND month re-used the SAME PK and
                 # raised a duplicate-PK error before allocation. Each month's
                 # link now owns a distinct id; same-month re-runs stay idempotent.
-                id=_demo_uuid("adsense-link", month, _ACCOUNT_ID, _CONTENT_OWNER_ID),
+                id=_demo_tenant_uuid(
+                    tenant_id, "adsense-link", month, _ACCOUNT_ID, _CONTENT_OWNER_ID
+                ),
                 tenant_id=tenant_id, adsense_account_id=_ACCOUNT_ID,
                 content_owner_id=_CONTENT_OWNER_ID, verification_status="VERIFIED",
                 provenance_kind="OPERATOR_ASSERTED", provenance_payload={"demo": True},
@@ -522,7 +597,9 @@ def _seed_account_links(
                 # FIX: Same month-scoping mismatch as the adsense link above —
                 # include ``month`` so each effective_month_start gets a distinct
                 # deterministic id and multi-month seeding cannot collide on the PK.
-                id=_demo_uuid("owner-link", month, _CONTENT_OWNER_ID, spec.youtube_channel_id),
+                id=_demo_tenant_uuid(
+                    tenant_id, "owner-link", month, _CONTENT_OWNER_ID, spec.youtube_channel_id
+                ),
                 tenant_id=tenant_id, content_owner_id=_CONTENT_OWNER_ID,
                 youtube_channel_id=spec.youtube_channel_id, provenance_kind="SOURCE_ROW",
                 active=True, effective_month_start=month,
@@ -881,7 +958,9 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 2
 
-    tenant_id = args.tenant or UUID(deps["UMS_TENANT_ID"])
+    default_tenant_id = UUID(deps["UMS_TENANT_ID"])
+    tenant_id = args.tenant or default_tenant_id
+    tenant_slug = _tenant_slug_for(tenant_id, default_tenant_id=default_tenant_id)
     session_factory = deps["build_session_factory"](database_url)
     engine = session_factory.kw["bind"]
 
@@ -894,7 +973,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         with session_factory() as session:
             seed_summary = _seed_substrate(
-                session, month=args.month, tenant_id=tenant_id,
+                session, month=args.month, tenant_id=tenant_id, tenant_slug=tenant_slug,
                 allocation_method=args.allocation_method, deps=deps,
             )
             commit_summary = _commit_allocation(
@@ -957,7 +1036,7 @@ def main(argv: list[str] | None = None) -> int:
         gateway_token=settings.trusted_gateway_token,
     )
     _print_summary(
-        database_url=database_url, month=args.month, tenant_id=tenant_id, tenant_slug="ums",
+        database_url=database_url, month=args.month, tenant_id=tenant_id, tenant_slug=tenant_slug,
         seed_summary=seed_summary, commit_summary=commit_summary, lock_summary=lock_summary,
         headers=headers, gateway_token_set=bool(settings.trusted_gateway_token),
     )

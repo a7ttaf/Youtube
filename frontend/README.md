@@ -140,7 +140,10 @@ only the write actions are gated.
 
 There is also an in-shell role preview (top-left role switcher) when running in
 `DEV`, so you can flip between `finance` / `assistant` / `company` to demo the
-permission gating without restarting.
+permission gating without restarting. This switcher is **presentation-only** — it
+changes the UI's permission modelling but not backend authorization, which always
+comes from the fixed dev-gateway role (`VITE_DEV_GATEWAY_ROLE`, injected
+server-side at proxy start); the switcher renders a hint saying exactly this.
 
 ## Which screen shows what
 

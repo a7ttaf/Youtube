@@ -158,19 +158,53 @@ describe("useExplanation", () => {
     expect(result.current.error).toMatchObject({ name: "ApiError", status: 403 });
   });
 
-  it("keeps the newer result when an older in-flight Explain resolves last", async () => {
-    const first = deferred<Response>();
-    const second = deferred<Response>();
+  it("shows the latest result across two sequential Explains (supersession token)", async () => {
+    // Each Explain fully settles before the next begins (the in-flight latch
+    // clears in finally), so both POST and the supersession token lets the second
+    // result replace the first. A fresh Response per call (bodies read once).
     fetchMock()
-      .mockReturnValueOnce(first.promise)
-      .mockReturnValueOnce(second.promise);
+      .mockResolvedValueOnce(jsonResponse({ ...GROSS_EXPLANATION, value: "111.11" }))
+      .mockResolvedValueOnce(jsonResponse({ ...GROSS_EXPLANATION, value: "222.22" }));
     const { result } = renderHook(() => useExplanation(), { wrapper });
 
-    const FIRST = { ...GROSS_EXPLANATION, value: "111.11" };
-    const SECOND = { ...GROSS_EXPLANATION, value: "222.22" };
+    await act(async () => {
+      await result.current.run({
+        channelId: "demo-channel-alpha",
+        month: "2026-03",
+        metric: "adjusted_gross_revenue_usd",
+      });
+    });
+    expect(result.current.data?.value).toBe("111.11");
 
     await act(async () => {
-      // Fire both Explains synchronously so they share the same render closure.
+      await result.current.run({
+        channelId: "demo-channel-beta",
+        month: "2026-03",
+        metric: "adjusted_gross_revenue_usd",
+      });
+    });
+
+    // Both Explains were dispatched (sequential, not same-tick) and the newer
+    // result is the one shown.
+    expect(fetchMock()).toHaveBeenCalledTimes(2);
+    expect(result.current.data?.value).toBe("222.22");
+    expect(result.current.loading).toBe(false);
+  });
+
+  it("drops a same-tick duplicate Explain: exactly one POST, one explanation", async () => {
+    const first = deferred<Response>();
+    // Only ONE response is queued; a second POST would have no mock and surface
+    // the dedupe regression as an undefined-response failure.
+    fetchMock().mockReturnValueOnce(first.promise);
+    const { result } = renderHook(() => useExplanation(), { wrapper });
+
+    const ONLY = { ...GROSS_EXPLANATION, value: "999.99" };
+    let firstResolved: NumberExplanation | null | undefined;
+    let secondResolved: NumberExplanation | null | undefined;
+
+    await act(async () => {
+      // Double-click before re-render: both calls run off the same render
+      // closure (the state `loading` guard cannot catch the second).
       const p1 = result.current
         .run({
           channelId: "demo-channel-alpha",
@@ -180,19 +214,48 @@ describe("useExplanation", () => {
         .catch(() => undefined);
       const p2 = result.current
         .run({
-          channelId: "demo-channel-beta",
+          channelId: "demo-channel-alpha",
           month: "2026-03",
           metric: "adjusted_gross_revenue_usd",
         })
         .catch(() => undefined);
-      // Resolve the SECOND run first, then the (superseded) FIRST last.
-      second.resolve(jsonResponse(SECOND));
-      first.resolve(jsonResponse(FIRST));
-      await Promise.all([p1, p2]);
+      first.resolve(jsonResponse(ONLY));
+      [firstResolved, secondResolved] = await Promise.all([p1, p2]);
     });
 
-    // The stale first response must not overwrite the newer second one.
-    expect(result.current.data?.value).toBe("222.22");
+    // Exactly one POST was dispatched; the duplicate was dropped, not queued, so
+    // only one REVENUE_VIEWED audit event is written server-side.
+    expect(fetchMock()).toHaveBeenCalledTimes(1);
+    // The surviving call resolves with the explanation; the dropped one with null.
+    expect(firstResolved).toMatchObject({ value: "999.99" });
+    expect(secondResolved).toBeNull();
+    expect(result.current.data?.value).toBe("999.99");
     expect(result.current.loading).toBe(false);
+  });
+
+  it("allows a fresh Explain after the in-flight request settles", async () => {
+    // A fresh Response per call: a Response body can only be read once.
+    fetchMock().mockImplementation(() => jsonResponse(GROSS_EXPLANATION));
+    const { result } = renderHook(() => useExplanation(), { wrapper });
+
+    // First Explain completes and clears the in-flight latch.
+    await act(async () => {
+      await result.current.run({
+        channelId: "demo-channel-alpha",
+        month: "2026-03",
+        metric: "adjusted_gross_revenue_usd",
+      });
+    });
+    // A later, non-overlapping Explain must NOT be dropped.
+    await act(async () => {
+      await result.current.run({
+        channelId: "demo-channel-alpha",
+        month: "2026-03",
+        metric: "adjusted_gross_revenue_usd",
+      });
+    });
+
+    expect(fetchMock()).toHaveBeenCalledTimes(2);
+    expect(result.current.data?.value).toBe(GROSS_EXPLANATION.value);
   });
 });

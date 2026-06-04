@@ -13,9 +13,10 @@ export type UseExplanationState = {
   data: NumberExplanation | null;
   loading: boolean;
   error: ApiError | Error | null;
-  // Trigger the POST on user action; resolves with the explanation (or rejects
-  // with the typed error already captured in `error`).
-  run: (params: ExplanationParams) => Promise<NumberExplanation>;
+  // Trigger the POST on user action; resolves with the explanation, or with
+  // `null` when a same-tick duplicate Explain is dropped by the in-flight guard
+  // (no POST fired), or rejects with the typed error already captured in `error`.
+  run: (params: ExplanationParams) => Promise<NumberExplanation | null>;
 };
 
 // ============================================================================
@@ -41,7 +42,17 @@ export type UseExplanationState = {
 //   synchronously inside the callback, so two same-render Explains get distinct
 //   tokens (a useState read off the render closure would hand both the same
 //   token). State writes are guarded by requestIdRef.current === token, so only
-//   the most recently started run can commit {data,loading,error}.
+//   the most recently started run can commit {data,loading,error}. Supersession
+//   governs SEQUENTIAL calls whose params changed mid-flight (latest wins).
+// Dedupe: the supersession token alone does NOT prevent a same-tick double-click
+//   from firing two POSTs — and each explain POST upserts the explanation AND
+//   writes a REVENUE_VIEWED (net: PAYMENT_VIEWED) audit event, so two POSTs mean
+//   duplicate audit records. A synchronous inFlightRef latch (the same pattern as
+//   useExportActions / useConnectors / useAdsense) drops a same-tick duplicate
+//   BEFORE its POST fires; the state-based `loading` guard cannot catch it (both
+//   clicks read the same stale loading=false). The dropped call resolves with
+//   null (it is dropped, NOT queued); the ref clears in finally so the next
+//   user-initiated Explain proceeds.
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() POST + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> NumberExplanation contract.
@@ -54,9 +65,18 @@ export function useExplanation(): UseExplanationState {
   const [error, setError] = useState<ApiError | Error | null>(null);
   // Monotonic counter so only the latest run() is allowed to commit state.
   const requestIdRef = useRef(0);
+  // Synchronous in-flight latch so a same-tick duplicate Explain is dropped
+  // before its POST fires (the state `loading` guard cannot see it in time).
+  const inFlightRef = useRef(false);
 
   const run = useCallback(
-    (params: ExplanationParams): Promise<NumberExplanation> => {
+    (params: ExplanationParams): Promise<NumberExplanation | null> => {
+      // FIX: drop a same-tick duplicate Explain before the POST fires; a
+      // double-click before re-render would otherwise pass the stale state
+      // `loading` guard twice and write duplicate REVENUE_VIEWED / PAYMENT_VIEWED
+      // audit events (each explain POST upserts + audits server-side).
+      if (inFlightRef.current) return Promise.resolve(null);
+      inFlightRef.current = true;
       const { channelId, month, metric } = params;
       const path =
         `/revenue/channels/${encodeURIComponent(channelId)}` +
@@ -88,6 +108,9 @@ export function useExplanation(): UseExplanationState {
             setLoading(false);
           }
           throw typed;
+        })
+        .finally(() => {
+          inFlightRef.current = false;
         });
     },
     [client],

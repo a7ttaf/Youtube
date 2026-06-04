@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import CloseView from "@/components/srcc/views/CloseView";
@@ -99,6 +99,15 @@ function routeFetch(opts: {
 
 function fetchMock() {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+}
+
+/** Resolve a promise from outside via a deferred, to keep a fetch pending. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
 }
 
 function renderCloseView(canCloseMonth = true) {
@@ -247,6 +256,73 @@ describe("CloseView wired to finance-close", () => {
     expect(JSON.parse(String(lockInit?.body))).toMatchObject({
       reason: "March close complete",
     });
+  });
+
+  it("drops a same-tick double-click on the armed confirm: exactly one /lock POST, no error banner", async () => {
+    // The /lock response stays PENDING across both confirm clicks (a deferred),
+    // so the first POST is still in flight — armed is still "lock", busy has not
+    // committed to the DOM, and the second click runs off the same render. Only
+    // the synchronous in-flight ref can drop it. A real 409 would fire if the
+    // duplicate POST went through.
+    const lockDeferred = deferred<Response>();
+    let lockCalls = 0;
+    let statusCall = 0;
+    fetchMock().mockImplementation(
+      routeFetch({
+        status: () => {
+          statusCall += 1;
+          return jsonResponse(statusCall === 1 ? OPEN_STATUS : LOCKED_STATUS);
+        },
+        readiness: () => jsonResponse(READINESS_READY),
+        lock: () => {
+          lockCalls += 1;
+          // The FIRST POST gets the pending deferred; a (regression) second POST
+          // would 409, surfacing the misleading banner this test guards against.
+          return lockCalls === 1
+            ? (lockDeferred.promise as unknown as Response)
+            : jsonResponse(
+                { detail: "Finance month is already LOCKED." },
+                409,
+              );
+        },
+      }),
+    );
+
+    renderCloseView();
+    const lockButton = await screen.findByRole("button", { name: /^lock month$/i });
+
+    fireEvent.change(screen.getByLabelText(/reason \(required, audited\)/i), {
+      target: { value: "March close complete" },
+    });
+
+    // First click arms the action (the button switches to a confirm label).
+    fireEvent.click(lockButton);
+    const confirmButton = await screen.findByRole("button", {
+      name: /^confirm lock 2026-03$/i,
+    });
+
+    // Double-click the armed confirm before busy=true re-renders: both clicks run
+    // off the same render closure, so the state `busy` guard cannot catch the
+    // second — only the synchronous in-flight ref drops it.
+    await act(async () => {
+      fireEvent.click(confirmButton);
+      fireEvent.click(confirmButton);
+      // Now settle the first (only) POST and let the refetch flip to LOCKED.
+      lockDeferred.resolve(jsonResponse({ ...LOCKED_STATUS, audit_event: {} }));
+      await Promise.resolve();
+    });
+
+    await waitFor(() =>
+      expect(screen.getAllByText("LOCKED").length).toBeGreaterThan(0),
+    );
+
+    // Exactly one /lock POST was dispatched; the duplicate click was dropped.
+    const lockRequests = fetchMock().mock.calls.filter(([input]) =>
+      urlOf(input).endsWith("/lock"),
+    );
+    expect(lockRequests).toHaveLength(1);
+    // No misleading "Action failed" banner (the dropped second click never 409s).
+    expect(screen.queryByText("Action failed")).not.toBeInTheDocument();
   });
 
   it("maps a 409 lock conflict to a clear inline message", async () => {
