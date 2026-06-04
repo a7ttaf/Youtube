@@ -108,7 +108,12 @@ def build_recalculation_preview(
     facts: Iterable[RevenueFactEntry],
     manual_overrides: Iterable[RevenueManualOverrideEntry],
 ) -> RevenueRecalculationPreview:
-    """Build a dry-run recalculation preview for one month + scope."""
+    """Build a dry-run recalculation preview for one month + scope.
+
+    Raises:
+        RevenueRecalculationValidationError: If allocation_method or currency is
+            invalid, or if dry_run is False (committed writes not implemented).
+    """
     normalized_method = normalize_allocation_method(allocation_method)
     normalized_currency = normalize_recalculation_currency(currency)
     if not dry_run:
@@ -174,7 +179,11 @@ def build_recalculation_preview(
 
 
 def normalize_allocation_method(value: str) -> str:
-    """Validate and normalize the allocation method string."""
+    """Validate and normalize the allocation method string.
+
+    Raises:
+        RevenueRecalculationValidationError: If the method is not in ALLOCATION_METHODS.
+    """
     normalized = value.strip().lower()
     if normalized not in ALLOCATION_METHODS:
         allowed = ", ".join(sorted(ALLOCATION_METHODS))
@@ -185,7 +194,11 @@ def normalize_allocation_method(value: str) -> str:
 
 
 def normalize_recalculation_currency(value: str) -> str:
-    """Validate and normalize the currency to USD."""
+    """Validate and normalize the currency to USD.
+
+    Raises:
+        RevenueRecalculationValidationError: If the currency is not USD.
+    """
     normalized = value.strip().upper()
     if normalized != "USD":
         raise RevenueRecalculationValidationError(
