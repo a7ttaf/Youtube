@@ -80,6 +80,9 @@ def downgrade() -> None:
     without NOT VALID; rows that violate the restored gross-only CHECK will cause
     the downgrade to abort. This migration is therefore irreversible on databases
     that have accepted post_tax commits.
+
+    :raises RuntimeError: If any ``committed_allocation_runs`` rows use
+        ``post_tax_revenue_proportional`` and have not been removed first.
     """
     is_pg = op.get_bind().dialect.name == "postgresql"
     if is_pg:
