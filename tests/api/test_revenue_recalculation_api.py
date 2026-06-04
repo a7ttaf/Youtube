@@ -302,7 +302,8 @@ def _seed_two_source_kinds(database_url: str) -> None:
 
 def test_post_tax_dry_run_blocks_on_missing_source_kind_net(tmp_path):
     """A channel with net for YOUTUBE_CMS but null net for ADSENSE blocks post_tax
-    under the (channel, source_kind) grain (channel grain would have passed)."""
+    under the (channel, source_kind) grain (channel grain would have passed).
+    """
     database_url = build_database_url(tmp_path)
     _seed_two_source_kinds(database_url)
     client = TestClient(create_app(database_url=database_url))

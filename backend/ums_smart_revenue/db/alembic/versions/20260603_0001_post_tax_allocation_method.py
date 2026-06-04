@@ -40,7 +40,8 @@ def _finite(column: str) -> str:
 # ============================================================================
 def upgrade() -> None:
     """Rename basis_gross_usd -> basis_amount_usd (+ recreate the finite CHECK) +
-    expand the runs method allowlist CHECK to post_tax."""
+    expand the runs method allowlist CHECK to post_tax.
+    """
     is_pg = op.get_bind().dialect.name == "postgresql"
     if is_pg:
         op.drop_constraint(
@@ -71,7 +72,15 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Restore the gross-only method CHECK + rename basis_amount_usd -> basis_gross_usd
-    (+ recreate the finite CHECK)."""
+    (+ recreate the finite CHECK).
+
+    Precondition: any committed_allocation_runs rows with
+    allocation_method='post_tax_revenue_proportional' must be removed before
+    downgrading. PostgreSQL validates ALL existing rows when ADD CONSTRAINT runs
+    without NOT VALID; rows that violate the restored gross-only CHECK will cause
+    the downgrade to abort. This migration is therefore irreversible on databases
+    that have accepted post_tax commits.
+    """
     # Restore the gross-only method CHECK.
     with op.batch_alter_table("committed_allocation_runs") as batch:
         batch.drop_constraint("ck_committed_allocation_runs_method", type_="check")

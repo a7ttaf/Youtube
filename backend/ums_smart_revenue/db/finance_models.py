@@ -873,7 +873,8 @@ class ContentOwnerChannelLinkORM(FinanceBase):
 
 class CommittedAllocationRunORM(FinanceBase):
     """Versioned, audited snapshot header of one account-allocation commit
-    (gross or post-tax, allowlisted)."""
+    (gross or post-tax, allowlisted).
+    """
 
     # ========================================================================
     # Purpose: One committed account-allocation run (header) for a month — the

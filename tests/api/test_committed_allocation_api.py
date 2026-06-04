@@ -265,7 +265,7 @@ def test_commit_post_tax_returns_201_with_basis_amount(tmp_path):
         )
         session.commit()
     app = create_app(database_url=database_url)
-    app.dependency_overrides[current_principal_from_headers] = lambda: _principal()
+    app.dependency_overrides[current_principal_from_headers] = _principal
     client = TestClient(app)
     response = client.post(
         COMMIT_PATH,

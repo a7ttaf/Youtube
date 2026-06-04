@@ -368,6 +368,10 @@ def build_account_allocation(
     DISTINCT channel ids (the Spec 2a read contract
     list_verified_adsense_account_channels guarantees this via .distinct());
     duplicates would double-count.
+
+    Raises:
+        AllocationValidationError: If allocation_method is not in
+            COMMITTABLE_ALLOCATION_METHODS.
     """
     # Fail closed for ALL callers (not only the public commit gate): an
     # unsupported method must raise clearly here rather than mislabel the result

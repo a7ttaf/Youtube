@@ -20,6 +20,14 @@ The post_tax (net) proportional weight is **source `RevenueFactEntry.net_revenue
 
 ## 3. Architecture (Approach 1 — parameterized basis in the orchestrator)
 
+### Alternatives considered
+
+- **Approach 1 — Parameterized basis in the orchestrator** (chosen): Basis construction branches in the orchestrator (`compute_month_account_allocation`); the Hamilton distribution engine (`_proportional_allocation`) is reused unchanged. Pros: minimal engine change, orchestrator already owns basis construction, fail-closed semantics are localized. Cons: orchestrator grows method-aware branching.
+- **Approach 2 — Separate engine per method**: Distinct engine functions for gross and post_tax (e.g. `build_gross_account_allocation` and `build_post_tax_account_allocation`). Pros: full per-method isolation. Cons: duplicates the Hamilton distribution, allocation-line construction, and fail-closed guards; higher maintenance cost for each new method.
+- **Approach 3 — Basis builder injected as a strategy**: Pass a basis-builder callable into the engine as a parameter. Pros: engine stays method-agnostic without branching. Cons: indirection layer for a single branch point in a two-method system; over-engineering that obscures the fail-closed semantics.
+
+### Decision: Approach 1
+
 The conserved largest-remainder distribution `_proportional_allocation` (`backend/ums_smart_revenue/finance/allocation.py:60-94`) is already basis-agnostic — it splits an amount across `(channel, weight)` pairs — so it is **reused unchanged**. Only the basis *number* differs per method, and basis construction already lives in the orchestrator, so that is where the method branches.
 
 ### 3.1 Orchestrator basis selection
