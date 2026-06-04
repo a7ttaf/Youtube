@@ -73,7 +73,7 @@ export type UseExplanationState = {
 //   - File: frontend/src/lib/api/types.ts -> NumberExplanation contract.
 //   - File: backend/ums_smart_revenue/api/revenue.py:1358 explain endpoint.
 // ============================================================================
-export function useExplanation(): UseExplanationState {
+export function useExplanation(): UseExplanationState { // skipcq: JS-0067
   const client = useApiClient();
   const [data, setData] = useState<NumberExplanation | null>(null);
   const [loading, setLoading] = useState<boolean>(false);

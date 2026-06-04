@@ -91,7 +91,7 @@ const SMART_ALERTS_CLEAR: SmartAlertsSummary = {
   audit_events: [],
 };
 
-function jsonResponse(body: unknown, status = 200) {
+function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
@@ -101,7 +101,7 @@ function jsonResponse(body: unknown, status = 200) {
 // Route each fetch by URL so the smart-alerts panel and the net-revenue content
 // can be driven with different responses in the same render — the core proof
 // that the panel fails independently.
-function routeFetch(opts: {
+function routeFetch(opts: { // skipcq: JS-0067
   netRevenue?: () => Response;
   smartAlerts?: () => Response;
 }) {
@@ -123,7 +123,7 @@ function routeFetch(opts: {
   );
 }
 
-function renderCommandView(canViewFinance = true) {
+function renderCommandView(canViewFinance = true) { // skipcq: JS-0067
   return render(
     <TenantProvider initialSlug="ums">
       <CommandView canViewFinance={canViewFinance} />

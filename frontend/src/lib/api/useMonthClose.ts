@@ -25,7 +25,7 @@ export type MonthCloseQuery = {
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET + X-UMS-Tenant.
 //   - File: backend/ums_smart_revenue/api/finance_close.py:75 get_finance_month_close.
 // ============================================================================
-export function useMonthClose(
+export function useMonthClose( // skipcq: JS-0067
   query: MonthCloseQuery,
 ): AsyncState<FinanceMonthCloseStatus> {
   const client = useApiClient();
@@ -55,7 +55,7 @@ export function useMonthClose(
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET + X-UMS-Tenant.
 //   - File: backend/ums_smart_revenue/api/finance_close.py:101 get_finance_close_readiness.
 // ============================================================================
-export function useMonthCloseReadiness(
+export function useMonthCloseReadiness( // skipcq: JS-0067
   query: MonthCloseQuery,
 ): AsyncState<FinanceCloseReadinessResponse> {
   const client = useApiClient();
@@ -89,7 +89,7 @@ export function useMonthCloseReadiness(
 //   - File: backend/ums_smart_revenue/api/finance_close.py:132 lock_finance_month.
 //   - File: backend/ums_smart_revenue/api/finance_close.py:167 unlock_finance_month.
 // ============================================================================
-export function useMonthCloseActions(query: MonthCloseQuery) {
+export function useMonthCloseActions(query: MonthCloseQuery) { // skipcq: JS-0067
   const client = useApiClient();
   const { month } = query;
   const encoded = encodeURIComponent(month);

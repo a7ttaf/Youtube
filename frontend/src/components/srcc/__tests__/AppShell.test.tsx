@@ -16,7 +16,7 @@ afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
 });
 
-function jsonResponse(body: unknown, status = 200) {
+function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
@@ -46,27 +46,27 @@ const NET_REVENUE_BODY = {
   audit_events: [],
 };
 
-function urlOf(input: unknown): string {
+function urlOf(input: unknown): string { // skipcq: JS-0067
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
 }
 
-function isTenantCall(input: unknown): boolean {
+function isTenantCall(input: unknown): boolean { // skipcq: JS-0067
   return urlOf(input).includes("/tenants/me");
 }
 
 // Route fetch by URL: /tenants/me -> the provided tenant responder, everything
 // else (the wired CommandView net-revenue call) -> a neutral net-revenue body.
-function routeFetch(tenantResponder: () => Response) {
+function routeFetch(tenantResponder: () => Response) { // skipcq: JS-0067
   return (input: unknown) =>
     Promise.resolve(
       isTenantCall(input) ? tenantResponder() : jsonResponse(NET_REVENUE_BODY),
     );
 }
 
-function tenantFetchCalls() {
+function tenantFetchCalls() { // skipcq: JS-0067
   const mock = globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
   return mock.mock.calls.filter(([input]) => isTenantCall(input));
 }

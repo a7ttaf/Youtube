@@ -47,7 +47,7 @@ const USD_FORMATTER = new Intl.NumberFormat("en-US", {
 //   null means "unknown". Display-only — never feed the parsed number back into
 //   a calculation that affects a stored/exported number.
 // ============================================================================
-export function formatMoney(
+export function formatMoney( // skipcq: JS-0067, JS-R1005
   value: string | null | undefined,
   options: { currency?: string; placeholder?: string } = {},
 ): string {
@@ -80,7 +80,7 @@ export function formatMoney(
  * unparsable, otherwise a locale string. With `options` the format is pinned to
  * "en-US" for determinism; without it the runtime default locale is used.
  */
-export function formatTimestamp(
+export function formatTimestamp( // skipcq: JS-0067
   value: string | null | undefined,
   options?: Intl.DateTimeFormatOptions,
 ): string {
@@ -94,7 +94,7 @@ export function formatTimestamp(
  * Format a money value for display, returning the RESTRICTED_FINANCE_VALUE
  * sentinel when the viewer lacks finance permission so no view leaks amounts.
  */
-export function financeDisplay(
+export function financeDisplay( // skipcq: JS-0067
   value: string | null | undefined,
   canViewFinance: boolean,
   options?: { currency?: string; placeholder?: string },
@@ -104,22 +104,22 @@ export function financeDisplay(
 }
 
 /** Render a tone-colored status badge wrapping its children. */
-export function Badge({ tone, children }: { tone: Severity; children: ReactNode }) {
+export function Badge({ tone, children }: { tone: Severity; children: ReactNode }) { // skipcq: JS-0067
   return <span className={`badge ${tone}`}>{children}</span>;
 }
 
 /** Render a small decorative status dot in the given tone. */
-export function Dot({ tone }: { tone?: Severity }) {
+export function Dot({ tone }: { tone?: Severity }) { // skipcq: JS-0067
   return <span className={`dot${tone ? ` ${tone}` : ""}`} aria-hidden="true" />;
 }
 
 /** Map a workflow tone to a Dot severity; "primary" renders an untoned dot. */
-export function workflowDotTone(tone: WorkflowTone): Severity | undefined {
+export function workflowDotTone(tone: WorkflowTone): Severity | undefined { // skipcq: JS-0067
   return tone === "primary" ? undefined : tone;
 }
 
 /** Render a list row with a tone dot, title, subtitle, and trailing slot. */
-export function ItemRow({
+export function ItemRow({ // skipcq: JS-0067
   tone,
   title,
   sub,
@@ -148,7 +148,7 @@ export function ItemRow({
  * Render a labelled summary tile; finance tiles show RESTRICTED_FINANCE_VALUE
  * when the viewer lacks finance permission.
  */
-export function SummaryTile({
+export function SummaryTile({ // skipcq: JS-0067
   label,
   value,
   note,

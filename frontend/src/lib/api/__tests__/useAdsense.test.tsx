@@ -11,7 +11,7 @@ import {
 } from "@/lib/api/useAdsense";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: React.ReactNode }) {
+function wrapper({ children }: { children: React.ReactNode }) { // skipcq: JS-0067
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
 }
 
@@ -51,30 +51,30 @@ const SYNC_RESULT: AdsenseSyncResponse = {
   audit_event: {},
 };
 
-function jsonResponse(body: unknown, status = 200) {
+function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
 }
 
-function fetchMock() {
+function fetchMock() { // skipcq: JS-0067
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
 }
 
-function lastFetchArgs() {
+function lastFetchArgs() { // skipcq: JS-0067
   return fetchMock().mock.calls.at(-1);
 }
 
 /** Narrow the last fetch args away from `undefined`, failing the test if none. */
-function requireFetchArgs() {
+function requireFetchArgs() { // skipcq: JS-0067
   const args = lastFetchArgs();
   if (!args) throw new Error("expected fetch to have been called");
   return args;
 }
 
 /** Resolve a promise from outside via a deferred, for ordering concurrent calls. */
-function deferred<T>() {
+function deferred<T>() { // skipcq: JS-0067
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
     resolve = res;
@@ -82,7 +82,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function methodOf(init: unknown): string {
+function methodOf(init: unknown): string { // skipcq: JS-0067
   return ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
 }
 

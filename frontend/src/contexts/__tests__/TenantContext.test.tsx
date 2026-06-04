@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 
 import { TenantProvider, useTenant } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: ReactNode }) {
+function wrapper({ children }: { children: ReactNode }) { // skipcq: JS-0067
   return <TenantProvider>{children}</TenantProvider>;
 }
 

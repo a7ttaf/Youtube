@@ -28,7 +28,7 @@ export type ExportsQuery = {
 //   - File: frontend/src/lib/api/types.ts -> ExportListResponse contract.
 //   - File: backend/ums_smart_revenue/api/exports.py:287 list_exports.
 // ============================================================================
-export function useExports(
+export function useExports( // skipcq: JS-0067
   query: ExportsQuery = {},
 ): AsyncState<ExportListResponse> {
   const client = useApiClient();

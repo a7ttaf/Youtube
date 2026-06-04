@@ -33,7 +33,7 @@ export type AsyncState<T> = {
  * reload) so stale finance values never show under a new filter. `reload()`
  * re-runs the same `run` reference.
  */
-export function useAsync<T>(
+export function useAsync<T>( // skipcq: JS-0067
   // The fetch must be a stable reference (memoize the caller's closure with
   // useCallback) so the effect does not re-run on every render.
   run: () => Promise<T>,

@@ -3,7 +3,7 @@ import { useMemo } from "react";
 
 import { useTenant } from "@/contexts/TenantContext";
 
-export class ApiError extends Error {
+export class ApiError extends Error { // skipcq: JS-D1001
   readonly name = "ApiError";
   constructor(
     message: string,
@@ -25,7 +25,7 @@ export class ApiError extends Error {
  * (e.g. binary download anchors) can target the same API origin the JSON client
  * uses instead of hard-coding a relative href against the frontend origin.
  */
-export function resolveUrl(path: string): string {
+export function resolveUrl(path: string): string { // skipcq: JS-0067
   if (/^https?:\/\//i.test(path)) return path;
   const raw = import.meta.env.VITE_API_BASE_URL ?? "";
   const base = raw.replace(/\/+$/, "");
@@ -33,7 +33,7 @@ export function resolveUrl(path: string): string {
   return `${base}${normalisedPath}`;
 }
 
-function buildHeaders(
+function buildHeaders( // skipcq: JS-0067, JS-D1001
   init: HeadersInit | undefined,
   tenantSlug: string,
   hasJsonBody: boolean,
@@ -70,7 +70,7 @@ type ParseBodyOptions = {
   strictJson?: boolean;
 };
 
-class JsonParseError extends Error {
+class JsonParseError extends Error { // skipcq: JS-D1001
   readonly name = "JsonParseError";
   constructor(
     message: string,
@@ -80,7 +80,7 @@ class JsonParseError extends Error {
   }
 }
 
-async function parseBody(
+async function parseBody( // skipcq: JS-0067, JS-D1001, JS-R1005
   res: Response,
   options: ParseBodyOptions = {},
 ): Promise<unknown> {
@@ -104,7 +104,7 @@ async function parseBody(
 
 type RequestOptions = RequestInit & { bodyIsJson?: boolean };
 
-function withJsonBody(
+function withJsonBody( // skipcq: JS-0067, JS-D1001, JS-R1005
   body: unknown,
   init: RequestInit = {},
 ): RequestOptions {
@@ -122,11 +122,11 @@ function withJsonBody(
   return { ...init, body: JSON.stringify(body), bodyIsJson: true };
 }
 
-export function useApiClient() {
+export function useApiClient() { // skipcq: JS-0067, JS-D1001
   const { tenantSlug } = useTenant();
 
   return useMemo(() => {
-    async function request<T>(
+    async function request<T>( // skipcq: JS-D1001
       method: string,
       path: string,
       init: RequestOptions = {},

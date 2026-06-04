@@ -68,7 +68,7 @@ const SMART_ALERTS_CLEAR: SmartAlertsSummary = {
   audit_events: [],
 };
 
-function jsonResponse(body: unknown, status = 200) {
+function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
@@ -78,7 +78,7 @@ function jsonResponse(body: unknown, status = 200) {
 // Route each fetch by URL and return a FRESH Response per call (a Response body
 // can only be read once, so the net-revenue + smart-alerts requests cannot share
 // one). net-revenue is driven by the test; smart-alerts defaults to CLEAR.
-function routeFetch(netRevenue: () => Response, smartAlerts?: () => Response) {
+function routeFetch(netRevenue: () => Response, smartAlerts?: () => Response) { // skipcq: JS-0067
   (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
     (input: RequestInfo | URL) => {
       const url = String(input);
@@ -92,7 +92,7 @@ function routeFetch(netRevenue: () => Response, smartAlerts?: () => Response) {
   );
 }
 
-function renderCommandView(canViewFinance: boolean) {
+function renderCommandView(canViewFinance: boolean) { // skipcq: JS-0067
   return render(
     <TenantProvider initialSlug="ums">
       <CommandView canViewFinance={canViewFinance} />

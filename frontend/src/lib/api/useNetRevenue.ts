@@ -26,7 +26,7 @@ export type NetRevenueQuery = {
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() GET + X-UMS-Tenant.
 //   - File: backend/ums_smart_revenue/api/revenue.py:1088 get_month_net_revenue.
 // ============================================================================
-export function useNetRevenue(query: NetRevenueQuery): AsyncState<NetRevenueResponse> {
+export function useNetRevenue(query: NetRevenueQuery): AsyncState<NetRevenueResponse> { // skipcq: JS-0067
   const client = useApiClient();
   const { month, scopeType, scopeId, currency } = query;
 

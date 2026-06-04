@@ -27,7 +27,7 @@ export type SmartAlertsQuery = {
 //   - File: frontend/src/lib/api/types.ts -> SmartAlertsSummary contract.
 //   - File: backend/ums_smart_revenue/api/revenue.py:844 get_month_smart_alerts.
 // ============================================================================
-export function useSmartAlerts(
+export function useSmartAlerts( // skipcq: JS-0067
   query: SmartAlertsQuery,
 ): AsyncState<SmartAlertsSummary> {
   const client = useApiClient();

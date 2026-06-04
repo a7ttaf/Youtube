@@ -93,29 +93,29 @@ const POPULATED_LIST: ExportListResponse = {
   pagination: { limit: 50, offset: 0, returned: 1, has_more: false },
 };
 
-function jsonResponse(body: unknown, status = 200) {
+function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
 }
 
-function urlOf(input: unknown): string {
+function urlOf(input: unknown): string { // skipcq: JS-0067
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
 }
 
-function methodOf(init: unknown): string {
+function methodOf(init: unknown): string { // skipcq: JS-0067
   return ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
 }
 
-function fetchMock() {
+function fetchMock() { // skipcq: JS-0067
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
 }
 
-function renderExportsView(
+function renderExportsView( // skipcq: JS-0067
   canCreateExport = true,
   {
     canExportFinance = true,

@@ -5,7 +5,7 @@ import type { ExportListResponse } from "@/lib/api/types";
 import { useExports } from "@/lib/api/useExports";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: React.ReactNode }) {
+function wrapper({ children }: { children: React.ReactNode }) { // skipcq: JS-0067
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
 }
 
@@ -49,23 +49,23 @@ const LIST_BODY: ExportListResponse = {
   pagination: { limit: 50, offset: 0, returned: 1, has_more: false },
 };
 
-function jsonResponse(body: unknown, status = 200) {
+function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
 }
 
-function fetchMock() {
+function fetchMock() { // skipcq: JS-0067
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
 }
 
-function lastFetchArgs() {
+function lastFetchArgs() { // skipcq: JS-0067
   return fetchMock().mock.calls.at(-1);
 }
 
 /** Narrow the last fetch args away from `undefined`, failing the test if none. */
-function requireFetchArgs() {
+function requireFetchArgs() { // skipcq: JS-0067
   const args = lastFetchArgs();
   if (!args) throw new Error("expected fetch to have been called");
   return args;

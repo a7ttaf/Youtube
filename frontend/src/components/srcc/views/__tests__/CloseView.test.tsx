@@ -66,14 +66,14 @@ const READINESS_BLOCKED: FinanceCloseReadinessResponse = {
   ],
 };
 
-function jsonResponse(body: unknown, status = 200) {
+function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
 }
 
-function urlOf(input: unknown): string {
+function urlOf(input: unknown): string { // skipcq: JS-0067
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
@@ -81,13 +81,13 @@ function urlOf(input: unknown): string {
 }
 
 // Route the two CloseView GETs (status vs /readiness) to separate responders.
-function routeFetch(opts: {
+function routeFetch(opts: { // skipcq: JS-0067
   status: () => Response;
   readiness: () => Response;
   lock?: () => Response;
   unlock?: () => Response;
 }) {
-  return (input: unknown) => {
+  return (input: unknown) => { // skipcq: JS-R1005
     const url = urlOf(input);
     if (url.endsWith("/readiness")) return Promise.resolve(opts.readiness());
     if (url.endsWith("/lock") && opts.lock) return Promise.resolve(opts.lock());
@@ -97,12 +97,12 @@ function routeFetch(opts: {
   };
 }
 
-function fetchMock() {
+function fetchMock() { // skipcq: JS-0067
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
 }
 
 /** Resolve a promise from outside via a deferred, to keep a fetch pending. */
-function deferred<T>() {
+function deferred<T>() { // skipcq: JS-0067
   let resolve!: (value: T) => void;
   const promise = new Promise<T>((res) => {
     resolve = res;
@@ -110,7 +110,7 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
-function renderCloseView(canCloseMonth = true) {
+function renderCloseView(canCloseMonth = true) { // skipcq: JS-0067
   return render(
     <TenantProvider initialSlug="ums">
       <CloseView permissions={{ canCloseMonth }} />

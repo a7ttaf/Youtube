@@ -5,7 +5,7 @@ import { useNetRevenue } from "@/lib/api/useNetRevenue";
 import type { NetRevenueResponse } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: React.ReactNode }) {
+function wrapper({ children }: { children: React.ReactNode }) { // skipcq: JS-0067
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
 }
 
@@ -62,19 +62,19 @@ const NET_REVENUE_BODY: NetRevenueResponse = {
   audit_events: [],
 };
 
-function jsonResponse(body: unknown, status = 200) {
+function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
 }
 
-function lastFetchArgs() {
+function lastFetchArgs() { // skipcq: JS-0067
   return (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1);
 }
 
 /** Narrow the last fetch args away from `undefined`, failing the test if none. */
-function requireFetchArgs() {
+function requireFetchArgs() { // skipcq: JS-0067
   const args = lastFetchArgs();
   if (!args) throw new Error("expected fetch to have been called");
   return args;

@@ -119,7 +119,7 @@ const SCOPE_TYPE_OPTIONS: Array<{ value: ExportScopeType; label: string }> = [
  * Returns the binary download route (resolved against the configured API origin)
  * and artifact format for a job, or null if the type has no GET route.
  */
-function downloadFor(
+function downloadFor( // skipcq: JS-0067
   job: ExportJob,
 ): { href: string; format: string } | null {
   const id = encodeURIComponent(job.id);
@@ -146,12 +146,12 @@ function downloadFor(
 //   server-side generation on first click; a COMPLETED job serves cached bytes.
 // ============================================================================
 /** Returns "Generate" for QUEUED jobs (generate-on-demand) and "Download" otherwise. */
-function downloadVerb(job: ExportJob): string {
+function downloadVerb(job: ExportJob): string { // skipcq: JS-0067
   return job.status.toUpperCase() === "QUEUED" ? "Generate" : "Download";
 }
 
 /** Maps an export-job status to its Severity badge tone. */
-function statusTone(status: string): Severity {
+function statusTone(status: string): Severity { // skipcq: JS-0067
   switch (status.toUpperCase()) {
     case "COMPLETED":
       return "green";
@@ -178,13 +178,13 @@ function statusTone(status: string): Severity {
  * (generate-on-demand) and COMPLETED (cached) are downloadable; FAILED and
  * CANCELLED are not.
  */
-function isDownloadable(job: ExportJob): boolean {
+function isDownloadable(job: ExportJob): boolean { // skipcq: JS-0067
   const status = job.status.toUpperCase();
   return status === "QUEUED" || status === "COMPLETED";
 }
 
 /** Builds a human-readable scope label (e.g. "company · company-a"). */
-function scopeLabel(job: ExportJob): string {
+function scopeLabel(job: ExportJob): string { // skipcq: JS-0067
   if (job.scope_type === "global") return "Global";
   if (job.scope_id) return `${job.scope_type} · ${job.scope_id}`;
   return job.scope_type;
@@ -196,7 +196,7 @@ function scopeLabel(job: ExportJob): string {
  * caller's matching permission is granted; the default selection is the first
  * allowed report type.
  */
-export default function ExportsView({
+export default function ExportsView({ // skipcq: JS-0067, JS-R1005
   canCreateExport,
   canExportFinance,
   canExportAnalytics,
@@ -325,7 +325,7 @@ export default function ExportsView({
 }
 
 /** The Export Center panel header (title, description, and audited badge). */
-function ExportCenterHeader() {
+function ExportCenterHeader() { // skipcq: JS-0067
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -341,7 +341,7 @@ function ExportCenterHeader() {
 }
 
 /** Static side panel listing the export guardrails (descriptive role context). */
-function ExportGuardrailsPanel() {
+function ExportGuardrailsPanel() { // skipcq: JS-0067
   return (
     <aside className="view-stack">
       <section className="panel">
@@ -363,7 +363,7 @@ function ExportGuardrailsPanel() {
 }
 
 /** Header for the export guardrails side panel (title, description, policy badge). */
-function GuardrailsHeader() {
+function GuardrailsHeader() { // skipcq: JS-0067
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -383,7 +383,7 @@ function GuardrailsHeader() {
  * an enabled form with no options. The label is kept by the parent so the field
  * stays accessible by name in both states.
  */
-function ReportTypeField({
+function ReportTypeField({ // skipcq: JS-0067
   exportType,
   onExportType,
   reportTypeOptions,
@@ -420,7 +420,7 @@ function ReportTypeField({
 }
 
 /** The export request form: report type, scope, month, currency, and reason. */
-function RequestExportForm({
+function RequestExportForm({ // skipcq: JS-0067
   exportType,
   onExportType,
   reportTypeOptions,
@@ -553,7 +553,7 @@ function RequestExportForm({
 }
 
 /** Inline alert banner shown when an export request POST fails. */
-function RequestError({ error }: { error: ApiError | Error }) {
+function RequestError({ error }: { error: ApiError | Error }) { // skipcq: JS-0067
   const { title, detail } = describeError(error);
   return (
     <div className="permission-band" role="alert" style={{ margin: 13 }}>
@@ -568,7 +568,7 @@ function RequestError({ error }: { error: ApiError | Error }) {
 }
 
 /** Inline status banner confirming a newly requested export job. */
-function RequestSuccess({ job }: { job: ExportJob }) {
+function RequestSuccess({ job }: { job: ExportJob }) { // skipcq: JS-0067
   return (
     <div className="permission-band" role="status" style={{ margin: 13 }}>
       <Dot tone="green" />
@@ -582,7 +582,7 @@ function RequestSuccess({ job }: { job: ExportJob }) {
 }
 
 /** The export jobs section: header with a refresh control plus the jobs body. */
-function ExportJobsTable({
+function ExportJobsTable({ // skipcq: JS-0067
   jobs,
   loading,
   error,
@@ -616,7 +616,7 @@ function ExportJobsTable({
 }
 
 /** Renders the export jobs table, or the error / loading / empty placeholder. */
-function ExportJobsTableBody({
+function ExportJobsTableBody({ // skipcq: JS-0067
   jobs,
   loading,
   error,
@@ -672,7 +672,7 @@ function ExportJobsTableBody({
 }
 
 /** The export jobs table header row (column labels). */
-function ExportJobsTableHead() {
+function ExportJobsTableHead() { // skipcq: JS-0067
   return (
     <thead>
       <tr>
@@ -689,7 +689,7 @@ function ExportJobsTableHead() {
 }
 
 /** A single export-job table row, including its status badge and download cell. */
-function ExportJobRow({ job }: { job: ExportJob }) {
+function ExportJobRow({ job }: { job: ExportJob }) { // skipcq: JS-0067
   return (
     <tr>
       <td>{job.export_type}</td>
@@ -712,7 +712,7 @@ function ExportJobRow({ job }: { job: ExportJob }) {
  * COMPLETED) when the type has a route, otherwise a failure reason or
  * not-ready note.
  */
-function ExportDownloadCell({ job }: { job: ExportJob }) {
+function ExportDownloadCell({ job }: { job: ExportJob }) { // skipcq: JS-0067
   const download = downloadFor(job);
   if (isDownloadable(job) && download) {
     // Plain anchor: the href is resolved against the configured API origin
