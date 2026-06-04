@@ -93,6 +93,7 @@ def _load_dependencies() -> Any:
         MonthlyChannelRevenueFactORM,
     )
     from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
+    from ums_smart_revenue.db.report_models import ReportBase
     from ums_smart_revenue.db.security_models import SecurityBase, UserORM
     from ums_smart_revenue.db.session import build_session_factory
     from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
@@ -121,6 +122,7 @@ def _load_dependencies() -> Any:
         "SecurityBase": SecurityBase,
         "TenantBase": TenantBase,
         "ExplanationBase": ExplanationBase,
+        "ReportBase": ReportBase,
         "TenantORM": TenantORM,
         "OrgUnitORM": OrgUnitORM,
         "YouTubeChannelORM": YouTubeChannelORM,
@@ -153,14 +155,22 @@ def _create_schema(engine: Any, deps: dict[str, Any]) -> None:
     On a fresh SQLite file the app's Alembic schema is not bootstrapped, so the
     seed creates the same metadata the tests create (TenantBase + OrgBase +
     SecurityBase + FinanceBase) plus ExplanationBase (the explain endpoint
-    persists to number_explanations). ``create_all`` is a safe no-op for tables
-    that already exist (the Postgres/Alembic path), so this stays idempotent.
+    persists to number_explanations) plus ReportBase (the exports read path the
+    docstring promises queries export_jobs; without it GET /exports 500s on a
+    fresh SQLite file). ``create_all`` is a safe no-op for tables that already
+    exist (the Postgres/Alembic path), so this stays idempotent.
     """
     deps["TenantBase"].metadata.create_all(engine)
     deps["OrgBase"].metadata.create_all(engine)
     deps["SecurityBase"].metadata.create_all(engine)
     deps["FinanceBase"].metadata.create_all(engine)
     deps["ExplanationBase"].metadata.create_all(engine)
+    # FIX: Create ReportBase too. The module docstring lists "exports" as a
+    # supported dashboard read path, but export_jobs (ReportBase) was never
+    # created here, so GET /exports raised "no such table: export_jobs" on a
+    # fresh SQLite seed. Creating it makes the promised exports read path return
+    # an empty (200) list instead of 500.
+    deps["ReportBase"].metadata.create_all(engine)
 
 
 # ============================================================================
