@@ -65,6 +65,8 @@ export default defineConfig(({ mode }) => { // skipcq: JS-R1005
   // the browser bundle. Server-only names (UMS_TRUSTED_GATEWAY_TOKEN) stay
   // confined to Node and never reach the browser.
   const gatewayToken = env.UMS_TRUSTED_GATEWAY_TOKEN ?? "";
+  // Optional scope ID for non-global dev identities; empty string = omit.
+  const gatewayScopeId = env.VITE_DEV_GATEWAY_SCOPE_ID ?? "";
 
   if (mode === "development" && !gatewayToken) {
     // Surface a single startup hint so missing trusted-gateway secrets do not
@@ -114,6 +116,10 @@ export default defineConfig(({ mode }) => { // skipcq: JS-R1005
                 // gateway contract.
                 if (gatewayTenantSlug)
                   proxyReq.setHeader("X-UMS-Tenant", gatewayTenantSlug);
+                // Inject X-Scope-ID when a non-global scope identity is
+                // configured; omitting it is safe for global-scope dev.
+                if (gatewayScopeId)
+                  proxyReq.setHeader("X-Scope-ID", gatewayScopeId);
               });
             },
           },

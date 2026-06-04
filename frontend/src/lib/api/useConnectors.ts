@@ -122,6 +122,9 @@ export function useConnectorJobActions(): UseConnectorJobActionsState { // skipc
       // the render closure handed both the same token, letting a slow earlier
       // response overwrite a newer one.
       const token = ++requestIdRef.current;
+      // FIX: clear any stale job result so a pending second request does not
+      // show the previous run's success banner while loading.
+      setData(null);
       setLoading(true);
       setError(null);
       return client

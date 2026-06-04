@@ -127,6 +127,9 @@ export function useAdsenseSyncActions(): UseAdsenseSyncActionsState { // skipcq:
       // the render closure handed both the same token, letting a slow earlier
       // response overwrite a newer one.
       const token = ++requestIdRef.current;
+      // FIX: clear any stale sync result so a pending second request does not
+      // show the previous batch's success banner while loading.
+      setData(null);
       setLoading(true);
       setError(null);
       return client
