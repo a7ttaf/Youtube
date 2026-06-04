@@ -19,9 +19,10 @@ import type { Severity } from "@/lib/mock/data";
 import { LockIcon } from "../icons";
 import {
   Badge,
-  Dot,
+  DEFAULT_MONTH,
   financeDisplay,
   ItemRow,
+  MONTH_OPTIONS,
   RESTRICTED_FINANCE_VALUE,
 } from "../shared";
 
@@ -42,18 +43,6 @@ import {
 //   - File: frontend/src/lib/api/types.ts -> NetRevenueResponse contract.
 //   - File: backend/ums_smart_revenue/api/revenue.py:1088 -> the endpoint.
 // ============================================================================
-
-// Default to a recent, demo-seedable month per the task brief.
-const DEFAULT_MONTH = "2026-03";
-
-// Months offered in the selector (most recent first). The selector is a simple
-// dropdown by design — wiring real data is the priority, not month discovery.
-const MONTH_OPTIONS = [
-  "2026-03",
-  "2026-02",
-  "2026-01",
-  "2025-12",
-];
 
 type ScopeOption = {
   label: string;
@@ -77,6 +66,7 @@ const ALLOCATION_SOURCE_COPY: Record<
   live_fallback: { label: "Live fallback", tone: "amber" },
 };
 
+/** Map a month/channel status string to a design-system badge tone. */
 function statusTone(status: string): Severity {
   const normalized = status.toUpperCase();
   if (normalized.includes("LOCK") || normalized === "OK" || normalized === "CALCULATED") {
@@ -102,15 +92,21 @@ function severityTone(severity: SmartAlertSeverity | string): Severity {
   }
 }
 
+/** Human-facing label for a channel row (its YouTube channel id for now). */
 function channelDisplayName(channel: ChannelNetRevenue): string {
   return channel.youtube_channel_id;
 }
 
+/** Two-letter avatar initials derived from a channel's id. */
 function channelAvatar(channel: ChannelNetRevenue): string {
   const id = channel.youtube_channel_id.replace(/[^a-zA-Z0-9]/g, "");
   return (id.slice(-2) || "--").toUpperCase();
 }
 
+/**
+ * Command Center screen: month/scope filters, the real net-revenue status strip
+ * and channel table, the smart-alerts panel, and the per-channel explanation.
+ */
 export default function CommandView({
   canViewFinance,
 }: {
@@ -120,7 +116,14 @@ export default function CommandView({
   const [scopeIndex, setScopeIndex] = useState<number>(0);
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
 
-  const scope = SCOPE_OPTIONS[scopeIndex] ?? SCOPE_OPTIONS[0]!;
+  // FIX: Replaced the non-null assertion on SCOPE_OPTIONS[0] with explicit
+  // narrowing; the selected index may be out of range, and the fallback is the
+  // first option, which must exist (the constant is defined non-empty above).
+  const fallbackScope = SCOPE_OPTIONS[0];
+  if (!fallbackScope) {
+    throw new Error("SCOPE_OPTIONS must define at least one scope option");
+  }
+  const scope = SCOPE_OPTIONS[scopeIndex] ?? fallbackScope;
   const { data, loading, error, reload } = useNetRevenue({
     month,
     scopeType: scope.scopeType,
@@ -191,143 +194,267 @@ export default function CommandView({
       {/* smart-alerts / problem panel — REAL data, fails independently */}
       <SmartAlertsPanel month={month} />
 
-      <section className="workspace" aria-label="Command workspace">
-        <div className="work-left">
-          {/* channel revenue table — REAL data */}
-          <section className="panel channel-table" aria-labelledby="channelTableTitle">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong id="channelTableTitle">Channel Revenue Table</strong>
-                <span>Money values are source-linked and permission-gated</span>
-              </div>
-              <Badge tone="blue">{`${channels.length} channels`}</Badge>
-            </div>
-            <NetRevenueChannelTable
-              data={data}
-              loading={loading}
-              error={error}
-              canViewFinance={canViewFinance}
-              currency={currency}
-              selectedChannelId={selectedChannel?.youtube_channel_id ?? null}
-              onSelect={setSelectedChannelId}
-            />
-          </section>
-
-          {/* issue + close split — still mock data (not part of net-revenue API) */}
-          <div className="layout-split">
-            <section className="panel" aria-labelledby="issuesTitle">
-              <div className="panel-header">
-                <div className="panel-title">
-                  <strong id="issuesTitle">Issue Queue</strong>
-                  <span>Sample data — not yet wired to the API</span>
-                </div>
-                <Badge tone="amber">Mock</Badge>
-              </div>
-              <div className="issue-list" role="list">
-                {ISSUES.map((i) => (
-                  <ItemRow
-                    key={i.title}
-                    tone={i.tone}
-                    title={i.title}
-                    sub={i.sub}
-                    trailing={<Badge tone={i.badge.tone}>{i.badge.text}</Badge>}
-                  />
-                ))}
-              </div>
-            </section>
-
-            <section className="panel" aria-labelledby="closeTitle">
-              <div className="panel-header">
-                <div className="panel-title">
-                  <strong id="closeTitle">Month Close Controls</strong>
-                  <span>Sample data — not yet wired to the API</span>
-                </div>
-                <Badge tone="amber">Mock</Badge>
-              </div>
-              <div className="close-list" role="list">
-                {CLOSE_STEPS.map((s) => (
-                  <ItemRow
-                    key={s.title}
-                    tone={s.tone}
-                    title={s.title}
-                    sub={s.sub}
-                    className="close-item"
-                    trailing={
-                      s.badge ? (
-                        <Badge tone={s.badge.tone}>{s.badge.text}</Badge>
-                      ) : (
-                        <button className="mini-button" type="button">
-                          {s.action}
-                        </button>
-                      )
-                    }
-                  />
-                ))}
-              </div>
-            </section>
-          </div>
-        </div>
-
-        {/* explain + readiness */}
-        <aside className="side-stack" aria-label="Explanation and readiness">
-          <section className="panel explain-card">
-            <div className="explain-head">
-              <div>
-                <h2>{selectedChannel ? channelDisplayName(selectedChannel) : "No channel"}</h2>
-                <p>Net revenue explanation, {month}</p>
-              </div>
-              {selectedChannel ? (
-                <Badge tone={statusTone(selectedChannel.status)}>
-                  {selectedChannel.confidence}
-                </Badge>
-              ) : (
-                <Badge tone="blue">—</Badge>
-              )}
-            </div>
-            <div className="formula" role="text" aria-label="Revenue formula">
-              net = adjusted_gross - channel_direct_deductions - account_allocated_deductions
-            </div>
-            <div className="explain-list" role="list">
-              {selectedChannel ? (
-                <ChannelExplainRows
-                  channel={selectedChannel}
-                  canViewFinance={canViewFinance}
-                  currency={currency}
-                />
-              ) : (
-                <ItemRow
-                  tone="blue"
-                  title="No channel selected"
-                  sub={loading ? "Loading net revenue…" : "No channels in this scope/month"}
-                  className="explain-row"
-                  trailing={<span className="muted">—</span>}
-                />
-              )}
-            </div>
-          </section>
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong>Export Readiness</strong>
-                <span>Sample data — not yet wired to the API</span>
-              </div>
-              <Badge tone="amber">Mock</Badge>
-            </div>
-            <div className="issue-list" role="list">
-              {EXPORT_READINESS.map((r) => (
-                <ItemRow
-                  key={r.title}
-                  tone={r.tone}
-                  title={r.title}
-                  sub={r.sub}
-                  trailing={<Badge tone={r.badge.tone}>{r.badge.text}</Badge>}
-                />
-              ))}
-            </div>
-          </section>
-        </aside>
-      </section>
+      <CommandWorkspace
+        data={data}
+        loading={loading}
+        error={error}
+        canViewFinance={canViewFinance}
+        currency={currency}
+        channelCount={channels.length}
+        selectedChannel={selectedChannel}
+        selectedChannelId={selectedChannel?.youtube_channel_id ?? null}
+        month={month}
+        onSelect={setSelectedChannelId}
+      />
     </>
+  );
+}
+
+/**
+ * Two-column Command Center workspace: the real channel table plus mock issue,
+ * close, explanation, and export-readiness panels. Splits into named panels so
+ * each JSX subtree stays shallow.
+ */
+function CommandWorkspace({
+  data,
+  loading,
+  error,
+  canViewFinance,
+  currency,
+  channelCount,
+  selectedChannel,
+  selectedChannelId,
+  month,
+  onSelect,
+}: {
+  data: NetRevenueResponse | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+  canViewFinance: boolean;
+  currency: string;
+  channelCount: number;
+  selectedChannel: ChannelNetRevenue | null;
+  selectedChannelId: string | null;
+  month: string;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <section className="workspace" aria-label="Command workspace">
+      <div className="work-left">
+        <ChannelRevenuePanel
+          data={data}
+          loading={loading}
+          error={error}
+          canViewFinance={canViewFinance}
+          currency={currency}
+          channelCount={channelCount}
+          selectedChannelId={selectedChannelId}
+          onSelect={onSelect}
+        />
+
+        {/* issue + close split — still mock data (not part of net-revenue API) */}
+        <div className="layout-split">
+          <IssueQueuePanel />
+          <MonthCloseControlsPanel />
+        </div>
+      </div>
+
+      {/* explain + readiness */}
+      <aside className="side-stack" aria-label="Explanation and readiness">
+        <ExplainCard
+          selectedChannel={selectedChannel}
+          canViewFinance={canViewFinance}
+          currency={currency}
+          loading={loading}
+          month={month}
+        />
+        <ExportReadinessPanel />
+      </aside>
+    </section>
+  );
+}
+
+/** Channel Revenue Table panel: header badge plus the real net-revenue table. */
+function ChannelRevenuePanel({
+  data,
+  loading,
+  error,
+  canViewFinance,
+  currency,
+  channelCount,
+  selectedChannelId,
+  onSelect,
+}: {
+  data: NetRevenueResponse | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+  canViewFinance: boolean;
+  currency: string;
+  channelCount: number;
+  selectedChannelId: string | null;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <section className="panel channel-table" aria-labelledby="channelTableTitle">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong id="channelTableTitle">Channel Revenue Table</strong>
+          <span>Money values are source-linked and permission-gated</span>
+        </div>
+        <Badge tone="blue">{`${channelCount} channels`}</Badge>
+      </div>
+      <NetRevenueChannelTable
+        data={data}
+        loading={loading}
+        error={error}
+        canViewFinance={canViewFinance}
+        currency={currency}
+        selectedChannelId={selectedChannelId}
+        onSelect={onSelect}
+      />
+    </section>
+  );
+}
+
+/** Mock Issue Queue panel (not yet wired to the API). */
+function IssueQueuePanel() {
+  return (
+    <section className="panel" aria-labelledby="issuesTitle">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong id="issuesTitle">Issue Queue</strong>
+          <span>Sample data — not yet wired to the API</span>
+        </div>
+        <Badge tone="amber">Mock</Badge>
+      </div>
+      <div className="issue-list" role="list">
+        {ISSUES.map((i) => (
+          <ItemRow
+            key={i.title}
+            tone={i.tone}
+            title={i.title}
+            sub={i.sub}
+            trailing={<Badge tone={i.badge.tone}>{i.badge.text}</Badge>}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/** Mock Month Close Controls panel (not yet wired to the API). */
+function MonthCloseControlsPanel() {
+  return (
+    <section className="panel" aria-labelledby="closeTitle">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong id="closeTitle">Month Close Controls</strong>
+          <span>Sample data — not yet wired to the API</span>
+        </div>
+        <Badge tone="amber">Mock</Badge>
+      </div>
+      <div className="close-list" role="list">
+        {CLOSE_STEPS.map((s) => (
+          <ItemRow
+            key={s.title}
+            tone={s.tone}
+            title={s.title}
+            sub={s.sub}
+            className="close-item"
+            trailing={<CloseStepAction step={s} />}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/** Trailing control for a close step: a status badge or an action button. */
+function CloseStepAction({ step }: { step: (typeof CLOSE_STEPS)[number] }) {
+  if (step.badge) {
+    return <Badge tone={step.badge.tone}>{step.badge.text}</Badge>;
+  }
+  return (
+    <button className="mini-button" type="button">
+      {step.action}
+    </button>
+  );
+}
+
+/** Net-revenue explanation card for the selected channel (or an empty state). */
+function ExplainCard({
+  selectedChannel,
+  canViewFinance,
+  currency,
+  loading,
+  month,
+}: {
+  selectedChannel: ChannelNetRevenue | null;
+  canViewFinance: boolean;
+  currency: string;
+  loading: boolean;
+  month: string;
+}) {
+  return (
+    <section className="panel explain-card">
+      <div className="explain-head">
+        <div>
+          <h2>{selectedChannel ? channelDisplayName(selectedChannel) : "No channel"}</h2>
+          <p>Net revenue explanation, {month}</p>
+        </div>
+        {selectedChannel ? (
+          <Badge tone={statusTone(selectedChannel.status)}>{selectedChannel.confidence}</Badge>
+        ) : (
+          <Badge tone="blue">—</Badge>
+        )}
+      </div>
+      <div className="formula" role="text" aria-label="Revenue formula">
+        net = adjusted_gross - channel_direct_deductions - account_allocated_deductions
+      </div>
+      <div className="explain-list" role="list">
+        {selectedChannel ? (
+          <ChannelExplainRows
+            channel={selectedChannel}
+            canViewFinance={canViewFinance}
+            currency={currency}
+          />
+        ) : (
+          <ItemRow
+            tone="blue"
+            title="No channel selected"
+            sub={loading ? "Loading net revenue…" : "No channels in this scope/month"}
+            className="explain-row"
+            trailing={<span className="muted">—</span>}
+          />
+        )}
+      </div>
+    </section>
+  );
+}
+
+/** Mock Export Readiness panel (not yet wired to the API). */
+function ExportReadinessPanel() {
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong>Export Readiness</strong>
+          <span>Sample data — not yet wired to the API</span>
+        </div>
+        <Badge tone="amber">Mock</Badge>
+      </div>
+      <div className="issue-list" role="list">
+        {EXPORT_READINESS.map((r) => (
+          <ItemRow
+            key={r.title}
+            tone={r.tone}
+            title={r.title}
+            sub={r.sub}
+            trailing={<Badge tone={r.badge.tone}>{r.badge.text}</Badge>}
+          />
+        ))}
+      </div>
+    </section>
   );
 }
 
@@ -435,6 +562,7 @@ function SmartAlertsHeaderBadge({
   );
 }
 
+/** Body of the smart-alerts panel: error, loading, empty, and alert-row states. */
 function SmartAlertsBody({
   data,
   loading,
@@ -506,6 +634,7 @@ function SmartAlertsBody({
   );
 }
 
+/** Top metric strip summarising the month's gross, net, deductions, and allocation source. */
 function NetRevenueStatusStrip({
   data,
   loading,
@@ -666,6 +795,7 @@ function NetRevenueStatusStrip({
   );
 }
 
+/** Selectable per-channel revenue table with error, loading, and empty states. */
 function NetRevenueChannelTable({
   data,
   loading,
@@ -719,76 +849,113 @@ function NetRevenueChannelTable({
   return (
     <div className="table-wrap">
       <table role="grid" aria-label="Channel revenue">
-        <thead>
-          <tr>
-            <th scope="col">Channel</th>
-            <th scope="col">Status</th>
-            <th scope="col">Gross</th>
-            <th scope="col">Deductions</th>
-            <th scope="col">Net</th>
-            <th scope="col">Confidence</th>
-            <th scope="col">Issues</th>
-          </tr>
-        </thead>
+        <ChannelTableHead />
         <tbody>
-          {channels.map((c) => {
-            const isSel = c.youtube_channel_id === selectedChannelId;
-            return (
-              <tr
-                key={c.youtube_channel_id}
-                role="row"
-                tabIndex={0}
-                aria-selected={isSel}
-                className={isSel ? "is-selected" : undefined}
-                onClick={() => onSelect(c.youtube_channel_id)}
-                onKeyDown={(e) => {
-                  if (e.target !== e.currentTarget) return;
-                  if (e.key === "Enter" || e.key === " ") {
-                    e.preventDefault();
-                    onSelect(c.youtube_channel_id);
-                  }
-                }}
-              >
-                <td>
-                  <span className="channel-cell">
-                    <span className="avatar">{channelAvatar(c)}</span>
-                    <span className="channel-copy">
-                      <span className="channel-name">{channelDisplayName(c)}</span>
-                      <span className="channel-id">{c.primary_source_kind ?? "no source"}</span>
-                    </span>
-                  </span>
-                </td>
-                <td>
-                  <Badge tone={statusTone(c.status)}>{c.status}</Badge>
-                </td>
-                <td className="money finance-data">
-                  {financeDisplay(c.adjusted_gross_revenue_usd, canViewFinance, { currency })}
-                </td>
-                <td className="money finance-data">
-                  {financeDisplay(c.deduction_amount_usd, canViewFinance, { currency })}
-                </td>
-                <td className="money finance-data">
-                  {financeDisplay(c.net_revenue_usd, canViewFinance, { currency })}
-                </td>
-                <td>
-                  <Badge tone={statusTone(c.status)}>{c.confidence}</Badge>
-                </td>
-                <td>
-                  {c.issues.length > 0 ? (
-                    <Badge tone="amber">{`${c.issues.length}`}</Badge>
-                  ) : (
-                    <span className="muted">None</span>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
+          {channels.map((c) => (
+            <ChannelRow
+              key={c.youtube_channel_id}
+              channel={c}
+              canViewFinance={canViewFinance}
+              currency={currency}
+              selected={c.youtube_channel_id === selectedChannelId}
+              onSelect={onSelect}
+            />
+          ))}
         </tbody>
       </table>
     </div>
   );
 }
 
+/** Static header row for the channel revenue table. */
+function ChannelTableHead() {
+  return (
+    <thead>
+      <tr>
+        <th scope="col">Channel</th>
+        <th scope="col">Status</th>
+        <th scope="col">Gross</th>
+        <th scope="col">Deductions</th>
+        <th scope="col">Net</th>
+        <th scope="col">Confidence</th>
+        <th scope="col">Issues</th>
+      </tr>
+    </thead>
+  );
+}
+
+/** Single selectable channel row: name, status, permission-gated money, and issues. */
+function ChannelRow({
+  channel,
+  canViewFinance,
+  currency,
+  selected,
+  onSelect,
+}: {
+  channel: ChannelNetRevenue;
+  canViewFinance: boolean;
+  currency: string;
+  selected: boolean;
+  onSelect: (id: string) => void;
+}) {
+  return (
+    <tr
+      role="row"
+      tabIndex={0}
+      aria-selected={selected}
+      className={selected ? "is-selected" : undefined}
+      onClick={() => onSelect(channel.youtube_channel_id)}
+      onKeyDown={(e) => {
+        if (e.target !== e.currentTarget) return;
+        if (e.key === "Enter" || e.key === " ") {
+          e.preventDefault();
+          onSelect(channel.youtube_channel_id);
+        }
+      }}
+    >
+      <td>
+        <ChannelNameCell channel={channel} />
+      </td>
+      <td>
+        <Badge tone={statusTone(channel.status)}>{channel.status}</Badge>
+      </td>
+      <td className="money finance-data">
+        {financeDisplay(channel.adjusted_gross_revenue_usd, canViewFinance, { currency })}
+      </td>
+      <td className="money finance-data">
+        {financeDisplay(channel.deduction_amount_usd, canViewFinance, { currency })}
+      </td>
+      <td className="money finance-data">
+        {financeDisplay(channel.net_revenue_usd, canViewFinance, { currency })}
+      </td>
+      <td>
+        <Badge tone={statusTone(channel.status)}>{channel.confidence}</Badge>
+      </td>
+      <td>
+        {channel.issues.length > 0 ? (
+          <Badge tone="amber">{`${channel.issues.length}`}</Badge>
+        ) : (
+          <span className="muted">None</span>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+/** Avatar + name + source-kind cell for a channel row. */
+function ChannelNameCell({ channel }: { channel: ChannelNetRevenue }) {
+  return (
+    <span className="channel-cell">
+      <span className="avatar">{channelAvatar(channel)}</span>
+      <span className="channel-copy">
+        <span className="channel-name">{channelDisplayName(channel)}</span>
+        <span className="channel-id">{channel.primary_source_kind ?? "no source"}</span>
+      </span>
+    </span>
+  );
+}
+
+/** Explanation rows for the selected channel: gross, deductions, and resulting net. */
 function ChannelExplainRows({
   channel,
   canViewFinance,

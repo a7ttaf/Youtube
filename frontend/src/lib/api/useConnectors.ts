@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import { ApiError, useApiClient } from "@/lib/api/client";
 import type {
@@ -57,9 +57,12 @@ export type UseConnectorJobActionsState = {
   loading: boolean;
   error: ApiError | Error | null;
   // Trigger the POST on user action; resolves with the recorded job-request
-  // result (execution_status === "recorded_not_executed") or rejects with the
-  // typed error already captured in `error`.
-  requestJob: (body: ConnectorJobRequestBody) => Promise<ConnectorJobResponse>;
+  // result (execution_status === "recorded_not_executed"), or with `null` when a
+  // same-tick duplicate submit is dropped by the in-flight guard (no POST fired),
+  // or rejects with the typed error already captured in `error`.
+  requestJob: (
+    body: ConnectorJobRequestBody,
+  ) => Promise<ConnectorJobResponse | null>;
 };
 
 // ============================================================================
@@ -80,6 +83,17 @@ export type UseConnectorJobActionsState = {
 //   translate. No client-side authorization is invented.
 // Blast Radius: Audit write only (no finance number, no connector execution) via
 //   the backend's own guarded, audited route.
+// Supersession: each requestJob() reads a fresh token from a useRef counter
+//   incremented synchronously inside the callback, so two same-render submits get
+//   distinct tokens (a useState read off the render closure would hand both the
+//   same token). State writes are guarded by requestIdRef.current === token, so
+//   only the most recently started request can commit {data,loading,error}.
+// Dedupe: a synchronous inFlightRef drops a same-tick duplicate submit (e.g. a
+//   double-click before re-render) BEFORE the POST fires, so a single click can
+//   never record two CONNECTOR_JOB_RUN audit events. The state-based `loading`
+//   guard cannot catch this (both clicks read the same stale loading=false). The
+//   dropped call resolves with null (it is dropped, NOT queued); the ref clears
+//   in finally so the next user-initiated submit proceeds.
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() POST + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> ConnectorJobRequestBody / ConnectorJobResponse.
@@ -90,43 +104,51 @@ export function useConnectorJobActions(): UseConnectorJobActionsState {
   const [data, setData] = useState<ConnectorJobResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<ApiError | Error | null>(null);
-  // Monotonic token so only the latest requestJob() is allowed to commit.
-  const [requestId, setRequestId] = useState(0);
+  // Monotonic counter so only the latest requestJob() is allowed to commit.
+  const requestIdRef = useRef(0);
+  // Synchronous in-flight latch so a same-tick duplicate submit is dropped
+  // before its POST fires (the state `loading` guard cannot see it in time).
+  const inFlightRef = useRef(false);
 
   const requestJob = useCallback(
-    (body: ConnectorJobRequestBody): Promise<ConnectorJobResponse> => {
-      const token = requestId + 1;
-      setRequestId(token);
+    (body: ConnectorJobRequestBody): Promise<ConnectorJobResponse | null> => {
+      // FIX: drop a same-tick duplicate submit before the POST fires; a
+      // double-click before re-render would otherwise pass the stale state
+      // `loading` guard twice and record duplicate CONNECTOR_JOB_RUN events.
+      if (inFlightRef.current) return Promise.resolve(null);
+      inFlightRef.current = true;
+      // FIX: take the token from a ref incremented synchronously so two submits
+      // in the same render get distinct tokens; the old `requestId + 1` read off
+      // the render closure handed both the same token, letting a slow earlier
+      // response overwrite a newer one.
+      const token = ++requestIdRef.current;
       setLoading(true);
       setError(null);
       return client
         .post<ConnectorJobResponse>("/connectors/jobs", body)
         .then((result) => {
           // Supersede: ignore a stale submit whose request changed mid-flight.
-          setRequestId((current) => {
-            if (current === token) {
-              setData(result);
-              setLoading(false);
-            }
-            return current;
-          });
+          if (requestIdRef.current === token) {
+            setData(result);
+            setLoading(false);
+          }
           return result;
         })
         .catch((caught: unknown) => {
           const typed =
             caught instanceof Error ? caught : new Error(String(caught));
-          setRequestId((current) => {
-            if (current === token) {
-              setData(null);
-              setError(typed);
-              setLoading(false);
-            }
-            return current;
-          });
+          if (requestIdRef.current === token) {
+            setData(null);
+            setError(typed);
+            setLoading(false);
+          }
           throw typed;
+        })
+        .finally(() => {
+          inFlightRef.current = false;
         });
     },
-    [client, requestId],
+    [client],
   );
 
   return { data, loading, error, requestJob };

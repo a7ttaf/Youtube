@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import { ApiError, useApiClient } from "@/lib/api/client";
 import type { ExportJobCreated, ExportRequestBody } from "@/lib/api/types";
@@ -8,9 +8,10 @@ export type UseExportActionsState = {
   data: ExportJobCreated | null;
   loading: boolean;
   error: ApiError | Error | null;
-  // Trigger the POST on user action; resolves with the created job (or rejects
-  // with the typed error already captured in `error`).
-  requestExport: (body: ExportRequestBody) => Promise<ExportJobCreated>;
+  // Trigger the POST on user action; resolves with the created job, or with
+  // `null` when a same-tick duplicate submit is dropped by the in-flight guard
+  // (no POST fired), or rejects with the typed error already captured in `error`.
+  requestExport: (body: ExportRequestBody) => Promise<ExportJobCreated | null>;
 };
 
 // ============================================================================
@@ -31,6 +32,18 @@ export type UseExportActionsState = {
 // Blast Radius: Export create (write path) — but only via the backend's own
 //   guarded, audited route; this hook adds no client-side authorization and
 //   never computes a finance number.
+// Supersession: each requestExport() reads a fresh token from a useRef counter
+//   incremented synchronously inside the callback, so two same-render submits get
+//   distinct tokens (a useState read off the render closure would hand both the
+//   same token). State writes are guarded by requestIdRef.current === token, so
+//   only the most recently started request can commit {data,loading,error}.
+// Dedupe: a synchronous inFlightRef drops a same-tick duplicate submit (e.g. a
+//   double-click before re-render) BEFORE the POST fires. The state-based
+//   `loading` guard in the view cannot catch this — both clicks read the stale
+//   loading=false from the same render — so without this ref BOTH would POST,
+//   creating duplicate export jobs + EXPORT_CREATED audit events. The dropped
+//   call resolves with null (it is dropped, NOT queued); the ref is cleared in
+//   finally so the next user-initiated submit proceeds.
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() POST + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> ExportRequestBody / ExportJobCreated.
@@ -41,43 +54,51 @@ export function useExportActions(): UseExportActionsState {
   const [data, setData] = useState<ExportJobCreated | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<ApiError | Error | null>(null);
-  // Monotonic token so only the latest requestExport() is allowed to commit.
-  const [requestId, setRequestId] = useState(0);
+  // Monotonic counter so only the latest requestExport() is allowed to commit.
+  const requestIdRef = useRef(0);
+  // Synchronous in-flight latch so a same-tick duplicate submit is dropped
+  // before its POST fires (the state `loading` guard cannot see it in time).
+  const inFlightRef = useRef(false);
 
   const requestExport = useCallback(
-    (body: ExportRequestBody): Promise<ExportJobCreated> => {
-      const token = requestId + 1;
-      setRequestId(token);
+    (body: ExportRequestBody): Promise<ExportJobCreated | null> => {
+      // FIX: drop a same-tick duplicate submit before the POST fires; a
+      // double-click before re-render would otherwise pass the stale state
+      // `loading` guard twice and create duplicate jobs + audit events.
+      if (inFlightRef.current) return Promise.resolve(null);
+      inFlightRef.current = true;
+      // FIX: take the token from a ref incremented synchronously so two submits
+      // in the same render get distinct tokens; the old `requestId + 1` read off
+      // the render closure handed both the same token, letting a slow earlier
+      // response overwrite a newer one.
+      const token = ++requestIdRef.current;
       setLoading(true);
       setError(null);
       return client
         .post<ExportJobCreated>("/exports", body)
         .then((result) => {
           // Supersede: ignore a stale submit whose request changed mid-flight.
-          setRequestId((current) => {
-            if (current === token) {
-              setData(result);
-              setLoading(false);
-            }
-            return current;
-          });
+          if (requestIdRef.current === token) {
+            setData(result);
+            setLoading(false);
+          }
           return result;
         })
         .catch((caught: unknown) => {
           const typed =
             caught instanceof Error ? caught : new Error(String(caught));
-          setRequestId((current) => {
-            if (current === token) {
-              setData(null);
-              setError(typed);
-              setLoading(false);
-            }
-            return current;
-          });
+          if (requestIdRef.current === token) {
+            setData(null);
+            setError(typed);
+            setLoading(false);
+          }
           throw typed;
+        })
+        .finally(() => {
+          inFlightRef.current = false;
         });
     },
-    [client, requestId],
+    [client],
   );
 
   return { data, loading, error, requestExport };

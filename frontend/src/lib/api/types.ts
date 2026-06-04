@@ -276,8 +276,11 @@ export type NumberExplanation = {
 //   the Exports screen. Fields are matched 1:1 against the backend serializers
 //   (not guessed); nullable fields serialize as null. An export is requested
 //   (POST), tracked through its lifecycle (QUEUED -> COMPLETED | FAILED |
-//   CANCELLED), and — once COMPLETED — its artifact is downloaded over a plain
-//   browser anchor (binary, NOT through the JSON-strict useApiClient).
+//   CANCELLED), and its artifact is downloaded over a plain browser anchor
+//   (binary, NOT through the JSON-strict useApiClient). The download routes
+//   generate-on-demand: a QUEUED job builds + persists + streams its bytes on
+//   first request, so QUEUED and COMPLETED jobs are both downloadable (QUEUED
+//   triggers generation; COMPLETED serves the cached artifact).
 // Standards: Read-only typed boundary at the API surface; no logic here. Money
 //   is not a concern on these shapes (jobs carry currency code + month, not
 //   amounts); artifact_byte_size is an integer.
@@ -304,8 +307,9 @@ export type ExportType =
   | "BRANDED_SLIDE_PACK"
   | "ANALYTICS_SUMMARY_CSV";
 
-// Lifecycle status of an export job. Created as QUEUED; terminal states are
-// COMPLETED (artifact ready to download), FAILED, and CANCELLED.
+// Lifecycle status of an export job. Created as QUEUED (downloadable: the GET
+// route generates the artifact on demand); terminal states are COMPLETED
+// (cached artifact ready to download), FAILED, and CANCELLED.
 // Source: request_export() status="QUEUED"; _TERMINAL_EXPORT_JOB_STATUSES.
 export type ExportJobStatus =
   | "QUEUED"

@@ -40,6 +40,46 @@ const READY_JOB: ExportJob = {
   completed_at: "2026-03-31T01:43:00+00:00",
 };
 
+// A QUEUED finance job: no persisted artifact yet, but downloadable because the
+// backend GET route generates on demand. The action is labelled "Generate".
+const QUEUED_FINANCE_JOB: ExportJob = {
+  ...READY_JOB,
+  id: "22222222-2222-2222-2222-222222222222",
+  status: "QUEUED",
+  file_url: null,
+  artifact_filename: null,
+  artifact_content_type: null,
+  artifact_byte_size: null,
+  artifact_checksum_sha256: null,
+  completed_at: null,
+};
+
+// A CANCELLED job is not downloadable (no artifact, no generation).
+const CANCELLED_JOB: ExportJob = {
+  ...READY_JOB,
+  id: "33333333-3333-3333-3333-333333333333",
+  status: "CANCELLED",
+  file_url: null,
+  completed_at: null,
+};
+
+// A FAILED job surfaces its failure_reason instead of a link.
+const FAILED_JOB: ExportJob = {
+  ...READY_JOB,
+  id: "44444444-4444-4444-4444-444444444444",
+  status: "FAILED",
+  file_url: null,
+  failure_reason: "Month is not locked",
+  completed_at: null,
+};
+
+// A QUEUED analytics CSV job: never gets a download link (no GET route).
+const CSV_JOB: ExportJob = {
+  ...QUEUED_FINANCE_JOB,
+  id: "55555555-5555-5555-5555-555555555555",
+  export_type: "ANALYTICS_SUMMARY_CSV",
+};
+
 const EMPTY_LIST: ExportListResponse = {
   items: [],
   pagination: { limit: 50, offset: 0, returned: 0, has_more: false },
@@ -72,10 +112,20 @@ function fetchMock() {
   return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
 }
 
-function renderExportsView(canCreateExport = true) {
+function renderExportsView(
+  canCreateExport = true,
+  {
+    canExportFinance = true,
+    canExportAnalytics = true,
+  }: { canExportFinance?: boolean; canExportAnalytics?: boolean } = {},
+) {
   return render(
     <TenantProvider initialSlug="ums">
-      <ExportsView canCreateExport={canCreateExport} />
+      <ExportsView
+        canCreateExport={canCreateExport}
+        canExportFinance={canExportFinance}
+        canExportAnalytics={canExportAnalytics}
+      />
     </TenantProvider>,
   );
 }
@@ -224,5 +274,89 @@ describe("ExportsView wired to the exports endpoint", () => {
     await waitFor(() =>
       expect(screen.getByText(/Export request failed/i)).toBeInTheDocument(),
     );
+  });
+
+  it("exposes a Generate link for a QUEUED finance job (download routes generate on demand)", async () => {
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        items: [QUEUED_FINANCE_JOB],
+        pagination: { limit: 50, offset: 0, returned: 1, has_more: false },
+      }),
+    );
+    renderExportsView();
+
+    const link = await screen.findByRole("link", { name: /generate xlsx/i });
+    expect(link).toHaveAttribute(
+      "href",
+      "/exports/22222222-2222-2222-2222-222222222222/finance-workbook.xlsx",
+    );
+    expect(link).toHaveAttribute("download");
+  });
+
+  it("does not expose a download link for CANCELLED or FAILED jobs", async () => {
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        items: [CANCELLED_JOB, FAILED_JOB],
+        pagination: { limit: 50, offset: 0, returned: 2, has_more: false },
+      }),
+    );
+    renderExportsView();
+
+    await waitFor(() =>
+      expect(screen.getByText("Month is not locked")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("Not ready")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("link", { name: /download|generate/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("never exposes a download link for an analytics CSV job (no GET route)", async () => {
+    fetchMock().mockResolvedValue(
+      jsonResponse({
+        items: [CSV_JOB],
+        pagination: { limit: 50, offset: 0, returned: 1, has_more: false },
+      }),
+    );
+    renderExportsView();
+
+    await waitFor(() =>
+      expect(screen.getByText("ANALYTICS_SUMMARY_CSV")).toBeInTheDocument(),
+    );
+    expect(
+      screen.queryByRole("link", { name: /download|generate/i }),
+    ).not.toBeInTheDocument();
+    expect(screen.getByText("Not ready")).toBeInTheDocument();
+  });
+
+  it("hides the finance report types and defaults to the CSV when finance export is not permitted", async () => {
+    fetchMock().mockResolvedValue(jsonResponse(EMPTY_LIST));
+    renderExportsView(true, { canExportFinance: false, canExportAnalytics: true });
+
+    await waitFor(() =>
+      expect(screen.getByText(/No export jobs yet/i)).toBeInTheDocument(),
+    );
+
+    const reportType = screen.getByLabelText("Report type") as HTMLSelectElement;
+    const optionLabels = Array.from(reportType.options).map((o) => o.textContent);
+    expect(optionLabels).toEqual(["Analytics summary (CSV)"]);
+    // The default selection falls back to the first allowed option.
+    expect(reportType.value).toBe("ANALYTICS_SUMMARY_CSV");
+  });
+
+  it("hides the analytics CSV when analytics export is not permitted", async () => {
+    fetchMock().mockResolvedValue(jsonResponse(EMPTY_LIST));
+    renderExportsView(true, { canExportFinance: true, canExportAnalytics: false });
+
+    await waitFor(() =>
+      expect(screen.getByText(/No export jobs yet/i)).toBeInTheDocument(),
+    );
+
+    const reportType = screen.getByLabelText("Report type") as HTMLSelectElement;
+    const optionValues = Array.from(reportType.options).map((o) => o.value);
+    expect(optionValues).not.toContain("ANALYTICS_SUMMARY_CSV");
+    expect(optionValues).toContain("FINANCE_EXCEL");
+    // The default selection is the first finance option.
+    expect(reportType.value).toBe("FINANCE_EXCEL");
   });
 });

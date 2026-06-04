@@ -67,6 +67,13 @@ function lastFetchArgs() {
   return fetchMock().mock.calls.at(-1);
 }
 
+/** Narrow the last fetch args away from `undefined`, failing the test if none. */
+function requireFetchArgs() {
+  const args = lastFetchArgs();
+  if (!args) throw new Error("expected fetch to have been called");
+  return args;
+}
+
 describe("useMonthClose", () => {
   it("requests GET /finance-close/{month} and returns the parsed status", async () => {
     fetchMock().mockResolvedValue(jsonResponse(CLOSE_STATUS));
@@ -74,7 +81,7 @@ describe("useMonthClose", () => {
       wrapper,
     });
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(lastFetchArgs()![0]).toBe("/finance-close/2026-03");
+    expect(requireFetchArgs()[0]).toBe("/finance-close/2026-03");
     expect(result.current.error).toBeNull();
     expect(result.current.data?.status).toBe("OPEN");
   });
@@ -100,7 +107,7 @@ describe("useMonthCloseReadiness", () => {
       { wrapper },
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(lastFetchArgs()![0]).toBe("/finance-close/2026-03/readiness");
+    expect(requireFetchArgs()[0]).toBe("/finance-close/2026-03/readiness");
     expect(result.current.data?.ready).toBe(false);
     expect(result.current.data?.blockers[0]?.blocker_type).toBe(
       "PENDING_MANUAL_OVERRIDES",
@@ -118,7 +125,7 @@ describe("useMonthCloseActions", () => {
       { wrapper },
     );
     await result.current.lock("March close complete");
-    const [url, init] = lastFetchArgs()!;
+    const [url, init] = requireFetchArgs();
     expect(url).toBe("/finance-close/2026-03/lock");
     expect((init as RequestInit).method).toBe("POST");
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({
@@ -135,7 +142,7 @@ describe("useMonthCloseActions", () => {
       { wrapper },
     );
     await result.current.unlock("Reopen for late correction");
-    const [url, init] = lastFetchArgs()!;
+    const [url, init] = requireFetchArgs();
     expect(url).toBe("/finance-close/2026-03/unlock");
     expect((init as RequestInit).method).toBe("POST");
     expect(JSON.parse((init as RequestInit).body as string)).toEqual({

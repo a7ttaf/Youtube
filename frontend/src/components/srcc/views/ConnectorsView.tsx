@@ -15,7 +15,13 @@ import {
   useConnectorJobActions,
 } from "@/lib/api/useConnectors";
 import type { Severity } from "@/lib/mock/data";
-import { Badge, Dot, formatMoney } from "../shared";
+import {
+  Badge,
+  DEFAULT_MONTH,
+  Dot,
+  financeDisplay,
+  MONTH_OPTIONS,
+} from "../shared";
 import { describeError } from "./CommandView";
 
 // ============================================================================
@@ -50,14 +56,11 @@ import { describeError } from "./CommandView";
 //   - File: backend/ums_smart_revenue/api/adsense.py -> payments/sync routes.
 // ============================================================================
 
-// Default to a recent, demo-seedable month per the task brief (matches the
-// other wired views).
-const DEFAULT_MONTH = "2026-03";
+// Hint shown wherever a connector-operations control is disabled because the
+// viewer's role cannot run connector jobs (mirrors the honest no-permission UX).
+const CONNECTOR_ROLE_HINT = "Requires a connector-operations role.";
 
-// Months offered in the selector (most recent first). A simple dropdown by
-// design — wiring real data is the priority, not month discovery.
-const MONTH_OPTIONS = ["2026-03", "2026-02", "2026-01", "2025-12"];
-
+/** Map a connector credential status to a tone for its display badge. */
 function credentialStatusTone(status: string): Severity {
   switch (status.toUpperCase()) {
     case "ACTIVE":
@@ -75,6 +78,7 @@ function credentialStatusTone(status: string): Severity {
   }
 }
 
+/** Map an AdSense payment status to a tone for its display badge. */
 function paymentStatusTone(status: string): Severity {
   switch (status.toUpperCase()) {
     case "PAID":
@@ -90,6 +94,7 @@ function paymentStatusTone(status: string): Severity {
   }
 }
 
+/** Format an ISO date string for display; echoes the raw value if unparsable. */
 function formatDate(value: string): string {
   const parsed = new Date(value);
   if (Number.isNaN(parsed.getTime())) return value;
@@ -100,12 +105,24 @@ function formatDate(value: string): string {
   });
 }
 
+/**
+ * The REAL-data Connectors / data-source screen: lists configured connector
+ * credentials and synced AdSense payments, and wires the audited "Request sync"
+ * and "Sync payments" write actions. `canRunConnectors` gates every write
+ * control; when false the controls render disabled with an honest role hint.
+ * `canViewFinance` gates the source-of-truth payment amounts: a non-finance
+ * viewer sees the RESTRICTED_FINANCE_VALUE sentinel via the shared financeDisplay
+ * gate rather than the real money value.
+ */
 export default function ConnectorsView({
   canRunConnectors,
+  canViewFinance,
 }: {
   canRunConnectors: boolean;
+  canViewFinance: boolean;
 }) {
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
+  const [reason, setReason] = useState<string>("");
 
   const credentials = useConnectorCredentials();
   const jobActions = useConnectorJobActions();
@@ -117,123 +134,266 @@ export default function ConnectorsView({
   const paymentRows = payments.data?.items ?? [];
 
   // ==========================================================================
-  // Purpose: Request a connector job run for one credential row. The backend
-  //   records + audits the intent but does NOT execute it; on success the
+  // Purpose: Request a connector job run for one credential row using the reason
+  //   typed into the inline, always-visible "Sync reason" field (the button is
+  //   already disabled while the reason is empty or a request is in flight). The
+  //   backend records + audits the intent but does NOT execute it; on success the
   //   recorded result is shown in a banner. Errors are captured by the hook.
   // ==========================================================================
   const onRequestSync = (credential: ConnectorCredential) => {
-    if (!canRunConnectors || jobActions.loading) return;
-    const reason = window.prompt(
-      `Request a sync for ${credential.connector_key} / ${credential.account_id}: reason (required)`,
-    );
-    if (reason === null) return; // user cancelled
     const trimmed = reason.trim();
-    if (!trimmed) return;
-    void jobActions
+    if (!canRunConnectors || jobActions.loading || !trimmed) return;
+    jobActions
       .requestJob({
         connector_key: credential.connector_key,
         account_id: credential.account_id,
         reason: trimmed,
       })
-      .catch(() => {});
+      .catch(() => {
+        // The hook already captured the typed error in jobActions.error and
+        // surfaces it in the banner; nothing more to do here.
+      });
   };
 
   return (
     <section className="view-page" aria-labelledby="connectorsTitle">
       <div className="view-grid">
-        <section className="panel">
-          <div className="panel-header">
-            <div className="panel-title">
-              <strong id="connectorsTitle">Data Sources</strong>
-              <span>
-                Configured connector connections and the synced data that has
-                flowed in — read from SQL-backed source-of-truth tables
-              </span>
-            </div>
-            <button
-              type="button"
-              className="icon-button"
-              aria-label="Refresh data sources"
-              title="Refresh data sources"
-              onClick={() => credentials.reload()}
-            >
-              ↻
-            </button>
-          </div>
+        <DataSourcesPanel
+          credentials={credentialRows}
+          credentialsLoading={credentials.loading}
+          credentialsError={credentials.error}
+          onReloadCredentials={() => credentials.reload()}
+          canRunConnectors={canRunConnectors}
+          reason={reason}
+          onReason={setReason}
+          jobError={jobActions.error}
+          jobResult={jobActions.data}
+          requestingJob={jobActions.loading}
+          onRequestSync={onRequestSync}
+          month={month}
+          onMonth={setMonth}
+          payments={paymentRows}
+          paymentsLoading={payments.loading}
+          paymentsError={payments.error}
+          onReloadPayments={() => payments.reload()}
+          canViewFinance={canViewFinance}
+        />
 
-          {jobActions.error ? (
-            <RequestJobError error={jobActions.error} />
-          ) : null}
-          {jobActions.data ? <RequestJobSuccess result={jobActions.data} /> : null}
-
-          <ConnectorCredentialsTable
-            credentials={credentialRows}
-            loading={credentials.loading}
-            error={credentials.error}
-            canRunConnectors={canRunConnectors}
-            requestingJob={jobActions.loading}
-            onRequestSync={onRequestSync}
-          />
-
-          <AdsensePaymentsSection
-            month={month}
-            onMonth={setMonth}
-            payments={paymentRows}
-            loading={payments.loading}
-            error={payments.error}
-            onRefresh={() => payments.reload()}
-          />
-        </section>
-
-        <aside className="view-stack">
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong>AdSense Payment Sync</strong>
-                <span>Supply a payment row to upsert into the finance source</span>
-              </div>
-              <Badge tone={canRunConnectors ? "amber" : "red"}>
-                {canRunConnectors ? "Connector job" : "Restricted"}
-              </Badge>
-            </div>
-            <AdsenseSyncForm
-              defaultMonth={month}
-              canRunConnectors={canRunConnectors}
-              actions={syncActions}
-              onSynced={() => payments.reload()}
-            />
-          </section>
-
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong>Run History</strong>
-                <span>Status available today: credentials + last request result</span>
-              </div>
-              <Badge tone="blue">Status</Badge>
-            </div>
-            {/* The ConnectorRunORM table exists but has NO read route yet, so a
-                live run-history feed cannot be shown without inventing an
-                endpoint. State the gap honestly instead of faking a timeline. */}
-            <div className="permission-band" role="note">
-              <Dot tone="amber" />
-              <span>
-                <strong>Run history not yet available</strong>
-                <span>
-                  No connector-runs read endpoint exists yet. A "Request sync"
-                  records and audits the intent (recorded, not executed); the
-                  last result appears above when you trigger one.
-                </span>
-              </span>
-              <Badge tone="amber">Gap</Badge>
-            </div>
-          </section>
-        </aside>
+        <ConnectorSidebar
+          month={month}
+          canRunConnectors={canRunConnectors}
+          syncActions={syncActions}
+          onSynced={() => payments.reload()}
+        />
       </div>
     </section>
   );
 }
 
+/**
+ * Left column of the Connectors screen: the data-sources header, job-request
+ * banners, the inline audited reason field, the credentials table, and the
+ * synced AdSense payments section. Extracted to keep the root JSX tree shallow.
+ */
+function DataSourcesPanel({
+  credentials,
+  credentialsLoading,
+  credentialsError,
+  onReloadCredentials,
+  canRunConnectors,
+  reason,
+  onReason,
+  jobError,
+  jobResult,
+  requestingJob,
+  onRequestSync,
+  month,
+  onMonth,
+  payments,
+  paymentsLoading,
+  paymentsError,
+  onReloadPayments,
+  canViewFinance,
+}: {
+  credentials: ConnectorCredential[];
+  credentialsLoading: boolean;
+  credentialsError: ApiError | Error | null;
+  onReloadCredentials: () => void;
+  canRunConnectors: boolean;
+  reason: string;
+  onReason: (value: string) => void;
+  jobError: ApiError | Error | null;
+  jobResult: ConnectorJobResponse | null;
+  requestingJob: boolean;
+  onRequestSync: (credential: ConnectorCredential) => void;
+  month: string;
+  onMonth: (value: string) => void;
+  payments: AdsensePayment[];
+  paymentsLoading: boolean;
+  paymentsError: ApiError | Error | null;
+  onReloadPayments: () => void;
+  canViewFinance: boolean;
+}) {
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong id="connectorsTitle">Data Sources</strong>
+          <span>
+            Configured connector connections and the synced data that has flowed
+            in — read from SQL-backed source-of-truth tables
+          </span>
+        </div>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="Refresh data sources"
+          title="Refresh data sources"
+          onClick={onReloadCredentials}
+        >
+          ↻
+        </button>
+      </div>
+
+      {jobError ? <RequestJobError error={jobError} /> : null}
+      {jobResult ? <RequestJobSuccess result={jobResult} /> : null}
+
+      <SyncReasonField
+        canRunConnectors={canRunConnectors}
+        reason={reason}
+        onReason={onReason}
+      />
+
+      <ConnectorCredentialsTable
+        credentials={credentials}
+        loading={credentialsLoading}
+        error={credentialsError}
+        canRunConnectors={canRunConnectors}
+        reason={reason}
+        requestingJob={requestingJob}
+        onRequestSync={onRequestSync}
+      />
+
+      <AdsensePaymentsSection
+        month={month}
+        onMonth={onMonth}
+        payments={payments}
+        loading={paymentsLoading}
+        error={paymentsError}
+        onRefresh={onReloadPayments}
+        canViewFinance={canViewFinance}
+      />
+    </section>
+  );
+}
+
+/**
+ * The inline, always-visible "Sync reason" field that every per-row Request sync
+ * uses; the reason is recorded on the audit event. When the viewer cannot run
+ * connectors the field is disabled and shows the connector-operations hint.
+ */
+function SyncReasonField({
+  canRunConnectors,
+  reason,
+  onReason,
+}: {
+  canRunConnectors: boolean;
+  reason: string;
+  onReason: (value: string) => void;
+}) {
+  return (
+    <div className="field-row" style={{ margin: 13 }}>
+      <label htmlFor="connectorSyncReason">Sync reason (required, audited)</label>
+      <input
+        id="connectorSyncReason"
+        value={reason}
+        disabled={!canRunConnectors}
+        placeholder="Why this sync is being requested"
+        onChange={(e) => onReason(e.target.value)}
+      />
+      {canRunConnectors ? null : (
+        <span className="item-sub" role="note">
+          {CONNECTOR_ROLE_HINT}
+        </span>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Right column of the Connectors screen: the AdSense payment-sync form panel and
+ * the run-history honesty note. Extracted to keep the root JSX tree shallow.
+ */
+function ConnectorSidebar({
+  month,
+  canRunConnectors,
+  syncActions,
+  onSynced,
+}: {
+  month: string;
+  canRunConnectors: boolean;
+  syncActions: ReturnType<typeof useAdsenseSyncActions>;
+  onSynced: () => void;
+}) {
+  return (
+    <aside className="view-stack">
+      <section className="panel">
+        <div className="panel-header">
+          <div className="panel-title">
+            <strong>AdSense Payment Sync</strong>
+            <span>Supply a payment row to upsert into the finance source</span>
+          </div>
+          <Badge tone={canRunConnectors ? "amber" : "red"}>
+            {canRunConnectors ? "Connector job" : "Restricted"}
+          </Badge>
+        </div>
+        <AdsenseSyncForm
+          defaultMonth={month}
+          canRunConnectors={canRunConnectors}
+          actions={syncActions}
+          onSynced={onSynced}
+        />
+      </section>
+
+      <RunHistoryNote />
+    </aside>
+  );
+}
+
+/**
+ * The run-history panel. No connector-runs read endpoint exists yet, so this
+ * states the gap honestly rather than faking a timeline.
+ */
+function RunHistoryNote() {
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong>Run History</strong>
+          <span>Status available today: credentials + last request result</span>
+        </div>
+        <Badge tone="blue">Status</Badge>
+      </div>
+      {/* The ConnectorRunORM table exists but has NO read route yet, so a
+          live run-history feed cannot be shown without inventing an
+          endpoint. State the gap honestly instead of faking a timeline. */}
+      <div className="permission-band" role="note">
+        <Dot tone="amber" />
+        <span>
+          <strong>Run history not yet available</strong>
+          <span>
+            No connector-runs read endpoint exists yet. A &quot;Request
+            sync&quot; records and audits the intent (recorded, not executed);
+            the last result appears above when you trigger one.
+          </span>
+        </span>
+        <Badge tone="amber">Gap</Badge>
+      </div>
+    </section>
+  );
+}
+
+/** Banner shown when a connector job-request POST fails (nothing was recorded). */
 function RequestJobError({ error }: { error: ApiError | Error }) {
   const { title, detail } = describeError(error);
   return (
@@ -272,11 +432,17 @@ function RequestJobSuccess({ result }: { result: ConnectorJobResponse }) {
   );
 }
 
+/**
+ * The configured connector data-sources table with a per-row audited
+ * "Request sync" button. Each button is disabled while the viewer cannot run
+ * connectors, the typed sync reason is empty, or a request is already in flight.
+ */
 function ConnectorCredentialsTable({
   credentials,
   loading,
   error,
   canRunConnectors,
+  reason,
   requestingJob,
   onRequestSync,
 }: {
@@ -284,6 +450,7 @@ function ConnectorCredentialsTable({
   loading: boolean;
   error: ApiError | Error | null;
   canRunConnectors: boolean;
+  reason: string;
   requestingJob: boolean;
   onRequestSync: (credential: ConnectorCredential) => void;
 }) {
@@ -319,6 +486,11 @@ function ConnectorCredentialsTable({
     );
   }
 
+  // The button is enabled only when the viewer may run connectors, a sync reason
+  // has been typed, and no other request is in flight.
+  const requestDisabled =
+    !canRunConnectors || reason.trim().length === 0 || requestingJob;
+
   return (
     <div className="table-wrap">
       <table aria-label="Connector data sources">
@@ -333,34 +505,14 @@ function ConnectorCredentialsTable({
         </thead>
         <tbody>
           {credentials.map((credential) => (
-            <tr key={credential.id}>
-              <td>
-                <span className="code-chip">{credential.connector_key}</span>
-              </td>
-              <td>{credential.account_id}</td>
-              <td>
-                <Badge tone={credentialStatusTone(credential.status)}>
-                  {credential.status}
-                </Badge>
-              </td>
-              <td>
-                {credential.has_secret_ref ? (
-                  <Badge tone="green">Configured</Badge>
-                ) : (
-                  <Badge tone="amber">Missing</Badge>
-                )}
-              </td>
-              <td>
-                <button
-                  className="mini-button"
-                  type="button"
-                  disabled={!canRunConnectors || requestingJob}
-                  onClick={() => onRequestSync(credential)}
-                >
-                  {requestingJob ? "Working…" : "Request sync"}
-                </button>
-              </td>
-            </tr>
+            <ConnectorCredentialRow
+              key={credential.id}
+              credential={credential}
+              canRunConnectors={canRunConnectors}
+              requestDisabled={requestDisabled}
+              requestingJob={requestingJob}
+              onRequestSync={onRequestSync}
+            />
           ))}
         </tbody>
       </table>
@@ -368,6 +520,70 @@ function ConnectorCredentialsTable({
   );
 }
 
+/**
+ * A single connector data-source row: connector key, account, status badge,
+ * secret-configured badge, and the per-row audited "Request sync" button. The
+ * button shows the connector-operations hint when the viewer lacks the role.
+ */
+function ConnectorCredentialRow({
+  credential,
+  canRunConnectors,
+  requestDisabled,
+  requestingJob,
+  onRequestSync,
+}: {
+  credential: ConnectorCredential;
+  canRunConnectors: boolean;
+  requestDisabled: boolean;
+  requestingJob: boolean;
+  onRequestSync: (credential: ConnectorCredential) => void;
+}) {
+  return (
+    <tr>
+      <td>
+        <span className="code-chip">{credential.connector_key}</span>
+      </td>
+      <td>{credential.account_id}</td>
+      <td>
+        <Badge tone={credentialStatusTone(credential.status)}>
+          {credential.status}
+        </Badge>
+      </td>
+      <td>
+        <CredentialSecretBadge hasSecretRef={credential.has_secret_ref} />
+      </td>
+      <td>
+        <button
+          className="mini-button"
+          type="button"
+          disabled={requestDisabled}
+          onClick={() => onRequestSync(credential)}
+        >
+          {requestingJob ? "Working…" : "Request sync"}
+        </button>
+        {canRunConnectors ? null : (
+          <span className="item-sub" role="note">
+            {CONNECTOR_ROLE_HINT}
+          </span>
+        )}
+      </td>
+    </tr>
+  );
+}
+
+/** Render the secret-status badge for a credential row. */
+function CredentialSecretBadge({ hasSecretRef }: { hasSecretRef: boolean }) {
+  return hasSecretRef ? (
+    <Badge tone="green">Configured</Badge>
+  ) : (
+    <Badge tone="amber">Missing</Badge>
+  );
+}
+
+/**
+ * The synced-AdSense-payments section: a month selector + refresh control above
+ * the payments table for the selected month.
+ */
 function AdsensePaymentsSection({
   month,
   onMonth,
@@ -375,6 +591,7 @@ function AdsensePaymentsSection({
   loading,
   error,
   onRefresh,
+  canViewFinance,
 }: {
   month: string;
   onMonth: (value: string) => void;
@@ -382,6 +599,7 @@ function AdsensePaymentsSection({
   loading: boolean;
   error: ApiError | Error | null;
   onRefresh: () => void;
+  canViewFinance: boolean;
 }) {
   return (
     <>
@@ -414,19 +632,32 @@ function AdsensePaymentsSection({
           </button>
         </div>
       </div>
-      <AdsensePaymentsTable payments={payments} loading={loading} error={error} />
+      <AdsensePaymentsTable
+        payments={payments}
+        loading={loading}
+        error={error}
+        canViewFinance={canViewFinance}
+      />
     </>
   );
 }
 
+/**
+ * The synced-AdSense-payments table for the selected month, with loading, error,
+ * and empty states. Amounts are backend strings formatted for display only and
+ * gated through financeDisplay so a non-finance viewer sees the Restricted
+ * sentinel instead of the source-of-truth payment value.
+ */
 function AdsensePaymentsTable({
   payments,
   loading,
   error,
+  canViewFinance,
 }: {
   payments: AdsensePayment[];
   loading: boolean;
   error: ApiError | Error | null;
+  canViewFinance: boolean;
 }) {
   if (error) {
     const { title, detail } = describeError(error);
@@ -474,21 +705,11 @@ function AdsensePaymentsTable({
         </thead>
         <tbody>
           {payments.map((payment) => (
-            <tr key={payment.id}>
-              <td>{payment.source_account_id}</td>
-              <td>{payment.payment_name}</td>
-              <td>{formatDate(payment.payment_date)}</td>
-              <td className="money finance-data">
-                {formatMoney(payment.payment_amount, {
-                  currency: payment.payment_currency,
-                })}
-              </td>
-              <td>
-                <Badge tone={paymentStatusTone(payment.payment_status)}>
-                  {payment.payment_status}
-                </Badge>
-              </td>
-            </tr>
+            <AdsensePaymentRow
+              key={payment.id}
+              payment={payment}
+              canViewFinance={canViewFinance}
+            />
           ))}
         </tbody>
       </table>
@@ -496,6 +717,43 @@ function AdsensePaymentsTable({
   );
 }
 
+/**
+ * A single synced AdSense payment row. The amount is a backend source-of-truth
+ * string rendered for display only (no float math) and gated via financeDisplay,
+ * so a non-finance viewer sees the Restricted sentinel rather than the value.
+ */
+function AdsensePaymentRow({
+  payment,
+  canViewFinance,
+}: {
+  payment: AdsensePayment;
+  canViewFinance: boolean;
+}) {
+  return (
+    <tr>
+      <td>{payment.source_account_id}</td>
+      <td>{payment.payment_name}</td>
+      <td>{formatDate(payment.payment_date)}</td>
+      <td className="money finance-data">
+        {financeDisplay(payment.payment_amount, canViewFinance, {
+          currency: payment.payment_currency,
+        })}
+      </td>
+      <td>
+        <Badge tone={paymentStatusTone(payment.payment_status)}>
+          {payment.payment_status}
+        </Badge>
+      </td>
+    </tr>
+  );
+}
+
+/**
+ * The AdSense payment-sync form: collects one payment row plus an audited reason
+ * and POSTs it for upsert into the finance source. Disabled with a role hint
+ * when the viewer cannot run connectors; the submit button stays disabled until
+ * every required field (and the reason) is filled.
+ */
 function AdsenseSyncForm({
   defaultMonth,
   canRunConnectors,
@@ -523,11 +781,12 @@ function AdsenseSyncForm({
     amount.trim().length > 0 &&
     reason.trim().length > 0;
 
+  /** Submit the single entered payment row for audited upsert into finance. */
   const onSubmit = () => {
     if (!canSubmit) return;
     // The backend rejects an empty batch; supply exactly the one payment row the
     // operator entered. month is derived from the screen's selected month.
-    void actions
+    actions
       .syncPayments({
         connector_key: "adsense",
         source_report_id: null,
@@ -549,7 +808,10 @@ function AdsenseSyncForm({
         setReason("");
         onSynced();
       })
-      .catch(() => {});
+      .catch(() => {
+        // The hook already captured the typed error in actions.error and
+        // surfaces it in the SyncError banner; nothing more to do here.
+      });
   };
 
   return (
@@ -618,6 +880,12 @@ function AdsenseSyncForm({
       {actions.error ? <SyncError error={actions.error} /> : null}
       {actions.data ? <SyncSuccess count={actions.data.synced_count} /> : null}
 
+      {canRunConnectors ? null : (
+        <span className="item-sub" role="note">
+          {CONNECTOR_ROLE_HINT}
+        </span>
+      )}
+
       <div className="action-row">
         <button
           className="primary-button"
@@ -632,6 +900,7 @@ function AdsenseSyncForm({
   );
 }
 
+/** Banner shown when the AdSense payment-sync POST fails (nothing was synced). */
 function SyncError({ error }: { error: ApiError | Error }) {
   const { title, detail } = describeError(error);
   return (
@@ -646,6 +915,7 @@ function SyncError({ error }: { error: ApiError | Error }) {
   );
 }
 
+/** Banner confirming how many AdSense payments were upserted into finance. */
 function SyncSuccess({ count }: { count: number }) {
   return (
     <div className="permission-band" role="status">

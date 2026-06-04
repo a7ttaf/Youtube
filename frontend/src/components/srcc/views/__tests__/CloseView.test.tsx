@@ -111,7 +111,12 @@ function renderCloseView(canCloseMonth = true) {
 
 describe("CloseView wired to finance-close", () => {
   it("shows a loading state before the responses resolve", () => {
-    fetchMock().mockReturnValue(new Promise<Response>(() => {}));
+    fetchMock().mockReturnValue(
+      // A never-resolving promise keeps both GETs pending so the loading state shows.
+      new Promise<Response>(() => {
+        /* intentionally never settles */
+      }),
+    );
     renderCloseView();
     expect(screen.getByText("Loading month close")).toBeInTheDocument();
   });
@@ -193,7 +198,7 @@ describe("CloseView wired to finance-close", () => {
     expect(lockButton).toBeDisabled();
   });
 
-  it("locks the month via the confirm + reason flow and refetches status", async () => {
+  it("locks the month via the reason + arm/confirm flow and refetches status", async () => {
     let statusCall = 0;
     fetchMock().mockImplementation(
       routeFetch({
@@ -206,12 +211,23 @@ describe("CloseView wired to finance-close", () => {
         lock: () => jsonResponse({ ...LOCKED_STATUS, audit_event: {} }),
       }),
     );
-    vi.spyOn(window, "prompt").mockReturnValue("March close complete");
-    vi.spyOn(window, "confirm").mockReturnValue(true);
 
     renderCloseView();
     const lockButton = await screen.findByRole("button", { name: /^lock month$/i });
+    // The reason is required: the action stays disabled until one is typed.
+    expect(lockButton).toBeDisabled();
+
+    fireEvent.change(screen.getByLabelText(/reason \(required, audited\)/i), {
+      target: { value: "March close complete" },
+    });
+
+    // First click arms the action (the button switches to a confirm label).
     fireEvent.click(lockButton);
+    const confirmButton = await screen.findByRole("button", {
+      name: /^confirm lock 2026-03$/i,
+    });
+    // Second click executes the POST.
+    fireEvent.click(confirmButton);
 
     // After the successful POST + refetch, the status flips to LOCKED.
     await waitFor(() =>
@@ -222,6 +238,15 @@ describe("CloseView wired to finance-close", () => {
         urlOf(input).endsWith("/lock"),
       ),
     ).toBe(true);
+    // The reason is sent in the POST body exactly as typed.
+    const lockCall = fetchMock().mock.calls.find(([input]) =>
+      urlOf(input).endsWith("/lock"),
+    );
+    if (!lockCall) throw new Error("expected a /lock request to have been made");
+    const lockInit = lockCall[1] as RequestInit | undefined;
+    expect(JSON.parse(String(lockInit?.body))).toMatchObject({
+      reason: "March close complete",
+    });
   });
 
   it("maps a 409 lock conflict to a clear inline message", async () => {
@@ -241,12 +266,17 @@ describe("CloseView wired to finance-close", () => {
           ),
       }),
     );
-    vi.spyOn(window, "prompt").mockReturnValue("force lock");
-    vi.spyOn(window, "confirm").mockReturnValue(true);
-
     renderCloseView();
     const lockButton = await screen.findByRole("button", { name: /^lock month$/i });
+
+    fireEvent.change(screen.getByLabelText(/reason \(required, audited\)/i), {
+      target: { value: "force lock" },
+    });
+    // Arm, then confirm the lock so the conflicting POST fires.
     fireEvent.click(lockButton);
+    fireEvent.click(
+      await screen.findByRole("button", { name: /^confirm lock 2026-03$/i }),
+    );
 
     await waitFor(() =>
       expect(screen.getByText("Action failed")).toBeInTheDocument(),

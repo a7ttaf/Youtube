@@ -200,13 +200,19 @@ describe("TraceView wired to the explain endpoint", () => {
     // Override: channel list resolves, explain hangs.
     fetchMock().mockImplementation((input: unknown) => {
       if (urlOf(input).includes("/explain")) {
-        return new Promise<Response>(() => {});
+        // Never resolves: the explain POST stays in flight so the loading state holds.
+        return new Promise<Response>(() => {
+          /* intentionally pending */
+        });
       }
       return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
     });
 
     renderTraceView();
     const explainButton = await screen.findByRole("button", { name: /^explain$/i });
+    // The button stays disabled until the channel list resolves; wait so the click
+    // does not depend on microtask ordering.
+    await waitFor(() => expect(explainButton).not.toBeDisabled());
     fireEvent.click(explainButton);
 
     await waitFor(() =>
@@ -226,7 +232,10 @@ describe("TraceView wired to the explain endpoint", () => {
     // Select the net metric, then Explain.
     const metricSelect = await screen.findByLabelText("Metric");
     fireEvent.change(metricSelect, { target: { value: "net_revenue_usd" } });
-    fireEvent.click(screen.getByRole("button", { name: /^explain$/i }));
+    const explainButton = screen.getByRole("button", { name: /^explain$/i });
+    // Wait for the button to enable (channel list resolved) before clicking.
+    await waitFor(() => expect(explainButton).not.toBeDisabled());
+    fireEvent.click(explainButton);
 
     // The metric value renders as a formatted money string.
     await waitFor(() =>
@@ -264,7 +273,12 @@ describe("TraceView wired to the explain endpoint", () => {
       </TenantProvider>,
     );
 
-    fireEvent.click(await screen.findByRole("button", { name: /^explain$/i }));
+    const explainButton = await screen.findByRole("button", {
+      name: /^explain$/i,
+    });
+    // Wait for the button to enable (channel list resolved) before clicking.
+    await waitFor(() => expect(explainButton).not.toBeDisabled());
+    fireEvent.click(explainButton);
 
     await waitFor(() =>
       expect(screen.getByText("Baseline gross revenue")).toBeInTheDocument(),
@@ -287,7 +301,12 @@ describe("TraceView wired to the explain endpoint", () => {
     );
     renderTraceView();
 
-    fireEvent.click(await screen.findByRole("button", { name: /^explain$/i }));
+    const explainButton = await screen.findByRole("button", {
+      name: /^explain$/i,
+    });
+    // Wait for the button to enable (channel list resolved) before clicking.
+    await waitFor(() => expect(explainButton).not.toBeDisabled());
+    fireEvent.click(explainButton);
 
     await waitFor(() =>
       expect(screen.getByText("No permission")).toBeInTheDocument(),

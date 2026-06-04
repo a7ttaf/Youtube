@@ -18,6 +18,20 @@ import type { Severity, WorkflowTone } from "@/lib/mock/data";
 // Sentinel shown wherever a finance value is withheld from the current viewer.
 export const RESTRICTED_FINANCE_VALUE = "Restricted";
 
+/**
+ * The month each wired view (Command/Close/Trace/Exports/Connectors) defaults
+ * to: a recent, demo-seedable month per the MVP task brief. Shared from here so
+ * the five views stay in lockstep instead of each copying the literal.
+ */
+export const DEFAULT_MONTH = "2026-03";
+
+/**
+ * Months offered in every wired view's month selector (most recent first). The
+ * selector is a simple dropdown by design — wiring real data is the priority,
+ * not month discovery — and DEFAULT_MONTH is its first entry.
+ */
+export const MONTH_OPTIONS = ["2026-03", "2026-02", "2026-01", "2025-12"];
+
 const USD_FORMATTER = new Intl.NumberFormat("en-US", {
   style: "currency",
   currency: "USD",
@@ -49,6 +63,10 @@ export function formatMoney(
   return USD_FORMATTER.format(parsed);
 }
 
+/**
+ * Format a money value for display, returning the RESTRICTED_FINANCE_VALUE
+ * sentinel when the viewer lacks finance permission so no view leaks amounts.
+ */
 export function financeDisplay(
   value: string | null | undefined,
   canViewFinance: boolean,
@@ -58,18 +76,22 @@ export function financeDisplay(
   return formatMoney(value, options);
 }
 
+/** Render a tone-colored status badge wrapping its children. */
 export function Badge({ tone, children }: { tone: Severity; children: ReactNode }) {
   return <span className={`badge ${tone}`}>{children}</span>;
 }
 
+/** Render a small decorative status dot in the given tone. */
 export function Dot({ tone }: { tone?: Severity }) {
   return <span className={`dot${tone ? ` ${tone}` : ""}`} aria-hidden="true" />;
 }
 
+/** Map a workflow tone to a Dot severity; "primary" renders an untoned dot. */
 export function workflowDotTone(tone: WorkflowTone): Severity | undefined {
   return tone === "primary" ? undefined : tone;
 }
 
+/** Render a list row with a tone dot, title, subtitle, and trailing slot. */
 export function ItemRow({
   tone,
   title,
@@ -95,6 +117,10 @@ export function ItemRow({
   );
 }
 
+/**
+ * Render a labelled summary tile; finance tiles show RESTRICTED_FINANCE_VALUE
+ * when the viewer lacks finance permission.
+ */
 export function SummaryTile({
   label,
   value,

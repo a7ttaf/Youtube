@@ -59,6 +59,13 @@ function lastFetchArgs() {
   return (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1);
 }
 
+/** Narrow the last fetch args away from `undefined`, failing the test if none. */
+function requireFetchArgs() {
+  const args = lastFetchArgs();
+  if (!args) throw new Error("expected fetch to have been called");
+  return args;
+}
+
 describe("useSmartAlerts", () => {
   it("requests the smart-alerts endpoint with the encoded month path", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
@@ -68,7 +75,7 @@ describe("useSmartAlerts", () => {
       wrapper,
     });
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(lastFetchArgs()![0]).toBe("/revenue/months/2026-03/smart-alerts");
+    expect(requireFetchArgs()[0]).toBe("/revenue/months/2026-03/smart-alerts");
   });
 
   it("returns the parsed real-shaped data on success and clears loading", async () => {

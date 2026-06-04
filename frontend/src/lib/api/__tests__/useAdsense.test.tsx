@@ -66,6 +66,22 @@ function lastFetchArgs() {
   return fetchMock().mock.calls.at(-1);
 }
 
+/** Narrow the last fetch args away from `undefined`, failing the test if none. */
+function requireFetchArgs() {
+  const args = lastFetchArgs();
+  if (!args) throw new Error("expected fetch to have been called");
+  return args;
+}
+
+/** Resolve a promise from outside via a deferred, for ordering concurrent calls. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 function methodOf(init: unknown): string {
   return ((init as RequestInit | undefined)?.method ?? "GET").toUpperCase();
 }
@@ -79,7 +95,7 @@ describe("useAdsensePayments", () => {
     );
 
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(lastFetchArgs()![0]).toBe("/adsense/payments?month=2026-03");
+    expect(requireFetchArgs()[0]).toBe("/adsense/payments?month=2026-03");
     expect(result.current.data?.items).toHaveLength(1);
     expect(result.current.data?.items[0]?.payment_amount).toBe("930");
     expect(result.current.error).toBeNull();
@@ -90,7 +106,7 @@ describe("useAdsensePayments", () => {
     const { result } = renderHook(() => useAdsensePayments(), { wrapper });
 
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(lastFetchArgs()![0]).toBe("/adsense/payments");
+    expect(requireFetchArgs()[0]).toBe("/adsense/payments");
   });
 
   it("captures a typed ApiError (403) and clears data", async () => {
@@ -116,7 +132,9 @@ describe("useAdsenseSyncActions", () => {
     fetchMock().mockResolvedValue(jsonResponse(SYNC_RESULT));
     const { result } = renderHook(() => useAdsenseSyncActions(), { wrapper });
 
-    let resolved: AdsenseSyncResponse | undefined;
+    // syncPayments resolves with the sync result OR null (dropped duplicate);
+    // the happy path here gets the result, but the type must admit null.
+    let resolved: AdsenseSyncResponse | null | undefined;
     await act(async () => {
       resolved = await result.current.syncPayments({
         connector_key: "adsense",
@@ -137,7 +155,7 @@ describe("useAdsenseSyncActions", () => {
       });
     });
 
-    const [url, init] = lastFetchArgs()!;
+    const [url, init] = requireFetchArgs();
     expect(url).toBe("/adsense/sync-payments");
     expect(methodOf(init)).toBe("POST");
     expect(resolved?.synced_count).toBe(1);
@@ -175,5 +193,80 @@ describe("useAdsenseSyncActions", () => {
 
     expect(result.current.data).toBeNull();
     expect(result.current.error).toMatchObject({ name: "ApiError", status: 409 });
+  });
+
+  it("drops a same-tick duplicate sync: exactly one POST, one upsert batch", async () => {
+    const first = deferred<Response>();
+    // Only ONE response is queued; a leaked second POST would have no mock.
+    fetchMock().mockReturnValueOnce(first.promise);
+    const { result } = renderHook(() => useAdsenseSyncActions(), { wrapper });
+
+    const ONLY = { ...SYNC_RESULT, synced_count: 1 };
+    const SYNC_BODY = {
+      connector_key: "adsense",
+      source_report_id: null,
+      reason: "Manual March payment",
+      payments: PAYMENTS.items.map((item) => ({
+        source_account_id: item.source_account_id,
+        month: item.month,
+        payment_name: item.payment_name,
+        payment_date: item.payment_date,
+        payment_amount: item.payment_amount,
+        payment_currency: item.payment_currency,
+        payment_status: item.payment_status,
+        raw_payload: item.raw_payload,
+      })),
+    };
+    let firstResolved: AdsenseSyncResponse | null | undefined;
+    let secondResolved: AdsenseSyncResponse | null | undefined;
+
+    await act(async () => {
+      // Double-click before re-render: both run off the same render closure;
+      // a leaked second POST would double-upsert the payment batch.
+      const p1 = result.current.syncPayments(SYNC_BODY).catch(() => undefined);
+      const p2 = result.current.syncPayments(SYNC_BODY).catch(() => undefined);
+      first.resolve(jsonResponse(ONLY));
+      [firstResolved, secondResolved] = await Promise.all([p1, p2]);
+    });
+
+    // Exactly one POST fired; the duplicate was dropped, not queued.
+    expect(fetchMock()).toHaveBeenCalledTimes(1);
+    expect(firstResolved).toMatchObject({ synced_count: 1 });
+    expect(secondResolved).toBeNull();
+    expect(result.current.data?.synced_count).toBe(1);
+    expect(result.current.loading).toBe(false);
+  });
+
+  it("allows a fresh sync after the in-flight one settles", async () => {
+    // A fresh Response per call: a Response body can only be read once.
+    fetchMock().mockImplementation(() => jsonResponse(SYNC_RESULT));
+    const { result } = renderHook(() => useAdsenseSyncActions(), { wrapper });
+
+    const SYNC_BODY = {
+      connector_key: "adsense",
+      source_report_id: null,
+      reason: "Manual March payment",
+      payments: PAYMENTS.items.map((item) => ({
+        source_account_id: item.source_account_id,
+        month: item.month,
+        payment_name: item.payment_name,
+        payment_date: item.payment_date,
+        payment_amount: item.payment_amount,
+        payment_currency: item.payment_currency,
+        payment_status: item.payment_status,
+        raw_payload: item.raw_payload,
+      })),
+    };
+    // First sync settles and clears the in-flight latch.
+    await act(async () => {
+      await result.current.syncPayments(SYNC_BODY);
+    });
+    // A later, non-overlapping sync must NOT be dropped.
+    await act(async () => {
+      await result.current.syncPayments(SYNC_BODY);
+    });
+
+    expect(fetchMock()).toHaveBeenCalledTimes(2);
+    expect(result.current.data?.synced_count).toBe(1);
   });
 });

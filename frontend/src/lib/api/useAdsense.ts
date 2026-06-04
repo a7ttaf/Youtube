@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import { ApiError, useApiClient } from "@/lib/api/client";
 import type {
@@ -60,9 +60,13 @@ export type UseAdsenseSyncActionsState = {
   data: AdsenseSyncResponse | null;
   loading: boolean;
   error: ApiError | Error | null;
-  // Trigger the POST on user action; resolves with the synced batch result or
-  // rejects with the typed error already captured in `error`.
-  syncPayments: (body: AdsenseSyncRequestBody) => Promise<AdsenseSyncResponse>;
+  // Trigger the POST on user action; resolves with the synced batch result, or
+  // with `null` when a same-tick duplicate submit is dropped by the in-flight
+  // guard (no POST fired), or rejects with the typed error already captured in
+  // `error`.
+  syncPayments: (
+    body: AdsenseSyncRequestBody,
+  ) => Promise<AdsenseSyncResponse | null>;
 };
 
 // ============================================================================
@@ -84,6 +88,17 @@ export type UseAdsenseSyncActionsState = {
 //   authorization is invented and no finance number is computed here.
 // Blast Radius: Finance payment write (source-of-truth rows) — but only via the
 //   backend's own guarded, audited route.
+// Supersession: each syncPayments() reads a fresh token from a useRef counter
+//   incremented synchronously inside the callback, so two same-render submits get
+//   distinct tokens (a useState read off the render closure would hand both the
+//   same token). State writes are guarded by requestIdRef.current === token, so
+//   only the most recently started request can commit {data,loading,error}.
+// Dedupe: a synchronous inFlightRef drops a same-tick duplicate submit (e.g. a
+//   double-click before re-render) BEFORE the POST fires, so one click can never
+//   trigger two payment-upsert batches + ADSENSE_PAYMENT_SYNCED audit events.
+//   The state-based `loading` guard cannot catch this (both clicks read the same
+//   stale loading=false). The dropped call resolves with null (it is dropped,
+//   NOT queued); the ref clears in finally so the next submit proceeds.
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() POST + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> AdsenseSyncRequestBody / AdsenseSyncResponse.
@@ -94,42 +109,51 @@ export function useAdsenseSyncActions(): UseAdsenseSyncActionsState {
   const [data, setData] = useState<AdsenseSyncResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<ApiError | Error | null>(null);
-  // Monotonic token so only the latest syncPayments() is allowed to commit.
-  const [requestId, setRequestId] = useState(0);
+  // Monotonic counter so only the latest syncPayments() is allowed to commit.
+  const requestIdRef = useRef(0);
+  // Synchronous in-flight latch so a same-tick duplicate submit is dropped
+  // before its POST fires (the state `loading` guard cannot see it in time).
+  const inFlightRef = useRef(false);
 
   const syncPayments = useCallback(
-    (body: AdsenseSyncRequestBody): Promise<AdsenseSyncResponse> => {
-      const token = requestId + 1;
-      setRequestId(token);
+    (body: AdsenseSyncRequestBody): Promise<AdsenseSyncResponse | null> => {
+      // FIX: drop a same-tick duplicate submit before the POST fires; a
+      // double-click before re-render would otherwise pass the stale state
+      // `loading` guard twice and upsert the same payment batch twice.
+      if (inFlightRef.current) return Promise.resolve(null);
+      inFlightRef.current = true;
+      // FIX: take the token from a ref incremented synchronously so two submits
+      // in the same render get distinct tokens; the old `requestId + 1` read off
+      // the render closure handed both the same token, letting a slow earlier
+      // response overwrite a newer one.
+      const token = ++requestIdRef.current;
       setLoading(true);
       setError(null);
       return client
         .post<AdsenseSyncResponse>("/adsense/sync-payments", body)
         .then((result) => {
-          setRequestId((current) => {
-            if (current === token) {
-              setData(result);
-              setLoading(false);
-            }
-            return current;
-          });
+          // Supersede: ignore a stale submit whose request changed mid-flight.
+          if (requestIdRef.current === token) {
+            setData(result);
+            setLoading(false);
+          }
           return result;
         })
         .catch((caught: unknown) => {
           const typed =
             caught instanceof Error ? caught : new Error(String(caught));
-          setRequestId((current) => {
-            if (current === token) {
-              setData(null);
-              setError(typed);
-              setLoading(false);
-            }
-            return current;
-          });
+          if (requestIdRef.current === token) {
+            setData(null);
+            setError(typed);
+            setLoading(false);
+          }
           throw typed;
+        })
+        .finally(() => {
+          inFlightRef.current = false;
         });
     },
-    [client, requestId],
+    [client],
   );
 
   return { data, loading, error, syncPayments };

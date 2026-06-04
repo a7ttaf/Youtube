@@ -64,13 +64,20 @@ function lastFetchArgs() {
   return fetchMock().mock.calls.at(-1);
 }
 
+/** Narrow the last fetch args away from `undefined`, failing the test if none. */
+function requireFetchArgs() {
+  const args = lastFetchArgs();
+  if (!args) throw new Error("expected fetch to have been called");
+  return args;
+}
+
 describe("useExports", () => {
   it("auto-fetches GET /exports on mount and returns the items", async () => {
     fetchMock().mockResolvedValue(jsonResponse(LIST_BODY));
     const { result } = renderHook(() => useExports(), { wrapper });
 
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(lastFetchArgs()![0]).toBe("/exports");
+    expect(requireFetchArgs()[0]).toBe("/exports");
     expect(result.current.data?.items).toHaveLength(1);
     expect(result.current.data?.items[0]?.status).toBe("COMPLETED");
     expect(result.current.error).toBeNull();
@@ -83,7 +90,7 @@ describe("useExports", () => {
     });
 
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(lastFetchArgs()![0]).toBe("/exports?limit=10&offset=20");
+    expect(requireFetchArgs()[0]).toBe("/exports?limit=10&offset=20");
   });
 
   it("captures a typed ApiError (403) and clears data", async () => {

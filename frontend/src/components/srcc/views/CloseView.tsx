@@ -14,7 +14,7 @@ import {
 } from "@/lib/api/useMonthClose";
 import type { Severity } from "@/lib/mock/data";
 import { RECON_NOTES } from "@/lib/mock/data";
-import { Badge, Dot, ItemRow } from "../shared";
+import { Badge, DEFAULT_MONTH, Dot, ItemRow, MONTH_OPTIONS } from "../shared";
 import { describeError } from "./CommandView";
 
 // ============================================================================
@@ -23,7 +23,8 @@ import { describeError } from "./CommandView";
 //   from GET /finance-close/{month} and its readiness checklist (blockers +
 //   ready flag) from GET /finance-close/{month}/readiness, with explicit
 //   loading / error / 403 states mirroring CommandView. Wires Lock and Unlock
-//   actions (POST {reason}) behind a reason prompt + confirm step, mapping a
+//   actions (POST {reason}) behind an inline audited-reason input and a two-step
+//   arm/confirm latch (first click arms, second click executes), mapping a
 //   409 (blockers / wrong state) to a clear inline message and refetching
 //   status on success. The Reconciliation Equation side panel stays on mock
 //   data (not part of the close API) and is labelled as such.
@@ -41,13 +42,6 @@ import { describeError } from "./CommandView";
 //   - File: backend/ums_smart_revenue/api/finance_close.py -> the endpoints.
 // ============================================================================
 
-// Default to a recent, demo-seedable month per the task brief (matches CommandView).
-const DEFAULT_MONTH = "2026-03";
-
-// Months offered in the selector (most recent first). A simple dropdown by
-// design — wiring real data is the priority, not month discovery.
-const MONTH_OPTIONS = ["2026-03", "2026-02", "2026-01", "2025-12"];
-
 type AccessPermissions = {
   canCloseMonth: boolean;
 };
@@ -57,11 +51,15 @@ type LockState = {
   error: string | null;
 };
 
+type LockAction = "lock" | "unlock";
+
+/** Map a close status to a badge tone: green when LOCKED, amber when open, blue when unknown. */
 function statusTone(status: string | undefined): Severity {
   if (!status) return "blue";
   return status.toUpperCase() === "LOCKED" ? "green" : "amber";
 }
 
+/** Map a blocker severity to a badge tone: red for HIGH, amber otherwise. */
 function blockerTone(severity: string): Severity {
   return severity.toUpperCase() === "HIGH" ? "red" : "amber";
 }
@@ -121,6 +119,10 @@ function describeActionError(error: unknown): string {
   return "Could not reach the finance-close service.";
 }
 
+/**
+ * The real-data Month-Close screen: status summary, readiness checklist, and the
+ * inline reason + arm/confirm lock/unlock workflow wired to the finance-close API.
+ */
 export default function CloseView({
   permissions,
 }: {
@@ -132,6 +134,9 @@ export default function CloseView({
     busy: false,
     error: null,
   });
+  // Audited free-text reason and the two-step arm latch for the pending action.
+  const [reason, setReason] = useState<string>("");
+  const [armed, setArmed] = useState<LockAction | null>(null);
 
   const {
     data: status,
@@ -150,34 +155,66 @@ export default function CloseView({
   const isLocked = status?.status?.toUpperCase() === "LOCKED";
 
   // ==========================================================================
-  // Purpose: Confirm + reason prompt + POST for a lock/unlock action. On
-  //   success it refetches both status and readiness so the UI reflects the
-  //   new state; on failure it surfaces the typed 409/403/other message inline
-  //   and leaves the existing data untouched.
+  // Purpose: POST a lock/unlock action using the trimmed, audited reason already
+  //   captured in component state (no native prompt/confirm — the arm/confirm UI
+  //   gates the call). On success it clears the reason + armed latch and refetches
+  //   both status and readiness so the UI reflects the new state; on failure it
+  //   surfaces the typed 409/403/other message inline and leaves the data and the
+  //   armed action untouched so the operator can retry.
   // ==========================================================================
   const runAction = useCallback(
-    async (kind: "lock" | "unlock") => {
-      const verb = kind === "lock" ? "Lock" : "Unlock";
-      const reason = window.prompt(`${verb} ${month}: reason (required)`);
-      if (reason === null) return; // user cancelled the prompt
+    async (kind: LockAction) => {
       const trimmed = reason.trim();
       if (!trimmed) {
         setLockState({ busy: false, error: "A reason is required." });
         return;
       }
-      if (!window.confirm(`${verb} finance month ${month}?`)) return;
       setLockState({ busy: true, error: null });
       try {
         await actions[kind](trimmed);
         setLockState({ busy: false, error: null });
+        setReason("");
+        setArmed(null);
         reloadStatus();
         reloadReadiness();
       } catch (caught) {
         setLockState({ busy: false, error: describeActionError(caught) });
       }
     },
-    [actions, month, reloadReadiness, reloadStatus],
+    [actions, reason, reloadReadiness, reloadStatus],
   );
+
+  // ==========================================================================
+  // Purpose: Drive the two-step lock/unlock latch. The first click arms the
+  //   action (revealing the Confirm/Cancel affordances); a second click on the
+  //   same action executes it with the captured reason. Switching months or
+  //   clicking Cancel disarms via resetWorkflow.
+  // ==========================================================================
+  const handleActionClick = useCallback(
+    (kind: LockAction) => {
+      if (armed === kind) {
+        // runAction captures every failure into lockState, so this never rejects;
+        // the catch is defensive belt-and-braces for an unexpected throw.
+        runAction(kind).catch(() => {
+          setLockState({
+            busy: false,
+            error: "Could not reach the finance-close service.",
+          });
+        });
+        return;
+      }
+      setArmed(kind);
+      setLockState((prev) => ({ busy: false, error: prev.error }));
+    },
+    [armed, runAction],
+  );
+
+  // Clear the reason, armed latch, and any prior error (used by Cancel + month change).
+  const resetWorkflow = useCallback(() => {
+    setReason("");
+    setArmed(null);
+    setLockState({ busy: false, error: null });
+  }, []);
 
   return (
     <section className="view-page" aria-labelledby="closeViewTitle">
@@ -189,142 +226,275 @@ export default function CloseView({
       />
 
       <div className="view-grid">
-        <section className="panel">
-          <div className="panel-header">
-            <div className="panel-title">
-              <strong id="closeViewTitle">Month Close Workbench</strong>
-              <span>Deterministic workflow from report ingestion to locked exports</span>
-            </div>
-            <Badge tone={canCloseMonth ? "amber" : "red"}>
-              {canCloseMonth ? "Finance Admin" : "Restricted"}
-            </Badge>
-          </div>
-
-          <div className="control-row" aria-label="Month close filters" style={{ marginBottom: 13 }}>
-            <select
-              className="control"
-              aria-label="Month"
-              value={month}
-              onChange={(e) => {
-                setMonth(e.target.value);
-                setLockState({ busy: false, error: null });
-              }}
-            >
-              {MONTH_OPTIONS.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              className="icon-button"
-              aria-label="Refresh month close"
-              title="Refresh month close"
-              onClick={() => {
-                reloadStatus();
-                reloadReadiness();
-              }}
-            >
-              ↻
-            </button>
-          </div>
-
-          <ReadinessChecklist
-            readiness={readiness}
-            loading={readinessLoading}
-            error={readinessError}
-          />
-        </section>
+        <MonthCloseWorkbench
+          month={month}
+          canCloseMonth={canCloseMonth}
+          readiness={readiness}
+          readinessLoading={readinessLoading}
+          readinessError={readinessError}
+          onMonthChange={(value) => {
+            setMonth(value);
+            resetWorkflow();
+          }}
+          onRefresh={() => {
+            reloadStatus();
+            reloadReadiness();
+          }}
+        />
 
         <aside className="view-stack">
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong>Lock Controls</strong>
-                <span>The backend rejects a lock until blockers are cleared</span>
-              </div>
-              <Badge tone={statusTone(status?.status)}>
-                {status?.status ?? "—"}
-              </Badge>
-            </div>
-            <div className="detail-grid">
-              <div className="detail-cell">
-                <span>Locked by</span>
-                <strong>{status?.locked_by ?? "—"}</strong>
-              </div>
-              <div className="detail-cell">
-                <span>Locked at</span>
-                <strong>{formatTimestamp(status?.locked_at)}</strong>
-              </div>
-              <div className="detail-cell">
-                <span>Unlocked by</span>
-                <strong>{status?.unlocked_by ?? "—"}</strong>
-              </div>
-              <div className="detail-cell">
-                <span>Unlocked at</span>
-                <strong>{formatTimestamp(status?.unlocked_at)}</strong>
-              </div>
-            </div>
-            {lockState.error ? (
-              <div className="permission-band" role="alert" style={{ marginTop: 8 }}>
-                <Dot tone="red" />
-                <span>
-                  <strong>Action failed</strong>
-                  <span>{lockState.error}</span>
-                </span>
-                <Badge tone="red">Blocked</Badge>
-              </div>
-            ) : null}
-            <div className="action-row">
-              <button
-                className="danger-button"
-                type="button"
-                disabled={!canCloseMonth || lockState.busy || !isLocked}
-                onClick={() => runAction("unlock")}
-              >
-                {lockState.busy ? "Working…" : "Unlock Month"}
-              </button>
-              <button
-                className="primary-button"
-                type="button"
-                disabled={!canCloseMonth || lockState.busy || isLocked}
-                onClick={() => runAction("lock")}
-              >
-                {lockState.busy ? "Working…" : "Lock Month"}
-              </button>
-            </div>
-          </section>
-
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong>Reconciliation Equation</strong>
-                <span>Sample data — not yet wired to the API</span>
-              </div>
-              <Badge tone="amber">Mock</Badge>
-            </div>
-            <div className="formula" style={{ margin: 13 }}>
-              gross_reported - official_tax - payment_fees - allocation_gap + approved_overrides = locked_net
-            </div>
-            <div className="issue-list" role="list">
-              {RECON_NOTES.map((n) => (
-                <ItemRow
-                  key={n.title}
-                  tone={n.tone}
-                  title={n.title}
-                  sub={n.sub}
-                  trailing={<Badge tone={n.badge.tone}>{n.badge.text}</Badge>}
-                />
-              ))}
-            </div>
-          </section>
+          <LockControlsPanel
+            status={status}
+            month={month}
+            canCloseMonth={canCloseMonth}
+            isLocked={isLocked}
+            lockState={lockState}
+            reason={reason}
+            armed={armed}
+            onReasonChange={setReason}
+            onActionClick={handleActionClick}
+            onCancel={resetWorkflow}
+          />
+          <ReconciliationPanel />
         </aside>
       </div>
     </section>
   );
 }
 
+/**
+ * Left workbench panel: title, the month selector + refresh control, and the
+ * readiness checklist. Extracted so the parent CloseView tree stays shallow.
+ */
+function MonthCloseWorkbench({
+  month,
+  canCloseMonth,
+  readiness,
+  readinessLoading,
+  readinessError,
+  onMonthChange,
+  onRefresh,
+}: {
+  month: string;
+  canCloseMonth: boolean;
+  readiness: FinanceCloseReadinessResponse | null;
+  readinessLoading: boolean;
+  readinessError: ApiError | Error | null;
+  onMonthChange: (value: string) => void;
+  onRefresh: () => void;
+}) {
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong id="closeViewTitle">Month Close Workbench</strong>
+          <span>Deterministic workflow from report ingestion to locked exports</span>
+        </div>
+        <Badge tone={canCloseMonth ? "amber" : "red"}>
+          {canCloseMonth ? "Finance Admin" : "Restricted"}
+        </Badge>
+      </div>
+
+      <div className="control-row" aria-label="Month close filters" style={{ marginBottom: 13 }}>
+        <select
+          className="control"
+          aria-label="Month"
+          value={month}
+          onChange={(e) => onMonthChange(e.target.value)}
+        >
+          {MONTH_OPTIONS.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="Refresh month close"
+          title="Refresh month close"
+          onClick={onRefresh}
+        >
+          ↻
+        </button>
+      </div>
+
+      <ReadinessChecklist
+        readiness={readiness}
+        loading={readinessLoading}
+        error={readinessError}
+      />
+    </section>
+  );
+}
+
+/**
+ * Inline "Action failed" alert band that surfaces a typed lock/unlock error.
+ * Extracted so the Lock Controls tree stays shallow (JSX nesting).
+ */
+function ActionFailedBand({ message }: { message: string }) {
+  return (
+    <div className="permission-band" role="alert" style={{ marginTop: 8 }}>
+      <Dot tone="red" />
+      <span>
+        <strong>Action failed</strong>
+        <span>{message}</span>
+      </span>
+      <Badge tone="red">Blocked</Badge>
+    </div>
+  );
+}
+
+/**
+ * Lock Controls panel: status badge, lock/unlock actor + timestamp grid, the
+ * audited reason input, and the two-step arm/confirm lock & unlock buttons. The
+ * parent owns all state; this component is presentational and calls back on intent.
+ */
+function LockControlsPanel({
+  status,
+  month,
+  canCloseMonth,
+  isLocked,
+  lockState,
+  reason,
+  armed,
+  onReasonChange,
+  onActionClick,
+  onCancel,
+}: {
+  status: FinanceMonthCloseStatus | null;
+  month: string;
+  canCloseMonth: boolean;
+  isLocked: boolean;
+  lockState: LockState;
+  reason: string;
+  armed: LockAction | null;
+  onReasonChange: (value: string) => void;
+  onActionClick: (kind: LockAction) => void;
+  onCancel: () => void;
+}) {
+  const reasonEmpty = reason.trim().length === 0;
+  const unlockArmed = armed === "unlock";
+  const lockArmed = armed === "lock";
+
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong>Lock Controls</strong>
+          <span>The backend rejects a lock until blockers are cleared</span>
+        </div>
+        <Badge tone={statusTone(status?.status)}>{status?.status ?? "—"}</Badge>
+      </div>
+      <div className="detail-grid">
+        <div className="detail-cell">
+          <span>Locked by</span>
+          <strong>{status?.locked_by ?? "—"}</strong>
+        </div>
+        <div className="detail-cell">
+          <span>Locked at</span>
+          <strong>{formatTimestamp(status?.locked_at)}</strong>
+        </div>
+        <div className="detail-cell">
+          <span>Unlocked by</span>
+          <strong>{status?.unlocked_by ?? "—"}</strong>
+        </div>
+        <div className="detail-cell">
+          <span>Unlocked at</span>
+          <strong>{formatTimestamp(status?.unlocked_at)}</strong>
+        </div>
+      </div>
+      <div className="control-row" style={{ marginTop: 8 }}>
+        <label className="field-label" htmlFor="closeReason">
+          Reason (required, audited)
+        </label>
+        <input
+          id="closeReason"
+          className="control"
+          type="text"
+          value={reason}
+          placeholder="Why is this month being locked or unlocked?"
+          disabled={!canCloseMonth || lockState.busy}
+          onChange={(e) => onReasonChange(e.target.value)}
+        />
+      </div>
+      {lockState.error ? <ActionFailedBand message={lockState.error} /> : null}
+      <div className="action-row">
+        <button
+          className="danger-button"
+          type="button"
+          disabled={!canCloseMonth || lockState.busy || !isLocked || reasonEmpty}
+          onClick={() => onActionClick("unlock")}
+        >
+          {lockState.busy && unlockArmed
+            ? "Working…"
+            : unlockArmed
+              ? `Confirm unlock ${month}`
+              : "Unlock Month"}
+        </button>
+        <button
+          className="primary-button"
+          type="button"
+          disabled={!canCloseMonth || lockState.busy || isLocked || reasonEmpty}
+          onClick={() => onActionClick("lock")}
+        >
+          {lockState.busy && lockArmed
+            ? "Working…"
+            : lockArmed
+              ? `Confirm lock ${month}`
+              : "Lock Month"}
+        </button>
+        {armed ? (
+          <button
+            className="ghost-button"
+            type="button"
+            disabled={lockState.busy}
+            onClick={onCancel}
+          >
+            Cancel
+          </button>
+        ) : null}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Static Reconciliation Equation reference panel. Still on mock data and labelled
+ * as such — not part of the close API.
+ */
+function ReconciliationPanel() {
+  return (
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong>Reconciliation Equation</strong>
+          <span>Sample data — not yet wired to the API</span>
+        </div>
+        <Badge tone="amber">Mock</Badge>
+      </div>
+      <div className="formula" style={{ margin: 13 }}>
+        gross_reported - official_tax - payment_fees - allocation_gap + approved_overrides = locked_net
+      </div>
+      <div className="issue-list" role="list">
+        {RECON_NOTES.map((n) => (
+          <ItemRow
+            key={n.title}
+            tone={n.tone}
+            title={n.title}
+            sub={n.sub}
+            trailing={<Badge tone={n.badge.tone}>{n.badge.text}</Badge>}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+/**
+ * Top summary tiles for the close screen: month, status, readiness, and allocation
+ * method, with explicit error and initial-loading states mirroring CommandView.
+ */
 function CloseStatusSummary({
   status,
   loading,
@@ -398,6 +568,10 @@ function CloseStatusSummary({
   );
 }
 
+/**
+ * The close readiness checklist: a ready banner when clear, otherwise one row per
+ * blocker, with explicit error, loading, and no-data states.
+ */
 function ReadinessChecklist({
   readiness,
   loading,

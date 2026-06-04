@@ -11,7 +11,7 @@ import { useExportActions } from "@/lib/api/useExportActions";
 import { useExports } from "@/lib/api/useExports";
 import { EXPORTS_GUARDRAILS } from "@/lib/mock/data";
 import type { Severity } from "@/lib/mock/data";
-import { Badge, Dot, ItemRow } from "../shared";
+import { Badge, DEFAULT_MONTH, Dot, ItemRow, MONTH_OPTIONS } from "../shared";
 import { describeError } from "./CommandView";
 
 // ============================================================================
@@ -42,14 +42,6 @@ import { describeError } from "./CommandView";
 //   - File: backend/ums_smart_revenue/api/exports.py:173 request_export / :287 list.
 // ============================================================================
 
-// Default to a recent, demo-seedable month per the task brief (matches the
-// other wired views).
-const DEFAULT_MONTH = "2026-03";
-
-// Months offered in the selector (most recent first). A simple dropdown by
-// design — wiring real data is the priority, not month discovery.
-const MONTH_OPTIONS = ["2026-03", "2026-02", "2026-01", "2025-12"];
-
 const CURRENCY_OPTIONS = ["USD", "EGP", "AED"];
 
 // The real accepted export_type enum values (ALLOWED_EXPORT_TYPES). The first
@@ -72,33 +64,43 @@ const SCOPE_TYPE_OPTIONS: Array<{ value: ExportScopeType; label: string }> = [
 ];
 
 // ============================================================================
-// Purpose: Map an export_type to its binary download route + a label. Only one
-//   route is valid per type (the backend 422s a mismatched type); the analytics
-//   CSV has no GET download endpoint yet, so it returns null and no link shows.
+// Purpose: Map an export_type to its binary download route + artifact format.
+//   Only one route is valid per type (the backend 422s a mismatched type); the
+//   analytics CSV has no GET download endpoint yet, so it returns null and no
+//   link shows. The action verb (Download vs Generate) is derived from job
+//   status by the caller; this returns the route and the format suffix only.
 // Standards: The path is the proxied route — the Vite dev proxy injects the
 //   trusted-gateway + X-UMS-Tenant headers, so a plain <a download> works
 //   without the browser ever holding the gateway secret. Never fetched through
 //   useApiClient (JSON-strict; cannot read binary).
 // ============================================================================
+/** Returns the binary download route and artifact format for a job, or null if the type has no GET route. */
 function downloadFor(
   job: ExportJob,
-): { href: string; label: string } | null {
+): { href: string; format: string } | null {
   const id = encodeURIComponent(job.id);
   switch (job.export_type) {
     case "FINANCE_EXCEL":
-      return { href: `/exports/${id}/finance-workbook.xlsx`, label: "Download XLSX" };
+      return { href: `/exports/${id}/finance-workbook.xlsx`, format: "XLSX" };
     case "EXECUTIVE_PDF":
-      return { href: `/exports/${id}/executive.pdf`, label: "Download PDF" };
+      return { href: `/exports/${id}/executive.pdf`, format: "PDF" };
     case "BRANDED_SLIDE_PACK":
-      return {
-        href: `/exports/${id}/branded-slide-pack.pptx`,
-        label: "Download PPTX",
-      };
+      return { href: `/exports/${id}/branded-slide-pack.pptx`, format: "PPTX" };
     default:
       return null;
   }
 }
 
+// ============================================================================
+// Purpose: The action verb for a downloadable job's link. A QUEUED job triggers
+//   server-side generation on first click; a COMPLETED job serves cached bytes.
+// ============================================================================
+/** Returns "Generate" for QUEUED jobs (generate-on-demand) and "Download" otherwise. */
+function downloadVerb(job: ExportJob): string {
+  return job.status.toUpperCase() === "QUEUED" ? "Generate" : "Download";
+}
+
+/** Maps an export-job status to its Severity badge tone. */
 function statusTone(status: string): Severity {
   switch (status.toUpperCase()) {
     case "COMPLETED":
@@ -114,18 +116,31 @@ function statusTone(status: string): Severity {
   }
 }
 
-// A COMPLETED job with a persisted artifact is the only state the backend will
-// serve cached bytes for; gate the visible download link on it.
+// FIX: The backend download routes generate-on-demand: for a QUEUED job with no
+// persisted artifact they build + persist + stream the bytes (exports.py
+// download_*; the `served is None` branch). So both QUEUED and COMPLETED jobs
+// are downloadable — QUEUED triggers server-side generation on first click,
+// COMPLETED serves cached bytes. Only FAILED (shows failure_reason) and
+// CANCELLED (no artifact) are not downloadable. Gating on COMPLETED + file_url
+// previously hid the link for a freshly QUEUED job that the backend would serve.
+/**
+ * True when the backend can serve or generate this job's artifact: QUEUED
+ * (generate-on-demand) and COMPLETED (cached) are downloadable; FAILED and
+ * CANCELLED are not.
+ */
 function isDownloadable(job: ExportJob): boolean {
-  return job.status.toUpperCase() === "COMPLETED" && job.file_url !== null;
+  const status = job.status.toUpperCase();
+  return status === "QUEUED" || status === "COMPLETED";
 }
 
+/** Builds a human-readable scope label (e.g. "company · company-a"). */
 function scopeLabel(job: ExportJob): string {
   if (job.scope_type === "global") return "Global";
   if (job.scope_id) return `${job.scope_type} · ${job.scope_id}`;
   return job.scope_type;
 }
 
+/** Formats an ISO timestamp for display, falling back to a dash or the raw value. */
 function formatTimestamp(value: string | null): string {
   if (!value) return "—";
   const parsed = new Date(value);
@@ -133,17 +148,42 @@ function formatTimestamp(value: string | null): string {
   return parsed.toLocaleString();
 }
 
+/**
+ * The wired Exports screen: a permission-filtered request form plus the export
+ * jobs table. Finance and analytics report types are offered only when the
+ * caller's matching permission is granted; the default selection is the first
+ * allowed report type.
+ */
 export default function ExportsView({
   canCreateExport,
+  canExportFinance,
+  canExportAnalytics,
 }: {
   canCreateExport: boolean;
+  canExportFinance: boolean;
+  canExportAnalytics: boolean;
 }) {
-  const [exportType, setExportType] = useState<ExportType>("FINANCE_EXCEL");
+  // Filter the report-type options to the caller's per-type export permissions.
+  // The first three options are finance exports; the CSV is analytics.
+  const reportTypeOptions = REPORT_TYPE_OPTIONS.filter((option) => {
+    if (option.value === "ANALYTICS_SUMMARY_CSV") return canExportAnalytics;
+    return canExportFinance;
+  });
+  const defaultExportType = reportTypeOptions[0]?.value ?? "FINANCE_EXCEL";
+
+  const [exportType, setExportType] = useState<ExportType>(defaultExportType);
   const [scopeType, setScopeType] = useState<ExportScopeType>("global");
   const [scopeId, setScopeId] = useState<string>("");
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   const [currency, setCurrency] = useState<string>("USD");
   const [reason, setReason] = useState<string>("");
+
+  // Keep the selection valid when the allowed set excludes the current choice
+  // (e.g. permissions change such that the selected type is no longer offered).
+  const selectionAllowed = reportTypeOptions.some(
+    (option) => option.value === exportType,
+  );
+  const effectiveExportType = selectionAllowed ? exportType : defaultExportType;
 
   const { data, loading, error, reload } = useExports();
   const actions = useExportActions();
@@ -155,10 +195,15 @@ export default function ExportsView({
   const canSubmit =
     canCreateExport && reasonProvided && scopeIdProvided && !actions.loading;
 
+  /**
+   * Validates and POSTs the request form, then refetches the list on success.
+   * The hook owns the error state, so the rejection is swallowed locally to
+   * avoid an unhandled promise rejection.
+   */
   const onGenerate = () => {
     if (!canSubmit) return;
     const body: ExportRequestBody = {
-      export_type: exportType,
+      export_type: effectiveExportType,
       scope_type: scopeType,
       // Global takes no scope_id; the backend coerces blank -> null anyway.
       scope_id: requiresScopeId ? scopeId.trim() : null,
@@ -168,36 +213,30 @@ export default function ExportsView({
       include_confidence_notes: true,
       include_manual_override_notes: true,
     };
-    // The hook captures its own error state; swallow the rejection here so an
-    // un-actioned promise does not surface as an unhandled rejection. On
-    // success refetch the list so the new QUEUED job appears.
-    void actions
+    // On success refetch the list so the new QUEUED job appears.
+    actions
       .requestExport(body)
       .then(() => {
         setReason("");
         reload();
       })
-      .catch(() => {});
+      .catch(() => {
+        // The hook captures its own error state (actions.error), which the form
+        // renders; swallow the rejection here so it does not surface as an
+        // unhandled promise rejection.
+      });
   };
 
   return (
     <section className="view-page" aria-labelledby="exportsTitle">
       <div className="view-grid wide-side">
         <section className="panel">
-          <div className="panel-header">
-            <div className="panel-title">
-              <strong id="exportsTitle">Export Center</strong>
-              <span>
-                Request a permission-controlled package, then download the
-                generated, checksum-audited artifact
-              </span>
-            </div>
-            <Badge tone="violet">Audited export</Badge>
-          </div>
+          <ExportCenterHeader />
 
           <RequestExportForm
-            exportType={exportType}
+            exportType={effectiveExportType}
             onExportType={setExportType}
+            reportTypeOptions={reportTypeOptions}
             scopeType={scopeType}
             onScopeType={setScopeType}
             scopeId={scopeId}
@@ -226,36 +265,68 @@ export default function ExportsView({
           />
         </section>
 
-        <aside className="view-stack">
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong>Export Guardrails</strong>
-                <span>Every package records scope, filters, checksum, and actor</span>
-              </div>
-              <Badge tone="amber">Policy</Badge>
-            </div>
-            <div className="issue-list" role="list">
-              {EXPORTS_GUARDRAILS.map((g) => (
-                <ItemRow
-                  key={g.title}
-                  tone={g.tone}
-                  title={g.title}
-                  sub={g.sub}
-                  trailing={<Badge tone={g.badge.tone}>{g.badge.text}</Badge>}
-                />
-              ))}
-            </div>
-          </section>
-        </aside>
+        <ExportGuardrailsPanel />
       </div>
     </section>
   );
 }
 
+/** The Export Center panel header (title, description, and audited badge). */
+function ExportCenterHeader() {
+  return (
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong id="exportsTitle">Export Center</strong>
+        <span>
+          Request a permission-controlled package, then download the generated,
+          checksum-audited artifact
+        </span>
+      </div>
+      <Badge tone="violet">Audited export</Badge>
+    </div>
+  );
+}
+
+/** Static side panel listing the export guardrails (descriptive role context). */
+function ExportGuardrailsPanel() {
+  return (
+    <aside className="view-stack">
+      <section className="panel">
+        <GuardrailsHeader />
+        <div className="issue-list" role="list">
+          {EXPORTS_GUARDRAILS.map((g) => (
+            <ItemRow
+              key={g.title}
+              tone={g.tone}
+              title={g.title}
+              sub={g.sub}
+              trailing={<Badge tone={g.badge.tone}>{g.badge.text}</Badge>}
+            />
+          ))}
+        </div>
+      </section>
+    </aside>
+  );
+}
+
+/** Header for the export guardrails side panel (title, description, policy badge). */
+function GuardrailsHeader() {
+  return (
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong>Export Guardrails</strong>
+        <span>Every package records scope, filters, checksum, and actor</span>
+      </div>
+      <Badge tone="amber">Policy</Badge>
+    </div>
+  );
+}
+
+/** The export request form: report type, scope, month, currency, and reason. */
 function RequestExportForm({
   exportType,
   onExportType,
+  reportTypeOptions,
   scopeType,
   onScopeType,
   scopeId,
@@ -274,6 +345,7 @@ function RequestExportForm({
 }: {
   exportType: ExportType;
   onExportType: (value: ExportType) => void;
+  reportTypeOptions: Array<{ value: ExportType; label: string }>;
   scopeType: ExportScopeType;
   onScopeType: (value: ExportScopeType) => void;
   scopeId: string;
@@ -300,7 +372,7 @@ function RequestExportForm({
           disabled={!canCreateExport}
           onChange={(e) => onExportType(e.target.value as ExportType)}
         >
-          {REPORT_TYPE_OPTIONS.map((o) => (
+          {reportTypeOptions.map((o) => (
             <option key={o.value} value={o.value}>
               {o.label}
             </option>
@@ -386,6 +458,7 @@ function RequestExportForm({
   );
 }
 
+/** Inline alert banner shown when an export request POST fails. */
 function RequestError({ error }: { error: ApiError | Error }) {
   const { title, detail } = describeError(error);
   return (
@@ -400,6 +473,7 @@ function RequestError({ error }: { error: ApiError | Error }) {
   );
 }
 
+/** Inline status banner confirming a newly requested export job. */
 function RequestSuccess({ job }: { job: ExportJob }) {
   return (
     <div className="permission-band" role="status" style={{ margin: 13 }}>
@@ -413,6 +487,7 @@ function RequestSuccess({ job }: { job: ExportJob }) {
   );
 }
 
+/** The export jobs section: header with a refresh control plus the jobs body. */
 function ExportJobsTable({
   jobs,
   loading,
@@ -446,6 +521,7 @@ function ExportJobsTable({
   );
 }
 
+/** Renders the export jobs table, or the error / loading / empty placeholder. */
 function ExportJobsTableBody({
   jobs,
   loading,
@@ -490,57 +566,76 @@ function ExportJobsTableBody({
   return (
     <div className="table-wrap">
       <table aria-label="Export jobs">
-        <thead>
-          <tr>
-            <th scope="col">Type</th>
-            <th scope="col">Scope</th>
-            <th scope="col">Month</th>
-            <th scope="col">Status</th>
-            <th scope="col">Created</th>
-            <th scope="col">Completed</th>
-            <th scope="col">Download</th>
-          </tr>
-        </thead>
+        <ExportJobsTableHead />
         <tbody>
-          {jobs.map((job) => {
-            const download = downloadFor(job);
-            const downloadable = isDownloadable(job);
-            return (
-              <tr key={job.id}>
-                <td>{job.export_type}</td>
-                <td>{scopeLabel(job)}</td>
-                <td>{job.month}</td>
-                <td>
-                  <Badge tone={statusTone(job.status)}>{job.status}</Badge>
-                </td>
-                <td>{formatTimestamp(job.created_at)}</td>
-                <td>{formatTimestamp(job.completed_at)}</td>
-                <td>
-                  {downloadable && download ? (
-                    // Plain anchor: the proxied path lets the browser stream the
-                    // binary with the dev proxy's injected trusted-gateway +
-                    // X-UMS-Tenant headers. NOT fetched via useApiClient (which
-                    // is JSON-strict and cannot read binary).
-                    <a
-                      className="mini-button"
-                      href={download.href}
-                      download
-                    >
-                      {download.label}
-                    </a>
-                  ) : (
-                    <span className="muted">
-                      {job.status.toUpperCase() === "FAILED"
-                        ? job.failure_reason ?? "Failed"
-                        : "Not ready"}
-                    </span>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
+          {jobs.map((job) => (
+            <ExportJobRow key={job.id} job={job} />
+          ))}
         </tbody>
       </table>
     </div>
+  );
+}
+
+/** The export jobs table header row (column labels). */
+function ExportJobsTableHead() {
+  return (
+    <thead>
+      <tr>
+        <th scope="col">Type</th>
+        <th scope="col">Scope</th>
+        <th scope="col">Month</th>
+        <th scope="col">Status</th>
+        <th scope="col">Created</th>
+        <th scope="col">Completed</th>
+        <th scope="col">Download</th>
+      </tr>
+    </thead>
+  );
+}
+
+/** A single export-job table row, including its status badge and download cell. */
+function ExportJobRow({ job }: { job: ExportJob }) {
+  return (
+    <tr>
+      <td>{job.export_type}</td>
+      <td>{scopeLabel(job)}</td>
+      <td>{job.month}</td>
+      <td>
+        <Badge tone={statusTone(job.status)}>{job.status}</Badge>
+      </td>
+      <td>{formatTimestamp(job.created_at)}</td>
+      <td>{formatTimestamp(job.completed_at)}</td>
+      <td>
+        <ExportDownloadCell job={job} />
+      </td>
+    </tr>
+  );
+}
+
+/**
+ * The download cell for a job: a link (Generate for QUEUED, Download for
+ * COMPLETED) when the type has a route, otherwise a failure reason or
+ * not-ready note.
+ */
+function ExportDownloadCell({ job }: { job: ExportJob }) {
+  const download = downloadFor(job);
+  if (isDownloadable(job) && download) {
+    // Plain anchor: the proxied path lets the browser stream the binary with the
+    // dev proxy's injected trusted-gateway + X-UMS-Tenant headers. NOT fetched
+    // via useApiClient (which is JSON-strict and cannot read binary). A QUEUED
+    // job triggers server-side generation on the first click.
+    return (
+      <a className="mini-button" href={download.href} download>
+        {`${downloadVerb(job)} ${download.format}`}
+      </a>
+    );
+  }
+  return (
+    <span className="muted">
+      {job.status.toUpperCase() === "FAILED"
+        ? job.failure_reason ?? "Failed"
+        : "Not ready"}
+    </span>
   );
 }

@@ -9,7 +9,6 @@ import type {
 import { TenantProvider } from "@/contexts/TenantContext";
 
 const ORIGINAL_FETCH = globalThis.fetch;
-const ORIGINAL_PROMPT = globalThis.prompt;
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
@@ -17,7 +16,6 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
-  globalThis.prompt = ORIGINAL_PROMPT;
   vi.restoreAllMocks();
 });
 
@@ -108,10 +106,13 @@ function routeBoth(
   };
 }
 
-function renderConnectorsView(canRunConnectors = true) {
+function renderConnectorsView(canRunConnectors = true, canViewFinance = true) {
   return render(
     <TenantProvider initialSlug="ums">
-      <ConnectorsView canRunConnectors={canRunConnectors} />
+      <ConnectorsView
+        canRunConnectors={canRunConnectors}
+        canViewFinance={canViewFinance}
+      />
     </TenantProvider>,
   );
 }
@@ -132,7 +133,8 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
 
   it("renders the synced AdSense payments list with the string amount formatted", async () => {
     fetchMock().mockImplementation(routeBoth(() => null));
-    renderConnectorsView();
+    // canViewFinance true -> the source-of-truth payment amount is visible.
+    renderConnectorsView(true, true);
 
     await waitFor(() =>
       expect(screen.getByText("AdSense payment March 2026")).toBeInTheDocument(),
@@ -140,6 +142,23 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     expect(screen.getByText("pub-1")).toBeInTheDocument();
     // payment_amount "930" formatted as USD currency.
     expect(screen.getByText("$930.00")).toBeInTheDocument();
+    expect(screen.getByText("PAID")).toBeInTheDocument();
+  });
+
+  it("withholds the AdSense payment amount behind the Restricted sentinel when the viewer cannot view finance", async () => {
+    fetchMock().mockImplementation(routeBoth(() => null));
+    // canViewFinance false -> the amount cell shows the Restricted sentinel, not
+    // the source-of-truth payment value, so a non-finance preview role cannot
+    // read the money through the connectors screen.
+    renderConnectorsView(true, false);
+
+    await waitFor(() =>
+      expect(screen.getByText("AdSense payment March 2026")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("pub-1")).toBeInTheDocument();
+    // The real amount is gone; the shared finance gate renders "Restricted".
+    expect(screen.queryByText("$930.00")).not.toBeInTheDocument();
+    expect(screen.getByText("Restricted")).toBeInTheDocument();
     expect(screen.getByText("PAID")).toBeInTheDocument();
   });
 
@@ -178,8 +197,7 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     );
   });
 
-  it("requests a connector job (POST /connectors/jobs) and shows the recorded-not-executed result", async () => {
-    globalThis.prompt = vi.fn(() => "Manual March resync");
+  it("requests a connector job (POST /connectors/jobs) with the inline reason and shows the recorded-not-executed result", async () => {
     fetchMock().mockImplementation(
       routeBoth((url, init) => {
         if (url === "/connectors/jobs" && methodOf(init) === "POST") {
@@ -201,7 +219,17 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     await waitFor(() =>
       expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
     );
-    fireEvent.click(screen.getByRole("button", { name: /request sync/i }));
+
+    const requestButton = screen.getByRole("button", { name: /request sync/i });
+    // The button is disabled until a sync reason is typed (no window.prompt).
+    expect(requestButton).toBeDisabled();
+
+    fireEvent.change(
+      screen.getByLabelText("Sync reason (required, audited)"),
+      { target: { value: "Manual March resync" } },
+    );
+    expect(requestButton).toBeEnabled();
+    fireEvent.click(requestButton);
 
     await waitFor(() =>
       expect(screen.getByText("Sync requested")).toBeInTheDocument(),
@@ -210,12 +238,16 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     expect(
       screen.getByText(/Queued \(recorded, not yet executed\)/i),
     ).toBeInTheDocument();
-    expect(
-      fetchMock().mock.calls.some(
-        ([input, init]) =>
-          urlOf(input) === "/connectors/jobs" && methodOf(init) === "POST",
-      ),
-    ).toBe(true);
+    const jobCall = fetchMock().mock.calls.find(
+      ([input, init]) =>
+        urlOf(input) === "/connectors/jobs" && methodOf(init) === "POST",
+    );
+    expect(jobCall).toBeDefined();
+    // The POST carried the trimmed reason typed into the inline field.
+    const jobBody = JSON.parse(
+      String((jobCall?.[1] as RequestInit | undefined)?.body ?? "{}"),
+    );
+    expect(jobBody.reason).toBe("Manual March resync");
   });
 
   it("syncs AdSense payments (POST /adsense/sync-payments) and refetches the list", async () => {
@@ -297,7 +329,7 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     expect(screen.getByRole("alert")).toBeInTheDocument();
   });
 
-  it("disables the Request sync + Sync payments actions when the viewer cannot run connectors", async () => {
+  it("disables the Request sync + Sync payments actions and shows the role hint when the viewer cannot run connectors", async () => {
     fetchMock().mockImplementation(routeBoth(() => null));
     renderConnectorsView(false);
 
@@ -310,5 +342,13 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     expect(
       screen.getByRole("button", { name: /^sync payments$/i }),
     ).toBeDisabled();
+    // The inline sync-reason field is disabled too.
+    expect(
+      screen.getByLabelText("Sync reason (required, audited)"),
+    ).toBeDisabled();
+    // The honest no-permission hint is visible (mirrors the credentials UX).
+    expect(
+      screen.getAllByText("Requires a connector-operations role.").length,
+    ).toBeGreaterThan(0);
   });
 });

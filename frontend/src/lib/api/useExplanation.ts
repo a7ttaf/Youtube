@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 
 import { ApiError, useApiClient } from "@/lib/api/client";
 import type { ExplanationMetric, NumberExplanation } from "@/lib/api/types";
@@ -37,6 +37,11 @@ export type UseExplanationState = {
 // Blast Radius: Finance number explanations (write path) — but only via the
 //   backend's own guarded, audited route; this hook adds no client-side
 //   authorization and never computes a finance number directly.
+// Supersession: each run() reads a fresh token from a useRef counter incremented
+//   synchronously inside the callback, so two same-render Explains get distinct
+//   tokens (a useState read off the render closure would hand both the same
+//   token). State writes are guarded by requestIdRef.current === token, so only
+//   the most recently started run can commit {data,loading,error}.
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> useApiClient() POST + X-UMS-Tenant.
 //   - File: frontend/src/lib/api/types.ts -> NumberExplanation contract.
@@ -47,8 +52,8 @@ export function useExplanation(): UseExplanationState {
   const [data, setData] = useState<NumberExplanation | null>(null);
   const [loading, setLoading] = useState<boolean>(false);
   const [error, setError] = useState<ApiError | Error | null>(null);
-  // Monotonic token so only the latest run() is allowed to commit state.
-  const [requestId, setRequestId] = useState(0);
+  // Monotonic counter so only the latest run() is allowed to commit state.
+  const requestIdRef = useRef(0);
 
   const run = useCallback(
     (params: ExplanationParams): Promise<NumberExplanation> => {
@@ -57,38 +62,35 @@ export function useExplanation(): UseExplanationState {
         `/revenue/channels/${encodeURIComponent(channelId)}` +
         `/months/${encodeURIComponent(month)}/explain` +
         `?metric=${encodeURIComponent(metric)}`;
-      const token = requestId + 1;
-      setRequestId(token);
+      // FIX: take the token from a ref incremented synchronously so two Explains
+      // in the same render get distinct tokens; the old `requestId + 1` read off
+      // the render closure handed both the same token, letting a slow earlier
+      // response overwrite a newer one.
+      const token = ++requestIdRef.current;
       setLoading(true);
       setError(null);
       return client
         .post<NumberExplanation>(path)
         .then((result) => {
           // Supersede: ignore a stale run whose params changed mid-flight.
-          setRequestId((current) => {
-            if (current === token) {
-              setData(result);
-              setLoading(false);
-            }
-            return current;
-          });
+          if (requestIdRef.current === token) {
+            setData(result);
+            setLoading(false);
+          }
           return result;
         })
         .catch((caught: unknown) => {
           const typed =
             caught instanceof Error ? caught : new Error(String(caught));
-          setRequestId((current) => {
-            if (current === token) {
-              setData(null);
-              setError(typed);
-              setLoading(false);
-            }
-            return current;
-          });
+          if (requestIdRef.current === token) {
+            setData(null);
+            setError(typed);
+            setLoading(false);
+          }
           throw typed;
         });
     },
-    [client, requestId],
+    [client],
   );
 
   return { data, loading, error, run };

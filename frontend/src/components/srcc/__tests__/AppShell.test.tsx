@@ -115,7 +115,12 @@ describe("AppShell tenant proof tag", () => {
       </TenantProvider>,
     );
     const tag = await screen.findByTestId("tenant-proof");
-    expect(tag.textContent).toContain("Tenant registry unavailable");
+    // The tag first renders "Tenant: ums (loading…)"; wait for the rejected
+    // /tenants/me promise to settle and surface the failure detail (mirrors the
+    // adjacent successful-retry test that also waits on the post-settle text).
+    await waitFor(() =>
+      expect(tag.textContent).toContain("Tenant registry unavailable"),
+    );
   });
 
   it("fires the bootstrap /tenants/me fetch exactly once under <StrictMode> (re-entry guard)", async () => {
@@ -199,7 +204,11 @@ describe("AppShell tenant proof tag", () => {
     expect(tag.textContent).toContain("Acme Holdings (acme)");
     const tenantCalls = tenantFetchCalls();
     expect(tenantCalls).toHaveLength(1);
-    const [, init] = tenantCalls.at(-1)!;
+    const lastCall = tenantCalls.at(-1);
+    if (!lastCall) {
+      throw new Error("expected a recorded /tenants/me fetch call");
+    }
+    const [, init] = lastCall;
     const sentHeaders = new Headers((init as RequestInit | undefined)?.headers);
     expect(sentHeaders.has("X-UMS-Tenant")).toBe(false);
   });

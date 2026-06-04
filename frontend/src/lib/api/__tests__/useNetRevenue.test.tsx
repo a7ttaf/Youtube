@@ -73,6 +73,13 @@ function lastFetchArgs() {
   return (globalThis.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls.at(-1);
 }
 
+/** Narrow the last fetch args away from `undefined`, failing the test if none. */
+function requireFetchArgs() {
+  const args = lastFetchArgs();
+  if (!args) throw new Error("expected fetch to have been called");
+  return args;
+}
+
 describe("useNetRevenue", () => {
   it("requests the net-revenue endpoint with the month path and scope query params", async () => {
     (globalThis.fetch as ReturnType<typeof vi.fn>).mockResolvedValue(
@@ -83,7 +90,7 @@ describe("useNetRevenue", () => {
       { wrapper },
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(lastFetchArgs()![0]).toBe(
+    expect(requireFetchArgs()[0]).toBe(
       "/revenue/months/2026-03/net-revenue?scope_type=global",
     );
   });
@@ -128,7 +135,7 @@ describe("useNetRevenue", () => {
       { wrapper },
     );
     await waitFor(() => expect(result.current.loading).toBe(false));
-    expect(lastFetchArgs()![0]).toBe(
+    expect(requireFetchArgs()[0]).toBe(
       "/revenue/months/2026-03/net-revenue?scope_type=company&scope_id=co+1",
     );
   });

@@ -2,6 +2,7 @@ import { useMemo, useState } from "react";
 
 import { ApiError } from "@/lib/api/client";
 import type {
+  ChannelNetRevenue,
   ExplanationComponent,
   ExplanationMetric,
   NumberExplanation,
@@ -9,7 +10,14 @@ import type {
 import { useExplanation } from "@/lib/api/useExplanation";
 import { useNetRevenue } from "@/lib/api/useNetRevenue";
 import type { Role, Severity } from "@/lib/mock/data";
-import { Badge, Dot, financeDisplay, ItemRow } from "../shared";
+import {
+  Badge,
+  DEFAULT_MONTH,
+  Dot,
+  financeDisplay,
+  ItemRow,
+  MONTH_OPTIONS,
+} from "../shared";
 import { describeError } from "./CommandView";
 
 // ============================================================================
@@ -39,14 +47,6 @@ import { describeError } from "./CommandView";
 //   - File: backend/ums_smart_revenue/api/revenue.py:1358 explain endpoint.
 // ============================================================================
 
-// Default to a recent, demo-seedable month per the task brief (matches the
-// other wired views).
-const DEFAULT_MONTH = "2026-03";
-
-// Months offered in the selector (most recent first). A simple dropdown by
-// design — wiring real data is the priority, not month discovery.
-const MONTH_OPTIONS = ["2026-03", "2026-02", "2026-01", "2025-12"];
-
 // The two metrics the explain endpoint accepts (SUPPORTED_METRICS); labelled
 // for the dropdown. The net metric carries the extra finalized-payment gate.
 const METRIC_OPTIONS: Array<{ value: ExplanationMetric; label: string }> = [
@@ -54,6 +54,7 @@ const METRIC_OPTIONS: Array<{ value: ExplanationMetric; label: string }> = [
   { value: "net_revenue_usd", label: "Net revenue" },
 ];
 
+/** Map a confidence label (HIGH/MEDIUM/LOW) to the badge tone, blue otherwise. */
 function confidenceTone(label: string | undefined): Severity {
   switch ((label ?? "").toUpperCase()) {
     case "HIGH":
@@ -75,6 +76,37 @@ function componentTone(key: string): Severity {
   return "green";
 }
 
+/**
+ * Static role -> permission-filter detail rows shown in the side panel. A closed
+ * Record over the Role union (finance/assistant/company) lets us index by the
+ * typed role directly with no fallback or non-null assertion — every role has an
+ * entry, so the lookup is total. Replaces the prior nested ternary chain.
+ */
+const PERMISSION_DETAILS: Record<Role, Array<{ label: string; value: string }>> = {
+  finance: [
+    { label: "Role", value: "Finance Admin" },
+    { label: "Scope", value: "Global finance month" },
+    { label: "Companies", value: "All allowed" },
+    { label: "Raw files", value: "Hidden unless explicitly granted" },
+  ],
+  assistant: [
+    { label: "Role", value: "Assistant Analyst" },
+    { label: "Scope", value: "Assigned non-finance work" },
+    { label: "Companies", value: "Visible without money cells" },
+    { label: "Raw files", value: "Hidden unless explicitly granted" },
+  ],
+  company: [
+    { label: "Role", value: "Company Manager" },
+    { label: "Scope", value: "Assigned company only" },
+    { label: "Companies", value: "Company-scoped" },
+    { label: "Raw files", value: "Hidden unless explicitly granted" },
+  ],
+};
+
+/**
+ * Trace / Explain-Number screen: pick month + channel + metric, then POST to the
+ * guarded explain endpoint and render the source-linked, permission-gated breakdown.
+ */
 export default function TraceView({
   canViewFinance,
   role,
@@ -113,111 +145,44 @@ export default function TraceView({
 
   const currency = netRevenue?.currency ?? "USD";
 
+  /** Generate the explanation for the selected channel-month-metric. */
   const runExplain = () => {
     if (!effectiveChannelId) return;
     // The hook captures its own error state; swallow the rejection here so an
     // un-actioned promise does not surface as an unhandled rejection.
-    void explanation.run({
-      channelId: effectiveChannelId,
-      month,
-      metric,
-    }).catch(() => {});
+    // FIX: dropped the `void` operator and let .catch() be the fire-and-forget
+    // sink, satisfying JS-0098 without changing behavior.
+    explanation
+      .run({
+        channelId: effectiveChannelId,
+        month,
+        metric,
+      })
+      .catch(() => {
+        /* The hook stored the error in state; nothing else to do here. */
+      });
   };
 
-  const permissionDetails =
-    role === "finance"
-      ? [
-          { label: "Role", value: "Finance Admin" },
-          { label: "Scope", value: "Global finance month" },
-          { label: "Companies", value: "All allowed" },
-          { label: "Raw files", value: "Hidden unless explicitly granted" },
-        ]
-      : role === "assistant"
-        ? [
-            { label: "Role", value: "Assistant Analyst" },
-            { label: "Scope", value: "Assigned non-finance work" },
-            { label: "Companies", value: "Visible without money cells" },
-            { label: "Raw files", value: "Hidden unless explicitly granted" },
-          ]
-        : [
-            { label: "Role", value: "Company Manager" },
-            { label: "Scope", value: "Assigned company only" },
-            { label: "Companies", value: "Company-scoped" },
-            { label: "Raw files", value: "Hidden unless explicitly granted" },
-          ];
+  const permissionDetails = PERMISSION_DETAILS[role];
 
   return (
     <section className="view-page" aria-labelledby="traceViewTitle">
       <div className="view-grid wide-side">
         <section className="panel">
-          <div className="panel-header">
-            <div className="panel-title">
-              <strong id="traceViewTitle">Explain Number</strong>
-              <span>
-                Generate the source-linked breakdown of a channel-month metric
-                from SQL-backed finance data
-              </span>
-            </div>
-            <Badge tone="violet">Audited read</Badge>
-          </div>
+          <TraceHeader />
 
-          <div
-            className="control-row"
-            aria-label="Explanation filters"
-            style={{ margin: 13 }}
-          >
-            <select
-              className="control"
-              aria-label="Month"
-              value={month}
-              onChange={(e) => setMonth(e.target.value)}
-            >
-              {MONTH_OPTIONS.map((m) => (
-                <option key={m} value={m}>
-                  {m}
-                </option>
-              ))}
-            </select>
-            <select
-              className="control"
-              aria-label="Channel"
-              value={effectiveChannelId}
-              disabled={channelsLoading || channels.length === 0}
-              onChange={(e) => setSelectedChannelId(e.target.value)}
-            >
-              {channels.length === 0 ? (
-                <option value="">
-                  {channelsLoading ? "Loading channels…" : "No channels"}
-                </option>
-              ) : (
-                channels.map((c) => (
-                  <option key={c.youtube_channel_id} value={c.youtube_channel_id}>
-                    {c.youtube_channel_id}
-                  </option>
-                ))
-              )}
-            </select>
-            <select
-              className="control"
-              aria-label="Metric"
-              value={metric}
-              onChange={(e) => setMetric(e.target.value as ExplanationMetric)}
-            >
-              {METRIC_OPTIONS.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
-            <button
-              className="primary-button"
-              type="button"
-              disabled={!effectiveChannelId || explanation.loading}
-              onClick={runExplain}
-            >
-              {explanation.loading ? "Explaining…" : "Explain"}
-            </button>
-          </div>
+          <ExplanationFilters
+            month={month}
+            onMonthChange={setMonth}
+            effectiveChannelId={effectiveChannelId}
+            channels={channels}
+            channelsLoading={channelsLoading}
+            onChannelChange={setSelectedChannelId}
+            metric={metric}
+            onMetricChange={setMetric}
+            explaining={explanation.loading}
+            onExplain={runExplain}
+          />
 
           {channelsError ? (
             <ChannelLoadError error={channelsError} />
@@ -230,30 +195,179 @@ export default function TraceView({
           />
         </section>
 
-        <aside className="view-stack">
-          <section className="panel">
-            <div className="panel-header">
-              <div className="panel-title">
-                <strong>Permission Filter</strong>
-                <span>Applied before the explanation query is authorized</span>
-              </div>
-              <Badge tone="violet">Scoped trace</Badge>
-            </div>
-            <div className="detail-grid">
-              {permissionDetails.map((d) => (
-                <div key={d.label} className="detail-cell">
-                  <span>{d.label}</span>
-                  <strong>{d.value}</strong>
-                </div>
-              ))}
-            </div>
-          </section>
-        </aside>
+        <PermissionFilterPanel details={permissionDetails} />
       </div>
     </section>
   );
 }
 
+/** Title block for the Explain Number panel. */
+function TraceHeader() {
+  return (
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong id="traceViewTitle">Explain Number</strong>
+        <span>
+          Generate the source-linked breakdown of a channel-month metric from
+          SQL-backed finance data
+        </span>
+      </div>
+      <Badge tone="violet">Audited read</Badge>
+    </div>
+  );
+}
+
+/** Month / channel / metric selectors plus the Explain trigger for the trace screen. */
+function ExplanationFilters({
+  month,
+  onMonthChange,
+  effectiveChannelId,
+  channels,
+  channelsLoading,
+  onChannelChange,
+  metric,
+  onMetricChange,
+  explaining,
+  onExplain,
+}: {
+  month: string;
+  onMonthChange: (value: string) => void;
+  effectiveChannelId: string;
+  channels: ChannelNetRevenue[];
+  channelsLoading: boolean;
+  onChannelChange: (value: string) => void;
+  metric: ExplanationMetric;
+  onMetricChange: (value: ExplanationMetric) => void;
+  explaining: boolean;
+  onExplain: () => void;
+}) {
+  return (
+    <div
+      className="control-row"
+      aria-label="Explanation filters"
+      style={{ margin: 13 }}
+    >
+      <select
+        className="control"
+        aria-label="Month"
+        value={month}
+        onChange={(e) => onMonthChange(e.target.value)}
+      >
+        {MONTH_OPTIONS.map((m) => (
+          <option key={m} value={m}>
+            {m}
+          </option>
+        ))}
+      </select>
+      <select
+        className="control"
+        aria-label="Channel"
+        value={effectiveChannelId}
+        disabled={channelsLoading || channels.length === 0}
+        onChange={(e) => onChannelChange(e.target.value)}
+      >
+        <ChannelOptions channels={channels} channelsLoading={channelsLoading} />
+      </select>
+      <select
+        className="control"
+        aria-label="Metric"
+        value={metric}
+        onChange={(e) => onMetricChange(e.target.value as ExplanationMetric)}
+      >
+        {METRIC_OPTIONS.map((m) => (
+          <option key={m.value} value={m.value}>
+            {m.label}
+          </option>
+        ))}
+      </select>
+      <button
+        className="primary-button"
+        type="button"
+        disabled={!effectiveChannelId || explaining}
+        onClick={onExplain}
+      >
+        {explaining ? "Explaining…" : "Explain"}
+      </button>
+    </div>
+  );
+}
+
+/** Option list for the channel selector: a placeholder when empty, otherwise rows. */
+function ChannelOptions({
+  channels,
+  channelsLoading,
+}: {
+  channels: ChannelNetRevenue[];
+  channelsLoading: boolean;
+}) {
+  if (channels.length === 0) {
+    return (
+      <option value="">
+        {channelsLoading ? "Loading channels…" : "No channels"}
+      </option>
+    );
+  }
+  return (
+    <>
+      {channels.map((c) => (
+        <option key={c.youtube_channel_id} value={c.youtube_channel_id}>
+          {c.youtube_channel_id}
+        </option>
+      ))}
+    </>
+  );
+}
+
+/** Static role-context side panel describing the scope applied before authorization. */
+function PermissionFilterPanel({
+  details,
+}: {
+  details: Array<{ label: string; value: string }>;
+}) {
+  return (
+    <aside className="view-stack">
+      <section className="panel">
+        <PermissionFilterHeader />
+        <div className="detail-grid">
+          {details.map((d) => (
+            <PermissionDetailCell key={d.label} label={d.label} value={d.value} />
+          ))}
+        </div>
+      </section>
+    </aside>
+  );
+}
+
+/** Title block for the permission-filter side panel. */
+function PermissionFilterHeader() {
+  return (
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong>Permission Filter</strong>
+        <span>Applied before the explanation query is authorized</span>
+      </div>
+      <Badge tone="violet">Scoped trace</Badge>
+    </div>
+  );
+}
+
+/** A single label/value cell in the permission-filter detail grid. */
+function PermissionDetailCell({
+  label,
+  value,
+}: {
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="detail-cell">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
+  );
+}
+
+/** Error band shown when the channel directory (net-revenue summary) fails to load. */
 function ChannelLoadError({ error }: { error: ApiError | Error }) {
   const { title, detail } = describeError(error);
   return (
@@ -272,6 +386,7 @@ function ChannelLoadError({ error }: { error: ApiError | Error }) {
   );
 }
 
+/** Render the explain hook's state: error, loading, idle prompt, or the result. */
 function ExplanationPanel({
   state,
   canViewFinance,
@@ -325,6 +440,7 @@ function ExplanationPanel({
   );
 }
 
+/** Render a returned explanation: value, confidence, formula, components, warnings. */
 function ExplanationResult({
   explanation,
   canViewFinance,
@@ -402,6 +518,7 @@ function ExplanationResult({
   );
 }
 
+/** Build a component row subtitle from its source kind/report, item count, or key. */
 function componentSubtitle(component: ExplanationComponent): string {
   if (component.source_kind) {
     return component.source_report_id
@@ -415,6 +532,7 @@ function componentSubtitle(component: ExplanationComponent): string {
   return component.key;
 }
 
+/** One explanation component row with a permission-gated money cell. */
 function ComponentRow({
   component,
   canViewFinance,

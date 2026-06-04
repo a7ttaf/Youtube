@@ -70,6 +70,22 @@ function lastFetchArgs() {
   return fetchMock().mock.calls.at(-1);
 }
 
+/** Narrow the last fetch args away from `undefined`, failing the test if none. */
+function requireFetchArgs() {
+  const args = lastFetchArgs();
+  if (!args) throw new Error("expected fetch to have been called");
+  return args;
+}
+
+/** Resolve a promise from outside via a deferred, for ordering concurrent calls. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 describe("useExportActions", () => {
   it("starts idle (no data, no loading, no error) before requestExport()", () => {
     fetchMock().mockResolvedValue(jsonResponse(CREATED, 202));
@@ -88,7 +104,7 @@ describe("useExportActions", () => {
       await result.current.requestExport(REQUEST_BODY);
     });
 
-    const [url, init] = lastFetchArgs()!;
+    const [url, init] = requireFetchArgs();
     expect(url).toBe("/exports");
     expect((init as RequestInit).method).toBe("POST");
     expect(JSON.parse((init as RequestInit).body as string)).toMatchObject({
@@ -117,5 +133,56 @@ describe("useExportActions", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.data).toBeNull();
     expect(result.current.error).toMatchObject({ name: "ApiError", status: 422 });
+  });
+
+  it("drops a same-tick duplicate submit: exactly one POST, one created job", async () => {
+    const first = deferred<Response>();
+    // Only ONE response is queued; a second POST would have no mock and surface
+    // the dedupe regression as an undefined-response failure.
+    fetchMock().mockReturnValueOnce(first.promise);
+    const { result } = renderHook(() => useExportActions(), { wrapper });
+
+    const ONLY = { ...CREATED, id: "only" };
+    let firstResolved: ExportJobCreated | null | undefined;
+    let secondResolved: ExportJobCreated | null | undefined;
+
+    await act(async () => {
+      // Double-click before re-render: both calls run off the same render
+      // closure (the state `loading` guard cannot catch the second).
+      const p1 = result.current
+        .requestExport(REQUEST_BODY)
+        .catch(() => undefined);
+      const p2 = result.current
+        .requestExport(REQUEST_BODY)
+        .catch(() => undefined);
+      first.resolve(jsonResponse(ONLY, 202));
+      [firstResolved, secondResolved] = await Promise.all([p1, p2]);
+    });
+
+    // Exactly one POST was dispatched; the duplicate was dropped, not queued.
+    expect(fetchMock()).toHaveBeenCalledTimes(1);
+    // The surviving call resolves with the created job; the dropped one with null.
+    expect(firstResolved).toMatchObject({ id: "only" });
+    expect(secondResolved).toBeNull();
+    expect(result.current.data?.id).toBe("only");
+    expect(result.current.loading).toBe(false);
+  });
+
+  it("allows a fresh submit after the in-flight request settles", async () => {
+    // A fresh Response per call: a Response body can only be read once.
+    fetchMock().mockImplementation(() => jsonResponse(CREATED, 202));
+    const { result } = renderHook(() => useExportActions(), { wrapper });
+
+    // First submit completes and clears the in-flight latch.
+    await act(async () => {
+      await result.current.requestExport(REQUEST_BODY);
+    });
+    // A later, non-overlapping submit must NOT be dropped.
+    await act(async () => {
+      await result.current.requestExport(REQUEST_BODY);
+    });
+
+    expect(fetchMock()).toHaveBeenCalledTimes(2);
+    expect(result.current.data?.id).toBe(CREATED.id);
   });
 });

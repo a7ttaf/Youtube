@@ -71,6 +71,22 @@ function lastFetchArgs() {
   return fetchMock().mock.calls.at(-1);
 }
 
+/** Narrow the last fetch args away from `undefined`, failing the test if none. */
+function requireFetchArgs() {
+  const args = lastFetchArgs();
+  if (!args) throw new Error("expected fetch to have been called");
+  return args;
+}
+
+/** Resolve a promise from outside via a deferred, for ordering concurrent calls. */
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+}
+
 describe("useExplanation", () => {
   it("starts idle (no data, no loading, no error) before run()", () => {
     fetchMock().mockResolvedValue(jsonResponse(GROSS_EXPLANATION));
@@ -94,7 +110,7 @@ describe("useExplanation", () => {
       });
     });
 
-    const [url, init] = lastFetchArgs()!;
+    const [url, init] = requireFetchArgs();
     expect(url).toBe(
       "/revenue/channels/demo-channel-alpha/months/2026-03/explain?metric=adjusted_gross_revenue_usd",
     );
@@ -116,7 +132,7 @@ describe("useExplanation", () => {
       });
     });
 
-    expect(lastFetchArgs()![0]).toBe(
+    expect(requireFetchArgs()[0]).toBe(
       "/revenue/channels/demo%2Falpha/months/2026-03/explain?metric=net_revenue_usd",
     );
   });
@@ -140,5 +156,43 @@ describe("useExplanation", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.data).toBeNull();
     expect(result.current.error).toMatchObject({ name: "ApiError", status: 403 });
+  });
+
+  it("keeps the newer result when an older in-flight Explain resolves last", async () => {
+    const first = deferred<Response>();
+    const second = deferred<Response>();
+    fetchMock()
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const { result } = renderHook(() => useExplanation(), { wrapper });
+
+    const FIRST = { ...GROSS_EXPLANATION, value: "111.11" };
+    const SECOND = { ...GROSS_EXPLANATION, value: "222.22" };
+
+    await act(async () => {
+      // Fire both Explains synchronously so they share the same render closure.
+      const p1 = result.current
+        .run({
+          channelId: "demo-channel-alpha",
+          month: "2026-03",
+          metric: "adjusted_gross_revenue_usd",
+        })
+        .catch(() => undefined);
+      const p2 = result.current
+        .run({
+          channelId: "demo-channel-beta",
+          month: "2026-03",
+          metric: "adjusted_gross_revenue_usd",
+        })
+        .catch(() => undefined);
+      // Resolve the SECOND run first, then the (superseded) FIRST last.
+      second.resolve(jsonResponse(SECOND));
+      first.resolve(jsonResponse(FIRST));
+      await Promise.all([p1, p2]);
+    });
+
+    // The stale first response must not overwrite the newer second one.
+    expect(result.current.data?.value).toBe("222.22");
+    expect(result.current.loading).toBe(false);
   });
 });
