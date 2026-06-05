@@ -377,8 +377,14 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
 - ✅ Manual override approval — shipped: POST /revenue/manual-overrides +
   /manual-overrides/{id}/approve (create + approve flow, locked-month guard,
   APPROVE_MANUAL_OVERRIDE scope, audited).
-- ⏳ Audit dashboard — remaining: tenant-scoped audit log backend
-  (PR #22); dashboard UI not built.
+- ✅ Audit dashboard — shipped (this branch `spec/audit-view-wiring`): the
+  AuditView timeline is wired to `GET /audit/events` (the tenant-scoped audit
+  log backend from PR #22). Cursor-paginated read, server-driven sensitive-
+  payload redaction (the UI reflects `details_redacted`, never reveals withheld
+  payloads), fail-closed gate (a non-audit viewer sees the restricted
+  placeholder and fires no fetch — so the self-auditing read is never spammed),
+  403 → no-permission copy. Summary tiles + coverage panel stay static context
+  (no aggregate-count route). Frontend-only; backend unchanged.
 
 ## P2 — Advanced features
 
@@ -465,8 +471,16 @@ single P-tier above.
   (401/403/network) or a `disabled` principal fails closed to `AccessDenied`;
   connector controls require `canRunConnectorJobs`; the Vite dev proxy now
   forwards `/session`. Smoke (`scripts/smoke_mvp.py`) asserts the contract
-  (raised by Codex review on PR #69). Remaining tails (unchanged): Registry/Audit
-  pages stay mock-labelled and live ingestion still needs real connector creds.
+  (raised by Codex review on PR #69). Remaining tails: Registry stays mock-
+  labelled and live ingestion still needs real connector creds (Audit is now
+  wired — see the Audit dashboard item under P0).
+- ✅ Production Audit view wiring — SHIPPED on `spec/audit-view-wiring` (stacked
+  on `spec/production-session-hydration`): the dashboard Audit page now reads the
+  real `GET /audit/events` feed (was mock `AUDIT_EVENTS`). Distinct cursor-
+  pagination types (`AuditLogEntry`/`AuditEventCursor`/`AuditEventPagination`),
+  a memoized `useAuditEvents` hook (one self-auditing fetch per mount, no loop),
+  and an extracted `views/AuditView.tsx`. Registry is now the only mock-labelled
+  page.
 - ⏳ Google source-reported revenue ingestion foundation: `currencies`
   reference table, tenant-scoped `google_revenue_source_rows` with idempotent
   source-row keys (full 64-char SHA-256 hex), storage repository, synthetic-

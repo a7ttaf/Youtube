@@ -183,7 +183,8 @@ only.
 | Trace / Explain     | `POST /revenue/channels/{ch}/months/{m}/explain?metric=...` (channel list reused from net-revenue) |
 | Exports             | `GET /exports` (job list) + `POST /exports` (request); QUEUED jobs show a **Generate** link that triggers on-demand generation via the `GET` download route, COMPLETED jobs re-serve the persisted artifact over that same route. `ANALYTICS_SUMMARY_CSV` has no binary route (computed inline, no Generate/download link) |
 | Connectors          | `GET /connectors/credentials` + `GET /adsense/payments`; `POST /connectors/jobs` and `POST /adsense/sync-payments`. The job-sync and AdSense-sync controls render **disabled for every preview role** (hint: "Requires a connector-operations role.") and use an inline reason field — no browser prompts |
-| Registry / Audit    | Mock data only (not wired to the API yet — clearly labelled in-app) |
+| Audit               | `GET /audit/events` (cursor-paginated timeline; server-driven sensitive-payload redaction; fail-closed — a non-audit viewer sees a restricted placeholder and fires no fetch). Summary tiles + coverage panel stay static context |
+| Registry            | Mock data only (not wired to the API yet — clearly labelled in-app) |
 
 Money values are backend decimal **strings** and are formatted for display only
 (no float math); finance cells are permission-gated to a `Restricted` sentinel
