@@ -17,6 +17,7 @@ beforeEach(() => {
 
 afterEach(() => {
   globalThis.fetch = ORIGINAL_FETCH;
+  vi.restoreAllMocks();
 });
 
 // Real-shaped audit-event page (AuditLogEntry.to_api() + cursor pagination).
@@ -132,6 +133,19 @@ describe("useAuditEvents", () => {
     fetchMock().mockResolvedValue(jsonResponse(EVENTS));
     const { result } = renderHook(
       () => useAuditEvents({ cursor_created_at: "2026-03-21T02:18:44Z" }),
+      { wrapper },
+    );
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const url = urlOf(requireFetchArgs()[0]);
+    expect(url).not.toContain("cursor_created_at");
+    expect(url).not.toContain("cursor_id");
+  });
+
+  it("sends NEITHER cursor param when only cursor_id is given (both-or-neither, symmetric)", async () => {
+    fetchMock().mockResolvedValue(jsonResponse(EVENTS));
+    const { result } = renderHook(
+      () => useAuditEvents({ cursor_id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" }),
       { wrapper },
     );
 

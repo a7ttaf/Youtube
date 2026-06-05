@@ -247,4 +247,24 @@ describe("AuditView wired to GET /audit/events", () => {
       screen.getByRole("button", { name: /download audit view/i }),
     ).toBeDisabled();
   });
+
+  it("shows a truncation indicator when the backend reports has_more: true", async () => {
+    const moreEvents: AuditEventListResponse = {
+      ...EVENTS,
+      pagination: { limit: 50, returned: 1, has_more: true, next_cursor: { created_at: "2026-03-21T02:18:44Z", id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" } },
+    };
+    fetchMock().mockImplementation(
+      routeEvents((url) =>
+        url.startsWith("/audit/events") ? jsonResponse(moreEvents) : null,
+      ),
+    );
+    renderAuditView();
+
+    await waitFor(() =>
+      expect(screen.getByText("REVENUE_EXPORTED")).toBeInTheDocument(),
+    );
+    // Operators must know more pages exist so they don't close an investigation early.
+    expect(screen.getByText(/More audit events available/i)).toBeInTheDocument();
+    expect(screen.getByText(/Showing first page only/i)).toBeInTheDocument();
+  });
 });

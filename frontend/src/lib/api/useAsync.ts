@@ -76,10 +76,20 @@ export function useAsync<T>( // skipcq: JS-0067
     // in-flight promise for the same (run, nonce); a real dep change or reload()
     // produces a new key and correctly starts a fresh request.
     const cached = inflightRef.current;
-    const promise =
-      cached && cached.run === run && cached.nonce === nonce
-        ? cached.promise
-        : run();
+    let promise: Promise<T>;
+    if (cached && cached.run === run && cached.nonce === nonce) {
+      promise = cached.promise;
+    } else {
+      try {
+        promise = run();
+      } catch (caught: unknown) {
+        // FIX: run() throwing synchronously (before returning a Promise) would
+        // otherwise leave loading=true pinned forever — .finally never fires.
+        setError(caught instanceof Error ? caught : new Error(String(caught)));
+        setLoading(false);
+        return;
+      }
+    }
     inflightRef.current = { run, nonce, promise };
     promise
       .then((result) => {

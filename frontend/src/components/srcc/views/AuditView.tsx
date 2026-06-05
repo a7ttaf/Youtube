@@ -224,6 +224,19 @@ function AuditTimelineFeed() { // skipcq: JS-0067, JS-R1005
       {events.map((event) => (
         <AuditTimelineItem key={event.id} event={event} />
       ))}
+      {/* When the backend has more pages, surface a clear truncation indicator
+          so operators investigating a security incident know to build a paginated
+          view rather than assuming the list is complete. */}
+      {data?.pagination?.has_more && (
+        <div className="timeline-item" role="listitem">
+          <TimelinePlaceholderRow
+            tone="amber"
+            title="More audit events available"
+            sub="Showing first page only — cursor pagination coming"
+            badge="Truncated"
+          />
+        </div>
+      )}
     </div>
   );
 }
@@ -315,7 +328,7 @@ function AuditTimelineItem({ event }: { event: AuditLogEntry }) { // skipcq: JS-
 function AuditCoveragePanel() { // skipcq: JS-0067
   return (
     <aside className="view-stack">
-      <section className="panel">
+      <section className="panel" aria-labelledby="auditCoverageTitle">
         <AuditCoverageHeader />
         <div className="issue-list" role="list">
           <ItemRow tone="green" title="Revenue reads" sub="Every money cell view emits an audit row"
@@ -335,7 +348,7 @@ function AuditCoverageHeader() { // skipcq: JS-0067
   return (
     <div className="panel-header">
       <div className="panel-title">
-        <strong>Audit Coverage</strong>
+        <strong id="auditCoverageTitle">Audit Coverage</strong>
         <span>Required to be present for every sensitive surface</span>
       </div>
     </div>
