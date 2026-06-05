@@ -46,11 +46,15 @@ export default function AuditView({ // skipcq: JS-0067
 }) {
   return (
     <section className="view-page" aria-labelledby="auditTitle">
-      <div className="view-summary" aria-label="Audit summary">
+      <div className="view-summary" aria-label="Audit summary (static context)">
         {AUDIT_SUMMARY.map((s) => (
           <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
         ))}
       </div>
+      {/* Summary counts above are static context — no live aggregate endpoint yet. */}
+      <span className="item-sub" role="note" style={{ marginBottom: "0.5rem", display: "block" }}>
+        Summary counts above are reference figures — live aggregate endpoint coming.
+      </span>
 
       <div className="view-grid">
         <AuditLogPanel canViewAudit={canViewAudit} />
@@ -100,6 +104,27 @@ function AuditLogPanelHeader() { // skipcq: JS-0067
 }
 
 /**
+ * Reusable inner content for timeline placeholder rows (restricted, error, loading,
+ * empty). Rendered as a fragment inside the caller's `timeline-item` div so each
+ * state can control its own wrapper attributes (role, aria-busy, etc.) independently.
+ */
+function TimelinePlaceholderRow({ tone, title, sub, badge }: { // skipcq: JS-0067
+  tone: Severity; title: string; sub: string; badge: string;
+}) {
+  return (
+    <>
+      <span className="timeline-time">--:--</span>
+      <Dot tone={tone} />
+      <span>
+        <span className="item-title">{title}</span>
+        <span className="item-sub">{sub}</span>
+      </span>
+      <Badge tone={tone}>{badge}</Badge>
+    </>
+  );
+}
+
+/**
  * Audit event timeline gate. A non-audit viewer sees a single restricted
  * placeholder row and — critically — NO hook is mounted here, so no /audit/events
  * fetch fires (fail-closed). Only when permitted is the always-fetching feed
@@ -110,13 +135,12 @@ function AuditTimeline({ canViewAudit }: { canViewAudit: boolean }) { // skipcq:
     return (
       <div className="timeline" role="list">
         <div className="timeline-item" role="listitem">
-          <span className="timeline-time">--:--</span>
-          <Dot tone="red" />
-          <span>
-            <span className="item-title">Audit view restricted</span>
-            <span className="item-sub">Sensitive audit events require Finance Admin access</span>
-          </span>
-          <Badge tone="red">Restricted</Badge>
+          <TimelinePlaceholderRow
+            tone="red"
+            title="Audit view restricted"
+            sub="Audit log access requires the VIEW_AUDIT_LOG permission"
+            badge="Restricted"
+          />
         </div>
       </div>
     );
@@ -153,13 +177,12 @@ function AuditTimelineFeed() { // skipcq: JS-0067, JS-R1005
             would be an orphan (no enclosing role="list"), so the row stays a
             plain item div. */}
         <div className="timeline-item">
-          <span className="timeline-time">--:--</span>
-          <Dot tone="red" />
-          <span>
-            <span className="item-title">{described.title}</span>
-            <span className="item-sub">{detail}</span>
-          </span>
-          <Badge tone="red">Error</Badge>
+          <TimelinePlaceholderRow
+            tone="red"
+            title={described.title}
+            sub={detail}
+            badge="Error"
+          />
         </div>
       </div>
     );
@@ -169,13 +192,12 @@ function AuditTimelineFeed() { // skipcq: JS-0067, JS-R1005
     return (
       <div className="timeline" role="list" aria-busy="true">
         <div className="timeline-item" role="listitem">
-          <span className="timeline-time">--:--</span>
-          <Dot tone="blue" />
-          <span>
-            <span className="item-title">Loading audit events…</span>
-            <span className="item-sub">Reading the audit log (this read is itself audited)</span>
-          </span>
-          <Badge tone="blue">Loading</Badge>
+          <TimelinePlaceholderRow
+            tone="blue"
+            title="Loading audit events…"
+            sub="Reading the audit log (this read is itself audited)"
+            badge="Loading"
+          />
         </div>
       </div>
     );
@@ -186,13 +208,12 @@ function AuditTimelineFeed() { // skipcq: JS-0067, JS-R1005
     return (
       <div className="timeline" role="list">
         <div className="timeline-item" role="listitem">
-          <span className="timeline-time">--:--</span>
-          <Dot tone="amber" />
-          <span>
-            <span className="item-title">No audit events recorded</span>
-            <span className="item-sub">No audit events match the current filters</span>
-          </span>
-          <Badge tone="amber">Empty</Badge>
+          <TimelinePlaceholderRow
+            tone="amber"
+            title="No audit events recorded"
+            sub="No audit events match the current filters"
+            badge="Empty"
+          />
         </div>
       </div>
     );
@@ -207,30 +228,43 @@ function AuditTimelineFeed() { // skipcq: JS-0067, JS-R1005
   );
 }
 
+/** Format the entity portion of the event subtitle (entity_type + optional id). */
+function fmtEntityPart(entity_type: string | null, entity_id: string | null): string | null { // skipcq: JS-0067
+  if (!entity_type) return null;
+  return entity_id ? `${entity_type}=${entity_id}` : entity_type;
+}
+
+/** Format the scope portion of the event subtitle (scope_type + optional id). */
+function fmtScopePart(scope_type: string | null, scope_id: string | null): string | null { // skipcq: JS-0067
+  if (!scope_type) return null;
+  return scope_id ? `${scope_type}:${scope_id}` : `scope=${scope_type}`;
+}
+
 /**
  * Build the subtitle line from the audit event's REAL non-null fields only — no
  * invented data. Renders the entity, scope, actor, and reason that are present.
  */
 function buildEventSub(event: AuditLogEntry): string { // skipcq: JS-0067
-  const parts: string[] = [];
-  if (event.entity_type) {
-    parts.push(
-      event.entity_id
-        ? `${event.entity_type}=${event.entity_id}`
-        : event.entity_type,
-    );
-  }
-  if (event.scope_type) {
-    parts.push(
-      event.scope_id
-        ? `${event.scope_type}:${event.scope_id}`
-        : `scope=${event.scope_type}`,
-    );
-  }
-  if (event.user_id) parts.push(`actor=${event.user_id}`);
-  if (event.reason) parts.push(`reason=${event.reason}`);
+  const parts = [
+    fmtEntityPart(event.entity_type, event.entity_id),
+    fmtScopePart(event.scope_type, event.scope_id),
+    event.user_id ? `actor=${event.user_id}` : null,
+    event.reason ? `reason=${event.reason}` : null,
+  ].filter(Boolean) as string[];
   // Honest fallback when the event carries no contextual fields at all.
   return parts.length > 0 ? parts.join(" · ") : "No additional context recorded";
+}
+
+/**
+ * Render a safe summary of non-redacted event details — top-level primitive
+ * values only (string, number, boolean). Nested objects are intentionally skipped
+ * to avoid surfacing raw structured data in the UI without schema knowledge.
+ */
+function renderDetailsLine(details: Record<string, unknown>): string | null { // skipcq: JS-0067
+  const pairs = Object.entries(details)
+    .filter(([, v]) => v !== null && v !== undefined && typeof v !== "object")
+    .map(([k, v]) => `${k}=${String(v)}`);
+  return pairs.length > 0 ? pairs.join(" · ") : null;
 }
 
 /**
@@ -238,9 +272,12 @@ function buildEventSub(event: AuditLogEntry): string { // skipcq: JS-0067
  * `sensitive` flag; when `details_redacted` is true the row shows a clear
  * "Sensitive (redacted)" indicator and renders NO details payload and NO reveal
  * control — the redaction decision is the backend's, never undone client-side.
+ * When `details_redacted` is false and the details object is non-empty, the
+ * top-level primitive fields are rendered as a safe key=value summary.
  */
 function AuditTimelineItem({ event }: { event: AuditLogEntry }) { // skipcq: JS-0067
   const tone: Severity = event.sensitive ? "red" : "green";
+  const detailsLine = event.details_redacted ? null : renderDetailsLine(event.details);
   return (
     <div className="timeline-item" role="listitem">
       <span className="timeline-time">{formatTimestamp(event.created_at)}</span>
@@ -252,6 +289,8 @@ function AuditTimelineItem({ event }: { event: AuditLogEntry }) { // skipcq: JS-
           <span className="item-sub" role="note">
             Sensitive (redacted) — payload withheld by the audit service
           </span>
+        ) : detailsLine ? (
+          <span className="item-sub" role="note">{detailsLine}</span>
         ) : null}
       </span>
       <Badge tone={tone}>{event.sensitive ? "Sensitive" : "Logged"}</Badge>

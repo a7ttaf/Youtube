@@ -17,6 +17,34 @@ export type AuditEventsQuery = {
   limit?: number;
 };
 
+/**
+ * Build the GET /audit/events URL with optional filter and pagination params.
+ * Cursor params are both-or-neither — a half-cursor 422s on the backend.
+ * Extracted to keep the useCallback closure a single expression (avoids a high
+ * cyclomatic complexity count from the conditional param-set branches).
+ */
+function buildAuditEventsUrl( // skipcq: JS-0067
+  event_type: string | undefined,
+  entity_type: string | undefined,
+  entity_id: string | undefined,
+  cursor_created_at: string | undefined,
+  cursor_id: string | undefined,
+  limit: number | undefined,
+): string {
+  const params = new URLSearchParams();
+  if (event_type != null) params.set("event_type", event_type);
+  if (entity_type != null) params.set("entity_type", entity_type);
+  if (entity_id != null) params.set("entity_id", entity_id);
+  if (limit != null) params.set("limit", String(limit));
+  // Both-or-neither: only append cursor when both halves are present.
+  if (cursor_created_at != null && cursor_id != null) {
+    params.set("cursor_created_at", cursor_created_at);
+    params.set("cursor_id", cursor_id);
+  }
+  const qs = params.toString();
+  return `/audit/events${qs ? `?${qs}` : ""}`;
+}
+
 // ============================================================================
 // Purpose: Typed auto-fetch hook for the audit-event log. Builds GET
 //   /audit/events (with optional event_type/entity_type/entity_id filters,
@@ -30,10 +58,11 @@ export type AuditEventsQuery = {
 //   render and self-audit in a loop. The hook fetches once per mount / filter
 //   change and never polls. Pagination is CURSOR-based (next_cursor.{created_at,
 //   id}), distinct from the offset PaginationMeta the other lists use; the cursor
-//   params are sent both-or-neither so a half-cursor never 422s. No client-side
-//   authorization is invented — the backend VIEW_AUDIT_LOG gate (and the separate
-//   sensitive-payload gate that drives redaction) is authoritative; a 403
-//   surfaces as the typed ApiError for the view to translate.
+//   params are sent both-or-neither (via buildAuditEventsUrl) so a half-cursor
+//   never 422s. No client-side authorization is invented — the backend
+//   VIEW_AUDIT_LOG gate (and the separate sensitive-payload gate that drives
+//   redaction) is authoritative; a 403 surfaces as the typed ApiError for the
+//   view to translate.
 // Blast Radius: Audit read (each call self-audits server-side via the backend's
 //   own guarded route). No finance number, no source-of-truth mutation.
 // Connections:
@@ -54,30 +83,13 @@ export function useAuditEvents( // skipcq: JS-0067
     limit,
   } = query;
 
-  const run = useCallback(() => {
-    const params = new URLSearchParams();
-    if (event_type != null) params.set("event_type", event_type);
-    if (entity_type != null) params.set("entity_type", entity_type);
-    if (entity_id != null) params.set("entity_id", entity_id);
-    if (limit != null) params.set("limit", String(limit));
-    // Cursor params are both-or-neither: a half-cursor 422s on the backend.
-    if (cursor_created_at != null && cursor_id != null) {
-      params.set("cursor_created_at", cursor_created_at);
-      params.set("cursor_id", cursor_id);
-    }
-    const qs = params.toString();
-    return client.get<AuditEventListResponse>(
-      `/audit/events${qs ? `?${qs}` : ""}`,
-    );
-  }, [
-    client,
-    event_type,
-    entity_type,
-    entity_id,
-    cursor_created_at,
-    cursor_id,
-    limit,
-  ]);
+  const run = useCallback(
+    () =>
+      client.get<AuditEventListResponse>(
+        buildAuditEventsUrl(event_type, entity_type, entity_id, cursor_created_at, cursor_id, limit),
+      ),
+    [client, event_type, entity_type, entity_id, cursor_created_at, cursor_id, limit],
+  );
 
   return useAsync(run);
 }

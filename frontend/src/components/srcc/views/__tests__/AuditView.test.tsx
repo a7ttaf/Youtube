@@ -129,6 +129,8 @@ describe("AuditView wired to GET /audit/events", () => {
     expect(screen.getByText(/exp-1/)).toBeInTheDocument();
     expect(screen.getByText(/finance\.admin@ums/)).toBeInTheDocument();
     expect(screen.getByText(/Monthly close export/)).toBeInTheDocument();
+    // Non-redacted details rendered as safe key=value pairs.
+    expect(screen.getByText(/checksum=exp_8b3c41/)).toBeInTheDocument();
     // Exactly one self-auditing fetch per mount (no loop).
     expect(auditCalls()).toHaveLength(1);
   });
@@ -165,11 +167,12 @@ describe("AuditView wired to GET /audit/events", () => {
     );
   });
 
-  it("renders the restricted placeholder and fires NO fetch when canViewAudit is false", async () => {
+  it("renders the restricted placeholder and fires NO fetch when canViewAudit is false", () => {
     fetchMock().mockImplementation(routeEvents(() => null));
     renderAuditView(false);
 
     expect(screen.getByText("Audit view restricted")).toBeInTheDocument();
+    expect(screen.getByText(/VIEW_AUDIT_LOG permission/i)).toBeInTheDocument();
     // Fail-closed: the gated branch calls no hook, so no /audit/events fetch.
     expect(auditCalls()).toHaveLength(0);
   });
