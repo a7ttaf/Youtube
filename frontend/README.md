@@ -145,6 +145,35 @@ changes the UI's permission modelling but not backend authorization, which alway
 comes from the fixed dev-gateway role (`VITE_DEV_GATEWAY_ROLE`, injected
 server-side at proxy start); the switcher renders a hint saying exactly this.
 
+## Production session hydration
+
+On bootstrap the SPA calls `GET /session/me` (`useSessionBootstrap` →
+`SessionContext`) to hydrate the **authenticated principal's capabilities** —
+camelCase booleans (`canViewRevenue`, `canExportRevenue`, `canRunConnectorJobs`,
+…) the backend derives from the principal's permissions at **global scope**. The
+AppShell renders the dashboard gated by those capabilities, so a **production
+build** now serves the real surface for an authorized principal instead of a
+permanent access-denied screen — **no preview role is needed**.
+
+- The shell shows a loading state until `/session/me` settles, then renders
+  the dashboard gated by capabilities.
+- **Failed hydration fails closed**: any rejection (401 / 403 / network) or a
+  `disabled` principal renders `AccessDenied` — the dashboard is never shown
+  before the principal is known, and a transient error never leaves a stale
+  principal's capabilities live.
+- **Connector controls require `canRunConnectorJobs`**: the job-sync and
+  AdSense-sync write actions stay disabled unless the principal's capability is
+  true.
+- The in-shell **role preview** (DEV only) is **presentation-only** — it relabels
+  the UI's permission modelling but does not change the hydrated capabilities,
+  which are always backend-derived from `/session/me`.
+
+The dev demo flow above still applies: `/session/me` rides the same
+trusted-gateway/dev-proxy headers (the proxy now also forwards `/session`), so
+the capabilities the SPA hydrates reflect the dev-gateway role
+(`VITE_DEV_GATEWAY_ROLE`) injected server-side. Capabilities are **global-scope**
+only.
+
 ## Which screen shows what
 
 | Screen (nav)        | Backend endpoint(s)                                              |

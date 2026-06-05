@@ -2,7 +2,8 @@
 """End-to-end smoke check for the UMS Smart Revenue June-14 MVP dashboard.
 
 Proves that ONE seeded demo month flows through every backend endpoint the six
-wired dashboard screens consume. It:
+wired dashboard screens consume, plus the production session-hydration path
+(GET /session/me) the SPA bootstrap now calls. It:
 
 1. Seeds a fully-populated demo month (scripts/seed_demo_month.py) into a
    throwaway SQLite file with ``--create-schema``. The seed exercises the real
@@ -219,9 +220,48 @@ def _validate_export_created(body: Any) -> str:
     return _require(isinstance(body.get("id"), str), "missing id on export job")
 
 
+def _validate_session_me(body: Any) -> str:
+    """Assert GET /session/me carries the principal identity + capabilities.
+
+    This is the production hydration contract the SPA calls on bootstrap:
+    identity (user_id/email) plus the camelCase capability booleans the AppShell
+    gates the dashboard on. The demo principal is super_owner @ global scope, so
+    every capability resolves true here — the assertion only proves the shape +
+    that identity is present, not a specific permission grant.
+    """
+    if not isinstance(body, Mapping):
+        return "response is not a JSON object"
+    capabilities = body.get("capabilities")
+    return (
+        _require(isinstance(body.get("user_id"), str) and body["user_id"], "missing user_id")
+        or _require(isinstance(body.get("email"), str) and body["email"], "missing email")
+        or _require(isinstance(capabilities, Mapping), "capabilities object missing")
+        or _require(
+            isinstance(capabilities.get("canViewRevenue"), bool),
+            "capabilities.canViewRevenue must be a camelCase bool",
+        )
+        or _require(
+            isinstance(capabilities.get("canRunConnectorJobs"), bool),
+            "capabilities.canRunConnectorJobs must be a camelCase bool",
+        )
+    )
+
+
 def _build_checks(month: str) -> list[_Check]:
     """Build the per-screen endpoint checks for the seeded demo month."""
     return [
+        # Production session hydration: the SPA bootstrap (useSessionBootstrap)
+        # calls GET /session/me to hydrate the principal's capabilities and gate
+        # the AppShell. It is a demo path the frontend now depends on, so the
+        # smoke proves the identity + camelCase capability shape under the same
+        # in-process trusted-gateway demo principal as every screen check.
+        _Check(
+            "Session",
+            "session hydration",
+            "GET",
+            "/session/me",
+            _validate_session_me,
+        ),
         _Check(
             "Command Center",
             "net-revenue summary",

@@ -454,12 +454,19 @@ single P-tier above.
   Exports, Connectors; Registry/Audit stay mock-labelled), demo-month seed
   (`scripts/seed_demo_month.py`), end-to-end smoke (`scripts/smoke_mvp.py`),
   demo runbook (`frontend/README.md`) — PR #69.
-- ⏳ Production session role hydration — remaining: the dashboard shell is
-  dev/preview-gated (`VITE_ENABLE_ROLE_PREVIEW`); a production build renders
-  the fail-closed access-denied state because no backend endpoint exposes the
-  authenticated principal's role to the SPA (only `GET /tenants/me` exists).
-  Needs a session/principal read endpoint plus AppShell hydration before any
-  production deployment (raised by Codex review on PR #69).
+- ✅ Production session role hydration — SHIPPED on `spec/production-session-hydration`:
+  `GET /session/me` (`backend/ums_smart_revenue/api/session.py`) returns the
+  authenticated principal's identity, optional tenant, active roles/permissions,
+  and **global-scope** camelCase capability booleans derived (fail-closed) from
+  the backend permission policy. The SPA bootstraps it (`useSessionBootstrap` +
+  `SessionContext`) and the AppShell renders the dashboard gated by those
+  capabilities — a production build no longer shows the permanent access-denied
+  screen; the dev preview role is now presentation-only. Failed hydration
+  (401/403/network) or a `disabled` principal fails closed to `AccessDenied`;
+  connector controls require `canRunConnectorJobs`; the Vite dev proxy now
+  forwards `/session`. Smoke (`scripts/smoke_mvp.py`) asserts the contract
+  (raised by Codex review on PR #69). Remaining tails (unchanged): Registry/Audit
+  pages stay mock-labelled and live ingestion still needs real connector creds.
 - ⏳ Google source-reported revenue ingestion foundation: `currencies`
   reference table, tenant-scoped `google_revenue_source_rows` with idempotent
   source-row keys (full 64-char SHA-256 hex), storage repository, synthetic-

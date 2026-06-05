@@ -591,13 +591,27 @@ operator-asserted (tenant_id, month, bank_reference)→account(s) receipt model
   display conversion is later work and must be labeled non-official unless
   it is the currency reported by Google/AdSense.
 
-### Status (2026-06-04)
+### Status (2026-06-05)
 
 Six screens are wired to live APIs on the June-14 MVP branch (PR #69):
 Command Center + smart alerts, Close, Trace/Explain, Exports, Connectors —
 plus a demo-month seed (`scripts/seed_demo_month.py`), an end-to-end smoke
 (`scripts/smoke_mvp.py`), and the demo runbook (`frontend/README.md`).
 Registry and Audit remain mock-only and are labelled as such in-app.
+
+- ✅ Production session hydration — SHIPPED on
+  `spec/production-session-hydration`: `GET /session/me`
+  (`backend/ums_smart_revenue/api/session.py`) returns the authenticated
+  principal's identity + optional tenant + roles/permissions + **global-scope**
+  camelCase capability booleans derived (fail-closed) from the permission
+  policy; the SPA bootstraps it (`useSessionBootstrap` + `SessionContext`) and
+  the AppShell renders the dashboard gated by those capabilities (capability-gated
+  AppShell). A production build no longer shows the permanent access-denied
+  screen and needs no preview role; the dev preview role is now
+  presentation-only. Failed hydration / a `disabled` principal fails closed to
+  `AccessDenied`; connector controls require `canRunConnectorJobs`; the smoke
+  asserts the contract. Remaining tails: Registry/Audit pages stay mock-only and
+  live ingestion still needs real connector credentials.
 
 ---
 
