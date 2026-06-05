@@ -5,6 +5,86 @@ export type TenantRead = {
 };
 
 // ============================================================================
+// Purpose: TypeScript mirror of the backend GET /session/me JSON contract. The
+//   SPA hydrates the authenticated principal's identity + backend-DERIVED
+//   capability booleans from this endpoint and gates every UI surface on them,
+//   so the browser never guesses authorization from a role string. Fields are
+//   matched 1:1 against the backend serializers (not guessed); nullable fields
+//   serialize as null. Capability keys are camelCase on the wire (the backend
+//   SessionCapabilities model uses an alias generator).
+// Standards: Read-only typed boundary at the API surface; no logic here. The
+//   capabilities are AUTHORITATIVE — the UI must never fabricate a capability
+//   the session did not grant.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/session.py
+//       SessionTenant            (lines 21-26) -> SessionTenantRef
+//       SessionScopeAssignment   (lines 29-34) -> SessionRoleAssignment
+//       SessionPermissionGrant   (lines 37-42) -> SessionPermissionGrant
+//       SessionCapabilities      (lines 45-64) -> SessionCapabilities
+//       SessionMe                (lines 67-77) -> SessionMe
+//       get_current_session_endpoint (lines 163-199) -> GET /session/me
+//   - File: frontend/src/contexts/SessionContext.tsx -> hydrates from this shape.
+// ============================================================================
+
+// The resolved tenant context on the session, or null when unresolved.
+// Source: SessionTenant (session.py:21-26).
+export type SessionTenantRef = {
+  id: string;
+  slug: string;
+  display_name: string;
+};
+
+// One active role assignment flattened for the SPA.
+// Source: SessionScopeAssignment (session.py:29-34).
+export type SessionRoleAssignment = {
+  role: string;
+  scope_type: string;
+  scope_id: string | null;
+};
+
+// One active direct permission grant flattened for the SPA.
+// Source: SessionPermissionGrant (session.py:37-42).
+export type SessionPermissionGrant = {
+  permission: string;
+  scope_type: string;
+  scope_id: string | null;
+};
+
+// Derived global-scope capability booleans the SPA uses to render UI. Every key
+// is camelCase (backend alias generator). These are AUTHORITATIVE — the UI gates
+// every surface on them and never fabricates one the backend did not grant.
+// Source: SessionCapabilities (session.py:45-64).
+export type SessionCapabilities = {
+  canViewRevenue: boolean;
+  canViewConfidence: boolean;
+  canViewPayments: boolean;
+  canViewBankReconciliation: boolean;
+  canCloseMonth: boolean;
+  canUnlockMonth: boolean;
+  canChangeAllocation: boolean;
+  canExportRevenue: boolean;
+  canExportAnalyticsReports: boolean;
+  canManageRegistry: boolean;
+  canManageConnectors: boolean;
+  canRunConnectorJobs: boolean;
+  canViewAudit: boolean;
+};
+
+// GET /session/me — the authenticated principal's identity, optional tenant,
+// active roles/permissions, service-account/disabled flags, and the derived
+// capabilities. Source: SessionMe (session.py:67-77).
+export type SessionMe = {
+  user_id: string;
+  email: string;
+  tenant: SessionTenantRef | null;
+  roles: SessionRoleAssignment[];
+  permissions: SessionPermissionGrant[];
+  is_service_account: boolean;
+  disabled: boolean;
+  capabilities: SessionCapabilities;
+};
+
+// ============================================================================
 // Purpose: TypeScript mirror of the backend net-revenue JSON contract. All
 //   money values are serialized as STRINGS by the backend (decimal_to_api) and
 //   may be null when a value is unknown — the UI formats them for display and

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 
 import { ApiError, useApiClient } from "@/lib/api/client";
-import type { TenantRead } from "@/lib/api/types";
+import type { SessionCapabilities, TenantRead } from "@/lib/api/types";
+import { useSessionBootstrap } from "@/contexts/SessionContext";
 import { useTenant } from "@/contexts/TenantContext";
 import {
   AUDIT_EVENTS,
@@ -37,15 +38,12 @@ const ROLE_LABELS: Record<Role, string> = {
   company: "Company Manager",
 };
 
-type AuthenticatedSession = {
-  role?: Role;
-};
-
 type AccessPermissions = {
   role: Role;
   canViewFinance: boolean;
   canManageRegistry: boolean;
   canCloseMonth: boolean;
+  canUnlockMonth: boolean;
   canCreateGlobalExports: boolean;
   canCreateScopedExports: boolean;
   canRequestRawExports: boolean;
@@ -55,43 +53,74 @@ type AccessPermissions = {
   canViewAudit: boolean;
 };
 
-// FIX: The previous comment claimed this value "is hydrated from the
-// server-authenticated session claim", but no hydration exists yet — the
-// backend exposes no principal/role endpoint (only GET /tenants/me). It is an
-// intentionally empty placeholder: a production build without
-// VITE_ENABLE_ROLE_PREVIEW renders <AccessDeniedState/> (fail-closed) until a
-// backend session endpoint ships. Tracked in Docs/15_DELIVERY_BACKLOG.md
-// ("Production session role hydration").
-const SERVER_AUTHENTICATED_SESSION: AuthenticatedSession = {};
+// FIX: Session capabilities are now hydrated from GET /session/me (see
+// SessionProvider / useSessionBootstrap) instead of guessed from a role string.
+// The empty SERVER_AUTHENTICATED_SESSION placeholder is removed: production
+// renders the dashboard gated by the backend-derived session.capabilities, the
+// dev role selector only drives the displayed label, and a failed hydration
+// (401/403/network) or session.disabled fails closed to <AccessDeniedState/>.
 
-const CAN_PREVIEW_ROLES =
-  import.meta.env.DEV || import.meta.env.VITE_ENABLE_ROLE_PREVIEW === "true";
 const DEFAULT_PREVIEW_ROLE: Role = "assistant";
 
-/**
- * Resolve the boolean access permissions for a preview role so each view gates
- * finance visibility, registry editing, exports, connectors, and audit consistently.
- */
-function permissionsForRole(role: Role): AccessPermissions { // skipcq: JS-0067
-  const finance = role === "finance";
-  const company = role === "company";
+// ============================================================================
+// Purpose: Report whether the dev-only role preview selector should render. The
+//          selector only changes the DISPLAYED role label; it never fabricates
+//          capabilities (those are always authoritative from /session/me). This
+//          is a function (not a module const) so the value is read at render
+//          time and tests can flip import.meta.env via vi.stubEnv to exercise
+//          the production (no-preview) path.
+// Standards: Dev preview is presentation only; capabilities stay backend-derived.
+// Blast Radius: Authorization (UI label only — never grants a capability).
+// ============================================================================
+function canPreviewRoles(): boolean { // skipcq: JS-0067
+  return (
+    import.meta.env.DEV || import.meta.env.VITE_ENABLE_ROLE_PREVIEW === "true"
+  );
+}
+
+// ============================================================================
+// Purpose: Map the backend-DERIVED session capabilities onto the UI gate shape
+//          the wired views already consume. This is the single capabilities ->
+//          UI-gates translation: every gate traces to an authoritative session
+//          capability, so the UI never grants a surface the backend did not.
+// Database/ORM: None (frontend).
+// Standards: Capabilities are authoritative — no gate is invented. Finance
+//            visibility maps to VIEW_REVENUE; close to LOCK_FINANCE_MONTH;
+//            allocation editing to CHANGE_ALLOCATION_RULE; finance export variants
+//            (global/scoped/raw/report) to EXPORT_REVENUE_REPORT; analytics CSV
+//            exports to EXPORT_ANALYTICS_REPORT (a distinct permission held by 8
+//            of 10 roles, incl. ops-admin, that don't hold revenue-export);
+//            audit to VIEW_AUDIT_LOG; connector job controls to RUN_CONNECTOR_JOBS
+//            (NOT to finance, honoring that a finance admin must not trigger
+//            connector jobs). Registry management uses canManageRegistry derived
+//            from MANAGE_CHANNELS (corporate_admin and revenue_operations_admin
+//            hold registry permissions without VIEW_REVENUE; finance_admin holds
+//            VIEW_REVENUE without registry permissions — the two are disjoint).
+// Blast Radius: Authorization (UI gating). No graph projection impact detected.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/session.py -> SessionCapabilities.
+//   - File: frontend/src/components/srcc/views/ConnectorsView.tsx -> canRunConnectors.
+// ============================================================================
+function capabilitiesToPermissions( // skipcq: JS-0067
+  role: Role,
+  capabilities: SessionCapabilities,
+): AccessPermissions {
+  const canExport = capabilities.canExportRevenue;
   return {
     role,
-    canViewFinance: finance,
-    canManageRegistry: finance,
-    canCloseMonth: finance,
-    canCreateGlobalExports: finance,
-    canCreateScopedExports: finance || company,
-    canRequestRawExports: finance,
-    canExportFinanceReports: finance,
-    canExportAnalyticsReports: finance || company,
-    // FIX: None of the frontend preview roles (finance/assistant/company) maps
-    // to a backend role that holds RUN_CONNECTOR_JOBS — only super_owner,
-    // revenue_operations_admin, system_integration_user, and connector_admin do
-    // (backend auth/seed.py). The previous `finance` flag enabled connector
-    // controls that always 403 at the backend, so it is fail-closed to false.
-    canRunConnectors: false,
-    canViewAudit: finance,
+    canViewFinance: capabilities.canViewRevenue,
+    canManageRegistry: capabilities.canManageRegistry,
+    canCloseMonth: capabilities.canCloseMonth,
+    canUnlockMonth: capabilities.canUnlockMonth,
+    canCreateGlobalExports: canExport,
+    canCreateScopedExports: canExport,
+    canRequestRawExports: canExport,
+    canExportFinanceReports: canExport,
+    canExportAnalyticsReports: capabilities.canExportAnalyticsReports,
+    // Honest: connector job/sync controls require RUN_CONNECTOR_JOBS, which a
+    // finance admin does not hold — so canViewRevenue must NOT enable them.
+    canRunConnectors: capabilities.canRunConnectorJobs,
+    canViewAudit: capabilities.canViewAudit,
   };
 }
 
@@ -107,13 +136,17 @@ function canCreateAnyExport(permissions: AccessPermissions) { // skipcq: JS-0067
   );
 }
 
-/** Render the fallback panel shown when no authenticated session role is present. */
-function AccessDeniedState() { // skipcq: JS-0067
+/**
+ * Render the fail-closed fallback panel shown when the session could not be
+ * hydrated (401/403/network) or the principal is disabled. The detail copy
+ * distinguishes a disabled principal from a failed/absent session.
+ */
+function AccessDeniedState({ disabled = false }: { disabled?: boolean }) { // skipcq: JS-0067
   return (
     <div className="app">
       <main className="main" aria-labelledby="accessDeniedTitle">
         <section className="panel">
-          <AccessDeniedHeader />
+          <AccessDeniedHeader disabled={disabled} />
         </section>
       </main>
     </div>
@@ -121,14 +154,44 @@ function AccessDeniedState() { // skipcq: JS-0067
 }
 
 /** Panel header for the access-denied state, kept flat to limit JSX nesting. */
-function AccessDeniedHeader() { // skipcq: JS-0067
+function AccessDeniedHeader({ disabled }: { disabled: boolean }) { // skipcq: JS-0067
   return (
     <div className="panel-header">
       <div className="panel-title">
         <strong id="accessDeniedTitle">Access denied</strong>
-        <span>Authenticated session role is required.</span>
+        <span>
+          {disabled
+            ? "This account is disabled."
+            : "An authenticated session is required."}
+        </span>
       </div>
-      <Badge tone="red">No session role</Badge>
+      <Badge tone="red">{disabled ? "Account disabled" : "No session"}</Badge>
+    </div>
+  );
+}
+
+/** Panel body shown while the one-shot /session/me bootstrap is in flight. */
+function SessionLoadingPanelContent() { // skipcq: JS-0067
+  return (
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong id="sessionLoadingTitle">Loading session…</strong>
+        <span>Resolving your authenticated capabilities.</span>
+      </div>
+      <Badge tone="blue">Loading</Badge>
+    </div>
+  );
+}
+
+/** Render the loading panel shown while the one-shot /session/me bootstrap runs. */
+function SessionLoadingState() { // skipcq: JS-0067
+  return (
+    <div className="app">
+      <main className="main" aria-labelledby="sessionLoadingTitle" aria-busy="true">
+        <section className="panel">
+          <SessionLoadingPanelContent />
+        </section>
+      </main>
     </div>
   );
 }
@@ -146,10 +209,10 @@ type TenantBootstrap = {
 //          failure, returning the proof label for the shell to render.
 // Database/ORM: None (frontend API call only).
 // Standards: useRef re-entry guard keeps fetch count at 1 under React StrictMode.
-//            Effect is gated on displayedRole so sessions that immediately
-//            render <AccessDeniedState/> never issue a bootstrap fetch.
-//            The guard is reset in the failure path so a subsequent dep
-//            change (role switch, provider rebuild) can retry — a transient
+//            Effect is gated on `enabled` (the session is ready) so a shell that
+//            renders the loading or fail-closed <AccessDeniedState/> never issues
+//            a tenant bootstrap fetch. The guard is reset in the failure path so
+//            a subsequent dep change (provider rebuild) can retry — a transient
 //            5xx must not permanently pin tenantSlug to the bootstrap value.
 // Blast Radius: None detected (read-only; does not mutate financial state).
 // Connections:
@@ -159,15 +222,22 @@ type TenantBootstrap = {
 /**
  * Bootstrap the active tenant from /tenants/me, hydrating TenantContext and
  * exposing the dev-only proof label that reflects success or the typed error.
+ * Gated on `enabled` so it only fires once the authenticated session is ready;
+ * `retryToken` is an opaque dependency (the dev preview role) that, when it
+ * changes after a failure, re-fires the bootstrap so a transient 5xx is not
+ * permanent.
  */
-function useTenantBootstrap(displayedRole: Role | undefined): TenantBootstrap { // skipcq: JS-0067
+function useTenantBootstrap( // skipcq: JS-0067
+  enabled: boolean,
+  retryToken: string,
+): TenantBootstrap {
   const tenant = useTenant();
   const client = useApiClient();
   const hasRequestedTenantRef = useRef(false);
   const [tenantError, setTenantError] = useState<ApiError | Error | null>(null);
 
   useEffect(() => {
-    if (!displayedRole) return;
+    if (!enabled) return;
     if (hasRequestedTenantRef.current || tenant.id) return;
     hasRequestedTenantRef.current = true;
     client
@@ -182,13 +252,13 @@ function useTenantBootstrap(displayedRole: Role | undefined): TenantBootstrap { 
       })
       .catch((error: unknown) => {
         // FIX: Clear the one-shot guard on failure so a future dependency
-        // change (role switch, client rebuild after slug change) can retry
-        // the bootstrap fetch. Without this, a transient 5xx on first load
-        // permanently disabled re-hydration and pinned X-UMS-Tenant to "ums".
+        // change (retryToken/role switch, client rebuild after slug change) can
+        // retry the bootstrap fetch. Without this, a transient 5xx on first
+        // load permanently disabled re-hydration and pinned X-UMS-Tenant.
         hasRequestedTenantRef.current = false;
         setTenantError(error as ApiError | Error);
       });
-  }, [client, tenant.id, tenant.hydrate, displayedRole]);
+  }, [client, tenant.id, tenant.hydrate, enabled, retryToken]);
 
   return { proofLabel: tenantProofLabel(tenant, tenantError) };
 }
@@ -235,25 +305,56 @@ function tenantProofLabel( // skipcq: JS-0067
 
 /* ------------------------------------------------------------------ shell */
 
-/**
- * Top-level SRCC shell: resolves the displayed role, bootstraps the tenant, and
- * composes the sidebar, top bar, and active view for the control center.
- */
+// ============================================================================
+// Purpose: Top-level SRCC shell. Hydrates the authenticated session from
+//          /session/me, then renders: a loading state while the bootstrap runs;
+//          the fail-closed <AccessDeniedState/> when hydration failed (401/403/
+//          network) OR the principal is disabled; otherwise the dashboard gated
+//          by the backend-DERIVED session.capabilities. The dev-only role
+//          selector drives the DISPLAYED label only — every capability gate
+//          comes from the session, never from the role string, so dev preview
+//          can never fabricate a capability the backend did not grant.
+// Database/ORM: None (frontend).
+// Standards: Hooks are called unconditionally before any early return. Fail
+//            closed: loading -> loading, error/disabled -> access denied.
+// Blast Radius: Authorization (UI gating). No graph projection impact detected.
+// Connections:
+//   - File: frontend/src/contexts/SessionContext.tsx -> useSessionBootstrap.
+//   - File: backend/ums_smart_revenue/api/session.py -> GET /session/me.
+// ============================================================================
 export default function AppShell() { // skipcq: JS-0067, JS-R1005
   const [view, setView] = useState<ViewKey>("command");
-  const authenticatedRole = SERVER_AUTHENTICATED_SESSION.role;
-  const [previewRole, setPreviewRole] = useState<Role>(
-    authenticatedRole ?? DEFAULT_PREVIEW_ROLE,
-  );
+  const [previewRole, setPreviewRole] = useState<Role>(DEFAULT_PREVIEW_ROLE);
 
-  const displayedRole = CAN_PREVIEW_ROLES ? previewRole : authenticatedRole;
-  const { proofLabel } = useTenantBootstrap(displayedRole);
+  const sessionBootstrap = useSessionBootstrap();
+  // The tenant bootstrap only runs once the authenticated session is ready, so
+  // a loading or access-denied shell never issues a /tenants/me fetch.
+  const sessionReady = sessionBootstrap.status === "ready";
+  // previewRole is passed as the retry token: a dev role switch after a failed
+  // tenant bootstrap re-fires it (dev-only; it does not affect capabilities).
+  const { proofLabel } = useTenantBootstrap(sessionReady, previewRole);
 
-  if (!displayedRole) {
-    return <AccessDeniedState />;
+  if (sessionBootstrap.status === "loading") {
+    return <SessionLoadingState />;
   }
 
-  const permissions = permissionsForRole(displayedRole);
+  // Fail closed: a failed hydration (401/403/network) OR a disabled principal
+  // renders the access-denied screen instead of any gated dashboard.
+  if (
+    sessionBootstrap.status === "error" ||
+    sessionBootstrap.session === null ||
+    sessionBootstrap.session.disabled
+  ) {
+    return <AccessDeniedState disabled={sessionBootstrap.session?.disabled ?? false} />;
+  }
+
+  // Capabilities are AUTHORITATIVE from the session. The dev role selector only
+  // changes the displayed label; permissions are derived from capabilities only.
+  const displayedRole = previewRole;
+  const permissions = capabilitiesToPermissions(
+    displayedRole,
+    sessionBootstrap.session.capabilities,
+  );
   const canViewFinance = permissions.canViewFinance;
   const copy = VIEW_COPY[view];
 
@@ -408,7 +509,7 @@ function RoleCard({ // skipcq: JS-0067
   return (
     <div className="role-card">
       <label htmlFor="roleSelect">Current role</label>
-      {CAN_PREVIEW_ROLES ? (
+      {canPreviewRoles() ? (
         <>
           <select
             id="roleSelect"

@@ -4,9 +4,38 @@ import { StrictMode } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import AppShell from "@/components/srcc/AppShell";
+import { SessionProvider } from "@/contexts/SessionContext";
 import { TenantProvider } from "@/contexts/TenantContext";
+import type { SessionMe } from "@/lib/api/types";
 
 const ORIGINAL_FETCH = globalThis.fetch;
+
+// A real-shaped /session/me body with every capability granted so the wired
+// dashboard renders and these tenant-proof tests focus on the tenant bootstrap.
+const FULL_SESSION: SessionMe = {
+  user_id: "00000000-0000-0000-0000-0000000000aa",
+  email: "dev@ums.local",
+  tenant: { id: "t1", slug: "ums", display_name: "UMS" },
+  roles: [],
+  permissions: [],
+  is_service_account: false,
+  disabled: false,
+  capabilities: {
+    canViewRevenue: true,
+    canViewConfidence: true,
+    canViewPayments: true,
+    canViewBankReconciliation: true,
+    canCloseMonth: true,
+    canUnlockMonth: true,
+    canChangeAllocation: true,
+    canExportRevenue: true,
+    canExportAnalyticsReports: true,
+    canManageRegistry: true,
+    canManageConnectors: true,
+    canRunConnectorJobs: true,
+    canViewAudit: true,
+  },
+};
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
@@ -57,13 +86,19 @@ function isTenantCall(input: unknown): boolean { // skipcq: JS-0067
   return urlOf(input).includes("/tenants/me");
 }
 
-// Route fetch by URL: /tenants/me -> the provided tenant responder, everything
+function isSessionCall(input: unknown): boolean { // skipcq: JS-0067
+  return urlOf(input).includes("/session/me");
+}
+
+// Route fetch by URL: /session/me -> a ready full-capability session (so the
+// dashboard renders), /tenants/me -> the provided tenant responder, everything
 // else (the wired CommandView net-revenue call) -> a neutral net-revenue body.
 function routeFetch(tenantResponder: () => Response) { // skipcq: JS-0067
-  return (input: unknown) =>
-    Promise.resolve(
-      isTenantCall(input) ? tenantResponder() : jsonResponse(NET_REVENUE_BODY),
-    );
+  return (input: unknown) => {
+    if (isSessionCall(input)) return Promise.resolve(jsonResponse(FULL_SESSION));
+    if (isTenantCall(input)) return Promise.resolve(tenantResponder());
+    return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
+  };
 }
 
 function tenantFetchCalls() { // skipcq: JS-0067
@@ -83,9 +118,11 @@ describe("AppShell tenant proof tag", () => {
       ),
     );
     render(
-      <TenantProvider initialSlug="ums">
-        <AppShell />
-      </TenantProvider>,
+      <SessionProvider>
+        <TenantProvider initialSlug="ums">
+          <AppShell />
+        </TenantProvider>
+      </SessionProvider>,
     );
     const tag = await screen.findByTestId("tenant-proof");
     // findByTestId only waits for the element; the tag first renders the
@@ -100,9 +137,11 @@ describe("AppShell tenant proof tag", () => {
       routeFetch(() => jsonResponse({ detail: "Tenant registry unavailable" }, 503)),
     );
     render(
-      <TenantProvider initialSlug="ums">
-        <AppShell />
-      </TenantProvider>,
+      <SessionProvider>
+        <TenantProvider initialSlug="ums">
+          <AppShell />
+        </TenantProvider>
+      </SessionProvider>,
     );
     const tag = await screen.findByTestId("tenant-proof");
     // The tag first renders the "(loading…)" placeholder; wait for the rejected
@@ -115,9 +154,11 @@ describe("AppShell tenant proof tag", () => {
       routeFetch(() => jsonResponse({ detail: "Tenant registry unavailable" }, 503)),
     );
     render(
-      <TenantProvider initialSlug="ums">
-        <AppShell />
-      </TenantProvider>,
+      <SessionProvider>
+        <TenantProvider initialSlug="ums">
+          <AppShell />
+        </TenantProvider>
+      </SessionProvider>,
     );
     const tag = await screen.findByTestId("tenant-proof");
     // The tag first renders "Tenant: ums (loading…)"; wait for the rejected
@@ -141,9 +182,11 @@ describe("AppShell tenant proof tag", () => {
     );
     render(
       <StrictMode>
-        <TenantProvider>
-          <AppShell />
-        </TenantProvider>
+        <SessionProvider>
+          <TenantProvider>
+            <AppShell />
+          </TenantProvider>
+        </SessionProvider>
       </StrictMode>,
     );
     await screen.findByTestId("tenant-proof");
@@ -170,9 +213,11 @@ describe("AppShell tenant proof tag", () => {
       }),
     );
     render(
-      <TenantProvider initialSlug="ums">
-        <AppShell />
-      </TenantProvider>,
+      <SessionProvider>
+        <TenantProvider initialSlug="ums">
+          <AppShell />
+        </TenantProvider>
+      </SessionProvider>,
     );
     const tag = await screen.findByTestId("tenant-proof");
     await waitFor(() => expect(tag.textContent).toMatch(/503/));
@@ -200,9 +245,11 @@ describe("AppShell tenant proof tag", () => {
       ),
     );
     render(
-      <TenantProvider initialSlug="ums">
-        <AppShell />
-      </TenantProvider>,
+      <SessionProvider>
+        <TenantProvider initialSlug="ums">
+          <AppShell />
+        </TenantProvider>
+      </SessionProvider>,
     );
     // The preview switcher is shown (vitest runs with import.meta.env.DEV), so
     // the disclaimer that the role preview does not change backend authorization
@@ -227,9 +274,11 @@ describe("AppShell tenant proof tag", () => {
       ),
     );
     render(
-      <TenantProvider>
-        <AppShell />
-      </TenantProvider>,
+      <SessionProvider>
+        <TenantProvider>
+          <AppShell />
+        </TenantProvider>
+      </SessionProvider>,
     );
     const tag = await screen.findByTestId("tenant-proof");
     // findByTestId only waits for the element; wait for the resolved tenant text
@@ -246,5 +295,255 @@ describe("AppShell tenant proof tag", () => {
     const [, init] = lastCall;
     const sentHeaders = new Headers((init as RequestInit | undefined)?.headers);
     expect(sentHeaders.has("X-UMS-Tenant")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------- session hydration
+
+// Build a /session/me body from a capability override + flags. Defaults to all
+// capabilities false so each test opts INTO exactly the capabilities it asserts.
+function sessionBody( // skipcq: JS-0067
+  capabilities: Partial<SessionMe["capabilities"]> = {},
+  overrides: Partial<SessionMe> = {},
+): SessionMe {
+  return {
+    ...FULL_SESSION,
+    capabilities: {
+      canViewRevenue: false,
+      canViewConfidence: false,
+      canViewPayments: false,
+      canViewBankReconciliation: false,
+      canCloseMonth: false,
+      canUnlockMonth: false,
+      canChangeAllocation: false,
+      canExportRevenue: false,
+      canExportAnalyticsReports: false,
+      canManageRegistry: false,
+      canManageConnectors: false,
+      canRunConnectorJobs: false,
+      canViewAudit: false,
+      ...capabilities,
+    },
+    ...overrides,
+  };
+}
+
+// Empty-but-real connector + AdSense list shapes so the Connectors view renders
+// its always-visible controls without a malformed body.
+const EMPTY_CONNECTOR_CREDENTIALS = {
+  items: [],
+  pagination: { limit: 50, offset: 0, returned: 0, has_more: false },
+};
+const EMPTY_ADSENSE_PAYMENTS = {
+  items: [],
+  pagination: { limit: 50, offset: 0, returned: 0, has_more: false },
+  audit_event: {},
+};
+
+// Route fetch with a caller-supplied /session/me responder; connector + AdSense
+// list calls get empty real-shaped bodies, tenant gets a fixed UMS body, and the
+// net-revenue call gets the neutral body.
+function routeFetchWithSession(sessionResponder: () => Response) { // skipcq: JS-0067
+  return (input: unknown) => {
+    if (isSessionCall(input)) return Promise.resolve(sessionResponder());
+    if (isTenantCall(input)) {
+      return Promise.resolve(
+        jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" }),
+      );
+    }
+    const url = urlOf(input);
+    if (url.includes("/connectors/credentials")) {
+      return Promise.resolve(jsonResponse(EMPTY_CONNECTOR_CREDENTIALS));
+    }
+    if (url.includes("/adsense/payments")) {
+      return Promise.resolve(jsonResponse(EMPTY_ADSENSE_PAYMENTS));
+    }
+    return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
+  };
+}
+
+function renderShell() { // skipcq: JS-0067
+  return render(
+    <SessionProvider>
+      <TenantProvider initialSlug="ums">
+        <AppShell />
+      </TenantProvider>
+    </SessionProvider>,
+  );
+}
+
+describe("AppShell production session hydration", () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it("PRODUCTION: a successful /session/me hydration renders the live dashboard gated by capabilities", async () => {
+    // Production: no dev role preview. Capabilities are authoritative.
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("VITE_ENABLE_ROLE_PREVIEW", "");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() =>
+        jsonResponse(sessionBody({ canViewRevenue: true })),
+      ),
+    );
+    renderShell();
+
+    // No permanent access-denied screen; the live command dashboard renders.
+    // canViewRevenue=true -> the role-state shows money visible (not withheld).
+    expect(await screen.findByText(/money visible/i)).toBeInTheDocument();
+    expect(screen.queryByText(/access denied/i)).not.toBeInTheDocument();
+    // In production the role control is a read-only <output>, NOT a <select>
+    // dropdown — the dev preview selector must not render.
+    const roleControl = screen.getByLabelText(/current role/i);
+    expect(roleControl.tagName).toBe("OUTPUT");
+    expect(screen.queryByTestId("role-preview-hint")).not.toBeInTheDocument();
+  });
+
+  it("PRODUCTION: withheld canViewRevenue gates finance cells to the Restricted sentinel", async () => {
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("VITE_ENABLE_ROLE_PREVIEW", "");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: false }))),
+    );
+    renderShell();
+
+    // The dashboard renders (no access denied), but money is withheld.
+    expect(await screen.findByText(/money withheld/i)).toBeInTheDocument();
+    expect(screen.queryByText(/access denied/i)).not.toBeInTheDocument();
+  });
+
+  it("FAIL CLOSED: a 401 /session/me hydration renders AccessDeniedState", async () => {
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("VITE_ENABLE_ROLE_PREVIEW", "");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() => jsonResponse({ detail: "Missing token" }, 401)),
+    );
+    renderShell();
+
+    expect(await screen.findByText(/access denied/i)).toBeInTheDocument();
+    expect(screen.getByText(/an authenticated session is required/i)).toBeInTheDocument();
+  });
+
+  it("FAIL CLOSED: a 403 /session/me hydration renders AccessDeniedState", async () => {
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("VITE_ENABLE_ROLE_PREVIEW", "");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() => jsonResponse({ detail: "Disabled or unknown" }, 403)),
+    );
+    renderShell();
+
+    expect(await screen.findByText(/access denied/i)).toBeInTheDocument();
+  });
+
+  it("FAIL CLOSED: a network error on /session/me renders AccessDeniedState", async () => {
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("VITE_ENABLE_ROLE_PREVIEW", "");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation((input: unknown) => {
+      if (isSessionCall(input)) return Promise.reject(new Error("network down"));
+      if (isTenantCall(input)) {
+        return Promise.resolve(
+          jsonResponse({ id: "t1", slug: "ums", display_name: "UMS" }),
+        );
+      }
+      return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
+    });
+    renderShell();
+
+    expect(await screen.findByText(/access denied/i)).toBeInTheDocument();
+  });
+
+  it("FAIL CLOSED: a hydrated session with disabled=true renders AccessDeniedState", async () => {
+    vi.stubEnv("DEV", false);
+    vi.stubEnv("VITE_ENABLE_ROLE_PREVIEW", "");
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() =>
+        jsonResponse(sessionBody({ canViewRevenue: true }, { disabled: true })),
+      ),
+    );
+    renderShell();
+
+    expect(await screen.findByText(/access denied/i)).toBeInTheDocument();
+    expect(screen.getByText(/this account is disabled/i)).toBeInTheDocument();
+  });
+
+  it("DEV PREVIEW: the role selector still renders and the shell hydrates from the session (preview not broken)", async () => {
+    // vitest runs with import.meta.env.DEV truthy by default -> dev preview on.
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: true }))),
+    );
+    renderShell();
+
+    // The dashboard renders (hydrated) AND the dev role selector is present.
+    expect(await screen.findByText(/money visible/i)).toBeInTheDocument();
+    const switcher = await screen.findByLabelText(/current role/i);
+    expect(switcher.tagName).toBe("SELECT");
+    expect(screen.queryByText(/access denied/i)).not.toBeInTheDocument();
+  });
+
+  it("DEV PREVIEW: switching the dev role does NOT fabricate a capability the session lacks", async () => {
+    // Session grants NO revenue. The dev role selector changing to "finance"
+    // (which historically implied money-visible) must NOT make money visible.
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() => jsonResponse(sessionBody({ canViewRevenue: false }))),
+    );
+    renderShell();
+
+    const roleSelect = (await screen.findByLabelText(/current role/i)) as HTMLSelectElement;
+    fireEvent.change(roleSelect, { target: { value: "finance" } });
+
+    // Capabilities are authoritative: money stays withheld despite the finance label.
+    await waitFor(() => expect(screen.getByText(/money withheld/i)).toBeInTheDocument());
+  });
+
+  it("CONNECTOR CONTROLS: disabled when canRunConnectorJobs=false (honest gating)", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() =>
+        jsonResponse(sessionBody({ canViewRevenue: true, canRunConnectorJobs: false })),
+      ),
+    );
+    renderShell();
+
+    // Navigate to the Connectors view.
+    fireEvent.click(await screen.findByText("Connectors"));
+    const reasonField = (await screen.findByLabelText(/sync reason/i)) as HTMLInputElement;
+    expect(reasonField).toBeDisabled();
+    const adsenseAccount = screen.getByLabelText(/account id/i) as HTMLInputElement;
+    expect(adsenseAccount).toBeDisabled();
+  });
+
+  it("CONNECTOR CONTROLS: enabled when canRunConnectorJobs=true (even with finance off)", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() =>
+        jsonResponse(sessionBody({ canViewRevenue: false, canRunConnectorJobs: true })),
+      ),
+    );
+    renderShell();
+
+    fireEvent.click(await screen.findByText("Connectors"));
+    const reasonField = (await screen.findByLabelText(/sync reason/i)) as HTMLInputElement;
+    expect(reasonField).not.toBeDisabled();
+    const adsenseAccount = screen.getByLabelText(/account id/i) as HTMLInputElement;
+    expect(adsenseAccount).not.toBeDisabled();
+  });
+
+  it("CONNECTOR CONTROLS: finance admin (canViewRevenue, no canRunConnectorJobs) cannot run connector jobs", async () => {
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      routeFetchWithSession(() =>
+        jsonResponse(
+          sessionBody({
+            canViewRevenue: true,
+            canCloseMonth: true,
+            canExportRevenue: true,
+            canRunConnectorJobs: false,
+          }),
+        ),
+      ),
+    );
+    renderShell();
+
+    fireEvent.click(await screen.findByText("Connectors"));
+    const reasonField = (await screen.findByLabelText(/sync reason/i)) as HTMLInputElement;
+    // Finance visibility is on, but connector job controls stay disabled.
+    expect(reasonField).toBeDisabled();
   });
 });

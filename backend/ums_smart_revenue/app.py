@@ -49,6 +49,7 @@ from ums_smart_revenue.api.revenue import (
 )
 from ums_smart_revenue.api.revenue import router as revenue_router
 from ums_smart_revenue.api.security import router as security_router
+from ums_smart_revenue.api.session import router as session_router
 from ums_smart_revenue.api.tenants import router as tenants_router
 from ums_smart_revenue.api.users import router as users_router
 from ums_smart_revenue.config.settings import (
@@ -126,6 +127,7 @@ def create_app(
     _app.include_router(reports_router)
     _app.include_router(revenue_router)
     _app.include_router(security_router)
+    _app.include_router(session_router)
     _app.include_router(tenants_router)
     _app.include_router(users_router)
 

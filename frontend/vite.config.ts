@@ -12,6 +12,10 @@ import { defineConfig, loadEnv } from "vite";
 // reverse-proxy model where the trusted gateway injects principal identity.
 const TENANT_SCOPED_ROUTES = [
   "/tenants",
+  // /session/me hydrates the authenticated principal's capabilities and uses
+  // the same trusted-gateway auth as /tenants/me, so it must be proxied with the
+  // injected principal headers in dev or the bootstrap call would 401.
+  "/session",
   "/revenue",
   "/finance-close",
   "/exports",
