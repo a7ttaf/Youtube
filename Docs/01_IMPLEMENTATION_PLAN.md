@@ -633,12 +633,20 @@ now wired to `GET /audit/events` (see below).
   resolve secret URI → OAuth refresh, no live data pull). 404 on missing credential;
   200 with `status` field (`ok` / `inactive_credential` / `auth_failed` / `error`) and
   string `detail` otherwise. `CONNECTOR_TESTED` audit event. 5 TDD tests, `MANAGE_CONNECTORS`
-  gate. Backend only; no migration. Remaining: Registry view wiring (below).
-- ⏳ Channel Registry view — design doc at
-  `Docs/superpowers/specs/2026-06-05-registry-view-design.md`. Mock fields mapped to
-  existing `GET /channels` + `ChannelRegistryEntry`; `state`, `action`, `node` semantics
-  undefined — need open-question answers before implementation plan can be written.
-  Remaining: answer open questions, write plan, implement.
+  gate. Backend only; no migration. Merged to main as PR #72 (28da1a6).
+- ✅ Registry Phase 1 wiring — on `feat/registry-phase1`: the Channel Registry
+  table is wired to `GET /channels` (replacing `REGISTRY_ROWS` mock). Client-side
+  derivation: avatar initials, CMS badge tone from `cms_status`, source label from
+  `revenue_source_status`, state (Option A — field-complete, no migration:
+  MISSING_REVENUE_SOURCE+revenue_required → Export block; OUTSIDE_CMS+no
+  content_owner_id → Evidence due; else Approved), trace key
+  (`"channel:{id}"` or `"pending"`). Active-channel and outside-CMS summary-tile
+  counts derived from response. Company column shows `primary_company_id` slug;
+  sector shows `—` (no GET /org-units yet). All write-path actions (Map, Assign,
+  Review) disabled in Phase 1 — PATCH /channels/{id}/mapping and account-
+  assignment route not yet wired. Extracted to `views/RegistryView.tsx`; 16 new
+  Vitest tests (useChannels hook + RegistryView component). Frontend-only;
+  backend unchanged. All pages now off mock.
 
 ---
 

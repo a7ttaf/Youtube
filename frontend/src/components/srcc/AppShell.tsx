@@ -6,9 +6,6 @@ import { useSessionBootstrap } from "@/contexts/SessionContext";
 import { useTenant } from "@/contexts/TenantContext";
 import {
   NAV_GROUPS,
-  REGISTRY_CONTROLS,
-  REGISTRY_ROWS,
-  REGISTRY_SUMMARY,
   VIEW_COPY,
   WORKFLOW_STEPS,
 } from "@/lib/mock/data";
@@ -19,11 +16,11 @@ import CloseView from "./views/CloseView";
 import CommandView from "./views/CommandView";
 import ConnectorsView from "./views/ConnectorsView";
 import ExportsView from "./views/ExportsView";
+import RegistryView from "./views/RegistryView";
 import TraceView from "./views/TraceView";
 import {
   Badge,
   Dot,
-  ItemRow,
   RESTRICTED_FINANCE_VALUE,
   SummaryTile,
   workflowDotTone,
@@ -648,7 +645,12 @@ function ViewRouter({ // skipcq: JS-0067, JS-R1005
   return (
     <>
       {view === "command" && <CommandView canViewFinance={canViewFinance} />}
-      {view === "registry" && <RegistryView permissions={permissions} />}
+      {view === "registry" && (
+        <RegistryView
+          canManageRegistry={permissions.canManageRegistry}
+          canViewFinance={permissions.canViewFinance}
+        />
+      )}
       {view === "close" && <CloseView permissions={permissions} />}
       {view === "trace" && (
         <TraceView canViewFinance={canViewFinance} role={displayedRole} />
@@ -703,280 +705,15 @@ function WorkflowRail() { // skipcq: JS-0067
 
 /* ------------------------------------------------------------------ registry */
 
-/** Mock Channel Registry view: summary tiles, registry table, and side panels. */
-function RegistryView({ permissions }: { permissions: AccessPermissions }) { // skipcq: JS-0067
-  const { canManageRegistry, canViewFinance } = permissions;
-  return (
-    <section className="view-page" aria-labelledby="registryTitle">
-      <div className="view-summary" aria-label="Registry summary">
-        {REGISTRY_SUMMARY.map((s) => (
-          <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
-        ))}
-      </div>
+// RegistryView is the wired Channel Registry screen; it lives in
+// ./views/RegistryView.tsx and reads GET /channels via useChannels. Client-side
+// derivation maps the API fields to avatar initials, CMS badge tone, source
+// label, state (Option A: from existing fields), trace key, and action label.
+// Company/sector columns show primary_company_id and "—" until GET /org-units
+// is added. Summary tiles derive active-channel + outside-CMS counts from the
+// response; finance tiles stay static placeholders.
 
-      <div className="view-grid wide-side">
-        <RegistryMainPanel canManageRegistry={canManageRegistry} />
 
-        <RegistrySidePanels canManageRegistry={canManageRegistry} />
-      </div>
-    </section>
-  );
-}
-
-/**
- * The registry main panel: header (title + bulk/mapping actions), the
- * finance-visible mapping band, and the registry table. Extracted so the
- * RegistryView JSX tree stays shallow (JSX nesting).
- */
-function RegistryMainPanel({ canManageRegistry }: { canManageRegistry: boolean }) { // skipcq: JS-0067
-  return (
-    <section className="panel">
-      <RegistryPanelHeader canManageRegistry={canManageRegistry} />
-      <RegistryMappingBand canManageRegistry={canManageRegistry} />
-      <RegistryTable canManageRegistry={canManageRegistry} />
-    </section>
-  );
-}
-
-/** Registry panel header: title/subtitle and the bulk-import / mapping-change actions. */
-function RegistryPanelHeader({ canManageRegistry }: { canManageRegistry: boolean }) { // skipcq: JS-0067
-  return (
-    <div className="panel-header">
-      <div className="panel-title">
-        <strong id="registryTitle">Channel Registry</strong>
-        <span>Ownership, CMS status, revenue scope, and SQL lineage identity</span>
-      </div>
-      <div className="view-actions">
-        <button className="ghost-button" type="button" disabled={!canManageRegistry}>
-          Bulk Import
-        </button>
-        <button className="primary-button" type="button" disabled={!canManageRegistry}>
-          Request Mapping Change
-        </button>
-      </div>
-    </div>
-  );
-}
-
-/** Finance-visible mapping band; the scope badge reflects registry-edit access. */
-function RegistryMappingBand({ canManageRegistry }: { canManageRegistry: boolean }) { // skipcq: JS-0067
-  return (
-    <div className="permission-band">
-      <Dot tone="green" />
-      <span>
-        <strong>Finance-visible mapping layer</strong>
-        <span>Company managers see only assigned companies; sector managers see assigned sectors; every mapping change writes an audit event.</span>
-      </span>
-      <Badge tone={canManageRegistry ? "blue" : "red"}>
-        {canManageRegistry ? "Scoped" : "Read only"}
-      </Badge>
-    </div>
-  );
-}
-
-/** The channel registry table column header row. Extracted to keep nesting shallow. */
-function RegistryTableHead() { // skipcq: JS-0067
-  return (
-    <thead>
-      <tr>
-        <th>Channel</th><th>Company</th><th>Sector</th><th>CMS</th>
-        <th>Revenue Source</th><th>Trace Key</th><th>State</th><th>Action</th>
-      </tr>
-    </thead>
-  );
-}
-
-/** Channel registry data table; trace keys are withheld from non-registry roles. */
-function RegistryTable({ canManageRegistry }: { canManageRegistry: boolean }) { // skipcq: JS-0067
-  return (
-    <div className="table-wrap">
-      <table aria-label="Channel registry">
-        <RegistryTableHead />
-        <tbody>
-          {REGISTRY_ROWS.map((r) => (
-            <RegistryRow key={r.code} row={r} canManageRegistry={canManageRegistry} />
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
-
-/** A single channel registry row; the action button is gated by registry access. */
-function RegistryRow({ // skipcq: JS-0067
-  row,
-  canManageRegistry,
-}: {
-  row: (typeof REGISTRY_ROWS)[number];
-  canManageRegistry: boolean;
-}) {
-  return (
-    <tr>
-      <RegistryChannelCell name={row.name} code={row.code} avatar={row.avatar} />
-      <td>{row.company}</td>
-      <td>{row.sector}</td>
-      <td><Badge tone={row.cms.tone}>{row.cms.text}</Badge></td>
-      <td>{row.source}</td>
-      <td>
-        <span className="code-chip">
-          {canManageRegistry ? row.node : RESTRICTED_FINANCE_VALUE}
-        </span>
-      </td>
-      <td><Badge tone={row.state.tone}>{row.state.text}</Badge></td>
-      <td>
-        <button className="mini-button" type="button" disabled={!canManageRegistry}>
-          {row.action}
-        </button>
-      </td>
-    </tr>
-  );
-}
-
-/** The avatar + name/id identity cell for one registry row. Extracted to keep nesting shallow. */
-function RegistryChannelCell({ // skipcq: JS-0067
-  name,
-  code,
-  avatar,
-}: {
-  name: string;
-  code: string;
-  avatar: string;
-}) {
-  return (
-    <td>
-      <span className="channel-cell">
-        <span className="avatar">{avatar}</span>
-        <span>
-          <span className="channel-name">{name}</span>
-          <span className="channel-id">{code}</span>
-        </span>
-      </span>
-    </td>
-  );
-}
-
-/** Registry side panels: the mapping-change request form and registry controls. */
-function RegistrySidePanels({ canManageRegistry }: { canManageRegistry: boolean }) { // skipcq: JS-0067
-  return (
-    <aside className="view-stack" aria-label="Registry side panels">
-      <MappingChangeRequestPanel canManageRegistry={canManageRegistry} />
-      <RegistryControlsPanel />
-    </aside>
-  );
-}
-
-/**
- * The mapping-change request panel: an audited form (channel, company, reason,
- * effective month) plus save/submit actions. Extracted with a shallow form so
- * the registry side-panel JSX tree stays within the nesting limit.
- */
-function MappingChangeRequestPanel({ canManageRegistry }: { canManageRegistry: boolean }) { // skipcq: JS-0067
-  return (
-    <section className="panel">
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong>Mapping Change Request</strong>
-          <span>Restricted to registry admins and corporate finance approvers</span>
-        </div>
-        <Badge tone="amber">Audit required</Badge>
-      </div>
-      <div className="form-grid">
-        <MappingSelectRow
-          htmlFor="registryChannel"
-          label="Channel"
-          options={["Sports Extra", "Music Stage"]}
-          disabled={!canManageRegistry}
-        />
-        <MappingSelectRow
-          htmlFor="registryCompany"
-          label="Company"
-          options={["TV Sector", "Catalog Media"]}
-          disabled={!canManageRegistry}
-        />
-        <MappingInputRow
-          htmlFor="registryReason"
-          label="Reason"
-          defaultValue="March source evidence received"
-          disabled={!canManageRegistry}
-        />
-        <MappingSelectRow
-          htmlFor="registryEffective"
-          label="Effective month"
-          options={["Mar 2026", "Apr 2026"]}
-          disabled={!canManageRegistry}
-        />
-      </div>
-      <div className="action-row">
-        <button className="ghost-button" type="button" disabled={!canManageRegistry}>Save Draft</button>
-        <button className="primary-button" type="button" disabled={!canManageRegistry}>Submit Approval</button>
-      </div>
-    </section>
-  );
-}
-
-/** A labelled mapping-form select row that owns its own options. Keeps the form tree shallow. */
-function MappingSelectRow({ // skipcq: JS-0067
-  htmlFor,
-  label,
-  options,
-  disabled,
-}: {
-  htmlFor: string;
-  label: string;
-  options: string[];
-  disabled: boolean;
-}) {
-  return (
-    <div className="field-row">
-      <label htmlFor={htmlFor}>{label}</label>
-      <select id={htmlFor} disabled={disabled}>
-        {options.map((option) => (
-          <option key={option}>{option}</option>
-        ))}
-      </select>
-    </div>
-  );
-}
-
-/** A labelled mapping-form text input row. Keeps the form tree shallow. */
-function MappingInputRow({ // skipcq: JS-0067
-  htmlFor,
-  label,
-  defaultValue,
-  disabled,
-}: {
-  htmlFor: string;
-  label: string;
-  defaultValue: string;
-  disabled: boolean;
-}) {
-  return (
-    <div className="field-row">
-      <label htmlFor={htmlFor}>{label}</label>
-      <input id={htmlFor} defaultValue={defaultValue} disabled={disabled} />
-    </div>
-  );
-}
-
-/** The registry-controls panel listing the expected production behaviors. */
-function RegistryControlsPanel() { // skipcq: JS-0067
-  return (
-    <section className="panel">
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong>Registry Controls</strong>
-          <span>Production behavior expected from the backend foundation</span>
-        </div>
-      </div>
-      <div className="issue-list" role="list">
-        {REGISTRY_CONTROLS.map((c) => (
-          <ItemRow key={c.title} tone={c.tone} title={c.title} sub={c.sub}
-            trailing={<Badge tone={c.badge.tone}>{c.badge.text}</Badge>} />
-        ))}
-      </div>
-    </section>
-  );
-}
 
 /* ------------------------------------------------------------------ close */
 
