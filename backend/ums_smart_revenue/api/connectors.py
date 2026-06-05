@@ -1,4 +1,5 @@
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, field_validator
@@ -20,6 +21,14 @@ from ums_smart_revenue.connectors.credentials import (
     SqlAlchemyConnectorCredentialRepository,
     is_external_secret_ref,
 )
+from ums_smart_revenue.connectors.google.errors import (
+    CredentialNotFoundError,
+    GoogleConnectorError,
+    InactiveCredentialError,
+    OAuthRefreshError,
+)
+from ums_smart_revenue.connectors.runs.orchestrator import resolve_connector_credentials
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
 
@@ -46,6 +55,10 @@ class ConnectorCredentialCreateRequest(NonBlankRequestModel):
 class ConnectorJobRequest(NonBlankRequestModel):
     connector_key: str = Field(min_length=1)
     account_id: str = Field(min_length=1)
+    reason: str = Field(min_length=1)
+
+
+class ConnectorTestRequest(NonBlankRequestModel):
     reason: str = Field(min_length=1)
 
 
@@ -140,6 +153,78 @@ def request_connector_job(
         "connector_key": payload.connector_key,
         "account_id": payload.account_id,
         "execution_status": "recorded_not_executed",
+        "audit_event": audit_record_to_api(record),
+    }
+
+
+@router.post("/credentials/{connector_key}/{account_id}/test")
+def test_connector_connection( # skipcq: JS-0067
+    connector_key: str,
+    account_id: str,
+    payload: ConnectorTestRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    session: Annotated[Session, Depends(current_db_session)],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+) -> dict[str, object]:
+    # ============================================================================
+    # Purpose: Probe the stored credential for (connector_key, account_id) by
+    #   resolving its secret URI and performing an OAuth token refresh. No live
+    #   data is fetched. Operators use this to verify that a registered credential
+    #   is still valid before relying on it for a connector run.
+    # Database/ORM: ApiConnectorCredentialORM (read only via resolve_connector_credentials).
+    # Standards: Requires MANAGE_CONNECTORS@connector(connector_key). Surfaces
+    #   CredentialNotFoundError as 404; credential/OAuth failures as 200 with
+    #   a machine-readable status field. Every probe is audited (CONNECTOR_TESTED).
+    # Blast Radius: None (read-only; OAuth refresh touches Google but does not
+    #   mutate stored state).
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> resolve_connector_credentials.
+    #   - File: backend/ums_smart_revenue/connectors/google/errors.py -> error taxonomy.
+    # ============================================================================
+    connector_scope = AccessScope.connector(connector_key)
+    _require_connector_permission(user, Permission.MANAGE_CONNECTORS, connector_scope)
+
+    tenant_uuid = UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
+    conn_status: str
+    detail: str | None = None
+
+    try:
+        resolve_connector_credentials(
+            session=session,
+            tenant_id=tenant_uuid,
+            connector_key=connector_key,
+            account_id=account_id,
+        )
+        conn_status = "ok"
+    except CredentialNotFoundError:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Connector credential not found",
+        )
+    except InactiveCredentialError as exc:
+        conn_status = "inactive_credential"
+        detail = str(exc)
+    except OAuthRefreshError as exc:
+        conn_status = "auth_failed"
+        detail = str(exc)
+    except GoogleConnectorError as exc:
+        conn_status = "error"
+        detail = str(exc)
+
+    record = _audit_connector_change(
+        audit_sink=audit_sink,
+        user=user,
+        event_type=AuditEventType.CONNECTOR_TESTED,
+        connector_key=connector_key,
+        account_id=account_id,
+        reason=payload.reason,
+        details={"status": conn_status},
+    )
+    return {
+        "connector_key": connector_key,
+        "account_id": account_id,
+        "status": conn_status,
+        "detail": detail,
         "audit_event": audit_record_to_api(record),
     }
 

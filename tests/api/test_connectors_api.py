@@ -1,3 +1,4 @@
+from unittest.mock import MagicMock, patch
 from uuid import UUID
 
 from fastapi.testclient import TestClient
@@ -9,6 +10,11 @@ from ums_smart_revenue.app import create_app
 from ums_smart_revenue.connectors.credentials import (
     _is_duplicate_credential_integrity_error,
     is_external_secret_ref,
+)
+from ums_smart_revenue.connectors.google.errors import (
+    CredentialNotFoundError,
+    InactiveCredentialError,
+    OAuthRefreshError,
 )
 from ums_smart_revenue.db.org_models import OrgBase
 from ums_smart_revenue.db.security_models import (
@@ -254,6 +260,116 @@ def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
     assert audit_log.event_type == "CONNECTOR_JOB_RUN"
     assert audit_log.scope_type == "connector"
     assert audit_log.scope_id == "youtube_reporting"
+
+
+def test_connector_admin_can_test_connection_ok(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    mock_creds = MagicMock()
+
+    with patch(
+        "ums_smart_revenue.api.connectors.resolve_connector_credentials",
+        return_value=mock_creds,
+    ):
+        response = client.post(
+            "/connectors/credentials/youtube_reporting/content-owner-1/test",
+            headers=auth_headers("connector_admin"),
+            json={"reason": "Verify OAuth token still valid"},
+        )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+
+    assert response.status_code == 200
+    assert response.json()["connector_key"] == "youtube_reporting"
+    assert response.json()["account_id"] == "content-owner-1"
+    assert response.json()["status"] == "ok"
+    assert response.json()["detail"] is None
+    assert "audit_event" in response.json()
+    assert audit_log.event_type == "CONNECTOR_TESTED"
+    assert audit_log.scope_type == "connector"
+    assert audit_log.scope_id == "youtube_reporting"
+    assert audit_log.reason == "Verify OAuth token still valid"
+
+
+def test_test_connection_returns_404_for_missing_credential(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    with patch(
+        "ums_smart_revenue.api.connectors.resolve_connector_credentials",
+        side_effect=CredentialNotFoundError(
+            connector_key="youtube_reporting", account_id="no-such-account"
+        ),
+    ):
+        response = client.post(
+            "/connectors/credentials/youtube_reporting/no-such-account/test",
+            headers=auth_headers("connector_admin"),
+            json={"reason": "Diagnose missing credential"},
+        )
+
+    assert response.status_code == 404
+    assert "not found" in response.json()["detail"].lower()
+
+
+def test_test_connection_returns_inactive_status_for_inactive_credential(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    with patch(
+        "ums_smart_revenue.api.connectors.resolve_connector_credentials",
+        side_effect=InactiveCredentialError(
+            credential_id="cred-uuid", status="disabled"
+        ),
+    ):
+        response = client.post(
+            "/connectors/credentials/youtube_reporting/content-owner-1/test",
+            headers=auth_headers("connector_admin"),
+            json={"reason": "Check disabled credential"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "inactive_credential"
+    assert response.json()["detail"] is not None
+
+
+def test_test_connection_returns_auth_failed_for_oauth_error(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    with patch(
+        "ums_smart_revenue.api.connectors.resolve_connector_credentials",
+        side_effect=OAuthRefreshError(inner=Exception("Token has been revoked")),
+    ):
+        response = client.post(
+            "/connectors/credentials/youtube_reporting/content-owner-1/test",
+            headers=auth_headers("connector_admin"),
+            json={"reason": "Check OAuth state after revoke report"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "auth_failed"
+    assert response.json()["detail"] is not None
+
+
+def test_test_connection_requires_manage_connectors_permission(tmp_path):
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/connectors/credentials/youtube_reporting/content-owner-1/test",
+        headers=auth_headers("assistant_analyst"),
+        json={"reason": "Should be denied"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: connectors.manage"
 
 
 def test_credential_integrity_classifier_uses_duplicate_constraint_only():
