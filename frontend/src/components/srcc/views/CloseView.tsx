@@ -478,7 +478,7 @@ function LockDetailGrid({ status }: { status: FinanceMonthCloseStatus | null }) 
  * audited reason input, and the two-step arm/confirm lock & unlock buttons. The
  * parent owns all state; this component is presentational and calls back on intent.
  */
-function LockControlsPanel({ // skipcq: JS-0067
+function LockControlsPanel({ // skipcq: JS-0067, JS-R1005
   status,
   month,
   canCloseMonth,
