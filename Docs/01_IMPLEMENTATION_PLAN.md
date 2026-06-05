@@ -625,8 +625,10 @@ now wired to `GET /audit/events` (see below).
   sensitive-payload redaction (the UI reflects `details_redacted`, never reveals
   withheld payloads or offers a reveal control); fail-closed gate (a non-audit
   viewer sees the restricted placeholder and fires no fetch); 403 → audit-
-  appropriate no-permission copy. Frontend-only; backend unchanged. Registry is
-  now the only mock-labelled page.
+  appropriate no-permission copy. Renders the FIRST page only (no Load More via
+  `next_cursor` yet); severity-filter + "Download Audit View" are disabled
+  placeholders (no facet / audit-export route yet). Frontend-only; backend
+  unchanged. Registry is now the only mock-labelled page.
 
 ---
 

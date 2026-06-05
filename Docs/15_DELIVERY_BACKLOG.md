@@ -383,8 +383,11 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   payload redaction (the UI reflects `details_redacted`, never reveals withheld
   payloads), fail-closed gate (a non-audit viewer sees the restricted
   placeholder and fires no fetch — so the self-auditing read is never spammed),
-  403 → no-permission copy. Summary tiles + coverage panel stay static context
-  (no aggregate-count route). Frontend-only; backend unchanged.
+  403 → no-permission copy. Renders the FIRST page only (no Load More via
+  `next_cursor` yet). The severity-filter and "Download Audit View" controls are
+  disabled placeholders (no facet / no audit-export route exists yet). Summary
+  tiles + coverage panel stay static context (no aggregate-count route).
+  Frontend-only; backend unchanged.
 
 ## P2 — Advanced features
 
