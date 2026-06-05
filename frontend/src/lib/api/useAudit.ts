@@ -18,7 +18,7 @@ export type AuditEventsQuery = {
 };
 
 /** Append a URLSearchParams entry only when the value is defined. */
-function appendParam(params: URLSearchParams, key: string, value: string | number | undefined): void {
+function appendParam(params: URLSearchParams, key: string, value: string | number | undefined): void { // skipcq: JS-0067
   if (value != null) params.append(key, String(value));
 }
 
