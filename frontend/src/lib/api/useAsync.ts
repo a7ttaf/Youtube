@@ -62,7 +62,7 @@ export function useAsync<T>( // skipcq: JS-0067
 
   const reload = useCallback(() => setNonce((value) => value + 1), []);
 
-  useEffect(() => {
+  useEffect(() => { // skipcq: JS-R1005, JS-0045
     let active = true;
     // FIX: clear data at fetch start so a slow request under a NEW month/scope
     // filter falls back to the loading state instead of briefly showing the
