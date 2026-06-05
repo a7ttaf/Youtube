@@ -233,8 +233,8 @@ def _validate_session_me(body: Any) -> str:
         return "response is not a JSON object"
     capabilities = body.get("capabilities")
     return (
-        _require(isinstance(body.get("user_id"), str) and body["user_id"], "missing user_id")
-        or _require(isinstance(body.get("email"), str) and body["email"], "missing email")
+        _require(isinstance(body.get("user_id"), str) and body.get("user_id"), "missing user_id")
+        or _require(isinstance(body.get("email"), str) and body.get("email"), "missing email")
         or _require(isinstance(capabilities, Mapping), "capabilities object missing")
         or _require(
             isinstance(capabilities.get("canViewRevenue"), bool),

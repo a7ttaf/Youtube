@@ -43,6 +43,7 @@ type AccessPermissions = {
   canViewFinance: boolean;
   canManageRegistry: boolean;
   canCloseMonth: boolean;
+  canUnlockMonth: boolean;
   canCreateGlobalExports: boolean;
   canCreateScopedExports: boolean;
   canRequestRawExports: boolean;
@@ -91,9 +92,10 @@ function canPreviewRoles(): boolean { // skipcq: JS-0067
 //            of 10 roles, incl. ops-admin, that don't hold revenue-export);
 //            audit to VIEW_AUDIT_LOG; connector job controls to RUN_CONNECTOR_JOBS
 //            (NOT to finance, honoring that a finance admin must not trigger
-//            connector jobs). Registry management is gated on canViewRevenue —
-//            the closest honest backend capability today (no dedicated
-//            registry-write permission is exposed on the session contract).
+//            connector jobs). Registry management uses canManageRegistry derived
+//            from MANAGE_CHANNELS (corporate_admin and revenue_operations_admin
+//            hold registry permissions without VIEW_REVENUE; finance_admin holds
+//            VIEW_REVENUE without registry permissions — the two are disjoint).
 // Blast Radius: Authorization (UI gating). No graph projection impact detected.
 // Connections:
 //   - File: backend/ums_smart_revenue/api/session.py -> SessionCapabilities.
@@ -107,10 +109,9 @@ function capabilitiesToPermissions( // skipcq: JS-0067
   return {
     role,
     canViewFinance: capabilities.canViewRevenue,
-    // No dedicated registry-write capability is exposed on the session contract;
-    // gate registry management on the closest honest capability (revenue view).
-    canManageRegistry: capabilities.canViewRevenue,
+    canManageRegistry: capabilities.canManageRegistry,
     canCloseMonth: capabilities.canCloseMonth,
+    canUnlockMonth: capabilities.canUnlockMonth,
     canCreateGlobalExports: canExport,
     canCreateScopedExports: canExport,
     canRequestRawExports: canExport,

@@ -66,6 +66,7 @@ const formatCloseTimestamp = (value: string | null | undefined): string =>
 
 type AccessPermissions = {
   canCloseMonth: boolean;
+  canUnlockMonth: boolean;
 };
 
 type LockState = {
@@ -136,7 +137,7 @@ export default function CloseView({ // skipcq: JS-0067
 }: {
   permissions: AccessPermissions;
 }) {
-  const { canCloseMonth } = permissions;
+  const { canCloseMonth, canUnlockMonth } = permissions;
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   const [lockState, setLockState] = useState<LockState>({
     busy: false,
@@ -253,7 +254,7 @@ export default function CloseView({ // skipcq: JS-0067
       <div className="view-grid">
         <MonthCloseWorkbench
           month={month}
-          canCloseMonth={canCloseMonth}
+          canCloseMonth={canCloseMonth || canUnlockMonth}
           readiness={readiness}
           readinessLoading={readinessLoading}
           readinessError={readinessError}
@@ -272,6 +273,7 @@ export default function CloseView({ // skipcq: JS-0067
             status={status}
             month={month}
             canCloseMonth={canCloseMonth}
+            canUnlockMonth={canUnlockMonth}
             isLocked={isLocked}
             lockState={lockState}
             reason={reason}
@@ -396,11 +398,13 @@ function lockActionLabel( // skipcq: JS-0067, JS-R1005
 function lockActionDisabled( // skipcq: JS-0067, JS-R1005
   kind: LockAction,
   canCloseMonth: boolean,
+  canUnlockMonth: boolean,
   busy: boolean,
   isLocked: boolean,
   reasonEmpty: boolean,
 ): boolean {
-  const shared = !canCloseMonth || busy || reasonEmpty;
+  const canAct = kind === "unlock" ? canUnlockMonth : canCloseMonth;
+  const shared = !canAct || busy || reasonEmpty;
   return kind === "unlock" ? shared || !isLocked : shared || isLocked;
 }
 
@@ -412,6 +416,7 @@ function LockActionButton({ // skipcq: JS-0067
   kind,
   month,
   canCloseMonth,
+  canUnlockMonth,
   isLocked,
   busy,
   reasonEmpty,
@@ -421,6 +426,7 @@ function LockActionButton({ // skipcq: JS-0067
   kind: LockAction;
   month: string;
   canCloseMonth: boolean;
+  canUnlockMonth: boolean;
   isLocked: boolean;
   busy: boolean;
   reasonEmpty: boolean;
@@ -432,7 +438,7 @@ function LockActionButton({ // skipcq: JS-0067
     <button
       className={className}
       type="button"
-      disabled={lockActionDisabled(kind, canCloseMonth, busy, isLocked, reasonEmpty)}
+      disabled={lockActionDisabled(kind, canCloseMonth, canUnlockMonth, busy, isLocked, reasonEmpty)}
       onClick={() => onActionClick(kind)}
     >
       {lockActionLabel(kind, month, busy, isArmed)}
@@ -476,6 +482,7 @@ function LockControlsPanel({ // skipcq: JS-0067
   status,
   month,
   canCloseMonth,
+  canUnlockMonth,
   isLocked,
   lockState,
   reason,
@@ -487,6 +494,7 @@ function LockControlsPanel({ // skipcq: JS-0067
   status: FinanceMonthCloseStatus | null;
   month: string;
   canCloseMonth: boolean;
+  canUnlockMonth: boolean;
   isLocked: boolean;
   lockState: LockState;
   reason: string;
@@ -517,7 +525,7 @@ function LockControlsPanel({ // skipcq: JS-0067
           type="text"
           value={reason}
           placeholder="Why is this month being locked or unlocked?"
-          disabled={!canCloseMonth || lockState.busy}
+          disabled={(!canCloseMonth && !canUnlockMonth) || lockState.busy}
           onChange={(e) => onReasonChange(e.target.value)}
         />
       </div>
@@ -527,6 +535,7 @@ function LockControlsPanel({ // skipcq: JS-0067
           kind="unlock"
           month={month}
           canCloseMonth={canCloseMonth}
+          canUnlockMonth={canUnlockMonth}
           isLocked={isLocked}
           busy={lockState.busy}
           reasonEmpty={reasonEmpty}
@@ -537,6 +546,7 @@ function LockControlsPanel({ // skipcq: JS-0067
           kind="lock"
           month={month}
           canCloseMonth={canCloseMonth}
+          canUnlockMonth={canUnlockMonth}
           isLocked={isLocked}
           busy={lockState.busy}
           reasonEmpty={reasonEmpty}

@@ -110,10 +110,10 @@ function deferred<T>() { // skipcq: JS-0067
   return { promise, resolve };
 }
 
-function renderCloseView(canCloseMonth = true) { // skipcq: JS-0067
+function renderCloseView(canCloseMonth = true, canUnlockMonth = true) { // skipcq: JS-0067
   return render(
     <TenantProvider initialSlug="ums">
-      <CloseView permissions={{ canCloseMonth }} />
+      <CloseView permissions={{ canCloseMonth, canUnlockMonth }} />
     </TenantProvider>,
   );
 }

@@ -138,6 +138,9 @@ export function useSessionBootstrap(): SessionBootstrap { // skipcq: JS-0067
     // Once the session is already resolved (seeded for a test, or hydrated by a
     // prior successful call) there is nothing to bootstrap.
     if (status === "ready") return;
+    // FIX: guard the re-fire triggered when status transitions loading→error;
+    // without this guard, fail() causes a second /session/me fetch on every error.
+    if (status === "error") return;
     if (hasRequestedRef.current) return;
     hasRequestedRef.current = true;
     client

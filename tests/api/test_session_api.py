@@ -121,6 +121,8 @@ def test_session_me_header_mode_finance_admin_capabilities(client_headers_mode):
     assert caps["canExportRevenue"] is True
     # finance_admin also holds EXPORT_ANALYTICS_REPORT (distinct from revenue).
     assert caps["canExportAnalyticsReports"] is True
+    # finance_admin holds VIEW_REVENUE but NOT MANAGE_CHANNELS (disjoint role sets).
+    assert caps["canManageRegistry"] is False
     assert caps["canViewAudit"] is True
     # finance_admin lacks connector permissions in ROLE_PERMISSIONS (seed.py).
     assert caps["canRunConnectorJobs"] is False
@@ -161,6 +163,8 @@ def test_session_me_header_mode_revenue_ops_admin_can_run_connector_jobs(
     # revenue_operations_admin DOES hold EXPORT_ANALYTICS_REPORT — must not
     # collapse to canExportRevenue=False (the two permissions are distinct).
     assert caps["canExportAnalyticsReports"] is True
+    # revenue_operations_admin also holds MANAGE_CHANNELS (distinct from finance).
+    assert caps["canManageRegistry"] is True
 
 
 def test_session_me_header_mode_finance_approver_analytics_false_revenue_true(
@@ -391,6 +395,7 @@ def test_session_me_db_mode_finance_admin_capabilities(client_db_mode):
     assert caps["canChangeAllocation"] is True
     assert caps["canExportRevenue"] is True
     assert caps["canExportAnalyticsReports"] is True
+    assert caps["canManageRegistry"] is False
     assert caps["canViewAudit"] is True
     assert caps["canRunConnectorJobs"] is False
     assert caps["canManageConnectors"] is False
