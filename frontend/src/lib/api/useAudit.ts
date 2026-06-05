@@ -17,11 +17,16 @@ export type AuditEventsQuery = {
   limit?: number;
 };
 
+/** Append a URLSearchParams entry only when the value is defined. */
+function appendParam(params: URLSearchParams, key: string, value: string | number | undefined): void {
+  if (value != null) params.append(key, String(value));
+}
+
 /**
  * Build the GET /audit/events URL with optional filter and pagination params.
  * Cursor params are both-or-neither — a half-cursor 422s on the backend.
- * Extracted to keep the useCallback closure a single expression (avoids a high
- * cyclomatic complexity count from the conditional param-set branches).
+ * appendParam centralises the null-guard for each scalar field, keeping this
+ * function's branching to the cursor pair and the qs-suffix check only.
  */
 function buildAuditEventsUrl( // skipcq: JS-0067
   event_type: string | undefined,
@@ -32,17 +37,17 @@ function buildAuditEventsUrl( // skipcq: JS-0067
   limit: number | undefined,
 ): string {
   const params = new URLSearchParams();
-  if (event_type != null) params.set("event_type", event_type);
-  if (entity_type != null) params.set("entity_type", entity_type);
-  if (entity_id != null) params.set("entity_id", entity_id);
-  if (limit != null) params.set("limit", String(limit));
+  appendParam(params, "event_type", event_type);
+  appendParam(params, "entity_type", entity_type);
+  appendParam(params, "entity_id", entity_id);
+  appendParam(params, "limit", limit);
   // Both-or-neither: only append cursor when both halves are present.
   if (cursor_created_at != null && cursor_id != null) {
     params.set("cursor_created_at", cursor_created_at);
     params.set("cursor_id", cursor_id);
   }
   const qs = params.toString();
-  return `/audit/events${qs ? `?${qs}` : ""}`;
+  return qs ? `/audit/events?${qs}` : "/audit/events";
 }
 
 // ============================================================================

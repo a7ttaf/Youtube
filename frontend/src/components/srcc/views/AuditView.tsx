@@ -268,6 +268,26 @@ function renderDetailsLine(details: Record<string, unknown>): string | null { //
 }
 
 /**
+ * Optional details note for a timeline entry. When details_redacted is true,
+ * shows the server-driven redaction notice. When false and non-empty, renders
+ * top-level primitive k=v pairs. Returns null when there is nothing to show.
+ * Extracted from AuditTimelineItem to keep its cyclomatic complexity below the
+ * analysis threshold.
+ */
+function DetailsNote({ event }: { event: AuditLogEntry }) { // skipcq: JS-0067
+  if (event.details_redacted) {
+    return (
+      <span className="item-sub" role="note">
+        Sensitive (redacted) — payload withheld by the audit service
+      </span>
+    );
+  }
+  const line = renderDetailsLine(event.details);
+  if (!line) return null;
+  return <span className="item-sub" role="note">{line}</span>;
+}
+
+/**
  * A single live audit timeline entry. The tone reflects the server-driven
  * `sensitive` flag; when `details_redacted` is true the row shows a clear
  * "Sensitive (redacted)" indicator and renders NO details payload and NO reveal
@@ -277,7 +297,6 @@ function renderDetailsLine(details: Record<string, unknown>): string | null { //
  */
 function AuditTimelineItem({ event }: { event: AuditLogEntry }) { // skipcq: JS-0067
   const tone: Severity = event.sensitive ? "red" : "green";
-  const detailsLine = event.details_redacted ? null : renderDetailsLine(event.details);
   return (
     <div className="timeline-item" role="listitem">
       <span className="timeline-time">{formatTimestamp(event.created_at)}</span>
@@ -285,13 +304,7 @@ function AuditTimelineItem({ event }: { event: AuditLogEntry }) { // skipcq: JS-
       <span>
         <span className="item-title">{event.event_type}</span>
         <span className="item-sub">{buildEventSub(event)}</span>
-        {event.details_redacted ? (
-          <span className="item-sub" role="note">
-            Sensitive (redacted) — payload withheld by the audit service
-          </span>
-        ) : detailsLine ? (
-          <span className="item-sub" role="note">{detailsLine}</span>
-        ) : null}
+        <DetailsNote event={event} />
       </span>
       <Badge tone={tone}>{event.sensitive ? "Sensitive" : "Logged"}</Badge>
     </div>
