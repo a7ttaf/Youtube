@@ -15,6 +15,7 @@ from ums_smart_revenue.connectors.google.errors import (
     CredentialNotFoundError,
     InactiveCredentialError,
     OAuthRefreshError,
+    SecretFetchError,
 )
 from ums_smart_revenue.db.org_models import OrgBase
 from ums_smart_revenue.db.security_models import (
@@ -263,6 +264,7 @@ def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
 
 
 def test_connector_admin_can_test_connection_ok(tmp_path):
+    """connector_admin: ok probe returns 200 status='ok' and writes CONNECTOR_TESTED audit."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -295,6 +297,7 @@ def test_connector_admin_can_test_connection_ok(tmp_path):
 
 
 def test_test_connection_returns_404_for_missing_credential(tmp_path):
+    """Missing credential probe returns 404, includes 'not found' detail, and writes CONNECTOR_TESTED audit."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -311,11 +314,21 @@ def test_test_connection_returns_404_for_missing_credential(tmp_path):
             json={"reason": "Diagnose missing credential"},
         )
 
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+
     assert response.status_code == 404
     assert "not found" in response.json()["detail"].lower()
+    assert response.json()["status"] == "not_found"
+    assert "audit_event" in response.json()
+    assert audit_log.event_type == "CONNECTOR_TESTED"
+    assert audit_log.scope_id == "youtube_reporting"
+    assert audit_log.details["status"] == "not_found"
 
 
 def test_test_connection_returns_inactive_status_for_inactive_credential(tmp_path):
+    """Inactive credential probe returns 200 with status='inactive_credential'."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -338,6 +351,7 @@ def test_test_connection_returns_inactive_status_for_inactive_credential(tmp_pat
 
 
 def test_test_connection_returns_auth_failed_for_oauth_error(tmp_path):
+    """OAuth refresh failure returns 200 with status='auth_failed'."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -357,7 +371,35 @@ def test_test_connection_returns_auth_failed_for_oauth_error(tmp_path):
     assert response.json()["detail"] is not None
 
 
+def test_test_connection_returns_error_for_generic_google_connector_error(tmp_path):
+    """Generic GoogleConnectorError (e.g. SecretFetchError) returns 200 with status='error'."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    with patch(
+        "ums_smart_revenue.api.connectors.resolve_connector_credentials",
+        side_effect=SecretFetchError(ref="gcp-secret://project/key", inner=Exception("backend unavailable")),
+    ):
+        response = client.post(
+            "/connectors/credentials/youtube_reporting/content-owner-1/test",
+            headers=auth_headers("connector_admin"),
+            json={"reason": "Check secret store availability"},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "error"
+    assert response.json()["detail"] is not None
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+    assert audit_log.event_type == "CONNECTOR_TESTED"
+    assert audit_log.details["status"] == "error"
+
+
 def test_test_connection_requires_manage_connectors_permission(tmp_path):
+    """Non-connector role (assistant_analyst) is rejected with 403."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -373,7 +415,11 @@ def test_test_connection_requires_manage_connectors_permission(tmp_path):
 
 
 def test_credential_integrity_classifier_uses_duplicate_constraint_only():
+    """Integrity classifier returns True only for the unique-constraint violation, not FK errors."""
+
     class DuplicateDiag:
+        """Minimal constraint diagnostic stub for testing the integrity classifier."""
+
         constraint_name = "uq_api_connector_credentials_connector_account"
 
     class DuplicateOrigError(Exception):

@@ -72,7 +72,7 @@ Returns per-channel issue list (scoped same as `GET /channels`). Each issue has 
 ### `PATCH /channels/{youtube_channel_id}/mapping`
 
 Changes `primary_company_id` for a channel. Requires `MANAGE_ORG_MAPPING@channel` + `MANAGE_ORG_MAPPING@company(target)`.
-Audited with reason. Respects month-lock (locked month blocks changes without Finance Admin override).
+Audited with reason. Note: the endpoint does not currently enforce month-lock; a Finance Admin override path is not yet implemented.
 
 ### `POST /channels`
 

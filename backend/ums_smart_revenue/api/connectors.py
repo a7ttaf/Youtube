@@ -2,6 +2,7 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
@@ -59,12 +60,15 @@ class ConnectorJobRequest(NonBlankRequestModel):
 
 
 class ConnectorTestRequest(NonBlankRequestModel):
+    """Request body for the test-connection probe endpoint."""
+
     reason: str = Field(min_length=1)
 
 
 def current_connector_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyConnectorCredentialRepository:
+    """FastAPI dependency providing a request-scoped credential repository."""
     return SqlAlchemyConnectorCredentialRepository(session)
 
 
@@ -75,6 +79,7 @@ def list_connector_credentials(
     limit: Annotated[int, Query(ge=1, le=MAX_CREDENTIAL_PAGE_SIZE)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, object]:
+    """List connector credentials the requesting user is permitted to manage."""
     connector_keys = _manageable_connector_keys(user)
     if connector_keys is not None and not connector_keys:
         _raise_missing_connector_permission(Permission.MANAGE_CONNECTORS)
@@ -101,6 +106,7 @@ def create_connector_credential(
     repository: Annotated[SqlAlchemyConnectorCredentialRepository, Depends(current_connector_repository)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Register a new connector credential reference for the given connector and account."""
     connector_scope = AccessScope.connector(payload.connector_key)
     _require_connector_permission(user, Permission.MANAGE_CONNECTORS, connector_scope)
     if not is_external_secret_ref(payload.encrypted_secret_ref):
@@ -138,6 +144,7 @@ def request_connector_job(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Enqueue a connector run request and emit a CONNECTOR_JOB_RUN audit event."""
     connector_scope = AccessScope.connector(payload.connector_key)
     _require_connector_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
     record = _audit_connector_change(
@@ -157,8 +164,8 @@ def request_connector_job(
     }
 
 
-@router.post("/credentials/{connector_key}/{account_id}/test")
-def test_connector_connection( # skipcq: JS-0067
+@router.post("/credentials/{connector_key}/{account_id:path}/test")
+def test_connector_connection(
     connector_key: str,
     account_id: str,
     payload: ConnectorTestRequest,
@@ -166,27 +173,39 @@ def test_connector_connection( # skipcq: JS-0067
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
+    """Probe credential OAuth health; every probe (including 404) is audited as CONNECTOR_TESTED."""
     # ============================================================================
     # Purpose: Probe the stored credential for (connector_key, account_id) by
     #   resolving its secret URI and performing an OAuth token refresh. No live
     #   data is fetched. Operators use this to verify that a registered credential
     #   is still valid before relying on it for a connector run.
     # Database/ORM: ApiConnectorCredentialORM (read only via resolve_connector_credentials).
-    # Standards: Requires MANAGE_CONNECTORS@connector(connector_key). Surfaces
-    #   CredentialNotFoundError as 404; credential/OAuth failures as 200 with
-    #   a machine-readable status field. Every probe is audited (CONNECTOR_TESTED).
+    # Standards: Requires MANAGE_CONNECTORS@connector(connector_key). Every probe
+    #   is audited (CONNECTOR_TESTED) including not-found; credential/OAuth failures
+    #   return 200 with a machine-readable status field; not-found returns 404 with
+    #   the audit already committed (JSONResponse, not HTTPException, so the session
+    #   commits rather than rolls back).
     # Blast Radius: None (read-only; OAuth refresh touches Google but does not
     #   mutate stored state).
     # Connections:
-    #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> resolve_connector_credentials.
+    #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py
+    #     -> resolve_connector_credentials.
     #   - File: backend/ums_smart_revenue/connectors/google/errors.py -> error taxonomy.
     # ============================================================================
     connector_scope = AccessScope.connector(connector_key)
     _require_connector_permission(user, Permission.MANAGE_CONNECTORS, connector_scope)
 
-    tenant_uuid = UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
-    conn_status: str
+    # FIX: Wrap UUID parse so a truthy but non-UUID tenant_id string (e.g. a slug)
+    # in headers mode falls back to the bootstrap tenant rather than raising a
+    # raw ValueError that would produce an unhandled 500.
+    try:
+        tenant_uuid = UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
+    except ValueError:
+        tenant_uuid = UUID(UMS_TENANT_ID)
+
+    conn_status: str = "ok"
     detail: str | None = None
+    not_found = False
 
     try:
         resolve_connector_credentials(
@@ -195,12 +214,12 @@ def test_connector_connection( # skipcq: JS-0067
             connector_key=connector_key,
             account_id=account_id,
         )
-        conn_status = "ok"
     except CredentialNotFoundError:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Connector credential not found",
-        )
+        # FIX: Audit the not-found probe before returning 404 so the audit trail
+        # is complete. Use JSONResponse (not HTTPException) so the session commits
+        # and the CONNECTOR_TESTED row is persisted despite the 404 status code.
+        conn_status = "not_found"
+        not_found = True
     except InactiveCredentialError as exc:
         conn_status = "inactive_credential"
         detail = str(exc)
@@ -220,6 +239,19 @@ def test_connector_connection( # skipcq: JS-0067
         reason=payload.reason,
         details={"status": conn_status},
     )
+
+    if not_found:
+        return JSONResponse(
+            status_code=status.HTTP_404_NOT_FOUND,
+            content={
+                "connector_key": connector_key,
+                "account_id": account_id,
+                "status": conn_status,
+                "detail": "Connector credential not found",
+                "audit_event": audit_record_to_api(record),
+            },
+        )
+
     return {
         "connector_key": connector_key,
         "account_id": account_id,
@@ -230,6 +262,7 @@ def test_connector_connection( # skipcq: JS-0067
 
 
 def _require_connector_permission(user: UserPrincipal, permission: Permission, scope: AccessScope) -> None:
+    """Raise 403 if the user lacks the given permission at the connector scope."""
     if not has_permission(user, permission, scope):
         _raise_missing_connector_permission(permission)
 
@@ -280,6 +313,7 @@ def _audit_connector_change(
     reason: str,
     details: dict[str, object],
 ):
+    """Write and return a CONNECTOR_* audit record via the request-scoped sink."""
     return record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -293,6 +327,7 @@ def _audit_connector_change(
 
 
 def _with_audit_event(entry: ConnectorCredentialEntry, record) -> dict[str, object]:
+    """Return the credential's API shape with an audit_event field appended."""
     response = entry.to_api()
     response["audit_event"] = audit_record_to_api(record)
     return response
