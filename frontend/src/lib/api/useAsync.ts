@@ -62,7 +62,7 @@ export function useAsync<T>( // skipcq: JS-0067
 
   const reload = useCallback(() => setNonce((value) => value + 1), []);
 
-  useEffect(() => { // skipcq: JS-R1005, JS-0045
+  useEffect(() => { // skipcq: JS-R1005
     let active = true;
     // FIX: clear data at fetch start so a slow request under a NEW month/scope
     // filter falls back to the loading state instead of briefly showing the
@@ -70,6 +70,9 @@ export function useAsync<T>( // skipcq: JS-0067
     setData(null);
     setLoading(true);
     setError(null);
+    // Extracted so every code path returns the same cleanup type (avoids the
+    // inconsistent-return lint rule on the outer function).
+    const cleanup = () => { active = false; };
     // FIX: StrictMode (dev) runs setup -> cleanup -> setup on the SAME instance
     // with IDENTICAL deps; calling run() on both setups fires the request TWICE.
     // For a self-auditing read that records a DUPLICATE audit event. Reuse the
@@ -87,7 +90,7 @@ export function useAsync<T>( // skipcq: JS-0067
         // otherwise leave loading=true pinned forever — .finally never fires.
         setError(caught instanceof Error ? caught : new Error(String(caught)));
         setLoading(false);
-        return;
+        return cleanup;
       }
     }
     inflightRef.current = { run, nonce, promise };
@@ -109,10 +112,8 @@ export function useAsync<T>( // skipcq: JS-0067
         if (!active) return;
         setLoading(false);
       });
-    return () => {
-      // Supersede: a newer run (dep change or reload) must win.
-      active = false;
-    };
+    // Supersede: a newer run (dep change or reload) must win.
+    return cleanup;
   }, [run, nonce]);
 
   return { data, loading, error, reload };
