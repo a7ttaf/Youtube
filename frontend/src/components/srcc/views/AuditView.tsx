@@ -130,14 +130,25 @@ function AuditTimelineFeed() { // skipcq: JS-0067, JS-R1005
   const { data, loading, error } = useAuditEvents();
 
   if (error) {
-    const { title, detail } = describeError(error);
+    const described = describeError(error);
+    // describeError's 403 detail is net-revenue-specific (the helper is shared
+    // with the finance screens). On the audit screen show an audit-appropriate
+    // denial instead; the shared helper stays untouched so the finance screens'
+    // copy (and their tests) are unaffected.
+    const is403 = error instanceof ApiError && error.status === 403;
+    const detail = is403
+      ? "Your role cannot view the audit log."
+      : described.detail;
     return (
       <div className="timeline" role="alert">
-        <div className="timeline-item" role="listitem">
+        {/* role="alert" already announces this region; an inner role="listitem"
+            would be an orphan (no enclosing role="list"), so the row stays a
+            plain item div. */}
+        <div className="timeline-item">
           <span className="timeline-time">--:--</span>
           <Dot tone="red" />
           <span>
-            <span className="item-title">{title}</span>
+            <span className="item-title">{described.title}</span>
             <span className="item-sub">{detail}</span>
           </span>
           <Badge tone="red">Error</Badge>

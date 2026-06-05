@@ -206,5 +206,8 @@ describe("AuditView wired to GET /audit/events", () => {
       expect(screen.getByText("No permission")).toBeInTheDocument(),
     );
     expect(screen.getByRole("alert")).toBeInTheDocument();
+    // The 403 detail is audit-appropriate, not the shared net-revenue copy.
+    expect(screen.getByText(/cannot view the audit log/i)).toBeInTheDocument();
+    expect(screen.queryByText(/net revenue/i)).not.toBeInTheDocument();
   });
 });
