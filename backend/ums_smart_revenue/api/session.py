@@ -114,7 +114,11 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
         can_change_allocation=_can(Permission.CHANGE_ALLOCATION_RULE),
         can_export_revenue=_can(Permission.EXPORT_REVENUE_REPORT),
         can_export_analytics_reports=_can(Permission.EXPORT_ANALYTICS_REPORT),
-        can_manage_registry=_can(Permission.MANAGE_CHANNELS),
+        can_manage_registry=(
+            _can(Permission.MANAGE_CHANNELS)
+            or _can(Permission.MANAGE_ORG_MAPPING)
+            or _can(Permission.MANAGE_GROUPS)
+        ),
         can_manage_connectors=_can(Permission.MANAGE_CONNECTORS),
         can_run_connector_jobs=_can(Permission.RUN_CONNECTOR_JOBS),
         can_view_audit=_can(Permission.VIEW_AUDIT_LOG),
