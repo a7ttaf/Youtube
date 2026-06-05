@@ -302,10 +302,6 @@ export const AUDIT_SUMMARY = [
   { label: "Retention", value: "7 years", note: "Finance audit policy baseline" },
 ];
 
-export const AUDIT_EVENTS = [
-  { id: "export-file-prepared", time: "02:18:44", tone: "red" as Severity, title: "Revenue export file prepared", sub: "actor=finance.admin@ums, permission=export:revenue, scope=global:mar-2026, checksum=exp_8b3c41", badge: { text: "Sensitive", tone: "red" as Severity } },
-  { id: "manual-override-submitted", time: "02:03:11", tone: "amber" as Severity, title: "Manual override submitted", sub: "target=Kids Arabic, before and after values stored, reason required, approver pending", badge: { text: "Pending", tone: "amber" as Severity } },
-  { id: "trace-query-filtered", time: "01:55:08", tone: "green" as Severity, title: "Trace query filtered", sub: "allowed_companies=United Studios, hidden_entities=38, source=sql", badge: { text: "Trace", tone: "violet" as Severity } },
-  { id: "bank-reconciliation-denied", time: "01:40:29", tone: "red" as Severity, title: "Denied bank reconciliation view", sub: "actor=assistant.analyst@ums, permission=view:bank_reconciliation, result=denied", badge: { text: "Denied", tone: "red" as Severity } },
-  { id: "mapping-change-approved", time: "01:22:51", tone: "green" as Severity, title: "Mapping change approved", sub: "channel=Sports Extra, company=TV Sector, approver=corporate.admin@ums", badge: { text: "Audit", tone: "blue" as Severity } },
-];
+// AUDIT_EVENTS removed: the Audit timeline is now wired to GET /audit/events via
+// views/AuditView (real, server-audited rows). AUDIT_SUMMARY stays as static
+// context — the endpoint exposes no aggregate counts.
