@@ -22,6 +22,10 @@ const TENANT_SCOPED_ROUTES = [
   "/connectors",
   "/adsense",
   "/channels",
+  // /audit/events bootstraps on the Audit view mount and uses the same
+  // trusted-gateway auth, so it must be proxied with the injected principal
+  // headers in dev or the bootstrap call would 401.
+  "/audit",
 ];
 
 // Repo root is one level above this file (frontend/vite.config.ts -> ..).

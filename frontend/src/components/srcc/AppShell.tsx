@@ -5,8 +5,6 @@ import type { SessionCapabilities, TenantRead } from "@/lib/api/types";
 import { useSessionBootstrap } from "@/contexts/SessionContext";
 import { useTenant } from "@/contexts/TenantContext";
 import {
-  AUDIT_EVENTS,
-  AUDIT_SUMMARY,
   NAV_GROUPS,
   REGISTRY_CONTROLS,
   REGISTRY_ROWS,
@@ -16,6 +14,7 @@ import {
 } from "@/lib/mock/data";
 import type { Role, ViewKey } from "@/lib/mock/data";
 import { BrandIcon, NAV_ICONS, RefreshIcon } from "./icons";
+import AuditView from "./views/AuditView";
 import CloseView from "./views/CloseView";
 import CommandView from "./views/CommandView";
 import ConnectorsView from "./views/ConnectorsView";
@@ -667,7 +666,12 @@ function ViewRouter({ // skipcq: JS-0067, JS-R1005
           canViewFinance={permissions.canViewFinance}
         />
       )}
-      {view === "audit" && <AuditView permissions={permissions} />}
+      {view === "audit" && (
+        <AuditView
+          canViewAudit={permissions.canViewAudit}
+          canViewFinance={permissions.canViewFinance}
+        />
+      )}
     </>
   );
 }
@@ -1003,124 +1007,7 @@ function RegistryControlsPanel() { // skipcq: JS-0067
 
 /* ------------------------------------------------------------------ audit */
 
-/** Mock Audit Log view: summary tiles, the audit timeline, and coverage panel. */
-function AuditView({ permissions }: { permissions: AccessPermissions }) { // skipcq: JS-0067
-  const { canViewAudit, canViewFinance } = permissions;
-  return (
-    <section className="view-page" aria-labelledby="auditTitle">
-      <div className="view-summary" aria-label="Audit summary">
-        {AUDIT_SUMMARY.map((s) => (
-          <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
-        ))}
-      </div>
-
-      <div className="view-grid">
-        <AuditLogPanel canViewAudit={canViewAudit} />
-        <AuditCoveragePanel />
-      </div>
-    </section>
-  );
-}
-
-/**
- * The audit-log main panel: header (title + severity filter / download actions)
- * and the audit timeline. Extracted so the AuditView JSX tree stays shallow.
- */
-function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) { // skipcq: JS-0067
-  return (
-    <section className="panel">
-      <AuditLogPanelHeader canViewAudit={canViewAudit} />
-      <AuditTimeline canViewAudit={canViewAudit} />
-    </section>
-  );
-}
-
-/** Audit-log panel header: title/subtitle and the severity filter + download actions. */
-function AuditLogPanelHeader({ canViewAudit }: { canViewAudit: boolean }) { // skipcq: JS-0067
-  return (
-    <div className="panel-header">
-      <div className="panel-title">
-        <strong id="auditTitle">Audit Log</strong>
-        <span>Every sensitive action records actor, permission, scope, target, and result</span>
-      </div>
-      <div className="view-actions">
-        <select className="control" aria-label="Audit severity" disabled={!canViewAudit}>
-          <option>All sensitive</option><option>Denied</option><option>Exports</option>
-        </select>
-        <button className="ghost-button" type="button" disabled={!canViewAudit}>Download Audit View</button>
-      </div>
-    </div>
-  );
-}
-
-/** Audit event timeline; non-audit roles see a single restricted placeholder row. */
-function AuditTimeline({ canViewAudit }: { canViewAudit: boolean }) { // skipcq: JS-0067
-  if (!canViewAudit) {
-    return (
-      <div className="timeline" role="list">
-        <div className="timeline-item" role="listitem">
-          <span className="timeline-time">--:--</span>
-          <Dot tone="red" />
-          <span>
-            <span className="item-title">Audit view restricted</span>
-            <span className="item-sub">Sensitive audit events require Finance Admin access</span>
-          </span>
-          <Badge tone="red">Restricted</Badge>
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="timeline" role="list">
-      {AUDIT_EVENTS.map((e) => (
-        <AuditTimelineItem key={e.id} event={e} />
-      ))}
-    </div>
-  );
-}
-
-/** A single audit timeline entry: timestamp, tone dot, title/subtitle, and badge. */
-function AuditTimelineItem({ event }: { event: (typeof AUDIT_EVENTS)[number] }) { // skipcq: JS-0067
-  return (
-    <div className="timeline-item" role="listitem">
-      <span className="timeline-time">{event.time}</span>
-      <Dot tone={event.tone} />
-      <span>
-        <span className="item-title">{event.title}</span>
-        <span className="item-sub">{event.sub}</span>
-      </span>
-      <Badge tone={event.badge.tone}>{event.badge.text}</Badge>
-    </div>
-  );
-}
-
-/** Static audit coverage panel listing the always-audited sensitive surfaces. */
-function AuditCoveragePanel() { // skipcq: JS-0067
-  return (
-    <aside className="view-stack">
-      <section className="panel">
-        <AuditCoverageHeader />
-        <div className="issue-list" role="list">
-          <ItemRow tone="green" title="Revenue reads" sub="Every money cell view emits an audit row"
-            trailing={<Badge tone="green">On</Badge>} />
-          <ItemRow tone="green" title="Override before/after" sub="Both values stored with reason and approver"
-            trailing={<Badge tone="green">On</Badge>} />
-          <ItemRow tone="amber" title="Trace queries" sub="Filtered query is audited with allowed scope"
-            trailing={<Badge tone="amber">Logged</Badge>} />
-        </div>
-      </section>
-    </aside>
-  );
-}
-
-/** Audit coverage panel header (title + subtitle). Extracted to keep nesting shallow. */
-function AuditCoverageHeader() { // skipcq: JS-0067
-  return (
-    <div className="panel-header">
-      <div className="panel-title">
-        <strong>Audit Coverage</strong>
-        <span>Required to be present for every sensitive surface</span>
-      </div>
-    </div>
-  );
-}
+// AuditView is the wired Audit Log screen; it lives in ./views/AuditView.tsx and
+// reads GET /audit/events via useAuditEvents (cursor-paginated, server-driven
+// redaction). The timeline gate is canViewAudit (restricted -> no fetch); the
+// summary tiles + coverage panel stay static context (no aggregate-count route).
