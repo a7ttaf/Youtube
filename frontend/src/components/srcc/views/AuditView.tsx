@@ -67,7 +67,7 @@ export default function AuditView({ // skipcq: JS-0067
 function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) { // skipcq: JS-0067
   return (
     <section className="panel">
-      <AuditLogPanelHeader canViewAudit={canViewAudit} />
+      <AuditLogPanelHeader />
       <AuditTimeline canViewAudit={canViewAudit} />
     </section>
   );
@@ -75,11 +75,12 @@ function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) { // skipcq:
 
 /**
  * Audit-log panel header: title/subtitle and the severity filter + download
- * actions. The filter/download controls are not yet wired (no server-side
- * severity facet or audit-export route), so they stay disabled placeholders
- * rather than faking behavior; they are also disabled for a non-audit viewer.
+ * actions. Neither control is wired yet — there is no server-side severity facet
+ * and no audit-export route/handler — so BOTH stay UNCONDITIONALLY disabled
+ * placeholders rather than presenting a control that does nothing. (`canViewAudit`
+ * is no longer needed here: a non-audit viewer never reaches the live panel.)
  */
-function AuditLogPanelHeader({ canViewAudit }: { canViewAudit: boolean }) { // skipcq: JS-0067
+function AuditLogPanelHeader() { // skipcq: JS-0067
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -90,7 +91,9 @@ function AuditLogPanelHeader({ canViewAudit }: { canViewAudit: boolean }) { // s
         <select className="control" aria-label="Audit severity" disabled>
           <option>All sensitive</option><option>Denied</option><option>Exports</option>
         </select>
-        <button className="ghost-button" type="button" disabled={!canViewAudit}>Download Audit View</button>
+        {/* No audit-export route exists yet — disabled for ALL users (a button
+            that did nothing was misleading) until a real handler is built. */}
+        <button className="ghost-button" type="button" disabled>Download Audit View</button>
       </div>
     </div>
   );
@@ -125,6 +128,11 @@ function AuditTimeline({ canViewAudit }: { canViewAudit: boolean }) { // skipcq:
  * The live audit-event feed. ALWAYS calls useAuditEvents() (it is only mounted
  * when the viewer may see the audit log), so the hook stays unconditional. Maps
  * loading / error (403 -> "No permission") / empty / loaded states.
+ *
+ * FIRST PAGE ONLY: this renders the default page (newest first, backend default
+ * limit) and does NOT yet consume `pagination.next_cursor`. A future "Load More"
+ * would pass `next_cursor.{created_at, id}` back as `cursor_created_at`/`cursor_id`
+ * to `useAuditEvents` to fetch the next page.
  */
 function AuditTimelineFeed() { // skipcq: JS-0067, JS-R1005
   const { data, loading, error } = useAuditEvents();

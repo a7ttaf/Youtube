@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError } from "@/lib/api/client";
 
@@ -14,7 +14,14 @@ import { ApiError } from "@/lib/api/client";
 //   data is cleared to null at the START of every fetch (dep change or reload)
 //   so a slow request cannot keep showing the PRIOR month's finance numbers
 //   under a NEW month/scope filter — views fall back to their loading state.
-// Blast Radius: None detected (read-only display state).
+//   The effect also DEDUPES a StrictMode/concurrent double-invoke (setup ->
+//   cleanup -> setup with identical deps on the same instance): it reuses the
+//   in-flight promise for the same (run, nonce) instead of firing a second
+//   request. This matters because several reads (the audit log + finance list
+//   endpoints) WRITE an audit row per call, so a double-invoke would otherwise
+//   record a duplicate audit event. A real dep change or reload() still fires.
+// Blast Radius: None detected (read-only display state); the dedupe only collapses
+//   identical back-to-back fires, so reload/dep-change refetch behavior is intact.
 // Connections:
 //   - File: frontend/src/lib/api/client.ts -> the thrown ApiError this surfaces.
 //   - File: frontend/src/lib/api/useNetRevenue.ts -> first consumer.
@@ -43,6 +50,15 @@ export function useAsync<T>( // skipcq: JS-0067
   const [error, setError] = useState<ApiError | Error | null>(null);
   // Bumped by reload() to force a re-fetch with the same `run` reference.
   const [nonce, setNonce] = useState(0);
+  // Holds the in-flight request for the current (run, nonce) so a StrictMode
+  // double-invoke (or concurrent remount) reuses it instead of starting a second,
+  // separately-audited request. Persists across the simulated unmount/remount
+  // because refs survive on the same component instance.
+  const inflightRef = useRef<{
+    run: () => Promise<T>;
+    nonce: number;
+    promise: Promise<T>;
+  } | null>(null);
 
   const reload = useCallback(() => setNonce((value) => value + 1), []);
 
@@ -54,7 +70,18 @@ export function useAsync<T>( // skipcq: JS-0067
     setData(null);
     setLoading(true);
     setError(null);
-    run()
+    // FIX: StrictMode (dev) runs setup -> cleanup -> setup on the SAME instance
+    // with IDENTICAL deps; calling run() on both setups fires the request TWICE.
+    // For a self-auditing read that records a DUPLICATE audit event. Reuse the
+    // in-flight promise for the same (run, nonce); a real dep change or reload()
+    // produces a new key and correctly starts a fresh request.
+    const cached = inflightRef.current;
+    const promise =
+      cached && cached.run === run && cached.nonce === nonce
+        ? cached.promise
+        : run();
+    inflightRef.current = { run, nonce, promise };
+    promise
       .then((result) => {
         if (!active) return;
         setData(result);

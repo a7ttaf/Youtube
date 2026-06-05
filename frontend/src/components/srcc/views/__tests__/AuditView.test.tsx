@@ -1,3 +1,4 @@
+import { StrictMode } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -209,5 +210,38 @@ describe("AuditView wired to GET /audit/events", () => {
     // The 403 detail is audit-appropriate, not the shared net-revenue copy.
     expect(screen.getByText(/cannot view the audit log/i)).toBeInTheDocument();
     expect(screen.queryByText(/net revenue/i)).not.toBeInTheDocument();
+  });
+
+  it("fires exactly ONE /audit/events fetch under StrictMode (the read self-audits, so no double-call)", async () => {
+    fetchMock().mockImplementation(routeEvents(() => null));
+    // Mirror the real app root (main.tsx wraps the tree in <StrictMode>), which
+    // double-invokes effects in dev. Because every GET /audit/events also WRITES
+    // an AUDIT_LOG_VIEWED row, a double-invoke would record a duplicate audit
+    // event. The useAsync in-flight dedupe must keep it to a single request.
+    render(
+      <StrictMode>
+        <TenantProvider initialSlug="ums">
+          <AuditView canViewAudit canViewFinance />
+        </TenantProvider>
+      </StrictMode>,
+    );
+
+    await waitFor(() =>
+      expect(screen.getByText("REVENUE_EXPORTED")).toBeInTheDocument(),
+    );
+    expect(auditCalls()).toHaveLength(1);
+  });
+
+  it("keeps Download Audit View disabled even for an audit viewer (no audit-export route exists yet)", async () => {
+    fetchMock().mockImplementation(routeEvents(() => null));
+    renderAuditView(true);
+
+    await waitFor(() =>
+      expect(screen.getByText("REVENUE_EXPORTED")).toBeInTheDocument(),
+    );
+    // The control is a disabled placeholder, not a button that does nothing.
+    expect(
+      screen.getByRole("button", { name: /download audit view/i }),
+    ).toBeDisabled();
   });
 });
