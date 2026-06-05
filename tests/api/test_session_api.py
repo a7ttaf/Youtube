@@ -43,6 +43,7 @@ GLOBAL_SCOPE_ID = UUID("00000000-0000-0000-0000-0000000000a2")
 
 
 def _token() -> str:
+    """Return the trusted-gateway token from the environment."""
     return os.environ["UMS_TRUSTED_GATEWAY_TOKEN"]
 
 
@@ -94,6 +95,7 @@ def client_headers_mode():
 
 
 def test_session_me_header_mode_finance_admin_capabilities(client_headers_mode):
+    """finance_admin: revenue caps true, connector caps false, cache headers set."""
     response = client_headers_mode.get(
         "/session/me",
         headers=_header_principal(role="finance_admin"),
@@ -139,6 +141,7 @@ def test_session_me_header_mode_finance_admin_capabilities(client_headers_mode):
 def test_session_me_header_mode_revenue_ops_admin_can_run_connector_jobs(
     client_headers_mode,
 ):
+    """revenue_operations_admin: canRunConnectorJobs true, canViewRevenue false."""
     response = client_headers_mode.get(
         "/session/me",
         headers=_header_principal(
@@ -155,6 +158,7 @@ def test_session_me_header_mode_revenue_ops_admin_can_run_connector_jobs(
 
 
 def test_session_me_header_mode_connector_admin_manages_and_runs(client_headers_mode):
+    """connector_admin: both canRunConnectorJobs and canManageConnectors true."""
     response = client_headers_mode.get(
         "/session/me",
         headers=_header_principal(role="connector_admin", user_id=CONNECTOR_OPS_ID),
@@ -171,6 +175,7 @@ def test_session_me_header_mode_connector_admin_manages_and_runs(client_headers_
 
 
 def test_session_me_header_mode_missing_token_unauthorized(client_headers_mode):
+    """Omitting the gateway token must return 401 (fail closed)."""
     response = client_headers_mode.get(
         "/session/me",
         headers=_header_principal(role="finance_admin", include_token=False),
@@ -181,6 +186,7 @@ def test_session_me_header_mode_missing_token_unauthorized(client_headers_mode):
 def test_session_me_header_mode_missing_identity_headers_unauthorized(
     client_headers_mode,
 ):
+    """Omitting identity headers must return 401 with the "Missing..." detail."""
     response = client_headers_mode.get(
         "/session/me",
         headers=_header_principal(role="finance_admin", include_identity=False),
@@ -209,6 +215,7 @@ def _build_database_url(tmp_path) -> str:
 
 
 def _seed_bootstrap_tenant(session: Session) -> None:
+    """Seed the bootstrap UMS tenant record into *session*."""
     now = datetime.now(UTC)
     session.add(
         TenantORM(
@@ -225,6 +232,7 @@ def _seed_bootstrap_tenant(session: Session) -> None:
 
 
 def _seed_role(session: Session, key: str, label: str) -> None:
+    """Seed a RoleORM row with *key* and *label* into *session*."""
     session.add(
         RoleORM(
             key=key,
@@ -237,6 +245,7 @@ def _seed_role(session: Session, key: str, label: str) -> None:
 
 
 def _seed_global_scope(session: Session, scope_id: UUID) -> None:
+    """Seed a global-type AccessScopeORM for the bootstrap tenant into *session*."""
     session.add(
         AccessScopeORM(
             id=scope_id,
@@ -258,6 +267,7 @@ def _seed_user_with_role(
     scope_id: UUID,
     status: str = "active",
 ) -> None:
+    """Seed a UserORM + active UserRoleAssignmentORM for *user_id* into *session*."""
     now = datetime.now(UTC)
     session.add(
         UserORM(
@@ -325,6 +335,7 @@ def seeded_db_engine(tmp_path):
 
 @pytest.fixture
 def client_db_mode(seeded_db_engine):
+    """Database-mode test client wired to the pre-seeded SQLite engine."""
     app = create_app(database_url=str(seeded_db_engine.url), authz_source="database")
     with TestClient(app) as client:
         yield client
@@ -336,6 +347,7 @@ def client_db_mode(seeded_db_engine):
 
 
 def test_session_me_db_mode_finance_admin_capabilities(client_db_mode):
+    """DB mode: finance_admin capabilities derived from SQL grants; tenant resolved."""
     response = client_db_mode.get(
         "/session/me",
         headers=_gateway_headers(FINANCE_ADMIN_ID),
@@ -373,6 +385,7 @@ def test_session_me_db_mode_finance_admin_capabilities(client_db_mode):
 
 
 def test_session_me_db_mode_revenue_ops_admin_can_run_connector_jobs(client_db_mode):
+    """DB mode: revenue_operations_admin canRunConnectorJobs true, canViewRevenue false."""
     response = client_db_mode.get(
         "/session/me",
         headers=_gateway_headers(CONNECTOR_OPS_ID),
@@ -389,6 +402,7 @@ def test_session_me_db_mode_revenue_ops_admin_can_run_connector_jobs(client_db_m
 
 
 def test_session_me_db_mode_disabled_user_forbidden(client_db_mode):
+    """DB mode: a disabled user must receive 403 Forbidden (fail closed)."""
     response = client_db_mode.get(
         "/session/me",
         headers=_gateway_headers(DISABLED_USER_ID),
@@ -398,6 +412,7 @@ def test_session_me_db_mode_disabled_user_forbidden(client_db_mode):
 
 
 def test_session_me_db_mode_unknown_user_forbidden(client_db_mode):
+    """DB mode: an unknown user_id must receive 403 Forbidden (fail closed)."""
     response = client_db_mode.get(
         "/session/me",
         headers=_gateway_headers(UNKNOWN_USER_ID),

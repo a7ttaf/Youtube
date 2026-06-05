@@ -78,6 +78,7 @@ class SessionMe(BaseModel):
 
 
 def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
+    """Derive global-scope UI capabilities from the principal's permission grants."""
     # ========================================================================
     # Purpose: Evaluate each UI capability against the principal in-memory at
     #          GLOBAL scope. A GLOBAL grant satisfies a global target; a
@@ -98,6 +99,7 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
     global_scope = AccessScope.global_scope()
 
     def _can(permission: Permission) -> bool:
+        """Return True if principal holds permission at global scope."""
         return has_permission(principal, permission, global_scope)
 
     return SessionCapabilities(
@@ -116,6 +118,7 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
 
 
 def _resolve_tenant() -> SessionTenant | None:
+    """Return the request-scoped tenant if present, else None; never raises."""
     # ========================================================================
     # Purpose: Return the request-scoped tenant if the resolver populated it,
     #          else None. Unlike /tenants/me this MUST NOT fail closed on a
@@ -165,6 +168,7 @@ def get_current_session_endpoint(
     response: Response,
     principal: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
 ) -> SessionMe:
+    """Return the authenticated principal's identity and derived capabilities."""
     response.headers["Cache-Control"] = "no-store"
     response.headers["Vary"] = "Authorization"
 

@@ -300,7 +300,7 @@ describe("AppShell tenant proof tag", () => {
 
 // Build a /session/me body from a capability override + flags. Defaults to all
 // capabilities false so each test opts INTO exactly the capabilities it asserts.
-function sessionBody(
+function sessionBody( // skipcq: JS-0067
   capabilities: Partial<SessionMe["capabilities"]> = {},
   overrides: Partial<SessionMe> = {},
 ): SessionMe {

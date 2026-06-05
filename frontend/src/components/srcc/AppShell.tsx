@@ -167,19 +167,26 @@ function AccessDeniedHeader({ disabled }: { disabled: boolean }) { // skipcq: JS
   );
 }
 
+/** Panel body shown while the one-shot /session/me bootstrap is in flight. */
+function SessionLoadingPanelContent() { // skipcq: JS-0067
+  return (
+    <div className="panel-header">
+      <div className="panel-title">
+        <strong id="sessionLoadingTitle">Loading session…</strong>
+        <span>Resolving your authenticated capabilities.</span>
+      </div>
+      <Badge tone="blue">Loading</Badge>
+    </div>
+  );
+}
+
 /** Render the loading panel shown while the one-shot /session/me bootstrap runs. */
 function SessionLoadingState() { // skipcq: JS-0067
   return (
     <div className="app">
       <main className="main" aria-labelledby="sessionLoadingTitle" aria-busy="true">
         <section className="panel">
-          <div className="panel-header">
-            <div className="panel-title">
-              <strong id="sessionLoadingTitle">Loading session…</strong>
-              <span>Resolving your authenticated capabilities.</span>
-            </div>
-            <Badge tone="blue">Loading</Badge>
-          </div>
+          <SessionLoadingPanelContent />
         </section>
       </main>
     </div>

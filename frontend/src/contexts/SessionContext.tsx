@@ -58,7 +58,7 @@ const SessionContext = createContext<SessionContextValue | null>(null);
 //   - File: frontend/src/components/srcc/AppShell.tsx -> consumes capabilities.
 //   - File: backend/ums_smart_revenue/api/session.py -> GET /session/me contract.
 // ============================================================================
-export function SessionProvider({
+export function SessionProvider({ // skipcq: JS-0067
   children,
   initialSession = null,
 }: {
@@ -93,7 +93,8 @@ export function SessionProvider({
   );
 }
 
-export function useSession(): SessionContextValue {
+/** Return the current session context value; must be called inside SessionProvider. */
+export function useSession(): SessionContextValue { // skipcq: JS-0067
   const value = useContext(SessionContext);
   if (value === null) {
     throw new Error("useSession must be used within <SessionProvider>");
@@ -126,7 +127,7 @@ export type SessionBootstrap = {
 //   - File: frontend/src/contexts/SessionContext.tsx -> hydrate()/fail().
 //   - File: backend/ums_smart_revenue/api/session.py -> GET /session/me.
 // ============================================================================
-export function useSessionBootstrap(): SessionBootstrap {
+export function useSessionBootstrap(): SessionBootstrap { // skipcq: JS-0067
   const session = useSession();
   const client = useApiClient();
   const hasRequestedRef = useRef(false);
