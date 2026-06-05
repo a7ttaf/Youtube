@@ -481,6 +481,20 @@ single P-tier above.
   (`AuditLogEntry`/`AuditEventCursor`/`AuditEventPagination`), a memoized
   `useAuditEvents` hook (one self-auditing fetch per mount, no loop), and an
   extracted `views/AuditView.tsx`. Registry is now the only mock-labelled page.
+- ✅ Connector credential test-connection probe — `POST /connectors/credentials/{connector_key}/{account_id}/test`
+  (branch `docs/plan-hygiene-post-71`): wraps `resolve_connector_credentials()` (load
+  credential row → resolve secret URI → OAuth token refresh, no live data pull).
+  Surfaces `CredentialNotFoundError` as 404; `InactiveCredentialError` / `OAuthRefreshError` /
+  other `GoogleConnectorError` as 200 with machine-readable `status` field (`inactive_credential` /
+  `auth_failed` / `error`) and a string `detail`. Every probe is audited (`CONNECTOR_TESTED`
+  event, `MANAGE_CONNECTORS@connector(connector_key)` gate, reason required).
+  5 TDD tests (ok, not-found, inactive, oauth-error, 403). Backend only; no migration.
+- ⏳ Channel Registry view design — `Docs/superpowers/specs/2026-06-05-registry-view-design.md`:
+  maps mock fields (avatar, name, code, company, sector, cms, source, node, state, action)
+  to existing backend assets (`GET /channels` + `ChannelRegistryEntry` + `OrgAccessIndex`),
+  identifies undefined semantics (state derivation rules, node/trace-key meaning, action targets),
+  and lists open questions to answer before building. Remaining: answers to the open questions
+  + implementation plan.
 - ⏳ Google source-reported revenue ingestion foundation: `currencies`
   reference table, tenant-scoped `google_revenue_source_rows` with idempotent
   source-row keys (full 64-char SHA-256 hex), storage repository, synthetic-

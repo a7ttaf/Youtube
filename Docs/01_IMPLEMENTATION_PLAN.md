@@ -628,6 +628,17 @@ now wired to `GET /audit/events` (see below).
   `next_cursor` yet); severity-filter + "Download Audit View" are disabled
   placeholders (no facet / audit-export route yet). Frontend-only; backend
   unchanged. Registry is now the only mock-labelled page.
+- ✅ Connector credential test-connection probe — `POST /connectors/credentials/{connector_key}/{account_id}/test`
+  (branch `docs/plan-hygiene-post-71`): wraps `resolve_connector_credentials()` (load cred →
+  resolve secret URI → OAuth refresh, no live data pull). 404 on missing credential;
+  200 with `status` field (`ok` / `inactive_credential` / `auth_failed` / `error`) and
+  string `detail` otherwise. `CONNECTOR_TESTED` audit event. 5 TDD tests, `MANAGE_CONNECTORS`
+  gate. Backend only; no migration. Remaining: Registry view wiring (below).
+- ⏳ Channel Registry view — design doc at
+  `Docs/superpowers/specs/2026-06-05-registry-view-design.md`. Mock fields mapped to
+  existing `GET /channels` + `ChannelRegistryEntry`; `state`, `action`, `node` semantics
+  undefined — need open-question answers before implementation plan can be written.
+  Remaining: answer open questions, write plan, implement.
 
 ---
 
