@@ -635,3 +635,61 @@ export type SmartAlertsSummary = {
   alerts: SmartAlert[];
   audit_events?: NetRevenueAuditEvent[];
 };
+
+// ============================================================================
+// Purpose: TypeScript mirror of the backend GET /audit/events JSON contract
+//   consumed by the Audit view. Fields are matched 1:1 against the backend
+//   serializers (not guessed); nullable fields serialize as null. Redaction is
+//   SERVER-DRIVEN: when details_redacted is true the backend has already replaced
+//   details with {} — the UI renders the redacted state and NEVER attempts a
+//   client-side reveal of a sensitive payload. Pagination is CURSOR-based, so it
+//   uses a distinct type, NOT the offset PaginationMeta used by the other lists.
+// Standards: Read-only typed boundary at the API surface; no logic here. No
+//   client-side authorization is invented — the backend VIEW_AUDIT_LOG gate (and
+//   the separate VIEW_SENSITIVE_AUDIT_PAYLOADS gate that drives redaction) is
+//   authoritative.
+// Connections:
+//   - File: backend/ums_smart_revenue/auth/audit_log.py
+//       AuditLogEntry.to_api()  (lines 35-52) -> AuditLogEntry
+//       AuditLogPage             (lines 55-62) -> AuditEventPagination
+//       _next_cursor()           (lines 207-215) -> AuditEventCursor
+//   - File: backend/ums_smart_revenue/api/audit.py
+//       list_audit_events()      (lines 85-97) -> AuditEventListResponse
+// ============================================================================
+
+// GET /audit/events item. Source: AuditLogEntry.to_api() (auth/audit_log.py:35-52).
+// Distinct from NetRevenueAuditEvent (the route-echo sub-object). details is {} when
+// details_redacted is true (server-driven redaction; never reveal client-side).
+export type AuditLogEntry = {
+  id: string;
+  user_id: string | null;
+  event_type: string;
+  entity_type: string | null;
+  entity_id: string | null;
+  scope_type: string | null;
+  scope_id: string | null;
+  request_id: string | null;
+  reason: string | null;
+  details: Record<string, unknown>;
+  details_redacted: boolean;
+  sensitive: boolean;
+  created_at: string; // ISO-8601
+};
+
+// Cursor pagination for /audit/events (NOT the offset PaginationMeta).
+// Source: AuditLogPage + _next_cursor() (auth/audit_log.py:55-62, 207-215).
+export type AuditEventCursor = { created_at: string; id: string };
+export type AuditEventPagination = {
+  limit: number;
+  returned: number;
+  has_more: boolean;
+  next_cursor: AuditEventCursor | null;
+};
+
+// GET /audit/events. Source: list_audit_events() (api/audit.py:85-97).
+// audit_event is the self-audit echo (loosely typed; not rendered).
+export type AuditEventListResponse = {
+  items: AuditLogEntry[];
+  pagination: AuditEventPagination;
+  audit_event: Record<string, unknown>;
+};
