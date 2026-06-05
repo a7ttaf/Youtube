@@ -1,6 +1,6 @@
 # Implementation Plan
 
-## Status (2026-05-27)
+## Status (2026-06-05)
 
 Mainline merge status is reconciled through PR #36 (S2 multi-tenant
 integration merged onto `main` at commit `96dbe73`), and the roadmap notes
@@ -53,8 +53,8 @@ of this is required for any phase below to work end-to-end.
 - ✅ PR #10: Frontend preview shell — follow-through shipped: API client +
   `X-UMS-Tenant` header wiring (PR #41); real dashboard pages wired to live
   APIs (PR #69: Command Center + smart alerts, Close, Trace/Explain, Exports,
-  Connectors; the Audit page is now wired to `GET /audit/events` on
-  `spec/audit-view-wiring`, so Registry is the only remaining mock-labelled page).
+  Connectors; the Audit page is wired to `GET /audit/events` (
+  PR #71 (31a7641), so Registry is the only remaining mock-labelled page).
 
 ### S1 — Governance, infra, scope freeze (2026-05-16)
 
@@ -432,8 +432,8 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
 
 ### Build
 
-- ⏳ Finance month-close screen — remaining: close-gate backend (PR #8);
-  UI not built.
+- ✅ Finance month-close screen — close-gate backend (PR #8); CloseView UI
+  shipped in PR #69 (status + readiness + lock/unlock with audited reason).
 - ⏳ Manual bank/payment input — remaining: bank recon repo (PR #29);
   input UI not built.
 - ⏳ Tax/deduction ingestion — substrate + ingestion shipped (PR #55):
@@ -447,7 +447,7 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   verified account→channel allocation for ACCOUNT-grain net-applicable evidence;
   persisted/committed allocation state shipped (PR-5 + PR-6); remaining allocation work is
   PAYMENT-grain evidence — BLOCKED pending remittance/bank data + the operator receipt→account model.
-- ⏳ Allocation rules (Spec 2b) — PR-1 SHIPPED + PR-2 SHIPPED + PR-3 SHIPPED + PR-4 SHIPPED + PR-5 SHIPPED + PR-6 SHIPPED (this branch): PR-2 folds
+- ⏳ Allocation rules (Spec 2b) — PR-1 SHIPPED (#58) + PR-2 SHIPPED (#59) + PR-3 SHIPPED (#60) + PR-4 SHIPPED (#61) + PR-5 SHIPPED (#62) + PR-6 SHIPPED (#65): PR-2 folds
   account-allocated net-applicable lines into net-revenue (API + finance exports) on the
   missing-net path, read/compute only (no persistence, no migration). PR-3 adds a
   `net_revenue_usd` metric to `POST /revenue/channels/{channel_id}/months/{month}/explain`,
@@ -455,10 +455,10 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   channel-direct + account-allocated deduction breakdowns in the existing `number_explanations`
   components JSON (read + persist, no migration, no schema change), gated by
   VIEW_FINALIZED_PAYMENTS@finance_month(month) with dual REVENUE_VIEWED + PAYMENT_VIEWED audit.
-  PR-4 SHIPPED (this branch): export deduction breakdown — XLSX/PDF/PPTX surface the
+  PR-4 SHIPPED (PR #61): export deduction breakdown — XLSX/PDF/PPTX surface the
   channel-direct vs account-allocated split plus two additive month aggregates on
   MonthNetRevenueSummary; read-surface only.
-  PR-5 SHIPPED (this branch): persisted/committed allocation — write-only versioned
+  PR-5 SHIPPED (PR #62): persisted/committed allocation — write-only versioned
   snapshot endpoint (POST /revenue/months/{month}/account-allocations/commit) over the
   gross_revenue_proportional compute + 4 tables + ALLOCATION_COMMITTED audit; readers unchanged.
   Post-review hardening (Codex): finite (non-NaN, non-Infinity) CHECK on
@@ -466,13 +466,13 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   identity columns (lines account/channel/component key; unallocated scope_id/component_key;
   notes channel) mirroring deduction_components; the commit OpenAPI contract now documents both
   201 (new snapshot) and 200 (idempotent replay).
-  PR-6 SHIPPED (this branch, 2026-06-03): read-switch — a central lock-aware
+  PR-6 SHIPPED (PR #65, 2026-06-03): read-switch — a central lock-aware
   resolve_month_account_allocation now backs all four readers (allocation GET, net-revenue,
   explain, exports), which prefer the latest committed snapshot for LOCKED months (lossless
   reconstruction; live fallback when no committed run; OPEN/no-close-row stays live), and emit
   full allocation_source/committed_run provenance on every surface plus an export disclosure
   token. No migration / no auth / no write-path change.
-  POST-TAX METHOD SHIPPED (this branch, 2026-06-04): allocation-method status —
+  POST-TAX METHOD SHIPPED (PR #67, 2026-06-04): allocation-method status —
   `gross_revenue_proportional` AND `post_tax_revenue_proportional` are now BOTH committable.
   The engine/orchestrator are parameterized on `allocation_method` (gross weights by source
   gross; post_tax weights by source net_revenue_usd, fail-closed omitting any
@@ -490,7 +490,7 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   Docs/superpowers/specs/2026-06-03-spec-payment-account-modeling-design.md); plus the
   remaining `company_level` / `manual` / `no_allocation` allocation methods.
   Prerequisite SHIPPED
-  (this branch): canonical channel↔account map — `adsense_content_owner_links`
+  (PR #57): canonical channel↔account map — `adsense_content_owner_links`
   (operator-verified account↔owner) + `content_owner_channel_links` (derived from
   source-row co-occurrence) + Alembic migration + audited propose/verify/reject
   API (dual MANAGE_ORG_MAPPING + CHANGE_ALLOCATION_RULE gate, per-account
@@ -602,21 +602,20 @@ plus a demo-month seed (`scripts/seed_demo_month.py`), an end-to-end smoke
 Registry remains mock-only and is labelled as such in-app; the Audit page is
 now wired to `GET /audit/events` (see below).
 
-- ✅ Production session hydration — SHIPPED on
-  `spec/production-session-hydration`: `GET /session/me`
-  (`backend/ums_smart_revenue/api/session.py`) returns the authenticated
-  principal's identity + optional tenant + roles/permissions + **global-scope**
-  camelCase capability booleans derived (fail-closed) from the permission
-  policy; the SPA bootstraps it (`useSessionBootstrap` + `SessionContext`) and
-  the AppShell renders the dashboard gated by those capabilities (capability-gated
-  AppShell). A production build no longer shows the permanent access-denied
-  screen and needs no preview role; the dev preview role is now
-  presentation-only. Failed hydration / a `disabled` principal fails closed to
-  `AccessDenied`; connector controls require `canRunConnectorJobs`; the smoke
-  asserts the contract. Remaining tails: Registry stays mock-only and live
-  ingestion still needs real connector credentials (Audit is now wired — below).
-- ✅ Production Audit view wiring — SHIPPED on `spec/audit-view-wiring` (stacked
-  on `spec/production-session-hydration`): the dashboard Audit page reads the real
+- ✅ Production session hydration — merged to main as PR #70 (4d7f154):
+  `GET /session/me` (`backend/ums_smart_revenue/api/session.py`) returns the
+  authenticated principal's identity + optional tenant + roles/permissions +
+  **global-scope** camelCase capability booleans derived (fail-closed) from the
+  permission policy; the SPA bootstraps it (`useSessionBootstrap` +
+  `SessionContext`) and the AppShell renders the dashboard gated by those
+  capabilities (capability-gated AppShell). A production build no longer shows
+  the permanent access-denied screen and needs no preview role; the dev preview
+  role is now presentation-only. Failed hydration / a `disabled` principal fails
+  closed to `AccessDenied`; connector controls require `canRunConnectorJobs`;
+  the smoke asserts the contract. Registry stays mock-only; live ingestion needs
+  real connector credentials.
+- ✅ Production Audit view wiring — merged to main as PR #71 (31a7641): the
+  dashboard Audit page reads the real
   `GET /audit/events` feed (tenant-scoped audit log from PR #22) instead of the
   mock `AUDIT_EVENTS`. A memoized `useAuditEvents` hook (one self-auditing fetch
   per mount — no loop), distinct cursor-pagination types
