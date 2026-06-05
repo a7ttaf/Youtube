@@ -63,6 +63,7 @@ export type SessionCapabilities = {
   canUnlockMonth: boolean;
   canChangeAllocation: boolean;
   canExportRevenue: boolean;
+  canExportAnalyticsReports: boolean;
   canManageConnectors: boolean;
   canRunConnectorJobs: boolean;
   canViewAudit: boolean;

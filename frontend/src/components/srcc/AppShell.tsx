@@ -85,13 +85,15 @@ function canPreviewRoles(): boolean { // skipcq: JS-0067
 // Database/ORM: None (frontend).
 // Standards: Capabilities are authoritative — no gate is invented. Finance
 //            visibility maps to VIEW_REVENUE; close to LOCK_FINANCE_MONTH;
-//            allocation editing to CHANGE_ALLOCATION_RULE; every export variant
-//            to EXPORT_REVENUE_REPORT; audit to VIEW_AUDIT_LOG; connector job
-//            controls to RUN_CONNECTOR_JOBS (NOT to finance, honoring that a
-//            finance admin must not be able to trigger connector jobs). Registry
-//            management is gated on canViewRevenue — the closest honest backend
-//            capability today (no dedicated registry-write permission is exposed
-//            on the session contract; this never grants a backend permission).
+//            allocation editing to CHANGE_ALLOCATION_RULE; finance export variants
+//            (global/scoped/raw/report) to EXPORT_REVENUE_REPORT; analytics CSV
+//            exports to EXPORT_ANALYTICS_REPORT (a distinct permission held by 8
+//            of 10 roles, incl. ops-admin, that don't hold revenue-export);
+//            audit to VIEW_AUDIT_LOG; connector job controls to RUN_CONNECTOR_JOBS
+//            (NOT to finance, honoring that a finance admin must not trigger
+//            connector jobs). Registry management is gated on canViewRevenue —
+//            the closest honest backend capability today (no dedicated
+//            registry-write permission is exposed on the session contract).
 // Blast Radius: Authorization (UI gating). No graph projection impact detected.
 // Connections:
 //   - File: backend/ums_smart_revenue/api/session.py -> SessionCapabilities.
@@ -113,7 +115,7 @@ function capabilitiesToPermissions( // skipcq: JS-0067
     canCreateScopedExports: canExport,
     canRequestRawExports: canExport,
     canExportFinanceReports: canExport,
-    canExportAnalyticsReports: canExport,
+    canExportAnalyticsReports: capabilities.canExportAnalyticsReports,
     // Honest: connector job/sync controls require RUN_CONNECTOR_JOBS, which a
     // finance admin does not hold — so canViewRevenue must NOT enable them.
     canRunConnectors: capabilities.canRunConnectorJobs,

@@ -119,6 +119,8 @@ def test_session_me_header_mode_finance_admin_capabilities(client_headers_mode):
     assert caps["canUnlockMonth"] is True
     assert caps["canChangeAllocation"] is True
     assert caps["canExportRevenue"] is True
+    # finance_admin also holds EXPORT_ANALYTICS_REPORT (distinct from revenue).
+    assert caps["canExportAnalyticsReports"] is True
     assert caps["canViewAudit"] is True
     # finance_admin lacks connector permissions in ROLE_PERMISSIONS (seed.py).
     assert caps["canRunConnectorJobs"] is False
@@ -155,6 +157,25 @@ def test_session_me_header_mode_revenue_ops_admin_can_run_connector_jobs(
     assert caps["canManageConnectors"] is False
     # ...and has no finance revenue visibility.
     assert caps["canViewRevenue"] is False
+    assert caps["canExportRevenue"] is False
+    # revenue_operations_admin DOES hold EXPORT_ANALYTICS_REPORT — must not
+    # collapse to canExportRevenue=False (the two permissions are distinct).
+    assert caps["canExportAnalyticsReports"] is True
+
+
+def test_session_me_header_mode_finance_approver_analytics_false_revenue_true(
+    client_headers_mode,
+):
+    """finance_approver: canExportRevenue true but canExportAnalyticsReports false."""
+    response = client_headers_mode.get(
+        "/session/me",
+        headers=_header_principal(role="finance_approver"),
+    )
+    assert response.status_code == 200, response.text
+    caps = response.json()["capabilities"]
+    # finance_approver holds EXPORT_REVENUE_REPORT but NOT EXPORT_ANALYTICS_REPORT.
+    assert caps["canExportRevenue"] is True
+    assert caps["canExportAnalyticsReports"] is False
 
 
 def test_session_me_header_mode_connector_admin_manages_and_runs(client_headers_mode):
@@ -369,6 +390,7 @@ def test_session_me_db_mode_finance_admin_capabilities(client_db_mode):
     assert caps["canCloseMonth"] is True
     assert caps["canChangeAllocation"] is True
     assert caps["canExportRevenue"] is True
+    assert caps["canExportAnalyticsReports"] is True
     assert caps["canViewAudit"] is True
     assert caps["canRunConnectorJobs"] is False
     assert caps["canManageConnectors"] is False
@@ -394,6 +416,9 @@ def test_session_me_db_mode_revenue_ops_admin_can_run_connector_jobs(client_db_m
     caps = response.json()["capabilities"]
     assert caps["canRunConnectorJobs"] is True
     assert caps["canViewRevenue"] is False
+    # revenue_operations_admin holds EXPORT_ANALYTICS_REPORT but not EXPORT_REVENUE_REPORT.
+    assert caps["canExportAnalyticsReports"] is True
+    assert caps["canExportRevenue"] is False
 
 
 # ---------------------------------------------------------------------------
