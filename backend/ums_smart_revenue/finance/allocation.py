@@ -285,16 +285,52 @@ def _multi_account_notes(
     ]
 
 
+def _resolve_weights(
+    component: DeductionComponent,
+    channels: list[str],
+    source_kind: str,
+    basis: Mapping[tuple[str, str], Decimal],
+    allocation_method: str,
+    channel_company: Mapping[str, str],
+) -> list[tuple[str, Decimal]] | UnallocatedIssue:
+    """Return (channel_id, weight) pairs for allocation, or an issue on failure.
+
+    Handles company_level (equal intra-company split via _company_level_weights)
+    and source-aligned proportional methods.  no_allocation is short-circuited
+    by the caller before this function is ever reached.
+    """
+    if allocation_method == COMPANY_LEVEL_ALLOCATION_METHOD:
+        return _company_level_weights(
+            component, channels, source_kind, basis, channel_company
+        )
+    present = [
+        (channel_id, basis[(channel_id, source_kind)])
+        for channel_id in channels
+        if (channel_id, source_kind) in basis
+    ]
+    if not present:
+        return _issue(
+            component, "BASIS_MISSING",
+            "no source-aligned basis for any verified channel",
+        )
+    if len(present) != len(channels):
+        return _issue(
+            component, "BASIS_INCOMPLETE",
+            "some verified channels missing source-aligned basis",
+        )
+    return present
+
+
 # ============================================================================
 # Purpose: Allocate ONE ACCOUNT-grain deduction component across its verified
-#   channels: gross/post_tax weight by source-aligned channel basis; company_level
-#   weights by company gross with a flat in-company split (_company_level_weights);
-#   no_allocation short-circuits to a typed INTENTIONAL_NO_ALLOCATION issue. Fails
-#   closed with a typed UnallocatedIssue on every blocking condition (non-ACCOUNT
+#   channels. Dispatches weight resolution to _resolve_weights (company_level
+#   and source-aligned proportional methods); no_allocation short-circuits
+#   before dispatch to a typed INTENTIONAL_NO_ALLOCATION issue. Fails closed
+#   with a typed UnallocatedIssue on every blocking condition (non-ACCOUNT
 #   scope, unmapped account/company, unresolved/missing/incomplete basis,
-#   non-positive basis total); never substitutes a different basis. Extracted from
-#   build_account_allocation so each function keeps a maintainable branching
-#   budget (DeepSource PY-R1000).
+#   non-positive basis total); never substitutes a different basis. Extracted
+#   from build_account_allocation; further split via _resolve_weights to keep
+#   each function within the PY-R1000 complexity budget.
 # Database/ORM: None (caller resolves the verified map and the basis).
 # Standards: Decimal arithmetic; exact per-component conservation via
 #   _proportional_allocation; net_applicable from NET_APPLICABLE_COMPONENT_KINDS.
@@ -356,35 +392,13 @@ def _allocate_component(
             False,
         )
 
-    if allocation_method == COMPANY_LEVEL_ALLOCATION_METHOD:
-        company_weights = _company_level_weights(
-            component, channels, source_kind, basis, channel_company
-        )
-        if isinstance(company_weights, UnallocatedIssue):
-            return _ComponentOutcome((), company_weights, False)
-        present = company_weights
-    else:
-        present = [
-            (channel_id, basis[(channel_id, source_kind)])
-            for channel_id in channels
-            if (channel_id, source_kind) in basis
-        ]
-        if not present:
-            return _ComponentOutcome(
-                (),
-                _issue(component, "BASIS_MISSING",
-                       "no source-aligned basis for any verified channel"),
-                False,
-            )
-        if len(present) != len(channels):
-            return _ComponentOutcome(
-                (),
-                _issue(component, "BASIS_INCOMPLETE",
-                       "some verified channels missing source-aligned basis"),
-                False,
-            )
+    weights = _resolve_weights(
+        component, channels, source_kind, basis, allocation_method, channel_company
+    )
+    if isinstance(weights, UnallocatedIssue):
+        return _ComponentOutcome((), weights, False)
 
-    basis_total = sum((weight for _, weight in present), Decimal("0"))
+    basis_total = sum((weight for _, weight in weights), Decimal("0"))
     if basis_total <= 0:
         zero_code, zero_detail = _ZERO_BASIS_ISSUE[allocation_method]
         return _ComponentOutcome(
@@ -394,7 +408,7 @@ def _allocate_component(
         )
 
     net_applicable = component.component_kind in NET_APPLICABLE_COMPONENT_KINDS
-    allocated = _proportional_allocation(amount, present)
+    allocated = _proportional_allocation(amount, weights)
     lines = tuple(
         AllocationLine(
             adsense_account_id=account,
@@ -408,7 +422,7 @@ def _allocate_component(
             allocated_amount_usd=allocated[channel_id],
             net_applicable=net_applicable,
         )
-        for channel_id, weight in present
+        for channel_id, weight in weights
     )
     return _ComponentOutcome(lines, None, True)
 
