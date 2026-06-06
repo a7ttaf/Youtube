@@ -57,12 +57,12 @@ Returns a flat list of `ChannelRegistryEntry.to_api()` objects. Response shape p
 }
 ```
 
-Permission gate: `VIEW_REVENUE@global` or scoped (`VIEW_REVENUE@channel`, `@company`, `@sector`).
+Permission gate: `VIEW_ANALYTICS@global` or scoped (`VIEW_ANALYTICS@channel`, `@company`, `@sector`).
 Returns all channels if global, or only those within the caller's scope.
 
 ### `GET /channels/outside-cms`
 
-Returns channels where `cms_status != INSIDE_CMS`. Includes an `issues` flag per channel
+Returns channels where `cms_status == 'OUTSIDE_CMS'` exactly (strict equality, not "anything that is not INSIDE_CMS" — `UNKNOWN` channels are excluded). Includes an `issues` flag per channel
 (`missing_official_revenue: bool`). Used by the outside-CMS monitor.
 
 ### `GET /channels/issues`
@@ -76,17 +76,17 @@ Audited with reason. Note: the endpoint does not currently enforce month-lock; a
 
 ### `POST /channels`
 
-Creates a new channel registration. Requires `MANAGE_CHANNELS@global`.
+Creates a new channel registration. Requires `MANAGE_CHANNELS@company(primary_company_id)` (company-scoped, not global — `AccessScope.company(payload.primary_company_id)`).
 Fields: `youtube_channel_id`, `channel_name`, `primary_company_id`.
 
 ### Org hierarchy (`OrgAccessIndex`, `OrgUnitORM`)
 
-`OrgAccessIndex` has:
+`OrgAccessIndex` has exactly three ID-to-ID maps (no display names):
 - `channel_company: dict[channel_id, company_id]`
 - `channel_sector: dict[channel_id, sector_id]`
-- `org_units: dict[unit_id, OrgUnitEntry]` — includes `name`, `type` ("sector", "company", "group")
+- `company_sector: dict[company_id, sector_id]`
 
-**Implication:** company and sector names can be resolved from `primary_company_id` via the org index. No new DB join is needed in the route if the org index is already loaded — but the current `GET /channels` response returns IDs, not names. A "registry view" endpoint would need to enrich the channel list with names.
+`OrgUnitORM.name` is discarded after the index is built — the org index cannot resolve display names. A "registry view" endpoint would need a separate `OrgUnitORM` query to enrich company and sector names.
 
 ### Permissions relevant to Registry
 
@@ -108,9 +108,9 @@ Fields: `youtube_channel_id`, `channel_name`, `primary_company_id`.
 | `avatar` | Computed client-side from `channel_name` | First letter of each word, up to 2 chars |
 | `name` | `channel_name` | Direct |
 | `code` | `youtube_channel_id` | Direct |
-| `company` | `org_units[channel_company[id]].name` | Name lookup via org index |
-| `sector` | `org_units[channel_sector[id]].name` | Name lookup via org index |
-| `cms` | Derived from `cms_status` | `INSIDE_CMS` → green, `OUTSIDE_CMS` → amber, `UNMAPPED` / null → red |
+| `company` | Requires a separate `OrgUnitORM` query; not in org index | Name lookup via ORM (see Section 2 — Org hierarchy) |
+| `sector` | Requires a separate `OrgUnitORM` query; not in org index | Name lookup via ORM (see Section 2 — Org hierarchy) |
+| `cms` | Derived from `cms_status` | `INSIDE_CMS` → green, `OUTSIDE_CMS` → amber, `UNKNOWN` → red (DB CHECK admits exactly these three values; `UNMAPPED` does not exist) |
 | `source` | Derived from `revenue_source_status` | Label mapping (see Section 4) |
 
 The `node` / trace-key, `state`, and `action` fields have **no backend equivalent today** — see Section 5.
@@ -173,14 +173,14 @@ Proposed derivation:
 
 The mock shows: `"channel:ums-drama"`, `"channel:sports-extra"`, `"channel:news-live"`, `"pending"`.
 
-This looks like a Neo4j node reference label. However, Neo4j is a read-only projection and
-cannot be the source of truth. The trace-key's value in the UI is:
-- As a display label that lets operators identify the channel in trace/explain views
+This looks like a trace-label format. Note: the Neo4j graph projection was retired in PR #12
+(`Docs/01_IMPLEMENTATION_PLAN.md` — "Neo4j graph component retired entirely"). There is no active graph
+dependency. The trace-key's value in the UI is:
+- A display label that lets operators identify the channel in trace/explain views
 - A link target — clicking it would navigate to `view=trace` filtered to this channel
 
 **Question for you:** Is the trace-key just `"channel:{youtube_channel_id}"` formatted?
-Or does it reference something specific in the Neo4j schema (node type + internal ID)?
-`"pending"` for unmapped channels implies the node doesn't exist in the graph yet — is that accurate?
+`"pending"` for unmapped channels would mean no trace key exists yet — is that the intended behaviour?
 
 ---
 
