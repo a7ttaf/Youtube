@@ -35,9 +35,12 @@ router = APIRouter(prefix="/connectors", tags=["connectors"])
 
 
 class NonBlankRequestModel(BaseModel):
+    """Base model that strips whitespace and rejects blank string fields."""
+
     @field_validator("*", mode="before")
     @classmethod
     def strip_required_strings(cls, value):
+        """Strip whitespace and reject blank values on all string fields."""
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
@@ -47,6 +50,8 @@ class NonBlankRequestModel(BaseModel):
 
 
 class ConnectorCredentialCreateRequest(NonBlankRequestModel):
+    """Request body for creating a connector credential reference."""
+
     connector_key: str = Field(min_length=1)
     account_id: str = Field(min_length=1)
     encrypted_secret_ref: str = Field(min_length=1)
@@ -54,6 +59,8 @@ class ConnectorCredentialCreateRequest(NonBlankRequestModel):
 
 
 class ConnectorJobRequest(NonBlankRequestModel):
+    """Request body for requesting a connector data-ingest job."""
+
     connector_key: str = Field(min_length=1)
     account_id: str = Field(min_length=1)
     reason: str = Field(min_length=1)
@@ -268,6 +275,7 @@ def _require_connector_permission(user: UserPrincipal, permission: Permission, s
 
 
 def _raise_missing_connector_permission(permission: Permission) -> None:
+    """Raise 403 for a missing connector permission; always raises, never returns."""
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail=f"Missing permission: {permission.value}",
@@ -275,6 +283,7 @@ def _raise_missing_connector_permission(permission: Permission) -> None:
 
 
 def _manageable_connector_keys(user: UserPrincipal) -> frozenset[str] | None:
+    """Return the connector keys the user can manage, or None for global-scope access."""
     if user.disabled:
         return frozenset()
     if has_permission(user, Permission.MANAGE_CONNECTORS, AccessScope.global_scope()):

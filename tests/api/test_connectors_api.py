@@ -31,6 +31,7 @@ USER_ID = UUID("00000000-0000-0000-0000-000000004001")
 def auth_headers(
     role: str, scope_type: str = "global", scope_id: str | None = None
 ) -> dict[str, str]:
+    """Build trust-gateway auth headers for the given role and optional connector scope."""
     headers = {
         "x-user-id": str(USER_ID),
         "x-user-email": "connector-user@example.com",
@@ -44,10 +45,12 @@ def auth_headers(
 
 
 def build_database_url(tmp_path) -> str:
+    """Return the SQLite URL for an isolated per-test connector database under tmp_path."""
     return f"sqlite+pysqlite:///{(tmp_path / 'connectors.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
+    """Create schema tables and seed the test user row for connector endpoint tests."""
     engine = create_engine(database_url)
     try:
         OrgBase.metadata.create_all(engine)
@@ -68,6 +71,7 @@ def seed_database(database_url: str) -> None:
 def test_connector_admin_can_create_credential_reference_without_exposing_secret_ref(
     tmp_path,
 ):
+    """connector_admin can register a secret ref; the ref is stored but not returned in the response."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -99,6 +103,7 @@ def test_connector_admin_can_create_credential_reference_without_exposing_secret
 
 
 def test_connector_credentials_reject_raw_secret_payload(tmp_path):
+    """Raw (non-prefixed) secret values are rejected with 422."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -123,6 +128,7 @@ def test_connector_credentials_reject_raw_secret_payload(tmp_path):
 
 
 def test_external_secret_ref_requires_prefix_and_locator():
+    """is_external_secret_ref requires a recognised scheme prefix and a non-blank locator path."""
     assert is_external_secret_ref(
         "secret-manager://ums/youtube-reporting/content-owner-1"
     )
@@ -132,6 +138,7 @@ def test_external_secret_ref_requires_prefix_and_locator():
 
 
 def test_connector_credentials_reject_blank_required_strings(tmp_path):
+    """Blank-whitespace connector_key is rejected with 422."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -151,6 +158,7 @@ def test_connector_credentials_reject_blank_required_strings(tmp_path):
 
 
 def test_connector_credentials_reject_malformed_actor_id(tmp_path):
+    """Non-UUID x-user-id header is rejected with 422 and a clear actor_user_id message."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -173,6 +181,7 @@ def test_connector_credentials_reject_malformed_actor_id(tmp_path):
 
 
 def test_connector_credentials_list_is_paginated(tmp_path):
+    """Credential list returns paginated results with correct pagination metadata."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -215,6 +224,7 @@ def test_connector_credentials_list_is_paginated(tmp_path):
 
 
 def test_assistant_cannot_create_connector_credential(tmp_path):
+    """assistant_analyst role is denied CREATE with 403 and a clear permission message."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -235,6 +245,7 @@ def test_assistant_cannot_create_connector_credential(tmp_path):
 
 
 def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
+    """revenue_operations_admin can enqueue a connector job; audit row is written with CONNECTOR_JOB_RUN."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -423,6 +434,8 @@ def test_credential_integrity_classifier_uses_duplicate_constraint_only():
         constraint_name = "uq_api_connector_credentials_connector_account"
 
     class DuplicateOrigError(Exception):
+        """Minimal exception stub simulating a database unique-constraint violation."""
+
         diag = DuplicateDiag()
 
     duplicate_error = IntegrityError(
