@@ -438,6 +438,25 @@ describe("RegistryView Phase 2: Map action (PATCH /channels/{id}/mapping)", () =
       (screen.getByLabelText("Channel") as HTMLSelectElement).value,
     ).toBe("UC-MUSIC-31");
   });
+
+  it("clears a stale success note when a row Map button is clicked again", async () => {
+    fetchMock().mockImplementation(routeRegistry());
+    renderRegistry();
+    await fillMappingForm();
+
+    fireEvent.click(screen.getByRole("button", { name: /^submit mapping change$/i }));
+    await waitFor(() =>
+      expect(screen.getByText(/Mapping updated — audited/i)).toBeInTheDocument(),
+    );
+
+    // Re-clicking a row Map button (even the SAME row) must reset the stale
+    // note so a previous action's confirmation never renders under a new target.
+    fireEvent.click(screen.getByRole("button", { name: /^map$/i }));
+    expect(screen.queryByText(/Mapping updated — audited/i)).not.toBeInTheDocument();
+    expect(
+      (screen.getByLabelText("Channel") as HTMLSelectElement).value,
+    ).toBe("UC-MUSIC-31");
+  });
 });
 
 describe("RegistryView Phase 2: Assign action (propose account link)", () => {
@@ -510,6 +529,10 @@ describe("RegistryView Phase 2: Assign action (propose account link)", () => {
       expect(screen.getByText("Link proposal failed")).toBeInTheDocument(),
     );
     expect(screen.getByText("adsense_account_id is malformed")).toBeInTheDocument();
+
+    // Re-clicking a row Assign button resets the stale error note.
+    fireEvent.click(screen.getByRole("button", { name: /^assign$/i }));
+    expect(screen.queryByText("Link proposal failed")).not.toBeInTheDocument();
   });
 });
 

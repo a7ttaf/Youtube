@@ -11,7 +11,11 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
+from ums_smart_revenue.auth.permissions import Permission
+from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM
 from ums_smart_revenue.db.security_models import SecurityBase, UserORM
 
@@ -166,6 +170,38 @@ def test_role_without_view_analytics_is_forbidden(tmp_path):
 
     # audit_viewer holds only VIEW_AUDIT_LOG -> no VIEW_ANALYTICS grant.
     response = client.get("/org-units", headers=auth_headers("audit_viewer", "global"))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: analytics.view"
+
+
+def test_disabled_principal_is_forbidden_despite_grant(tmp_path):
+    """A disabled principal is rejected fail-closed even WITH a VIEW_ANALYTICS grant.
+
+    The trusted-gateway header path never marks a principal disabled, so the
+    gate's disabled branch is exercised by overriding the principal dependency
+    directly — proving the route's own guard fails closed rather than relying
+    on an upstream dependency to pre-filter disabled users.
+    """
+    database_url = build_database_url(tmp_path)
+    seed(database_url)
+    app = create_app(database_url=database_url)
+
+    def _disabled_principal():
+        """Disabled principal that still carries a global VIEW_ANALYTICS grant."""
+        return UserPrincipal(
+            user_id=str(USER_ID),
+            email="org-reader@example.com",
+            direct_permissions=(
+                PermissionGrant(Permission.VIEW_ANALYTICS, AccessScope.global_scope()),
+            ),
+            disabled=True,
+        )
+
+    app.dependency_overrides[current_principal_from_headers] = _disabled_principal
+    client = TestClient(app)
+
+    response = client.get("/org-units")
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: analytics.view"

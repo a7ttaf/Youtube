@@ -203,8 +203,12 @@ export default function RegistryView({ // skipcq: JS-0067
 }) {
   const channelState = useChannels();
   const orgUnitState = useOrgUnits();
-  const [mapPresetChannelId, setMapPresetChannelId] = useState<string | null>(null);
-  const [assignContext, setAssignContext] = useState<ChannelRegistryEntry | null>(null);
+  // Fresh object per click (not a bare id): the panels' effects key on object
+  // identity, so re-clicking the SAME row still re-presets the form and clears
+  // any stale success/error note from a previous action.
+  const [mapPreset, setMapPreset] = useState<{ channelId: string } | null>(null);
+  const [assignContext, setAssignContext] =
+    useState<{ channel: ChannelRegistryEntry } | null>(null);
 
   const unitsById = useMemo(
     () => new Map((orgUnitState.data ?? []).map((unit) => [unit.id, unit])),
@@ -223,11 +227,12 @@ export default function RegistryView({ // skipcq: JS-0067
   );
 
   const onMap = useCallback(
-    (ch: ChannelRegistryEntry) => setMapPresetChannelId(ch.youtube_channel_id),
+    (ch: ChannelRegistryEntry) =>
+      setMapPreset({ channelId: ch.youtube_channel_id }),
     [],
   );
   const onAssign = useCallback(
-    (ch: ChannelRegistryEntry) => setAssignContext(ch),
+    (ch: ChannelRegistryEntry) => setAssignContext({ channel: ch }),
     [],
   );
   const onReview = useCallback(
@@ -257,7 +262,7 @@ export default function RegistryView({ // skipcq: JS-0067
           canManageRegistry={canManageRegistry}
           channels={channelState.data ?? []}
           companies={companies}
-          mapPresetChannelId={mapPresetChannelId}
+          mapPreset={mapPreset}
           assignContext={assignContext}
           onMutated={channelState.reload}
         />
@@ -547,15 +552,15 @@ function RegistrySidePanels({ // skipcq: JS-0067
   canManageRegistry,
   channels,
   companies,
-  mapPresetChannelId,
+  mapPreset,
   assignContext,
   onMutated,
 }: {
   canManageRegistry: boolean;
   channels: ChannelRegistryEntry[];
   companies: OrgUnit[];
-  mapPresetChannelId: string | null;
-  assignContext: ChannelRegistryEntry | null;
+  mapPreset: { channelId: string } | null;
+  assignContext: { channel: ChannelRegistryEntry } | null;
   onMutated: () => void;
 }) {
   return (
@@ -564,12 +569,12 @@ function RegistrySidePanels({ // skipcq: JS-0067
         canManageRegistry={canManageRegistry}
         channels={channels}
         companies={companies}
-        presetChannelId={mapPresetChannelId}
+        preset={mapPreset}
         onMapped={onMutated}
       />
       <AccountLinkProposalPanel
         canManageRegistry={canManageRegistry}
-        contextChannel={assignContext}
+        context={assignContext}
         onProposed={onMutated}
       />
       <RegistryControlsPanel />
@@ -596,13 +601,13 @@ function MappingChangeRequestPanel({ // skipcq: JS-0067, JS-R1005
   canManageRegistry,
   channels,
   companies,
-  presetChannelId,
+  preset,
   onMapped,
 }: {
   canManageRegistry: boolean;
   channels: ChannelRegistryEntry[];
   companies: OrgUnit[];
-  presetChannelId: string | null;
+  preset: { channelId: string } | null;
   onMapped: () => void;
 }) {
   const [channelId, setChannelId] = useState("");
@@ -614,10 +619,16 @@ function MappingChangeRequestPanel({ // skipcq: JS-0067, JS-R1005
   const inFlightRef = useRef(false);
   const submitMapping = useChannelMappingAction();
 
-  // A row "Map" click presets the channel selection (operator can still change it).
+  // A row "Map" click presets the channel selection (operator can still change
+  // it) AND clears any stale success/error note from a previous action — the
+  // preset is a fresh object per click, so even re-clicking the same row resets.
   useEffect(() => {
-    if (presetChannelId) setChannelId(presetChannelId);
-  }, [presetChannelId]);
+    if (preset) {
+      setChannelId(preset.channelId);
+      setConfirmation(null);
+      setError(null);
+    }
+  }, [preset]);
 
   const trimmedReason = reason.trim();
   const canSubmit =
@@ -741,11 +752,11 @@ const currentMonth = (): string => {
 // ============================================================================
 function AccountLinkProposalPanel({ // skipcq: JS-0067, JS-R1005
   canManageRegistry,
-  contextChannel,
+  context,
   onProposed,
 }: {
   canManageRegistry: boolean;
-  contextChannel: ChannelRegistryEntry | null;
+  context: { channel: ChannelRegistryEntry } | null;
   onProposed: () => void;
 }) {
   const [adsenseAccountId, setAdsenseAccountId] = useState("");
@@ -757,6 +768,15 @@ function AccountLinkProposalPanel({ // skipcq: JS-0067, JS-R1005
   const [confirmation, setConfirmation] = useState<string | null>(null);
   const inFlightRef = useRef(false);
   const propose = useProposeAccountLinkAction();
+
+  // A row "Assign" click resets stale success/error notes (fresh object per
+  // click, so re-clicking the same row also resets).
+  useEffect(() => {
+    if (context) {
+      setConfirmation(null);
+      setError(null);
+    }
+  }, [context]);
 
   const canSubmit =
     canManageRegistry && !busy && adsenseAccountId.trim() !== "" &&
@@ -800,9 +820,9 @@ function AccountLinkProposalPanel({ // skipcq: JS-0067, JS-R1005
         </div>
         <Badge tone="amber">Audit required</Badge>
       </div>
-      {contextChannel ? (
+      {context ? (
         <div className="form-note">
-          Context: {contextChannel.channel_name} ({contextChannel.youtube_channel_id})
+          Context: {context.channel.channel_name} ({context.channel.youtube_channel_id})
         </div>
       ) : null}
       <div className="form-grid">
