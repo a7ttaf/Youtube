@@ -593,6 +593,14 @@ def _commit_recalculation_write(
                 "and an ALLOCATION_COMMITTED audit event was recorded."
             ),
         },
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "dry_run=false write conflict, two shapes: a pre-flight "
+                "{write_status: BLOCKED_BY_ISSUES, blocking_issues: [...]} dict, "
+                "or a plain-string detail (LOCKED month / idempotency-key reused "
+                "with a different request)."
+            ),
+        },
     },
 )
 def request_revenue_recalculation(

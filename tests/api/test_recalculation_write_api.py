@@ -437,3 +437,16 @@ def test_recalculate_openapi_documents_both_success_statuses(tmp_path):
     responses = schema["paths"]["/revenue/recalculate"]["post"]["responses"]
     assert "201" in responses, "recalculate write must document the 201 create response"
     assert "200" in responses, "recalculate write must document the 200 replay response"
+
+
+def test_recalculate_openapi_documents_409_conflict(tmp_path):
+    """The published OpenAPI contract advertises the 409 the write path can return.
+
+    The write path 409s in two client-relevant shapes: the pre-flight
+    BLOCKED_BY_ISSUES dict and the service-layer LOCKED-month / idempotency-key
+    plain-string detail. A schema-generated client must see 409 to handle them.
+    """
+    client = _client(build_database_url(tmp_path), _principal)
+    schema = client.get("/openapi.json").json()
+    responses = schema["paths"]["/revenue/recalculate"]["post"]["responses"]
+    assert "409" in responses, "recalculate write must document the 409 conflict response"
