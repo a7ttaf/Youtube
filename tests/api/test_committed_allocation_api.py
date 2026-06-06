@@ -951,3 +951,18 @@ def test_commit_unknown_method_any_casing_rejected_422(tmp_path):
     assert "magic_estimate" in detail
     assert _committed_run_methods(db) == []
     assert not _committed_audit_rows(db)
+
+
+def test_commit_openapi_documents_409_conflict(tmp_path):
+    """The published OpenAPI contract advertises the commit's 409 response.
+
+    The route returns 409 as a plain-string detail for two cases -- a LOCKED
+    finance month and an idempotency key reused with a different request -- so
+    schema-generated clients must see the conflict response, matching runtime
+    behavior and mirroring the /revenue/recalculate 409 documentation.
+    """
+    client = _client(build_database_url(tmp_path), _principal)
+    schema = client.get("/openapi.json").json()
+    path_template = "/revenue/months/{month}/account-allocations/commit"
+    responses = schema["paths"][path_template]["post"]["responses"]
+    assert "409" in responses, "commit must document the 409 conflict response"
