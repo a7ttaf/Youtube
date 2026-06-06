@@ -240,13 +240,16 @@ def test_malformed_month_rejected_422(tmp_path):
 
 
 def test_unsupported_method_rejected_422(tmp_path):
-    """A non-gross_revenue_proportional method is rejected with 422."""
+    """A method outside the committable allowlist is rejected with 422."""
     db = build_database_url(tmp_path)
     _seed(db, mapped=True)
     client = _client(db, _principal)
     resp = client.post(
         COMMIT_PATH,
-        json={"idempotency_key": "k", "reason": "r", "allocation_method": "company_level"},
+        json={
+            "idempotency_key": "k", "reason": "r",
+            "allocation_method": "definitely_not_a_method",
+        },
     )
     assert resp.status_code == 422
 
@@ -317,6 +320,145 @@ def test_missing_permission_forbidden_403(tmp_path, missing):
     client = _client(db, _drop_one)
     resp = client.post(COMMIT_PATH, json={"idempotency_key": "k", "reason": "r"})
     assert resp.status_code == 403
+
+
+def test_commit_no_allocation_snapshots_withheld_components(tmp_path):
+    """no_allocation commits 201 with zero lines and the full withheld set as evidence."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json={"idempotency_key": "k-na", "reason": "withhold this month",
+              "allocation_method": "no_allocation"},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["run"]["allocation_method"] == "no_allocation"
+    assert body["allocations"] == []
+    assert len(body["unallocated"]) == 1
+    issue = body["unallocated"][0]
+    assert issue["issue_code"] == "INTENTIONAL_NO_ALLOCATION"
+    assert issue["component_key"] == "ad-1"
+    assert Decimal(issue["amount_usd"]) == Decimal("100")
+    assert body["audit_event"]["event_type"] == "ALLOCATION_COMMITTED"
+    assert len(_committed_audit_rows(db)) == 1
+
+
+def test_commit_no_allocation_idempotent_replay_200(tmp_path):
+    """Replaying a no_allocation commit returns 200 without a second audit row."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    payload = {"idempotency_key": "k-na", "reason": "withhold",
+               "allocation_method": "no_allocation"}
+    first = client.post(COMMIT_PATH, json=payload)
+    second = client.post(COMMIT_PATH, json=payload)
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json()["audit_event"] is None
+    assert second.json()["unallocated"] == first.json()["unallocated"]
+    assert len(_committed_audit_rows(db)) == 1
+
+
+def test_commit_no_allocation_needs_no_channel_map(tmp_path):
+    """no_allocation commits even when the account has no verified channels.
+
+    The intentional withhold needs neither facts nor links; the issue stays
+    INTENTIONAL_NO_ALLOCATION (not ACCOUNT_UNMAPPED) because the short-circuit
+    runs before the verified-channel check.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=False)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json={"idempotency_key": "k", "reason": "r", "allocation_method": "no_allocation"},
+    )
+    assert resp.status_code == 201
+    assert resp.json()["unallocated"][0]["issue_code"] == "INTENTIONAL_NO_ALLOCATION"
+
+
+def test_commit_company_level_returns_201(tmp_path):
+    """company_level commits via the real org channel->company index (201)."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json={"idempotency_key": "k-cl", "reason": "company close",
+              "allocation_method": "company_level"},
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["run"]["allocation_method"] == "company_level"
+    assert body["unallocated"] == []
+    assert len(body["allocations"]) == 1
+    line = body["allocations"][0]
+    assert line["youtube_channel_id"] == "chA"
+    assert Decimal(line["allocated_amount_usd"]) == Decimal("100")
+    # Single channel in a single company: company gross 1000 / 1 = full weight.
+    assert Decimal(line["basis_share"]) == Decimal("1")
+
+
+def test_commit_company_level_unmapped_channel_rejected_422(tmp_path):
+    """A verified channel outside the company index fails the commit closed (422)."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    # chB is verified for pub-1 but has NO primary_org_unit_id, so the org index
+    # cannot map it to a company -> COMPANY_UNMAPPED -> reject-on-unallocated.
+    engine = create_engine(db)
+    with Session(engine) as session:
+        session.add_all([
+            YouTubeChannelORM(
+                id=uuid4(), tenant_id=TENANT, youtube_channel_id="chB",
+                channel_name="B", primary_org_unit_id=None,
+                cms_status="INSIDE_CMS", revenue_required=True, active=True,
+            ),
+            ContentOwnerChannelLinkORM(
+                id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
+                youtube_channel_id="chB", provenance_kind="SOURCE_ROW",
+                active=True, effective_month_start="2026-01",
+            ),
+        ])
+        session.commit()
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json={"idempotency_key": "k", "reason": "r", "allocation_method": "company_level"},
+    )
+    assert resp.status_code == 422
+    assert "unallocated" in resp.json()["detail"]
+
+
+def test_locked_month_get_returns_no_allocation_snapshot(tmp_path):
+    """PR-6 read-switch proof: a LOCKED month's GET serves the committed
+    no_allocation snapshot (zero lines, the withheld set, committed provenance).
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    commit = client.post(
+        COMMIT_PATH,
+        json={"idempotency_key": "k-na", "reason": "withhold",
+              "allocation_method": "no_allocation"},
+    )
+    assert commit.status_code == 201
+    engine = create_engine(db)
+    with Session(engine) as session:
+        session.execute(
+            FinanceMonthCloseORM.__table__.update()
+            .where(FinanceMonthCloseORM.month == MONTH)
+            .values(status="LOCKED")
+        )
+        session.commit()
+    read = client.get(f"/revenue/months/{MONTH}/account-allocations")
+    assert read.status_code == 200
+    body = read.json()
+    assert body["allocation_source"] == "committed_snapshot"
+    assert body["allocation_method"] == "no_allocation"
+    assert body["allocations"] == []
+    assert body["unallocated"][0]["issue_code"] == "INTENTIONAL_NO_ALLOCATION"
 
 
 def test_net_revenue_unchanged_by_commit(tmp_path):

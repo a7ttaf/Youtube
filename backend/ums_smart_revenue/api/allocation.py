@@ -26,6 +26,7 @@ from ums_smart_revenue.api.dependencies import (
 from ums_smart_revenue.api.revenue import (
     current_committed_allocation_repository,
     current_deduction_component_repository,
+    current_org_access_index,
     current_revenue_fact_repository,
 )
 from ums_smart_revenue.auth.audit import AuditEventType
@@ -33,7 +34,7 @@ from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import has_permission
-from ums_smart_revenue.auth.scopes import AccessScope
+from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
 from ums_smart_revenue.finance.account_allocation_read import (
     allocation_provenance_to_api,
     resolve_month_account_allocation,
@@ -296,13 +297,17 @@ def get_account_allocations(
 
 # ============================================================================
 # Purpose: Commit a versioned, audited snapshot of the month's account
-#   allocation (gross_revenue_proportional). Re-runs the same live compute under
-#   the finance-month advisory lock and persists the result; an idempotent
-#   replay returns the existing run without a second audit. This is the WRITE path;
-#   readers prefer the committed snapshot for LOCKED months via the PR-6 read-switch.
+#   allocation (gross / post-tax / company_level / no_allocation, allowlisted).
+#   Re-runs the same live compute under the finance-month advisory lock and
+#   persists the result; an idempotent replay returns the existing run without a
+#   second audit. company_level consumes the org-access channel->company map
+#   (read-only, resolved here at the boundary); no_allocation snapshots its full
+#   intentional-withhold set. This is the WRITE path; readers prefer the
+#   committed snapshot for LOCKED months via the PR-6 read-switch.
 # Database/ORM: writes committed_allocation_runs/_lines/_unallocated/_notes via
 #   the committed-allocation repository; reads deduction_components, the verified
-#   account->channel map, monthly_channel_revenue_facts for the compute.
+#   account->channel map, monthly_channel_revenue_facts, and the org-unit
+#   channel->company index for the compute.
 # Standards: thin route; 422 on malformed month before scope checks; fail-closed
 #   three-gate permission check (VIEW_REVENUE@global, VIEW_FINALIZED_PAYMENTS +
 #   CHANGE_ALLOCATION_RULE@finance_month); typed errors -> 422/409; sensitive
@@ -354,6 +359,7 @@ def commit_account_allocations(
         SqlAlchemyChannelAccountLinkRepository,
         Depends(current_channel_account_link_repository),
     ],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
     response: Response,
 ) -> CommitAllocationResponse:
@@ -375,6 +381,7 @@ def commit_account_allocations(
             reason=payload.reason, committed_by=user.user_id,  # str; repo -> UUID
             deduction_repository=deduction_repository,
             revenue_repository=revenue_repository, link_repository=link_repository,
+            channel_company=org_index.channel_company,
         )
     except CommittedAllocationValidationError as exc:
         raise HTTPException(

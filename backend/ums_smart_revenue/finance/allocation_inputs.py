@@ -7,11 +7,13 @@ exactly one allocation path. Pure orchestration over repositories: no auth, no
 audit, no writes.
 """
 
+from collections.abc import Mapping
 from decimal import Decimal
 from uuid import UUID
 
 from ums_smart_revenue.finance.allocation import (
     ALLOCATION_METHOD,
+    NO_ALLOCATION_METHOD,
     POST_TAX_ALLOCATION_METHOD,
     AccountAllocationResult,
     build_account_allocation,
@@ -83,15 +85,33 @@ def compute_month_account_allocation(
     link_repository: SqlAlchemyChannelAccountLinkRepository,
     adsense_account_id: str | None = None,
     allocation_method: str = ALLOCATION_METHOD,
+    channel_company: Mapping[str, str] | None = None,
 ) -> AccountAllocationResult:
-    """Gather inputs and run the account allocation for one finance month."""
+    """Gather inputs and run the account allocation for one finance month.
+
+    channel_company (channel id -> company org-unit id) is only consulted by
+    the company_level method; the engine fails closed when it is required but
+    absent. no_allocation needs neither facts nor verified links, so those
+    queries are skipped entirely (the engine withholds every component).
+    """
     components = deduction_repository.list_account_components(
         month=month, adsense_account_id=adsense_account_id
     )
+    if allocation_method == NO_ALLOCATION_METHOD:
+        return build_account_allocation(
+            month=month,
+            components=components,
+            verified_channels={},
+            basis={},
+            allocation_method=allocation_method,
+        )
     facts = revenue_repository.list_month_facts(month=month)
     if allocation_method == POST_TAX_ALLOCATION_METHOD:
         basis = _build_net_basis(facts)
     else:
+        # gross_revenue_proportional AND company_level both weight from the
+        # source-aligned gross basis (company_level derives company weights
+        # from it inside the engine).
         basis = _build_gross_basis(facts)
     tenant_id: UUID = link_repository.tenant_id
     accounts = sorted({component.scope_id for component in components})
@@ -107,4 +127,5 @@ def compute_month_account_allocation(
         verified_channels=verified_channels,
         basis=basis,
         allocation_method=allocation_method,
+        channel_company=channel_company,
     )

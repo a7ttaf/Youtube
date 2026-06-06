@@ -1,7 +1,8 @@
 """Committed account-allocation write path (Phase 4 Spec 2b).
 
 Persists a versioned, audited snapshot of the account-allocation compute
-(gross or post-tax, allowlisted). Runs on the shared request session and holds
+(gross / post-tax / company_level / no_allocation, allowlisted). Runs on the
+shared request session and holds
 the finance-month advisory lock across idempotency lookup, OPEN-month guard,
 method validation, compute, reject-on-unallocated, version assignment, and the
 row inserts. It NEVER opens or commits its own session/transaction — the FastAPI
@@ -9,6 +10,7 @@ session dependency commits after the route returns.
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from uuid import UUID
 
@@ -24,6 +26,8 @@ from ums_smart_revenue.db.finance_models import (
 )
 from ums_smart_revenue.finance.allocation import (
     COMMITTABLE_ALLOCATION_METHODS,
+    COMPANY_LEVEL_ALLOCATION_METHOD,
+    NO_ALLOCATION_METHOD,
     AccountAllocationResult,
 )
 from ums_smart_revenue.finance.allocation_inputs import compute_month_account_allocation
@@ -96,8 +100,10 @@ class SqlAlchemyCommittedAllocationRepository:
 
     # ========================================================================
     # Purpose: Commit a versioned snapshot of the account-allocation compute
-    #   (gross or post-tax, allowlisted) for one month, under the finance-month
-    #   advisory lock.
+    #   (gross / post-tax / company_level / no_allocation, allowlisted) for one
+    #   month, under the finance-month advisory lock. company_level requires the
+    #   caller-resolved channel_company map; no_allocation snapshots its full
+    #   intentional-withhold set instead of rejecting on unallocated.
     # Database/ORM: committed_allocation_runs/_lines/_unallocated/_notes;
     #   reads FinanceMonthCloseORM (lock) via month_close helpers.
     # Standards: shared request session (no commit here); typed errors -> route
@@ -116,6 +122,7 @@ class SqlAlchemyCommittedAllocationRepository:
         deduction_repository: object,
         revenue_repository: object,
         link_repository: object,
+        channel_company: Mapping[str, str] | None = None,
     ) -> CommitAllocationOutcome:
         """Compute + persist a committed run, or replay an idempotent retry."""
         committed_by_uuid = _actor_identity_uuid(committed_by)
@@ -146,6 +153,16 @@ class SqlAlchemyCommittedAllocationRepository:
             raise CommittedAllocationValidationError(
                 f"unsupported allocation method: {allocation_method}"
             )
+        # Service-layer mirror of the engine's company_level precondition so the
+        # route gets a typed 422 (the engine's AllocationValidationError would
+        # surface as a 500 from this path).
+        if (
+            allocation_method == COMPANY_LEVEL_ALLOCATION_METHOD
+            and channel_company is None
+        ):
+            raise CommittedAllocationValidationError(
+                "channel_company mapping is required for company_level"
+            )
 
         result: AccountAllocationResult = compute_month_account_allocation(
             month=month,
@@ -153,8 +170,11 @@ class SqlAlchemyCommittedAllocationRepository:
             revenue_repository=revenue_repository,
             link_repository=link_repository,
             allocation_method=allocation_method,
+            channel_company=channel_company,
         )
-        if result.unallocated:
+        # no_allocation withholds EVERY component by design — its snapshot
+        # persists the full unallocated set as evidence instead of rejecting.
+        if result.unallocated and allocation_method != NO_ALLOCATION_METHOD:
             raise CommittedAllocationValidationError(
                 f"cannot commit: {len(result.unallocated)} unallocated component(s)"
             )
@@ -204,8 +224,9 @@ class SqlAlchemyCommittedAllocationRepository:
             )
             for note in result.notes
         )
-        # result.unallocated is empty here (reject-on-unallocated above); the
-        # comprehension is retained for snapshot fidelity / future draft state.
+        # result.unallocated is empty here for every method except
+        # no_allocation (reject-on-unallocated above); a no_allocation run
+        # snapshots its full INTENTIONAL_NO_ALLOCATION set as evidence.
         unallocated = tuple(
             CommittedAllocationUnallocatedORM(
                 run_id=run.id, scope_id=iss.scope_id, component_kind=iss.component_kind,
