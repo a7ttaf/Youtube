@@ -238,18 +238,26 @@ def test_connector_connection(
         conn_status = "not_found"
         not_found = True
     except InactiveCredentialError:
-        # FIX: str(exc) embeds the raw DB credential UUID; use a safe canned message.
+        # FIX: str(exc) embeds the raw DB credential UUID; safe canned message only.
         conn_status = "inactive_credential"
-        detail = "Credential is inactive or revoked; contact an administrator to re-register it."
+        detail = (
+            "Credential is inactive or revoked;"
+            " contact an administrator to re-register it."
+        )
     except OAuthRefreshError:
         # FIX: str(exc) exposes the inner exception class name; safe canned message only.
         conn_status = "auth_failed"
-        detail = "OAuth token refresh failed; check that the credential secret is current."
+        detail = (
+            "OAuth token refresh failed;"
+            " check that the credential secret is current."
+        )
     except GoogleConnectorError:
-        # FIX: str(exc) on GoogleConnectorError subclasses can include full Google API
-        # URLs (e.g. 'GET https://youtubeanalytics.googleapis.com/v2/reports?...: HTTP 403').
+        # FIX: str(exc) on GoogleConnectorError subclasses embeds full Google API URLs.
         conn_status = "error"
-        detail = "Connector probe returned an error; check connector configuration and account access."
+        detail = (
+            "Connector probe returned an error;"
+            " check connector configuration and account access."
+        )
 
     record = _audit_connector_change(
         audit_sink=audit_sink,
