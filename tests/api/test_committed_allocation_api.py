@@ -736,6 +736,63 @@ def test_commit_request_fingerprint_backward_compatible_without_lines():
     assert current == legacy
 
 
+def test_commit_request_fingerprint_canonicalizes_equal_amount_texts():
+    """Numerically-equal manual amounts share ONE fingerprint; a real change differs.
+
+    Pydantic preserves the literal text of a JSON-string Decimal, so "100.00",
+    "100" and "1E+2" reach the fingerprint as three distinct strings. The
+    canonical 6dp serialization must collapse them to one digest so a legitimate
+    idempotent retry that re-encodes the amount replays (200) instead of 409-ing,
+    while a genuinely different value still yields a different digest.
+    """
+    from ums_smart_revenue.api.allocation import (
+        ManualAllocationLineModel,
+        commit_request_fingerprint,
+    )
+
+    def _digest(amount: Decimal) -> str:
+        """Fingerprint of a single-line manual request carrying `amount`."""
+        return commit_request_fingerprint(
+            allocation_method="manual",
+            reason="month close",
+            manual_lines=[
+                ManualAllocationLineModel(
+                    component_key="ad-1", youtube_channel_id="chA", amount_usd=amount
+                )
+            ],
+        )
+
+    base = _digest(Decimal("100.00"))
+    assert _digest(Decimal("100")) == base
+    assert _digest(Decimal("1E+2")) == base
+    assert _digest(Decimal("100.000001")) != base
+
+
+def test_manual_idempotent_replay_with_reencoded_amount_returns_200(tmp_path):
+    """A manual retry that re-encodes the amount ("100.00" -> "100") replays 200.
+
+    The amounts are numerically equal, so the canonical fingerprint matches and
+    the second POST returns the SAME run with 200 and writes NO second
+    ALLOCATION_COMMITTED audit row -- mirroring the identical-body replay test.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    first = client.post(COMMIT_PATH, json=_manual_body(key="dup-reencode"))
+    second = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            key="dup-reencode",
+            lines=[{"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "100"}],
+        ),
+    )
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json()["audit_event"] is None
+    assert second.json()["run"]["run_id"] == first.json()["run"]["run_id"]
+    assert len(_committed_audit_rows(db)) == 1
+
+
 def test_manual_out_of_range_amount_rejected_422(tmp_path):
     """An out-of-range manual amount fails closed at the boundary (422, no audit).
 
