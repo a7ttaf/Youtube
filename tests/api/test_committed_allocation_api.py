@@ -865,3 +865,89 @@ def test_manual_locked_month_get_serves_committed_snapshot(tmp_path):
     assert len(body["allocations"]) == 1
     assert body["allocations"][0]["basis_source_kind"] == "MANUAL"
     assert Decimal(body["allocations"][0]["allocated_amount_usd"]) == Decimal("100")
+
+
+def _committed_run_methods(database_url: str):
+    """Return the persisted allocation_method of every committed run row."""
+    from ums_smart_revenue.db.finance_models import CommittedAllocationRunORM
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        return [
+            row.allocation_method
+            for row in session.scalars(select(CommittedAllocationRunORM)).all()
+        ]
+
+
+def test_commit_non_canonical_casing_accepted_and_canonicalized_201(tmp_path):
+    """A padded/upper-cased valid method commits 201 and is stored canonical.
+
+    The commit boundary must normalize allocation_method exactly as recalc does
+    (strip().lower()), so " GROSS_REVENUE_PROPORTIONAL " is accepted, the
+    response run reports the canonical lowercase, and the persisted run row
+    stores the canonical lowercase value.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json={
+            "idempotency_key": "K", "reason": "month close",
+            "allocation_method": " GROSS_REVENUE_PROPORTIONAL ",
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["run"]["allocation_method"] == "gross_revenue_proportional"
+    assert _committed_run_methods(db) == ["gross_revenue_proportional"]
+
+
+def test_commit_cross_casing_idempotent_replay_returns_200(tmp_path):
+    """Lowercase commit then an upper-cased retry of the SAME key replays 200.
+
+    Because the boundary normalizes the method before fingerprinting, a re-cased
+    retry of the same logical commit replays the existing run (200, same run id)
+    instead of 409-ing on a casing-only fingerprint mismatch, and writes no
+    second ALLOCATION_COMMITTED audit row.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    first = client.post(
+        COMMIT_PATH,
+        json={"idempotency_key": "K2", "reason": "month close",
+              "allocation_method": "gross_revenue_proportional"},
+    )
+    second = client.post(
+        COMMIT_PATH,
+        json={"idempotency_key": "K2", "reason": "month close",
+              "allocation_method": "GROSS_REVENUE_PROPORTIONAL"},
+    )
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json()["audit_event"] is None
+    assert second.json()["run"]["run_id"] == first.json()["run"]["run_id"]
+    assert len(_committed_audit_rows(db)) == 1
+
+
+def test_commit_unknown_method_any_casing_rejected_422(tmp_path):
+    """An unknown method (any casing) fail-closes 422 with the service message.
+
+    Normalization at the boundary does not widen the allowlist: the service's
+    own "unsupported allocation method: <normalized>" guard still rejects the
+    request (422), and no run row or audit row is persisted.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json={"idempotency_key": "k", "reason": "r",
+              "allocation_method": "MAGIC_ESTIMATE"},
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "unsupported allocation method" in detail
+    assert "magic_estimate" in detail
+    assert _committed_run_methods(db) == []
+    assert not _committed_audit_rows(db)

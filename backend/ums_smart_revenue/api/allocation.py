@@ -498,8 +498,18 @@ def commit_account_allocations(
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, payment_scope)
     _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, payment_scope)
 
+    # Cross-endpoint symmetry: /revenue/recalculate normalizes allocation_method
+    # (strip().lower()) BEFORE fingerprinting, so the commit endpoint must too —
+    # otherwise the same logical commit replayed across endpoints with different
+    # casing would 409 on a casing-only fingerprint mismatch. Normalizing the
+    # service-call argument as well keeps fresh-commit and replay consistent:
+    # fingerprint-only normalization would let a re-cased retry REPLAY a run the
+    # fresh path would 422, because the idempotency lookup precedes the service
+    # allowlist check. The service allowlist stays the validation authority.
+    allocation_method = payload.allocation_method.strip().lower()
+
     fingerprint = commit_request_fingerprint(
-        allocation_method=payload.allocation_method, reason=payload.reason,
+        allocation_method=allocation_method, reason=payload.reason,
         manual_lines=payload.manual_lines,
     )
     manual_lines = (
@@ -516,7 +526,7 @@ def commit_account_allocations(
     )
     try:
         outcome = committed_repository.commit_allocation(
-            month=month, allocation_method=payload.allocation_method,
+            month=month, allocation_method=allocation_method,
             idempotency_key=payload.idempotency_key, request_fingerprint=fingerprint,
             reason=payload.reason, committed_by=user.user_id,  # str; repo -> UUID
             deduction_repository=deduction_repository,
