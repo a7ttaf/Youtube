@@ -171,6 +171,7 @@ class TrustedGatewayTenantResolverMiddleware:
         bypass_paths: Iterable[str] = DEFAULT_BYPASS_PATHS,
         authorize_tenant: TenantAuthorizer | None = None,
     ) -> None:
+        """Initialise with the inner ASGI app, session factory, and optional bypass paths."""
         self._bypass_paths = _normalise_bypass_paths(bypass_paths)
         self._resolver = TenantResolverMiddleware(
             asgi_app,
@@ -180,6 +181,7 @@ class TrustedGatewayTenantResolverMiddleware:
         )
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Validate the trusted-gateway token before delegating to the tenant resolver."""
         if scope["type"] != "http" or scope.get("method", "").upper() == "OPTIONS":
             await self._resolver(scope, receive, send)
             return
@@ -204,10 +206,12 @@ class DefaultTenantMiddleware:
         asgi_app: ASGIApp,
         bypass_paths: Iterable[str] = DEFAULT_BYPASS_PATHS,
     ) -> None:
+        """Initialise with the inner ASGI app and optional bypass paths."""
         self.app = asgi_app
         self._bypass_paths = _normalise_bypass_paths(bypass_paths)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        """Bind the bootstrap tenant context and delegate to the inner app."""
         if scope["type"] != "http" or scope.get("method", "").upper() == "OPTIONS":
             await self.app(scope, receive, send)
             return
