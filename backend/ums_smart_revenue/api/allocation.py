@@ -465,6 +465,13 @@ def get_account_allocations(
                 "ALLOCATION_COMMITTED audit event was recorded."
             ),
         },
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "Write conflict returned as a plain-string detail: the finance "
+                "month is LOCKED, or the idempotency key was reused with a "
+                "different request."
+            ),
+        },
     },
 )
 def commit_account_allocations(
