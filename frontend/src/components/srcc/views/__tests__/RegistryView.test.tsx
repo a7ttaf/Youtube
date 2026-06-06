@@ -24,7 +24,8 @@ const CHANNELS: ChannelRegistryEntry[] = [
     cms_status: "INSIDE_CMS",
     content_owner_id: "ams/content-owner-1",
     revenue_required: true,
-    revenue_source_status: "YOUTUBE_REPORTING_API",
+    // OFFICIAL_CMS_REVENUE is the DB-constrained enum value (not YOUTUBE_REPORTING_API).
+    revenue_source_status: "OFFICIAL_CMS_REVENUE",
     active: true,
   },
   {
@@ -41,7 +42,8 @@ const CHANNELS: ChannelRegistryEntry[] = [
     youtube_channel_id: "UC-MUSIC-31",
     channel_name: "Music Stage",
     primary_company_id: null,
-    cms_status: "UNMAPPED",
+    // UNKNOWN is the DB-constrained enum value (not UNMAPPED).
+    cms_status: "UNKNOWN",
     content_owner_id: null,
     revenue_required: true,
     revenue_source_status: "MISSING_REVENUE_SOURCE",
@@ -107,7 +109,7 @@ describe("RegistryView wired to GET /channels", () => {
     expect(screen.getAllByText("Music Stage").length).toBeGreaterThanOrEqual(1);
   });
 
-  it("derives CMS badges from cms_status: INSIDE_CMS→green, OUTSIDE_CMS→amber, UNMAPPED→red", async () => {
+  it("derives CMS badges from cms_status: INSIDE_CMS→green, OUTSIDE_CMS→amber, UNKNOWN→red (fallback)", async () => {
     fetchMock().mockImplementation(routeChannels());
     renderRegistry();
 
@@ -119,6 +121,7 @@ describe("RegistryView wired to GET /channels", () => {
     // "Outside CMS" appears as both the summary tile label AND the CMS badge —
     // use getAllByText and assert at least one match.
     expect(screen.getAllByText("Outside CMS").length).toBeGreaterThanOrEqual(1);
+    // UNKNOWN status falls through to the "Unmapped" fallback in cmsBadge.
     expect(screen.getByText("Unmapped")).toBeInTheDocument();
   });
 
@@ -129,8 +132,11 @@ describe("RegistryView wired to GET /channels", () => {
     await waitFor(() =>
       expect(screen.getByText("UMS Drama")).toBeInTheDocument(),
     );
-    expect(screen.getByText("YouTube Reporting API")).toBeInTheDocument();
+    // OFFICIAL_CMS_REVENUE → "Official CMS revenue"
+    expect(screen.getByText("Official CMS revenue")).toBeInTheDocument();
+    // OFFICIAL_MANUAL_IMPORT → "Uploaded owner statement"
     expect(screen.getByText("Uploaded owner statement")).toBeInTheDocument();
+    // MISSING_REVENUE_SOURCE → "Not linked"
     expect(screen.getByText("Not linked")).toBeInTheDocument();
   });
 
@@ -170,13 +176,16 @@ describe("RegistryView wired to GET /channels", () => {
     expect(screen.queryByText("channel:UC-DRAMA-01")).not.toBeInTheDocument();
   });
 
-  it("shows a loading state while fetching", () => {
+  it("shows a loading state while fetching and does not render mock tile values", () => {
     fetchMock().mockImplementation(
       () => new Promise<Response>(() => { /* never resolves */ }),
     );
     renderRegistry();
 
     expect(screen.getByText(/Loading channels/i)).toBeInTheDocument();
+    // Summary tiles must not show stale mock values while the fetch is in flight.
+    expect(screen.queryByText("318")).not.toBeInTheDocument();
+    expect(screen.queryByText("$42.8K")).not.toBeInTheDocument();
   });
 
   it("shows an empty state when the API returns no channels", async () => {
@@ -188,7 +197,7 @@ describe("RegistryView wired to GET /channels", () => {
     );
   });
 
-  it("shows a 403 error message when the user lacks VIEW_ANALYTICS permission", async () => {
+  it("shows a 403 error message and does not render mock tile values on error", async () => {
     fetchMock().mockImplementation(
       routeChannels(null, 403),
     );
@@ -198,6 +207,9 @@ describe("RegistryView wired to GET /channels", () => {
       expect(screen.getByText("No permission")).toBeInTheDocument(),
     );
     expect(screen.getByText(/cannot view the channel registry/i)).toBeInTheDocument();
+    // Summary tiles must not show stale mock values when the fetch fails.
+    expect(screen.queryByText("318")).not.toBeInTheDocument();
+    expect(screen.queryByText("$42.8K")).not.toBeInTheDocument();
   });
 
   it("derives active channel count and outside-CMS count for summary tiles", async () => {
@@ -209,8 +221,13 @@ describe("RegistryView wired to GET /channels", () => {
     );
     // Active channels: total returned (3)
     expect(screen.getByText("3")).toBeInTheDocument();
-    // Outside CMS: channels where cms_status !== INSIDE_CMS (Sports Extra + Music Stage = 2)
-    expect(screen.getByText("2")).toBeInTheDocument();
+    // Outside CMS: only channels with cms_status === OUTSIDE_CMS (Sports Extra = 1).
+    // Music Stage has cms_status UNKNOWN, which is NOT counted as outside-CMS.
+    expect(screen.getByText("1")).toBeInTheDocument();
+    // Finance tiles (Unmapped revenue, Scoped changes) have no live source —
+    // they should show "—", not the stale mock values.
+    expect(screen.queryByText("$42.8K")).not.toBeInTheDocument();
+    expect(screen.queryByText("318")).not.toBeInTheDocument();
   });
 
   it("fires exactly one /channels fetch per mount (no duplicate on double-invoke)", async () => {
@@ -223,18 +240,18 @@ describe("RegistryView wired to GET /channels", () => {
     expect(channelCalls()).toHaveLength(1);
   });
 
-  it("disables action buttons and bulk-import when canManageRegistry is false", async () => {
+  it("disables write-path buttons (Bulk Import, Request Mapping Change, Save Draft, Submit Approval) for all users in Phase 1", async () => {
     fetchMock().mockImplementation(routeChannels());
-    renderRegistry(false);
+    // Test with canManageRegistry=true — Phase 1 write buttons must be disabled
+    // for ALL users since the backend routes are not yet wired.
+    renderRegistry(true);
 
     await waitFor(() =>
       expect(screen.getByText("UMS Drama")).toBeInTheDocument(),
     );
-    expect(
-      screen.getByRole("button", { name: /bulk import/i }),
-    ).toBeDisabled();
-    expect(
-      screen.getByRole("button", { name: /request mapping change/i }),
-    ).toBeDisabled();
+    expect(screen.getByRole("button", { name: /bulk import/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /request mapping change/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /save draft/i })).toBeDisabled();
+    expect(screen.getByRole("button", { name: /submit approval/i })).toBeDisabled();
   });
 });

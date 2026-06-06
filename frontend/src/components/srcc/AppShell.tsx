@@ -22,7 +22,6 @@ import {
   Badge,
   Dot,
   RESTRICTED_FINANCE_VALUE,
-  SummaryTile,
   workflowDotTone,
 } from "./shared";
 

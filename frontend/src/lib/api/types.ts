@@ -713,12 +713,13 @@ export type ChannelRegistryEntry = {
   youtube_channel_id: string;
   channel_name: string;
   primary_company_id: string | null;
-  // "INSIDE_CMS" | "OUTSIDE_CMS" | "UNMAPPED"
+  // DB constraint (ck_youtube_channels_cms_status): "INSIDE_CMS" | "OUTSIDE_CMS" | "UNKNOWN"
   cms_status: string;
   content_owner_id: string | null;
   revenue_required: boolean;
-  // "YOUTUBE_REPORTING_API" | "YOUTUBE_ANALYTICS_API" | "OFFICIAL_MANUAL_IMPORT"
-  // | "MISSING_REVENUE_SOURCE" | "PERFORMANCE_ONLY"
+  // DB constraint (ck_youtube_channels_revenue_source_status):
+  // "OFFICIAL_CMS_REVENUE" | "OFFICIAL_MANUAL_IMPORT" | "ALLOCATED_FROM_PAYMENT_POOL"
+  // | "PERFORMANCE_ONLY" | "MISSING_REVENUE_SOURCE"
   revenue_source_status: string;
   active: boolean;
 };

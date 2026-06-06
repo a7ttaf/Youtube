@@ -28,14 +28,14 @@ const CHANNELS: ChannelRegistryEntry[] = [
     cms_status: "INSIDE_CMS",
     content_owner_id: "ams/content-owner-1",
     revenue_required: true,
-    revenue_source_status: "YOUTUBE_REPORTING_API",
+    revenue_source_status: "OFFICIAL_CMS_REVENUE",
     active: true,
   },
   {
     youtube_channel_id: "UC-MUSIC-31",
     channel_name: "Music Stage",
     primary_company_id: null,
-    cms_status: "UNMAPPED",
+    cms_status: "UNKNOWN",
     content_owner_id: null,
     revenue_required: true,
     revenue_source_status: "MISSING_REVENUE_SOURCE",
@@ -81,7 +81,7 @@ describe("useChannels", () => {
     expect(typeof result.current.reload).toBe("function");
   });
 
-  it("returns loading: true before the response arrives", async () => {
+  it("returns loading: true before the response arrives", () => {
     fetchMock().mockImplementation(
       () => new Promise<Response>(() => { /* never resolves */ }),
     );

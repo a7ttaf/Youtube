@@ -18,15 +18,16 @@ import {
 //   label, state per Option A rules, trace key, action label). Company/sector
 //   columns show primary_company_id and "—" respectively — a future GET /org-units
 //   or enriched endpoint will add display names. Summary tiles derive active-channel
-//   and outside-CMS counts from the response; finance-gated tiles stay static
-//   placeholders until a finance-month endpoint exists.
+//   and outside-CMS counts from the response; finance-gated tiles stay "—"
+//   until a finance-month endpoint exists. Mock values are never shown after a
+//   live fetch succeeds; loading tiles show "…" and error tiles show "—".
 // Database/ORM: None (frontend) — consumes GET /channels (VIEW_ANALYTICS gate).
 // Standards: No client-side authorization is invented. canManageRegistry gates
-//   trace-key visibility and write-action buttons at the COMPONENT boundary
-//   (fail-closed: non-registry viewers see Restricted in the trace-key cell and
-//   disabled buttons). State derivation is Option A (field-complete, no migration).
-//   All write-path actions (Map, Assign) remain disabled for Phase 1 — the PATCH
-//   /channels/{id}/mapping and account-assignment routes are not yet wired.
+//   trace-key visibility at the COMPONENT boundary (fail-closed: non-registry
+//   viewers see Restricted in the trace-key cell). All write-path actions remain
+//   disabled for Phase 1 — the PATCH /channels/{id}/mapping route, bulk-import
+//   route, and account-assignment routes are not yet wired; buttons are always
+//   disabled regardless of canManageRegistry until those routes exist.
 //   A 403 from GET /channels surfaces as a no-permission error row; no
 //   client-side auth guessing occurs (VIEW_ANALYTICS gate is the backend's call).
 // Blast Radius: Registry read only. No finance number, no source-of-truth mutation.
@@ -40,34 +41,37 @@ import {
 // ---- Client-side derivation helpers ----------------------------------------
 
 /** Compute up to 2-char initials from a channel display name. */
-function avatarFromName(name: string): string { // skipcq: JS-0067
-  return name
+const avatarFromName = (name: string): string => // skipcq: JS-0067
+  name
     .split(/\s+/)
+    .filter(Boolean)
     .slice(0, 2)
-    .map((w) => w[0]?.toUpperCase() ?? "")
+    .map((w) => w[0].toUpperCase())
     .join("");
-}
 
 const CMS_BADGE: Record<string, { text: string; tone: Severity }> = {
   INSIDE_CMS: { text: "Inside CMS", tone: "green" },
   OUTSIDE_CMS: { text: "Outside CMS", tone: "amber" },
 };
 
-function cmsBadge(cms_status: string): { text: string; tone: Severity } {
-  return CMS_BADGE[cms_status] ?? { text: "Unmapped", tone: "red" };
-}
+/** Returns the display badge for a channel CMS status; falls back to Unmapped for unknown values. */
+const cmsBadge = (cms_status: string): { text: string; tone: Severity } =>
+  CMS_BADGE[cms_status] ?? { text: "Unmapped", tone: "red" };
 
+// DB-constrained revenue_source_status values (ck_youtube_channels_revenue_source_status):
+// OFFICIAL_CMS_REVENUE | OFFICIAL_MANUAL_IMPORT | ALLOCATED_FROM_PAYMENT_POOL
+// | PERFORMANCE_ONLY | MISSING_REVENUE_SOURCE
 const SOURCE_LABELS: Record<string, string> = {
-  YOUTUBE_REPORTING_API: "YouTube Reporting API",
-  YOUTUBE_ANALYTICS_API: "YouTube Analytics API",
+  OFFICIAL_CMS_REVENUE: "Official CMS revenue",
   OFFICIAL_MANUAL_IMPORT: "Uploaded owner statement",
-  MISSING_REVENUE_SOURCE: "Not linked",
+  ALLOCATED_FROM_PAYMENT_POOL: "Allocated from payment pool",
   PERFORMANCE_ONLY: "Performance only (no revenue)",
+  MISSING_REVENUE_SOURCE: "Not linked",
 };
 
-function sourceLabel(revenue_source_status: string): string {
-  return SOURCE_LABELS[revenue_source_status] ?? revenue_source_status;
-}
+/** Returns a human-readable revenue source label, falling back to the raw enum value. */
+const sourceLabel = (revenue_source_status: string): string =>
+  SOURCE_LABELS[revenue_source_status] ?? revenue_source_status;
 
 /**
  * Option A state derivation — purely from existing fields, no new DB column.
@@ -75,7 +79,7 @@ function sourceLabel(revenue_source_status: string): string {
  * Evidence due: outside CMS without a verified content-owner link.
  * Approved: everything else (source resolved + CMS status resolved).
  */
-function deriveState(ch: ChannelRegistryEntry): { text: string; tone: Severity } {
+const deriveState = (ch: ChannelRegistryEntry): { text: string; tone: Severity } => {
   if (ch.revenue_required && ch.revenue_source_status === "MISSING_REVENUE_SOURCE") {
     return { text: "Export block", tone: "red" };
   }
@@ -83,50 +87,60 @@ function deriveState(ch: ChannelRegistryEntry): { text: string; tone: Severity }
     return { text: "Evidence due", tone: "amber" };
   }
   return { text: "Approved", tone: "green" };
-}
+};
 
 /**
  * Action label derived from state. All write-path actions (Map, Assign) stay
  * disabled until the backend routes are wired. "Review" has no route yet either
  * — the button remains visible but disabled for all Phase 1 users.
  */
-function deriveAction(state: { text: string }): string {
+const deriveAction = (state: { text: string }): string => {
   if (state.text === "Export block") return "Map";
   if (state.text === "Evidence due") return "Assign";
   return "Review";
-}
+};
 
 /**
  * Trace key: "channel:{youtube_channel_id}" when the channel has an org mapping,
  * "pending" when unmapped (no primary_company_id). The Neo4j node doesn't exist
  * for unmapped channels, so "pending" is the honest label.
  */
-function traceKey(ch: ChannelRegistryEntry): string {
-  return ch.primary_company_id ? `channel:${ch.youtube_channel_id}` : "pending";
-}
+const traceKey = (ch: ChannelRegistryEntry): string =>
+  ch.primary_company_id ? `channel:${ch.youtube_channel_id}` : "pending";
 
 // ---- Summary tile counts (derived from fetched channels) -------------------
 
-function buildSummaryTiles(
+// ============================================================================
+// Purpose: Derive display values for all four summary tiles from the live
+//   channel response. Returns neutral values (loading: "…", error: "—") when
+//   channels is null so mock numbers are never shown during load or on error.
+//   Finance tiles (Unmapped revenue, Scoped changes) have no live source in
+//   Phase 1 — they show "—" after a successful fetch rather than static mock
+//   numbers, because this page is presented as off-mock and numbers-first.
+//   Outside-CMS count includes ONLY channels with cms_status === "OUTSIDE_CMS",
+//   matching the backend /channels/outside-cms endpoint semantics; UNKNOWN
+//   channels are not counted as outside-CMS.
+// ============================================================================
+const buildSummaryTiles = (
   channels: ChannelRegistryEntry[] | null,
+  loading: boolean,
   baseStatic: typeof REGISTRY_SUMMARY,
-): typeof REGISTRY_SUMMARY {
-  if (!channels) return baseStatic;
+): typeof REGISTRY_SUMMARY => {
+  const neutral = loading ? "…" : "—";
+  if (!channels) {
+    return baseStatic.map((tile) => ({ ...tile, value: neutral }));
+  }
   const activeCount = channels.length;
   const outsideCmsCount = channels.filter(
-    (ch) => ch.cms_status !== "INSIDE_CMS",
+    (ch) => ch.cms_status === "OUTSIDE_CMS",
   ).length;
   return baseStatic.map((tile) => {
-    if (tile.label === "Active channels") {
-      return { ...tile, value: String(activeCount) };
-    }
-    if (tile.label === "Outside CMS") {
-      return { ...tile, value: String(outsideCmsCount) };
-    }
-    // Unmapped revenue and Scoped changes: no live source yet — keep static.
-    return tile;
+    if (tile.label === "Active channels") return { ...tile, value: String(activeCount) };
+    if (tile.label === "Outside CMS") return { ...tile, value: String(outsideCmsCount) };
+    // Finance tiles (Unmapped revenue, Scoped changes): no live source yet.
+    return { ...tile, value: "—" };
   });
-}
+};
 
 // ---- Sub-components --------------------------------------------------------
 
@@ -144,7 +158,11 @@ export default function RegistryView({ // skipcq: JS-0067
   canViewFinance: boolean;
 }) {
   const channelState = useChannels();
-  const summaryTiles = buildSummaryTiles(channelState.data, REGISTRY_SUMMARY);
+  const summaryTiles = buildSummaryTiles(
+    channelState.data,
+    channelState.loading,
+    REGISTRY_SUMMARY,
+  );
 
   return (
     <section className="view-page" aria-labelledby="registryTitle">
@@ -174,7 +192,7 @@ function RegistryMainPanel({ // skipcq: JS-0067
 }) {
   return (
     <section className="panel">
-      <RegistryPanelHeader canManageRegistry={canManageRegistry} />
+      <RegistryPanelHeader />
       <RegistryMappingBand canManageRegistry={canManageRegistry} />
       <RegistryTable canManageRegistry={canManageRegistry} channelState={channelState} />
     </section>
@@ -182,7 +200,7 @@ function RegistryMainPanel({ // skipcq: JS-0067
 }
 
 /** Registry panel header: title/subtitle and the bulk-import / mapping-change actions. */
-function RegistryPanelHeader({ canManageRegistry }: { canManageRegistry: boolean }) { // skipcq: JS-0067
+function RegistryPanelHeader() { // skipcq: JS-0067
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -190,12 +208,12 @@ function RegistryPanelHeader({ canManageRegistry }: { canManageRegistry: boolean
         <span>Ownership, CMS status, revenue scope, and SQL lineage identity</span>
       </div>
       <div className="view-actions">
-        {/* No bulk-import route exists yet — disabled for all users until built. */}
-        <button className="ghost-button" type="button" disabled={!canManageRegistry}>
+        {/* Phase 1: no bulk-import route exists yet — disabled for all users. */}
+        <button className="ghost-button" type="button" disabled>
           Bulk Import
         </button>
-        {/* No mapping-change submission route yet — disabled until PATCH /channels/{id}/mapping is wired. */}
-        <button className="primary-button" type="button" disabled={!canManageRegistry}>
+        {/* Phase 1: no mapping-change submission route yet — disabled for all users. */}
+        <button className="primary-button" type="button" disabled>
           Request Mapping Change
         </button>
       </div>
@@ -231,6 +249,24 @@ function RegistryTableHead() { // skipcq: JS-0067
   );
 }
 
+/** Single-row message cell inside the registry table shell (loading, error, empty). */
+function RegistryTableMessageRow({ // skipcq: JS-0067
+  title,
+  sub,
+}: {
+  title: string;
+  sub: string;
+}) {
+  return (
+    <tr>
+      <td colSpan={8}>
+        <span className="item-title">{title}</span>
+        <span className="item-sub">{sub}</span>
+      </td>
+    </tr>
+  );
+}
+
 /**
  * Channel registry data table. Receives the shared channelState (hoisted from
  * RegistryView) rather than calling useChannels() itself — a second hook call
@@ -239,7 +275,7 @@ function RegistryTableHead() { // skipcq: JS-0067
  * non-registry viewers (fail-closed: shows RESTRICTED_FINANCE_VALUE). All
  * action buttons disabled in Phase 1 — write routes not yet wired.
  */
-function RegistryTable({ // skipcq: JS-0067, JS-R1005
+function RegistryTable({ // skipcq: JS-R1005, JS-0067
   canManageRegistry,
   channelState,
 }: {
@@ -255,18 +291,14 @@ function RegistryTable({ // skipcq: JS-0067, JS-R1005
         <table aria-label="Channel registry">
           <RegistryTableHead />
           <tbody>
-            <tr>
-              <td colSpan={8}>
-                <span className="item-title">
-                  {is403 ? "No permission" : "Failed to load channels"}
-                </span>
-                <span className="item-sub">
-                  {is403
-                    ? "Your role cannot view the channel registry."
-                    : "An error occurred loading the channel registry. Please try again."}
-                </span>
-              </td>
-            </tr>
+            <RegistryTableMessageRow
+              title={is403 ? "No permission" : "Failed to load channels"}
+              sub={
+                is403
+                  ? "Your role cannot view the channel registry."
+                  : "An error occurred loading the channel registry. Please try again."
+              }
+            />
           </tbody>
         </table>
       </div>
@@ -279,12 +311,10 @@ function RegistryTable({ // skipcq: JS-0067, JS-R1005
         <table aria-label="Channel registry">
           <RegistryTableHead />
           <tbody>
-            <tr>
-              <td colSpan={8}>
-                <span className="item-title">Loading channels…</span>
-                <span className="item-sub">Reading the channel registry</span>
-              </td>
-            </tr>
+            <RegistryTableMessageRow
+              title="Loading channels…"
+              sub="Reading the channel registry"
+            />
           </tbody>
         </table>
       </div>
@@ -299,12 +329,10 @@ function RegistryTable({ // skipcq: JS-0067, JS-R1005
         <table aria-label="Channel registry">
           <RegistryTableHead />
           <tbody>
-            <tr>
-              <td colSpan={8}>
-                <span className="item-title">No channels in registry</span>
-                <span className="item-sub">No channels are registered for this tenant</span>
-              </td>
-            </tr>
+            <RegistryTableMessageRow
+              title="No channels in registry"
+              sub="No channels are registered for this tenant"
+            />
           </tbody>
         </table>
       </div>
@@ -405,8 +433,9 @@ function RegistrySidePanels({ canManageRegistry }: { canManageRegistry: boolean 
 
 /**
  * The mapping-change request panel. Inputs are disabled for non-registry roles.
- * Submit is disabled in Phase 1 for all users — PATCH /channels/{id}/mapping
- * is not wired to the form yet.
+ * Submit and Save Draft are disabled in Phase 1 for ALL users — PATCH
+ * /channels/{id}/mapping is not wired yet; enabling them would silently no-op
+ * for registry managers and create a misleading write-affordance.
  */
 function MappingChangeRequestPanel({ canManageRegistry }: { canManageRegistry: boolean }) { // skipcq: JS-0067
   return (
@@ -445,13 +474,15 @@ function MappingChangeRequestPanel({ canManageRegistry }: { canManageRegistry: b
         />
       </div>
       <div className="action-row">
-        <button className="ghost-button" type="button" disabled={!canManageRegistry}>Save Draft</button>
-        <button className="primary-button" type="button" disabled={!canManageRegistry}>Submit Approval</button>
+        {/* Phase 1: submit route not wired — disabled for all users. */}
+        <button className="ghost-button" type="button" disabled>Save Draft</button>
+        <button className="primary-button" type="button" disabled>Submit Approval</button>
       </div>
     </section>
   );
 }
 
+/** A labelled select inside the mapping-change form. */
 function MappingSelectRow({ // skipcq: JS-0067
   htmlFor,
   label,
@@ -475,6 +506,7 @@ function MappingSelectRow({ // skipcq: JS-0067
   );
 }
 
+/** A labelled text input inside the mapping-change form. */
 function MappingInputRow({ // skipcq: JS-0067
   htmlFor,
   label,
