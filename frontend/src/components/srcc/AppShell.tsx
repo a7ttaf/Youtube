@@ -320,6 +320,9 @@ function tenantProofLabel( // skipcq: JS-0067
 export default function AppShell() { // skipcq: JS-0067, JS-R1005
   const [view, setView] = useState<ViewKey>("command");
   const [previewRole, setPreviewRole] = useState<Role>(DEFAULT_PREVIEW_ROLE);
+  // Registry "Review" navigation target: seeds TraceView's initial channel
+  // selection. Navigation-only state — carries no authorization meaning.
+  const [traceChannelId, setTraceChannelId] = useState<string | null>(null);
 
   const sessionBootstrap = useSessionBootstrap();
   // The tenant bootstrap only runs once the authenticated session is ready, so
@@ -376,6 +379,11 @@ export default function AppShell() { // skipcq: JS-0067, JS-R1005
           permissions={permissions}
           canViewFinance={canViewFinance}
           displayedRole={displayedRole}
+          traceChannelId={traceChannelId}
+          onOpenTrace={(channelId) => {
+            setTraceChannelId(channelId);
+            setView("trace");
+          }}
         />
         {view === "command" && <WorkflowRail />}
       </main>
@@ -635,11 +643,15 @@ function ViewRouter({ // skipcq: JS-0067, JS-R1005
   permissions,
   canViewFinance,
   displayedRole,
+  traceChannelId,
+  onOpenTrace,
 }: {
   view: ViewKey;
   permissions: AccessPermissions;
   canViewFinance: boolean;
   displayedRole: Role;
+  traceChannelId: string | null;
+  onOpenTrace: (channelId: string) => void;
 }) {
   return (
     <>
@@ -648,11 +660,16 @@ function ViewRouter({ // skipcq: JS-0067, JS-R1005
         <RegistryView
           canManageRegistry={permissions.canManageRegistry}
           canViewFinance={permissions.canViewFinance}
+          onOpenTrace={onOpenTrace}
         />
       )}
       {view === "close" && <CloseView permissions={permissions} />}
       {view === "trace" && (
-        <TraceView canViewFinance={canViewFinance} role={displayedRole} />
+        <TraceView
+          canViewFinance={canViewFinance}
+          role={displayedRole}
+          presetChannelId={traceChannelId ?? undefined}
+        />
       )}
       {view === "exports" && (
         <ExportsView

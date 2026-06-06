@@ -110,15 +110,22 @@ const PERMISSION_DETAILS: Record<Role, Array<{ label: string; value: string }>> 
 export default function TraceView({ // skipcq: JS-0067
   canViewFinance,
   role,
+  presetChannelId,
 }: {
   canViewFinance: boolean;
   role: Role;
+  presetChannelId?: string;
 }) {
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   const [metric, setMetric] = useState<ExplanationMetric>(
     "adjusted_gross_revenue_usd",
   );
-  const [selectedChannelId, setSelectedChannelId] = useState<string>("");
+  // presetChannelId seeds the INITIAL selection only (Registry "Review" nav);
+  // the existing resolution below still falls back to the first channel when
+  // the preset is absent from the selected month's channel list.
+  const [selectedChannelId, setSelectedChannelId] = useState<string>(
+    presetChannelId ?? "",
+  );
 
   // Reuse the net-revenue summary purely as the channel directory for the
   // dropdown (global scope, matching CommandView's default).
