@@ -362,14 +362,25 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   two-method allowlist (service + DB CHECK + migration 20260603_0001), the persisted basis
   field was renamed `basis_gross_usd`→`basis_amount_usd`, and `/revenue/recalculate`'s
   dry-run net check moved to (channel, source_kind) grain so READY can no longer be
-  reported while commit would go UNALLOCATED. Remaining allocation methods out:
-  `company_level`, `manual`, `no_allocation`.
+  reported while commit would go UNALLOCATED.
+  ✅ company_level + no_allocation methods shipped (branch
+  `spec/no-allocation-company-level-methods`, 2026-06-06): `company_level` weights by
+  company source-aligned gross with a flat in-company split (org-access channel→company
+  index resolved at the route boundary; fail-closed COMPANY_UNMAPPED /
+  COMPANY_BASIS_INCOMPLETE / ZERO_COMPANY_BASIS; requires the full SECTOR→COMPANY
+  hierarchy because the access index only maps channels whose company has a sector
+  parent); `no_allocation` commits a zero-line snapshot persisting every component as a
+  typed INTENTIONAL_NO_ALLOCATION unallocated row (reject-on-unallocated bypassed for
+  this method only; needs neither facts nor verified links). Service allowlist now four
+  methods; DB CHECK widened to five (migration 20260606_0001 — 'manual' pre-cleared at
+  the DB layer only, still service-rejected). Recalculate preview parity: no_allocation
+  exempt from NO_REVENUE_FACTS; company_level blocks on COMPANY_MAPPING_MISSING.
   Remaining: PAYMENT-grain allocation is BLOCKED — pending live remittance/bank evidence
   + an operator-asserted (tenant_id, month, bank_reference)→account(s) receipt-assertion
   model (verified 2026-06-03: no deterministic bank_reference→account bridge exists in the
   data — see Docs/superpowers/specs/2026-06-03-spec-payment-account-modeling-design.md).
-  Also remaining: the `company_level` / `manual` / `no_allocation` methods are not yet
-  committable (still rejected by the API/service/DB two-method allowlist).
+  Also remaining: the `manual` method + the `/revenue/recalculate` committed write-path
+  (paired PR in flight, Codex lane).
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed
   permissions). Month-close status UI shipped in PR #69 (CloseView wired to
