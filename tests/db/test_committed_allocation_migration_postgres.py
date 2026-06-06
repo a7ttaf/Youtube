@@ -214,20 +214,30 @@ def test_orphan_tenant_rejected(alembic_config, fresh_engine):
 
 
 def test_bad_method_rejected(alembic_config, fresh_engine):
-    """allocation_method CHECK rejects non-gross_revenue_proportional methods."""
+    """allocation_method CHECK rejects methods outside the five-method allowlist."""
     command.upgrade(alembic_config, "head")
-    sql, params = _insert_run_sql(method="company_level", key="x")
+    sql, params = _insert_run_sql(method="definitely_not_a_method", key="x")
     with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
         conn.execute(sql, params)
 
 
-def test_runs_method_check_accepts_post_tax_rejects_third(alembic_config, fresh_engine):
-    """After upgrade to head, the runs method CHECK allows post_tax and rejects a third."""
+def test_runs_method_check_accepts_allowlist_rejects_unknown(alembic_config, fresh_engine):
+    """After upgrade to head, the runs method CHECK allows all five allowlisted
+    methods (gross is covered by the other inserts in this module) and rejects an
+    unknown method. Pins migration 20260606_0001's widened constraint on Postgres.
+    """
     command.upgrade(alembic_config, "head")
-    ok_sql, ok_params = _insert_run_sql(method="post_tax_revenue_proportional", key="k-pt")
+    allowed = (
+        ("post_tax_revenue_proportional", "k-pt"),
+        ("company_level", "k-cl"),
+        ("manual", "k-man"),
+        ("no_allocation", "k-na"),
+    )
     with fresh_engine.begin() as conn:
-        conn.execute(ok_sql, ok_params)  # post_tax is allowlisted -> succeeds
-    bad_sql, bad_params = _insert_run_sql(method="company_level", key="k-bad")
+        for index, (method, key) in enumerate(allowed, start=1):
+            ok_sql, ok_params = _insert_run_sql(method=method, key=key, version=index)
+            conn.execute(ok_sql, ok_params)  # allowlisted -> succeeds
+    bad_sql, bad_params = _insert_run_sql(method="definitely_not_a_method", key="k-bad")
     with pytest.raises(IntegrityError), fresh_engine.begin() as conn:
         conn.execute(bad_sql, bad_params)  # violates ck_committed_allocation_runs_method
 
