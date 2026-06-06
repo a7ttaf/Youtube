@@ -3,7 +3,7 @@ from datetime import date
 from decimal import Decimal
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
@@ -43,6 +43,9 @@ from ums_smart_revenue.finance.channel_account_links import (
     SqlAlchemyChannelAccountLinkRepository,
 )
 from ums_smart_revenue.finance.committed_allocation import (
+    CommittedAllocationIdempotencyConflictError,
+    CommittedAllocationLockedMonthError,
+    CommittedAllocationValidationError,
     SqlAlchemyCommittedAllocationRepository,
 )
 from ums_smart_revenue.finance.decimal_formatting import decimal_to_api as _decimal_to_api
@@ -81,6 +84,7 @@ from ums_smart_revenue.finance.payment_matching import (
 from ums_smart_revenue.finance.recalculation import (
     RevenueRecalculationValidationError,
     build_recalculation_preview,
+    normalize_allocation_method,
 )
 from ums_smart_revenue.finance.reconciliation import (
     build_revenue_reconciliation_issue_queue,
@@ -294,6 +298,10 @@ class RevenueRecalculationRequest(BaseModel):
     scope_id: str | None = None
     currency: str = Field(default="USD", min_length=1)
     dry_run: bool = True
+    # Required only when dry_run is False (the route enforces it after the gates);
+    # ignored on a dry run. Shared with the commit endpoint for cross-endpoint
+    # idempotency coherence via commit_request_fingerprint.
+    idempotency_key: str | None = None
     reason: str = Field(min_length=1)
 
     @field_validator(
@@ -309,10 +317,10 @@ class RevenueRecalculationRequest(BaseModel):
         """Strip whitespace from required string fields and reject blank values."""
         return _strip_required_string(value)
 
-    @field_validator("scope_id", mode="before")
+    @field_validator("scope_id", "idempotency_key", mode="before")
     @classmethod
     def strip_optional_string(cls, value):
-        """Strip whitespace from the optional scope_id field, returning None for blank input."""
+        """Strip whitespace from optional string fields, returning None for blank input."""
         if value is None:
             return None
         if isinstance(value, str):
@@ -430,7 +438,163 @@ def check_channel_revenue_authorization(
     )
 
 
-@router.post("/recalculate")
+# ============================================================================
+# Purpose: Enforce the dry_run=False request-shape contract that is stricter
+#   than a dry run: a committed write must be whole-month (scope_type=global),
+#   carry an idempotency_key, and never run the manual method (manual needs the
+#   explicit-lines commit endpoint). Returns the NORMALIZED allocation method for
+#   the downstream commit so the manual check and the service agree on casing.
+# Database/ORM: None.
+# Standards: typed 422s with safe, actionable messages; runs AFTER the auth gates
+#   (authorization-before-validation parity with the commit endpoint).
+# Blast Radius: Authorization order + write-path validation. No finance number.
+# ============================================================================
+def _validate_recalculation_write_request(payload: RevenueRecalculationRequest) -> str:
+    """Validate the dry_run=False request shape; return the normalized method."""
+    if payload.scope_type.strip() != "global":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="committed recalculation requires scope_type=global",
+        )
+    if not payload.idempotency_key:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="idempotency_key is required when dry_run=false",
+        )
+    try:
+        normalized_method = normalize_allocation_method(payload.allocation_method)
+    except RevenueRecalculationValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    if normalized_method == "manual":
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                "manual allocation requires explicit lines; use POST "
+                "/revenue/months/{month}/account-allocations/commit"
+            ),
+        )
+    return normalized_method
+
+
+# ============================================================================
+# Purpose: Perform the committed recalculation write after the preview pre-flight
+#   gate passed. Delegates to the SAME committed-allocation service as the commit
+#   endpoint (advisory lock, idempotency, version chain), reusing the shared
+#   commit_request_fingerprint for cross-endpoint idempotency coherence, then
+#   emits the durable ALLOCATION_COMMITTED audit. Sets the response status to 201
+#   (fresh) or 200 (idempotent replay) and returns the run/audit fragment merged
+#   into the preview body by the route.
+# Database/ORM: writes committed_allocation_runs/_lines/_unallocated/_notes via
+#   the committed-allocation repository; writes one ALLOCATION_COMMITTED row on a
+#   fresh commit via the durable audit sink.
+# Standards: typed service errors -> 422/409 (parity with the commit route);
+#   summary-only audit; no per-line dump; manual_lines never passed (rejected
+#   earlier). Reuses api.allocation helpers via a deferred import to avoid the
+#   api.revenue <-> api.allocation module cycle.
+# Blast Radius: Finance write; identical persistence path to the commit endpoint.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/committed_allocation.py -> writer.
+#   - File: backend/ums_smart_revenue/api/allocation.py -> shared fingerprint /
+#     run serializer / audit emitter (reused, no logic drift).
+# ============================================================================
+def _commit_recalculation_write(
+    *,
+    payload: RevenueRecalculationRequest,
+    normalized_method: str,
+    user: UserPrincipal,
+    org_index: OrgAccessIndex,
+    month_scope: AccessScope,
+    committed_repository: SqlAlchemyCommittedAllocationRepository,
+    deduction_repository: SqlAlchemyDeductionComponentRepository,
+    revenue_repository: SqlAlchemyRevenueFactRepository,
+    link_repository: SqlAlchemyChannelAccountLinkRepository,
+    audit_sink: AuditSink,
+    response: Response,
+) -> dict[str, object]:
+    """Commit the recalculation snapshot and return the write-response fragment."""
+    # Deferred import: api.allocation imports from api.revenue, so a top-level
+    # import here would form a cycle. The reused helpers carry no drift.
+    from ums_smart_revenue.api.allocation import (
+        _run_to_api,
+        commit_request_fingerprint,
+        emit_allocation_committed_audit,
+    )
+
+    fingerprint = commit_request_fingerprint(
+        allocation_method=normalized_method, reason=payload.reason,
+    )
+    try:
+        outcome = committed_repository.commit_allocation(
+            month=payload.month, allocation_method=normalized_method,
+            idempotency_key=payload.idempotency_key, request_fingerprint=fingerprint,
+            reason=payload.reason, committed_by=user.user_id,  # str; repo -> UUID
+            deduction_repository=deduction_repository,
+            revenue_repository=revenue_repository, link_repository=link_repository,
+            channel_company=org_index.channel_company,
+        )
+    except CommittedAllocationValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    except (
+        CommittedAllocationLockedMonthError,
+        CommittedAllocationIdempotencyConflictError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+
+    write_status = "COMMITTED" if outcome.created else "IDEMPOTENT_REPLAY"
+    commit_audit_event = emit_allocation_committed_audit(
+        sink=audit_sink, actor=user, month=payload.month, scope=month_scope,
+        reason=payload.reason, outcome=outcome,
+    )
+    response.status_code = (
+        status.HTTP_201_CREATED if outcome.created else status.HTTP_200_OK
+    )
+    return {
+        "write_status": write_status,
+        "committed_run": _run_to_api(outcome.run),
+        "commit_audit_event": commit_audit_event,
+    }
+
+
+# ============================================================================
+# Purpose: Preview a scoped revenue recalculation (dry_run=true), or commit a
+#   whole-month allocation snapshot (dry_run=false) via the same service path as
+#   the dedicated commit endpoint. dry_run=true never writes; dry_run=false adds a
+#   stricter contract: scope_type=global, an idempotency_key, the write-only
+#   VIEW_FINALIZED_PAYMENTS gate, and a preview pre-flight whose blocking issues
+#   return 409 BLOCKED_BY_ISSUES before any write.
+# Database/ORM: dry-run reads only; the write branch persists committed allocation
+#   rows + one ALLOCATION_COMMITTED audit row (see _commit_recalculation_write).
+# Standards: thin route; fail-closed gates BEFORE request-shape validation BEFORE
+#   pre-flight BEFORE the service; typed errors -> 422/409; in-memory RECALCULATION
+#   audit carries the final write_status. No secrets, no per-line dump.
+# Blast Radius: Authorization (added write gate), finance write, audit. No Neo4j.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/recalculation.py -> pre-flight.
+#   - File: backend/ums_smart_revenue/finance/committed_allocation.py -> writer.
+# ============================================================================
+@router.post(
+    "/recalculate",
+    responses={
+        status.HTTP_200_OK: {
+            "description": (
+                "Dry-run preview (no writes), or an idempotent replay of an "
+                "existing committed run (no second ALLOCATION_COMMITTED audit)."
+            ),
+        },
+        status.HTTP_201_CREATED: {
+            "description": (
+                "dry_run=false: a new versioned allocation snapshot was committed "
+                "and an ALLOCATION_COMMITTED audit event was recorded."
+            ),
+        },
+    },
+)
 def request_revenue_recalculation(
     payload: RevenueRecalculationRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
@@ -443,22 +607,40 @@ def request_revenue_recalculation(
         SqlAlchemyManualOverrideRepository,
         Depends(current_manual_override_repository),
     ],
+    committed_repository: Annotated[
+        SqlAlchemyCommittedAllocationRepository,
+        Depends(current_committed_allocation_repository),
+    ],
+    deduction_repository: Annotated[
+        SqlAlchemyDeductionComponentRepository,
+        Depends(current_deduction_component_repository),
+    ],
+    link_repository: Annotated[
+        SqlAlchemyChannelAccountLinkRepository,
+        Depends(current_channel_account_link_repository),
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    response: Response,
 ) -> dict[str, object]:
-    """Build a dry-run revenue recalculation preview for the requested scope."""
+    """Preview (dry_run) or commit (dry_run=false) a revenue recalculation."""
     target_scope, channel_ids = _revenue_read_scope_to_channel_ids(
         scope_type=payload.scope_type,
         scope_id=payload.scope_id,
         org_index=org_index,
     )
     month_scope = AccessScope.finance_month(payload.month)
+    # Gates first (authorization before request-shape validation). The write path
+    # must never be weaker than the commit endpoint: dry_run=false adds the
+    # write-only VIEW_FINALIZED_PAYMENTS gate right after the two dry-run gates.
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, month_scope)
     if not payload.dry_run:
-        raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            detail="committed recalculation writes are not implemented; use dry_run=true",
-        )
+        _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, month_scope)
+
+    normalized_write_method: str | None = None
+    if not payload.dry_run:
+        normalized_write_method = _validate_recalculation_write_request(payload)
+
     try:
         facts = revenue_repository.list_month_facts(
             month=payload.month,
@@ -497,6 +679,39 @@ def request_revenue_recalculation(
             detail=str(exc),
         ) from exc
 
+    write_fragment: dict[str, object] | None = None
+    if not payload.dry_run:
+        # Pre-flight: the preview is the gate; blocking issues stop the write
+        # before any persistence (409). The commit service stays the final
+        # authority and fail-closes independently on what the preview cannot see
+        # (e.g. a LOCKED month, which the preview has no awareness of).
+        if preview.blocking_issues:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={
+                    "write_status": "BLOCKED_BY_ISSUES",
+                    "blocking_issues": [
+                        issue.to_api() for issue in preview.blocking_issues
+                    ],
+                },
+            )
+        write_fragment = _commit_recalculation_write(
+            payload=payload,
+            normalized_method=normalized_write_method,  # set on the write path
+            user=user,
+            org_index=org_index,
+            month_scope=month_scope,
+            committed_repository=committed_repository,
+            deduction_repository=deduction_repository,
+            revenue_repository=revenue_repository,
+            link_repository=link_repository,
+            audit_sink=audit_sink,
+            response=response,
+        )
+
+    final_write_status = (
+        write_fragment["write_status"] if write_fragment else preview.write_status
+    )
     summary = preview.source_summary.to_api()
     record = record_audit_event(
         sink=audit_sink,
@@ -513,12 +728,16 @@ def request_revenue_recalculation(
             "scope_id": preview.scope_id,
             "revenue_fact_count": summary["revenue_fact_count"],
             "source_channel_count": summary["source_channel_count"],
-            "write_status": preview.write_status,
+            "write_status": final_write_status,
         },
     )
-    response = preview.to_api()
-    response["audit_event"] = audit_record_to_api(record)
-    return response
+    response_body = preview.to_api()
+    if write_fragment is not None:
+        # The route owns the final write_status in the response body; the preview
+        # object itself stays NO_WRITES_PERFORMED (it never writes).
+        response_body.update(write_fragment)
+    response_body["audit_event"] = audit_record_to_api(record)
+    return response_body
 
 
 @router.post("/facts", status_code=status.HTTP_201_CREATED)

@@ -129,16 +129,17 @@ def build_recalculation_preview(
     channel_company. This prevents a false READY_FOR_REVIEW when a verified
     account channel lacks a company mapping but has no fact row.
 
+    The builder NEVER writes; it is the pre-flight gate for both dry-run preview
+    and the committed write path. dry_run is echoed onto the returned preview so
+    the route can serialize it faithfully; the route itself drives the commit
+    (and overrides write_status) after this gate passes.
+
     Raises:
         RevenueRecalculationValidationError: If allocation_method or currency is
-            invalid, or if dry_run is False (committed writes not implemented).
+            invalid.
     """
     normalized_method = normalize_allocation_method(allocation_method)
     normalized_currency = normalize_recalculation_currency(currency)
-    if not dry_run:
-        raise RevenueRecalculationValidationError(
-            "committed recalculation writes are not implemented; use dry_run=true"
-        )
 
     fact_list = [fact for fact in facts if fact.month == month]
     override_list = [
@@ -194,7 +195,7 @@ def build_recalculation_preview(
         scope_type=scope_type,
         scope_id=scope_id,
         currency=normalized_currency,
-        dry_run=True,
+        dry_run=dry_run,
         status="BLOCKED" if blocking_issues else "READY_FOR_REVIEW",
         write_status="NO_WRITES_PERFORMED",
         source_summary=source_summary,
