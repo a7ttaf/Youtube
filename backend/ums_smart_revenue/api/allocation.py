@@ -69,6 +69,19 @@ class ManualAllocationLineModel(BaseModel):
     youtube_channel_id: str = Field(min_length=1)
     amount_usd: Decimal = Field(ge=0)
 
+    @field_validator("component_key", "youtube_channel_id", mode="before")
+    @classmethod
+    def _strip(cls, value):
+        """Strip the line identifiers so they match the stored values.
+
+        Parity with CommitAllocationRequest._strip: a padded " ad-1 " would
+        otherwise reach the builder untrimmed and 422 as an unknown
+        component_key, and a whitespace-only value would slip past min_length=1.
+        Stripping before validation makes whitespace-only fail cleanly and keeps
+        the idempotency fingerprint stable across padded retries.
+        """
+        return value.strip() if isinstance(value, str) else value
+
 
 class CommitAllocationRequest(BaseModel):
     """Body for a commit: a client idempotency key + a required reason.

@@ -736,6 +736,52 @@ def test_commit_request_fingerprint_backward_compatible_without_lines():
     assert current == legacy
 
 
+def test_manual_out_of_range_amount_rejected_422(tmp_path):
+    """An out-of-range manual amount fails closed at the boundary (422, no audit).
+
+    "1e1000" passes the Pydantic Field(ge=0) schema (not NaN/Infinity) but cannot
+    be quantized to 6dp inside the builder; the builder must raise a typed
+    AllocationValidationError so the route returns 422 instead of an unhandled 500.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            lines=[{"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "1e1000"}]
+        ),
+    )
+    assert resp.status_code == 422
+    assert not _committed_audit_rows(db)
+
+
+def test_manual_padded_line_strings_stripped_commits_201(tmp_path):
+    """Padded component_key/channel id strip to valid values and commit 201.
+
+    ManualAllocationLineModel mirrors the CommitAllocationRequest strip parity, so
+    " ad-1 " / " chA " reach the builder trimmed and allocate cleanly instead of
+    422-ing with a confusing "unknown component_key".
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            lines=[
+                {"component_key": " ad-1 ", "youtube_channel_id": " chA ", "amount_usd": "100.00"}
+            ]
+        ),
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    line = body["allocations"][0]
+    assert line["component_key"] == "ad-1"
+    assert line["youtube_channel_id"] == "chA"
+    assert len(_committed_audit_rows(db)) == 1
+
+
 def test_manual_locked_month_get_serves_committed_snapshot(tmp_path):
     """A LOCKED month's GET serves the committed manual snapshot (read-switch).
 
