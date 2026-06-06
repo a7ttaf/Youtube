@@ -209,7 +209,7 @@ def test_unsupported_scope_is_guarded():
 
 
 def test_channel_in_multiple_accounts_emits_informational_note():
-    """A channel verified under multiple accounts emits the multi-account note and still allocates."""
+    """A channel verified under multiple accounts notes the overlap and still allocates."""
     result = build_account_allocation(
         month="2026-04",
         components=[_component(amount="10.00", scope_id="pub-1", key="a")],
