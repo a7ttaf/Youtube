@@ -181,7 +181,7 @@ def request_connector_job(
     }
 
 
-@router.post("/credentials/{connector_key}/{account_id:path}/test")
+@router.post("/credentials/{connector_key}/{account_id}/test")
 def test_connector_connection(
     connector_key: str,
     account_id: str,
@@ -237,15 +237,19 @@ def test_connector_connection(
         # and the CONNECTOR_TESTED row is persisted despite the 404 status code.
         conn_status = "not_found"
         not_found = True
-    except InactiveCredentialError as exc:
+    except InactiveCredentialError:
+        # FIX: str(exc) embeds the raw DB credential UUID; use a safe canned message.
         conn_status = "inactive_credential"
-        detail = str(exc)
-    except OAuthRefreshError as exc:
+        detail = "Credential is inactive or revoked; contact an administrator to re-register it."
+    except OAuthRefreshError:
+        # FIX: str(exc) exposes the inner exception class name; safe canned message only.
         conn_status = "auth_failed"
-        detail = str(exc)
-    except GoogleConnectorError as exc:
+        detail = "OAuth token refresh failed; check that the credential secret is current."
+    except GoogleConnectorError:
+        # FIX: str(exc) on GoogleConnectorError subclasses can include full Google API
+        # URLs (e.g. 'GET https://youtubeanalytics.googleapis.com/v2/reports?...: HTTP 403').
         conn_status = "error"
-        detail = str(exc)
+        detail = "Connector probe returned an error; check connector configuration and account access."
 
     record = _audit_connector_change(
         audit_sink=audit_sink,

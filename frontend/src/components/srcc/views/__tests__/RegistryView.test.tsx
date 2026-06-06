@@ -186,6 +186,9 @@ describe("RegistryView wired to GET /channels", () => {
     // Summary tiles must not show stale mock values while the fetch is in flight.
     expect(screen.queryByText("318")).not.toBeInTheDocument();
     expect(screen.queryByText("$42.8K")).not.toBeInTheDocument();
+    // Mock note subtitles must also be cleared so they don't contradict live values.
+    expect(screen.queryByText(/300\+ target registry/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Allocation requires explicit source mapping/)).not.toBeInTheDocument();
   });
 
   it("shows an empty state when the API returns no channels", async () => {
@@ -210,6 +213,9 @@ describe("RegistryView wired to GET /channels", () => {
     // Summary tiles must not show stale mock values when the fetch fails.
     expect(screen.queryByText("318")).not.toBeInTheDocument();
     expect(screen.queryByText("$42.8K")).not.toBeInTheDocument();
+    // Mock note subtitles must also be cleared on error.
+    expect(screen.queryByText(/300\+ target registry/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Allocation requires explicit source mapping/)).not.toBeInTheDocument();
   });
 
   it("derives active channel count and outside-CMS count for summary tiles", async () => {
@@ -227,6 +233,9 @@ describe("RegistryView wired to GET /channels", () => {
     // Finance tiles (Unmapped revenue, Scoped changes) have no live source —
     // they should show "—", not the stale mock values.
     expect(screen.queryByText("$42.8K")).not.toBeInTheDocument();
+    // Mock note subtitles must be cleared even when channels load successfully.
+    expect(screen.queryByText(/300\+ target registry/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Allocation requires explicit source mapping/)).not.toBeInTheDocument();
     expect(screen.queryByText("318")).not.toBeInTheDocument();
   });
 

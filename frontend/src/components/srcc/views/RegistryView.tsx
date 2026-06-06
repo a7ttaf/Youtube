@@ -120,6 +120,10 @@ const traceKey = (ch: ChannelRegistryEntry): string =>
 //   Outside-CMS count includes ONLY channels with cms_status === "OUTSIDE_CMS",
 //   matching the backend /channels/outside-cms endpoint semantics; UNKNOWN
 //   channels are not counted as outside-CMS.
+//   Note field: always cleared ("") — the mock subtitle strings ("300+ target
+//   registry") are stale copy that contradicts live-derived values. SummaryTile
+//   renders <small>{note}</small> unconditionally, so a non-empty note would
+//   appear next to the live count and mislead the viewer.
 // ============================================================================
 const buildSummaryTiles = (
   channels: ChannelRegistryEntry[] | null,
@@ -128,17 +132,18 @@ const buildSummaryTiles = (
 ): typeof REGISTRY_SUMMARY => {
   const neutral = loading ? "…" : "—";
   if (!channels) {
-    return baseStatic.map((tile) => ({ ...tile, value: neutral }));
+    return baseStatic.map((tile) => ({ ...tile, value: neutral, note: "" }));
   }
   const activeCount = channels.length;
   const outsideCmsCount = channels.filter(
     (ch) => ch.cms_status === "OUTSIDE_CMS",
   ).length;
   return baseStatic.map((tile) => {
-    if (tile.label === "Active channels") return { ...tile, value: String(activeCount) };
-    if (tile.label === "Outside CMS") return { ...tile, value: String(outsideCmsCount) };
+    // FIX: always clear note — mock subtitle copy contradicts live-derived values.
+    if (tile.label === "Active channels") return { ...tile, value: String(activeCount), note: "" };
+    if (tile.label === "Outside CMS") return { ...tile, value: String(outsideCmsCount), note: "" };
     // Finance tiles (Unmapped revenue, Scoped changes): no live source yet.
-    return { ...tile, value: "—" };
+    return { ...tile, value: "—", note: "" };
   });
 };
 
