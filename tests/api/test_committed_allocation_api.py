@@ -505,3 +505,260 @@ def test_net_revenue_unchanged_by_commit(tmp_path):
         return {k: v for k, v in payload.items() if k != "audit_events"}
 
     assert _stable(before.json()) == _stable(after.json())
+
+
+# The seed component "ad-1" (pub-1, DEDUCTION 100) is verified to chA only, so a
+# single full-amount line is the canonical valid manual split for these tests.
+def _manual_body(*, key: str = "k-man", lines=None, reason: str = "manual close"):
+    """Build a manual commit body; `lines` defaults to the full ad-1 -> chA split."""
+    return {
+        "idempotency_key": key,
+        "reason": reason,
+        "allocation_method": "manual",
+        "manual_lines": lines
+        if lines is not None
+        else [{"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "100.00"}],
+    }
+
+
+def test_manual_commit_happy_path_201_with_posted_split(tmp_path):
+    """A valid manual split commits 201 with MANUAL-basis lines + one audit row."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(COMMIT_PATH, json=_manual_body())
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["run"]["allocation_method"] == "manual"
+    assert body["unallocated"] == []
+    assert len(body["allocations"]) == 1
+    line = body["allocations"][0]
+    assert line["youtube_channel_id"] == "chA"
+    assert line["component_key"] == "ad-1"
+    assert line["basis_source_kind"] == "MANUAL"
+    assert Decimal(line["allocated_amount_usd"]) == Decimal("100")
+    assert body["audit_event"]["event_type"] == "ALLOCATION_COMMITTED"
+    assert len(_committed_audit_rows(db)) == 1
+
+
+def test_manual_lines_with_gross_method_rejected_422(tmp_path):
+    """Supplying manual_lines with a non-manual method is rejected with 422."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json={
+            "idempotency_key": "k", "reason": "r",
+            "allocation_method": "gross_revenue_proportional",
+            "manual_lines": [
+                {"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "100.00"}
+            ],
+        },
+    )
+    assert resp.status_code == 422
+    assert not _committed_audit_rows(db)
+
+
+def test_manual_sum_mismatch_rejected_422(tmp_path):
+    """A manual split that does not sum to the component amount is rejected 422."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            lines=[{"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "90.00"}]
+        ),
+    )
+    assert resp.status_code == 422
+    assert not _committed_audit_rows(db)
+
+
+def test_manual_unknown_component_key_rejected_422(tmp_path):
+    """A manual line for an unknown component_key is rejected with 422."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            lines=[
+                {"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "100.00"},
+                {"component_key": "ghost", "youtube_channel_id": "chA", "amount_usd": "0.00"},
+            ]
+        ),
+    )
+    assert resp.status_code == 422
+    assert not _committed_audit_rows(db)
+
+
+def test_manual_channel_not_verified_rejected_422(tmp_path):
+    """A manual line whose channel is not verified for the account is rejected 422."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            lines=[{"component_key": "ad-1", "youtube_channel_id": "chZ", "amount_usd": "100.00"}]
+        ),
+    )
+    assert resp.status_code == 422
+    assert not _committed_audit_rows(db)
+
+
+def test_manual_duplicate_pair_rejected_422(tmp_path):
+    """A duplicate (component_key, channel) manual line is rejected with 422."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            lines=[
+                {"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "60.00"},
+                {"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "40.00"},
+            ]
+        ),
+    )
+    assert resp.status_code == 422
+    assert not _committed_audit_rows(db)
+
+
+def test_manual_uncovered_component_rejected_422(tmp_path):
+    """A second ACCOUNT component with no manual line is rejected with 422."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    # Seed a second ACCOUNT component; cover only the first.
+    engine = create_engine(db)
+    with Session(engine) as session:
+        session.add(
+            DeductionComponentORM(
+                id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind="DEDUCTION",
+                scope_kind="ACCOUNT", scope_id="pub-1", amount_usd=Decimal("50.00"),
+                currency_code="USD", source_system="adsense_management",
+                source_table="google_revenue_source_rows", component_key="ad-2",
+                raw_payload={},
+            )
+        )
+        session.commit()
+    client = _client(db, _principal)
+    resp = client.post(COMMIT_PATH, json=_manual_body())
+    assert resp.status_code == 422
+    assert not _committed_audit_rows(db)
+
+
+def test_manual_idempotent_replay_returns_200_without_second_audit(tmp_path):
+    """Re-POST a manual commit with the same key + identical lines -> 200, no audit."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    body = _manual_body(key="dup-man")
+    first = client.post(COMMIT_PATH, json=body)
+    second = client.post(COMMIT_PATH, json=body)
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json()["audit_event"] is None
+    assert second.json()["run"]["run_id"] == first.json()["run"]["run_id"]
+    assert len(_committed_audit_rows(db)) == 1
+
+
+def test_manual_same_key_different_lines_conflicts_409(tmp_path):
+    """Same key but a different manual split (different fingerprint) -> 409.
+
+    chB is also verified for pub-1 so the second body is itself a valid split;
+    only the fingerprint difference (not a validation error) drives the 409.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    engine = create_engine(db)
+    with Session(engine) as session:
+        session.add_all([
+            YouTubeChannelORM(
+                id=uuid4(), tenant_id=TENANT, youtube_channel_id="chB",
+                channel_name="B", primary_org_unit_id=COMPANY_ID,
+                cms_status="INSIDE_CMS", revenue_required=True, active=True,
+            ),
+            ContentOwnerChannelLinkORM(
+                id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
+                youtube_channel_id="chB", provenance_kind="SOURCE_ROW",
+                active=True, effective_month_start="2026-01",
+            ),
+        ])
+        session.commit()
+    client = _client(db, _principal)
+    first = client.post(COMMIT_PATH, json=_manual_body(key="dup-man"))
+    assert first.status_code == 201
+    conflict = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            key="dup-man",
+            lines=[
+                {"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "70.00"},
+                {"component_key": "ad-1", "youtube_channel_id": "chB", "amount_usd": "30.00"},
+            ],
+        ),
+    )
+    assert conflict.status_code == 409
+
+
+def test_manual_locked_month_conflicts_409(tmp_path):
+    """A LOCKED month rejects a manual commit with 409."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True, status="LOCKED")
+    client = _client(db, _principal)
+    resp = client.post(COMMIT_PATH, json=_manual_body())
+    assert resp.status_code == 409
+
+
+def test_commit_request_fingerprint_backward_compatible_without_lines():
+    """commit_request_fingerprint with manual_lines=None equals the legacy digest.
+
+    The legacy digest hashed only {allocation_method, reason}; the renamed helper
+    must stay byte-identical for that two-field input so existing snapshots replay.
+    """
+    import hashlib
+    import json
+
+    from ums_smart_revenue.api.allocation import commit_request_fingerprint
+
+    legacy = hashlib.blake2b(
+        json.dumps(
+            {"allocation_method": "gross_revenue_proportional", "reason": "month close"},
+            sort_keys=True,
+        ).encode(),
+        digest_size=16,
+    ).hexdigest()
+    current = commit_request_fingerprint(
+        allocation_method="gross_revenue_proportional", reason="month close",
+    )
+    assert current == legacy
+
+
+def test_manual_locked_month_get_serves_committed_snapshot(tmp_path):
+    """A LOCKED month's GET serves the committed manual snapshot (read-switch).
+
+    PR A proved the resolver is method-agnostic; this pins it for `manual`.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    commit = client.post(COMMIT_PATH, json=_manual_body())
+    assert commit.status_code == 201
+    engine = create_engine(db)
+    with Session(engine) as session:
+        session.execute(
+            FinanceMonthCloseORM.__table__.update()
+            .where(FinanceMonthCloseORM.month == MONTH)
+            .values(status="LOCKED")
+        )
+        session.commit()
+    read = client.get(f"/revenue/months/{MONTH}/account-allocations")
+    assert read.status_code == 200
+    body = read.json()
+    assert body["allocation_source"] == "committed_snapshot"
+    assert body["allocation_method"] == "manual"
+    assert len(body["allocations"]) == 1
+    assert body["allocations"][0]["basis_source_kind"] == "MANUAL"
+    assert Decimal(body["allocations"][0]["allocated_amount_usd"]) == Decimal("100")
