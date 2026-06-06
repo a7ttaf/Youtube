@@ -658,6 +658,9 @@ function MappingChangeRequestPanel({ // skipcq: JS-0067, JS-R1005
       inFlightRef.current = false;
     }
   };
+  const selectedChannelMissing = channelId !== "" && !channels.some(
+    (ch) => ch.youtube_channel_id === channelId,
+  );
 
   return (
     <section className="panel">
@@ -678,6 +681,7 @@ function MappingChangeRequestPanel({ // skipcq: JS-0067, JS-R1005
             onChange={(e) => setChannelId(e.target.value)}
           >
             <option value="">Select channel…</option>
+            {selectedChannelMissing ? <option value={channelId}>{channelId}</option> : null}
             {channels.map((ch) => (
               <option key={ch.youtube_channel_id} value={ch.youtube_channel_id}>
                 {ch.channel_name} ({ch.youtube_channel_id})
