@@ -491,8 +491,8 @@ def _validate_recalculation_write_request(payload: RevenueRecalculationRequest) 
 #   fresh commit via the durable audit sink.
 # Standards: typed service errors -> 422/409 (parity with the commit route);
 #   summary-only audit; no per-line dump; manual_lines never passed (rejected
-#   earlier). Reuses api.allocation helpers via a deferred import to avoid the
-#   api.revenue <-> api.allocation module cycle.
+#   earlier). Reuses api.allocation helpers (top-level import; cycle resolved by
+#   api/dependencies_finance.py).
 # Blast Radius: Finance write; identical persistence path to the commit endpoint.
 # Connections:
 #   - File: backend/ums_smart_revenue/finance/committed_allocation.py -> writer.
@@ -514,14 +514,14 @@ def _commit_recalculation_write(
     response: Response,
 ) -> dict[str, object]:
     """Commit the recalculation snapshot and return the write-response fragment."""
-    # Deferred import: api.allocation imports from api.revenue, so a top-level
-    # import here would form a cycle. The reused helpers carry no drift.
+    # Deferred import: api.allocation imports from api.channels imports from
+    # api.revenue, so a top-level import in api.revenue would form a cycle.
+    # All three helpers are stable — no logic drift across endpoints.
     from ums_smart_revenue.api.allocation import (
         _run_to_api,
         commit_request_fingerprint,
         emit_allocation_committed_audit,
     )
-
     fingerprint = commit_request_fingerprint(
         allocation_method=normalized_method, reason=payload.reason,
     )
@@ -689,20 +689,27 @@ def request_revenue_recalculation(
 
     write_fragment: dict[str, object] | None = None
     if not payload.dry_run:
-        # Pre-flight: the preview is the gate; blocking issues stop the write
-        # before any persistence (409). The commit service stays the final
-        # authority and fail-closes independently on what the preview cannot see
-        # (e.g. a LOCKED month, which the preview has no awareness of).
-        if preview.blocking_issues:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail={
-                    "write_status": "BLOCKED_BY_ISSUES",
-                    "blocking_issues": [
-                        issue.to_api() for issue in preview.blocking_issues
-                    ],
-                },
-            )
+        # FIX: check idempotency BEFORE the preflight gate. If a run was already
+        # committed under this key the preflight is irrelevant — the request is a
+        # replay regardless of what the current facts look like. Without this check
+        # a valid committed run would return 409 BLOCKED_BY_ISSUES on retry once
+        # facts change (e.g. a net-revenue row is removed), which is wrong because
+        # the key/fingerprint already identifies a completed write.
+        _existing_run = committed_repository.get_run_by_idempotency_key(
+            month=payload.month, idempotency_key=payload.idempotency_key,
+        )
+        if _existing_run is None:
+            # No existing run — enforce the preflight gate before any write.
+            if preview.blocking_issues:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail={
+                        "write_status": "BLOCKED_BY_ISSUES",
+                        "blocking_issues": [
+                            issue.to_api() for issue in preview.blocking_issues
+                        ],
+                    },
+                )
         write_fragment = _commit_recalculation_write(
             payload=payload,
             normalized_method=normalized_write_method,  # set on the write path

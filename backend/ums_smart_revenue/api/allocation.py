@@ -17,15 +17,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.channel_account_links import (
-    current_channel_account_link_repository,
-)
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_principal_from_headers,
 )
-from ums_smart_revenue.api.revenue import (
+from ums_smart_revenue.api.dependencies_finance import (
+    current_channel_account_link_repository,
     current_committed_allocation_repository,
     current_deduction_component_repository,
     current_org_access_index,
@@ -84,6 +82,26 @@ class ManualAllocationLineModel(BaseModel):
         the idempotency fingerprint stable across padded retries.
         """
         return value.strip() if isinstance(value, str) else value
+
+    @field_validator("amount_usd", mode="after")
+    @classmethod
+    def _validate_precision(cls, value: Decimal) -> Decimal:
+        """Reject amounts with more than 6 decimal places (422 at boundary).
+
+        FIX: Without this check, an over-precision amount (e.g. 100.0000004)
+        would quantize to the same fingerprint as a valid amount (100.000000),
+        allowing an invalid retry with the same key to replay a prior committed
+        run and silently return 200 instead of 422.
+        """
+        try:
+            quantized = value.quantize(MANUAL_AMOUNT_SCALE)
+        except InvalidOperation:
+            raise ValueError("amount_usd is out of range")
+        if value != quantized:
+            raise ValueError(
+                "amount_usd must have at most 6 decimal places"
+            )
+        return value
 
 
 class CommitAllocationRequest(BaseModel):

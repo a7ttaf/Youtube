@@ -283,8 +283,8 @@ class SqlAlchemyCommittedAllocationRepository:
     #   (route 422); no writes here; no session/lock interaction.
     # Blast Radius: Finance read-model + compute only. No persistence, no Neo4j.
     # ========================================================================
+    @staticmethod
     def _compute_result(
-        self,
         *,
         month: str,
         allocation_method: str,
@@ -318,7 +318,10 @@ class SqlAlchemyCommittedAllocationRepository:
                 )
             except AllocationValidationError as exc:
                 raise CommittedAllocationValidationError(str(exc)) from exc
-        if manual_lines:
+        # FIX: use `is not None` so an empty manual_lines=[] (converted to ())
+        # at the route boundary is correctly rejected for non-manual methods,
+        # preventing silent ignore and idempotency fingerprint drift.
+        if manual_lines is not None:
             raise CommittedAllocationValidationError(
                 "manual_lines is only valid for allocation_method=manual"
             )

@@ -64,7 +64,17 @@ def build_manual_account_allocation(
     verified_channels: Mapping[str, Sequence[str]],
     manual_lines: Sequence[ManualAllocationInput],
 ) -> AccountAllocationResult:
-    """Compute the manual allocation result, or fail closed on any violation."""
+    """Compute the manual allocation result, or fail closed on any violation.
+
+    :raises AllocationValidationError: On any of the following:
+        - Any non-ACCOUNT component exists in the month.
+        - A line references an unknown component_key.
+        - A line's channel is not verified for the component's account.
+        - A duplicate (component_key, channel) pair is supplied.
+        - A line amount is out of range, negative, or has more than 6 dp.
+        - Any ACCOUNT component is not covered by at least one line.
+        - The per-component line sum does not exactly equal the component amount.
+    """
     component_list = list(components)
     non_account = sorted(
         component.component_key
@@ -82,45 +92,11 @@ def build_manual_account_allocation(
     by_key: dict[str, DeductionComponent] = {
         component.component_key: component for component in component_list
     }
-
-    lines_by_component: dict[str, list[ManualAllocationInput]] = {}
-    seen_pairs: set[tuple[str, str]] = set()
-    for line in manual_lines:
-        component = by_key.get(line.component_key)
-        if component is None:
-            raise AllocationValidationError(
-                f"manual line references unknown component_key: {line.component_key}"
-            )
-        verified = verified_channels.get(component.scope_id) or ()
-        if line.youtube_channel_id not in verified:
-            raise AllocationValidationError(
-                f"channel {line.youtube_channel_id} is not verified for account "
-                f"{component.scope_id} (component_key {line.component_key})"
-            )
-        pair = (line.component_key, line.youtube_channel_id)
-        if pair in seen_pairs:
-            raise AllocationValidationError(
-                "duplicate manual line for "
-                f"(component_key {line.component_key}, channel {line.youtube_channel_id})"
-            )
-        seen_pairs.add(pair)
-        # FIX: quantize() raised an uncaught decimal.InvalidOperation for a
-        # schema-valid but out-of-range magnitude (e.g. "1e1000"), escaping the
-        # typed-error chain as a 500; catch it and fail closed as 422.
-        try:
-            quantized = line.amount_usd.quantize(MANUAL_AMOUNT_SCALE)
-        except InvalidOperation as exc:
-            raise AllocationValidationError(
-                f"manual line amount for channel {line.youtube_channel_id} "
-                f"(component_key {line.component_key}) is out of range"
-            ) from exc
-        if line.amount_usd < 0 or line.amount_usd != quantized:
-            raise AllocationValidationError(
-                f"manual line amount for channel {line.youtube_channel_id} "
-                f"(component_key {line.component_key}) must be >= 0 and quantized "
-                "to <= 6 decimal places"
-            )
-        lines_by_component.setdefault(line.component_key, []).append(line)
+    lines_by_component = _index_and_validate_lines(
+        manual_lines=manual_lines,
+        by_key=by_key,
+        verified_channels=verified_channels,
+    )
 
     uncovered = sorted(key for key in by_key if key not in lines_by_component)
     if uncovered:
@@ -154,6 +130,60 @@ def build_manual_account_allocation(
             unallocated=(),
         ),
     )
+
+
+def _index_and_validate_lines(
+    *,
+    manual_lines: Sequence[ManualAllocationInput],
+    by_key: Mapping[str, DeductionComponent],
+    verified_channels: Mapping[str, Sequence[str]],
+) -> dict[str, list[ManualAllocationInput]]:
+    """Validate each line and index them by component_key.
+
+    :raises AllocationValidationError: On unknown component_key, unverified
+        channel, duplicate (component_key, channel) pair, out-of-range amount,
+        or over-precision amount (> 6 decimal places).
+    """
+    lines_by_component: dict[str, list[ManualAllocationInput]] = {}
+    seen_pairs: set[tuple[str, str]] = set()
+    for line in manual_lines:
+        component = by_key.get(line.component_key)
+        if component is None:
+            raise AllocationValidationError(
+                f"manual line references unknown component_key: {line.component_key}"
+            )
+        verified = verified_channels.get(component.scope_id) or ()
+        if line.youtube_channel_id not in verified:
+            raise AllocationValidationError(
+                f"channel {line.youtube_channel_id} is not verified for account "
+                f"{component.scope_id} (component_key {line.component_key})"
+            )
+        pair = (line.component_key, line.youtube_channel_id)
+        if pair in seen_pairs:
+            raise AllocationValidationError(
+                "duplicate manual line for "
+                f"(component_key {line.component_key}, "
+                f"channel {line.youtube_channel_id})"
+            )
+        seen_pairs.add(pair)
+        # FIX: quantize() raised an uncaught decimal.InvalidOperation for a
+        # schema-valid but out-of-range magnitude (e.g. "1e1000"), escaping the
+        # typed-error chain as a 500; catch it and fail closed as 422.
+        try:
+            quantized = line.amount_usd.quantize(MANUAL_AMOUNT_SCALE)
+        except InvalidOperation as exc:
+            raise AllocationValidationError(
+                f"manual line amount for channel {line.youtube_channel_id} "
+                f"(component_key {line.component_key}) is out of range"
+            ) from exc
+        if line.amount_usd < 0 or line.amount_usd != quantized:
+            raise AllocationValidationError(
+                f"manual line amount for channel {line.youtube_channel_id} "
+                f"(component_key {line.component_key}) must be >= 0 and "
+                "quantized to <= 6 decimal places"
+            )
+        lines_by_component.setdefault(line.component_key, []).append(line)
+    return lines_by_component
 
 
 def _build_lines(
