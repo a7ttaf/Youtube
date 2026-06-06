@@ -1,8 +1,11 @@
 """Pure account-level deduction allocation (Phase 4 Spec 2b PR-1).
 
 Distributes ACCOUNT-grain deduction components across the verified
-channel↔account map by source-aligned proportional (gross or post-tax net)
-share. No database access: the caller resolves every input. See
+channel↔account map. Four committable methods: gross_revenue_proportional and
+post_tax_revenue_proportional weight by source-aligned channel basis;
+company_level weights by company gross with a flat split inside each company;
+no_allocation intentionally withholds every component as a typed unallocated
+issue. No database access: the caller resolves every input. See
 Docs/superpowers/specs/2026-05-31-spec-account-allocation-design.md.
 """
 
@@ -20,12 +23,20 @@ from ums_smart_revenue.finance.deduction_policy import (
 
 ALLOCATION_METHOD = "gross_revenue_proportional"
 POST_TAX_ALLOCATION_METHOD = "post_tax_revenue_proportional"
+COMPANY_LEVEL_ALLOCATION_METHOD = "company_level"
+NO_ALLOCATION_METHOD = "no_allocation"
 COMMITTABLE_ALLOCATION_METHODS = frozenset(
-    {ALLOCATION_METHOD, POST_TAX_ALLOCATION_METHOD}
+    {
+        ALLOCATION_METHOD,
+        POST_TAX_ALLOCATION_METHOD,
+        COMPANY_LEVEL_ALLOCATION_METHOD,
+        NO_ALLOCATION_METHOD,
+    }
 )
 
 # Method-aware zero-basis issue (code, detail). Net is non-negative (DB CHECK +
 # validator), so the post_tax trigger is a zero total, not a negative one.
+# no_allocation never reaches the basis math, so it has no entry here.
 _ZERO_BASIS_ISSUE: dict[str, tuple[str, str]] = {
     ALLOCATION_METHOD: (
         "ZERO_GROSS_BASIS",
@@ -34,6 +45,10 @@ _ZERO_BASIS_ISSUE: dict[str, tuple[str, str]] = {
     POST_TAX_ALLOCATION_METHOD: (
         "ZERO_NET_BASIS",
         "verified channels have zero source-aligned net",
+    ),
+    COMPANY_LEVEL_ALLOCATION_METHOD: (
+        "ZERO_COMPANY_BASIS",
+        "verified channels' companies have zero or negative source-aligned gross",
     ),
 }
 _SCALE = Decimal("0.000001")  # 6dp, matches deduction_components.amount_usd
@@ -184,6 +199,69 @@ class _ComponentOutcome:
     allocated: bool
 
 
+# ============================================================================
+# Purpose: Build per-channel company_level weights for ONE component: each
+#   company's source-aligned gross splits flat (equally) across its verified
+#   channels. Fails closed (typed UnallocatedIssue) when any verified channel
+#   lacks a company mapping or any company has zero source-aligned evidence —
+#   missing evidence is never treated as zero; an explicit zero IS evidence and
+#   yields a zero weight.
+# Database/ORM: None (caller resolves the channel->company map and the basis).
+# Standards: Decimal arithmetic; deterministic ordering (sorted companies and
+#   channels) so committed snapshots are stable across runs.
+# Blast Radius: Finance read-model only. No persistence, no auth, no Neo4j.
+# ============================================================================
+def _company_level_weights(
+    component: DeductionComponent,
+    channels: Sequence[str],
+    source_kind: str,
+    basis: Mapping[tuple[str, str], Decimal],
+    channel_company: Mapping[str, str],
+) -> list[tuple[str, Decimal]] | UnallocatedIssue:
+    """Per-channel weights for company_level, or a fail-closed UnallocatedIssue."""
+    unmapped = sorted(ch for ch in channels if ch not in channel_company)
+    if unmapped:
+        return _issue(
+            component, "COMPANY_UNMAPPED",
+            "verified channels missing company mapping: " + ", ".join(unmapped[:10]),
+        )
+    members: dict[str, list[str]] = {}
+    for channel_id in channels:
+        members.setdefault(channel_company[channel_id], []).append(channel_id)
+    present_companies = {
+        company
+        for company, company_channels in members.items()
+        if any((ch, source_kind) in basis for ch in company_channels)
+    }
+    if not present_companies:
+        return _issue(component, "BASIS_MISSING",
+                      "no source-aligned basis for any verified channel")
+    absent = sorted(set(members) - present_companies)
+    if absent:
+        return _issue(
+            component, "COMPANY_BASIS_INCOMPLETE",
+            "companies with no source-aligned basis: " + ", ".join(absent[:10]),
+        )
+    weights: list[tuple[str, Decimal]] = []
+    for company in sorted(members):
+        company_channels = sorted(members[company])
+        company_gross = sum(
+            (
+                basis[(ch, source_kind)]
+                for ch in company_channels
+                if (ch, source_kind) in basis
+            ),
+            Decimal("0"),
+        )
+        # Keep full Decimal precision here; _proportional_allocation quantizes
+        # the final allocated amounts via Hamilton largest-remainder. Early
+        # quantization can round a tiny company_gross/n to 0.000000 for every
+        # channel, making basis_total == 0 and falsely producing ZERO_COMPANY_BASIS.
+        per_channel = company_gross / len(company_channels)
+        weights.extend((ch, per_channel) for ch in company_channels)
+    return weights
+
+
 def _multi_account_notes(
     verified_channels: Mapping[str, Sequence[str]],
 ) -> list[AllocationNote]:
@@ -207,14 +285,52 @@ def _multi_account_notes(
     ]
 
 
+def _resolve_weights(
+    component: DeductionComponent,
+    channels: list[str],
+    source_kind: str,
+    basis: Mapping[tuple[str, str], Decimal],
+    allocation_method: str,
+    channel_company: Mapping[str, str],
+) -> list[tuple[str, Decimal]] | UnallocatedIssue:
+    """Return (channel_id, weight) pairs for allocation, or an issue on failure.
+
+    Handles company_level (equal intra-company split via _company_level_weights)
+    and source-aligned proportional methods.  no_allocation is short-circuited
+    by the caller before this function is ever reached.
+    """
+    if allocation_method == COMPANY_LEVEL_ALLOCATION_METHOD:
+        return _company_level_weights(
+            component, channels, source_kind, basis, channel_company
+        )
+    present = [
+        (channel_id, basis[(channel_id, source_kind)])
+        for channel_id in channels
+        if (channel_id, source_kind) in basis
+    ]
+    if not present:
+        return _issue(
+            component, "BASIS_MISSING",
+            "no source-aligned basis for any verified channel",
+        )
+    if len(present) != len(channels):
+        return _issue(
+            component, "BASIS_INCOMPLETE",
+            "some verified channels missing source-aligned basis",
+        )
+    return present
+
+
 # ============================================================================
 # Purpose: Allocate ONE ACCOUNT-grain deduction component across its verified
-#   channels by source-aligned proportional (gross or post-tax net) share. Fails
-#   closed with a typed UnallocatedIssue on every blocking condition (non-ACCOUNT
-#   scope, unmapped account, unresolved/missing/incomplete basis, non-positive
-#   basis total); never substitutes a different basis. Extracted from
-#   build_account_allocation so each function keeps a maintainable branching
-#   budget (DeepSource PY-R1000).
+#   channels. Dispatches weight resolution to _resolve_weights (company_level
+#   and source-aligned proportional methods); no_allocation short-circuits
+#   before dispatch to a typed INTENTIONAL_NO_ALLOCATION issue. Fails closed
+#   with a typed UnallocatedIssue on every blocking condition (non-ACCOUNT
+#   scope, unmapped account/company, unresolved/missing/incomplete basis,
+#   non-positive basis total); never substitutes a different basis. Extracted
+#   from build_account_allocation; further split via _resolve_weights to keep
+#   each function within the PY-R1000 complexity budget.
 # Database/ORM: None (caller resolves the verified map and the basis).
 # Standards: Decimal arithmetic; exact per-component conservation via
 #   _proportional_allocation; net_applicable from NET_APPLICABLE_COMPONENT_KINDS.
@@ -225,6 +341,7 @@ def _allocate_component(
     verified_channels: Mapping[str, Sequence[str]],
     basis: Mapping[tuple[str, str], Decimal],
     allocation_method: str,
+    channel_company: Mapping[str, str],
 ) -> _ComponentOutcome:
     """Return the allocation outcome for a single component (pure compute)."""
     if component.scope_kind != "ACCOUNT":
@@ -246,6 +363,17 @@ def _allocate_component(
     if amount == 0:
         return _ComponentOutcome((), None, True)
 
+    if allocation_method == NO_ALLOCATION_METHOD:
+        # Intentional withhold: the operator chose not to distribute this
+        # month's account deductions. Typed issue (not a silent drop) so the
+        # committed snapshot preserves every withheld component as evidence.
+        return _ComponentOutcome(
+            (),
+            _issue(component, "INTENTIONAL_NO_ALLOCATION",
+                   "allocation intentionally withheld by the no_allocation method"),
+            False,
+        )
+
     channels = list(verified_channels.get(account) or [])
     if not channels:
         return _ComponentOutcome(
@@ -264,27 +392,13 @@ def _allocate_component(
             False,
         )
 
-    present = [
-        (channel_id, basis[(channel_id, source_kind)])
-        for channel_id in channels
-        if (channel_id, source_kind) in basis
-    ]
-    if not present:
-        return _ComponentOutcome(
-            (),
-            _issue(component, "BASIS_MISSING",
-                   "no source-aligned basis for any verified channel"),
-            False,
-        )
-    if len(present) != len(channels):
-        return _ComponentOutcome(
-            (),
-            _issue(component, "BASIS_INCOMPLETE",
-                   "some verified channels missing source-aligned basis"),
-            False,
-        )
+    weights = _resolve_weights(
+        component, channels, source_kind, basis, allocation_method, channel_company
+    )
+    if isinstance(weights, UnallocatedIssue):
+        return _ComponentOutcome((), weights, False)
 
-    basis_total = sum((weight for _, weight in present), Decimal("0"))
+    basis_total = sum((weight for _, weight in weights), Decimal("0"))
     if basis_total <= 0:
         zero_code, zero_detail = _ZERO_BASIS_ISSUE[allocation_method]
         return _ComponentOutcome(
@@ -294,7 +408,7 @@ def _allocate_component(
         )
 
     net_applicable = component.component_kind in NET_APPLICABLE_COMPONENT_KINDS
-    allocated = _proportional_allocation(amount, present)
+    allocated = _proportional_allocation(amount, weights)
     lines = tuple(
         AllocationLine(
             adsense_account_id=account,
@@ -308,7 +422,7 @@ def _allocate_component(
             allocated_amount_usd=allocated[channel_id],
             net_applicable=net_applicable,
         )
-        for channel_id, weight in present
+        for channel_id, weight in weights
     )
     return _ComponentOutcome(lines, None, True)
 
@@ -361,6 +475,7 @@ def build_account_allocation(
     verified_channels: Mapping[str, Sequence[str]],
     basis: Mapping[tuple[str, str], Decimal],
     allocation_method: str = ALLOCATION_METHOD,
+    channel_company: Mapping[str, str] | None = None,
 ) -> AccountAllocationResult:
     """Compute per-channel allocation + unallocated issues for one month.
 
@@ -371,7 +486,8 @@ def build_account_allocation(
 
     Raises:
         AllocationValidationError: If allocation_method is not in
-            COMMITTABLE_ALLOCATION_METHODS.
+            COMMITTABLE_ALLOCATION_METHODS, or if allocation_method is
+            company_level and no channel_company mapping was supplied.
     """
     # Fail closed for ALL callers (not only the public commit gate): an
     # unsupported method must raise clearly here rather than mislabel the result
@@ -380,6 +496,13 @@ def build_account_allocation(
     if allocation_method not in COMMITTABLE_ALLOCATION_METHODS:
         raise AllocationValidationError(
             f"unsupported allocation method: {allocation_method}"
+        )
+    # company_level cannot distinguish "channel has no company" from "the caller
+    # forgot the mapping" — require an explicit mapping object (empty is allowed
+    # and yields per-component COMPANY_UNMAPPED issues).
+    if allocation_method == COMPANY_LEVEL_ALLOCATION_METHOD and channel_company is None:
+        raise AllocationValidationError(
+            "channel_company mapping is required for company_level"
         )
     lines: list[AllocationLine] = []
     unallocated: list[UnallocatedIssue] = []
@@ -390,7 +513,8 @@ def build_account_allocation(
     for component in components:
         component_count += 1
         outcome = _allocate_component(
-            component, verified_channels, basis, allocation_method
+            component, verified_channels, basis, allocation_method,
+            channel_company or {},
         )
         lines.extend(outcome.lines)
         if outcome.issue is not None:

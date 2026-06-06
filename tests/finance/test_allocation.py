@@ -209,7 +209,7 @@ def test_unsupported_scope_is_guarded():
 
 
 def test_channel_in_multiple_accounts_emits_informational_note():
-    """A channel verified under multiple accounts emits the multi-account note and still allocates."""
+    """A channel verified under multiple accounts notes the overlap and still allocates."""
     result = build_account_allocation(
         month="2026-04",
         components=[_component(amount="10.00", scope_id="pub-1", key="a")],
@@ -337,12 +337,241 @@ def test_gross_zero_basis_still_emits_zero_gross_basis_code():
 
 
 def test_unsupported_method_fails_closed():
-    """The engine fails closed for a method outside the {gross, post_tax} allowlist."""
+    """The engine fails closed for a method outside the committable allowlist."""
     with pytest.raises(allocation.AllocationValidationError):
         build_account_allocation(
             month="2026-04",
             components=[_component(amount="10.00")],
             verified_channels={"pub-1": ["chA"]},
             basis={("chA", "ADSENSE"): Decimal("100")},
+            allocation_method="definitely_not_a_method",
+        )
+
+
+def test_manual_method_rejected_by_engine():
+    """The proportional engine must NEVER compute 'manual'.
+
+    The DB CHECK pre-clears 'manual' (migration 20260606_0001) for the paired
+    operator-lines PR, but that PR's manual builder lives OUTSIDE this engine:
+    letting 'manual' through here would silently weight operator-asserted
+    splits by gross (and KeyError on the zero-basis path). This pin must
+    survive the paired PR — extend the service-level allowlist there, not
+    this engine's COMMITTABLE_ALLOCATION_METHODS.
+    """
+    with pytest.raises(allocation.AllocationValidationError):
+        build_account_allocation(
+            month="2026-04",
+            components=[_component(amount="10.00")],
+            verified_channels={"pub-1": ["chA"]},
+            basis={("chA", "ADSENSE"): Decimal("100")},
+            allocation_method="manual",
+        )
+
+
+def test_no_allocation_withholds_every_account_component():
+    """no_allocation produces zero lines; each component is INTENTIONAL_NO_ALLOCATION."""
+    result = build_account_allocation(
+        month="2026-04",
+        components=[
+            _component(amount="100.00", key="a"),
+            _component(amount="7.00", scope_id="pub-2", key="b"),
+        ],
+        verified_channels={},
+        basis={},
+        allocation_method="no_allocation",
+    )
+    assert result.lines == ()
+    assert [iss.issue_code for iss in result.unallocated] == [
+        "INTENTIONAL_NO_ALLOCATION",
+        "INTENTIONAL_NO_ALLOCATION",
+    ]
+    assert result.summary.allocated_component_count == 0
+    assert result.summary.unallocated_component_count == 2
+    assert result.summary.allocated_total_usd == Decimal("0")
+    assert result.summary.unallocated_total_usd == Decimal("107.00")
+    assert result.allocation_method == "no_allocation"
+
+
+def test_no_allocation_zero_amount_component_stays_noop():
+    """A zero-amount component stays an allocated no-op under no_allocation."""
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(amount="0.00")],
+        verified_channels={},
+        basis={},
+        allocation_method="no_allocation",
+    )
+    assert result.lines == ()
+    assert result.unallocated == ()
+    assert result.summary.allocated_component_count == 1
+
+
+def test_no_allocation_non_account_scope_still_guarded():
+    """The UNSUPPORTED_SCOPE guard outranks the intentional-withhold issue."""
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(scope_kind="PAYMENT", scope_id="BANK-1", amount="5.00")],
+        verified_channels={},
+        basis={},
+        allocation_method="no_allocation",
+    )
+    assert result.unallocated[0].issue_code == "UNSUPPORTED_SCOPE"
+
+
+def test_company_level_splits_by_company_gross_then_equally_within():
+    """Company share follows company gross; the split inside a company is flat."""
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(amount="100.00")],
+        verified_channels={"pub-1": ["ch1", "ch2", "ch3"]},
+        basis={
+            ("ch1", "ADSENSE"): Decimal("200"),
+            ("ch2", "ADSENSE"): Decimal("100"),
+            ("ch3", "ADSENSE"): Decimal("100"),
+        },
+        allocation_method="company_level",
+        channel_company={"ch1": "compA", "ch2": "compA", "ch3": "compB"},
+    )
+    by_channel = {ln.youtube_channel_id: ln.allocated_amount_usd for ln in result.lines}
+    # compA gross 300 -> 75 split flat (37.50 each, NOT 50/25); compB gross 100 -> 25.
+    assert by_channel == {
+        "ch1": Decimal("37.500000"),
+        "ch2": Decimal("37.500000"),
+        "ch3": Decimal("25.000000"),
+    }
+    assert sum(by_channel.values()) == Decimal("100.000000")
+    assert result.allocation_method == "company_level"
+
+
+def test_company_level_channel_without_facts_gets_equal_share():
+    """A channel with no fact rows still receives its flat company share."""
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(amount="10.00")],
+        verified_channels={"pub-1": ["ch1", "ch2"]},
+        basis={("ch1", "ADSENSE"): Decimal("300")},  # ch2 has no facts
+        allocation_method="company_level",
+        channel_company={"ch1": "compA", "ch2": "compA"},
+    )
+    by_channel = {ln.youtube_channel_id: ln.allocated_amount_usd for ln in result.lines}
+    # Gross method would fail BASIS_INCOMPLETE here; flat split is the method's point.
+    assert by_channel == {"ch1": Decimal("5.000000"), "ch2": Decimal("5.000000")}
+
+
+def test_company_level_unmapped_channel_fails_closed():
+    """A verified channel with no company mapping blocks the whole component."""
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(amount="10.00")],
+        verified_channels={"pub-1": ["ch1", "ch2"]},
+        basis={("ch1", "ADSENSE"): Decimal("100"), ("ch2", "ADSENSE"): Decimal("100")},
+        allocation_method="company_level",
+        channel_company={"ch1": "compA"},  # ch2 unmapped
+    )
+    assert result.lines == ()
+    assert result.unallocated[0].issue_code == "COMPANY_UNMAPPED"
+    assert "ch2" in result.unallocated[0].detail
+
+
+def test_company_level_company_without_any_basis_fails_closed():
+    """A company with no source-aligned evidence blocks the component (missing != zero)."""
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(amount="10.00")],
+        verified_channels={"pub-1": ["ch1", "ch3"]},
+        basis={("ch1", "ADSENSE"): Decimal("100")},  # compB (ch3) has no evidence
+        allocation_method="company_level",
+        channel_company={"ch1": "compA", "ch3": "compB"},
+    )
+    assert result.lines == ()
+    assert result.unallocated[0].issue_code == "COMPANY_BASIS_INCOMPLETE"
+    assert "compB" in result.unallocated[0].detail
+
+
+def test_company_level_explicit_zero_company_gets_zero_share():
+    """An explicit-zero company IS evidence: weight 0, not a blocking issue."""
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(amount="10.00")],
+        verified_channels={"pub-1": ["ch1", "ch3"]},
+        basis={("ch1", "ADSENSE"): Decimal("300"), ("ch3", "ADSENSE"): Decimal("0")},
+        allocation_method="company_level",
+        channel_company={"ch1": "compA", "ch3": "compB"},
+    )
+    by_channel = {ln.youtube_channel_id: ln.allocated_amount_usd for ln in result.lines}
+    assert by_channel == {"ch1": Decimal("10.000000"), "ch3": Decimal("0.000000")}
+
+
+def test_company_level_no_basis_at_all_is_basis_missing():
+    """No source-aligned basis for any verified channel keeps BASIS_MISSING."""
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(amount="10.00")],
+        verified_channels={"pub-1": ["ch1"]},
+        basis={},
+        allocation_method="company_level",
+        channel_company={"ch1": "compA"},
+    )
+    assert result.unallocated[0].issue_code == "BASIS_MISSING"
+
+
+def test_company_level_zero_company_basis_fails_closed():
+    """An all-zero company gross total fails closed with ZERO_COMPANY_BASIS."""
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(amount="10.00")],
+        verified_channels={"pub-1": ["ch1"]},
+        basis={("ch1", "ADSENSE"): Decimal("0")},
+        allocation_method="company_level",
+        channel_company={"ch1": "compA"},
+    )
+    assert result.lines == ()
+    assert result.unallocated[0].issue_code == "ZERO_COMPANY_BASIS"
+
+
+def test_company_level_requires_channel_company_mapping():
+    """company_level without a channel->company mapping raises (fail-closed)."""
+    with pytest.raises(allocation.AllocationValidationError):
+        build_account_allocation(
+            month="2026-04",
+            components=[_component(amount="10.00")],
+            verified_channels={"pub-1": ["ch1"]},
+            basis={("ch1", "ADSENSE"): Decimal("100")},
             allocation_method="company_level",
         )
+
+
+def test_company_level_source_alignment_preserved():
+    """company_level weights only by the component's own source kind."""
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(amount="10.00", source_system="adsense_management")],
+        verified_channels={"pub-1": ["ch1"]},
+        basis={("ch1", "YOUTUBE_CMS"): Decimal("999")},  # wrong source kind
+        allocation_method="company_level",
+        channel_company={"ch1": "compA"},
+    )
+    assert result.lines == ()
+    assert result.unallocated[0].issue_code == "BASIS_MISSING"
+
+
+def test_company_level_sub_micro_unit_company_gross_allocates_not_zero_basis():
+    """A company_gross that rounds to 0.000000 per channel must not produce ZERO_COMPANY_BASIS.
+
+    The weight must remain unquantized inside _company_level_weights so that
+    basis_total stays positive even when company_gross / n < Decimal('0.0000005').
+    """
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(amount="10.00")],
+        verified_channels={"pub-1": ["ch1", "ch2"]},
+        # 0.0000009 / 2 = 0.00000045 — rounds to 0.000000 with ROUND_HALF_EVEN,
+        # which would have produced false ZERO_COMPANY_BASIS before the fix.
+        basis={("ch1", "ADSENSE"): Decimal("0.0000009"), ("ch2", "ADSENSE"): Decimal("0")},
+        allocation_method="company_level",
+        channel_company={"ch1": "compA", "ch2": "compA"},
+    )
+    # The full $10 allocates; ch2's zero basis means it gets no share but the
+    # component is not blocked by a spurious ZERO_COMPANY_BASIS issue.
+    assert result.unallocated == ()
+    assert sum(ln.allocated_amount_usd for ln in result.lines) == Decimal("10.000000")

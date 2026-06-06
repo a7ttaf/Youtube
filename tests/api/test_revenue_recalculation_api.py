@@ -272,6 +272,123 @@ def test_recalculation_rejects_unknown_allocation_method(tmp_path):
     )
 
 
+def test_no_allocation_dry_run_ready_without_facts(tmp_path):
+    """no_allocation needs no revenue facts: a factless month previews READY.
+
+    The commit engine withholds every component without touching facts, so the
+    dry run must not report a NO_REVENUE_FACTS block the commit would ignore.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(
+            month="2026-04",  # no facts seeded for this month
+            scope_type="global", scope_id=None,
+            allocation_method="no_allocation",
+            reason="Withhold April allocation",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "READY_FOR_REVIEW"
+    assert body["blocking_issues"] == []
+    assert body["source_summary"]["revenue_fact_count"] == 0
+
+
+def test_gross_dry_run_still_blocks_without_facts(tmp_path):
+    """The NO_REVENUE_FACTS exemption is no_allocation-only; gross stays blocked."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(
+            month="2026-04", scope_type="global", scope_id=None,
+            reason="Preview April allocation",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "BLOCKED"
+    assert any(
+        issue["issue_type"] == "NO_REVENUE_FACTS" for issue in body["blocking_issues"]
+    )
+
+
+def test_company_level_dry_run_ready_when_all_channels_mapped(tmp_path):
+    """company_level previews READY when every scoped fact channel has a company."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(
+            scope_type="global", scope_id=None,
+            allocation_method="company_level",
+            reason="Preview company-level allocation",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "READY_FOR_REVIEW"
+    assert body["blocking_issues"] == []
+
+
+def test_company_level_dry_run_blocks_on_unmapped_channel(tmp_path):
+    """A scoped fact channel without a company mapping blocks company_level.
+
+    Mirrors the commit engine's COMPANY_UNMAPPED fail-closed path so the dry
+    run cannot report READY while the commit would go UNALLOCATED.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add_all([
+            YouTubeChannelORM(
+                id=uuid4(), youtube_channel_id="channel-unmapped",
+                channel_name="Unmapped", primary_org_unit_id=None,
+                cms_status="INSIDE_CMS", revenue_required=True, active=True,
+            ),
+            MonthlyChannelRevenueFactORM(
+                id=uuid4(), month="2026-03", youtube_channel_id="channel-unmapped",
+                source_kind="YOUTUBE_CMS", source_report_id="cms-report-2026-03",
+                gross_revenue_usd=Decimal("50.00"), net_revenue_usd=None,
+                views=1, watch_time_minutes=Decimal("1"),
+                confidence_score=Decimal("0.95"), imported_by=USER_ID,
+            ),
+        ])
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.post(
+        "/revenue/recalculate",
+        headers=auth_headers("finance_admin", "global"),
+        json=recalculation_payload(
+            scope_type="global", scope_id=None,
+            allocation_method="company_level",
+            reason="Preview company-level allocation",
+        ),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "BLOCKED"
+    issues = {issue["issue_type"] for issue in body["blocking_issues"]}
+    assert "COMPANY_MAPPING_MISSING" in issues
+
+
 def _seed_two_source_kinds(database_url: str) -> None:
     """One channel with YOUTUBE_CMS net=880 and ADSENSE net=None (grain isolation)."""
     engine = create_engine(database_url)

@@ -1,4 +1,4 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 from ums_smart_revenue.finance.manual_overrides import RevenueManualOverrideEntry
@@ -14,6 +14,10 @@ ALLOCATION_METHODS = frozenset(
     }
 )
 NET_REVENUE_REQUIRED_METHODS = frozenset({"post_tax_revenue_proportional"})
+COMPANY_MAPPING_REQUIRED_METHODS = frozenset({"company_level"})
+# no_allocation withholds every component without reading facts, so a factless
+# month must not block its preview (the commit engine ignores facts entirely).
+SOURCE_FACTS_OPTIONAL_METHODS = frozenset({"no_allocation"})
 
 
 class RevenueRecalculationValidationError(ValueError):
@@ -107,8 +111,23 @@ def build_recalculation_preview(
     dry_run: bool,
     facts: Iterable[RevenueFactEntry],
     manual_overrides: Iterable[RevenueManualOverrideEntry],
+    channel_company: Mapping[str, str] | None = None,
+    verified_channel_ids: frozenset[str] | None = None,
 ) -> RevenueRecalculationPreview:
     """Build a dry-run recalculation preview for one month + scope.
+
+    channel_company (channel id -> company org-unit id) is only consulted for
+    company_level: a scoped fact channel missing from the mapping mirrors the
+    commit engine's fail-closed COMPANY_UNMAPPED path as a blocking issue. A
+    None mapping counts every channel as unmapped (fail-closed), so a caller
+    that forgets the org index cannot see READY.
+
+    verified_channel_ids is an optional superset of channels to check for
+    company mapping under company_level. When provided, the preview checks the
+    union of fact-derived channels AND verified_channel_ids, so verified
+    channels that have no revenue facts this month are also checked against
+    channel_company. This prevents a false READY_FOR_REVIEW when a verified
+    account channel lacks a company mapping but has no fact row.
 
     Raises:
         RevenueRecalculationValidationError: If allocation_method or currency is
@@ -149,12 +168,24 @@ def build_recalculation_preview(
         net_revenue_source_count=len(net_revenue_source_keys),
         missing_net_revenue_source_count=missing_net_revenue_count,
     )
+    unmapped_company_channel_count = 0
+    if normalized_method in COMPANY_MAPPING_REQUIRED_METHODS:
+        mapping = channel_company or {}
+        # Union fact-derived channels with any extra verified channels supplied
+        # by the caller (e.g. all channels in scope from the org index). This
+        # catches verified channels that have no fact rows for the month but
+        # would still be checked by the commit engine's COMPANY_UNMAPPED guard.
+        channels_to_check = source_channel_ids | (verified_channel_ids or frozenset())
+        unmapped_company_channel_count = sum(
+            1 for channel_id in channels_to_check if channel_id not in mapping
+        )
     blocking_issues = tuple(
         _build_blocking_issues(
             month=month,
             allocation_method=normalized_method,
             source_channel_count=len(source_channel_ids),
             missing_net_revenue_source_count=missing_net_revenue_count,
+            unmapped_company_channel_count=unmapped_company_channel_count,
         )
     )
     return RevenueRecalculationPreview(
@@ -213,10 +244,14 @@ def _build_blocking_issues(
     allocation_method: str,
     source_channel_count: int,
     missing_net_revenue_source_count: int,
+    unmapped_company_channel_count: int = 0,
 ) -> list[RecalculationIssue]:
     """Collect blocking RecalculationIssues for the given method and source counts."""
     issues: list[RecalculationIssue] = []
-    if source_channel_count == 0:
+    if (
+        source_channel_count == 0
+        and allocation_method not in SOURCE_FACTS_OPTIONAL_METHODS
+    ):
         issues.append(
             RecalculationIssue(
                 issue_type="NO_REVENUE_FACTS",
@@ -236,6 +271,19 @@ def _build_blocking_issues(
                     f"{missing_net_revenue_source_count} scoped "
                     f"(channel, source kind) source(s) in {month} have no net "
                     f"revenue for {allocation_method}."
+                ),
+            )
+        )
+    # Non-zero only for COMPANY_MAPPING_REQUIRED_METHODS (the caller computes
+    # the count method-gated); mirrors the commit engine's COMPANY_UNMAPPED.
+    if unmapped_company_channel_count:
+        issues.append(
+            RecalculationIssue(
+                issue_type="COMPANY_MAPPING_MISSING",
+                severity="HIGH",
+                message=(
+                    f"{unmapped_company_channel_count} scoped source channel(s) "
+                    f"in {month} have no company mapping for {allocation_method}."
                 ),
             )
         )

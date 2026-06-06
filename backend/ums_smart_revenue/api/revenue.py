@@ -477,6 +477,15 @@ def request_revenue_recalculation(
             dry_run=payload.dry_run,
             facts=facts,
             manual_overrides=overrides,
+            # company_level parity: the preview mirrors the commit engine's
+            # fail-closed COMPANY_UNMAPPED path from the same org index.
+            channel_company=org_index.channel_company,
+            # Pass the scoped channel set so verified channels without fact
+            # rows are also checked against the company mapping, preventing
+            # false READY_FOR_REVIEW before a company_level commit.
+            verified_channel_ids=(
+                frozenset(channel_ids) if channel_ids is not None else None
+            ),
         )
     except (
         ManualOverrideValidationError,

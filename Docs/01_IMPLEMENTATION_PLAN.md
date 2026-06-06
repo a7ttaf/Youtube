@@ -481,14 +481,25 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   20260603_0001); the persisted basis field was renamed `basis_gross_usd`→`basis_amount_usd`
   (column + finite CHECK + migration); and `/revenue/recalculate`'s dry-run net check moved
   from channel grain to (channel, source_kind) grain so a dry-run can no longer report READY
-  while the commit engine would go UNALLOCATED. Pending: the `company_level` / `manual` /
-  `no_allocation` methods are NOT yet committable (still rejected by the two-method allowlist),
-  and PAYMENT-grain allocation remains pending (below).
+  while the commit engine would go UNALLOCATED.
+  COMPANY_LEVEL + NO_ALLOCATION METHODS SHIPPED (branch
+  `spec/no-allocation-company-level-methods`, 2026-06-06): `company_level` weights by
+  company source-aligned gross with a flat split inside each company (consumes the
+  org-access channel→company index at the route boundary; fail-closed COMPANY_UNMAPPED /
+  COMPANY_BASIS_INCOMPLETE / ZERO_COMPANY_BASIS); `no_allocation` commits a zero-line
+  snapshot persisting every component as a typed INTENTIONAL_NO_ALLOCATION unallocated
+  row (reject-on-unallocated bypassed for this method only). Service allowlist is now
+  four methods; the DB CHECK widened to all five via migration 20260606_0001 ('manual'
+  pre-cleared at DB layer only). `/revenue/recalculate` preview parity: no_allocation is
+  exempt from NO_REVENUE_FACTS; company_level gains COMPANY_MAPPING_MISSING.
+  Pending: the `manual` method + the `/revenue/recalculate` committed write-path are in
+  flight in a paired PR (Codex lane); PAYMENT-grain allocation remains pending (below).
   Remaining: PAYMENT-grain allocation BLOCKED — pending live remittance/bank evidence + an
   operator-asserted (tenant_id, month, bank_reference)→account(s) receipt-assertion model
   (verified 2026-06-03, no deterministic bank_reference→account bridge — see
   Docs/superpowers/specs/2026-06-03-spec-payment-account-modeling-design.md); plus the
-  remaining `company_level` / `manual` / `no_allocation` allocation methods.
+  `manual` method + recalculate committed write-path (paired PR in flight;
+  `company_level` / `no_allocation` shipped 2026-06-06, see above).
   Prerequisite SHIPPED
   (PR #57): canonical channel↔account map — `adsense_content_owner_links`
   (operator-verified account↔owner) + `content_owner_channel_links` (derived from

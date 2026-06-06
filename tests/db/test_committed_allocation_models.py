@@ -93,10 +93,10 @@ def test_run_and_children_persist(tmp_path):
 
 
 def test_method_check_rejects_other_method(tmp_path):
-    """allocation_method CHECK rejects a method outside the {gross, post_tax} allowlist."""
+    """allocation_method CHECK rejects a method outside the five-method allowlist."""
     engine = _engine(tmp_path)
     with Session(engine) as session, pytest.raises(IntegrityError):
-        session.add(_run(allocation_method="company_level"))
+        session.add(_run(allocation_method="definitely_not_a_method"))
         session.commit()
 
 
@@ -109,6 +109,23 @@ def test_method_check_accepts_post_tax(tmp_path):
         ))
         session.commit()
         assert session.query(CommittedAllocationRunORM).count() == 1
+
+
+def test_method_check_accepts_widened_methods(tmp_path):
+    """allocation_method CHECK accepts company_level / manual / no_allocation.
+
+    'manual' is DB-cleared only (the service allowlist still rejects it until
+    its own PR); this pins the ORM constraint matching migration 20260606_0001.
+    """
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        for index, method in enumerate(("company_level", "manual", "no_allocation")):
+            session.add(_run(
+                allocation_method=method, idempotency_key=f"key-{method}",
+                commit_version=index + 2,
+            ))
+        session.commit()
+        assert session.query(CommittedAllocationRunORM).count() == 3
 
 
 def test_commit_version_check_rejects_zero(tmp_path):

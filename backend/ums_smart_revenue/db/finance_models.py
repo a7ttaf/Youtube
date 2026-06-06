@@ -943,8 +943,9 @@ class CommittedAllocationRunORM(FinanceBase):
             name="ck_committed_allocation_runs_month_format",
         ),
         CheckConstraint(
-            "allocation_method IN "
-            "('gross_revenue_proportional', 'post_tax_revenue_proportional')",
+            "allocation_method IN ("
+            "'gross_revenue_proportional', 'post_tax_revenue_proportional', "
+            "'company_level', 'manual', 'no_allocation')",
             name="ck_committed_allocation_runs_method",
         ),
         CheckConstraint(
