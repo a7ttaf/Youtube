@@ -370,6 +370,25 @@ def test_downgrade_blocked_by_post_tax_rows(alembic_config, fresh_engine):
     assert "basis_gross_usd" not in cols
 
 
+def test_downgrade_blocked_by_widened_method_rows(alembic_config, fresh_engine):
+    """Downgrade from head raises RuntimeError when widened-method rows exist.
+
+    The pre-check in 20260606_0001.downgrade() fails fast (explicit message)
+    instead of letting PostgreSQL reject the restored two-method CHECK with a
+    cryptic constraint violation; the widened CHECK stays in place.
+    """
+    command.upgrade(alembic_config, "head")
+    sql, params = _insert_run_sql(method="no_allocation", key="na-block")
+    with fresh_engine.begin() as conn:
+        conn.execute(sql, params)
+    with pytest.raises(RuntimeError, match="company_level/manual/no_allocation"):
+        command.downgrade(alembic_config, "20260603_0001")
+    # The five-method CHECK must still be in force: a widened method inserts.
+    ok_sql, ok_params = _insert_run_sql(method="company_level", key="cl-after", version=2)
+    with fresh_engine.begin() as conn:
+        conn.execute(ok_sql, ok_params)
+
+
 def test_lines_amount_infinity_rejected_by_numeric_type(alembic_config, fresh_engine):
     """+Infinity in a line amount is rejected by the NUMERIC(20,6) type."""
     command.upgrade(alembic_config, "head")

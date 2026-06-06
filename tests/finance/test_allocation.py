@@ -348,6 +348,26 @@ def test_unsupported_method_fails_closed():
         )
 
 
+def test_manual_method_rejected_by_engine():
+    """The proportional engine must NEVER compute 'manual'.
+
+    The DB CHECK pre-clears 'manual' (migration 20260606_0001) for the paired
+    operator-lines PR, but that PR's manual builder lives OUTSIDE this engine:
+    letting 'manual' through here would silently weight operator-asserted
+    splits by gross (and KeyError on the zero-basis path). This pin must
+    survive the paired PR — extend the service-level allowlist there, not
+    this engine's COMMITTABLE_ALLOCATION_METHODS.
+    """
+    with pytest.raises(allocation.AllocationValidationError):
+        build_account_allocation(
+            month="2026-04",
+            components=[_component(amount="10.00")],
+            verified_channels={"pub-1": ["chA"]},
+            basis={("chA", "ADSENSE"): Decimal("100")},
+            allocation_method="manual",
+        )
+
+
 def test_no_allocation_withholds_every_account_component():
     """no_allocation produces zero lines; each component is INTENTIONAL_NO_ALLOCATION."""
     result = build_account_allocation(

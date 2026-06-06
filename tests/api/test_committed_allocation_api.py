@@ -254,6 +254,28 @@ def test_unsupported_method_rejected_422(tmp_path):
     assert resp.status_code == 422
 
 
+def test_manual_method_rejected_by_service_allowlist_422(tmp_path):
+    """'manual' is DB-pre-cleared but the service allowlist MUST still reject it.
+
+    Migration 20260606_0001 widened the DB CHECK to five methods so the paired
+    manual-allocation PR needs no second migration; until that PR lands, the
+    service-layer COMMITTABLE_ALLOCATION_METHODS allowlist is the ONLY guard
+    against an uncomputed 'manual' commit. This test pins that guard (422, no
+    run persisted, no audit). It stays valid after the paired PR: a manual
+    commit without explicit lines must still 422 there.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json={"idempotency_key": "k-man", "reason": "r", "allocation_method": "manual"},
+    )
+    assert resp.status_code == 422
+    assert "manual" in resp.json()["detail"]
+    assert not _committed_audit_rows(db)
+
+
 def test_commit_post_tax_returns_201_with_basis_amount(tmp_path):
     """POST commit with post_tax persists the method + the renamed basis key."""
     database_url = build_database_url(tmp_path)
