@@ -1,3 +1,4 @@
+"""SQLAlchemy engine and session-factory helpers with per-URL engine caching."""
 from collections.abc import Callable, Iterator
 from threading import Lock
 

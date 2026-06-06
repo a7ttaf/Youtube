@@ -1,3 +1,4 @@
+"""Audit event types and structured audit record dataclasses."""
 from dataclasses import dataclass
 from enum import StrEnum
 
@@ -32,6 +33,7 @@ class AuditEventType(StrEnum):
     USER_PERMISSION_CHANGED = "USER_PERMISSION_CHANGED"
     CONNECTOR_JOB_RUN = "CONNECTOR_JOB_RUN"
     CONNECTOR_SETTINGS_CHANGED = "CONNECTOR_SETTINGS_CHANGED"
+    CONNECTOR_TESTED = "CONNECTOR_TESTED"
     EXCHANGE_RATE_SYNCED = "EXCHANGE_RATE_SYNCED"
     RAW_FILE_VIEWED = "RAW_FILE_VIEWED"
     REVENUE_VIEWED = "REVENUE_VIEWED"
@@ -155,6 +157,11 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
     ),
     AuditEventType.CONNECTOR_SETTINGS_CHANGED: AuditEventDefinition(
         AuditEventType.CONNECTOR_SETTINGS_CHANGED,
+        reason_required=True,
+        permission=Permission.MANAGE_CONNECTORS,
+    ),
+    AuditEventType.CONNECTOR_TESTED: AuditEventDefinition(
+        AuditEventType.CONNECTOR_TESTED,
         reason_required=True,
         permission=Permission.MANAGE_CONNECTORS,
     ),

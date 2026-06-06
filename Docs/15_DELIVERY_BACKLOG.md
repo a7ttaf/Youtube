@@ -1,8 +1,8 @@
 # Delivery Backlog
 
-## Status (2026-06-01)
+## Status (2026-06-05)
 
-Reconciled through PR #50 (B2.6 connector row-count classification). Marker conventions
+Reconciled through PR #71 (31a7641). Marker conventions
 match `01_IMPLEMENTATION_PLAN.md`:
 
 - `✅ PR #N` — shipped end-to-end at the layer being marked.
@@ -181,7 +181,7 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   /revenue/recalculate (build_recalculation_preview; dry-run-only
   allocation-method preview with blocking-issue detection; committed writes
   intentionally rejected as not-yet-implemented).
-- ⏳ Channel↔account map — shipped (this branch): two-layer canonical map
+- ✅ Channel↔account map — shipped (PR #57): two-layer canonical map
   (`adsense_content_owner_links` operator-verified + `content_owner_channel_links`
   derived from source rows), audited propose/verify/reject API behind dual
   MANAGE_ORG_MAPPING + CHANGE_ALLOCATION_RULE gates, per-account advisory-lock
@@ -314,7 +314,7 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
     unique key `uq_content_owner_channel_links_key` blocks inserting a fresh active
     row for the same start month — build the deactivate (N8) and reactivate (V8d)
     halves together.
-- ⏳ Allocation engine (Spec 2b) — PR-1 + PR-2 + PR-3 + PR-4 shipped (this branch): account-level
+- ⏳ Allocation engine (Spec 2b) — PR-1 (#58) + PR-2 (#59) + PR-3 (#60) + PR-4 (#61) + PR-5 (#62) + PR-6 (#65) + post_tax (#67) shipped: account-level
   deduction allocation compute + read. `finance/allocation.py` distributes
   ACCOUNT-grain `deduction_components` across each account's verified channels
   (`list_verified_adsense_account_channels`) by source-aligned raw-gross-proportional
@@ -323,38 +323,38 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   incomplete basis. Read-only `GET /revenue/months/{month}/account-allocations`
   (ACCOUNT-only query, `VIEW_REVENUE@global` + `VIEW_FINALIZED_PAYMENTS@finance_month`,
   REVENUE_VIEWED + PAYMENT_VIEWED). No persistence, no migration.
-  PR-2 shipped (this branch): net-revenue API + finance exports consume account-allocated
+  PR-2 shipped (PR #59): net-revenue API + finance exports consume account-allocated
   net-applicable (TAX/DEDUCTION) lines on the missing-net path (COMPONENT_DERIVED), with
   per-channel channel_direct/account_allocated breakdown fields, a global-scope-only
   unallocated-account surface, a VIEW_FINALIZED_PAYMENTS gate (on the route's org target_scope)
   + PAYMENT_VIEWED audit on the net route, and PAYMENT_VIEWED on all finance-artifact exports.
   Net-revenue audit envelope
   changed from `audit_event` to `audit_events` (plural).
-  PR-3 shipped (this branch): a `net_revenue_usd` metric on
+  PR-3 shipped (PR #60): a `net_revenue_usd` metric on
   `POST /revenue/channels/{channel_id}/months/{month}/explain` that reuses the PR-2 net builder
   + a shared no-drift `resolve_applicable_channel_deductions` helper to emit channel-direct +
   account-allocated deduction provenance in the existing `number_explanations` components JSON
   (read + persist, no migration, no schema change), gated by
   VIEW_FINALIZED_PAYMENTS@finance_month(month) with dual REVENUE_VIEWED + PAYMENT_VIEWED audit.
-  PR-4 shipped (this branch): the channel-direct/account-allocated deduction split now
+  PR-4 shipped (PR #61): the channel-direct/account-allocated deduction split now
   renders in all finance exports — per-channel columns in the XLSX Channel Breakdown +
   Deductions sheets, month-level aggregate rows in the XLSX Executive Summary +
   Company/Sector breakdown sheets, the PDF gross-vs-net table, and the PPTX deduction
   slide — backed by two additive total_channel_direct/account_allocated aggregate fields
   on MonthNetRevenueSummary (no migration, no auth/audit/allocation-math change).
-  PR-5 shipped (this branch): persisted/committed allocation — a versioned, audited
+  PR-5 shipped (PR #62): persisted/committed allocation — a versioned, audited
   POST /revenue/months/{month}/account-allocations/commit writes a snapshot of the
   gross_revenue_proportional compute (4 new tables: committed_allocation_runs/lines/
   unallocated/notes; month-scoped idempotency; lock-held compute; reject-on-unallocated;
   CHANGE_ALLOCATION_RULE gate + ALLOCATION_COMMITTED summary-only audit reusing
   CHANGE_ALLOCATION_RULE). Readers (net-revenue, allocation-read, exports) still compute
   live — read-switch deferred.
-  PR-6 shipped (this branch, 2026-06-03): read-switch — allocation GET, net-revenue,
+  PR-6 shipped (PR #65, 2026-06-03): read-switch — allocation GET, net-revenue,
   explain, and exports prefer the committed snapshot for LOCKED months (lock-aware +
   live fallback when no committed run; OPEN stays live), with lossless reconstruction and
   full allocation_source/committed_run provenance on every surface plus an export
   disclosure token. No migration / no auth / no write-path change.
-  ✅ post_tax method shipped (this branch, 2026-06-04): `post_tax_revenue_proportional`
+  ✅ post_tax method shipped (PR #67, 2026-06-04): `post_tax_revenue_proportional`
   is now a second COMMITTABLE allocation method alongside `gross_revenue_proportional` —
   the engine/orchestrator parameterize on `allocation_method` (gross weights by source
   gross; post_tax weights by source net_revenue_usd, fail-closed omitting any
@@ -377,7 +377,7 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
 - ✅ Manual override approval — shipped: POST /revenue/manual-overrides +
   /manual-overrides/{id}/approve (create + approve flow, locked-month guard,
   APPROVE_MANUAL_OVERRIDE scope, audited).
-- ✅ Audit dashboard — shipped (this branch `spec/audit-view-wiring`): the
+- ✅ Audit dashboard — merged to main (PR #71, 31a7641): the
   AuditView timeline is wired to `GET /audit/events` (the tenant-scoped audit
   log backend from PR #22). Cursor-paginated read, server-driven sensitive-
   payload redaction (the UI reflects `details_redacted`, never reveals withheld
@@ -463,7 +463,7 @@ single P-tier above.
   Exports, Connectors; Registry/Audit stay mock-labelled), demo-month seed
   (`scripts/seed_demo_month.py`), end-to-end smoke (`scripts/smoke_mvp.py`),
   demo runbook (`frontend/README.md`) — PR #69.
-- ✅ Production session role hydration — SHIPPED on `spec/production-session-hydration`:
+- ✅ Production session role hydration — merged to main (PR #70, 4d7f154):
   `GET /session/me` (`backend/ums_smart_revenue/api/session.py`) returns the
   authenticated principal's identity, optional tenant, active roles/permissions,
   and **global-scope** camelCase capability booleans derived (fail-closed) from
@@ -473,17 +473,28 @@ single P-tier above.
   screen; the dev preview role is now presentation-only. Failed hydration
   (401/403/network) or a `disabled` principal fails closed to `AccessDenied`;
   connector controls require `canRunConnectorJobs`; the Vite dev proxy now
-  forwards `/session`. Smoke (`scripts/smoke_mvp.py`) asserts the contract
-  (raised by Codex review on PR #69). Remaining tails: Registry stays mock-
-  labelled and live ingestion still needs real connector creds (Audit is now
-  wired — see the Audit dashboard item under P0).
-- ✅ Production Audit view wiring — SHIPPED on `spec/audit-view-wiring` (stacked
-  on `spec/production-session-hydration`): the dashboard Audit page now reads the
-  real `GET /audit/events` feed (was mock `AUDIT_EVENTS`). Distinct cursor-
-  pagination types (`AuditLogEntry`/`AuditEventCursor`/`AuditEventPagination`),
-  a memoized `useAuditEvents` hook (one self-auditing fetch per mount, no loop),
-  and an extracted `views/AuditView.tsx`. Registry is now the only mock-labelled
-  page.
+  forwards `/session`. Smoke (`scripts/smoke_mvp.py`) asserts the contract.
+  Registry stays mock-only; live ingestion needs real connector credentials.
+- ✅ Production Audit view wiring — merged to main (PR #71, 31a7641): the
+  dashboard Audit page now reads the real `GET /audit/events` feed (was mock
+  `AUDIT_EVENTS`). Distinct cursor-pagination types
+  (`AuditLogEntry`/`AuditEventCursor`/`AuditEventPagination`), a memoized
+  `useAuditEvents` hook (one self-auditing fetch per mount, no loop), and an
+  extracted `views/AuditView.tsx`. Registry is now the only mock-labelled page.
+- ✅ Connector credential test-connection probe — `POST /connectors/credentials/{connector_key}/{account_id}/test`
+  (branch `docs/plan-hygiene-post-71`): wraps `resolve_connector_credentials()` (load
+  credential row → resolve secret URI → OAuth token refresh, no live data pull).
+  Surfaces `CredentialNotFoundError` as 404; `InactiveCredentialError` / `OAuthRefreshError` /
+  other `GoogleConnectorError` as 200 with machine-readable `status` field (`inactive_credential` /
+  `auth_failed` / `error`) and a string `detail`. Every probe is audited (`CONNECTOR_TESTED`
+  event, `MANAGE_CONNECTORS@connector(connector_key)` gate, reason required).
+  5 TDD tests (ok, not-found, inactive, oauth-error, 403). Backend only; no migration.
+- ⏳ Channel Registry view design — `Docs/superpowers/specs/2026-06-05-registry-view-design.md`:
+  maps mock fields (avatar, name, code, company, sector, cms, source, node, state, action)
+  to existing backend assets (`GET /channels` + `ChannelRegistryEntry` + `OrgAccessIndex`),
+  identifies undefined semantics (state derivation rules, node/trace-key meaning, action targets),
+  and lists open questions to answer before building. Remaining: answers to the open questions
+  + implementation plan.
 - ⏳ Google source-reported revenue ingestion foundation: `currencies`
   reference table, tenant-scoped `google_revenue_source_rows` with idempotent
   source-row keys (full 64-char SHA-256 hex), storage repository, synthetic-
