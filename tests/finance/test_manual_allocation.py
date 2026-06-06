@@ -162,6 +162,26 @@ def test_over_precision_amount_rejected():
     assert "chA" in str(exc.value)
 
 
+def test_out_of_range_amount_rejected():
+    """A magnitude too large to quantize fails closed instead of raising 500.
+
+    "1e1000" passes Pydantic's Field(ge=0) (it is neither NaN nor Infinity) but
+    exceeds the default decimal context when quantized to 6dp, raising
+    decimal.InvalidOperation. The builder must convert that into a typed
+    AllocationValidationError so the route boundary returns a clean 422.
+    """
+    components = [_component(component_key="ad-1", amount_usd="100.00")]
+    verified = {"pub-1": ("chA",)}
+    lines = [_line("ad-1", "chA", "1e1000")]
+    with pytest.raises(AllocationValidationError) as exc:
+        build_manual_account_allocation(
+            month=MONTH, components=components,
+            verified_channels=verified, manual_lines=lines,
+        )
+    assert "chA" in str(exc.value)
+    assert "out of range" in str(exc.value)
+
+
 def test_sum_mismatch_rejected():
     """Lines whose amounts do not sum exactly to the component amount fail closed."""
     components = [_component(component_key="ad-1", amount_usd="100.00")]

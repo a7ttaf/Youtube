@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 
 from ums_smart_revenue.finance.allocation import (
     AccountAllocationResult,
@@ -104,7 +104,17 @@ def build_manual_account_allocation(
                 f"(component_key {line.component_key}, channel {line.youtube_channel_id})"
             )
         seen_pairs.add(pair)
-        if line.amount_usd < 0 or line.amount_usd != line.amount_usd.quantize(_SCALE):
+        # FIX: quantize() raised an uncaught decimal.InvalidOperation for a
+        # schema-valid but out-of-range magnitude (e.g. "1e1000"), escaping the
+        # typed-error chain as a 500; catch it and fail closed as 422.
+        try:
+            quantized = line.amount_usd.quantize(_SCALE)
+        except InvalidOperation as exc:
+            raise AllocationValidationError(
+                f"manual line amount for channel {line.youtube_channel_id} "
+                f"(component_key {line.component_key}) is out of range"
+            ) from exc
+        if line.amount_usd < 0 or line.amount_usd != quantized:
             raise AllocationValidationError(
                 f"manual line amount for channel {line.youtube_channel_id} "
                 f"(component_key {line.component_key}) must be >= 0 and quantized "
