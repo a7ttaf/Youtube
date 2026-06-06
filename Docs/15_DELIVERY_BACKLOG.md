@@ -516,6 +516,13 @@ single P-tier above.
   mock). All display fields derived client-side (avatar, CMS badge, source
   label, state per Option A, trace key). Extracted to `views/RegistryView.tsx`;
   16 new Vitest tests. All six dashboard pages off mock data.
+- ✅ Soft Dark design system — on `feat/design-system-softdark` (stacked on
+  Registry Phase 2): `frontend/src/styles.css` token values converted to the
+  UMS Revenue Design System Soft Dark theme (dark_dimmed surfaces/ink/status,
+  `--ink-strong` money tier, DS weight tiers, srgb topbar color-mix fix); OFL
+  webfonts shipped in `frontend/public/fonts/` (+licenses); `DESIGN.md`
+  re-pinned to the new palette/fonts. Visual-only — zero selector/logic change;
+  vite build + 190 Vitest + tsc green.
 - ✅ Channel Registry Phase 2 — on `feat/registry-phase2`: `GET /org-units`
   (read-only, tenant-scoped, active-only, fail-closed VIEW_ANALYTICS; no
   migration) resolves Company/Sector display names with an honest raw-id
