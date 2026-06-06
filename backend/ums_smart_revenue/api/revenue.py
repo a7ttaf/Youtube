@@ -477,6 +477,9 @@ def request_revenue_recalculation(
             dry_run=payload.dry_run,
             facts=facts,
             manual_overrides=overrides,
+            # company_level parity: the preview mirrors the commit engine's
+            # fail-closed COMPANY_UNMAPPED path from the same org index.
+            channel_company=org_index.channel_company,
         )
     except (
         ManualOverrideValidationError,
