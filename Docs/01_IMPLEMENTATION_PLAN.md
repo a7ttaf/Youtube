@@ -492,14 +492,25 @@ channel↔account map, and multi-currency FX) stays out per Docs/18.
   four methods; the DB CHECK widened to all five via migration 20260606_0001 ('manual'
   pre-cleared at DB layer only). `/revenue/recalculate` preview parity: no_allocation is
   exempt from NO_REVENUE_FACTS; company_level gains COMPANY_MAPPING_MISSING.
-  Pending: the `manual` method + the `/revenue/recalculate` committed write-path are in
-  flight in a paired PR (Codex lane); PAYMENT-grain allocation remains pending (below).
+  MANUAL METHOD + RECALCULATE COMMITTED WRITE-PATH SHIPPED (branch
+  `spec/manual-allocation-recalc-write`, 2026-06-06): `manual` commits an
+  operator-asserted per-channel split posted as `manual_lines` on the commit endpoint
+  (pure fail-closed builder in `finance/manual_allocation.py` — exact per-component
+  Decimal sums, verified channels only, ≤6dp non-negative amounts, every ACCOUNT
+  component covered, out-of-range amounts rejected typed; the engine keeps rejecting
+  manual — it is committable via the service-level allowlist only; manual lines fold
+  into the idempotency fingerprint with legacy digests unchanged).
+  `/revenue/recalculate` `dry_run=false` now performs a real committed allocation via
+  the same service path (same advisory lock / idempotency / version chain; preview runs
+  as a pre-flight BLOCKED_BY_ISSUES 409 gate; write-only VIEW_FINALIZED_PAYMENTS gate;
+  `idempotency_key` required; cross-endpoint idempotent replay with the commit
+  endpoint; manual is redirected to the commit endpoint).
   Remaining: PAYMENT-grain allocation BLOCKED — pending live remittance/bank evidence + an
   operator-asserted (tenant_id, month, bank_reference)→account(s) receipt-assertion model
   (verified 2026-06-03, no deterministic bank_reference→account bridge — see
-  Docs/superpowers/specs/2026-06-03-spec-payment-account-modeling-design.md); plus the
-  `manual` method + recalculate committed write-path (paired PR in flight;
-  `company_level` / `no_allocation` shipped 2026-06-06, see above).
+  Docs/superpowers/specs/2026-06-03-spec-payment-account-modeling-design.md). All five
+  allocation methods + the recalculate committed write-path shipped 2026-06-06 (see
+  above).
   Prerequisite SHIPPED
   (PR #57): canonical channel↔account map — `adsense_content_owner_links`
   (operator-verified account↔owner) + `content_owner_channel_links` (derived from
