@@ -553,3 +553,25 @@ def test_company_level_source_alignment_preserved():
     )
     assert result.lines == ()
     assert result.unallocated[0].issue_code == "BASIS_MISSING"
+
+
+def test_company_level_sub_micro_unit_company_gross_allocates_not_zero_basis():
+    """A company_gross that rounds to 0.000000 per channel must not produce ZERO_COMPANY_BASIS.
+
+    The weight must remain unquantized inside _company_level_weights so that
+    basis_total stays positive even when company_gross / n < Decimal('0.0000005').
+    """
+    result = build_account_allocation(
+        month="2026-04",
+        components=[_component(amount="10.00")],
+        verified_channels={"pub-1": ["ch1", "ch2"]},
+        # 0.0000009 / 2 = 0.00000045 — rounds to 0.000000 with ROUND_HALF_EVEN,
+        # which would have produced false ZERO_COMPANY_BASIS before the fix.
+        basis={("ch1", "ADSENSE"): Decimal("0.0000009"), ("ch2", "ADSENSE"): Decimal("0")},
+        allocation_method="company_level",
+        channel_company={"ch1": "compA", "ch2": "compA"},
+    )
+    # The full $10 allocates; ch2's zero basis means it gets no share but the
+    # component is not blocked by a spurious ZERO_COMPANY_BASIS issue.
+    assert result.unallocated == ()
+    assert sum(ln.allocated_amount_usd for ln in result.lines) == Decimal("10.000000")

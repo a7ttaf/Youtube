@@ -253,7 +253,11 @@ def _company_level_weights(
             ),
             Decimal("0"),
         )
-        per_channel = (company_gross / len(company_channels)).quantize(_SCALE)
+        # Keep full Decimal precision here; _proportional_allocation quantizes
+        # the final allocated amounts via Hamilton largest-remainder. Early
+        # quantization can round a tiny company_gross/n to 0.000000 for every
+        # channel, making basis_total == 0 and falsely producing ZERO_COMPANY_BASIS.
+        per_channel = company_gross / len(company_channels)
         weights.extend((ch, per_channel) for ch in company_channels)
     return weights
 

@@ -59,11 +59,11 @@ def downgrade() -> None:
         the widened methods and have not been removed first.
     """
     if op.get_bind().dialect.name == "postgresql":
-        placeholders = ", ".join(f"'{method}'" for method in _NEW_METHODS)
         count = op.get_bind().execute(
             sa.text(
                 "SELECT COUNT(*) FROM committed_allocation_runs "
-                f"WHERE allocation_method IN ({placeholders})"
+                "WHERE allocation_method IN "
+                "('company_level', 'manual', 'no_allocation')"
             )
         ).scalar()
         if count:

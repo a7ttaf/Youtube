@@ -112,6 +112,7 @@ def build_recalculation_preview(
     facts: Iterable[RevenueFactEntry],
     manual_overrides: Iterable[RevenueManualOverrideEntry],
     channel_company: Mapping[str, str] | None = None,
+    verified_channel_ids: frozenset[str] | None = None,
 ) -> RevenueRecalculationPreview:
     """Build a dry-run recalculation preview for one month + scope.
 
@@ -120,6 +121,13 @@ def build_recalculation_preview(
     commit engine's fail-closed COMPANY_UNMAPPED path as a blocking issue. A
     None mapping counts every channel as unmapped (fail-closed), so a caller
     that forgets the org index cannot see READY.
+
+    verified_channel_ids is an optional superset of channels to check for
+    company mapping under company_level. When provided, the preview checks the
+    union of fact-derived channels AND verified_channel_ids, so verified
+    channels that have no revenue facts this month are also checked against
+    channel_company. This prevents a false READY_FOR_REVIEW when a verified
+    account channel lacks a company mapping but has no fact row.
 
     Raises:
         RevenueRecalculationValidationError: If allocation_method or currency is
@@ -163,8 +171,13 @@ def build_recalculation_preview(
     unmapped_company_channel_count = 0
     if normalized_method in COMPANY_MAPPING_REQUIRED_METHODS:
         mapping = channel_company or {}
+        # Union fact-derived channels with any extra verified channels supplied
+        # by the caller (e.g. all channels in scope from the org index). This
+        # catches verified channels that have no fact rows for the month but
+        # would still be checked by the commit engine's COMPANY_UNMAPPED guard.
+        channels_to_check = source_channel_ids | (verified_channel_ids or frozenset())
         unmapped_company_channel_count = sum(
-            1 for channel_id in source_channel_ids if channel_id not in mapping
+            1 for channel_id in channels_to_check if channel_id not in mapping
         )
     blocking_issues = tuple(
         _build_blocking_issues(

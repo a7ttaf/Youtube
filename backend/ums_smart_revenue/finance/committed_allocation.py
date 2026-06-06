@@ -124,7 +124,16 @@ class SqlAlchemyCommittedAllocationRepository:
         link_repository: object,
         channel_company: Mapping[str, str] | None = None,
     ) -> CommitAllocationOutcome:
-        """Compute + persist a committed run, or replay an idempotent retry."""
+        """Compute + persist a committed run, or replay an idempotent retry.
+
+        Raises:
+            CommittedAllocationIdempotencyConflictError: Idempotency key reused
+                with a different request fingerprint.
+            CommittedAllocationLockedMonthError: Finance month is already LOCKED.
+            CommittedAllocationValidationError: Unsupported allocation method,
+                unallocated components prevent commit, or company_level is
+                selected without a channel_company mapping.
+        """
         committed_by_uuid = _actor_identity_uuid(committed_by)
         # Hold the finance-month advisory lock + close-row FOR UPDATE for the
         # whole unit (the lock is transaction-scoped on Postgres; no-op on SQLite).
