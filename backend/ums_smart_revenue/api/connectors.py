@@ -1,3 +1,4 @@
+"""FastAPI route handlers for connector credential management and test-connection probing."""
 from typing import Annotated
 from uuid import UUID
 

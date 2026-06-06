@@ -1,3 +1,4 @@
+"""Integration tests for connector credential and test-connection API endpoints."""
 from unittest.mock import MagicMock, patch
 from uuid import UUID
 
