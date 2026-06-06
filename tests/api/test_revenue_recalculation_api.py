@@ -227,8 +227,15 @@ def test_finance_viewer_cannot_request_recalculation(tmp_path):
     )
 
 
-def test_recalculation_rejects_committed_writes_until_engine_is_enabled(tmp_path):
-    """dry_run=False raises 422 before any audit write."""
+def test_recalculation_write_requires_idempotency_key(tmp_path):
+    """dry_run=False without an idempotency_key raises 422 before any write.
+
+    Updated from the legacy "writes not implemented" guard (removed by the
+    committed write-path task). finance_admin carries all three write gates
+    (VIEW_REVENUE, CHANGE_ALLOCATION_RULE, VIEW_FINALIZED_PAYMENTS), so a global
+    dry_run=False request reaches the request-shape validation; with no
+    idempotency_key it 422s there. No audit row and no committed run is written.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -236,7 +243,9 @@ def test_recalculation_rejects_committed_writes_until_engine_is_enabled(tmp_path
     response = client.post(
         "/revenue/recalculate",
         headers=auth_headers("finance_admin", "global"),
-        json=recalculation_payload(dry_run=False),
+        json=recalculation_payload(
+            scope_type="global", scope_id=None, dry_run=False
+        ),
     )
 
     engine = create_engine(database_url)
@@ -244,12 +253,14 @@ def test_recalculation_rejects_committed_writes_until_engine_is_enabled(tmp_path
         audit_count = session.execute(
             text("SELECT COUNT(*) FROM audit_logs")
         ).scalar_one()
+        run_count = session.execute(
+            text("SELECT COUNT(*) FROM committed_allocation_runs")
+        ).scalar_one()
 
     assert response.status_code == 422
-    assert response.json()["detail"] == (
-        "committed recalculation writes are not implemented; use dry_run=true"
-    )
+    assert response.json()["detail"] == "idempotency_key is required when dry_run=false"
     assert audit_count == 0
+    assert run_count == 0
 
 
 def test_recalculation_rejects_unknown_allocation_method(tmp_path):

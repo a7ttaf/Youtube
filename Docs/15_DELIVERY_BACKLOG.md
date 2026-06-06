@@ -379,8 +379,18 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   + an operator-asserted (tenant_id, month, bank_reference)→account(s) receipt-assertion
   model (verified 2026-06-03: no deterministic bank_reference→account bridge exists in the
   data — see Docs/superpowers/specs/2026-06-03-spec-payment-account-modeling-design.md).
-  Also remaining: the `manual` method + the `/revenue/recalculate` committed write-path
-  (paired PR in flight, Codex lane).
+  ✅ manual method + recalculate committed write-path shipped (branch
+  `spec/manual-allocation-recalc-write`, 2026-06-06): `manual` commits an
+  operator-asserted per-channel split via `manual_lines` on the commit endpoint (pure
+  fail-closed builder: exact per-component Decimal sums, verified channels only, ≤6dp
+  non-negative amounts, every ACCOUNT component covered, out-of-range amounts rejected
+  typed; the engine keeps rejecting manual — service-level allowlist only; manual lines
+  fold into the idempotency fingerprint, legacy digests unchanged).
+  `/revenue/recalculate` `dry_run=false` performs a real committed allocation through
+  the same service path (same advisory lock / idempotency / version chain; preview runs
+  as a pre-flight BLOCKED_BY_ISSUES 409 gate; write-only VIEW_FINALIZED_PAYMENTS gate;
+  `idempotency_key` required when writing; cross-endpoint idempotent replay with the
+  commit endpoint; manual is redirected to the commit endpoint).
 - ✅ Month lock/unlock — shipped: POST /finance-close/{month}/lock + /unlock
   (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED, fail-closed
   permissions). Month-close status UI shipped in PR #69 (CloseView wired to

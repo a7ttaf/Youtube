@@ -9,21 +9,21 @@ live) via resolve_month_account_allocation.
 
 import hashlib
 import json
+from collections.abc import Sequence
+from decimal import Decimal, InvalidOperation
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.channel_account_links import (
-    current_channel_account_link_repository,
-)
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_principal_from_headers,
 )
-from ums_smart_revenue.api.revenue import (
+from ums_smart_revenue.api.dependencies_finance import (
+    current_channel_account_link_repository,
     current_committed_allocation_repository,
     current_deduction_component_repository,
     current_org_access_index,
@@ -44,6 +44,7 @@ from ums_smart_revenue.finance.channel_account_links import (
     SqlAlchemyChannelAccountLinkRepository,
 )
 from ums_smart_revenue.finance.committed_allocation import (
+    CommitAllocationOutcome,
     CommittedAllocationIdempotencyConflictError,
     CommittedAllocationLockedMonthError,
     CommittedAllocationValidationError,
@@ -53,17 +54,68 @@ from ums_smart_revenue.finance.decimal_formatting import decimal_to_api
 from ums_smart_revenue.finance.deduction_ingestion import (
     SqlAlchemyDeductionComponentRepository,
 )
+from ums_smart_revenue.finance.manual_allocation import (
+    MANUAL_AMOUNT_SCALE,
+    ManualAllocationInput,
+)
 from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
 
 router = APIRouter(prefix="/revenue", tags=["account-allocations"])
 
 
+class ManualAllocationLineModel(BaseModel):
+    """One operator-asserted manual allocation line in a commit body."""
+
+    component_key: str = Field(min_length=1)
+    youtube_channel_id: str = Field(min_length=1)
+    amount_usd: Decimal = Field(ge=0)
+
+    @field_validator("component_key", "youtube_channel_id", mode="before")
+    @classmethod
+    def _strip(cls, value):
+        """Strip the line identifiers so they match the stored values.
+
+        Parity with CommitAllocationRequest._strip: a padded " ad-1 " would
+        otherwise reach the builder untrimmed and 422 as an unknown
+        component_key, and a whitespace-only value would slip past min_length=1.
+        Stripping before validation makes whitespace-only fail cleanly and keeps
+        the idempotency fingerprint stable across padded retries.
+        """
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("amount_usd", mode="after")
+    @classmethod
+    def _validate_precision(cls, value: Decimal) -> Decimal:
+        """Reject amounts with more than 6 decimal places (422 at boundary).
+
+        FIX: Without this check, an over-precision amount (e.g. 100.0000004)
+        would quantize to the same fingerprint as a valid amount (100.000000),
+        allowing an invalid retry with the same key to replay a prior committed
+        run and silently return 200 instead of 422.
+        """
+        try:
+            quantized = value.quantize(MANUAL_AMOUNT_SCALE)
+        except InvalidOperation:
+            raise ValueError("amount_usd is out of range")
+        if value != quantized:
+            raise ValueError(
+                "amount_usd must have at most 6 decimal places"
+            )
+        return value
+
+
 class CommitAllocationRequest(BaseModel):
-    """Body for a commit: a client idempotency key + a required reason."""
+    """Body for a commit: a client idempotency key + a required reason.
+
+    `manual_lines` is only consulted (and required) when allocation_method is
+    'manual'; for every other method it must be omitted (the service rejects
+    stray lines so they are never silently ignored).
+    """
 
     idempotency_key: str = Field(min_length=1)
     reason: str = Field(min_length=1)
     allocation_method: str = "gross_revenue_proportional"
+    manual_lines: list[ManualAllocationLineModel] | None = None
 
     @field_validator("idempotency_key", "reason", mode="before")
     @classmethod
@@ -87,12 +139,57 @@ class CommitAllocationResponse(BaseModel):
     audit_event: dict[str, object] | None
 
 
-def _request_fingerprint(*, allocation_method: str, reason: str) -> str:
-    """Stable digest of the client-controlled request (month is the lookup scope)."""
-    canonical = json.dumps(
-        {"allocation_method": allocation_method, "reason": reason}, sort_keys=True
-    )
-    return hashlib.blake2b(canonical.encode(), digest_size=16).hexdigest()
+def _canonical_amount_text(amount: Decimal) -> str:
+    """Fixed-point 6dp text so numerically-equal amounts share one digest."""
+    try:
+        return format(amount.quantize(MANUAL_AMOUNT_SCALE), "f")
+    except InvalidOperation:
+        # Out-of-range magnitudes can never commit (the builder fail-closes 422
+        # downstream); raw text keeps the digest deterministic without raising
+        # at fingerprint time.
+        return str(amount)
+
+
+# ============================================================================
+# Purpose: Stable digest of the client-controlled commit request (month is the
+#   lookup scope, not part of the digest). The manual_lines payload is folded in
+#   ONLY when present so the digest stays byte-identical to the legacy two-field
+#   form for non-manual requests — otherwise a manual retry with the same key but
+#   a different split would silently replay instead of conflicting (409).
+# Database/ORM: None.
+# Standards: deterministic JSON (sort_keys + per-line sort); amounts canonicalized
+#   to fixed-point 6dp text so numerically-equal Decimals share one digest.
+# Blast Radius: Idempotency correctness only. No persistence, no auth, no Neo4j.
+# ============================================================================
+def commit_request_fingerprint(
+    *,
+    allocation_method: str,
+    reason: str,
+    manual_lines: Sequence[ManualAllocationLineModel] | None = None,
+) -> str:
+    """Return the blake2b idempotency fingerprint for a commit request."""
+    canonical: dict[str, object] = {
+        "allocation_method": allocation_method,
+        "reason": reason,
+    }
+    if manual_lines is not None:
+        # FIX: serialize the amount as canonical fixed-point 6dp text, not raw
+        # str(); a textual digest treated numerically-equal retries ("100.00"
+        # vs "100") as a fingerprint mismatch and returned 409 instead of the
+        # intended idempotent replay (200).
+        canonical["manual_lines"] = sorted(
+            (
+                {
+                    "component_key": line.component_key,
+                    "youtube_channel_id": line.youtube_channel_id,
+                    "amount_usd": _canonical_amount_text(line.amount_usd),
+                }
+                for line in manual_lines
+            ),
+            key=lambda item: (item["component_key"], item["youtube_channel_id"]),
+        )
+    payload = json.dumps(canonical, sort_keys=True)
+    return hashlib.blake2b(payload.encode(), digest_size=16).hexdigest()
 
 
 def _run_to_api(run) -> dict[str, object]:  # noqa: ANN001
@@ -116,6 +213,52 @@ def _run_to_api(run) -> dict[str, object]:  # noqa: ANN001
             "reconciliation_total_usd": decimal_to_api(run.reconciliation_total_usd),
         },
     }
+
+
+# ============================================================================
+# Purpose: Emit the ALLOCATION_COMMITTED audit event for a FRESH commit only;
+#   an idempotent replay (outcome.created is False) records nothing and returns
+#   None. The audit detail is summary-only (counts + totals, no per-line dump) so
+#   no allocation line leaks into the audit trail. Extracted to a module-level
+#   helper so future commit paths (e.g. recalculate) reuse it without drift.
+# Database/ORM: writes one AuditLog row via the durable AuditSink.
+# Standards: summary-only detail; reason carried through; safe entity ids only.
+# Blast Radius: Audit only. No finance number, no allocation row, no Neo4j.
+# ============================================================================
+def emit_allocation_committed_audit(
+    *,
+    sink: AuditSink,
+    actor: UserPrincipal,
+    month: str,
+    scope: AccessScope,
+    reason: str,
+    outcome: CommitAllocationOutcome,
+) -> dict[str, object] | None:
+    """Emit ALLOCATION_COMMITTED for a fresh commit; None on idempotent replay."""
+    if not outcome.created:
+        return None
+    return audit_record_to_api(
+        record_audit_event(
+            sink=sink, actor=actor,
+            event_type=AuditEventType.ALLOCATION_COMMITTED,
+            entity_type="committed_allocation_run", entity_id=str(outcome.run.id),
+            scope=scope, reason=reason,
+            details={
+                "run_id": str(outcome.run.id),
+                "commit_version": outcome.run.commit_version,
+                "month": month,
+                "allocation_method": outcome.run.allocation_method,
+                "component_count": outcome.run.component_count,
+                "allocated_component_count": outcome.run.allocated_component_count,
+                "unallocated_component_count": outcome.run.unallocated_component_count,
+                "allocated_total_usd": decimal_to_api(outcome.run.allocated_total_usd),
+                "net_applicable_total_usd": decimal_to_api(
+                    outcome.run.net_applicable_total_usd
+                ),
+                "note_count": len(outcome.notes),
+            },
+        )
+    )
 
 
 def _require_permission(
@@ -297,12 +440,14 @@ def get_account_allocations(
 
 # ============================================================================
 # Purpose: Commit a versioned, audited snapshot of the month's account
-#   allocation (gross / post-tax / company_level / no_allocation, allowlisted).
-#   Re-runs the same live compute under the finance-month advisory lock and
-#   persists the result; an idempotent replay returns the existing run without a
-#   second audit. company_level consumes the org-access channel->company map
-#   (read-only, resolved here at the boundary); no_allocation snapshots its full
-#   intentional-withhold set. This is the WRITE path; readers prefer the
+#   allocation (gross / post-tax / company_level / no_allocation / manual,
+#   allowlisted). Re-runs the same live compute under the finance-month advisory
+#   lock and persists the result; an idempotent replay returns the existing run
+#   without a second audit. company_level consumes the org-access channel->company
+#   map (read-only, resolved here at the boundary); no_allocation snapshots its
+#   full intentional-withhold set; manual persists the operator-asserted
+#   per-channel split from the request body (manual_lines fold into the
+#   idempotency fingerprint). This is the WRITE path; readers prefer the
 #   committed snapshot for LOCKED months via the PR-6 read-switch.
 # Database/ORM: writes committed_allocation_runs/_lines/_unallocated/_notes via
 #   the committed-allocation repository; reads deduction_components, the verified
@@ -338,6 +483,13 @@ def get_account_allocations(
                 "ALLOCATION_COMMITTED audit event was recorded."
             ),
         },
+        status.HTTP_409_CONFLICT: {
+            "description": (
+                "Write conflict returned as a plain-string detail: the finance "
+                "month is LOCKED, or the idempotency key was reused with a "
+                "different request."
+            ),
+        },
     },
 )
 def commit_account_allocations(
@@ -371,17 +523,40 @@ def commit_account_allocations(
     _require_permission(user, Permission.VIEW_FINALIZED_PAYMENTS, payment_scope)
     _require_permission(user, Permission.CHANGE_ALLOCATION_RULE, payment_scope)
 
-    fingerprint = _request_fingerprint(
-        allocation_method=payload.allocation_method, reason=payload.reason
+    # Cross-endpoint symmetry: /revenue/recalculate normalizes allocation_method
+    # (strip().lower()) BEFORE fingerprinting, so the commit endpoint must too —
+    # otherwise the same logical commit replayed across endpoints with different
+    # casing would 409 on a casing-only fingerprint mismatch. Normalizing the
+    # service-call argument as well keeps fresh-commit and replay consistent:
+    # fingerprint-only normalization would let a re-cased retry REPLAY a run the
+    # fresh path would 422, because the idempotency lookup precedes the service
+    # allowlist check. The service allowlist stays the validation authority.
+    allocation_method = payload.allocation_method.strip().lower()
+
+    fingerprint = commit_request_fingerprint(
+        allocation_method=allocation_method, reason=payload.reason,
+        manual_lines=payload.manual_lines,
+    )
+    manual_lines = (
+        None
+        if payload.manual_lines is None
+        else tuple(
+            ManualAllocationInput(
+                component_key=line.component_key,
+                youtube_channel_id=line.youtube_channel_id,
+                amount_usd=line.amount_usd,
+            )
+            for line in payload.manual_lines
+        )
     )
     try:
         outcome = committed_repository.commit_allocation(
-            month=month, allocation_method=payload.allocation_method,
+            month=month, allocation_method=allocation_method,
             idempotency_key=payload.idempotency_key, request_fingerprint=fingerprint,
             reason=payload.reason, committed_by=user.user_id,  # str; repo -> UUID
             deduction_repository=deduction_repository,
             revenue_repository=revenue_repository, link_repository=link_repository,
-            channel_company=org_index.channel_company,
+            channel_company=org_index.channel_company, manual_lines=manual_lines,
         )
     except CommittedAllocationValidationError as exc:
         raise HTTPException(
@@ -393,30 +568,10 @@ def commit_account_allocations(
     ) as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
-    audit_event: dict[str, object] | None = None
-    if outcome.created:
-        audit_event = audit_record_to_api(
-            record_audit_event(
-                sink=audit_sink, actor=user,
-                event_type=AuditEventType.ALLOCATION_COMMITTED,
-                entity_type="committed_allocation_run", entity_id=str(outcome.run.id),
-                scope=payment_scope, reason=payload.reason,
-                details={
-                    "run_id": str(outcome.run.id),
-                    "commit_version": outcome.run.commit_version,
-                    "month": month,
-                    "allocation_method": outcome.run.allocation_method,
-                    "component_count": outcome.run.component_count,
-                    "allocated_component_count": outcome.run.allocated_component_count,
-                    "unallocated_component_count": outcome.run.unallocated_component_count,
-                    "allocated_total_usd": decimal_to_api(outcome.run.allocated_total_usd),
-                    "net_applicable_total_usd": decimal_to_api(
-                        outcome.run.net_applicable_total_usd
-                    ),
-                    "note_count": len(outcome.notes),
-                },
-            )
-        )
+    audit_event = emit_allocation_committed_audit(
+        sink=audit_sink, actor=user, month=month, scope=payment_scope,
+        reason=payload.reason, outcome=outcome,
+    )
     # The decorator declares 201 as the default success status. A fresh commit
     # keeps 201 (new snapshot + audit); an idempotent replay returns the existing
     # run with 200 and no second audit -- matching the documented OpenAPI responses.

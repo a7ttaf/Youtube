@@ -29,13 +29,26 @@ from ums_smart_revenue.finance.allocation import (
     COMPANY_LEVEL_ALLOCATION_METHOD,
     NO_ALLOCATION_METHOD,
     AccountAllocationResult,
+    AllocationValidationError,
 )
 from ums_smart_revenue.finance.allocation_inputs import compute_month_account_allocation
+from ums_smart_revenue.finance.manual_allocation import (
+    MANUAL_ALLOCATION_METHOD,
+    ManualAllocationInput,
+    build_manual_account_allocation,
+)
 from ums_smart_revenue.finance.month_close import get_or_create_month_close_row
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
+
+# Service-layer allowlist. The proportional ENGINE allowlist
+# (COMMITTABLE_ALLOCATION_METHODS) intentionally excludes 'manual': manual lines
+# bypass the engine entirely via build_manual_account_allocation. This service
+# set widens it so the commit route accepts 'manual' while the engine pin in
+# tests/finance/test_allocation.py stays green.
+SERVICE_COMMITTABLE_METHODS = COMMITTABLE_ALLOCATION_METHODS | {MANUAL_ALLOCATION_METHOD}
 
 
 class CommittedAllocationValidationError(ValueError):
@@ -100,10 +113,12 @@ class SqlAlchemyCommittedAllocationRepository:
 
     # ========================================================================
     # Purpose: Commit a versioned snapshot of the account-allocation compute
-    #   (gross / post-tax / company_level / no_allocation, allowlisted) for one
-    #   month, under the finance-month advisory lock. company_level requires the
-    #   caller-resolved channel_company map; no_allocation snapshots its full
-    #   intentional-withhold set instead of rejecting on unallocated.
+    #   (gross / post-tax / company_level / no_allocation / manual, allowlisted)
+    #   for one month, under the finance-month advisory lock. company_level
+    #   requires the caller-resolved channel_company map; no_allocation snapshots
+    #   its full intentional-withhold set instead of rejecting on unallocated;
+    #   manual bypasses the proportional engine and persists the operator-asserted
+    #   per-channel split (validated fail-closed by build_manual_account_allocation).
     # Database/ORM: committed_allocation_runs/_lines/_unallocated/_notes;
     #   reads FinanceMonthCloseORM (lock) via month_close helpers.
     # Standards: shared request session (no commit here); typed errors -> route
@@ -123,6 +138,7 @@ class SqlAlchemyCommittedAllocationRepository:
         revenue_repository: object,
         link_repository: object,
         channel_company: Mapping[str, str] | None = None,
+        manual_lines: tuple[ManualAllocationInput, ...] | None = None,
     ) -> CommitAllocationOutcome:
         """Compute + persist a committed run, or replay an idempotent retry.
 
@@ -158,7 +174,7 @@ class SqlAlchemyCommittedAllocationRepository:
         if close_row.status == "LOCKED":
             raise CommittedAllocationLockedMonthError(f"Finance month is locked: {month}")
 
-        if allocation_method not in COMMITTABLE_ALLOCATION_METHODS:
+        if allocation_method not in SERVICE_COMMITTABLE_METHODS:
             raise CommittedAllocationValidationError(
                 f"unsupported allocation method: {allocation_method}"
             )
@@ -173,13 +189,14 @@ class SqlAlchemyCommittedAllocationRepository:
                 "channel_company mapping is required for company_level"
             )
 
-        result: AccountAllocationResult = compute_month_account_allocation(
+        result = self._compute_result(
             month=month,
+            allocation_method=allocation_method,
             deduction_repository=deduction_repository,
             revenue_repository=revenue_repository,
             link_repository=link_repository,
-            allocation_method=allocation_method,
             channel_company=channel_company,
+            manual_lines=manual_lines,
         )
         # no_allocation withholds EVERY component by design — its snapshot
         # persists the full unallocated set as evidence instead of rejecting.
@@ -249,6 +266,72 @@ class SqlAlchemyCommittedAllocationRepository:
         self._session.flush()
         return CommitAllocationOutcome(
             run=run, lines=lines, unallocated=unallocated, notes=notes, created=True
+        )
+
+    # ========================================================================
+    # Purpose: Resolve the AccountAllocationResult to persist for one commit.
+    #   manual bypasses the proportional engine: it reads the month's ACCOUNT
+    #   components + the verified account->channel map and feeds them, with the
+    #   operator-asserted lines, to build_manual_account_allocation (fail-closed,
+    #   exact per-component conservation). Every other method delegates to the
+    #   shared compute_month_account_allocation engine and rejects stray
+    #   manual_lines so they are never silently ignored.
+    # Database/ORM: reads deduction_components (list_account_components) and the
+    #   verified map (list_verified_adsense_account_channels) for manual; the
+    #   engine path reads via compute_month_account_allocation.
+    # Standards: typed AllocationValidationError -> CommittedAllocationValidationError
+    #   (route 422); no writes here; no session/lock interaction.
+    # Blast Radius: Finance read-model + compute only. No persistence, no Neo4j.
+    # ========================================================================
+    @staticmethod
+    def _compute_result(
+        *,
+        month: str,
+        allocation_method: str,
+        deduction_repository: object,
+        revenue_repository: object,
+        link_repository: object,
+        channel_company: Mapping[str, str] | None,
+        manual_lines: tuple[ManualAllocationInput, ...] | None,
+    ) -> AccountAllocationResult:
+        """Build the allocation result for one commit (manual or engine path)."""
+        if allocation_method == MANUAL_ALLOCATION_METHOD:
+            if not manual_lines:
+                raise CommittedAllocationValidationError(
+                    "manual_lines is required for allocation_method=manual"
+                )
+            components = deduction_repository.list_account_components(month=month)
+            tenant_id = link_repository.tenant_id
+            accounts = sorted({component.scope_id for component in components})
+            verified_channels = {
+                account: link_repository.list_verified_adsense_account_channels(
+                    tenant_id=tenant_id, month=month, adsense_account_id=account
+                )
+                for account in accounts
+            }
+            try:
+                return build_manual_account_allocation(
+                    month=month,
+                    components=components,
+                    verified_channels=verified_channels,
+                    manual_lines=manual_lines,
+                )
+            except AllocationValidationError as exc:
+                raise CommittedAllocationValidationError(str(exc)) from exc
+        # FIX: use `is not None` so an empty manual_lines=[] (converted to ())
+        # at the route boundary is correctly rejected for non-manual methods,
+        # preventing silent ignore and idempotency fingerprint drift.
+        if manual_lines is not None:
+            raise CommittedAllocationValidationError(
+                "manual_lines is only valid for allocation_method=manual"
+            )
+        return compute_month_account_allocation(
+            month=month,
+            deduction_repository=deduction_repository,
+            revenue_repository=revenue_repository,
+            link_repository=link_repository,
+            allocation_method=allocation_method,
+            channel_company=channel_company,
         )
 
     # ========================================================================

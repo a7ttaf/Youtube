@@ -7,6 +7,15 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from tests.api._commit_helpers import (
+    build_database_url,
+)
+from tests.api._commit_helpers import (
+    build_test_client as _client,
+)
+from tests.api._commit_helpers import (
+    committed_audit_rows as _committed_audit_rows,
+)
 from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
@@ -21,7 +30,7 @@ from ums_smart_revenue.db.finance_models import (
     MonthlyChannelRevenueFactORM,
 )
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
-from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.db.security_models import SecurityBase, UserORM
 from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
@@ -32,11 +41,6 @@ COMPANY_ID = UUID("00000000-0000-0000-0000-0000000a0201")
 CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-0000000a0301")
 USER_ID = UUID("00000000-0000-0000-0000-0000000a0401")
 COMMIT_PATH = f"/revenue/months/{MONTH}/account-allocations/commit"
-
-
-def build_database_url(tmp_path) -> str:
-    """Return a unique SQLite URL under pytest's temp path."""
-    return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
 def _seed(database_url: str, *, mapped: bool = True, status: str = "OPEN") -> None:
@@ -129,24 +133,6 @@ def _principal(*, revenue: bool = True, payments: bool = True, change: bool = Tr
         user_id=str(USER_ID), email="commit@example.com",
         direct_permissions=tuple(grants),
     )
-
-
-def _client(database_url: str, principal_factory) -> TestClient:
-    """TestClient with the principal dependency overridden by `principal_factory`."""
-    app = create_app(database_url=database_url)
-    app.dependency_overrides[current_principal_from_headers] = principal_factory
-    return TestClient(app)
-
-
-def _committed_audit_rows(database_url: str):
-    """Return the ALLOCATION_COMMITTED audit rows persisted in the test database."""
-    engine = create_engine(database_url)
-    with Session(engine) as session:
-        return [
-            row
-            for row in session.scalars(select(AuditLogORM)).all()
-            if row.event_type == "ALLOCATION_COMMITTED"
-        ]
 
 
 def test_commit_creates_run_and_summary_only_audit(tmp_path):
@@ -505,3 +491,464 @@ def test_net_revenue_unchanged_by_commit(tmp_path):
         return {k: v for k, v in payload.items() if k != "audit_events"}
 
     assert _stable(before.json()) == _stable(after.json())
+
+
+# The seed component "ad-1" (pub-1, DEDUCTION 100) is verified to chA only, so a
+# single full-amount line is the canonical valid manual split for these tests.
+def _manual_body(*, key: str = "k-man", lines=None, reason: str = "manual close"):
+    """Build a manual commit body; `lines` defaults to the full ad-1 -> chA split."""
+    return {
+        "idempotency_key": key,
+        "reason": reason,
+        "allocation_method": "manual",
+        "manual_lines": lines
+        if lines is not None
+        else [{"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "100.00"}],
+    }
+
+
+def test_manual_commit_happy_path_201_with_posted_split(tmp_path):
+    """A valid manual split commits 201 with MANUAL-basis lines + one audit row."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(COMMIT_PATH, json=_manual_body())
+    assert resp.status_code == 201
+    body = resp.json()
+    assert body["run"]["allocation_method"] == "manual"
+    assert body["unallocated"] == []
+    assert len(body["allocations"]) == 1
+    line = body["allocations"][0]
+    assert line["youtube_channel_id"] == "chA"
+    assert line["component_key"] == "ad-1"
+    assert line["basis_source_kind"] == "MANUAL"
+    assert Decimal(line["allocated_amount_usd"]) == Decimal("100")
+    assert body["audit_event"]["event_type"] == "ALLOCATION_COMMITTED"
+    assert len(_committed_audit_rows(db)) == 1
+
+
+def test_manual_lines_with_gross_method_rejected_422(tmp_path):
+    """Supplying manual_lines with a non-manual method is rejected with 422."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json={
+            "idempotency_key": "k", "reason": "r",
+            "allocation_method": "gross_revenue_proportional",
+            "manual_lines": [
+                {"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "100.00"}
+            ],
+        },
+    )
+    assert resp.status_code == 422
+    assert not _committed_audit_rows(db)
+
+
+def test_manual_sum_mismatch_rejected_422(tmp_path):
+    """A manual split that does not sum to the component amount is rejected 422."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            lines=[{"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "90.00"}]
+        ),
+    )
+    assert resp.status_code == 422
+    assert not _committed_audit_rows(db)
+
+
+def test_manual_unknown_component_key_rejected_422(tmp_path):
+    """A manual line for an unknown component_key is rejected with 422."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            lines=[
+                {"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "100.00"},
+                {"component_key": "ghost", "youtube_channel_id": "chA", "amount_usd": "0.00"},
+            ]
+        ),
+    )
+    assert resp.status_code == 422
+    assert not _committed_audit_rows(db)
+
+
+def test_manual_channel_not_verified_rejected_422(tmp_path):
+    """A manual line whose channel is not verified for the account is rejected 422."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            lines=[{"component_key": "ad-1", "youtube_channel_id": "chZ", "amount_usd": "100.00"}]
+        ),
+    )
+    assert resp.status_code == 422
+    assert not _committed_audit_rows(db)
+
+
+def test_manual_duplicate_pair_rejected_422(tmp_path):
+    """A duplicate (component_key, channel) manual line is rejected with 422."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            lines=[
+                {"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "60.00"},
+                {"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "40.00"},
+            ]
+        ),
+    )
+    assert resp.status_code == 422
+    assert not _committed_audit_rows(db)
+
+
+def test_manual_uncovered_component_rejected_422(tmp_path):
+    """A second ACCOUNT component with no manual line is rejected with 422."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    # Seed a second ACCOUNT component; cover only the first.
+    engine = create_engine(db)
+    with Session(engine) as session:
+        session.add(
+            DeductionComponentORM(
+                id=uuid4(), tenant_id=TENANT, month=MONTH, component_kind="DEDUCTION",
+                scope_kind="ACCOUNT", scope_id="pub-1", amount_usd=Decimal("50.00"),
+                currency_code="USD", source_system="adsense_management",
+                source_table="google_revenue_source_rows", component_key="ad-2",
+                raw_payload={},
+            )
+        )
+        session.commit()
+    client = _client(db, _principal)
+    resp = client.post(COMMIT_PATH, json=_manual_body())
+    assert resp.status_code == 422
+    assert not _committed_audit_rows(db)
+
+
+def test_manual_idempotent_replay_returns_200_without_second_audit(tmp_path):
+    """Re-POST a manual commit with the same key + identical lines -> 200, no audit."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    body = _manual_body(key="dup-man")
+    first = client.post(COMMIT_PATH, json=body)
+    second = client.post(COMMIT_PATH, json=body)
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json()["audit_event"] is None
+    assert second.json()["run"]["run_id"] == first.json()["run"]["run_id"]
+    assert len(_committed_audit_rows(db)) == 1
+
+
+def test_manual_same_key_different_lines_conflicts_409(tmp_path):
+    """Same key but a different manual split (different fingerprint) -> 409.
+
+    chB is also verified for pub-1 so the second body is itself a valid split;
+    only the fingerprint difference (not a validation error) drives the 409.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    engine = create_engine(db)
+    with Session(engine) as session:
+        session.add_all([
+            YouTubeChannelORM(
+                id=uuid4(), tenant_id=TENANT, youtube_channel_id="chB",
+                channel_name="B", primary_org_unit_id=COMPANY_ID,
+                cms_status="INSIDE_CMS", revenue_required=True, active=True,
+            ),
+            ContentOwnerChannelLinkORM(
+                id=uuid4(), tenant_id=TENANT, content_owner_id="owner-1",
+                youtube_channel_id="chB", provenance_kind="SOURCE_ROW",
+                active=True, effective_month_start="2026-01",
+            ),
+        ])
+        session.commit()
+    client = _client(db, _principal)
+    first = client.post(COMMIT_PATH, json=_manual_body(key="dup-man"))
+    assert first.status_code == 201
+    conflict = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            key="dup-man",
+            lines=[
+                {"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "70.00"},
+                {"component_key": "ad-1", "youtube_channel_id": "chB", "amount_usd": "30.00"},
+            ],
+        ),
+    )
+    assert conflict.status_code == 409
+
+
+def test_manual_locked_month_conflicts_409(tmp_path):
+    """A LOCKED month rejects a manual commit with 409."""
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True, status="LOCKED")
+    client = _client(db, _principal)
+    resp = client.post(COMMIT_PATH, json=_manual_body())
+    assert resp.status_code == 409
+
+
+def test_commit_request_fingerprint_backward_compatible_without_lines():
+    """commit_request_fingerprint with manual_lines=None equals the legacy digest.
+
+    The legacy digest hashed only {allocation_method, reason}; the renamed helper
+    must stay byte-identical for that two-field input so existing snapshots replay.
+    """
+    import hashlib
+    import json
+
+    from ums_smart_revenue.api.allocation import commit_request_fingerprint
+
+    legacy = hashlib.blake2b(
+        json.dumps(
+            {"allocation_method": "gross_revenue_proportional", "reason": "month close"},
+            sort_keys=True,
+        ).encode(),
+        digest_size=16,
+    ).hexdigest()
+    current = commit_request_fingerprint(
+        allocation_method="gross_revenue_proportional", reason="month close",
+    )
+    assert current == legacy
+
+
+def test_commit_request_fingerprint_canonicalizes_equal_amount_texts():
+    """Numerically-equal manual amounts share ONE fingerprint; a real change differs.
+
+    Pydantic preserves the literal text of a JSON-string Decimal, so "100.00",
+    "100" and "1E+2" reach the fingerprint as three distinct strings. The
+    canonical 6dp serialization must collapse them to one digest so a legitimate
+    idempotent retry that re-encodes the amount replays (200) instead of 409-ing,
+    while a genuinely different value still yields a different digest.
+    """
+    from ums_smart_revenue.api.allocation import (
+        ManualAllocationLineModel,
+        commit_request_fingerprint,
+    )
+
+    def _digest(amount: Decimal) -> str:
+        """Fingerprint of a single-line manual request carrying `amount`."""
+        return commit_request_fingerprint(
+            allocation_method="manual",
+            reason="month close",
+            manual_lines=[
+                ManualAllocationLineModel(
+                    component_key="ad-1", youtube_channel_id="chA", amount_usd=amount
+                )
+            ],
+        )
+
+    base = _digest(Decimal("100.00"))
+    assert _digest(Decimal("100")) == base
+    assert _digest(Decimal("1E+2")) == base
+    assert _digest(Decimal("100.000001")) != base
+
+
+def test_manual_idempotent_replay_with_reencoded_amount_returns_200(tmp_path):
+    """A manual retry that re-encodes the amount ("100.00" -> "100") replays 200.
+
+    The amounts are numerically equal, so the canonical fingerprint matches and
+    the second POST returns the SAME run with 200 and writes NO second
+    ALLOCATION_COMMITTED audit row -- mirroring the identical-body replay test.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    first = client.post(COMMIT_PATH, json=_manual_body(key="dup-reencode"))
+    second = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            key="dup-reencode",
+            lines=[{"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "100"}],
+        ),
+    )
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json()["audit_event"] is None
+    assert second.json()["run"]["run_id"] == first.json()["run"]["run_id"]
+    assert len(_committed_audit_rows(db)) == 1
+
+
+def test_manual_out_of_range_amount_rejected_422(tmp_path):
+    """An out-of-range manual amount fails closed at the boundary (422, no audit).
+
+    "1e1000" passes the Pydantic Field(ge=0) schema (not NaN/Infinity) but cannot
+    be quantized to 6dp inside the builder; the builder must raise a typed
+    AllocationValidationError so the route returns 422 instead of an unhandled 500.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            lines=[{"component_key": "ad-1", "youtube_channel_id": "chA", "amount_usd": "1e1000"}]
+        ),
+    )
+    assert resp.status_code == 422
+    assert not _committed_audit_rows(db)
+
+
+def test_manual_padded_line_strings_stripped_commits_201(tmp_path):
+    """Padded component_key/channel id strip to valid values and commit 201.
+
+    ManualAllocationLineModel mirrors the CommitAllocationRequest strip parity, so
+    " ad-1 " / " chA " reach the builder trimmed and allocate cleanly instead of
+    422-ing with a confusing "unknown component_key".
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json=_manual_body(
+            lines=[
+                {"component_key": " ad-1 ", "youtube_channel_id": " chA ", "amount_usd": "100.00"}
+            ]
+        ),
+    )
+    assert resp.status_code == 201
+    body = resp.json()
+    line = body["allocations"][0]
+    assert line["component_key"] == "ad-1"
+    assert line["youtube_channel_id"] == "chA"
+    assert len(_committed_audit_rows(db)) == 1
+
+
+def test_manual_locked_month_get_serves_committed_snapshot(tmp_path):
+    """A LOCKED month's GET serves the committed manual snapshot (read-switch).
+
+    PR A proved the resolver is method-agnostic; this pins it for `manual`.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    commit = client.post(COMMIT_PATH, json=_manual_body())
+    assert commit.status_code == 201
+    engine = create_engine(db)
+    with Session(engine) as session:
+        session.execute(
+            FinanceMonthCloseORM.__table__.update()
+            .where(FinanceMonthCloseORM.month == MONTH)
+            .values(status="LOCKED")
+        )
+        session.commit()
+    read = client.get(f"/revenue/months/{MONTH}/account-allocations")
+    assert read.status_code == 200
+    body = read.json()
+    assert body["allocation_source"] == "committed_snapshot"
+    assert body["allocation_method"] == "manual"
+    assert len(body["allocations"]) == 1
+    assert body["allocations"][0]["basis_source_kind"] == "MANUAL"
+    assert Decimal(body["allocations"][0]["allocated_amount_usd"]) == Decimal("100")
+
+
+def _committed_run_methods(database_url: str):
+    """Return the persisted allocation_method of every committed run row."""
+    from ums_smart_revenue.db.finance_models import CommittedAllocationRunORM
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        return [
+            row.allocation_method
+            for row in session.scalars(select(CommittedAllocationRunORM)).all()
+        ]
+
+
+def test_commit_non_canonical_casing_accepted_and_canonicalized_201(tmp_path):
+    """A padded/upper-cased valid method commits 201 and is stored canonical.
+
+    The commit boundary must normalize allocation_method exactly as recalc does
+    (strip().lower()), so " GROSS_REVENUE_PROPORTIONAL " is accepted, the
+    response run reports the canonical lowercase, and the persisted run row
+    stores the canonical lowercase value.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json={
+            "idempotency_key": "K", "reason": "month close",
+            "allocation_method": " GROSS_REVENUE_PROPORTIONAL ",
+        },
+    )
+    assert resp.status_code == 201
+    assert resp.json()["run"]["allocation_method"] == "gross_revenue_proportional"
+    assert _committed_run_methods(db) == ["gross_revenue_proportional"]
+
+
+def test_commit_cross_casing_idempotent_replay_returns_200(tmp_path):
+    """Lowercase commit then an upper-cased retry of the SAME key replays 200.
+
+    Because the boundary normalizes the method before fingerprinting, a re-cased
+    retry of the same logical commit replays the existing run (200, same run id)
+    instead of 409-ing on a casing-only fingerprint mismatch, and writes no
+    second ALLOCATION_COMMITTED audit row.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    first = client.post(
+        COMMIT_PATH,
+        json={"idempotency_key": "K2", "reason": "month close",
+              "allocation_method": "gross_revenue_proportional"},
+    )
+    second = client.post(
+        COMMIT_PATH,
+        json={"idempotency_key": "K2", "reason": "month close",
+              "allocation_method": "GROSS_REVENUE_PROPORTIONAL"},
+    )
+    assert first.status_code == 201
+    assert second.status_code == 200
+    assert second.json()["audit_event"] is None
+    assert second.json()["run"]["run_id"] == first.json()["run"]["run_id"]
+    assert len(_committed_audit_rows(db)) == 1
+
+
+def test_commit_unknown_method_any_casing_rejected_422(tmp_path):
+    """An unknown method (any casing) fail-closes 422 with the service message.
+
+    Normalization at the boundary does not widen the allowlist: the service's
+    own "unsupported allocation method: <normalized>" guard still rejects the
+    request (422), and no run row or audit row is persisted.
+    """
+    db = build_database_url(tmp_path)
+    _seed(db, mapped=True)
+    client = _client(db, _principal)
+    resp = client.post(
+        COMMIT_PATH,
+        json={"idempotency_key": "k", "reason": "r",
+              "allocation_method": "MAGIC_ESTIMATE"},
+    )
+    assert resp.status_code == 422
+    detail = resp.json()["detail"]
+    assert "unsupported allocation method" in detail
+    assert "magic_estimate" in detail
+    assert _committed_run_methods(db) == []
+    assert not _committed_audit_rows(db)
+
+
+def test_commit_openapi_documents_409_conflict(tmp_path):
+    """The published OpenAPI contract advertises the commit's 409 response.
+
+    The route returns 409 as a plain-string detail for two cases -- a LOCKED
+    finance month and an idempotency key reused with a different request -- so
+    schema-generated clients must see the conflict response, matching runtime
+    behavior and mirroring the /revenue/recalculate 409 documentation.
+    """
+    client = _client(build_database_url(tmp_path), _principal)
+    schema = client.get("/openapi.json").json()
+    path_template = "/revenue/months/{month}/account-allocations/commit"
+    responses = schema["paths"][path_template]["post"]["responses"]
+    assert "409" in responses, "commit must document the 409 conflict response"
