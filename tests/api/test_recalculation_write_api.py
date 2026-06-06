@@ -11,12 +11,18 @@ recalculation seed lacks.
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.api.dependencies import current_principal_from_headers
-from ums_smart_revenue.app import create_app
+from tests.api._commit_helpers import (
+    build_database_url,
+)
+from tests.api._commit_helpers import (
+    build_test_client as _client,
+)
+from tests.api._commit_helpers import (
+    committed_audit_rows as _committed_audit_rows,
+)
 from ums_smart_revenue.auth.models import PermissionGrant, UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.scopes import AccessScope
@@ -30,7 +36,7 @@ from ums_smart_revenue.db.finance_models import (
     MonthlyChannelRevenueFactORM,
 )
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
-from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.db.security_models import SecurityBase, UserORM
 from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
@@ -41,11 +47,6 @@ COMPANY_ID = UUID("00000000-0000-0000-0000-0000000b0201")
 CHANNEL_ROW_ID = UUID("00000000-0000-0000-0000-0000000b0301")
 USER_ID = UUID("00000000-0000-0000-0000-0000000b0401")
 RECALC_PATH = "/revenue/recalculate"
-
-
-def build_database_url(tmp_path) -> str:
-    """Return a unique SQLite URL under pytest's temp path."""
-    return f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
 
 
 def _seed(database_url: str, *, mapped: bool = True, status: str = "OPEN") -> None:
@@ -149,24 +150,6 @@ def _principal(
         user_id=str(USER_ID), email="recalc@example.com",
         direct_permissions=tuple(grants),
     )
-
-
-def _client(database_url: str, principal_factory) -> TestClient:
-    """TestClient with the principal dependency overridden by `principal_factory`."""
-    app = create_app(database_url=database_url)
-    app.dependency_overrides[current_principal_from_headers] = principal_factory
-    return TestClient(app)
-
-
-def _committed_audit_rows(database_url: str):
-    """Return the ALLOCATION_COMMITTED audit rows persisted in the test database."""
-    engine = create_engine(database_url)
-    with Session(engine) as session:
-        return [
-            row
-            for row in session.scalars(select(AuditLogORM)).all()
-            if row.event_type == "ALLOCATION_COMMITTED"
-        ]
 
 
 def _run_rows(database_url: str):
