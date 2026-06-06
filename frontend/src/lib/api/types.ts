@@ -693,3 +693,33 @@ export type AuditEventListResponse = {
   pagination: AuditEventPagination;
   audit_event: Record<string, unknown>;
 };
+
+// ============================================================================
+// Purpose: TypeScript mirror of the backend GET /channels JSON contract consumed
+//   by the Registry view. Fields are matched 1:1 against
+//   ChannelRegistryEntry.to_api() (org/channel_registry.py:19-29). The view
+//   enriches this data client-side: avatar initials, cms badge tone, source label,
+//   state derivation (Option A: from existing fields, no migration), and trace key.
+// Standards: Read-only typed boundary at the API surface; no logic here.
+// Connections:
+//   - File: backend/ums_smart_revenue/org/channel_registry.py
+//       ChannelRegistryEntry.to_api() (lines 19-29) -> ChannelRegistryEntry
+//   - File: backend/ums_smart_revenue/api/channels.py
+//       list_channels() (lines 116-130) -> GET /channels
+// ============================================================================
+
+// GET /channels item. Source: ChannelRegistryEntry.to_api() (channel_registry.py:19-29).
+export type ChannelRegistryEntry = {
+  youtube_channel_id: string;
+  channel_name: string;
+  primary_company_id: string | null;
+  // DB constraint (ck_youtube_channels_cms_status): "INSIDE_CMS" | "OUTSIDE_CMS" | "UNKNOWN"
+  cms_status: string;
+  content_owner_id: string | null;
+  revenue_required: boolean;
+  // DB constraint (ck_youtube_channels_revenue_source_status):
+  // "OFFICIAL_CMS_REVENUE" | "OFFICIAL_MANUAL_IMPORT" | "ALLOCATED_FROM_PAYMENT_POOL"
+  // | "PERFORMANCE_ONLY" | "MISSING_REVENUE_SOURCE"
+  revenue_source_status: string;
+  active: boolean;
+};

@@ -489,12 +489,14 @@ single P-tier above.
   `auth_failed` / `error`) and a string `detail`. Every probe is audited (`CONNECTOR_TESTED`
   event, `MANAGE_CONNECTORS@connector(connector_key)` gate, reason required).
   5 TDD tests (ok, not-found, inactive, oauth-error, 403). Backend only; no migration.
-- ⏳ Channel Registry view design — `Docs/superpowers/specs/2026-06-05-registry-view-design.md`:
-  maps mock fields (avatar, name, code, company, sector, cms, source, node, state, action)
-  to existing backend assets (`GET /channels` + `ChannelRegistryEntry` + `OrgAccessIndex`),
-  identifies undefined semantics (state derivation rules, node/trace-key meaning, action targets),
-  and lists open questions to answer before building. Remaining: answers to the open questions
-  + implementation plan.
+  Merged to main as PR #72 (28da1a6).
+- ✅ Channel Registry Phase 1 wiring — on `feat/registry-phase1`: the Registry
+  table is wired to `GET /channels` (replacing the `REGISTRY_ROWS` mock). All
+  display fields derived client-side from the API response (avatar, CMS badge,
+  source label, state per Option A, trace key). Active-channel and outside-CMS
+  tile counts derived from response. Extracted to `views/RegistryView.tsx`; 16
+  new Vitest tests. All six dashboard pages are now off mock data. Write paths
+  (Map/Assign/company reassignment) remain Phase 2.
 - ⏳ Google source-reported revenue ingestion foundation: `currencies`
   reference table, tenant-scoped `google_revenue_source_rows` with idempotent
   source-row keys (full 64-char SHA-256 hex), storage repository, synthetic-
