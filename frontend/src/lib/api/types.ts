@@ -723,3 +723,41 @@ export type ChannelRegistryEntry = {
   revenue_source_status: string;
   active: boolean;
 };
+
+// ============================================================================
+// Purpose: TypeScript mirror of the backend GET /org-units JSON contract used by
+//   the Registry view to resolve Company/Sector names from the org-unit ids
+//   already carried on ChannelRegistryEntry. `primary_company_id` IS the
+//   org-unit UUID, so a name is a direct id lookup; `parent_id` walks one hop
+//   up (COMPANY -> SECTOR) for the Sector column.
+// Standards: Read-only typed boundary at the API surface; no logic here.
+// Connections:
+//   - File: backend/ums_smart_revenue/org/org_units_read.py
+//       OrgUnitEntry.to_api() -> GET /org-units item
+//   - File: backend/ums_smart_revenue/api/org_units.py -> GET /org-units
+// ============================================================================
+
+// GET /org-units item. Source: OrgUnitEntry.to_api() (org/org_units_read.py).
+export type OrgUnit = {
+  id: string;
+  parent_id: string | null;
+  // org_units.type: "HOLDING" | "SECTOR" | "COMPANY"
+  type: string;
+  name: string;
+  active: boolean;
+};
+
+// PATCH /channels/{id}/mapping response. The route returns the updated mapping
+// plus the audit event it recorded; the view only needs the audit_event for the
+// success confirmation, so the rest stays an opaque record.
+export type ChannelMappingResponse = Record<string, unknown> & {
+  audit_event: Record<string, unknown>;
+};
+
+// POST /revenue/channel-account-links (propose) response. Returns the created
+// UNVERIFIED link row plus the audit event; both are opaque records the view
+// surfaces as a "proposed" confirmation rather than parsing field-by-field.
+export type AccountLinkProposalResponse = {
+  link: Record<string, unknown>;
+  audit_event: Record<string, unknown>;
+};
