@@ -27,7 +27,7 @@ from ums_smart_revenue.finance.deduction_policy import NET_APPLICABLE_COMPONENT_
 
 MANUAL_ALLOCATION_METHOD = "manual"
 _BASIS_SOURCE_KIND = "MANUAL"
-_SCALE = Decimal("0.000001")  # 6dp, matches deduction_components.amount_usd
+MANUAL_AMOUNT_SCALE = Decimal("0.000001")  # 6dp, matches deduction_components.amount_usd
 
 
 @dataclass(frozen=True)
@@ -108,7 +108,7 @@ def build_manual_account_allocation(
         # schema-valid but out-of-range magnitude (e.g. "1e1000"), escaping the
         # typed-error chain as a 500; catch it and fail closed as 422.
         try:
-            quantized = line.amount_usd.quantize(_SCALE)
+            quantized = line.amount_usd.quantize(MANUAL_AMOUNT_SCALE)
         except InvalidOperation as exc:
             raise AllocationValidationError(
                 f"manual line amount for channel {line.youtube_channel_id} "
@@ -177,7 +177,7 @@ def _build_lines(
             basis_source_kind=_BASIS_SOURCE_KIND,
             basis_amount_usd=line.amount_usd,
             basis_share=(
-                (line.amount_usd / component.amount_usd).quantize(_SCALE)
+                (line.amount_usd / component.amount_usd).quantize(MANUAL_AMOUNT_SCALE)
                 if component.amount_usd != 0
                 else Decimal("0")
             ),

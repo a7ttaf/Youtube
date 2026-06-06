@@ -10,7 +10,7 @@ live) via resolve_month_account_allocation.
 import hashlib
 import json
 from collections.abc import Sequence
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
@@ -56,7 +56,10 @@ from ums_smart_revenue.finance.decimal_formatting import decimal_to_api
 from ums_smart_revenue.finance.deduction_ingestion import (
     SqlAlchemyDeductionComponentRepository,
 )
-from ums_smart_revenue.finance.manual_allocation import ManualAllocationInput
+from ums_smart_revenue.finance.manual_allocation import (
+    MANUAL_AMOUNT_SCALE,
+    ManualAllocationInput,
+)
 from ums_smart_revenue.finance.revenue_facts import SqlAlchemyRevenueFactRepository
 
 router = APIRouter(prefix="/revenue", tags=["account-allocations"])
@@ -118,6 +121,17 @@ class CommitAllocationResponse(BaseModel):
     audit_event: dict[str, object] | None
 
 
+def _canonical_amount_text(amount: Decimal) -> str:
+    """Fixed-point 6dp text so numerically-equal amounts share one digest."""
+    try:
+        return format(amount.quantize(MANUAL_AMOUNT_SCALE), "f")
+    except InvalidOperation:
+        # Out-of-range magnitudes can never commit (the builder fail-closes 422
+        # downstream); raw text keeps the digest deterministic without raising
+        # at fingerprint time.
+        return str(amount)
+
+
 # ============================================================================
 # Purpose: Stable digest of the client-controlled commit request (month is the
 #   lookup scope, not part of the digest). The manual_lines payload is folded in
@@ -125,8 +139,8 @@ class CommitAllocationResponse(BaseModel):
 #   form for non-manual requests — otherwise a manual retry with the same key but
 #   a different split would silently replay instead of conflicting (409).
 # Database/ORM: None.
-# Standards: deterministic JSON (sort_keys + per-line sort); Decimal serialized
-#   via str() for an exact, locale-free representation.
+# Standards: deterministic JSON (sort_keys + per-line sort); amounts canonicalized
+#   to fixed-point 6dp text so numerically-equal Decimals share one digest.
 # Blast Radius: Idempotency correctness only. No persistence, no auth, no Neo4j.
 # ============================================================================
 def commit_request_fingerprint(
@@ -141,12 +155,16 @@ def commit_request_fingerprint(
         "reason": reason,
     }
     if manual_lines is not None:
+        # FIX: serialize the amount as canonical fixed-point 6dp text, not raw
+        # str(); a textual digest treated numerically-equal retries ("100.00"
+        # vs "100") as a fingerprint mismatch and returned 409 instead of the
+        # intended idempotent replay (200).
         canonical["manual_lines"] = sorted(
             (
                 {
                     "component_key": line.component_key,
                     "youtube_channel_id": line.youtube_channel_id,
-                    "amount_usd": str(line.amount_usd),
+                    "amount_usd": _canonical_amount_text(line.amount_usd),
                 }
                 for line in manual_lines
             ),
