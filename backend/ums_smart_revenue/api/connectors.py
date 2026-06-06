@@ -287,7 +287,10 @@ def _require_connector_permission(
 
 
 def _raise_missing_connector_permission(permission: Permission) -> None:
-    """Raise 403 for a missing connector permission; always raises, never returns."""
+    """Raise 403 for a missing connector permission; always raises, never returns.
+
+    :raises HTTPException: HTTP 403 with the permission name in the detail field.
+    """
     raise HTTPException(
         status_code=status.HTTP_403_FORBIDDEN,
         detail=f"Missing permission: {permission.value}",

@@ -52,7 +52,7 @@ Returns a flat list of `ChannelRegistryEntry.to_api()` objects. Response shape p
   "cms_status": "INSIDE_CMS",
   "content_owner_id": "ams/content-owner-1",
   "revenue_required": true,
-  "revenue_source_status": "YOUTUBE_REPORTING_API",
+  "revenue_source_status": "OFFICIAL_CMS_REVENUE",
   "active": true
 }
 ```
@@ -77,7 +77,7 @@ Audited with reason. Note: the endpoint does not currently enforce month-lock; a
 ### `POST /channels`
 
 Creates a new channel registration. Requires `MANAGE_CHANNELS@company(primary_company_id)` (company-scoped, not global — `AccessScope.company(payload.primary_company_id)`).
-Fields: `youtube_channel_id`, `channel_name`, `primary_company_id`.
+Fields (all required, no defaults): `youtube_channel_id`, `channel_name`, `primary_company_id`, `cms_status`, `revenue_required` — per `ChannelCreateRequest` in `backend/ums_smart_revenue/api/channels.py`.
 
 ### Org hierarchy (`OrgAccessIndex`, `OrgUnitORM`)
 
@@ -121,13 +121,16 @@ The `node` / trace-key, `state`, and `action` fields have **no backend equivalen
 
 Based on the backend enum values used in `channel_issues.py` and `channels.py`:
 
-| `revenue_source_status` | Mock label equivalent |
+| `revenue_source_status` | Suggested UI label |
 |---|---|
-| `YOUTUBE_REPORTING_API` | "YouTube Reporting API" |
-| `YOUTUBE_ANALYTICS_API` | "YouTube Analytics API" |
+| `OFFICIAL_CMS_REVENUE` | "Official CMS Revenue" |
 | `OFFICIAL_MANUAL_IMPORT` | "Uploaded owner statement" |
+| `ALLOCATED_FROM_PAYMENT_POOL` | "Allocated from payment pool" |
 | `MISSING_REVENUE_SOURCE` | "Not linked" |
 | `PERFORMANCE_ONLY` | "Performance only (no revenue)" |
+
+DB CHECK constraint (`org_models.py` lines 128-133) admits exactly these five values.
+`YOUTUBE_REPORTING_API` and `YOUTUBE_ANALYTICS_API` are not valid enum values.
 
 ---
 
@@ -144,7 +147,7 @@ The mock shows: `"Approved"` (green), `"Evidence due"` (amber), `"Export block"`
 **Option A — Derived from existing fields (no new DB column)**
 Define the state as a function of existing fields:
 - `"Export block"` → `revenue_required = true AND revenue_source_status = MISSING_REVENUE_SOURCE`
-- `"Evidence due"` → `cms_status = OUTSIDE_CMS AND content_owner_id IS NULL` (no verified account link)
+- `"Evidence due"` → `cms_status = OUTSIDE_CMS AND content_owner_id IS NULL` (quick heuristic — note: `content_owner_id` is a denormalized column; authoritative verified links live in `adsense_content_owner_links` + `content_owner_channel_links` tables via `finance/channel_account_links.py`)
 - `"Approved"` → everything else (has a revenue source, CMS status resolved)
 
 This is purely computed — no migration, no new table. The rules can live in the frontend or in a new API field.
@@ -163,11 +166,11 @@ operator-controlled workflow states (useful if "Approved" means "a human signed 
 The mock shows: `"Map"`, `"Assign"`, `"Review"`. These look like contextual actions tied to the row's `state`.
 
 Proposed derivation:
-- `"Map"` → channel is `UNMAPPED` or has no `primary_company_id` → opens a company-assignment modal (calls `PATCH /channels/{id}/mapping`)
-- `"Assign"` → channel is `OUTSIDE_CMS` without `content_owner_id` → opens an account-assignment modal (no backend route yet)
+- `"Map"` → channel has no `primary_company_id` → opens a company-assignment modal (calls `PATCH /channels/{id}/mapping`). Authorization caveat: `OrgAccessIndex.channel_company` skips channels without a company, so company-scoped users will receive 403 when trying to remap an unmapped channel. Global-scope `MANAGE_ORG_MAPPING` is required for this flow.
+- `"Assign"` → channel is `OUTSIDE_CMS` without a verified account link → opens an account-assignment modal. The shipped proposal route is `POST /revenue/channel-account-links` (`backend/ums_smart_revenue/api/channel_account_links.py`). Note: `POST /revenue/channels/{id}/account-allocations/propose` does not exist.
 - `"Review"` → channel is in an `"Approved"` or normal state → navigates to channel detail / trace view
 
-**Question for you:** What does "Assign" open? Does it assign a content owner (AdSense account)? Is there a backend route for this, or is it the same as the channel↔account map from Spec 2b (`POST /revenue/channels/{id}/account-allocations/propose`)?
+**Question for you:** What does "Assign" open? Does it assign a content owner (AdSense account)? Is it the `POST /revenue/channel-account-links` route from Spec 2b, or something else?
 
 ### 5c. `node` — Trace-key
 
@@ -198,7 +201,7 @@ If we build a single enriched endpoint for the Registry table (e.g., `GET /chann
 
 **Alternative:** No new endpoint. The frontend calls `GET /channels` (already live) and enriches
 client-side using the existing `canManageRegistry` capabilities. Company/sector names require a
-separate `GET /org-units` call (or they're already available in the SPA from session or a prior fetch).
+separate org-unit name lookup (no `GET /org-units` route is shipped — a registry-view endpoint must resolve company/sector names via a direct `OrgUnitORM` query, or the SPA must have them from a prior authenticated session context).
 
 ---
 
