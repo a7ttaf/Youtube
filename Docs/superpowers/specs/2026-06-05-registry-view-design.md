@@ -71,7 +71,7 @@ Returns per-channel issue list (scoped same as `GET /channels`). Each issue has 
 
 ### `PATCH /channels/{youtube_channel_id}/mapping`
 
-Changes `primary_company_id` for a channel. Requires `MANAGE_ORG_MAPPING@channel` + `MANAGE_ORG_MAPPING@company(target)`.
+Changes `primary_company_id` for a channel. Requires `MANAGE_ORG_MAPPING` on the channel AND `MANAGE_ORG_MAPPING` on the target company. The channel-side check is called with `AccessScope.channel(id)` but resolved through `org_index`, so a `MANAGE_ORG_MAPPING@company(X)` grant also satisfies it if the channel belongs to company X. Scoped note: this is NOT the same as `@channel` alone — the org-index expansion makes company/sector grants valid for the source side.
 Audited with reason. Note: the endpoint does not currently enforce month-lock; a Finance Admin override path is not yet implemented.
 
 ### `POST /channels`
@@ -95,9 +95,9 @@ Fields (all required, no defaults): `youtube_channel_id`, `channel_name`, `prima
 | `MANAGE_CHANNELS` | Create channels, manage the registry |
 | `MANAGE_ORG_MAPPING` | Reassign channel → company mappings |
 | `MANAGE_GROUPS` | Manage channel groups |
-| `VIEW_REVENUE` | See channel list |
+| `VIEW_ANALYTICS` | See channel list (live gate — `_require_analytics_view_permission`) |
 
-`canManageRegistry` in the SPA = `MANAGE_CHANNELS OR MANAGE_ORG_MAPPING OR MANAGE_GROUPS`.
+`canManageRegistry` in the SPA = `MANAGE_CHANNELS OR MANAGE_ORG_MAPPING OR MANAGE_GROUPS` — **global-scope only** (checked via `AccessScope.global_scope()` in `api/session.py`). Scoped mapping stewards (e.g., `MANAGE_ORG_MAPPING@company(X)`) can call `PATCH /channels/{id}/mapping` directly but will be treated as read-only by the SPA. A future Registry build should use backend row/scope checks instead of relying solely on this session capability.
 
 ---
 
@@ -192,7 +192,7 @@ dependency. The trace-key's value in the UI is:
 If we build a single enriched endpoint for the Registry table (e.g., `GET /channels/registry-view`), it needs to:
 
 1. **Return channel list** — same as `GET /channels` but with org-level enrichment
-2. **Join company + sector names** — resolve `primary_company_id` → `{company_name, sector_name}` via `OrgAccessIndex`
+2. **Join company + sector names** — resolve `primary_company_id` → `{company_name, sector_name}` via a separate `OrgUnitORM` query (NOT `OrgAccessIndex` — that has ID-to-ID maps only; names are discarded after index build)
 3. **Derive `cms` badge** — from `cms_status` enum
 4. **Derive `source` label** — from `revenue_source_status` enum
 5. **Derive `state` + `action`** — depends on Section 5a decision
