@@ -83,7 +83,9 @@ def current_connector_repository(
 @router.get("/credentials")
 def list_connector_credentials(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyConnectorCredentialRepository, Depends(current_connector_repository)],
+    repository: Annotated[
+        SqlAlchemyConnectorCredentialRepository, Depends(current_connector_repository)
+    ],
     limit: Annotated[int, Query(ge=1, le=MAX_CREDENTIAL_PAGE_SIZE)] = 50,
     offset: Annotated[int, Query(ge=0)] = 0,
 ) -> dict[str, object]:
@@ -111,7 +113,9 @@ def list_connector_credentials(
 def create_connector_credential(
     payload: ConnectorCredentialCreateRequest,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
-    repository: Annotated[SqlAlchemyConnectorCredentialRepository, Depends(current_connector_repository)],
+    repository: Annotated[
+        SqlAlchemyConnectorCredentialRepository, Depends(current_connector_repository)
+    ],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     """Register a new connector credential reference for the given connector and account."""
@@ -130,9 +134,14 @@ def create_connector_credential(
             actor_user_id=user.user_id,
         )
     except ConnectorCredentialValidationError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
     except ConnectorCredentialConflictError as exc:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Connector credential already exists") from exc
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Connector credential already exists",
+        ) from exc
 
     record = _audit_connector_change(
         audit_sink=audit_sink,
@@ -269,7 +278,9 @@ def test_connector_connection(
     }
 
 
-def _require_connector_permission(user: UserPrincipal, permission: Permission, scope: AccessScope) -> None:
+def _require_connector_permission(
+    user: UserPrincipal, permission: Permission, scope: AccessScope
+) -> None:
     """Raise 403 if the user lacks the given permission at the connector scope."""
     if not has_permission(user, permission, scope):
         _raise_missing_connector_permission(permission)
