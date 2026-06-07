@@ -75,6 +75,8 @@ class ConnectorRunPage:
 
 
 class ConnectorRunError(ValueError):
+"""Repository for connector run operations: starting runs, linking raw report files, and finishing runs with counts and error summaries."""
+
     """Base validation error for connector run history operations."""
 
 
@@ -109,6 +111,7 @@ def start_run(
     report_month: str,
     triggered_by_user_id: UUID | None,
 ) -> ConnectorRunEntry:
+    """Start a connector run in the RUNNING state for the given tenant, report month, and account. Creates and returns a new ConnectorRunEntry."""
     validate_report_month(report_month)
     row = ConnectorRunORM(
         id=uuid4(),
@@ -145,6 +148,7 @@ def link_raw_file(
     raw_report_file_id: UUID,
     ordering_index: int,
 ) -> None:
+    """Link a persisted raw report file to an existing connector run with specified ordering. Raises ConnectorRunLinkConflictError if already linked."""
     _validate_ordering_index(ordering_index)
     _get_run(session, tenant_id=tenant_id, connector_run_id=connector_run_id)
     _get_raw_file(session, tenant_id=tenant_id, raw_report_file_id=raw_report_file_id)
@@ -184,6 +188,7 @@ def finish_run(
     counts: dict[str, int],
     error_summary: str | None,
 ) -> ConnectorRunEntry:
+    """Finish a running connector run by transitioning it to a terminal status, persisting counts and optional error summary. Returns the updated ConnectorRunEntry."""
     normalized_status = _validate_terminal_status(status)
     normalized_counts = _validate_counts(counts)
     row = _get_run(
@@ -292,73 +297,78 @@ def _parse_cursor_uuid(value: str) -> UUID:
     try:
         return UUID(value)
     except ValueError as exc:
+"""Utilities for connector run repository: fetching runs and raw files, validating inputs, and converting ORM rows to entries."""
+
         raise ConnectorRunValidationError("cursor_id must be a valid UUID") from exc
 
 
-def _next_cursor(items: list[ConnectorRunEntry]) -> dict[str, str] | None:
-    """Build the next-page cursor from the last item in a non-empty page."""
-    if not items:
-        return None
-    last_item = items[-1]
-    return {
-        "started_at": last_item.started_at.isoformat(),
-        "id": last_item.id,
-    }
+ def _next_cursor(items: list[ConnectorRunEntry]) -> dict[str, str] | None:
+     """Build the next-page cursor from the last item in a non-empty page."""
+     if not items:
+         return None
+     last_item = items[-1]
+     return {
+         "started_at": last_item.started_at.isoformat(),
+         "id": last_item.id,
+     }
 
 
-# ============================================================================
-# Purpose: Fetch a tenant-scoped connector run, optionally locking it for the
-#          terminal status transition.
-# Database/ORM: ConnectorRunORM.
-# Standards: Tenant filter always applied; with_for_update protects
-#            finish_run from double terminal writes where the DB supports it.
-# Blast Radius: Connector run lifecycle only. Finance facts untouched.
-# Connections:
-#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
-#     Calls finish_run from success, partial, and failure paths.
-# ============================================================================
-def _get_run(
-    session: Session,
-    *,
-    tenant_id: UUID,
-    connector_run_id: UUID,
-    for_update: bool = False,
-) -> ConnectorRunORM:
-    stmt = select(ConnectorRunORM).where(
-        ConnectorRunORM.tenant_id == tenant_id,
-        ConnectorRunORM.id == connector_run_id,
-    )
-    if for_update:
-        stmt = stmt.with_for_update()
-    row = session.scalars(stmt).one_or_none()
-    if row is None:
-        raise ConnectorRunNotFoundError("Connector run not found")
-    return row
+ # ============================================================================
+ # Purpose: Fetch a tenant-scoped connector run, optionally locking it for the
+ #          terminal status transition.
+ # Database/ORM: ConnectorRunORM.
+ # Standards: Tenant filter always applied; with_for_update protects
+ #            finish_run from double terminal writes where the DB supports it.
+ # Blast Radius: Connector run lifecycle only. Finance facts untouched.
+ # Connections:
+ #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+ #     Calls finish_run from success, partial, and failure paths.
+ # ============================================================================
+ def _get_run(
+     session: Session,
+     *,
+     tenant_id: UUID,
+     connector_run_id: UUID,
+     for_update: bool = False,
+ ) -> ConnectorRunORM:
+     """Fetch a tenant-scoped connector run with optional locking for terminal status transition."""
+     stmt = select(ConnectorRunORM).where(
+         ConnectorRunORM.tenant_id == tenant_id,
+         ConnectorRunORM.id == connector_run_id,
+     )
+     if for_update:
+         stmt = stmt.with_for_update()
+     row = session.scalars(stmt).one_or_none()
+     if row is None:
+         raise ConnectorRunNotFoundError("Connector run not found")
+     return row
 
 
-# ============================================================================
-# Purpose: Validate deterministic raw-file ordering before join-row insert.
-# Database/ORM: ConnectorRunRawFileORM.
-# Standards: Reject bools, non-integers, and negative indexes fail closed.
-# Blast Radius: Connector run evidence ordering only. Finance facts untouched.
-# Connections:
-#   - File: backend/ums_smart_revenue/db/connector_models.py ->
-#     ConnectorRunRawFileORM.ordering_index.
-# ============================================================================
-def _validate_ordering_index(ordering_index: int) -> None:
-    if (
-        isinstance(ordering_index, bool)
-        or not isinstance(ordering_index, int)
-        or ordering_index < 0
-    ):
-        raise ConnectorRunValidationError(
-            "ordering_index must be a non-negative integer"
-        )
+ # ============================================================================
+ # Purpose: Validate deterministic raw-file ordering before join-row insert.
+ # Database/ORM: ConnectorRunRawFileORM.
+ # Standards: Reject bools, non-integers, and negative indexes fail closed.
+ # Blast Radius: Connector run evidence ordering only. Finance facts untouched.
+ # Connections:
+ #   - File: backend/ums_smart_revenue/db/connector_models.py ->
+ #     ConnectorRunRawFileORM.ordering_index.
+ # ============================================================================
+ def _validate_ordering_index(ordering_index: int) -> None:
+     """Validate that the ordering_index is a non-negative integer and not a boolean."""
+     if (
+         isinstance(ordering_index, bool)
+         or not isinstance(ordering_index, int)
+         or ordering_index < 0
+     ):
+         raise ConnectorRunValidationError(
+             "ordering_index must be a non-negative integer"
+         )
 
 
 def _get_raw_file(
     session: Session, *, tenant_id: UUID, raw_report_file_id: UUID
 ) -> RawReportFileORM:
+    """Retrieve a raw report file scoped to a tenant or raise if not found."""
     row = session.scalars(
         select(RawReportFileORM).where(
             RawReportFileORM.tenant_id == tenant_id,
@@ -370,30 +380,33 @@ def _get_raw_file(
     return row
 
 
-# ============================================================================
-# Purpose: Validate the connector run month before any run-row write or
-#          orchestrator dispatch.
-# Database/ORM: None.
-# Standards: ASCII-only YYYY-MM guard shared by the repository and orchestrator.
-# Blast Radius: Connector run identity only; finance, audit, Neo4j, and exports
-#               are unaffected until a valid month reaches ingestion.
-# Connections:
-#   - Function: start_run -> validates before inserting ConnectorRunORM.
-#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
-#     validates dry-run and live-run inputs before credential/network work.
-# ============================================================================
-def validate_report_month(report_month: str) -> None:
-    if not MONTH_PATTERN.fullmatch(report_month):
-        raise ConnectorRunValidationError(
-            "report_month must use YYYY-MM with a calendar month from 01 to 12"
-        )
+ # ============================================================================
+ # Purpose: Validate the connector run month before any run-row write or
+ #          orchestrator dispatch.
+ # Database/ORM: None.
+ # Standards: ASCII-only YYYY-MM guard shared by the repository and orchestrator.
+ # Blast Radius: Connector run identity only; finance, audit, Neo4j, and exports
+ #               are unaffected until a valid month reaches ingestion.
+ # Connections:
+ #   - Function: start_run -> validates before inserting ConnectorRunORM.
+ #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+ #     validates dry-run and live-run inputs before credential/network work.
+ # ============================================================================
+ def validate_report_month(report_month: str) -> None:
+     """Ensure report_month matches YYYY-MM format with a valid calendar month."""
+     if not MONTH_PATTERN.fullmatch(report_month):
+         raise ConnectorRunValidationError(
+             "report_month must use YYYY-MM with a calendar month from 01 to 12"
+         )
 
 
 def _validate_month(report_month: str) -> None:
+    """Delegate to validate_report_month to check YYYY-MM format."""
     validate_report_month(report_month)
 
 
 def _required_text(value: str, field_name: str) -> str:
+    """Trim whitespace and ensure a required text field is not blank, else raise."""
     normalized = value.strip()
     if not normalized:
         raise ConnectorRunValidationError(f"{field_name} must not be blank")
@@ -401,6 +414,7 @@ def _required_text(value: str, field_name: str) -> str:
 
 
 def _validate_terminal_status(status: str) -> str:
+    """Ensure status is one of the allowed terminal statuses and return it."""
     if status not in TERMINAL_STATUSES:
         raise ConnectorRunValidationError(
             "connector run status must be terminal: SUCCEEDED, PARTIAL, or FAILED"
@@ -409,6 +423,7 @@ def _validate_terminal_status(status: str) -> str:
 
 
 def _validate_counts(counts: dict[str, int]) -> dict[str, int]:
+    """Validate counts dict contains expected keys with non-negative integer values and return it."""
     expected = set(CONNECTOR_RUN_COUNT_KEYS)
     actual = set(counts)
     if actual != expected:
@@ -427,10 +442,12 @@ def _validate_counts(counts: dict[str, int]) -> dict[str, int]:
 
 
 def _zero_counts() -> dict[str, int]:
+    """Generate a counts dict with all connector run count keys initialized to zero."""
     return dict.fromkeys(CONNECTOR_RUN_COUNT_KEYS, 0)
 
 
 def _to_entry(row: ConnectorRunORM) -> ConnectorRunEntry:
+    """Convert a ConnectorRunORM row into a ConnectorRunEntry dataclass for API responses."""
     return ConnectorRunEntry(
         id=str(row.id),
         tenant_id=str(row.tenant_id),
