@@ -517,6 +517,25 @@ def test_list_runs_connector_key_filter(session: Session) -> None:
     assert [item.id for item in page.items] == [str(yt.id)]
 
 
+def test_list_runs_connector_keys_filter(session: Session) -> None:
+    """Connector-key set filtering returns only the allowed connector runs."""
+    base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
+    yt = _seed_run(session, connector_key="youtube-reporting", started_at=base)
+    adsense = _seed_run(
+        session, connector_key="adsense", started_at=base.replace(hour=13)
+    )
+    _seed_run(session, connector_key="news", started_at=base.replace(hour=14))
+
+    page = list_runs(
+        session,
+        tenant_id=TENANT_ID,
+        connector_keys={"youtube-reporting", "adsense"},
+        limit=10,
+    )
+
+    assert [item.id for item in page.items] == [str(adsense.id), str(yt.id)]
+
+
 def test_list_runs_account_id_filter(session: Session) -> None:
     """Account-id filtering returns only rows for the requested account."""
     base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)

@@ -528,7 +528,7 @@ def test_list_runs_returns_envelope_and_item_shape(tmp_path):
 
 
 def test_list_runs_allows_connector_scoped_health_access(tmp_path):
-    """connector-scoped connector_admin still gets the run-history envelope."""
+    """connector-scoped connector_admin gets only the permitted connector runs."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     seed_runs(database_url)
@@ -541,7 +541,27 @@ def test_list_runs_allows_connector_scoped_health_access(tmp_path):
 
     assert response.status_code == 200
     body = response.json()
-    assert body["pagination"]["returned"] == 3
+    assert body["pagination"]["returned"] == 2
+    assert {item["connector_key"] for item in body["items"]} == {
+        "youtube-reporting"
+    }
+
+
+def test_list_runs_rejects_connector_outside_scoped_health_access(tmp_path):
+    """Connector-scoped connector_admin cannot request another connector's runs."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_runs(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/runs",
+        headers=auth_headers("connector_admin", "connector", "youtube_reporting"),
+        params={"connector_key": "adsense"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: connectors.view_health"
 
 
 def test_list_runs_forbidden_without_view_connector_health(tmp_path):

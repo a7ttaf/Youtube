@@ -14,7 +14,10 @@ from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
-from ums_smart_revenue.auth.policy import has_permission
+from ums_smart_revenue.auth.policy import (
+    connector_health_connector_ids,
+    has_permission,
+)
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.connectors.credentials import (
     MAX_CREDENTIAL_PAGE_SIZE,
@@ -151,7 +154,8 @@ def list_connector_runs(
     # Purpose: Surface read-only connector run history for the dashboard, with
     #   optional connector/account filters and a both-or-neither keyset cursor.
     #   Fail-closed behind VIEW_CONNECTOR_HEALTH at global or connector scope;
-    #   no audit emission (operational metadata read, mirrors the
+    #   connector-scoped callers are narrowed to their granted connector IDs.
+    #   No audit emission (operational metadata read, mirrors the
     #   credential-list route).
     # Database/ORM: ConnectorRunORM via connectors.runs.repository.list_runs
     #   (read only).
@@ -164,21 +168,32 @@ def list_connector_runs(
     #     list_runs.
     #   - File: backend/ums_smart_revenue/api/audit.py -> mirrored envelope.
     # ========================================================================
-    _require_connector_health(user)
+    allowed_connector_ids = connector_health_connector_ids(user)
+    _require_connector_health(user, allowed_connector_ids)
 
     # FIX: Mirror the test-connection route's tenant resolution so a truthy but
     # non-UUID tenant_id falls back to the bootstrap tenant instead of raising a
     # raw ValueError that would surface as an unhandled 500.
     try:
-        page = list_runs(
-            session,
-            tenant_id=_resolve_tenant_uuid(user),
-            connector_key=connector_key,
-            account_id=account_id,
-            cursor_started_at=cursor_started_at,
-            cursor_id=cursor_id,
-            limit=limit,
-        )
+        list_runs_kwargs: dict[str, object] = {
+            "session": session,
+            "tenant_id": _resolve_tenant_uuid(user),
+            "account_id": account_id,
+            "cursor_started_at": cursor_started_at,
+            "cursor_id": cursor_id,
+            "limit": limit,
+        }
+        if allowed_connector_ids is None:
+            list_runs_kwargs["connector_key"] = connector_key
+        elif connector_key is not None:
+            if connector_key not in allowed_connector_ids:
+                _raise_missing_connector_permission(
+                    Permission.VIEW_CONNECTOR_HEALTH
+                )
+            list_runs_kwargs["connector_key"] = connector_key
+        else:
+            list_runs_kwargs["connector_keys"] = allowed_connector_ids
+        page = list_runs(**list_runs_kwargs)
     except ConnectorRunValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -380,44 +395,21 @@ def _require_connector_permission(
         _raise_missing_connector_permission(permission)
 
 
-def _require_connector_health(user: UserPrincipal) -> None:
-    """Raise 403 unless the user holds VIEW_CONNECTOR_HEALTH at any allowed scope."""
-    if not _has_any_connector_health_access(user):
-        _raise_missing_connector_permission(Permission.VIEW_CONNECTOR_HEALTH)
+def _require_connector_health(
+    user: UserPrincipal,
+    allowed_connector_ids: frozenset[str] | None = None,
+) -> None:
+    """Raise 403 unless the user holds VIEW_CONNECTOR_HEALTH at any allowed scope.
 
-
-def _has_any_connector_health_access(user: UserPrincipal) -> bool:
-    """Return True when the user has VIEW_CONNECTOR_HEALTH at global or connector scope."""
-    if has_permission(
-        user, Permission.VIEW_CONNECTOR_HEALTH, AccessScope.global_scope()
-    ):
-        return True
-    for grant in user.direct_permissions:
-        if (
-            grant.active
-            and grant.permission == Permission.VIEW_CONNECTOR_HEALTH
-            and grant.scope.type.value == "connector"
-            and grant.scope.id
-            and has_permission(
-                user,
-                Permission.VIEW_CONNECTOR_HEALTH,
-                AccessScope.connector(grant.scope.id),
-            )
-        ):
-            return True
-    for assignment in user.role_assignments:
-        if (
-            assignment.active
-            and assignment.scope.type.value == "connector"
-            and assignment.scope.id
-            and has_permission(
-                user,
-                Permission.VIEW_CONNECTOR_HEALTH,
-                AccessScope.connector(assignment.scope.id),
-            )
-        ):
-            return True
-    return False
+    Raises:
+        HTTPException: If the caller has neither global nor connector-scoped
+            VIEW_CONNECTOR_HEALTH access.
+    """
+    if allowed_connector_ids is None:
+        return
+    if allowed_connector_ids:
+        return
+    _raise_missing_connector_permission(Permission.VIEW_CONNECTOR_HEALTH)
 
 
 def _raise_missing_connector_permission(permission: Permission) -> None:

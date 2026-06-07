@@ -1,6 +1,7 @@
 """Repository helpers for tenant-scoped connector run history."""
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
@@ -223,8 +224,9 @@ def finish_run(
 # ============================================================================
 # ============================================================================
 # Purpose: List tenant-scoped connector run history, newest-first, with
-#          optional connector_key/account_id filters and (started_at, id)
-#          cursor pagination. Read-only: never mutates run state.
+#          optional connector_key/connectors/account_id filters and
+#          (started_at, id) cursor pagination. Read-only: never mutates run
+#          state.
 # Database/ORM: ConnectorRunORM (read only).
 # Standards: Tenant filter always applied; both-or-neither cursor and limit
 #            bounds raise ConnectorRunValidationError (translated to 422 at the
@@ -239,6 +241,7 @@ def list_runs(
     *,
     tenant_id: UUID,
     connector_key: str | None = None,
+    connector_keys: Iterable[str] | None = None,
     account_id: str | None = None,
     cursor_started_at: datetime | None = None,
     cursor_id: str | None = None,
@@ -266,6 +269,12 @@ def list_runs(
     )
     if connector_key is not None:
         stmt = stmt.where(ConnectorRunORM.connector_key == connector_key)
+    if connector_keys is not None:
+        connector_key_values = tuple(connector_keys)
+        if connector_key_values:
+            stmt = stmt.where(ConnectorRunORM.connector_key.in_(connector_key_values))
+        else:
+            return ConnectorRunPage(items=[], limit=limit, next_cursor=None)
     if account_id is not None:
         stmt = stmt.where(ConnectorRunORM.account_id == account_id)
     if cursor_started_at is not None and cursor_id is not None:
