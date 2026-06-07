@@ -296,20 +296,19 @@ def _parse_cursor_uuid(value: str) -> UUID:
     try:
         return UUID(value)
     except ValueError as exc:
-"""Utilities for connector run repository: fetching runs and raw files, validating inputs, and converting ORM rows to entries."""
-
+        """Utilities for connector run repository: fetching runs and raw files, validating inputs, and converting ORM rows to entries."""
         raise ConnectorRunValidationError("cursor_id must be a valid UUID") from exc
 
 
- def _next_cursor(items: list[ConnectorRunEntry]) -> dict[str, str] | None:
-     """Build the next-page cursor from the last item in a non-empty page."""
-     if not items:
-         return None
-     last_item = items[-1]
-     return {
-         "started_at": last_item.started_at.isoformat(),
-         "id": last_item.id,
-     }
+def _next_cursor(items: list[ConnectorRunEntry]) -> dict[str, str] | None:
+    """Build the next-page cursor from the last item in a non-empty page."""
+    if not items:
+        return None
+    last_item = items[-1]
+    return {
+        "started_at": last_item.started_at.isoformat(),
+        "id": last_item.id,
+    }
 
 
  # ============================================================================

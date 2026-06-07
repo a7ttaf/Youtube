@@ -72,9 +72,7 @@ def test_raw_report_file_has_tenant_id_composite_unique_for_b2_3_fk() -> None:
 
 
 def test_connector_run_raw_file_constraints_and_indexes_match_contract() -> None:
-    """
-    Validate constraints and indexes on connector_run_raw_files table per contract.
-    """
+    """Validate constraints and indexes on connector_run_raw_files table per contract."""
     constraints = {c.name for c in ConnectorRunRawFileORM.__table__.constraints}
     indexes = {i.name for i in ConnectorRunRawFileORM.__table__.indexes}
 
@@ -126,9 +124,7 @@ def test_start_run_accepts_null_triggered_by_user_id(session: Session) -> None:
 def test_start_run_rejects_malformed_report_month(
     session: Session, month: str
 ) -> None:
-    """
-    Check that start_run raises validation error for malformed report_month formats.
-    """
+    """Check that start_run raises validation error for malformed report_month formats."""
     with pytest.raises(ConnectorRunValidationError, match="report_month"):
         start_run(
             session,
@@ -327,9 +323,7 @@ def test_link_raw_file_rejects_invalid_ordering_index(
 def test_link_raw_file_rejects_raw_file_from_different_tenant(
     session: Session,
 ) -> None:
-    """
-    Check link_raw_file raises LookupError for raw files belonging to another tenant.
-    """
+    """Check link_raw_file raises LookupError for raw files belonging to another tenant."""
     entry = _start_default_run(session)
     raw_file = _raw_file(session, tenant_id=OTHER_TENANT_ID, report_type="rt-other")
 
