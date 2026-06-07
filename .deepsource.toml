@@ -26,7 +26,7 @@ enabled = true
 [[analyzers]]
 name = "javascript"
 enabled = true
-exclude_patterns = ["**/*.ts", "**/*.tsx"]
+exclude_patterns = ["**/*.ts", "**/*.tsx", "ci/**", "frontend/dist/**"]
 
   [analyzers.meta]
   plugins = ["react"]
