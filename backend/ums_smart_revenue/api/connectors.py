@@ -150,8 +150,9 @@ def list_connector_runs(
     # ========================================================================
     # Purpose: Surface read-only connector run history for the dashboard, with
     #   optional connector/account filters and a both-or-neither keyset cursor.
-    #   Fail-closed behind VIEW_CONNECTOR_HEALTH at global scope; no audit
-    #   emission (operational metadata read, mirrors the credential-list route).
+    #   Fail-closed behind VIEW_CONNECTOR_HEALTH at global or connector scope;
+    #   no audit emission (operational metadata read, mirrors the
+    #   credential-list route).
     # Database/ORM: ConnectorRunORM via connectors.runs.repository.list_runs
     #   (read only).
     # Standards: Boundary permission gate; typed ConnectorRunValidationError ->
@@ -380,11 +381,43 @@ def _require_connector_permission(
 
 
 def _require_connector_health(user: UserPrincipal) -> None:
-    """Raise 403 unless the user holds VIEW_CONNECTOR_HEALTH at global scope."""
-    if not has_permission(
+    """Raise 403 unless the user holds VIEW_CONNECTOR_HEALTH at any allowed scope."""
+    if not _has_any_connector_health_access(user):
+        _raise_missing_connector_permission(Permission.VIEW_CONNECTOR_HEALTH)
+
+
+def _has_any_connector_health_access(user: UserPrincipal) -> bool:
+    """Return True when the user has VIEW_CONNECTOR_HEALTH at global or connector scope."""
+    if has_permission(
         user, Permission.VIEW_CONNECTOR_HEALTH, AccessScope.global_scope()
     ):
-        _raise_missing_connector_permission(Permission.VIEW_CONNECTOR_HEALTH)
+        return True
+    for grant in user.direct_permissions:
+        if (
+            grant.active
+            and grant.permission == Permission.VIEW_CONNECTOR_HEALTH
+            and grant.scope.type.value == "connector"
+            and grant.scope.id
+            and has_permission(
+                user,
+                Permission.VIEW_CONNECTOR_HEALTH,
+                AccessScope.connector(grant.scope.id),
+            )
+        ):
+            return True
+    for assignment in user.role_assignments:
+        if (
+            assignment.active
+            and assignment.scope.type.value == "connector"
+            and assignment.scope.id
+            and has_permission(
+                user,
+                Permission.VIEW_CONNECTOR_HEALTH,
+                AccessScope.connector(assignment.scope.id),
+            )
+        ):
+            return True
+    return False
 
 
 def _raise_missing_connector_permission(permission: Permission) -> None:

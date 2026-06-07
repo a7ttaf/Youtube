@@ -86,9 +86,7 @@ def test_connector_run_raw_file_constraints_and_indexes_match_contract() -> None
 
 
 def test_start_run_inserts_running_row_with_zero_counts(session: Session) -> None:
-    """
-    Test that start_run creates a RUNNING entry with all counts initialized to zero.
-    """
+    """Start run creates a RUNNING entry with zeroed counts."""
     entry = start_run(
         session,
         tenant_id=TENANT_ID,

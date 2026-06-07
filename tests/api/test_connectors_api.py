@@ -527,6 +527,23 @@ def test_list_runs_returns_envelope_and_item_shape(tmp_path):
     assert item["report_month"] == "2026-04"
 
 
+def test_list_runs_allows_connector_scoped_health_access(tmp_path):
+    """connector-scoped connector_admin still gets the run-history envelope."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_runs(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/runs",
+        headers=auth_headers("connector_admin", "connector", "youtube_reporting"),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pagination"]["returned"] == 3
+
+
 def test_list_runs_forbidden_without_view_connector_health(tmp_path):
     """audit_viewer lacks VIEW_CONNECTOR_HEALTH and is fail-closed with 403."""
     database_url = build_database_url(tmp_path)
