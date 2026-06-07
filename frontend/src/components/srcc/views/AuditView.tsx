@@ -24,8 +24,9 @@ const AUDIT_EVENT_TYPE_OPTIONS = [
  * @returns True if the X-Truncated header equals "true", case-insensitive; otherwise false.
  */
 /** Read the CSV export truncation flag from the backend response headers. */
-const hasTruncatedExportHeader = (headers: Headers): boolean =>
-  (headers.get("X-Truncated") ?? "").toLowerCase() === "true";
+function hasTruncatedExportHeader(headers: Headers): boolean { // skipcq: JS-0067
+  return (headers.get("X-Truncated") ?? "").toLowerCase() === "true";
+}
 
 // ============================================================================
 // Purpose: The REAL-data Audit Log screen, extracted from AppShell. The timeline
@@ -211,12 +212,13 @@ function useAuditExportDownload(eventType: string) { // skipcq: JS-0067
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
 
   /** Read the current audit slice as CSV, save it, and mark truncation state. */
-  const downloadAuditCsv = async (): Promise<void> => {
+  function downloadAuditCsv(): Promise<void> {
     const url = buildAuditEventsExportUrl(eventType);
-    const { blob, headers } = await client.getBlob(url);
-    saveBlobAsFile(blob, "audit-events.csv");
-    setTruncated(hasTruncatedExportHeader(headers));
-  };
+    return client.getBlob(url).then(({ blob, headers }) => {
+      saveBlobAsFile(blob, "audit-events.csv");
+      setTruncated(hasTruncatedExportHeader(headers));
+    });
+  }
 
   /** Normalize the download failure into the shared audit-screen detail copy. */
   const describeDownloadError = (caught: unknown): string => {
