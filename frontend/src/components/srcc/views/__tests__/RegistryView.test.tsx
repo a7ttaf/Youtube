@@ -92,7 +92,7 @@ type RouteOverrides = {
 
 /** Route the registry's four endpoints; unrouted URLs fail loudly (404 + []). */
 function routeRegistry(overrides: RouteOverrides = {}) { // skipcq: JS-0067, JS-R1005
-  return (input: unknown, init?: RequestInit) => {
+  return (input: unknown, init?: RequestInit) => { // skipcq: JS-R1005
     const url = urlOf(input);
     if (url === "/channels") {
       return Promise.resolve(
