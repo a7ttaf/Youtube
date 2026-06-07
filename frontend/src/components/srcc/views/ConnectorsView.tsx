@@ -38,10 +38,10 @@ import { describeError } from "./CommandView";
 //   actions: "Request sync" (POST /connectors/jobs) and "Sync payments" (POST
 //   /adsense/sync-payments). Each connector credential row exposes a Request
 //   sync button that records — but does NOT execute — a job-run intent
-//   (execution_status "recorded_not_executed"), surfaced honestly. There is no
-//   GET connector-runs route today, so a clearly-labelled "Run history not yet
-//   available" note states the gap rather than inventing a feed. Loading /
-//   error / 403 states mirror the other wired views.
+//   (execution_status "recorded_not_executed"), surfaced honestly. The view
+//   now also consumes GET /connectors/runs for the newest-first run-history
+//   feed, with keyset pagination and fail-closed 403 handling. Loading / error
+//   / empty / 403 states mirror the other wired views.
 // Database/ORM: None (frontend) — consumes GET /connectors/credentials, POST
 //   /connectors/jobs (audited record-only), GET /adsense/payments, and POST
 //   /adsense/sync-payments (audited payment upsert).
@@ -51,9 +51,9 @@ import { describeError } from "./CommandView";
 //   payment list) are authoritative; a 403 surfaces as no-permission copy. The
 //   connector secret is never returned (only has_secret_ref); payment_amount is
 //   a backend STRING formatted for display only (no float math).
-// Blast Radius: Connector job audit write + AdSense payment write — both via the
-//   backend's own guarded, audited routes only. No source-of-truth finance
-//   number is computed or mutated client-side.
+// Blast Radius: Connector job audit write + connector test probes + AdSense
+//   payment write — all via the backend's own guarded, audited routes only. No
+//   source-of-truth finance number is computed or mutated client-side.
 // Connections:
 //   - File: frontend/src/lib/api/useConnectors.ts -> credentials + job action hooks.
 //   - File: frontend/src/lib/api/useAdsense.ts -> payments + sync action hooks.
@@ -132,10 +132,12 @@ function formatDate(value: string): string { // skipcq: JS-0067
  */
 export default function ConnectorsView({ // skipcq: JS-0067
   canRunConnectors,
+  canManageConnectors,
   canViewFinance,
   canViewConnectorHealth,
 }: {
   canRunConnectors: boolean;
+  canManageConnectors: boolean;
   canViewFinance: boolean;
   canViewConnectorHealth: boolean;
 }) {
@@ -183,6 +185,7 @@ export default function ConnectorsView({ // skipcq: JS-0067
           credentialsError={credentials.error}
           onReloadCredentials={() => credentials.reload()}
           canRunConnectors={canRunConnectors}
+          canManageConnectors={canManageConnectors}
           reason={reason}
           onReason={setReason}
           jobError={jobActions.error}
@@ -213,8 +216,9 @@ export default function ConnectorsView({ // skipcq: JS-0067
 
 /**
  * Left column of the Connectors screen: the data-sources header, job-request
- * banners, the inline audited reason field, the credentials table, and the
- * synced AdSense payments section. Extracted to keep the root JSX tree shallow.
+ * banners, the inline audited reason field, the credentials table and test
+ * probes, and the synced AdSense payments section. Extracted to keep the root
+ * JSX tree shallow.
  */
 function DataSourcesPanel({ // skipcq: JS-0067
   credentials,
@@ -222,6 +226,7 @@ function DataSourcesPanel({ // skipcq: JS-0067
   credentialsError,
   onReloadCredentials,
   canRunConnectors,
+  canManageConnectors,
   reason,
   onReason,
   jobError,
@@ -242,6 +247,7 @@ function DataSourcesPanel({ // skipcq: JS-0067
   credentialsError: ApiError | Error | null;
   onReloadCredentials: () => void;
   canRunConnectors: boolean;
+  canManageConnectors: boolean;
   reason: string;
   onReason: (value: string) => void;
   jobError: ApiError | Error | null;
@@ -292,6 +298,7 @@ function DataSourcesPanel({ // skipcq: JS-0067
         loading={credentialsLoading}
         error={credentialsError}
         canRunConnectors={canRunConnectors}
+        canManageConnectors={canManageConnectors}
         reason={reason}
         requestingJob={requestingJob}
         onRequestSync={onRequestSync}
@@ -542,30 +549,51 @@ function RunHistoryFeed() { // skipcq: JS-0067
   const { error, runs, hasMore, loading, loadMore } = useRunHistoryFeedState();
 
   if (error) return <RunHistoryError error={error} />;
-  if (loading && runs.length === 0) {
-    return (
-      <div className="permission-band" role="note" aria-busy="true">
-        <Dot tone="blue" />
-        <span>
-          <strong>Loading run history…</strong>
-          <span>Reading the connector run log.</span>
-        </span>
-        <Badge tone="blue">Loading</Badge>
-      </div>
-    );
-  }
-  if (runs.length === 0) {
-    return (
-      <div className="permission-band" role="note">
-        <Dot tone="amber" />
-        <span>
-          <strong>No connector runs recorded</strong>
-          <span>No connector pull runs have been recorded yet.</span>
-        </span>
-        <Badge tone="amber">Empty</Badge>
-      </div>
-    );
-  }
+  if (loading && runs.length === 0) return <RunHistoryLoadingState />;
+  if (runs.length === 0) return <RunHistoryEmptyState />;
+  return <RunHistoryList runs={runs} hasMore={hasMore} loading={loading} loadMore={loadMore} />;
+}
+
+/** Skeleton-free loading note for the initial run-history fetch. */
+function RunHistoryLoadingState() { // skipcq: JS-0067
+  return (
+    <div className="permission-band" role="note" aria-busy="true">
+      <Dot tone="blue" />
+      <span>
+        <strong>Loading run history…</strong>
+        <span>Reading the connector run log.</span>
+      </span>
+      <Badge tone="blue">Loading</Badge>
+    </div>
+  );
+}
+
+/** Empty-state note shown when no connector run rows exist yet. */
+function RunHistoryEmptyState() { // skipcq: JS-0067
+  return (
+    <div className="permission-band" role="note">
+      <Dot tone="amber" />
+      <span>
+        <strong>No connector runs recorded</strong>
+        <span>No connector pull runs have been recorded yet.</span>
+      </span>
+      <Badge tone="amber">Empty</Badge>
+    </div>
+  );
+}
+
+/** Render the loaded connector run list and its append pagination control. */
+function RunHistoryList({
+  runs,
+  hasMore,
+  loading,
+  loadMore,
+}: {
+  runs: ConnectorRun[];
+  hasMore: boolean;
+  loading: boolean;
+  loadMore: () => void;
+}) {
   return (
     <div className="timeline" role="list">
       {runs.map((run) => (
@@ -612,7 +640,7 @@ function RunHistoryError({ error }: { error: ApiError | Error }) { // skipcq: JS
  * error_summary when the run failed or partially failed.
  */
 function RunHistoryRow({ run }: { run: ConnectorRun }) { // skipcq: JS-0067
-  const c = run.counts;
+  const counts = run.counts;
   return (
     <div className="timeline-item" role="listitem">
       <span className="timeline-time">{formatTimestamp(run.started_at)}</span>
@@ -627,10 +655,10 @@ function RunHistoryRow({ run }: { run: ConnectorRun }) { // skipcq: JS-0067
           )} · finished ${formatTimestamp(run.finished_at)}`}
         </span>
         <span className="item-sub" role="note">
-          {`reports ${c.reports_succeeded}/${c.reports_attempted} ok` +
-            `${c.reports_failed > 0 ? ` · ${c.reports_failed} failed` : ""}` +
-            ` · rows +${c.rows_upserted_created}/~${c.rows_upserted_updated}/=` +
-            `${c.rows_upserted_unchanged} (${c.rows_upserted_total} total)`}
+          {`reports ${counts.reports_succeeded}/${counts.reports_attempted} ok` +
+            `${counts.reports_failed > 0 ? ` · ${counts.reports_failed} failed` : ""}` +
+            ` · rows +${counts.rows_upserted_created}/~${counts.rows_upserted_updated}/=` +
+            `${counts.rows_upserted_unchanged} (${counts.rows_upserted_total} total)`}
         </span>
         {run.error_summary ? (
           <span className="item-sub" role="note">
@@ -684,14 +712,17 @@ function RequestJobSuccess({ result }: { result: ConnectorJobResponse }) { // sk
 
 /**
  * The configured connector data-sources table with a per-row audited
- * "Request sync" button. Each button is disabled while the viewer cannot run
- * connectors, the typed sync reason is empty, or a request is already in flight.
+ * "Request sync" button. The request button is disabled while the viewer
+ * cannot run connectors, the typed sync reason is empty, or a request is
+ * already in flight; the per-row Test button is separately gated on
+ * canManageConnectors.
  */
 function ConnectorCredentialsTable({ // skipcq: JS-0067, JS-R1005
   credentials,
   loading,
   error,
   canRunConnectors,
+  canManageConnectors,
   reason,
   requestingJob,
   onRequestSync,
@@ -701,6 +732,7 @@ function ConnectorCredentialsTable({ // skipcq: JS-0067, JS-R1005
   loading: boolean;
   error: ApiError | Error | null;
   canRunConnectors: boolean;
+  canManageConnectors: boolean;
   reason: string;
   requestingJob: boolean;
   onRequestSync: (credential: ConnectorCredential) => void;
@@ -753,6 +785,7 @@ function ConnectorCredentialsTable({ // skipcq: JS-0067, JS-R1005
               key={credential.id}
               credential={credential}
               canRunConnectors={canRunConnectors}
+              canManageConnectors={canManageConnectors}
               requestDisabled={requestDisabled}
               requestingJob={requestingJob}
               onRequestSync={onRequestSync}
@@ -789,6 +822,7 @@ function ConnectorCredentialsTableHead() { // skipcq: JS-0067
 function ConnectorCredentialRow({ // skipcq: JS-0067
   credential,
   canRunConnectors,
+  canManageConnectors,
   requestDisabled,
   requestingJob,
   onRequestSync,
@@ -796,6 +830,7 @@ function ConnectorCredentialRow({ // skipcq: JS-0067
 }: {
   credential: ConnectorCredential;
   canRunConnectors: boolean;
+  canManageConnectors: boolean;
   requestDisabled: boolean;
   requestingJob: boolean;
   onRequestSync: (credential: ConnectorCredential) => void;
@@ -833,7 +868,7 @@ function ConnectorCredentialRow({ // skipcq: JS-0067
       <td>
         <ConnectorTestCell
           credential={credential}
-          canRunConnectors={canRunConnectors}
+          canManageConnectors={canManageConnectors}
           connectorTest={connectorTest}
         />
       </td>
@@ -850,19 +885,23 @@ function ConnectorCredentialRow({ // skipcq: JS-0067
  */
 function ConnectorTestCell({ // skipcq: JS-0067
   credential,
-  canRunConnectors,
+  canManageConnectors,
   connectorTest,
 }: {
   credential: ConnectorCredential;
-  canRunConnectors: boolean;
+  canManageConnectors: boolean;
   connectorTest: ReturnType<typeof useConnectorTest>;
 }) {
   const key = `${credential.connector_key}::${credential.account_id}`;
   const result = connectorTest.results[key];
   const error = connectorTest.errors[key];
   const pending = Boolean(connectorTest.pending[key]);
+  /**
+   * Trigger the one-click test probe for this credential row when the viewer
+   * may manage connectors and the row is idle.
+   */
   const onTest = () => {
-    if (!canRunConnectors || pending) return;
+    if (!canManageConnectors || pending) return;
     connectorTest.test(credential.connector_key, credential.account_id).catch(() => {
       // The hook already captured the typed error in connectorTest.errors;
       // the cell renders it below. Nothing more to do here.
@@ -873,7 +912,7 @@ function ConnectorTestCell({ // skipcq: JS-0067
       <button
         className="mini-button"
         type="button"
-        disabled={!canRunConnectors || pending}
+        disabled={!canManageConnectors || pending}
         onClick={onTest}
       >
         {pending ? "Testing…" : "Test"}
@@ -893,17 +932,14 @@ function ConnectorTestCell({ // skipcq: JS-0067
 
 /** Map a test-connection probe status to a tone for its result badge. */
 function testStatusTone(status: ConnectorTestStatus): Severity { // skipcq: JS-0067
-  switch (status) {
-    case "ok":
-      return "green";
-    case "inactive_credential":
-      return "amber";
-    case "auth_failed":
-    case "error":
-    case "not_found":
-    default:
-      return "red";
-  }
+  const tones: Record<ConnectorTestStatus, Severity> = {
+    ok: "green",
+    inactive_credential: "amber",
+    auth_failed: "red",
+    error: "red",
+    not_found: "red",
+  };
+  return tones[status] ?? "red";
 }
 
 /** Inline error note for a failed (non-404) test-connection probe. */

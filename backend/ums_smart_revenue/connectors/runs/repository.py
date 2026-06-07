@@ -44,14 +44,7 @@ class ConnectorRunEntry:
     error_summary: str | None
 
     def to_api(self) -> dict[str, object]:
-        # ====================================================================
-        # Purpose: Serialize a connector run for the read API, exposing
-        #   operational metadata with ISO-8601 timestamps. tenant_id is
-        #   intentionally withheld (single-tenant boundary, never client-facing).
-        # Database/ORM: None (operates on the immutable entry).
-        # Standards: Stable key set mirrored by the GET /connectors/runs route.
-        # Blast Radius: Connector run read surface only. Finance untouched.
-        # ====================================================================
+        """Serialize the immutable run entry into the stable read API shape."""
         return {
             "id": self.id,
             "connector_key": self.connector_key,
@@ -70,13 +63,15 @@ class ConnectorRunEntry:
 
 @dataclass(frozen=True)
 class ConnectorRunPage:
+    """One page of tenant-scoped connector run history plus its cursor."""
+
     items: list[ConnectorRunEntry]
     limit: int
     next_cursor: dict[str, str] | None
 
 
 class ConnectorRunError(ValueError):
-    pass
+    """Base validation error for connector run history operations."""
 
 
 class ConnectorRunValidationError(ConnectorRunError):
@@ -242,6 +237,7 @@ def list_runs(
     cursor_id: str | None = None,
     limit: int,
 ) -> ConnectorRunPage:
+    """List tenant-scoped connector runs newest-first with keyset pagination."""
     if limit < 1 or limit > MAX_CONNECTOR_RUN_PAGE_SIZE:
         raise ConnectorRunValidationError(
             f"limit must be between 1 and {MAX_CONNECTOR_RUN_PAGE_SIZE}"
@@ -283,6 +279,7 @@ def list_runs(
 
 
 def _parse_cursor_uuid(value: str) -> UUID:
+    """Parse the keyset cursor UUID or raise a typed validation error."""
     try:
         return UUID(value)
     except ValueError as exc:
@@ -290,6 +287,7 @@ def _parse_cursor_uuid(value: str) -> UUID:
 
 
 def _next_cursor(items: list[ConnectorRunEntry]) -> dict[str, str] | None:
+    """Build the next-page cursor from the last item in a non-empty page."""
     if not items:
         return None
     last_item = items[-1]

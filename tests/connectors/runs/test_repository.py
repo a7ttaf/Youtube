@@ -392,8 +392,7 @@ def _seed_run(
     started_at: datetime,
     status: str = "SUCCEEDED",
 ) -> ConnectorRunORM:
-    # Insert a fully-formed connector run row with an explicit started_at so
-    # ordering and cursor-walk assertions are deterministic at sqlite resolution.
+    """Insert a deterministic connector run row for ordering and cursor tests."""
     row = ConnectorRunORM(
         id=uuid4(),
         tenant_id=tenant_id,
@@ -413,6 +412,7 @@ def _seed_run(
 
 
 def test_list_runs_returns_newest_first(session: Session) -> None:
+    """Newest-first ordering returns the latest run first and no next cursor."""
     base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
     oldest = _seed_run(session, started_at=base)
     middle = _seed_run(session, started_at=base.replace(hour=13))
@@ -430,6 +430,7 @@ def test_list_runs_returns_newest_first(session: Session) -> None:
 
 
 def test_list_runs_cursor_walk_returns_next_page(session: Session) -> None:
+    """Cursor pagination returns the next window and preserves the boundary cursor."""
     base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
     rows = [_seed_run(session, started_at=base.replace(minute=m)) for m in range(5)]
     # rows[4] is newest; newest-first order = reversed.
@@ -452,6 +453,7 @@ def test_list_runs_cursor_walk_returns_next_page(session: Session) -> None:
 
 
 def test_list_runs_half_cursor_raises(session: Session) -> None:
+    """A half-present cursor pair is rejected with a typed validation error."""
     with pytest.raises(ConnectorRunValidationError):
         list_runs(
             session,
@@ -464,6 +466,7 @@ def test_list_runs_half_cursor_raises(session: Session) -> None:
 
 
 def test_list_runs_limit_out_of_range_raises(session: Session) -> None:
+    """Out-of-range list limits fail closed with a validation error."""
     with pytest.raises(ConnectorRunValidationError):
         list_runs(session, tenant_id=TENANT_ID, limit=0)
     with pytest.raises(ConnectorRunValidationError):
@@ -473,6 +476,7 @@ def test_list_runs_limit_out_of_range_raises(session: Session) -> None:
 
 
 def test_list_runs_excludes_other_tenant(session: Session) -> None:
+    """Tenant scoping excludes rows that belong to a different tenant."""
     base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
     mine = _seed_run(session, started_at=base)
     _seed_run(session, tenant_id=OTHER_TENANT_ID, started_at=base.replace(hour=13))
@@ -483,6 +487,7 @@ def test_list_runs_excludes_other_tenant(session: Session) -> None:
 
 
 def test_list_runs_connector_key_filter(session: Session) -> None:
+    """Connector-key filtering only returns matching run rows."""
     base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
     yt = _seed_run(session, connector_key="youtube-reporting", started_at=base)
     _seed_run(session, connector_key="adsense", started_at=base.replace(hour=13))
@@ -495,6 +500,7 @@ def test_list_runs_connector_key_filter(session: Session) -> None:
 
 
 def test_list_runs_account_id_filter(session: Session) -> None:
+    """Account-id filtering only returns rows for the requested account."""
     base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
     a = _seed_run(session, account_id="acct-a", started_at=base)
     _seed_run(session, account_id="acct-b", started_at=base.replace(hour=13))
@@ -505,6 +511,7 @@ def test_list_runs_account_id_filter(session: Session) -> None:
 
 
 def test_list_runs_has_more_boundary(session: Session) -> None:
+    """The page reports next_cursor only when an extra row exists."""
     base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
     for m in range(3):
         _seed_run(session, started_at=base.replace(minute=m))
@@ -519,6 +526,7 @@ def test_list_runs_has_more_boundary(session: Session) -> None:
 
 
 def test_to_api_shape_excludes_tenant_id(session: Session) -> None:
+    """The API payload hides tenant_id but preserves the operational fields."""
     base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
     _seed_run(session, started_at=base)
 
@@ -542,6 +550,7 @@ def _raw_file(
     tenant_id: UUID,
     report_type: str,
 ) -> RawReportFileORM:
+    """Insert a raw report file row for connector-run linkage tests."""
     row = RawReportFileORM(
         id=uuid4(),
         tenant_id=tenant_id,

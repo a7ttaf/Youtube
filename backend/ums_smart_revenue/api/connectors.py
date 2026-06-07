@@ -86,6 +86,27 @@ def current_connector_repository(
     return SqlAlchemyConnectorCredentialRepository(session)
 
 
+# ============================================================================
+# Purpose: Resolve a trusted tenant UUID from the authenticated principal
+#          headers and fall back to the bootstrap tenant when parsing fails.
+# Database/ORM: None.
+# Standards: Fail closed on malformed tenant strings by using the bootstrap
+#            tenant UUID rather than surfacing a raw ValueError at the route
+#            boundary.
+# Blast Radius: Authorization boundary only; no finance, audit, or graph
+#               projection impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/tenancy/constants.py -> UMS_TENANT_ID.
+#   - File: backend/ums_smart_revenue/connectors/runs/repository.py -> tenant-scoped read.
+# ============================================================================
+def _resolve_tenant_uuid(user: UserPrincipal) -> UUID:
+    """Resolve a trusted tenant UUID from the principal headers, falling back closed."""
+    try:
+        return UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
+    except ValueError:
+        return UUID(UMS_TENANT_ID)
+
+
 @router.get("/credentials")
 def list_connector_credentials(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
@@ -148,14 +169,9 @@ def list_connector_runs(
     # non-UUID tenant_id falls back to the bootstrap tenant instead of raising a
     # raw ValueError that would surface as an unhandled 500.
     try:
-        tenant_uuid = UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
-    except ValueError:
-        tenant_uuid = UUID(UMS_TENANT_ID)
-
-    try:
         page = list_runs(
             session,
-            tenant_id=tenant_uuid,
+            tenant_id=_resolve_tenant_uuid(user),
             connector_key=connector_key,
             account_id=account_id,
             cursor_started_at=cursor_started_at,
@@ -285,11 +301,6 @@ def test_connector_connection(
     # FIX: Wrap UUID parse so a truthy but non-UUID tenant_id string (e.g. a slug)
     # in headers mode falls back to the bootstrap tenant rather than raising a
     # raw ValueError that would produce an unhandled 500.
-    try:
-        tenant_uuid = UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
-    except ValueError:
-        tenant_uuid = UUID(UMS_TENANT_ID)
-
     conn_status: str = "ok"
     detail: str | None = None
     not_found = False
@@ -297,7 +308,7 @@ def test_connector_connection(
     try:
         resolve_connector_credentials(
             session=session,
-            tenant_id=tenant_uuid,
+            tenant_id=_resolve_tenant_uuid(user),
             connector_key=connector_key,
             account_id=account_id,
         )

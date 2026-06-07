@@ -191,11 +191,13 @@ function renderConnectorsView( // skipcq: JS-0067
   canRunConnectors = true,
   canViewFinance = true,
   canViewConnectorHealth = true,
+  canManageConnectors = true,
 ) {
   return render(
     <TenantProvider initialSlug="ums">
       <ConnectorsView
         canRunConnectors={canRunConnectors}
+        canManageConnectors={canManageConnectors}
         canViewFinance={canViewFinance}
         canViewConnectorHealth={canViewConnectorHealth}
       />
@@ -415,6 +417,16 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     expect(body.reason).toBe("operator connection health check");
   });
 
+  it("disables the Test button when the viewer cannot manage connectors", async () => {
+    fetchMock().mockImplementation(routeBoth(() => null));
+    renderConnectorsView(true, true, true, false);
+
+    await waitFor(() =>
+      expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /^test$/i })).toBeDisabled();
+  });
+
   it("shows a red badge when the test reports auth_failed", async () => {
     fetchMock().mockImplementation(
       routeBoth((url, init) => {
@@ -485,7 +497,7 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     await userEvent.click(testButton);
 
     await waitFor(() =>
-      expect(screen.getByRole("button", { name: /testing…/i })).toBeDisabled(),
+      expect(screen.getByRole("button", { name: /testing…/iu })).toBeDisabled(),
     );
 
     resolveTest?.(

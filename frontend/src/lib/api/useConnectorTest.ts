@@ -11,6 +11,18 @@ const TEST_CONNECTION_REASON = "operator connection health check";
 const probeKey = (connector_key: string, account_id: string): string =>
   `${connector_key}::${account_id}`;
 
+/**
+ * Remove a single key from a record without mutating the original object.
+ */
+function omitRecordKey<T extends Record<string, unknown>>(
+  record: T,
+  key: string,
+): T {
+  return Object.fromEntries(
+    Object.entries(record).filter(([entryKey]) => entryKey !== key),
+  ) as T;
+}
+
 export type UseConnectorTestState = {
   // Per-row latest probe result, keyed by `${connector_key}::${account_id}`.
   results: Record<string, ConnectorTestResult>;
@@ -72,16 +84,8 @@ export function useConnectorTest(): UseConnectorTestState { // skipcq: JS-0067
       if (inFlightRef.current[key]) return Promise.resolve(null);
       inFlightRef.current[key] = true;
       // Clear the prior result/error for this row and latch it as in flight.
-      setResults((prev) => {
-        const next = { ...prev };
-        delete next[key];
-        return next;
-      });
-      setErrors((prev) => {
-        const next = { ...prev };
-        delete next[key];
-        return next;
-      });
+      setResults((prev) => omitRecordKey(prev, key));
+      setErrors((prev) => omitRecordKey(prev, key));
       setPending((prev) => ({ ...prev, [key]: true }));
 
       const path = `/connectors/credentials/${encodeURIComponent(

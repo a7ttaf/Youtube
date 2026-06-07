@@ -23,7 +23,7 @@ describe("buildConnectorRunsUrl", () => {
   });
 
   it("drops a half cursor (started_at only)", () => {
-    const url = buildConnectorRunsUrl(undefined, undefined, "2026-03-21T02:00:00Z", undefined);
+    const url = buildConnectorRunsUrl(undefined, undefined, "2026-03-21T02:00:00Z");
     expect(url).not.toContain("cursor_started_at");
     expect(url).not.toContain("cursor_id");
     expect(url).toBe("/connectors/runs");

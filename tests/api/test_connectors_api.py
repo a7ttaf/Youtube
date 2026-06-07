@@ -1,6 +1,7 @@
 """Integration tests for connector credential and test-connection API endpoints."""
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -453,9 +454,6 @@ def test_credential_integrity_classifier_uses_duplicate_constraint_only():
 # ---------------------------------------------------------------------------
 # GET /connectors/runs (run history)
 # ---------------------------------------------------------------------------
-
-from datetime import UTC, datetime  # noqa: E402
-from uuid import uuid4  # noqa: E402
 
 from ums_smart_revenue.db.connector_models import ConnectorRunORM  # noqa: E402
 from ums_smart_revenue.db.report_models import ReportBase  # noqa: E402
