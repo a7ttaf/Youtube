@@ -18,6 +18,11 @@ const AUDIT_EVENT_TYPE_OPTIONS = [
   { label: "Logins", value: "LOGIN" },
 ];
 
+/**
+ * Checks whether the response headers indicate a truncated export.
+ * @param headers - The Headers object from the fetch response.
+ * @returns True if the X-Truncated header equals "true", case-insensitive; otherwise false.
+ */
 /** Read the CSV export truncation flag from the backend response headers. */
 const hasTruncatedExportHeader = (headers: Headers): boolean =>
   (headers.get("X-Truncated") ?? "").toLowerCase() === "true";
@@ -131,12 +136,21 @@ const AuditTimeline = ({
     );
   }
   return <AuditTimelineFeed eventType={eventType} />;
+/**
+ * Hook to handle downloading audit event CSV exports.
+ * @param eventType The type of audit events to export.
+ * @returns An object containing the download function and related state flags.
+ */
 };
 
 /**
  * The audit-log main panel: header (title + event-type filter / download
  * actions) and the live audit timeline. Extracted so the AuditView JSX tree
  * stays shallow.
+  /**
+   * Download the audit events as a CSV file and update truncated state.
+   * @returns Promise<void> resolving when download completes.
+   */
  */
 function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) { // skipcq: JS-0067
   const [eventType, setEventType] = useState("");
