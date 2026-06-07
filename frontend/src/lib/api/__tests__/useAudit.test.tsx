@@ -165,9 +165,11 @@ describe("useAuditEvents", () => {
   });
 
   it("builds /audit/events/export URL without query params when no filters are provided", () => {
-    expect(buildAuditEventsExportUrl()).toBe(
-      "/audit/events/export",
-    );
+    expect(buildAuditEventsExportUrl()).toBe("/audit/events/export");
+  });
+
+  it("omits empty-string export filters instead of serializing blank query params", () => {
+    expect(buildAuditEventsExportUrl("")).toBe("/audit/events/export");
   });
 
   it("reload() re-runs the fetch", async () => {

@@ -9,9 +9,6 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
 from ums_smart_revenue.api.dependencies import (
-"""
-Provides API routes for audit logging, allowing retrieval and management of audit events.
-"""
     current_db_session,
     current_principal_from_headers,
 )
@@ -40,9 +37,7 @@ _CSV_INJECTION_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
 def current_audit_log_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyAuditLogRepository:
-    """
-    Create and return an SqlAlchemyAuditLogRepository using the provided database session.
-    """
+    """Return the SQL audit-log repository bound to the current session."""
     return SqlAlchemyAuditLogRepository(session)
 
 
@@ -60,9 +55,7 @@ def list_audit_events(
     cursor_id: str | None = None,
     limit: Annotated[int, Query(ge=1, le=MAX_AUDIT_LOG_PAGE_SIZE)] = 50,
 ) -> dict[str, object]:
-    """
-    Retrieve a paginated list of audit events matching optional filters and enforce access permissions.
-    """
+    """Return the filtered audit-event page and the self-audit record."""
     audit_scope = AccessScope.global_scope()
     _require_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope)
     include_sensitive_details = has_permission(
@@ -127,13 +120,7 @@ def export_audit_events(
     entity_type: str | None = None,
     entity_id: str | None = None,
 ) -> Response:
-    """
-    Export the current filtered audit events as a CSV attachment for dashboard reporting.
-
-    This endpoint retrieves audit events based on optional filters (event_type, entity_type, entity_id),
-    always ordered newest-first, without consuming the caller's cursor state. It emits an EXPORT_DOWNLOADED
-    audit event via the provided AuditSink and returns the data as a CSV attachment.
-    """
+    """Export the current filtered audit slice as a CSV attachment."""
     # ========================================================================
     # Purpose: Export the current filtered audit-event slice as a CSV
     #   attachment for dashboard reporting. Always starts from newest-first;
@@ -209,6 +196,7 @@ def export_audit_events(
         entity_type="audit_events_export",
         entity_id=event_type or "all",
         scope=audit_scope,
+        permission_override=Permission.VIEW_AUDIT_LOG,
         details={
             "filters": {
                 "event_type": event_type,
@@ -230,9 +218,7 @@ def export_audit_events(
 def _require_permission(
     user: UserPrincipal, permission: Permission, scope: AccessScope
 ) -> None:
-    """Ensure the user has the specified permission in the given scope.
-    Raises HTTPException with status code 403 if the user lacks permission.
-    """
+    """Raise HTTP 403 when the caller lacks the requested permission."""
     if not has_permission(user, permission, scope):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
@@ -241,7 +227,7 @@ def _require_permission(
 
 
 def _csv_safe(value: str) -> str:
-    """Neutralize CSV/Excel formula injection by prefixing an apostrophe to any string cell beginning with =, +, -, @, tab, or CR."""
+    """Prefix risky leading characters so CSV consumers do not execute cells."""
     # ========================================================================
     # Purpose: Neutralize CSV/Excel formula injection by prefixing an
     #   apostrophe to any string cell beginning with =, +, -, @, tab, or CR.
@@ -255,12 +241,12 @@ def _csv_safe(value: str) -> str:
 
 
 def _bool_cell(value: object) -> str:
-    """Convert a boolean-like value to its lowercase string 'true' or 'false' for CSV cells."""
+    """Render truthy values as lowercase CSV booleans."""
     return "true" if value else "false"
 
 
 def _audit_events_to_csv(rows: list[dict[str, object]]) -> str:
-    """Render to_api()-serialized audit rows to a deterministic CSV with stable column order, ISO timestamps, lowercase booleans, and safe JSON details."""
+    """Serialize already-redacted audit rows into deterministic CSV text."""
     # ========================================================================
     # Purpose: Render to_api()-serialized audit rows to a deterministic CSV.
     #   Stable column order, ISO created_at passthrough, lowercase booleans,

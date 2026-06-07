@@ -22,6 +22,23 @@ all against existing backend read models, plus one new read-only CSV route.
 - No ranking panel, no outside-CMS monitor (Phase 5).
 - CloseView untouched (it does not consume net-revenue data).
 
+## Alternatives Considered
+
+The design stays intentionally narrow: a synchronous CSV download from the
+existing audit read model, with frontend filtering and pagination state kept
+separate from export state.
+
+- Async export job pipeline. Rejected because the audit download is bounded to a
+  read-only view, not a long-running finance export. Adding job tracking,
+  artifact storage, polling, and retry semantics would increase blast radius
+  without solving a known scale problem at the current cap.
+- Client-side CSV generation. Rejected because the browser cannot enforce the
+  same fail-closed permission checks, sensitive-payload redaction rules, or
+  snapshot-before-audit behavior that the backend route owns.
+- Reusing the list page's loaded rows. Rejected because the UI cursor only
+  reflects what the user has already paged through; export must represent the
+  complete filtered result set from the first row onward.
+
 ## 1. Audit "Load More" (frontend-only)
 
 `AuditTimelineFeed` accumulates pages locally alongside `useAuditEvents`:

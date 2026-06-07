@@ -25,19 +25,23 @@ export type ConfidenceDisplay = {
   tone: ConfidenceTone;
 };
 
+const API_LABEL_TO_TONE: Record<string, ConfidenceTone> = {
+  HIGH: "green",
+  MEDIUM: "amber",
+  LOW: "red",
+};
+
+const PREFIX_TO_DISPLAY: Record<string, ConfidenceDisplay> = {
+  A: { label: "Verified", tone: "green" },
+  B: { label: "Reconciled", tone: "green" },
+  C: { label: "Estimated", tone: "amber" },
+  D: { label: "Estimated", tone: "amber" },
+  E: { label: "Missing", tone: "red" },
+};
+
 /** Map an API human label (HIGH/MEDIUM/LOW) to a tone — matches TraceView. */
-export function toneFromApiLabel(label: string): ConfidenceTone {
-  switch (label.toUpperCase()) {
-    case "HIGH":
-      return "green";
-    case "MEDIUM":
-      return "amber";
-    case "LOW":
-      return "red";
-    default:
-      return "blue";
-  }
-}
+const toneFromApiLabel = (label: string): ConfidenceTone =>
+  API_LABEL_TO_TONE[label.toUpperCase()] ?? "blue";
 
 /**
  * Resolve a confidence code (+ optional API label) into a human label and tone.
@@ -45,21 +49,14 @@ export function toneFromApiLabel(label: string): ConfidenceTone {
  *   A -> Verified (green), B -> Reconciled (green), C/D -> Estimated (amber),
  *   E -> Missing (red); unknown -> the raw code with a neutral tone.
  */
-export function confidenceDisplay( // skipcq: JS-0067
+export const confidenceDisplay = (
   code: string,
   apiLabel?: string | null,
-): ConfidenceDisplay {
+): ConfidenceDisplay => {
   const trimmedLabel = apiLabel?.trim();
   if (trimmedLabel) {
     return { label: trimmedLabel, tone: toneFromApiLabel(trimmedLabel) };
   }
-  const confidenceMap: Record<string, ConfidenceDisplay> = {
-    A: { label: "Verified", tone: "green" },
-    B: { label: "Reconciled", tone: "green" },
-    C: { label: "Estimated", tone: "amber" },
-    D: { label: "Estimated", tone: "amber" },
-    E: { label: "Missing", tone: "red" },
-  };
   const prefix = (code ?? "").trim().charAt(0).toUpperCase();
-  return confidenceMap[prefix] ?? { label: code || "—", tone: "blue" };
-}
+  return PREFIX_TO_DISPLAY[prefix] ?? { label: code || "—", tone: "blue" };
+};

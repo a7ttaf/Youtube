@@ -1,7 +1,3 @@
-"""Module containing tests and helper utilities for the audit API.
-
-This module provides functions to generate authentication headers, build and seed a test database, and define test cases to verify audit event retrieval, masking of sensitive details, and stable pagination.
-"""
 import csv
 from datetime import UTC, datetime, timedelta
 from io import StringIO
@@ -11,14 +7,16 @@ from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.channels import current_audit_sink
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
 USER_ID = UUID("00000000-0000-0000-0000-000000013001")
 
 
 def auth_headers(role: str) -> dict[str, str]:
-    """Generate authentication headers for test requests based on the specified user role."""
+    """Build trusted-gateway headers for the requested test role."""
     return {
         "x-user-id": str(USER_ID),
         "x-user-email": f"{role}@example.com",
@@ -29,12 +27,12 @@ def auth_headers(role: str) -> dict[str, str]:
 
 
 def build_database_url(tmp_path) -> str:
-    """Construct a SQLite database URL for testing using the provided temporary path."""
+    """Build a disposable SQLite database URL for the audit API tests."""
     return f"sqlite+pysqlite:///{(tmp_path / 'audit.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
-    """Initialize the test database schema and seed it with a user and audit log entries."""
+    """Seed the audit test database with representative audit rows."""
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
     created_at = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=10)
@@ -76,7 +74,7 @@ def seed_database(database_url: str) -> None:
 
 
 def test_audit_viewer_lists_audit_events_with_sensitive_details_masked(tmp_path):
-    """Test that the audit viewer endpoint lists events and properly masks sensitive details for the audit_viewer role."""
+    """List audit events and keep sensitive payloads masked for viewers."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     with TestClient(create_app(database_url=database_url)) as client:
@@ -117,7 +115,7 @@ def test_audit_viewer_lists_audit_events_with_sensitive_details_masked(tmp_path)
 
 
 def test_audit_event_cursor_pagination_is_stable_when_new_events_arrive(tmp_path):
-    """Test that cursor-based pagination remains stable when new audit events are added between requests."""
+    """Keep cursor pagination stable even when newer rows arrive mid-read."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     with TestClient(create_app(database_url=database_url)) as client:
@@ -169,7 +167,7 @@ def test_audit_event_cursor_pagination_is_stable_when_new_events_arrive(tmp_path
 
 
 def test_super_owner_can_view_sensitive_audit_details(tmp_path):
-    """Test super owner can view sensitive fields in audit events."""
+    """Allow the super owner to see sensitive audit payloads."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
 
@@ -195,11 +193,15 @@ EXPORT_HEADER = (
 
 
 def test_audit_events_export_success_csv_shape(tmp_path):
-    """Test that exporting audit events returns correctly shaped CSV with headers and data."""
+    """Export CSV rows, shape, and the recorded audit-view permission."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
+    audit_sink = InMemoryAuditSink()
 
-    with TestClient(create_app(database_url=database_url)) as client:
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+
+    with TestClient(app) as client:
         response = client.get(
             "/audit/events/export?event_type=LOGIN",
             headers=auth_headers("audit_viewer"),
@@ -223,10 +225,13 @@ def test_audit_events_export_success_csv_shape(tmp_path):
     assert rows[0]["details"] == '{"ip":"127.0.0.1"}'
     assert rows[0]["details_redacted"] == "false"
     assert rows[0]["sensitive"] == "false"
+    assert len(audit_sink.records) == 1
+    assert audit_sink.records[0].event_type == "EXPORT_DOWNLOADED"
+    assert audit_sink.records[0].permission == "audit.view"
 
 
 def test_audit_events_export_denied_without_permission(tmp_path):
-    """Test that export endpoint returns 403 when user lacks audit.view permission."""
+    """Return 403 and avoid export audit writes when permission is missing."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
 
@@ -251,7 +256,7 @@ def test_audit_events_export_denied_without_permission(tmp_path):
 
 
 def test_audit_events_export_event_type_filter_narrows_rows(tmp_path):
-    """Test that filtering by event_type restricts exported rows to matching events."""
+    """Narrow the CSV export when an event_type filter is supplied."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
 
@@ -282,7 +287,7 @@ def test_audit_events_export_event_type_filter_narrows_rows(tmp_path):
 
 
 def test_audit_events_export_redacts_sensitive_for_plain_viewer(tmp_path):
-    """Test that export redacts sensitive details for viewers without elevated permission."""
+    """Keep sensitive export rows redacted for a plain audit viewer."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
 
@@ -308,7 +313,7 @@ def test_audit_events_export_redacts_sensitive_for_plain_viewer(tmp_path):
 
 
 def test_audit_events_export_ignores_cursor_params(tmp_path):
-    """Test that export ignores pagination cursor parameters and always exports full data."""
+    """Ignore cursor params so CSV exports always start from the beginning."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
 
@@ -339,7 +344,7 @@ def test_audit_events_export_ignores_cursor_params(tmp_path):
 
 
 def test_audit_events_export_caps_rows_and_sets_truncated(tmp_path, monkeypatch):
-    """Test that export caps number of rows at max and sets x-truncated header when truncated."""
+    """Cap large CSV exports and surface truncation via the response header."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     monkeypatch.setattr(
@@ -358,7 +363,7 @@ def test_audit_events_export_caps_rows_and_sets_truncated(tmp_path, monkeypatch)
 
 
 def test_audit_events_export_no_truncated_header_under_cap(tmp_path):
-    """Test that x-truncated header is absent when export row count is under cap."""
+    """Omit the truncation header when the CSV stays within the row cap."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
 
@@ -373,7 +378,7 @@ def test_audit_events_export_no_truncated_header_under_cap(tmp_path):
 
 
 def test_audit_events_export_snapshot_excludes_own_event(tmp_path):
-    """Test that export snapshot excludes the export action itself but later retrieval includes it."""
+    """Snapshot the CSV before emitting its own export audit event."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
 
@@ -398,7 +403,7 @@ def test_audit_events_export_snapshot_excludes_own_event(tmp_path):
 
 
 def test_audit_events_export_guards_formula_injection(tmp_path):
-    """Test that export protects against formula injection in fields like reason."""
+    """Escape spreadsheet formula prefixes in the exported CSV."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     engine = create_engine(database_url)
@@ -432,7 +437,7 @@ def test_audit_events_export_guards_formula_injection(tmp_path):
 
 
 def test_assistant_cannot_view_audit_events(tmp_path):
-    """Test that an assistant analyst cannot view audit events due to missing permission."""
+    """Reject audit log reads for the assistant analyst role."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
 
