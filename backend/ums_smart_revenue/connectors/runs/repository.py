@@ -237,7 +237,12 @@ def list_runs(
     cursor_id: str | None = None,
     limit: int,
 ) -> ConnectorRunPage:
-    """List tenant-scoped connector runs newest-first with keyset pagination."""
+    """List tenant-scoped connector runs newest-first with keyset pagination.
+
+    Raises:
+        ConnectorRunValidationError: If limit is out of range or cursor params
+            are not provided together (both-or-neither).
+    """
     if limit < 1 or limit > MAX_CONNECTOR_RUN_PAGE_SIZE:
         raise ConnectorRunValidationError(
             f"limit must be between 1 and {MAX_CONNECTOR_RUN_PAGE_SIZE}"
