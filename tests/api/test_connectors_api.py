@@ -441,10 +441,12 @@ def test_credential_integrity_classifier_uses_duplicate_constraint_only():
     # pylint: disable=too-few-public-methods
     class DuplicateDiag:
         """Minimal constraint diagnostic stub for testing the integrity classifier."""
+
         constraint_name = "uq_api_connector_credentials_connector_account"
 
     class DuplicateOrigError(Exception):
         """Minimal exception stub simulating a database unique-constraint violation."""
+
         diag = DuplicateDiag()
 
     duplicate_error = IntegrityError(
@@ -613,7 +615,7 @@ def test_list_runs_half_cursor_returns_422(tmp_path):
 
 
 def test_list_runs_limit_over_cap_returns_422(tmp_path):
-    """limit above the 100 cap is rejected by FastAPI Query validation with 422."""
+    """Limit above the 100 cap is rejected by FastAPI Query validation with 422."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     seed_runs(database_url)

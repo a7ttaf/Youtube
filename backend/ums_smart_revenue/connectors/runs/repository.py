@@ -255,6 +255,7 @@ def list_runs(
     Raises:
         ConnectorRunValidationError: If limit is out of range or cursor params
             are not provided together (both-or-neither).
+
     """
     if limit < 1 or limit > MAX_CONNECTOR_RUN_PAGE_SIZE:
         raise ConnectorRunValidationError(
