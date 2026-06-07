@@ -113,6 +113,36 @@ export function Dot({ tone }: { tone?: Severity }) { // skipcq: JS-0067
   return <span className={`dot${tone ? ` ${tone}` : ""}`} aria-hidden="true" />;
 }
 
+// ============================================================================
+// Purpose: Render the repeated placeholder row used by audit timeline states.
+// Database/ORM: None.
+// Standards: Presentation-only helper; no side effects.
+// Blast Radius: Audit read only.
+// ============================================================================
+export function TimelinePlaceholderRow({
+  tone,
+  title,
+  sub,
+  badge,
+}: {
+  tone: Severity;
+  title: string;
+  sub: string;
+  badge: string;
+}) {
+  return (
+    <>
+      <span className="timeline-time">--:--</span>
+      <Dot tone={tone} />
+      <span>
+        <span className="item-title">{title}</span>
+        <span className="item-sub">{sub}</span>
+      </span>
+      <Badge tone={tone}>{badge}</Badge>
+    </>
+  );
+}
+
 /** Map a workflow tone to a Dot severity; "primary" renders an untoned dot. */
 export function workflowDotTone(tone: WorkflowTone): Severity | undefined { // skipcq: JS-0067
   return tone === "primary" ? undefined : tone;

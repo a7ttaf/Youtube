@@ -4,7 +4,7 @@ import { ApiError } from "@/lib/api/client";
 import { type AuditEventPagination, type AuditLogEntry } from "@/lib/api/types";
 import type { Severity } from "@/lib/mock/data";
 
-import { Badge, Dot, formatTimestamp } from "../shared";
+import { Badge, Dot, TimelinePlaceholderRow, formatTimestamp } from "../shared";
 
 import { describeError } from "./CommandView";
 import { useAuditEvents } from "@/lib/api/useAudit";
@@ -62,28 +62,6 @@ const renderDetailsLine = (details: Record<string, unknown>): string | null => {
     .filter(([, v]) => v !== null && v !== undefined && typeof v !== "object")
     .map(([k, v]) => `${k}=${String(v)}`);
   return pairs.length > 0 ? pairs.join(" · ") : null;
-};
-
-/**
- * Reusable inner content for timeline placeholder rows (restricted, error,
- * loading, empty). Rendered as a fragment inside the caller's `timeline-item`
- * div so each state can control its own wrapper attributes (role, aria-busy,
- * etc.) independently.
- */
-const TimelinePlaceholderRow = ({ tone, title, sub, badge }: {
-  tone: Severity; title: string; sub: string; badge: string;
-}) => {
-  return (
-    <>
-      <span className="timeline-time">--:--</span>
-      <Dot tone={tone} />
-      <span>
-        <span className="item-title">{title}</span>
-        <span className="item-sub">{sub}</span>
-      </span>
-      <Badge tone={tone}>{badge}</Badge>
-    </>
-  );
 };
 
 /**
@@ -325,6 +303,13 @@ export const useAuditTimelineFeedState = (eventType: string | undefined): AuditT
   const [pagination, setPagination] = useState<AuditEventPagination | null>(null);
   const [cursorCreatedAt, setCursorCreatedAt] = useState<string>();
   const [cursorId, setCursorId] = useState<string>();
+
+  useEffect(() => {
+    setRows([]);
+    setPagination(null);
+    setCursorCreatedAt(undefined);
+    setCursorId(undefined);
+  }, [eventType]);
 
   const { data, loading, error } = useAuditEvents({
     event_type: eventType,

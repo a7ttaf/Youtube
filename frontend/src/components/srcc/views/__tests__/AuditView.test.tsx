@@ -248,6 +248,26 @@ describe("AuditView wired to GET /audit/events", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("resets the live timeline when the event type filter changes", async () => {
+    const user = userEvent.setup();
+    fetchMock().mockImplementation(routeEvents(() => null));
+    renderAuditView();
+
+    await waitFor(() =>
+      expect(screen.getByText("REVENUE_EXPORTED")).toBeInTheDocument(),
+    );
+
+    await user.selectOptions(screen.getByLabelText(/audit event type/i), "CHANNEL_UPDATED");
+
+    await waitFor(() =>
+      expect(screen.getByText("CHANNEL_UPDATED")).toBeInTheDocument(),
+    );
+    expect(screen.queryByText("REVENUE_EXPORTED")).not.toBeInTheDocument();
+    const lastAuditCall = auditCalls().at(-1);
+    expect(lastAuditCall).toBeDefined();
+    expect(urlOf(lastAuditCall?.[0])).toContain("event_type=CHANNEL_UPDATED");
+  });
+
   it("maps a 403 on the events read to a no-permission message in an alert", async () => {
     fetchMock().mockImplementation(
       routeEvents((url) =>

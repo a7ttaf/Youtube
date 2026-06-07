@@ -1,40 +1,11 @@
 import { useState } from "react";
 
-import type { Severity } from "@/lib/mock/data";
 import { AUDIT_SUMMARY } from "@/lib/mock/data";
 
-import { Badge, Dot, ItemRow, SummaryTile } from "../shared";
+import { Badge, ItemRow, SummaryTile, TimelinePlaceholderRow } from "../shared";
 
 import AuditLogPanelHeader from "./AuditLogPanelHeader";
 import AuditTimelineFeed from "./AuditTimelineFeed";
-
-/**
- * Compact placeholder row used by the restricted timeline branch.
- * Kept local so the gated view can render without mounting the live feed hook.
- */
-const TimelinePlaceholderRow = ({
-  tone,
-  title,
-  sub,
-  badge,
-}: {
-  tone: Severity;
-  title: string;
-  sub: string;
-  badge: string;
-}) => {
-  return (
-    <>
-      <span className="timeline-time">--:--</span>
-      <Dot tone={tone} />
-      <span>
-        <span className="item-title">{title}</span>
-        <span className="item-sub">{sub}</span>
-      </span>
-      <Badge tone={tone}>{badge}</Badge>
-    </>
-  );
-};
 
 // ============================================================================
 // Purpose: Render the audit log screen shell, summary tiles, and the gated
