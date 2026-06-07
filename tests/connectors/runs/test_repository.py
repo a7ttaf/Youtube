@@ -3,10 +3,8 @@ from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, select
-"""
-Test module for connector runs repository functionality, including starting, finishing runs,
-linking raw files, and validating database constraints and indexes.
-"""
+# Test module for connector runs repository functionality, including starting, finishing runs,
+# linking raw files, and validating database constraints and indexes.
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.runs.repository import (
@@ -33,9 +31,7 @@ USER_ID = UUID("00000000-0000-0000-0000-000000082303")
 
 @pytest.fixture
 def session() -> Session:
-    """
-    Provide an in-memory SQLite database session with initialized metadata for tests.
-    """
+    """Provide an in-memory SQLite database session with initialized metadata for tests."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     ReportBase.metadata.create_all(engine)
     with Session(engine) as session:
@@ -51,9 +47,7 @@ def test_connector_run_models_are_registered_on_report_base() -> None:
 
 
 def test_connector_run_constraints_and_indexes_match_contract() -> None:
-    """
-    Ensure constraints and indexes on connector_runs table match the repository contract.
-    """
+    """Ensure constraints and indexes on connector_runs table match the repository contract."""
     constraints = {c.name for c in ConnectorRunORM.__table__.constraints}
     indexes = {i.name for i in ConnectorRunORM.__table__.indexes}
 
@@ -114,9 +108,7 @@ def test_start_run_inserts_running_row_with_zero_counts(session: Session) -> Non
 
 
 def test_start_run_accepts_null_triggered_by_user_id(session: Session) -> None:
-    """
-    Ensure start_run allows None for triggered_by_user_id without error.
-    """
+    """Ensure start_run allows None for triggered_by_user_id without error."""
     entry = start_run(
         session,
         tenant_id=TENANT_ID,
@@ -151,9 +143,7 @@ def test_start_run_rejects_malformed_report_month(
 def test_finish_run_sets_terminal_status_counts_and_finished_at(
     session: Session,
 ) -> None:
-    """
-    Verify finish_run correctly updates status, counts, and sets finished_at.
-    """
+    """Verify finish_run correctly updates status, counts, and sets finished_at."""
     entry = _start_default_run(session)
     counts = {
         "reports_attempted": 2,
@@ -183,9 +173,7 @@ def test_finish_run_sets_terminal_status_counts_and_finished_at(
 def test_finish_run_truncates_error_summary_to_500_chars(
     session: Session,
 ) -> None:
-    """
-    Ensure finish_run trims error_summary longer than 500 characters.
-    """
+    """Ensure finish_run trims error_summary longer than 500 characters."""
     entry = _start_default_run(session)
 
     finished = finish_run(
@@ -203,9 +191,7 @@ def test_finish_run_truncates_error_summary_to_500_chars(
 def test_finish_run_rejects_non_terminal_or_unknown_status(
     session: Session, status: str
 ) -> None:
-    """
-    Check that finish_run rejects statuses that are not terminal or are invalid.
-    """
+    """Check that finish_run rejects statuses that are not terminal or are invalid."""
     entry = _start_default_run(session)
 
     with pytest.raises(ConnectorRunValidationError, match="terminal"):
@@ -279,9 +265,7 @@ def test_finish_run_rejects_cross_tenant_run_id(session: Session) -> None:
 
 
 def test_finish_run_rejects_already_terminal_run(session: Session) -> None:
-    """
-    Ensure finish_run rejects attempts to finish a run that is already terminal.
-    """
+    """Ensure finish_run rejects attempts to finish a run that is already terminal."""
     entry = _start_default_run(session)
     finish_run(
         session,
@@ -304,9 +288,7 @@ def test_finish_run_rejects_already_terminal_run(session: Session) -> None:
 
 
 def test_link_raw_file_inserts_tenant_scoped_join_row(session: Session) -> None:
-    """
-    Test that link_raw_file creates a join row scoped to the correct tenant.
-    """
+    """Test that link_raw_file creates a join row scoped to the correct tenant."""
     entry = _start_default_run(session)
     raw_file = _raw_file(session, tenant_id=TENANT_ID, report_type="rt-a")
 
@@ -328,9 +310,7 @@ def test_link_raw_file_inserts_tenant_scoped_join_row(session: Session) -> None:
 def test_link_raw_file_rejects_invalid_ordering_index(
     session: Session, ordering_index
 ) -> None:
-    """
-    Ensure link_raw_file rejects invalid ordering_index values.
-    """
+    """Ensure link_raw_file rejects invalid ordering_index values."""
     entry = _start_default_run(session)
     raw_file = _raw_file(session, tenant_id=TENANT_ID, report_type="rt-a")
 
@@ -364,9 +344,7 @@ def test_link_raw_file_rejects_raw_file_from_different_tenant(
 
 
 def test_link_raw_file_rejects_cross_tenant_run_id(session: Session) -> None:
-    """
-    Verify link_raw_file raises LookupError when connector_run_id is from another tenant.
-    """
+    """Verify link_raw_file raises LookupError when connector_run_id is from another tenant."""
     entry = _start_default_run(session)
     raw_file = _raw_file(session, tenant_id=OTHER_TENANT_ID, report_type="rt-other")
 
@@ -419,9 +397,7 @@ def test_link_raw_file_duplicate_is_rejected_by_unique_constraint(
 
 
 def _zero_counts() -> dict[str, int]:
-    """
-    Return a dict mapping all connector run count keys to zero.
-    """
+    """Return a dict mapping all connector run count keys to zero."""
     return dict.fromkeys(CONNECTOR_RUN_COUNT_KEYS, 0)
 
 

@@ -75,8 +75,7 @@ class ConnectorRunPage:
 
 
 class ConnectorRunError(ValueError):
-"""Repository for connector run operations: starting runs, linking raw report files, and finishing runs with counts and error summaries."""
-
+    """Repository for connector run operations: starting runs, linking raw report files, and finishing runs with counts and error summaries."""
     """Base validation error for connector run history operations."""
 
 
