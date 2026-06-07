@@ -438,16 +438,13 @@ def test_test_connection_requires_manage_connectors_permission(tmp_path):
 
 def test_credential_integrity_classifier_uses_duplicate_constraint_only():
     """Integrity classifier returns True only for the unique-constraint violation, not FK errors."""
-
     # pylint: disable=too-few-public-methods
     class DuplicateDiag:
         """Minimal constraint diagnostic stub for testing the integrity classifier."""
-
         constraint_name = "uq_api_connector_credentials_connector_account"
 
     class DuplicateOrigError(Exception):
         """Minimal exception stub simulating a database unique-constraint violation."""
-
         diag = DuplicateDiag()
 
     duplicate_error = IntegrityError(
