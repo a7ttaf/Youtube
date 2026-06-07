@@ -5,10 +5,42 @@
 @custom-variant dark (&:is(.dark *));
 
 /* =========================================================================
- * UMS Smart Revenue Control Center — design tokens
- * Single dark theme. Tokens are aliased so shadcn utilities
- * (bg-background, text-foreground, etc.) and the mockup's plain class
- * selectors (.panel, .metric, .nav-item) both work off the same palette.
+ * Webfonts — Soft Dark OFL stack (served from /public/fonts)
+ *   Mona Sans (GitHub, OFL)           — body / UI
+ *   Newsreader (Production Type, OFL) — display serif
+ *   Monaspace Neon (GitHub, OFL)      — mono
+ * Licenses ship alongside the files in frontend/public/fonts/.
+ * =======================================================================*/
+@font-face {
+  font-family: "Mona Sans";
+  src: url("/fonts/MonaSans-VF.woff2") format("woff2");
+  font-weight: 200 900;
+  font-stretch: 75% 125%;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Newsreader";
+  src: url("/fonts/Newsreader-VF.woff2") format("woff2");
+  font-weight: 200 800;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Monaspace Neon";
+  src: url("/fonts/MonaspaceNeon-VF.woff2") format("woff2");
+  font-weight: 200 800;
+  font-style: normal;
+  font-display: swap;
+}
+
+/* =========================================================================
+ * UMS Smart Revenue Control Center — design tokens (Soft Dark)
+ * Surfaces/ink/status are GitHub dark_dimmed (Primer) per the UMS Revenue
+ * Design System; the Anthropic-orange accent is unchanged. Tokens are
+ * aliased so shadcn utilities (bg-background, text-foreground, etc.) and
+ * the mockup's plain class selectors (.panel, .metric, .nav-item) both
+ * work off the same palette.
  * =======================================================================*/
 
 @theme inline {
@@ -40,35 +72,36 @@
 :root {
   color-scheme: dark;
 
-  --font-display: ui-serif, Georgia, Cambria, "Times New Roman", Times, serif;
-  --font-body: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-  --font-mono: ui-monospace, SFMono-Regular, "Cascadia Code", Consolas, monospace;
+  --font-display: "Newsreader", Georgia, "Times New Roman", serif;
+  --font-body: "Mona Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "Monaspace Neon", ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 
-  /* Surfaces */
-  --bg: oklch(0.16 0.006 72);
-  --bg-rail: oklch(0.19 0.006 72);
-  --ink: oklch(0.955 0.016 82);
-  --muted: oklch(0.76 0.018 82);
-  --faint: oklch(0.59 0.014 82);
-  --line: oklch(0.31 0.008 72);
-  --line-strong: oklch(0.44 0.012 72);
-  --panel: oklch(0.205 0.006 72);
-  --panel-soft: oklch(0.24 0.006 72);
-  --panel-raised: oklch(0.265 0.007 72);
-  --panel-active: oklch(0.58 0.133 47 / 0.14);
-  --nav: oklch(0.135 0.005 72);
-  --nav-2: oklch(0.18 0.006 72);
+  /* Surfaces (GitHub dark_dimmed) */
+  --bg: #212830;
+  --bg-rail: #1b212a;
+  --ink: #d1d7e0;
+  --ink-strong: #f0f6fc; /* KPI & money values — near-white tier */
+  --muted: #9198a1;
+  --faint: #656c76;
+  --line: #3d444d;
+  --line-strong: #656c76;
+  --panel: #262c36;
+  --panel-soft: #2a313c;
+  --panel-raised: #2f3742;
+  --panel-active: oklch(0.66 0.15 45 / 0.16);
+  --nav: #151b23;
+  --nav-2: #1c232b;
 
   /* Accents */
   --primary: oklch(0.66 0.15 45);
   --primary-hover: oklch(0.72 0.15 45);
   --primary-soft: oklch(0.66 0.15 45 / 0.16);
-  --green: oklch(0.72 0.12 154);
-  --green-soft: oklch(0.72 0.12 154 / 0.18);
-  --amber: oklch(0.76 0.13 78);
-  --amber-soft: oklch(0.76 0.13 78 / 0.17);
-  --red: oklch(0.68 0.15 30);
-  --red-soft: oklch(0.68 0.15 30 / 0.16);
+  --green: #57ab5a;
+  --green-soft: rgba(87, 171, 90, 0.18);
+  --amber: #c69026;
+  --amber-soft: rgba(198, 144, 38, 0.18);
+  --red: #e5534b;
+  --red-soft: rgba(229, 83, 75, 0.16);
   --violet: oklch(0.66 0.15 45);
   --violet-soft: oklch(0.66 0.15 45 / 0.16);
 
@@ -76,12 +109,12 @@
   --background: var(--bg);
   --foreground: var(--ink);
 
-  --shadow: 0 24px 70px color-mix(in oklch, oklch(0 0 0) 38%, transparent);
-  --shadow-sm: 0 1px 2px color-mix(in oklch, oklch(0 0 0) 28%, transparent);
-  --shadow-md: 0 10px 28px color-mix(in oklch, oklch(0 0 0) 24%, transparent);
+  --shadow: 0 24px 70px color-mix(in oklch, oklch(0 0 0) 48%, transparent);
+  --shadow-sm: 0 1px 2px color-mix(in oklch, oklch(0 0 0) 36%, transparent);
+  --shadow-md: 0 10px 28px color-mix(in oklch, oklch(0 0 0) 30%, transparent);
   --radius: 8px;
   --radius-sm: 5px;
-  --focus: 0 0 0 3px color-mix(in oklch, var(--primary) 24%, transparent);
+  --focus: 0 0 0 3px color-mix(in oklch, var(--primary) 28%, transparent);
   --ease-out-quart: cubic-bezier(0.25, 1, 0.5, 1);
   --ease-out-expo: cubic-bezier(0.16, 1, 0.3, 1);
 
@@ -195,7 +228,7 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   font-family: var(--font-display);
   font-size: 18px;
   line-height: 1.1;
-  font-weight: 600;
+  font-weight: 400;
 }
 .brand span {
   display: block;
@@ -281,7 +314,7 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   border-top: 1px solid var(--line);
   color: var(--muted);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 650;
 }
 .role-state {
   display: inline-flex;
@@ -311,12 +344,14 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   position: sticky;
   top: 0;
   z-index: 6;
-  background: color-mix(in oklch, var(--bg) 94%, transparent);
+  /* FIX: mix in srgb, not oklch — oklch→transparent mixing shifts the hue
+     toward red on Chromium (matches the soft-dark mockup's fix). */
+  background: color-mix(in srgb, var(--bg) 94%, transparent);
   backdrop-filter: blur(14px);
   border-bottom: 1px solid var(--line);
   box-shadow:
-    0 1px 0 color-mix(in oklch, var(--panel) 65%, transparent),
-    0 10px 28px color-mix(in oklch, var(--ink) 4%, transparent);
+    0 1px 0 color-mix(in srgb, var(--panel) 65%, transparent),
+    0 10px 28px color-mix(in srgb, var(--ink) 4%, transparent);
   padding: 14px 22px 12px;
   display: grid;
   grid-template-columns: minmax(230px, 1fr) auto;
@@ -330,7 +365,7 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   font-family: var(--font-display);
   font-size: 30px;
   line-height: 1;
-  font-weight: 600;
+  font-weight: 400;
   letter-spacing: 0;
 }
 .page-title p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
@@ -347,10 +382,10 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   background: color-mix(in oklch, var(--panel) 86%, var(--panel-soft));
   color: var(--muted);
   font-size: 11px;
-  font-weight: 600;
+  font-weight: 650;
   white-space: nowrap;
 }
-.cue strong { color: var(--ink); font-weight: 700; }
+.cue strong { color: var(--ink); font-weight: 760; }
 .cue.green  { background: color-mix(in oklch, var(--green-soft) 72%, var(--panel)); border-color: color-mix(in oklch, var(--green) 22%, var(--line)); }
 .cue.amber  { background: color-mix(in oklch, var(--amber-soft) 74%, var(--panel)); border-color: color-mix(in oklch, var(--amber) 24%, var(--line)); }
 .cue.red    { background: color-mix(in oklch, var(--red-soft) 72%, var(--panel)); border-color: color-mix(in oklch, var(--red) 23%, var(--line)); }
@@ -400,7 +435,7 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   border: 1px solid color-mix(in oklch, var(--red) 36%, var(--line));
   background: var(--red-soft);
   color: color-mix(in oklch, var(--ink) 88%, var(--red));
-  font-weight: 600; font-size: 12px;
+  font-weight: 760; font-size: 12px;
   border-radius: var(--radius-sm);
   cursor: pointer;
 }
@@ -467,7 +502,7 @@ button:focus-visible, select:focus-visible, input:focus-visible {
   font-size: 27px;
   line-height: 1.05;
   font-weight: 600;
-  color: var(--ink);
+  color: var(--ink-strong);
   white-space: nowrap;
   font-variant-numeric: tabular-nums;
 }
@@ -625,7 +660,7 @@ th {
   color: var(--muted);
   font-size: 11px;
   text-transform: uppercase;
-  font-weight: 700;
+  font-weight: 760;
   background: var(--panel-soft);
   position: sticky;
   top: 0;
@@ -634,8 +669,9 @@ th {
 .money {
   font-variant-numeric: tabular-nums;
   white-space: nowrap;
-  font-weight: 600;
+  font-weight: 680;
   text-align: right;
+  color: var(--ink-strong);
 }
 tbody tr { transition: background-color 150ms var(--ease-out-quart); }
 tbody tr:hover td { background: color-mix(in oklch, var(--primary-soft) 22%, transparent); }
@@ -661,7 +697,7 @@ tbody tr:focus-visible td {
   transition: border-color 150ms var(--ease-out-quart);
 }
 tbody tr:hover .avatar { border-color: color-mix(in oklch, var(--primary) 30%, var(--line)); }
-.channel-name { display: block; font-weight: 700; color: var(--ink); }
+.channel-name { display: block; font-weight: 720; color: var(--ink); }
 .channel-id   { display: block; color: var(--muted); font-size: 11px; margin-top: 1px; }
 
 .mini-button {
@@ -721,7 +757,7 @@ tbody tr:hover .avatar { border-color: color-mix(in oklch, var(--primary) 30%, v
   border-bottom: 0;
 }
 
-.item-title { display: block; font-size: 12px; font-weight: 700; line-height: 1.25; }
+.item-title { display: block; font-size: 12px; font-weight: 730; line-height: 1.25; }
 .item-sub   { display: block; margin-top: 2px; font-size: 11px; color: var(--muted); }
 
 .side-stack { display: grid; gap: 14px; align-content: start; min-width: 0; }
@@ -785,7 +821,7 @@ tbody tr:hover .avatar { border-color: color-mix(in oklch, var(--primary) 30%, v
   background: var(--panel);
   color: var(--ink);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 730;
   box-shadow: 0 6px 18px color-mix(in oklch, var(--ink) 10%, transparent);
   padding: 0 10px;
   transition: border-color 180ms var(--ease-out-quart), box-shadow 180ms var(--ease-out-quart), transform 200ms var(--ease-out-expo);
@@ -826,8 +862,8 @@ tbody tr:hover .avatar { border-color: color-mix(in oklch, var(--primary) 30%, v
   align-items: center;
   gap: 14px;
 }
-.workflow-label { font-size: 12px; font-weight: 700; display: grid; gap: 2px; }
-.workflow-label span { color: var(--muted); font-size: 11px; font-weight: 500; }
+.workflow-label { font-size: 12px; font-weight: 760; display: grid; gap: 2px; }
+.workflow-label span { color: var(--muted); font-size: 11px; font-weight: 560; }
 .steps {
   display: grid;
   grid-template-columns: repeat(6, minmax(100px, 1fr));
@@ -875,7 +911,7 @@ tbody tr:hover .avatar { border-color: color-mix(in oklch, var(--primary) 30%, v
   gap: 6px;
   font-size: 11px;
   color: color-mix(in oklch, var(--ink) 88%, var(--green));
-  font-weight: 700;
+  font-weight: 750;
 }
 
 /* =========================================================================
@@ -907,7 +943,7 @@ tbody tr:hover .avatar { border-color: color-mix(in oklch, var(--primary) 30%, v
 .summary-tile span:first-child {
   color: var(--muted);
   font-size: 11px;
-  font-weight: 700;
+  font-weight: 760;
   text-transform: uppercase;
 }
 .summary-tile strong {
@@ -939,7 +975,7 @@ tbody tr:hover .avatar { border-color: color-mix(in oklch, var(--primary) 30%, v
   border-bottom: 1px solid var(--line);
   background: color-mix(in oklch, var(--primary-soft) 45%, transparent);
 }
-.permission-band strong { display: block; font-size: 12px; line-height: 1.25; font-weight: 700; }
+.permission-band strong { display: block; font-size: 12px; line-height: 1.25; font-weight: 760; }
 .permission-band span { color: var(--muted); font-size: 11px; display: block; }
 
 .detail-grid {
@@ -955,8 +991,8 @@ tbody tr:hover .avatar { border-color: color-mix(in oklch, var(--primary) 30%, v
   background: var(--panel-soft);
   min-height: 70px;
 }
-.detail-cell span { display: block; color: var(--muted); font-size: 11px; font-weight: 700; margin-bottom: 6px; text-transform: uppercase; }
-.detail-cell strong { display: block; font-size: 13px; line-height: 1.35; font-weight: 700; }
+.detail-cell span { display: block; color: var(--muted); font-size: 11px; font-weight: 720; margin-bottom: 6px; text-transform: uppercase; }
+.detail-cell strong { display: block; font-size: 13px; line-height: 1.35; font-weight: 760; }
 
 .form-grid { display: grid; gap: 10px; padding: 13px; }
 .field-row {
@@ -965,7 +1001,7 @@ tbody tr:hover .avatar { border-color: color-mix(in oklch, var(--primary) 30%, v
   gap: 10px;
   align-items: center;
 }
-.field-row label { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; }
+.field-row label { color: var(--muted); font-size: 11px; font-weight: 760; text-transform: uppercase; }
 .field-row input, .field-row select {
   width: 100%; height: 34px; padding: 0 10px;
   font-size: 12px;
@@ -1001,7 +1037,7 @@ tbody tr:hover .avatar { border-color: color-mix(in oklch, var(--primary) 30%, v
   background: var(--panel-soft);
   display: grid; gap: 5px;
 }
-.health-block strong { font-size: 13px; font-weight: 700; }
+.health-block strong { font-size: 13px; font-weight: 760; }
 .health-block span { color: var(--muted); font-size: 11px; }
 
 .code-chip {
