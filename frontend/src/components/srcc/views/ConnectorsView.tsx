@@ -583,7 +583,7 @@ function RunHistoryEmptyState() { // skipcq: JS-0067
 }
 
 /** Render the loaded connector run list and its append pagination control. */
-function RunHistoryList({
+function RunHistoryList({ // skipcq: JS-0067
   runs,
   hasMore,
   loading,

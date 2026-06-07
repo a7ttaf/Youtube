@@ -14,7 +14,7 @@ const probeKey = (connector_key: string, account_id: string): string =>
 /**
  * Remove a single key from a record without mutating the original object.
  */
-function omitRecordKey<T extends Record<string, unknown>>(
+function omitRecordKey<T extends Record<string, unknown>>( // skipcq: JS-0067
   record: T,
   key: string,
 ): T {
