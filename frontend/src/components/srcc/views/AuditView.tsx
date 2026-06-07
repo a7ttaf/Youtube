@@ -143,11 +143,10 @@ function AuditTimeline({
  * actions) and the live audit timeline. Extracted so the AuditView JSX tree
  * stays shallow.
  */
-const AuditLogPanel = function AuditLogPanel({
-  canViewAudit,
-}: {
+const AuditLogPanel = function AuditLogPanel(props: {
   canViewAudit: boolean;
 }) {
+  const { canViewAudit } = props;
   const [eventType, setEventType] = useState("");
 
   return (
