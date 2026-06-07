@@ -10,6 +10,7 @@ import type {
 import { useExplanation } from "@/lib/api/useExplanation";
 import { useNetRevenue } from "@/lib/api/useNetRevenue";
 import type { Role, Severity } from "@/lib/mock/data";
+import { confidenceDisplay } from "@/lib/confidence";
 import {
   Badge,
   DEFAULT_MONTH,
@@ -54,18 +55,14 @@ const METRIC_OPTIONS: Array<{ value: ExplanationMetric; label: string }> = [
   { value: "net_revenue_usd", label: "Net revenue" },
 ];
 
-/** Map a confidence label (HIGH/MEDIUM/LOW) to the badge tone, blue otherwise. */
+/**
+ * Map a confidence label (HIGH/MEDIUM/LOW) to the badge tone, blue otherwise.
+ * Delegates to the shared confidenceDisplay helper (label-only call) so Command
+ * and Trace stay tone-consistent; behavior is unchanged from the prior local
+ * switch (its ConfidenceTone union is a subset of Severity).
+ */
 function confidenceTone(label: string | undefined): Severity { // skipcq: JS-0067
-  switch ((label ?? "").toUpperCase()) {
-    case "HIGH":
-      return "green";
-    case "MEDIUM":
-      return "amber";
-    case "LOW":
-      return "red";
-    default:
-      return "blue";
-  }
+  return confidenceDisplay("", label).tone;
 }
 
 // Component breakdown tone: the value row (positive contribution) is green,

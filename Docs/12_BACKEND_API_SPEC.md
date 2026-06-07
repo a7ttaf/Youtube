@@ -419,9 +419,30 @@ the generated deck through the same artifact store and marks the export job
 ```http
 GET /audit/events?limit=50
 GET /audit/events?limit=50&cursor_created_at=2026-05-10T12:00:00Z&cursor_id=00000000-0000-0000-0000-000000000001
+GET /audit/events/export?event_type=REVENUE_VIEWED&entity_type=channel&entity_id=chan-1
 ```
 
-Audit event reads require `audit.view`. Sensitive audit `details` are masked unless the caller also has `audit.view_sensitive_payloads`. Audit reads are themselves recorded as `AUDIT_LOG_VIEWED`.
+Audit event reads require `audit.view`. Sensitive audit `details` are masked unless
+the caller also has `audit.view_sensitive_payloads`. Audit reads are themselves
+recorded as `AUDIT_LOG_VIEWED`.
+
+`GET /audit/events/export` returns the current filtered slice as CSV (`text/csv`)
+with a `Content-Disposition: attachment; filename="audit-events.csv"` header. It
+accepts the `event_type`, `entity_type`, and `entity_id` filters only — **no
+`cursor_created_at`/`cursor_id`/`limit` params** (any such params are ignored). The
+export always starts from the newest event, never the caller's loaded-page state.
+Rows are gathered up to a fixed cap of **10,000**; when more rows remain beyond the
+cap the response sets `X-Truncated: true`. The CSV columns are, in order:
+`created_at` (ISO-8601), `event_type`, `user_id`, `entity_type`, `entity_id`,
+`scope_type`, `scope_id`, `request_id`, `reason`, `sensitive`, `details_redacted`,
+`details`. Booleans render lowercase; `details` is stable compact JSON
+(`sort_keys=True`) for visible rows and the **empty string** for redacted rows
+(`details_redacted=true`). String cells beginning with `=`, `+`, `-`, `@`, tab, or
+CR are prefixed with an apostrophe to neutralize spreadsheet formula injection.
+The export rows are materialized before the download is recorded, so the CSV never
+contains its own event; one `EXPORT_DOWNLOADED` event (entity_type
+`audit_events_export`) is then written with the filter set, returned row count,
+`truncated`, and `details_redacted` flags.
 
 `GET /audit/events` uses newest-first cursor pagination. `limit` defaults to `50` and is capped at `100`; when `pagination.has_more` is true, clients pass `pagination.next_cursor.created_at` as `cursor_created_at` and `pagination.next_cursor.id` as `cursor_id` to continue from the same `(created_at, id)` position. Older unpaginated and `page`/`page_size` examples are outdated. `AUDIT_LOG_VIEWED` records created by audit reads are stored, but this listing excludes them from the paginated result set so read-generated audit entries cannot shift the pages a client is iterating. `audit.view` and `audit.view_sensitive_payloads` only affect visibility within that filtered result set.
 

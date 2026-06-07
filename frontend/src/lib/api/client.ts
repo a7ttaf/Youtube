@@ -159,9 +159,36 @@ export function useApiClient() { // skipcq: JS-0067, JS-D1001
       }
     }
 
+    // ========================================================================
+    // Purpose: GET a non-JSON (binary/text) response as a Blob, applying the SAME
+    //   tenant/auth header conventions the JSON client uses, and returning both the
+    //   blob and the raw Headers so callers can read response headers (e.g. the
+    //   audit CSV export's X-Truncated). Kept separate from request<T> because that
+    //   path strict-parses JSON and would mangle a CSV body.
+    // Standards: Same fail-closed ApiError boundary on non-2xx; same X-UMS-Tenant
+    //   injection via buildHeaders. No Accept override is forced so the server may
+    //   honor its own content type.
+    // Blast Radius: Read-only download surface. No finance math, no mutation.
+    // ========================================================================
+    async function getBlob( // skipcq: JS-D1001
+      path: string,
+      init: RequestInit = {},
+    ): Promise<{ blob: Blob; headers: Headers }> {
+      const url = resolveUrl(path);
+      const headers = buildHeaders(init.headers, tenantSlug, false);
+      const res = await fetch(url, { ...init, method: "GET", headers });
+      if (!res.ok) {
+        const body = await parseBody(res);
+        throw new ApiError(`${res.status} ${res.statusText}`, res.status, body, url);
+      }
+      const blob = await res.blob();
+      return { blob, headers: res.headers };
+    }
+
     return {
       get: <T>(path: string, init?: RequestInit) =>
         request<T>("GET", path, init),
+      getBlob,
       post: <T>(path: string, body?: unknown, init?: RequestInit) =>
         request<T>("POST", path, withJsonBody(body, init)),
       put: <T>(path: string, body?: unknown, init?: RequestInit) =>

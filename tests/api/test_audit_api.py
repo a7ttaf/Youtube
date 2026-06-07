@@ -1,17 +1,22 @@
+import csv
 from datetime import UTC, datetime, timedelta
+from io import StringIO
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.channels import current_audit_sink
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 
 USER_ID = UUID("00000000-0000-0000-0000-000000013001")
 
 
 def auth_headers(role: str) -> dict[str, str]:
+    """Build trusted-gateway headers for the requested test role."""
     return {
         "x-user-id": str(USER_ID),
         "x-user-email": f"{role}@example.com",
@@ -22,10 +27,12 @@ def auth_headers(role: str) -> dict[str, str]:
 
 
 def build_database_url(tmp_path) -> str:
+    """Build a disposable SQLite database URL for the audit API tests."""
     return f"sqlite+pysqlite:///{(tmp_path / 'audit.db').as_posix()}"
 
 
 def seed_database(database_url: str) -> None:
+    """Seed the audit test database with representative audit rows."""
     engine = create_engine(database_url)
     SecurityBase.metadata.create_all(engine)
     created_at = datetime.now(UTC).replace(microsecond=0) - timedelta(minutes=10)
@@ -67,6 +74,7 @@ def seed_database(database_url: str) -> None:
 
 
 def test_audit_viewer_lists_audit_events_with_sensitive_details_masked(tmp_path):
+    """List audit events and keep sensitive payloads masked for viewers."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     with TestClient(create_app(database_url=database_url)) as client:
@@ -107,6 +115,7 @@ def test_audit_viewer_lists_audit_events_with_sensitive_details_masked(tmp_path)
 
 
 def test_audit_event_cursor_pagination_is_stable_when_new_events_arrive(tmp_path):
+    """Keep cursor pagination stable even when newer rows arrive mid-read."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     with TestClient(create_app(database_url=database_url)) as client:
@@ -158,6 +167,7 @@ def test_audit_event_cursor_pagination_is_stable_when_new_events_arrive(tmp_path
 
 
 def test_super_owner_can_view_sensitive_audit_details(tmp_path):
+    """Allow the super owner to see sensitive audit payloads."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
 
@@ -176,7 +186,258 @@ def test_super_owner_can_view_sensitive_audit_details(tmp_path):
     assert response.json()["items"][0]["details_redacted"] is False
 
 
+EXPORT_HEADER = (
+    "created_at,event_type,user_id,entity_type,entity_id,scope_type,scope_id,"
+    "request_id,reason,sensitive,details_redacted,details"
+)
+
+
+def test_audit_events_export_success_csv_shape(tmp_path):
+    """Export CSV rows, shape, and the recorded audit-view permission."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    audit_sink = InMemoryAuditSink()
+
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+
+    with TestClient(app) as client:
+        response = client.get(
+            "/audit/events/export?event_type=LOGIN",
+            headers=auth_headers("audit_viewer"),
+        )
+
+    assert response.status_code == 200
+    assert response.headers["content-type"].startswith("text/csv")
+    assert (
+        response.headers["content-disposition"]
+        == 'attachment; filename="audit-events.csv"'
+    )
+    assert "x-truncated" not in response.headers
+    lines = response.text.splitlines()
+    assert lines[0] == EXPORT_HEADER
+    rows = list(csv.DictReader(StringIO(response.text)))
+    assert len(rows) == 1
+    assert rows[0]["event_type"] == "LOGIN"
+    # created_at must be ISO-8601 (parseable), not a python repr.
+    datetime.fromisoformat(rows[0]["created_at"])
+    # Non-redacted details serialized as stable compact JSON.
+    assert rows[0]["details"] == '{"ip":"127.0.0.1"}'
+    assert rows[0]["details_redacted"] == "false"
+    assert rows[0]["sensitive"] == "false"
+    assert len(audit_sink.records) == 1
+    assert audit_sink.records[0].event_type == "EXPORT_DOWNLOADED"
+    assert audit_sink.records[0].permission == "audit.view"
+
+
+def test_audit_events_export_denied_without_permission(tmp_path):
+    """Return 403 and avoid export audit writes when permission is missing."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        response = client.get(
+            "/audit/events/export",
+            headers=auth_headers("assistant_analyst"),
+        )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == "Missing permission: audit.view"
+
+        # Fail-closed: no EXPORT_DOWNLOADED audit row written on denial.
+        engine = create_engine(database_url)
+        with Session(engine) as session:
+            export_events = session.scalars(
+                select(AuditLogORM).where(
+                    AuditLogORM.event_type == "EXPORT_DOWNLOADED"
+                )
+            ).all()
+        assert export_events == []
+
+
+def test_audit_events_export_event_type_filter_narrows_rows(tmp_path):
+    """Narrow the CSV export when an event_type filter is supplied."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        all_rows = list(
+            csv.DictReader(
+                StringIO(
+                    client.get(
+                        "/audit/events/export",
+                        headers=auth_headers("audit_viewer"),
+                    ).text
+                )
+            )
+        )
+        filtered = list(
+            csv.DictReader(
+                StringIO(
+                    client.get(
+                        "/audit/events/export?event_type=LOGIN",
+                        headers=auth_headers("audit_viewer"),
+                    ).text
+                )
+            )
+        )
+
+    assert {r["event_type"] for r in all_rows} == {"REVENUE_VIEWED", "LOGIN"}
+    assert [r["event_type"] for r in filtered] == ["LOGIN"]
+
+
+def test_audit_events_export_redacts_sensitive_for_plain_viewer(tmp_path):
+    """Keep sensitive export rows redacted for a plain audit viewer."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        viewer = client.get(
+            "/audit/events/export?event_type=REVENUE_VIEWED",
+            headers=auth_headers("audit_viewer"),
+        )
+        owner = client.get(
+            "/audit/events/export?event_type=REVENUE_VIEWED",
+            headers=auth_headers("super_owner"),
+        )
+
+    viewer_rows = list(csv.DictReader(StringIO(viewer.text)))
+    assert viewer_rows[0]["details"] == ""
+    assert viewer_rows[0]["details_redacted"] == "true"
+    assert "YOUTUBE_CMS" not in viewer.text
+    assert "gross_revenue_usd" not in viewer.text
+
+    owner_rows = list(csv.DictReader(StringIO(owner.text)))
+    assert owner_rows[0]["details_redacted"] == "false"
+    assert "YOUTUBE_CMS" in owner_rows[0]["details"]
+
+
+def test_audit_events_export_ignores_cursor_params(tmp_path):
+    """Ignore cursor params so CSV exports always start from the beginning."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+
+    # Filter to a seeded event_type so accrued EXPORT_DOWNLOADED self-events
+    # from earlier calls do not perturb the comparison.
+    with TestClient(create_app(database_url=database_url)) as client:
+        plain = client.get(
+            "/audit/events/export?event_type=REVENUE_VIEWED",
+            headers=auth_headers("audit_viewer"),
+        )
+        with_cursor = client.get(
+            "/audit/events/export",
+            headers=auth_headers("audit_viewer"),
+            params={
+                "event_type": "REVENUE_VIEWED",
+                "cursor_created_at": "2026-05-10T12:00:00+00:00",
+                "cursor_id": str(uuid4()),
+            },
+        )
+
+    plain_rows = list(csv.DictReader(StringIO(plain.text)))
+    cursor_rows = list(csv.DictReader(StringIO(with_cursor.text)))
+    # Cursor params are ignored: export starts from the beginning either way.
+    assert [r["entity_id"] for r in plain_rows] == [
+        r["entity_id"] for r in cursor_rows
+    ]
+    assert len(cursor_rows) == 1
+
+
+def test_audit_events_export_caps_rows_and_sets_truncated(tmp_path, monkeypatch):
+    """Cap large CSV exports and surface truncation via the response header."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    monkeypatch.setattr(
+        "ums_smart_revenue.api.audit.AUDIT_EXPORT_MAX_ROWS", 1
+    )
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        capped = client.get(
+            "/audit/events/export",
+            headers=auth_headers("audit_viewer"),
+        )
+
+    capped_rows = list(csv.DictReader(StringIO(capped.text)))
+    assert len(capped_rows) == 1
+    assert capped.headers["x-truncated"] == "true"
+
+
+def test_audit_events_export_no_truncated_header_under_cap(tmp_path):
+    """Omit the truncation header when the CSV stays within the row cap."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        full = client.get(
+            "/audit/events/export",
+            headers=auth_headers("audit_viewer"),
+        )
+
+    assert len(list(csv.DictReader(StringIO(full.text)))) == 2
+    assert "x-truncated" not in full.headers
+
+
+def test_audit_events_export_snapshot_excludes_own_event(tmp_path):
+    """Snapshot the CSV before emitting its own export audit event."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        first = client.get(
+            "/audit/events/export",
+            headers=auth_headers("audit_viewer"),
+        )
+        # First export's CSV must not contain its own download event.
+        assert "audit_events_export" not in first.text
+        assert "EXPORT_DOWNLOADED" not in first.text
+
+        # But a privileged list afterward DOES show the first export's event.
+        listing = client.get(
+            "/audit/events?event_type=EXPORT_DOWNLOADED",
+            headers=auth_headers("super_owner"),
+        )
+
+    items = listing.json()["items"]
+    assert any(item["event_type"] == "EXPORT_DOWNLOADED" for item in items)
+    assert any(item["entity_type"] == "audit_events_export" for item in items)
+
+
+def test_audit_events_export_guards_formula_injection(tmp_path):
+    """Escape spreadsheet formula prefixes in the exported CSV."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            AuditLogORM(
+                id=uuid4(),
+                user_id=USER_ID,
+                event_type="LOGIN",
+                entity_type="user_session",
+                entity_id=str(USER_ID),
+                scope_type="global",
+                scope_id=None,
+                reason="=cmd|'/C calc'!A1",
+                details={},
+                sensitive=False,
+                created_at=datetime.now(UTC).replace(microsecond=0),
+            )
+        )
+        session.commit()
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        response = client.get(
+            "/audit/events/export?event_type=LOGIN",
+            headers=auth_headers("audit_viewer"),
+        )
+
+    rows = list(csv.DictReader(StringIO(response.text)))
+    reasons = [r["reason"] for r in rows]
+    assert "'=cmd|'/C calc'!A1" in reasons
+
+
 def test_assistant_cannot_view_audit_events(tmp_path):
+    """Reject audit log reads for the assistant analyst role."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
 

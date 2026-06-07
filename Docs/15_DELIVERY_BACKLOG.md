@@ -151,10 +151,12 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   (build_month_net_revenue_summary; per-channel gross/net/deduction roll-up,
   scope-filtered, USD-only). Tax/deduction ingestion + allocation-rule
   application remain unbuilt (Phase 4).
-- ⏳ Confidence labels — remaining: labels ARE computed in services
+- ⏳ Confidence labels — labels ARE computed in services
   (net-revenue B_RECONCILED/D_ESTIMATED/E_MISSING; explain confidence label)
-  and returned by the net-revenue/explain APIs; dashboard UI surfacing not
-  built.
+  and returned by the net-revenue/explain APIs; Trace/Explain shows label +
+  score (PR #69) and CommandView now renders human confidence badges
+  (`confidenceDisplay` helper, raw code in title/aria — Track C,
+  `feat/audit-track-c`). Remaining: finance adoption/validation of the labels.
 - ✅ Explain-number API — shipped: POST
   /revenue/channels/{channel_id}/months/{month}/explain
   (build_channel_month_revenue_explanation; per-metric source/formula/
@@ -404,11 +406,15 @@ ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
   payload redaction (the UI reflects `details_redacted`, never reveals withheld
   payloads), fail-closed gate (a non-audit viewer sees the restricted
   placeholder and fires no fetch — so the self-auditing read is never spammed),
-  403 → no-permission copy. Renders the FIRST page only (no Load More via
-  `next_cursor` yet). The severity-filter and "Download Audit View" controls are
-  disabled placeholders (no facet / no audit-export route exists yet). Summary
-  tiles + coverage panel stay static context (no aggregate-count route).
-  Frontend-only; backend unchanged.
+  403 → no-permission copy. Track C follow-up (`feat/audit-track-c`) finished
+  the surface: Load More via `next_cursor` (append + id-dedupe + reset on
+  filter change), a live event-type filter on the existing `event_type` param,
+  and "Download Audit View" wired to the new `GET /audit/events/export` sync
+  CSV route (same gate/filters/redaction as the list route; 10,000-row cap
+  with `X-Truncated` surfaced in the UI; snapshot-before-audit
+  `EXPORT_DOWNLOADED` emission; deterministic, formula-injection-guarded CSV).
+  Summary tiles + coverage panel stay static context (no aggregate-count
+  route).
 
 ## P2 — Advanced features
 
@@ -583,8 +589,9 @@ single P-tier above.
    currency effects without treating public FX rates as official revenue.
 5. ⏳ Confidence labels that finance trusts — remaining: computation rules
    exist (net-revenue B_RECONCILED/D_ESTIMATED/E_MISSING + explain confidence
-   label) and PR #69 surfaces the explain confidence label + score in the
-   Trace/Explain screen; remaining is finance adoption/validation of those
-   labels across the rest of the dashboard.
+   label), PR #69 surfaces the explain confidence label + score in the
+   Trace/Explain screen, and Track C (`feat/audit-track-c`) surfaces human
+   confidence badges on CommandView; remaining is finance adoption/validation
+   of those labels.
 6. ✅ Flexible grouping without hardcoded UMS structure — channel group
    registry (PR #25 + tests in PR #30).
