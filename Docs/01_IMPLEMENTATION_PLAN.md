@@ -646,10 +646,18 @@ now wired to `GET /audit/events` (see below).
   sensitive-payload redaction (the UI reflects `details_redacted`, never reveals
   withheld payloads or offers a reveal control); fail-closed gate (a non-audit
   viewer sees the restricted placeholder and fires no fetch); 403 → audit-
-  appropriate no-permission copy. Renders the FIRST page only (no Load More via
-  `next_cursor` yet); severity-filter + "Download Audit View" are disabled
-  placeholders (no facet / audit-export route yet). Frontend-only; backend
-  unchanged. Registry is now the only mock-labelled page.
+  appropriate no-permission copy. Frontend-only; backend unchanged. Registry is
+  now the only mock-labelled page. Track C follow-up (branch
+  `feat/audit-track-c`) completed the surface: Load More via
+  `pagination.next_cursor` (append + id-dedupe + filter-change reset), a live
+  event-type filter on the existing `event_type` param (real `AuditEventType`
+  values; no severity facet was invented), and "Download Audit View" wired to a
+  new synchronous `GET /audit/events/export` CSV route (same gate/filters/
+  redaction as the list route, 10,000-row cap + `X-Truncated` header surfaced
+  in the UI, snapshot-before-audit `EXPORT_DOWNLOADED` emission, formula-
+  injection-guarded deterministic CSV). CommandView confidence badges now show
+  human labels via the shared `confidenceDisplay` helper (raw code in
+  title/aria).
 - ✅ Connector credential test-connection probe — `POST /connectors/credentials/{connector_key}/{account_id}/test`
   (branch `docs/plan-hygiene-post-71`): wraps `resolve_connector_credentials()` (load cred →
   resolve secret URI → OAuth refresh, no live data pull). 404 on missing credential;
