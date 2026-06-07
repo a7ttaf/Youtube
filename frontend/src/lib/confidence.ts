@@ -32,9 +32,9 @@ const API_LABEL_TO_TONE: Record<string, ConfidenceTone> = {
 };
 
 const PREFIX_TO_DISPLAY: Record<string, ConfidenceDisplay> = {
-  A: { label: "Verified", tone: "green" },
+  A: { label: "Official", tone: "green" },
   B: { label: "Reconciled", tone: "green" },
-  C: { label: "Estimated", tone: "amber" },
+  C: { label: "Allocated", tone: "amber" },
   D: { label: "Estimated", tone: "amber" },
   E: { label: "Missing", tone: "red" },
 };
@@ -46,8 +46,9 @@ const toneFromApiLabel = (label: string): ConfidenceTone =>
 /**
  * Resolve a confidence code (+ optional API label) into a human label and tone.
  * Prefers a non-empty API label; otherwise falls back by code prefix:
- *   A -> Verified (green), B -> Reconciled (green), C/D -> Estimated (amber),
- *   E -> Missing (red); unknown -> the raw code with a neutral tone.
+ *   A -> Official (green), B -> Reconciled (green), C -> Allocated (amber),
+ *   D -> Estimated (amber), E -> Missing (red); unknown -> the raw code with a
+ *   neutral tone.
  */
 export const confidenceDisplay = (
   code: string,

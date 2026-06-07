@@ -20,21 +20,21 @@ describe("confidenceDisplay", () => {
   });
 
   it("ignores a blank API label and falls back to the prefix map", () => {
-    expect(confidenceDisplay("A_VERIFIED", "  ")).toEqual({
-      label: "Verified",
+    expect(confidenceDisplay("A_OFFICIAL", "  ")).toEqual({
+      label: "Official",
       tone: "green",
     });
-    expect(confidenceDisplay("A_VERIFIED", null)).toEqual({
-      label: "Verified",
+    expect(confidenceDisplay("A_OFFICIAL", null)).toEqual({
+      label: "Official",
       tone: "green",
     });
   });
 
   it("maps each code prefix to its human label and tone", () => {
-    expect(confidenceDisplay("A_VERIFIED")).toEqual({ label: "Verified", tone: "green" });
+    expect(confidenceDisplay("A_OFFICIAL")).toEqual({ label: "Official", tone: "green" });
     expect(confidenceDisplay("B_RECONCILED")).toEqual({ label: "Reconciled", tone: "green" });
-    expect(confidenceDisplay("C_ESTIMATED")).toEqual({ label: "Estimated", tone: "amber" });
-    expect(confidenceDisplay("D_MODELLED")).toEqual({ label: "Estimated", tone: "amber" });
+    expect(confidenceDisplay("C_ALLOCATED")).toEqual({ label: "Allocated", tone: "amber" });
+    expect(confidenceDisplay("D_ESTIMATED")).toEqual({ label: "Estimated", tone: "amber" });
     expect(confidenceDisplay("E_MISSING")).toEqual({ label: "Missing", tone: "red" });
   });
 
