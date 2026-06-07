@@ -75,7 +75,7 @@ class ConnectorRunError(ValueError):
 
 
 class ConnectorRunValidationError(ConnectorRunError):
-    pass
+    """Validation failure for connector run history queries or cursors."""
 
 
 class ConnectorRunLinkConflictError(ConnectorRunError):
