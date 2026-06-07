@@ -143,7 +143,11 @@ function AuditTimeline({
  * actions) and the live audit timeline. Extracted so the AuditView JSX tree
  * stays shallow.
  */
-function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) { // skipcq: JS-0067
+type AuditLogPanelProps = {
+  canViewAudit: boolean;
+};
+
+const AuditLogPanel = ({ canViewAudit }: AuditLogPanelProps) => {
   const [eventType, setEventType] = useState("");
 
   return (
@@ -160,7 +164,7 @@ function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) { // skipcq:
       />
     </section>
   );
-}
+};
 
 /**
  * Trigger a browser save of a blob via a temporary object URL + <a download>.
@@ -217,6 +221,9 @@ function useAuditExportDownload(eventType: string) { // skipcq: JS-0067
     setBusy(true);
     setErrorDetail(null);
     setTruncated(false);
+    /**
+     * Read the current audit slice as CSV, save it, and mark truncation state.
+     */
     const downloadAuditCsv = async (): Promise<void> => {
       const url = buildAuditEventsExportUrl(eventType);
       const { blob, headers } = await client.getBlob(url);
