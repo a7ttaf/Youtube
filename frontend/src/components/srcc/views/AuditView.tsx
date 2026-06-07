@@ -18,6 +18,7 @@ const AUDIT_EVENT_TYPE_OPTIONS = [
   { label: "Logins", value: "LOGIN" },
 ];
 
+/** Read the CSV export truncation flag from the backend response headers. */
 const hasTruncatedExportHeader = (headers: Headers): boolean =>
   (headers.get("X-Truncated") ?? "").toLowerCase() === "true";
 
@@ -80,8 +81,62 @@ export default function AuditView({ // skipcq: JS-0067
 }
 
 /**
- * The audit-log main panel: header (title + event-type filter / download actions)
- * and the live audit timeline. Extracted so the AuditView JSX tree stays shallow.
+ * Reusable inner content for timeline placeholder rows (restricted, error,
+ * loading, empty). Rendered as a fragment inside the caller's `timeline-item`
+ * div so each state can control its own wrapper attributes (role, aria-busy,
+ * etc.) independently.
+ */
+function TimelinePlaceholderRow({ tone, title, sub, badge }: { // skipcq: JS-0067
+  tone: Severity; title: string; sub: string; badge: string;
+}) {
+  return (
+    <>
+      <span className="timeline-time">--:--</span>
+      <Dot tone={tone} />
+      <span>
+        <span className="item-title">{title}</span>
+        <span className="item-sub">{sub}</span>
+      </span>
+      <Badge tone={tone}>{badge}</Badge>
+    </>
+  );
+}
+
+/**
+ * Audit event timeline gate. A non-audit viewer sees a single restricted
+ * placeholder row and - critically - NO hook is mounted here, so no
+ * /audit/events fetch fires (fail-closed). Only when permitted is the
+ * always-fetching feed mounted, keeping the useAuditEvents call unconditional
+ * (rules-of-hooks safe).
+ */
+const AuditTimeline = ({
+  canViewAudit,
+  eventType,
+}: {
+  canViewAudit: boolean;
+  eventType: string | undefined;
+}): JSX.Element => {
+  if (!canViewAudit) {
+    return (
+      <div className="timeline" role="list">
+        <div className="timeline-item" role="listitem">
+          <TimelinePlaceholderRow
+            tone="red"
+            title="Audit view restricted"
+            sub="Audit log access requires the VIEW_AUDIT_LOG permission"
+            badge="Restricted"
+          />
+        </div>
+      </div>
+    );
+  }
+  return <AuditTimelineFeed eventType={eventType} />;
+};
+
+/**
+ * The audit-log main panel: header (title + event-type filter / download
+ * actions) and the live audit timeline. Extracted so the AuditView JSX tree
+ * stays shallow.
  */
 function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) { // skipcq: JS-0067
   const [eventType, setEventType] = useState("");
@@ -93,7 +148,11 @@ function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) { // skipcq:
         onEventType={setEventType}
         canViewAudit={canViewAudit}
       />
-      <AuditTimeline canViewAudit={canViewAudit} eventType={eventType || undefined} />
+      <AuditTimeline
+        key={eventType || "all"}
+        canViewAudit={canViewAudit}
+        eventType={eventType || undefined}
+      />
     </section>
   );
 }
@@ -137,6 +196,7 @@ function useAuditExportDownload(eventType: string) { // skipcq: JS-0067
   const [truncated, setTruncated] = useState(false);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
 
+  /** Read the current audit slice as CSV, save it, and mark truncation state. */
   const downloadAuditCsv = async (): Promise<void> => {
     const url = buildAuditEventsExportUrl(eventType);
     const { blob, headers } = await client.getBlob(url);
@@ -144,20 +204,25 @@ function useAuditExportDownload(eventType: string) { // skipcq: JS-0067
     setTruncated(hasTruncatedExportHeader(headers));
   };
 
+  /** Normalize the download failure into the shared audit-screen detail copy. */
+  const describeDownloadError = (caught: unknown): string => {
+    const asError = caught instanceof Error ? caught : new Error("Download failed");
+    return describeError(asError).detail;
+  };
+
   /** Download the current audit slice as CSV and surface truncation state. */
-  const download = async () => {
+  const download = (): void => {
     if (busy) return;
     setBusy(true);
     setErrorDetail(null);
     setTruncated(false);
-    try {
-      await downloadAuditCsv();
-    } catch (caught) {
-      const asError = caught instanceof Error ? caught : new Error("Download failed");
-      setErrorDetail(describeError(asError).detail);
-    } finally {
-      setBusy(false);
-    }
+    void downloadAuditCsv()
+      .catch((caught) => {
+        setErrorDetail(describeDownloadError(caught));
+      })
+      .finally(() => {
+        setBusy(false);
+      });
   };
 
   return { download, busy, truncated, errorDetail };
@@ -228,57 +293,6 @@ function AuditLogPanelHeader({ // skipcq: JS-0067
     </div>
   );
 }
-
-/**
- * Reusable inner content for timeline placeholder rows (restricted, error, loading,
- * empty). Rendered as a fragment inside the caller's `timeline-item` div so each
- * state can control its own wrapper attributes (role, aria-busy, etc.) independently.
- */
-function TimelinePlaceholderRow({ tone, title, sub, badge }: { // skipcq: JS-0067
-  tone: Severity; title: string; sub: string; badge: string;
-}) {
-  return (
-    <>
-      <span className="timeline-time">--:--</span>
-      <Dot tone={tone} />
-      <span>
-        <span className="item-title">{title}</span>
-        <span className="item-sub">{sub}</span>
-      </span>
-      <Badge tone={tone}>{badge}</Badge>
-    </>
-  );
-}
-
-/**
- * Audit event timeline gate. A non-audit viewer sees a single restricted
- * placeholder row and — critically — NO hook is mounted here, so no /audit/events
- * fetch fires (fail-closed). Only when permitted is the always-fetching feed
- * mounted, keeping the useAuditEvents call unconditional (rules-of-hooks safe).
- */
-const AuditTimeline = ({
-  canViewAudit,
-  eventType,
-}: {
-  canViewAudit: boolean;
-  eventType: string | undefined;
-}): JSX.Element => {
-  if (!canViewAudit) {
-    return (
-      <div className="timeline" role="list">
-        <div className="timeline-item" role="listitem">
-          <TimelinePlaceholderRow
-            tone="red"
-            title="Audit view restricted"
-            sub="Audit log access requires the VIEW_AUDIT_LOG permission"
-            badge="Restricted"
-          />
-        </div>
-      </div>
-    );
-  }
-  return <AuditTimelineFeed key={eventType ?? "all"} eventType={eventType} />;
-};
 
 /**
  * The live audit-event feed. ALWAYS calls useAuditEvents() (it is only mounted
