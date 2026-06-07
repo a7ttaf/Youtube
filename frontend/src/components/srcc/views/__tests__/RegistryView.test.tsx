@@ -65,16 +65,19 @@ const ORG_UNITS: OrgUnit[] = [
   },
 ];
 
-function jsonResponse(body: unknown, status = 200) {  return new Response(JSON.stringify(body), {
+function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
+  return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
 }
 
-function fetchMock() {  return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
+function fetchMock() { // skipcq: JS-0067
+  return globalThis.fetch as unknown as ReturnType<typeof vi.fn>;
 }
 
-function urlOf(input: unknown): string {  if (typeof input === "string") return input;
+function urlOf(input: unknown): string { // skipcq: JS-0067
+  if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
   if (input instanceof Request) return input.url;
   return String(input);
@@ -88,7 +91,9 @@ type RouteOverrides = {
 };
 
 /** Route the registry's four endpoints; unrouted URLs fail loudly (404 + []). */
-function routeRegistry(overrides: RouteOverrides = {}) {  return (input: unknown, init?: RequestInit) => {    const url = urlOf(input);
+function routeRegistry(overrides: RouteOverrides = {}) { // skipcq: JS-0067, JS-R1005
+  return (input: unknown, init?: RequestInit) => {
+    const url = urlOf(input);
     if (url === "/channels") {
       return Promise.resolve(
         overrides.channels ? overrides.channels() : jsonResponse(CHANNELS),
@@ -121,10 +126,12 @@ function routeRegistry(overrides: RouteOverrides = {}) {  return (input: unknown
 }
 
 /** Backwards-compatible channels-only router used by the Phase 1 read tests. */
-function routeChannels(body: ChannelRegistryEntry[] | null = CHANNELS, status = 200) {  return routeRegistry({ channels: () => jsonResponse(body, status) });
+function routeChannels(body: ChannelRegistryEntry[] | null = CHANNELS, status = 200) { // skipcq: JS-0067
+  return routeRegistry({ channels: () => jsonResponse(body, status) });
 }
 
-function renderRegistry(  canManageRegistry = true,
+function renderRegistry( // skipcq: JS-0067
+  canManageRegistry = true,
   canViewFinance = true,
   onOpenTrace?: (channelId: string) => void,
 ) {
@@ -139,15 +146,18 @@ function renderRegistry(  canManageRegistry = true,
   );
 }
 
-function callsTo(predicate: (url: string, init?: RequestInit) => boolean) {  return fetchMock().mock.calls.filter((args: unknown[]) =>
+function callsTo(predicate: (url: string, init?: RequestInit) => boolean) { // skipcq: JS-0067
+  return fetchMock().mock.calls.filter((args: unknown[]) =>
     predicate(urlOf(args[0]), args[1] as RequestInit | undefined),
   );
 }
 
-function channelCalls() {  return callsTo((url) => url === "/channels");
+function channelCalls() { // skipcq: JS-0067
+  return callsTo((url) => url === "/channels");
 }
 
-function deferred<T>() {  let resolve!: (value: T) => void;
+function deferred<T>() { // skipcq: JS-0067
+  let resolve!: (value: T) => void;
   const promise = new Promise<T>((r) => {
     resolve = r;
   });
