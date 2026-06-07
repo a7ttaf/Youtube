@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, useApiClient } from "@/lib/api/client";
 import type { SessionCapabilities, TenantRead } from "@/lib/api/types";
@@ -320,6 +320,9 @@ function tenantProofLabel( // skipcq: JS-0067
 export default function AppShell() { // skipcq: JS-0067, JS-R1005
   const [view, setView] = useState<ViewKey>("command");
   const [previewRole, setPreviewRole] = useState<Role>(DEFAULT_PREVIEW_ROLE);
+  // Registry "Review" navigation target: seeds TraceView's initial channel
+  // selection. Navigation-only state — carries no authorization meaning.
+  const [traceChannelId, setTraceChannelId] = useState<string | null>(null);
 
   const sessionBootstrap = useSessionBootstrap();
   // The tenant bootstrap only runs once the authenticated session is ready, so
@@ -328,6 +331,17 @@ export default function AppShell() { // skipcq: JS-0067, JS-R1005
   // previewRole is passed as the retry token: a dev role switch after a failed
   // tenant bootstrap re-fires it (dev-only; it does not affect capabilities).
   const { proofLabel } = useTenantBootstrap(sessionReady, previewRole);
+
+  // FIX: Clear the Registry→Trace navigation seed when leaving the trace view
+  // so that a later manual click on the Trace nav item opens a blank view
+  // instead of pre-selecting the last "Review" channel.
+  const handleViewChange = useCallback(
+    (next: ViewKey) => {
+      if (next !== "trace") setTraceChannelId(null);
+      setView(next);
+    },
+    [setView, setTraceChannelId],
+  );
 
   if (sessionBootstrap.status === "loading") {
     return <SessionLoadingState />;
@@ -358,7 +372,7 @@ export default function AppShell() { // skipcq: JS-0067, JS-R1005
       {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
       <Sidebar
         view={view}
-        onSelectView={setView}
+        onSelectView={handleViewChange}
         previewRole={previewRole}
         onSelectPreviewRole={setPreviewRole}
         displayedRole={displayedRole}
@@ -376,6 +390,11 @@ export default function AppShell() { // skipcq: JS-0067, JS-R1005
           permissions={permissions}
           canViewFinance={canViewFinance}
           displayedRole={displayedRole}
+          traceChannelId={traceChannelId}
+          onOpenTrace={(channelId) => {
+            setTraceChannelId(channelId);
+            setView("trace");
+          }}
         />
         {view === "command" && <WorkflowRail />}
       </main>
@@ -635,11 +654,15 @@ function ViewRouter({ // skipcq: JS-0067, JS-R1005
   permissions,
   canViewFinance,
   displayedRole,
+  traceChannelId,
+  onOpenTrace,
 }: {
   view: ViewKey;
   permissions: AccessPermissions;
   canViewFinance: boolean;
   displayedRole: Role;
+  traceChannelId: string | null;
+  onOpenTrace: (channelId: string) => void;
 }) {
   return (
     <>
@@ -648,11 +671,16 @@ function ViewRouter({ // skipcq: JS-0067, JS-R1005
         <RegistryView
           canManageRegistry={permissions.canManageRegistry}
           canViewFinance={permissions.canViewFinance}
+          onOpenTrace={onOpenTrace}
         />
       )}
       {view === "close" && <CloseView permissions={permissions} />}
       {view === "trace" && (
-        <TraceView canViewFinance={canViewFinance} role={displayedRole} />
+        <TraceView
+          canViewFinance={canViewFinance}
+          role={displayedRole}
+          presetChannelId={traceChannelId ?? undefined}
+        />
       )}
       {view === "exports" && (
         <ExportsView

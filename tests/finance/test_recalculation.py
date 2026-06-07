@@ -99,3 +99,41 @@ def test_verified_channel_ids_none_falls_back_to_fact_channels_only():
     )
     assert preview_none.status == preview_default.status
     assert preview_none.blocking_issues == preview_default.blocking_issues
+
+
+def test_no_allocation_factless_preview_is_ready():
+    """no_allocation is in SOURCE_FACTS_OPTIONAL_METHODS: zero facts → READY_FOR_REVIEW."""
+    preview = build_recalculation_preview(
+        month="2026-04",
+        allocation_method="no_allocation",
+        scope_type="global",
+        scope_id=None,
+        currency="USD",
+        dry_run=True,
+        facts=[],
+        manual_overrides=[],
+    )
+    assert preview.status == "READY_FOR_REVIEW"
+    assert not preview.blocking_issues
+
+
+def test_manual_factless_preview_is_blocked():
+    """manual is NOT in SOURCE_FACTS_OPTIONAL_METHODS: zero facts → BLOCKED.
+
+    The recalculation route rejects dry_run=false/manual with 422 (it redirects
+    to the account-allocations/commit endpoint), so a manual dry-run returning
+    READY_FOR_REVIEW with no facts would be a false positive with no commit path.
+    """
+    preview = build_recalculation_preview(
+        month="2026-04",
+        allocation_method="manual",
+        scope_type="global",
+        scope_id=None,
+        currency="USD",
+        dry_run=True,
+        facts=[],
+        manual_overrides=[],
+    )
+    assert preview.status == "BLOCKED"
+    issue_types = [i.issue_type for i in preview.blocking_issues]
+    assert "NO_REVENUE_FACTS" in issue_types

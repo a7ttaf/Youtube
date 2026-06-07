@@ -103,6 +103,19 @@ const PERMISSION_DETAILS: Record<Role, Array<{ label: string; value: string }>> 
   ],
 };
 
+/** Resolve which channel to explain: the current selection if present, else the first channel. */
+function resolveEffectiveChannelId( // skipcq: JS-0067
+  selectedChannelId: string,
+  channels: Array<{ youtube_channel_id: string }>,
+): string {
+  return (
+    channels.find((c) => c.youtube_channel_id === selectedChannelId)
+      ?.youtube_channel_id ??
+    channels[0]?.youtube_channel_id ??
+    ""
+  );
+}
+
 /**
  * Trace / Explain-Number screen: pick month + channel + metric, then POST to the
  * guarded explain endpoint and render the source-linked, permission-gated breakdown.
@@ -110,15 +123,22 @@ const PERMISSION_DETAILS: Record<Role, Array<{ label: string; value: string }>> 
 export default function TraceView({ // skipcq: JS-0067
   canViewFinance,
   role,
+  presetChannelId,
 }: {
   canViewFinance: boolean;
   role: Role;
+  presetChannelId?: string;
 }) {
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   const [metric, setMetric] = useState<ExplanationMetric>(
     "adjusted_gross_revenue_usd",
   );
-  const [selectedChannelId, setSelectedChannelId] = useState<string>("");
+  // presetChannelId seeds the INITIAL selection only (Registry "Review" nav);
+  // the existing resolution below still falls back to the first channel when
+  // the preset is absent from the selected month's channel list.
+  const [selectedChannelId, setSelectedChannelId] = useState<string>(
+    presetChannelId ?? "",
+  );
 
   // Reuse the net-revenue summary purely as the channel directory for the
   // dropdown (global scope, matching CommandView's default).
@@ -135,13 +155,7 @@ export default function TraceView({ // skipcq: JS-0067
 
   const explanation = useExplanation();
 
-  // Resolve the channel to explain: the explicit selection if it still exists
-  // in this month, otherwise the first channel.
-  const effectiveChannelId =
-    channels.find((c) => c.youtube_channel_id === selectedChannelId)
-      ?.youtube_channel_id ??
-    channels[0]?.youtube_channel_id ??
-    "";
+  const effectiveChannelId = resolveEffectiveChannelId(selectedChannelId, channels);
 
   const currency = netRevenue?.currency ?? "USD";
 

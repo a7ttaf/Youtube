@@ -163,7 +163,8 @@ def test_session_me_header_mode_revenue_ops_admin_can_run_connector_jobs(
     # revenue_operations_admin DOES hold EXPORT_ANALYTICS_REPORT — must not
     # collapse to canExportRevenue=False (the two permissions are distinct).
     assert caps["canExportAnalyticsReports"] is True
-    # revenue_operations_admin also holds MANAGE_CHANNELS (distinct from finance).
+    # revenue_operations_admin holds MANAGE_ORG_MAPPING (and MANAGE_CHANNELS);
+    # the capability gates the live Map/Assign routes that require MANAGE_ORG_MAPPING.
     assert caps["canManageRegistry"] is True
 
 

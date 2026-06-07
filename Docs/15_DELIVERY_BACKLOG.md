@@ -511,13 +511,24 @@ single P-tier above.
   event, `MANAGE_CONNECTORS@connector(connector_key)` gate, reason required).
   5 TDD tests (ok, not-found, inactive, oauth-error, 403). Backend only; no migration.
   Merged to main as PR #72 (28da1a6).
-- ✅ Channel Registry Phase 1 wiring — on `feat/registry-phase1`: the Registry
-  table is wired to `GET /channels` (replacing the `REGISTRY_ROWS` mock). All
-  display fields derived client-side from the API response (avatar, CMS badge,
-  source label, state per Option A, trace key). Active-channel and outside-CMS
-  tile counts derived from response. Extracted to `views/RegistryView.tsx`; 16
-  new Vitest tests. All six dashboard pages are now off mock data. Write paths
-  (Map/Assign/company reassignment) remain Phase 2.
+- ✅ Channel Registry Phase 1 wiring — merged to main as PR #73 (56bf9a8): the
+  Registry table is wired to `GET /channels` (replacing the `REGISTRY_ROWS`
+  mock). All display fields derived client-side (avatar, CMS badge, source
+  label, state per Option A, trace key). Extracted to `views/RegistryView.tsx`;
+  16 new Vitest tests. All six dashboard pages off mock data.
+- ✅ Channel Registry Phase 2 — on `feat/registry-phase2`: `GET /org-units`
+  (read-only, tenant-scoped, active-only, fail-closed VIEW_ANALYTICS; no
+  migration) resolves Company/Sector display names with an honest raw-id
+  fallback and supplies the Map modal's company options. Live write paths:
+  Map → `PATCH /channels/{id}/mapping` (audited reason, in-flight latch,
+  reload-on-success, typed inline errors incl. the unmapped-channel
+  global-grant dead-zone); Assign → `POST /revenue/channel-account-links`
+  (UNVERIFIED OPERATOR_ASSERTED proposal; verify/reject stays the admin API
+  flow); Review → Trace navigation preselected on the channel. Backend +5 TDD
+  org-units tests; frontend 189 Vitest green (10 new RegistryView + 5 hook).
+  Remaining (definition-blocked): bulk inventory import format; "Scoped
+  changes" tile; mapping-route month-lock enforcement (pre-existing gap,
+  named follow-up).
 - ⏳ Google source-reported revenue ingestion foundation: `currencies`
   reference table, tenant-scoped `google_revenue_source_rows` with idempotent
   source-row keys (full 64-char SHA-256 hex), storage repository, synthetic-

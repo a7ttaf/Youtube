@@ -1,6 +1,11 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+
 import { ApiError } from "@/lib/api/client";
-import type { ChannelRegistryEntry } from "@/lib/api/types";
+import type { ChannelRegistryEntry, OrgUnit } from "@/lib/api/types";
+import { useChannelMappingAction } from "@/lib/api/useChannelMapping";
 import { useChannels } from "@/lib/api/useChannels";
+import { useProposeAccountLinkAction } from "@/lib/api/useChannelAccountLinks";
+import { useOrgUnits } from "@/lib/api/useOrgUnits";
 import type { Severity } from "@/lib/mock/data";
 import { REGISTRY_CONTROLS, REGISTRY_SUMMARY } from "@/lib/mock/data";
 import {
@@ -12,37 +17,38 @@ import {
 } from "../shared";
 
 // ============================================================================
-// Purpose: The REAL-data Channel Registry screen, extracted from AppShell. The
-//   table is wired to GET /channels via useChannels; client-side derivation maps
-//   the API fields to the display model (avatar initials, CMS badge tone, source
-//   label, state per Option A rules, trace key, action label). Company/sector
-//   columns show primary_company_id and "—" respectively — a future GET /org-units
-//   or enriched endpoint will add display names. Summary tiles derive active-channel
-//   and outside-CMS counts from the response; finance-gated tiles stay "—"
-//   until a finance-month endpoint exists. Mock values are never shown after a
-//   live fetch succeeds; loading tiles show "…" and error tiles show "—".
-// Database/ORM: None (frontend) — consumes GET /channels (VIEW_ANALYTICS gate).
+// Purpose: The REAL-data Channel Registry screen (Phase 2). The table is wired
+//   to GET /channels; company/sector columns resolve display names from the new
+//   GET /org-units endpoint with an honest raw-id fallback (a missing or
+//   deactivated unit shows its raw id, never an invented name). Row actions are
+//   live: "Map" opens the mapping-change panel (PATCH /channels/{id}/mapping),
+//   "Assign" opens the account-link proposal panel (POST
+//   /revenue/channel-account-links, proposes an UNVERIFIED link), "Review"
+//   navigates to the Trace view preselected on the channel. Bulk import stays
+//   disabled (no route; format undefined — spec non-goal).
+// Database/ORM: None (frontend) — consumes GET /channels + GET /org-units
+//   (VIEW_ANALYTICS gates), PATCH /channels/{id}/mapping (dual
+//   MANAGE_ORG_MAPPING), POST /revenue/channel-account-links
+//   (MANAGE_ORG_MAPPING@global).
 // Standards: No client-side authorization is invented. canManageRegistry gates
-//   trace-key visibility at the COMPONENT boundary (fail-closed: non-registry
-//   viewers see Restricted in the trace-key cell). All write-path actions remain
-//   disabled for Phase 1 — the PATCH /channels/{id}/mapping route, bulk-import
-//   route, and account-assignment routes are not yet wired; buttons are always
-//   disabled regardless of canManageRegistry until those routes exist.
-//   A 403 from GET /channels surfaces as a no-permission error row; no
-//   client-side auth guessing occurs (VIEW_ANALYTICS gate is the backend's call).
-// Blast Radius: Registry read only. No finance number, no source-of-truth mutation.
+//   the write affordances and trace-key visibility (fail-closed); the backend
+//   permission checks remain the authority and scoped 403s surface inline.
+//   Mutations use the synchronous in-flight ref latch (one request per click
+//   burst -> one audit event) and reload the channel list on success.
+// Blast Radius: Registry reads + two audited registry write paths. No finance
+//   number computation; no source-of-truth mutation outside the wired routes.
 // Connections:
-//   - File: frontend/src/lib/api/useChannels.ts -> the channel-list fetch hook.
-//   - File: frontend/src/lib/api/types.ts -> ChannelRegistryEntry contract.
-//   - File: backend/ums_smart_revenue/api/channels.py:116 list_channels.
-//   - File: Docs/superpowers/specs/2026-06-05-registry-view-design.md -> spec.
+//   - File: frontend/src/lib/api/useOrgUnits.ts -> org-unit name directory.
+//   - File: frontend/src/lib/api/useChannelMapping.ts -> PATCH mapping action.
+//   - File: frontend/src/lib/api/useChannelAccountLinks.ts -> propose action.
+//   - File: backend/ums_smart_revenue/api/org_units.py -> GET /org-units.
+//   - File: Docs/superpowers/specs/2026-06-07-registry-phase2-design.md -> spec.
 // ============================================================================
 
 // ---- Client-side derivation helpers ----------------------------------------
 
 /** Compute up to 2-char initials from a channel display name. */
-const avatarFromName = (name: string): string => // skipcq: JS-0067
-  name
+const avatarFromName = (name: string): string =>  name
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)
@@ -90,23 +96,67 @@ const deriveState = (ch: ChannelRegistryEntry): { text: string; tone: Severity }
 };
 
 /**
- * Action label derived from state. All write-path actions (Map, Assign) stay
- * disabled until the backend routes are wired. "Review" has no route yet either
- * — the button remains visible but disabled for all Phase 1 users.
+ * Action label derived from state. Phase 2: Map and Assign are LIVE write
+ * affordances (gated by canManageRegistry; the backend stays the authority);
+ * Review is read-only navigation to the Trace view.
+ *
+ * Any channel without a primary_company_id (including PERFORMANCE_ONLY and
+ * other non-Export-block shapes) needs Map first; a company assignment is
+ * the prerequisite for all downstream actions. Mapped channels with a missing
+ * revenue source need Review, not a remap that would audit an unrelated change.
  */
-const deriveAction = (state: { text: string }): string => {
-  if (state.text === "Export block") return "Map";
+const deriveAction = (
+  state: { text: string },
+  ch: ChannelRegistryEntry,
+): string => {
+  if (!ch.primary_company_id) return "Map";
   if (state.text === "Evidence due") return "Assign";
   return "Review";
 };
 
 /**
  * Trace key: "channel:{youtube_channel_id}" when the channel has an org mapping,
- * "pending" when unmapped (no primary_company_id). The Neo4j node doesn't exist
- * for unmapped channels, so "pending" is the honest label.
+ * "pending" when unmapped (no primary_company_id).
  */
 const traceKey = (ch: ChannelRegistryEntry): string =>
   ch.primary_company_id ? `channel:${ch.youtube_channel_id}` : "pending";
+
+/**
+ * Company display name with honest fallback: org-unit name when the unit is in
+ * the active directory, otherwise the raw id (never an invented name), "—" when
+ * the channel is unmapped.
+ */
+const companyLabel = (
+  ch: ChannelRegistryEntry,
+  unitsById: Map<string, OrgUnit>,
+): string => {
+  if (!ch.primary_company_id) return "—";
+  return unitsById.get(ch.primary_company_id)?.name ?? ch.primary_company_id;
+};
+
+/** Sector display name via the company unit's parent; "—" when unresolvable. */
+const sectorLabel = (
+  ch: ChannelRegistryEntry,
+  unitsById: Map<string, OrgUnit>,
+): string => {
+  const company = ch.primary_company_id
+    ? unitsById.get(ch.primary_company_id)
+    : undefined;
+  const parentId = company?.parent_id;
+  return (parentId ? unitsById.get(parentId)?.name : undefined) ?? "—";
+};
+
+/** Map a mutation failure to operator-facing copy (typed ApiError aware). */
+const describeMutationError = (err: unknown): string => {
+  if (err instanceof ApiError) {
+    const body = err.body as { detail?: unknown } | null;
+    const detail = typeof body?.detail === "string" ? body.detail : null;
+    return detail ?? (err.status === 403
+      ? "No permission for this action."
+      : `Request failed (${err.status}).`);
+  }
+  return "Request failed. Please retry.";
+};
 
 // ---- Summary tile counts (derived from fetched channels) -------------------
 
@@ -114,16 +164,9 @@ const traceKey = (ch: ChannelRegistryEntry): string =>
 // Purpose: Derive display values for all four summary tiles from the live
 //   channel response. Returns neutral values (loading: "…", error: "—") when
 //   channels is null so mock numbers are never shown during load or on error.
-//   Finance tiles (Unmapped revenue, Scoped changes) have no live source in
-//   Phase 1 — they show "—" after a successful fetch rather than static mock
-//   numbers, because this page is presented as off-mock and numbers-first.
-//   Outside-CMS count includes ONLY channels with cms_status === "OUTSIDE_CMS",
-//   matching the backend /channels/outside-cms endpoint semantics; UNKNOWN
-//   channels are not counted as outside-CMS.
-//   Note field: always cleared ("") — the mock subtitle strings ("300+ target
-//   registry") are stale copy that contradicts live-derived values. SummaryTile
-//   renders <small>{note}</small> unconditionally, so a non-empty note would
-//   appear next to the live count and mislead the viewer.
+//   Finance tiles (Unmapped revenue, Scoped changes) have no live source —
+//   they show "—" after a successful fetch rather than static mock numbers.
+//   Outside-CMS count includes ONLY channels with cms_status === "OUTSIDE_CMS".
 // ============================================================================
 const buildSummaryTiles = (
   channels: ChannelRegistryEntry[] | null,
@@ -147,26 +190,60 @@ const buildSummaryTiles = (
   });
 };
 
-// ---- Sub-components --------------------------------------------------------
+// ---- Root component ---------------------------------------------------------
 
 /**
- * The real-data channel registry view: live summary tiles + the registry main
- * panel + the static side panels. useChannels() is called ONCE here and the
- * state is threaded down to both the summary tiles and the table — a second
- * hook call in a child would cause a duplicate GET /channels fetch.
+ * The real-data channel registry view. useChannels() and useOrgUnits() are each
+ * called ONCE here and threaded down — a second hook call in a child would
+ * duplicate the GET. Row actions set the side-panel targets (Map/Assign) or
+ * navigate to Trace (Review).
  */
 export default function RegistryView({ // skipcq: JS-0067
   canManageRegistry,
   canViewFinance,
+  onOpenTrace,
 }: {
   canManageRegistry: boolean;
   canViewFinance: boolean;
+  onOpenTrace?: (channelId: string) => void;
 }) {
   const channelState = useChannels();
+  const orgUnitState = useOrgUnits();
+  // Fresh object per click (not a bare id): the panels' effects key on object
+  // identity, so re-clicking the SAME row still re-presets the form and clears
+  // any stale success/error note from a previous action.
+  const [mapPreset, setMapPreset] = useState<{ channelId: string } | null>(null);
+  const [assignContext, setAssignContext] =
+    useState<{ channel: ChannelRegistryEntry } | null>(null);
+
+  const unitsById = useMemo(
+    () => new Map((orgUnitState.data ?? []).map((unit) => [unit.id, unit])),
+    [orgUnitState.data],
+  );
+  const companies = useMemo(
+    () =>
+      (orgUnitState.data ?? []).filter((unit) => unit.type === "COMPANY"),
+    [orgUnitState.data],
+  );
+
   const summaryTiles = buildSummaryTiles(
     channelState.data,
     channelState.loading,
     REGISTRY_SUMMARY,
+  );
+
+  const onMap = useCallback(
+    (ch: ChannelRegistryEntry) =>
+      setMapPreset({ channelId: ch.youtube_channel_id }),
+    [],
+  );
+  const onAssign = useCallback(
+    (ch: ChannelRegistryEntry) => setAssignContext({ channel: ch }),
+    [],
+  );
+  const onReview = useCallback(
+    (ch: ChannelRegistryEntry) => onOpenTrace?.(ch.youtube_channel_id),
+    [onOpenTrace],
   );
 
   return (
@@ -178,8 +255,23 @@ export default function RegistryView({ // skipcq: JS-0067
       </div>
 
       <div className="view-grid wide-side">
-        <RegistryMainPanel canManageRegistry={canManageRegistry} channelState={channelState} />
-        <RegistrySidePanels canManageRegistry={canManageRegistry} />
+        <RegistryMainPanel
+          canManageRegistry={canManageRegistry}
+          channelState={channelState}
+          unitsById={unitsById}
+          hasTraceNav={Boolean(onOpenTrace)}
+          onMap={onMap}
+          onAssign={onAssign}
+          onReview={onReview}
+        />
+        <RegistrySidePanels
+          canManageRegistry={canManageRegistry}
+          channels={channelState.data ?? []}
+          companies={companies}
+          mapPreset={mapPreset}
+          assignContext={assignContext}
+          onMutated={channelState.reload}
+        />
       </div>
     </section>
   );
@@ -187,24 +279,39 @@ export default function RegistryView({ // skipcq: JS-0067
 
 type ChannelAsyncState = ReturnType<typeof useChannels>;
 
+type RowActions = {
+  hasTraceNav: boolean;
+  onMap: (ch: ChannelRegistryEntry) => void;
+  onAssign: (ch: ChannelRegistryEntry) => void;
+  onReview: (ch: ChannelRegistryEntry) => void;
+};
+
 /** The registry main panel: header + mapping band + registry table. */
 function RegistryMainPanel({ // skipcq: JS-0067
   canManageRegistry,
   channelState,
+  unitsById,
+  ...rowActions
 }: {
   canManageRegistry: boolean;
   channelState: ChannelAsyncState;
-}) {
+  unitsById: Map<string, OrgUnit>;
+} & RowActions) {
   return (
     <section className="panel">
       <RegistryPanelHeader />
       <RegistryMappingBand canManageRegistry={canManageRegistry} />
-      <RegistryTable canManageRegistry={canManageRegistry} channelState={channelState} />
+      <RegistryTable
+        canManageRegistry={canManageRegistry}
+        channelState={channelState}
+        unitsById={unitsById}
+        {...rowActions}
+      />
     </section>
   );
 }
 
-/** Registry panel header: title/subtitle and the bulk-import / mapping-change actions. */
+/** Registry panel header: title/subtitle and the bulk-import action. */
 function RegistryPanelHeader() { // skipcq: JS-0067
   return (
     <div className="panel-header">
@@ -213,13 +320,9 @@ function RegistryPanelHeader() { // skipcq: JS-0067
         <span>Ownership, CMS status, revenue scope, and SQL lineage identity</span>
       </div>
       <div className="view-actions">
-        {/* Phase 1: no bulk-import route exists yet — disabled for all users. */}
+        {/* Spec non-goal: no bulk-import route exists (format undefined) — disabled. */}
         <button className="ghost-button" type="button" disabled>
           Bulk Import
-        </button>
-        {/* Phase 1: no mapping-change submission route yet — disabled for all users. */}
-        <button className="primary-button" type="button" disabled>
-          Request Mapping Change
         </button>
       </div>
     </div>
@@ -272,45 +375,51 @@ function RegistryTableMessageRow({ // skipcq: JS-0067
   );
 }
 
+/** Error message row for the registry table; extracted to keep RegistryTable CC low. */
+function registryErrorRow(error: unknown) { // skipcq: JS-0067
+  const is403 = error instanceof ApiError && error.status === 403;
+  return (
+    <RegistryTableMessageRow
+      title={is403 ? "No permission" : "Failed to load channels"}
+      sub={
+        is403
+          ? "Your role cannot view the channel registry."
+          : "An error occurred loading the channel registry. Please try again."
+      }
+    />
+  );
+}
+
 /**
- * Channel registry data table. Receives the shared channelState (hoisted from
- * RegistryView) rather than calling useChannels() itself — a second hook call
- * would cause a duplicate GET /channels request. Handles loading, error (403 →
- * no-permission row), empty, and loaded states. Trace keys are withheld from
- * non-registry viewers (fail-closed: shows RESTRICTED_FINANCE_VALUE). All
- * action buttons disabled in Phase 1 — write routes not yet wired.
+ * Channel registry data table. Receives the shared channelState and org-unit
+ * directory (both hoisted from RegistryView). Handles loading, error (403 →
+ * no-permission row), empty, and loaded states. Trace keys stay withheld from
+ * non-registry viewers (fail-closed: RESTRICTED_FINANCE_VALUE).
  */
-function RegistryTable({ // skipcq: JS-R1005, JS-0067
+function RegistryTable({ // skipcq: JS-0067
   canManageRegistry,
   channelState,
+  unitsById,
+  ...rowActions
 }: {
   canManageRegistry: boolean;
   channelState: ChannelAsyncState;
-}) {
-  const { data: channels, loading, error } = channelState;
+  unitsById: Map<string, OrgUnit>;
+} & RowActions) {
+  const { data: channels, error } = channelState;
 
   if (error) {
-    const is403 = error instanceof ApiError && error.status === 403;
     return (
       <div className="table-wrap" role="alert">
         <table aria-label="Channel registry">
           <RegistryTableHead />
-          <tbody>
-            <RegistryTableMessageRow
-              title={is403 ? "No permission" : "Failed to load channels"}
-              sub={
-                is403
-                  ? "Your role cannot view the channel registry."
-                  : "An error occurred loading the channel registry. Please try again."
-              }
-            />
-          </tbody>
+          <tbody>{registryErrorRow(error)}</tbody>
         </table>
       </div>
     );
   }
 
-  if (loading && !channels) {
+  if (!channels) {
     return (
       <div className="table-wrap" aria-busy="true">
         <table aria-label="Channel registry">
@@ -326,9 +435,7 @@ function RegistryTable({ // skipcq: JS-R1005, JS-0067
     );
   }
 
-  const rows = channels ?? [];
-
-  if (rows.length === 0) {
+  if (channels.length === 0) {
     return (
       <div className="table-wrap">
         <table aria-label="Channel registry">
@@ -349,8 +456,14 @@ function RegistryTable({ // skipcq: JS-R1005, JS-0067
       <table aria-label="Channel registry">
         <RegistryTableHead />
         <tbody>
-          {rows.map((ch) => (
-            <RegistryRow key={ch.youtube_channel_id} channel={ch} canManageRegistry={canManageRegistry} />
+          {channels.map((ch) => (
+            <RegistryRow
+              key={ch.youtube_channel_id}
+              channel={ch}
+              canManageRegistry={canManageRegistry}
+              unitsById={unitsById}
+              {...rowActions}
+            />
           ))}
         </tbody>
       </table>
@@ -362,15 +475,32 @@ function RegistryTable({ // skipcq: JS-R1005, JS-0067
 function RegistryRow({ // skipcq: JS-0067
   channel: ch,
   canManageRegistry,
+  unitsById,
+  hasTraceNav,
+  onMap,
+  onAssign,
+  onReview,
 }: {
   channel: ChannelRegistryEntry;
   canManageRegistry: boolean;
-}) {
+  unitsById: Map<string, OrgUnit>;
+} & RowActions) {
   const avatar = avatarFromName(ch.channel_name);
   const cms = cmsBadge(ch.cms_status);
   const state = deriveState(ch);
-  const action = deriveAction(state);
+  const action = deriveAction(state, ch);
   const node = traceKey(ch);
+
+  // Map/Assign are write affordances (capability-gated; backend authorizes);
+  // Review is read-only navigation and stays enabled whenever nav is wired.
+  const isWriteAction = action !== "Review";
+  const disabled = isWriteAction ? !canManageRegistry : !hasTraceNav;
+  /** Route the row click to the Map, Assign, or Review handler for this channel. */
+  const onClick = () => {
+    if (action === "Map") onMap(ch);
+    else if (action === "Assign") onAssign(ch);
+    else onReview(ch);
+  };
 
   return (
     <tr>
@@ -379,10 +509,9 @@ function RegistryRow({ // skipcq: JS-0067
         code={ch.youtube_channel_id}
         avatar={avatar}
       />
-      {/* Company column: show primary_company_id slug (display names need GET /org-units). */}
-      <td>{ch.primary_company_id ?? "—"}</td>
-      {/* Sector column: not returned by GET /channels — requires org-unit name lookup. */}
-      <td>—</td>
+      {/* Company/Sector: org-unit display names with honest raw-id fallback. */}
+      <td>{companyLabel(ch, unitsById)}</td>
+      <td>{sectorLabel(ch, unitsById)}</td>
       <td><Badge tone={cms.tone}>{cms.text}</Badge></td>
       <td>{sourceLabel(ch.revenue_source_status)}</td>
       <td>
@@ -392,10 +521,12 @@ function RegistryRow({ // skipcq: JS-0067
       </td>
       <td><Badge tone={state.tone}>{state.text}</Badge></td>
       <td>
-        {/* All write-path actions (Map, Assign, Review) are disabled in Phase 1.
-            Map → PATCH /channels/{id}/mapping not wired; Assign → account-assignment
-            route undefined; Review → channel detail/trace view not built. */}
-        <button className="mini-button" type="button" disabled>
+        <button
+          className="mini-button"
+          type="button"
+          disabled={disabled}
+          onClick={onClick}
+        >
           {action}
         </button>
       </td>
@@ -426,23 +557,164 @@ function RegistryChannelCell({ // skipcq: JS-0067
   );
 }
 
-/** Registry side panels: the mapping-change request form and registry controls. */
-function RegistrySidePanels({ canManageRegistry }: { canManageRegistry: boolean }) { // skipcq: JS-0067
+/** Registry side panels: the live mapping-change form, the account-link proposal form, and registry controls. */
+function RegistrySidePanels({ // skipcq: JS-0067
+  canManageRegistry,
+  channels,
+  companies,
+  mapPreset,
+  assignContext,
+  onMutated,
+}: {
+  canManageRegistry: boolean;
+  channels: ChannelRegistryEntry[];
+  companies: OrgUnit[];
+  mapPreset: { channelId: string } | null;
+  assignContext: { channel: ChannelRegistryEntry } | null;
+  onMutated: () => void;
+}) {
   return (
     <aside className="view-stack" aria-label="Registry side panels">
-      <MappingChangeRequestPanel canManageRegistry={canManageRegistry} />
+      <MappingChangeRequestPanel
+        canManageRegistry={canManageRegistry}
+        channels={channels}
+        companies={companies}
+        preset={mapPreset}
+        onMapped={onMutated}
+      />
+      <AccountLinkProposalPanel
+        canManageRegistry={canManageRegistry}
+        context={assignContext}
+        onProposed={onMutated}
+      />
       <RegistryControlsPanel />
     </aside>
   );
 }
 
-/**
- * The mapping-change request panel. Inputs are disabled for non-registry roles.
- * Submit and Save Draft are disabled in Phase 1 for ALL users — PATCH
- * /channels/{id}/mapping is not wired yet; enabling them would silently no-op
- * for registry managers and create a misleading write-affordance.
- */
-function MappingChangeRequestPanel({ canManageRegistry }: { canManageRegistry: boolean }) { // skipcq: JS-0067
+/** Guard + field check for the mapping submission; extracted to keep MappingChangeRequestPanel CC low. */
+function isMappingSubmittable( // skipcq: JS-0067
+  canManageRegistry: boolean,
+  busy: boolean,
+  channelId: string,
+  companyId: string,
+  trimmedReason: string,
+): boolean {
+  return (
+    canManageRegistry && !busy &&
+    channelId !== "" && companyId !== "" && trimmedReason !== ""
+  );
+}
+
+/** True when the preset channelId is not present in the loaded channel list. */
+function isMissingSelectedChannel( // skipcq: JS-0067
+  channelId: string,
+  channels: ChannelRegistryEntry[],
+): boolean {
+  return channelId !== "" && !channels.some((ch) => ch.youtube_channel_id === channelId);
+}
+
+// ============================================================================
+// Purpose: LIVE mapping-change form — submits PATCH /channels/{id}/mapping
+//   with {primary_company_id, reason}. Channel options come from the live
+//   channel list; company options from active COMPANY org-units (labels are
+//   display names, submitted values are org-unit UUIDs). A row "Map" click
+//   presets the channel. The mock "Save Draft" and "Effective month" controls
+//   are gone — the backend has no draft or effective-month concept on this
+//   route, and a dead affordance would be dishonest UI.
+// Standards: reason required + trimmed; synchronous in-flight ref latch (one
+//   PATCH per click burst -> one CHANNEL_UPDATED audit event); success reloads
+//   the channel list; typed ApiError surfaces inline (403 incl. the
+//   unmapped-channel dead-zone, 404, 409, 422) and form state survives for
+//   retry. canManageRegistry disables inputs; the backend dual
+//   MANAGE_ORG_MAPPING check stays the authority.
+// ============================================================================
+function MappingChangeRequestPanel({ // skipcq: JS-0067
+  canManageRegistry,
+  channels,
+  companies,
+  preset,
+  onMapped,
+}: {
+  canManageRegistry: boolean;
+  channels: ChannelRegistryEntry[];
+  companies: OrgUnit[];
+  preset: { channelId: string } | null;
+  onMapped: () => void;
+}) {
+  const [channelId, setChannelId] = useState("");
+  const [companyId, setCompanyId] = useState("");
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmation, setConfirmation] = useState<string | null>(null);
+  const inFlightRef = useRef(false);
+  const submitMapping = useChannelMappingAction();
+
+  // A row "Map" click presets the channel selection (operator can still change
+  // it) AND clears any stale form values from a previous action — the
+  // preset is a fresh object per click, so even re-clicking the same row resets.
+  // FIX: also clear companyId and reason so a stale company from a prior row
+  // cannot silently carry over to the newly targeted channel.
+  useEffect(() => {
+    if (preset) {
+      setChannelId(preset.channelId);
+      setCompanyId("");
+      setReason("");
+      setConfirmation(null);
+      setError(null);
+    }
+  }, [preset]);
+
+  const trimmedReason = reason.trim();
+  const canSubmit = isMappingSubmittable(canManageRegistry, busy, channelId, companyId, trimmedReason);
+
+  /** Submit the mapping-change PATCH; latched against concurrent double-clicks. */
+  const submit = async () => {
+    if (!canSubmit) return;
+    // Synchronous latch: both clicks of a same-tick double-click run off the
+    // same render, so state alone cannot drop the second PATCH.
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    setBusy(true);
+    setError(null);
+    setConfirmation(null);
+    try {
+      await submitMapping(channelId, companyId, trimmedReason);
+      setBusy(false);
+      setCompanyId("");
+      setReason("");
+      setConfirmation("Mapping updated — audited as CHANNEL_UPDATED.");
+      onMapped();
+    } catch (caught) {
+      setBusy(false);
+      setError(describeMutationError(caught));
+      // Form state stays intact so the operator can correct and retry.
+    } finally {
+      inFlightRef.current = false;
+    }
+  };
+  const selectedChannelMissing = isMissingSelectedChannel(channelId, channels);
+
+  // Hoist option lists out of the return to keep JSX nesting ≤ 4 levels deep.
+  const channelOpts = [
+    <option key="_ph" value="">Select channel…</option>,
+    ...(selectedChannelMissing
+      ? [<option key={channelId} value={channelId}>{channelId}</option>]
+      : []),
+    ...channels.map((ch) => (
+      <option key={ch.youtube_channel_id} value={ch.youtube_channel_id}>
+        {ch.channel_name} ({ch.youtube_channel_id})
+      </option>
+    )),
+  ];
+  const companyOpts = [
+    <option key="_ph" value="">Select company…</option>,
+    ...companies.map((unit) => (
+      <option key={unit.id} value={unit.id}>{unit.name}</option>
+    )),
+  ];
+
   return (
     <section className="panel">
       <div className="panel-header">
@@ -453,81 +725,222 @@ function MappingChangeRequestPanel({ canManageRegistry }: { canManageRegistry: b
         <Badge tone="amber">Audit required</Badge>
       </div>
       <div className="form-grid">
-        <MappingSelectRow
-          htmlFor="registryChannel"
-          label="Channel"
-          options={["Sports Extra", "Music Stage"]}
-          disabled={!canManageRegistry}
-        />
-        <MappingSelectRow
-          htmlFor="registryCompany"
-          label="Company"
-          options={["TV Sector", "Catalog Media"]}
-          disabled={!canManageRegistry}
-        />
-        <MappingInputRow
-          htmlFor="registryReason"
-          label="Reason"
-          defaultValue="March source evidence received"
-          disabled={!canManageRegistry}
-        />
-        <MappingSelectRow
-          htmlFor="registryEffective"
-          label="Effective month"
-          options={["Mar 2026", "Apr 2026"]}
-          disabled={!canManageRegistry}
-        />
+        <div className="field-row">
+          <label htmlFor="registryChannel">Channel</label>
+          <select
+            id="registryChannel"
+            disabled={!canManageRegistry}
+            value={channelId}
+            onChange={(e) => setChannelId(e.target.value)}
+          >
+            {channelOpts}
+          </select>
+        </div>
+        <div className="field-row">
+          <label htmlFor="registryCompany">Company</label>
+          <select
+            id="registryCompany"
+            disabled={!canManageRegistry}
+            value={companyId}
+            onChange={(e) => setCompanyId(e.target.value)}
+          >
+            {companyOpts}
+          </select>
+        </div>
+        <div className="field-row">
+          <label htmlFor="registryReason">Reason (required, audited)</label>
+          <input
+            id="registryReason"
+            disabled={!canManageRegistry}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Why this mapping changes"
+          />
+        </div>
       </div>
+      {error ? (
+        <div className="form-error" role="alert">
+          <strong>Mapping change failed</strong>
+          <span>{error}</span>
+        </div>
+      ) : null}
+      {confirmation ? <div className="form-note">{confirmation}</div> : null}
       <div className="action-row">
-        {/* Phase 1: submit route not wired — disabled for all users. */}
-        <button className="ghost-button" type="button" disabled>Save Draft</button>
-        <button className="primary-button" type="button" disabled>Submit Approval</button>
+        <button
+          className="primary-button"
+          type="button"
+          disabled={!canSubmit}
+          onClick={submit}
+        >
+          {busy ? "Submitting…" : "Submit mapping change"}
+        </button>
       </div>
     </section>
   );
 }
 
-/** A labelled select inside the mapping-change form. */
-function MappingSelectRow({ // skipcq: JS-0067
-  htmlFor,
-  label,
-  options,
-  disabled,
-}: {
-  htmlFor: string;
-  label: string;
-  options: string[];
-  disabled: boolean;
-}) {
-  return (
-    <div className="field-row">
-      <label htmlFor={htmlFor}>{label}</label>
-      <select id={htmlFor} disabled={disabled}>
-        {options.map((option) => (
-          <option key={option}>{option}</option>
-        ))}
-      </select>
-    </div>
-  );
-}
+/** Current month as YYYY-MM for the proposal default (operator can change it). */
+const currentMonth = (): string => {
+  const now = new Date();
+  return `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}`;
+};
 
-/** A labelled text input inside the mapping-change form. */
-function MappingInputRow({ // skipcq: JS-0067
-  htmlFor,
-  label,
-  defaultValue,
-  disabled,
+// ============================================================================
+// Purpose: LIVE account-link proposal form — submits POST
+//   /revenue/channel-account-links proposing an UNVERIFIED AdSense-account ↔
+//   content-owner link (provenance_kind fixed OPERATOR_ASSERTED, empty
+//   payload). Verification stays a separate dual-gated admin flow — this panel
+//   never claims a link is verified. A row "Assign" click sets the channel
+//   context line; the link itself is account↔owner grain, not channel grain.
+// Standards: same mutation discipline as the mapping panel (required trimmed
+//   reason, in-flight ref latch, inline typed errors, reload on success).
+//   Backend gate: MANAGE_ORG_MAPPING@global.
+// ============================================================================
+function AccountLinkProposalPanel({ // skipcq: JS-0067, JS-R1005
+  canManageRegistry,
+  context,
+  onProposed,
 }: {
-  htmlFor: string;
-  label: string;
-  defaultValue: string;
-  disabled: boolean;
+  canManageRegistry: boolean;
+  context: { channel: ChannelRegistryEntry } | null;
+  onProposed: () => void;
 }) {
+  const [adsenseAccountId, setAdsenseAccountId] = useState("");
+  const [contentOwnerId, setContentOwnerId] = useState("");
+  const [effectiveMonthStart, setEffectiveMonthStart] = useState(currentMonth);
+  const [reason, setReason] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmation, setConfirmation] = useState<string | null>(null);
+  const inFlightRef = useRef(false);
+  const propose = useProposeAccountLinkAction();
+
+  // A row "Assign" click resets the full form so that stale values from a prior
+  // channel's proposal never carry over to the newly targeted channel.
+  // FIX: also clear account IDs and reset the effective month so the operator
+  // always starts from a blank form when switching Assign targets.
+  useEffect(() => {
+    if (context) {
+      setAdsenseAccountId("");
+      setContentOwnerId("");
+      setEffectiveMonthStart(currentMonth());
+      setReason("");
+      setConfirmation(null);
+      setError(null);
+    }
+  }, [context]);
+
+  const canSubmit =
+    canManageRegistry && !busy && adsenseAccountId.trim() !== "" &&
+    contentOwnerId.trim() !== "" && effectiveMonthStart !== "" &&
+    reason.trim() !== "";
+
+  /** Submit the account-link proposal POST; latched against concurrent double-clicks. */
+  const submit = async () => {
+    if (!canSubmit) return;
+    if (inFlightRef.current) return;
+    inFlightRef.current = true;
+    setBusy(true);
+    setError(null);
+    setConfirmation(null);
+    try {
+      await propose({
+        adsenseAccountId: adsenseAccountId.trim(),
+        contentOwnerId: contentOwnerId.trim(),
+        effectiveMonthStart,
+        reason: reason.trim(),
+      });
+      setBusy(false);
+      setAdsenseAccountId("");
+      setContentOwnerId("");
+      setEffectiveMonthStart(currentMonth());
+      setReason("");
+      setConfirmation(
+        "Link proposed (UNVERIFIED) — verification is a separate admin step.",
+      );
+      onProposed();
+    } catch (caught) {
+      setBusy(false);
+      setError(describeMutationError(caught));
+    } finally {
+      inFlightRef.current = false;
+    }
+  };
+
   return (
-    <div className="field-row">
-      <label htmlFor={htmlFor}>{label}</label>
-      <input id={htmlFor} defaultValue={defaultValue} disabled={disabled} />
-    </div>
+    <section className="panel">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong>Account Link Proposal</strong>
+          <span>Proposes an UNVERIFIED AdSense account ↔ content owner link</span>
+        </div>
+        <Badge tone="amber">Audit required</Badge>
+      </div>
+      {context ? (
+        <div className="form-note">
+          Context: {context.channel.channel_name} ({context.channel.youtube_channel_id})
+        </div>
+      ) : null}
+      <div className="form-grid">
+        <div className="field-row">
+          <label htmlFor="assignAccount">AdSense account ID</label>
+          <input
+            id="assignAccount"
+            disabled={!canManageRegistry}
+            value={adsenseAccountId}
+            onChange={(e) => setAdsenseAccountId(e.target.value)}
+            placeholder="pub-…"
+          />
+        </div>
+        <div className="field-row">
+          <label htmlFor="assignOwner">Content owner ID</label>
+          <input
+            id="assignOwner"
+            disabled={!canManageRegistry}
+            value={contentOwnerId}
+            onChange={(e) => setContentOwnerId(e.target.value)}
+            placeholder="content owner"
+          />
+        </div>
+        <div className="field-row">
+          <label htmlFor="assignMonth">Effective month start</label>
+          <input
+            id="assignMonth"
+            type="month"
+            disabled={!canManageRegistry}
+            value={effectiveMonthStart}
+            onChange={(e) => setEffectiveMonthStart(e.target.value)}
+          />
+        </div>
+        <div className="field-row">
+          <label htmlFor="assignReason">Proposal reason (required, audited)</label>
+          <input
+            id="assignReason"
+            disabled={!canManageRegistry}
+            value={reason}
+            onChange={(e) => setReason(e.target.value)}
+            placeholder="Evidence for this link"
+          />
+        </div>
+      </div>
+      {error ? (
+        <div className="form-error" role="alert">
+          <strong>Link proposal failed</strong>
+          <span>{error}</span>
+        </div>
+      ) : null}
+      {confirmation ? <div className="form-note">{confirmation}</div> : null}
+      <div className="action-row">
+        <button
+          className="primary-button"
+          type="button"
+          disabled={!canSubmit}
+          onClick={submit}
+        >
+          {busy ? "Proposing…" : "Propose link"}
+        </button>
+      </div>
+    </section>
   );
 }
 

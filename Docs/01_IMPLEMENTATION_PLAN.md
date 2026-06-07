@@ -656,19 +656,29 @@ now wired to `GET /audit/events` (see below).
   200 with `status` field (`ok` / `inactive_credential` / `auth_failed` / `error`) and
   string `detail` otherwise. `CONNECTOR_TESTED` audit event. 5 TDD tests, `MANAGE_CONNECTORS`
   gate. Backend only; no migration. Merged to main as PR #72 (28da1a6).
-- ✅ Registry Phase 1 wiring — on `feat/registry-phase1`: the Channel Registry
-  table is wired to `GET /channels` (replacing `REGISTRY_ROWS` mock). Client-side
-  derivation: avatar initials, CMS badge tone from `cms_status`, source label from
-  `revenue_source_status`, state (Option A — field-complete, no migration:
-  MISSING_REVENUE_SOURCE+revenue_required → Export block; OUTSIDE_CMS+no
-  content_owner_id → Evidence due; else Approved), trace key
-  (`"channel:{id}"` or `"pending"`). Active-channel and outside-CMS summary-tile
-  counts derived from response. Company column shows `primary_company_id` slug;
-  sector shows `—` (no GET /org-units yet). All write-path actions (Map, Assign,
-  Review) disabled in Phase 1 — PATCH /channels/{id}/mapping and account-
-  assignment route not yet wired. Extracted to `views/RegistryView.tsx`; 16 new
-  Vitest tests (useChannels hook + RegistryView component). Frontend-only;
-  backend unchanged. All pages now off mock.
+- ✅ Registry Phase 1 wiring — merged to main as PR #73 (56bf9a8): the Channel
+  Registry table is wired to `GET /channels` (replacing `REGISTRY_ROWS` mock).
+  Client-side derivation: avatar initials, CMS badge tone from `cms_status`,
+  source label from `revenue_source_status`, state (Option A — field-complete,
+  no migration), trace key (`"channel:{id}"` or `"pending"`). Extracted to
+  `views/RegistryView.tsx`; 16 new Vitest tests. Frontend-only; all pages off
+  mock.
+- ✅ Registry Phase 2 — on `feat/registry-phase2` (spec
+  `Docs/superpowers/specs/2026-06-07-registry-phase2-design.md`): new read-only
+  `GET /org-units` (tenant-scoped, active-only, fail-closed VIEW_ANALYTICS gate
+  mirroring `GET /channels`; no migration) feeds Company/Sector display names
+  (honest raw-id fallback when a unit is missing/deactivated or the fetch
+  fails) and the Map modal's company options. Row actions are LIVE: "Map" →
+  `PATCH /channels/{id}/mapping` via the mapping-change panel (row click
+  presets the channel; required audited reason; in-flight latch — one PATCH
+  per click burst; reload on success; typed inline 403/404/409/422); "Assign"
+  → `POST /revenue/channel-account-links` proposing an UNVERIFIED
+  OPERATOR_ASSERTED link (verification stays the dual-gated admin flow);
+  "Review" → navigates to Trace preselected on the channel (AppShell
+  `onOpenTrace` + TraceView `presetChannelId`). Mock Save-Draft/effective-month
+  controls removed (no backend concept). Remaining (definition-blocked):
+  bulk channel inventory import; "Scoped changes" tile; month-lock enforcement
+  on the mapping route (pre-existing backend gap, named follow-up).
 
 ---
 

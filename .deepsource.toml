@@ -10,23 +10,15 @@ enabled = true
 
 # FIX: The JavaScript analyzer previously ran with no project context, so it
 # treated the Vite/React/TS sources under frontend/ as plain browser scripts
-# (141 false JS-0067 "global scope" hits on ES-module top-level declarations)
 # and applied the default cyclomatic-complexity band to routine React view
 # branching. Declare the real stack: React plugin, TypeScript dialect,
 # ES modules, browser + vitest environments, the frontend/ dependency root
 # (package.json + tsconfig.json), and an explicit "high" complexity threshold
 # consistent with the Python analyzer's effective bar.
-#
-# FIX 2: Even with module_system = "es-modules", the generic JS analyzer
-# continued to introduce 234+ JS-0067 false positives on TypeScript ES-module
-# top-level declarations (all MINOR severity), causing the PR check to fail
-# on occurrence count. TypeScript source files are authoritative-checked by
-# tsc + typescript-eslint + Vitest; exclude them from the plain JS analyzer
-# so only genuine JavaScript files (e.g. ci/ fixtures) are JS-analyzed.
 [[analyzers]]
 name = "javascript"
 enabled = true
-exclude_patterns = ["**/*.ts", "**/*.tsx"]
+exclude_patterns = ["ci/**", "frontend/dist/**"]
 
   [analyzers.meta]
   plugins = ["react"]
