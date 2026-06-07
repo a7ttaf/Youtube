@@ -221,9 +221,7 @@ def test_finish_run_rejects_counts_with_missing_or_extra_keys(
 def test_finish_run_rejects_counts_with_negative_or_non_int_values(
     session: Session,
 ) -> None:
-    """
-    Ensure finish_run rejects counts containing negative or non-integer values.
-    """
+    """Ensure finish_run rejects counts containing negative or non-integer values."""
     entry = _start_default_run(session)
     bad_counts = _zero_counts()
     bad_counts["reports_failed"] = -1
