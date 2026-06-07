@@ -57,6 +57,10 @@ def _require_analytics_view_permission(user: UserPrincipal) -> None:
     Fail-closed mirror of api/channels.py:_require_analytics_view_permission.
     A disabled principal or one without any granted VIEW_ANALYTICS scope must
     403, never receive a silent empty list that reads as "no org units exist".
+
+    Raises:
+        HTTPException: HTTP 403 when the principal is disabled or holds no
+            VIEW_ANALYTICS grant in any scope.
     """
     if user.disabled or not _granted_scopes_for_permission(
         user, Permission.VIEW_ANALYTICS

@@ -457,6 +457,33 @@ describe("RegistryView Phase 2: Map action (PATCH /channels/{id}/mapping)", () =
       (screen.getByLabelText("Channel") as HTMLSelectElement).value,
     ).toBe("UC-MUSIC-31");
   });
+
+  it("routes a mapped channel with MISSING_REVENUE_SOURCE to Review, not Map", async () => {
+    // A channel that already has a primary_company_id but a missing revenue
+    // source must not offer Map (which would audit an unrelated company remap).
+    const mappedExportBlock: ChannelRegistryEntry = {
+      youtube_channel_id: "UC-MAPPED-NOSRC",
+      channel_name: "Mapped No Source",
+      primary_company_id: "united-studios",
+      cms_status: "INSIDE_CMS",
+      content_owner_id: "ams/co-1",
+      revenue_required: true,
+      revenue_source_status: "MISSING_REVENUE_SOURCE",
+      active: true,
+    };
+    fetchMock().mockImplementation(
+      routeRegistry({ channels: () => jsonResponse([...CHANNELS, mappedExportBlock]) }),
+    );
+    renderRegistry();
+
+    await waitFor(() =>
+      expect(screen.getByText("Mapped No Source")).toBeInTheDocument(),
+    );
+    // The unmapped UC-MUSIC-31 still gets Map; the mapped Export-block must not.
+    // With the fix: exactly 1 Map button (UC-MUSIC-31 only).
+    const mapButtons = screen.getAllByRole("button", { name: /^map$/i });
+    expect(mapButtons).toHaveLength(1);
+  });
 });
 
 describe("RegistryView Phase 2: Assign action (propose account link)", () => {

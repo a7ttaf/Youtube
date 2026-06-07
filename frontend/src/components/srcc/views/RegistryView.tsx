@@ -100,9 +100,16 @@ const deriveState = (ch: ChannelRegistryEntry): { text: string; tone: Severity }
  * Action label derived from state. Phase 2: Map and Assign are LIVE write
  * affordances (gated by canManageRegistry; the backend stays the authority);
  * Review is read-only navigation to the Trace view.
+ *
+ * Map is only offered for unmapped channels (no primary_company_id): a mapped
+ * channel with MISSING_REVENUE_SOURCE needs investigation, not a company remap
+ * that would audit an unrelated mapping change.
  */
-const deriveAction = (state: { text: string }): string => {
-  if (state.text === "Export block") return "Map";
+const deriveAction = (
+  state: { text: string },
+  ch: ChannelRegistryEntry,
+): string => {
+  if (state.text === "Export block" && !ch.primary_company_id) return "Map";
   if (state.text === "Evidence due") return "Assign";
   return "Review";
 };
@@ -479,7 +486,7 @@ function RegistryRow({ // skipcq: JS-0067
   const avatar = avatarFromName(ch.channel_name);
   const cms = cmsBadge(ch.cms_status);
   const state = deriveState(ch);
-  const action = deriveAction(state);
+  const action = deriveAction(state, ch);
   const node = traceKey(ch);
 
   // Map/Assign are write affordances (capability-gated; backend authorizes);
