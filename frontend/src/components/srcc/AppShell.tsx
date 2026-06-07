@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError, useApiClient } from "@/lib/api/client";
 import type { SessionCapabilities, TenantRead } from "@/lib/api/types";
@@ -332,6 +332,17 @@ export default function AppShell() { // skipcq: JS-0067, JS-R1005
   // tenant bootstrap re-fires it (dev-only; it does not affect capabilities).
   const { proofLabel } = useTenantBootstrap(sessionReady, previewRole);
 
+  // FIX: Clear the Registry→Trace navigation seed when leaving the trace view
+  // so that a later manual click on the Trace nav item opens a blank view
+  // instead of pre-selecting the last "Review" channel.
+  const handleViewChange = useCallback(
+    (next: ViewKey) => {
+      if (next !== "trace") setTraceChannelId(null);
+      setView(next);
+    },
+    [setView, setTraceChannelId],
+  );
+
   if (sessionBootstrap.status === "loading") {
     return <SessionLoadingState />;
   }
@@ -361,7 +372,7 @@ export default function AppShell() { // skipcq: JS-0067, JS-R1005
       {import.meta.env.DEV && <TenantProofTag label={proofLabel} />}
       <Sidebar
         view={view}
-        onSelectView={setView}
+        onSelectView={handleViewChange}
         previewRole={previewRole}
         onSelectPreviewRole={setPreviewRole}
         displayedRole={displayedRole}

@@ -352,7 +352,7 @@ describe("RegistryView Phase 2: Map action (PATCH /channels/{id}/mapping)", () =
     fireEvent.click(screen.getByRole("button", { name: /^submit mapping change$/i }));
 
     await waitFor(() =>
-      expect(screen.getByText(/Mapping updated — audited/i)).toBeInTheDocument(),
+      expect(screen.getByText(/Mapping updated — audited/iu)).toBeInTheDocument(),
     );
     const patches = callsTo(
       (url, init) => url === "/channels/UC-MUSIC-31/mapping" && init?.method === "PATCH",
@@ -418,7 +418,7 @@ describe("RegistryView Phase 2: Map action (PATCH /channels/{id}/mapping)", () =
     });
 
     await waitFor(() =>
-      expect(screen.getByText(/Mapping updated — audited/i)).toBeInTheDocument(),
+      expect(screen.getByText(/Mapping updated — audited/iu)).toBeInTheDocument(),
     );
     expect(
       callsTo((url, init) => url.endsWith("/mapping") && init?.method === "PATCH"),
@@ -446,13 +446,13 @@ describe("RegistryView Phase 2: Map action (PATCH /channels/{id}/mapping)", () =
 
     fireEvent.click(screen.getByRole("button", { name: /^submit mapping change$/i }));
     await waitFor(() =>
-      expect(screen.getByText(/Mapping updated — audited/i)).toBeInTheDocument(),
+      expect(screen.getByText(/Mapping updated — audited/iu)).toBeInTheDocument(),
     );
 
     // Re-clicking a row Map button (even the SAME row) must reset the stale
     // note so a previous action's confirmation never renders under a new target.
     fireEvent.click(screen.getByRole("button", { name: /^map$/i }));
-    expect(screen.queryByText(/Mapping updated — audited/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Mapping updated — audited/iu)).not.toBeInTheDocument();
     expect(
       (screen.getByLabelText("Channel") as HTMLSelectElement).value,
     ).toBe("UC-MUSIC-31");

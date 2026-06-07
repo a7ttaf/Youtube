@@ -620,11 +620,15 @@ function MappingChangeRequestPanel({ // skipcq: JS-0067, JS-R1005
   const submitMapping = useChannelMappingAction();
 
   // A row "Map" click presets the channel selection (operator can still change
-  // it) AND clears any stale success/error note from a previous action — the
+  // it) AND clears any stale form values from a previous action — the
   // preset is a fresh object per click, so even re-clicking the same row resets.
+  // FIX: also clear companyId and reason so a stale company from a prior row
+  // cannot silently carry over to the newly targeted channel.
   useEffect(() => {
     if (preset) {
       setChannelId(preset.channelId);
+      setCompanyId("");
+      setReason("");
       setConfirmation(null);
       setError(null);
     }
@@ -647,6 +651,7 @@ function MappingChangeRequestPanel({ // skipcq: JS-0067, JS-R1005
     try {
       await submitMapping(channelId, companyId, trimmedReason);
       setBusy(false);
+      setCompanyId("");
       setReason("");
       setConfirmation("Mapping updated — audited as CHANNEL_UPDATED.");
       onMapped();
@@ -773,10 +778,16 @@ function AccountLinkProposalPanel({ // skipcq: JS-0067, JS-R1005
   const inFlightRef = useRef(false);
   const propose = useProposeAccountLinkAction();
 
-  // A row "Assign" click resets stale success/error notes (fresh object per
-  // click, so re-clicking the same row also resets).
+  // A row "Assign" click resets the full form so that stale values from a prior
+  // channel's proposal never carry over to the newly targeted channel.
+  // FIX: also clear account IDs and reset the effective month so the operator
+  // always starts from a blank form when switching Assign targets.
   useEffect(() => {
     if (context) {
+      setAdsenseAccountId("");
+      setContentOwnerId("");
+      setEffectiveMonthStart(currentMonth());
+      setReason("");
       setConfirmation(null);
       setError(null);
     }
@@ -802,6 +813,9 @@ function AccountLinkProposalPanel({ // skipcq: JS-0067, JS-R1005
         reason: reason.trim(),
       });
       setBusy(false);
+      setAdsenseAccountId("");
+      setContentOwnerId("");
+      setEffectiveMonthStart(currentMonth());
       setReason("");
       setConfirmation(
         "Link proposed (UNVERIFIED) — verification is a separate admin step.",

@@ -17,7 +17,9 @@ NET_REVENUE_REQUIRED_METHODS = frozenset({"post_tax_revenue_proportional"})
 COMPANY_MAPPING_REQUIRED_METHODS = frozenset({"company_level"})
 # no_allocation withholds every component without reading facts, so a factless
 # month must not block its preview (the commit engine ignores facts entirely).
-SOURCE_FACTS_OPTIONAL_METHODS = frozenset({"no_allocation"})
+# manual skips the proportional engine entirely and reads only deduction
+# components, so a fact-free month must also not block the manual preview.
+SOURCE_FACTS_OPTIONAL_METHODS = frozenset({"no_allocation", "manual"})
 
 
 class RevenueRecalculationValidationError(ValueError):

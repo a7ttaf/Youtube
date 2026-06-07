@@ -11,6 +11,19 @@ from ums_smart_revenue.api.dependencies import (
     current_db_session,
     current_principal_from_headers,
 )
+
+# FIX: Import the canonical dependency providers from dependencies_finance so
+# that all callers (this module, allocation.py, channels.py, groups.py,
+# exports.py) share a single Python function object — FastAPI dependency_overrides
+# keying on the object here is the same key as any `from api.revenue import`
+# or `from api.dependencies_finance import` in tests.
+from ums_smart_revenue.api.dependencies_finance import (
+    current_channel_account_link_repository,
+    current_committed_allocation_repository,
+    current_deduction_component_repository,
+    current_org_access_index,
+    current_revenue_fact_repository,
+)
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import (
     AuditRecord,
@@ -102,7 +115,6 @@ from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_sum
 from ums_smart_revenue.finance.smart_alerts import (
     build_monthly_smart_alert_summary,
 )
-from ums_smart_revenue.org.access_index import load_org_access_index_from_session
 
 router = APIRouter(prefix="/revenue", tags=["revenue"])
 MONTH_VALUE_PATTERN = re.compile(r"^\d{4}-\d{2}$")
@@ -329,20 +341,6 @@ class RevenueRecalculationRequest(BaseModel):
         return value
 
 
-def current_org_access_index(
-    session: Annotated[Session, Depends(current_db_session)],
-) -> OrgAccessIndex:
-    """Load the org-access index from the current database session for scope resolution."""
-    return load_org_access_index_from_session(session)
-
-
-def current_revenue_fact_repository(
-    session: Annotated[Session, Depends(current_db_session)],
-) -> SqlAlchemyRevenueFactRepository:
-    """Build the revenue-fact repository bound to the current database session."""
-    return SqlAlchemyRevenueFactRepository(session)
-
-
 def current_adsense_payment_repository(
     session: Annotated[Session, Depends(current_db_session)],
 ) -> SqlAlchemyAdSensePaymentRepository:
@@ -369,38 +367,6 @@ def current_finance_month_close_repository(
 ) -> SqlAlchemyFinanceMonthCloseRepository:
     """Build the finance-month-close repository bound to the current database session."""
     return SqlAlchemyFinanceMonthCloseRepository(session)
-
-
-def current_deduction_component_repository(
-    session: Annotated[Session, Depends(current_db_session)],
-) -> SqlAlchemyDeductionComponentRepository:
-    """Build the tenant-aware deduction-component repository for a request."""
-    return SqlAlchemyDeductionComponentRepository(session)
-
-
-def current_channel_account_link_repository(
-    session: Annotated[Session, Depends(current_db_session)],
-) -> SqlAlchemyChannelAccountLinkRepository:
-    """Build the tenant-aware channel-account-link repository for a request.
-
-    Defined locally to avoid the api.channel_account_links → api.channels →
-    api.revenue circular import. The net-revenue route needs this dependency
-    to compute account allocations before building the summary.
-    """
-    return SqlAlchemyChannelAccountLinkRepository(session)
-
-
-def current_committed_allocation_repository(
-    session: Annotated[Session, Depends(current_db_session)],
-) -> SqlAlchemyCommittedAllocationRepository:
-    """Build the committed-allocation repository bound to the request session.
-
-    Defined here (beside the other finance repo providers) so the read-switch
-    resolver can be wired from both api.revenue (net-revenue/explain) and
-    api.allocation (the GET + the POST commit route, which imports this symbol)
-    without the api.revenue -> api.allocation -> api.revenue import cycle.
-    """
-    return SqlAlchemyCommittedAllocationRepository(session)
 
 
 def current_number_explanation_repository(

@@ -52,9 +52,12 @@ def list_org_units(
 
 
 def _require_analytics_view_permission(user: UserPrincipal) -> None:
-    # Fail-closed mirror of api/channels.py:_require_analytics_view_permission.
-    # A disabled principal or one without any granted VIEW_ANALYTICS scope must
-    # 403, never receive a silent empty list that reads as "no org units exist".
+    """Raise HTTP 403 if the principal lacks any VIEW_ANALYTICS grant.
+
+    Fail-closed mirror of api/channels.py:_require_analytics_view_permission.
+    A disabled principal or one without any granted VIEW_ANALYTICS scope must
+    403, never receive a silent empty list that reads as "no org units exist".
+    """
     if user.disabled or not _granted_scopes_for_permission(
         user, Permission.VIEW_ANALYTICS
     ):
@@ -67,9 +70,12 @@ def _require_analytics_view_permission(user: UserPrincipal) -> None:
 def _granted_scopes_for_permission(
     user: UserPrincipal, permission: Permission
 ) -> tuple[AccessScope, ...]:
-    # Mirror of the channels-route helper: any active direct grant or active
-    # role assignment carrying the permission counts (scope value irrelevant
-    # here — names are tenant-wide structure metadata, not per-unit secrets).
+    """Return all AccessScope values for which the principal holds a permission.
+
+    Mirrors the channels-route helper: both active direct grants and active
+    role assignments carrying the permission are included. Returns an empty
+    tuple if no grant exists (falsy → caller should 403).
+    """
     scopes: list[AccessScope] = []
     for grant in user.direct_permissions:
         if grant.active and grant.permission == permission:
