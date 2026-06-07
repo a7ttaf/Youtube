@@ -6,25 +6,32 @@ Internal product UI for a finance/revenue command center. The design serves comp
 
 ## Color
 
-Use the Claude login reference palette with dark charcoal, warm cream, and Anthropic orange:
+Use the Soft Dark palette (GitHub dark_dimmed / Primer surfaces) with the Anthropic
+orange accent — per the UMS Revenue Design System:
 
-- Background: near-black charcoal `oklch(16% .006 72)`.
-- Navigation: darker charcoal rail `oklch(13.5% .005 72)`.
-- Surfaces: raised dark panels `oklch(20.5% .006 72)` with warm neutral borders.
-- Primary action: warm cream text/button surface using the same contrast pattern as Claude login.
-- Primary accent: Anthropic orange `oklch(66% .15 45)` for brand marks, selected states, graph emphasis, and finance highlight states.
-- Finance positive: green with label support.
-- Warning: amber for allocated or unresolved values.
-- Critical: red for missing data or permission blocks.
+- Background: app canvas `#212830`; body gradient stop `#1b212a`.
+- Navigation: rail well `#151b23`.
+- Surfaces: raised dark panels `#262c36` (subtle `#2a313c`, raised `#2f3742`) with
+  hairline borders `#3d444d` (`#656c76` on emphasis).
+- Ink is tiered: chrome text `#d1d7e0`; KPI and money values near-white `#f0f6fc`.
+- Primary action: ink-toned button surface (light-on-dark contrast pattern).
+- Primary accent: Anthropic orange `oklch(66% .15 45)` for brand marks, selected
+  states, the focus ring, graph emphasis, and finance highlight states.
+- Finance positive: green `#57ab5a` with label support.
+- Warning: amber `#c69026` for allocated or unresolved values.
+- Critical: red `#e5534b` for missing data or permission blocks.
 - Graph/read-model accent: Anthropic orange, used sparingly for graph-related states.
 
 ## Typography
 
-Use local Anthropic font files from `mockups/FontsPP`:
+Use the redistributable OFL webfonts (shipped in `frontend/public/fonts/`; sources in
+`mockups/FontsGH/`):
 
-- Display: Anthropic Serif for page titles, major panel headings, and KPI values.
-- Body/UI: Anthropic Sans for navigation, tables, forms, buttons, labels, and supporting text.
-- Code-like labels: Anthropic Mono for formulas, identifiers, and chips.
+- Display: Newsreader for page titles, major panel headings, and KPI/money values.
+- Body/UI: Mona Sans for navigation, tables, forms, buttons, labels, and supporting text.
+- Code-like labels: Monaspace Neon for formulas, identifiers, and chips.
+- Variable-font weights are intentional (560/680/720/760 tiers) — table headers and
+  labels sit above 700; serif display values stay at 400–600.
 - Keep product UI sizes fixed and table text compact. Do not use viewport-scaled typography.
 
 ## Layout

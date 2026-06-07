@@ -671,6 +671,14 @@ now wired to `GET /audit/events` (see below).
   no migration), trace key (`"channel:{id}"` or `"pending"`). Extracted to
   `views/RegistryView.tsx`; 16 new Vitest tests. Frontend-only; all pages off
   mock.
+- ✅ Soft Dark design system applied — on `feat/design-system-softdark` (stacked
+  on Registry Phase 2): token-value conversion of `frontend/src/styles.css` to
+  the UMS Revenue Design System Soft Dark theme (GitHub dark_dimmed
+  surfaces/ink/status; Anthropic-orange accent unchanged; new `--ink-strong`
+  near-white tier for money/KPI values; variable-font weight tiers) + OFL
+  webfonts (Mona Sans / Newsreader / Monaspace Neon from `mockups/FontsGH`)
+  shipped in `frontend/public/fonts/` with licenses. Visual-only: no selector
+  or component-logic change; `DESIGN.md` updated off the old warm palette.
 - ✅ Registry Phase 2 — on `feat/registry-phase2` (spec
   `Docs/superpowers/specs/2026-06-07-registry-phase2-design.md`): new read-only
   `GET /org-units` (tenant-scoped, active-only, fail-closed VIEW_ANALYTICS gate
