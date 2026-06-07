@@ -107,7 +107,7 @@ const PERMISSION_DETAILS: Record<Role, Array<{ label: string; value: string }>> 
  * Trace / Explain-Number screen: pick month + channel + metric, then POST to the
  * guarded explain endpoint and render the source-linked, permission-gated breakdown.
  */
-export default function TraceView({ // skipcq: JS-0067
+export default function TraceView({ // skipcq: JS-0067, JS-R1005
   canViewFinance,
   role,
   presetChannelId,

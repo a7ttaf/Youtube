@@ -140,7 +140,7 @@ const sectorLabel = (
 };
 
 /** Map a mutation failure to operator-facing copy (typed ApiError aware). */
-const describeMutationError = (err: unknown): string => {
+const describeMutationError = (err: unknown): string => { // skipcq: JS-R1005
   if (err instanceof ApiError) {
     const body = err.body as { detail?: unknown } | null;
     const detail = typeof body?.detail === "string" ? body.detail : null;
@@ -486,6 +486,7 @@ function RegistryRow({ // skipcq: JS-0067
   // Review is read-only navigation and stays enabled whenever nav is wired.
   const isWriteAction = action !== "Review";
   const disabled = isWriteAction ? !canManageRegistry : !hasTraceNav;
+  /** Route the row click to the Map, Assign, or Review handler for this channel. */
   const onClick = () => {
     if (action === "Map") onMap(ch);
     else if (action === "Assign") onAssign(ch);
@@ -639,6 +640,7 @@ function MappingChangeRequestPanel({ // skipcq: JS-0067, JS-R1005
     canManageRegistry && !busy && channelId !== "" && companyId !== "" &&
     trimmedReason !== "";
 
+  /** Submit the mapping-change PATCH; latched against concurrent double-clicks. */
   const submit = async () => {
     if (!canSubmit) return;
     // Synchronous latch: both clicks of a same-tick double-click run off the
@@ -668,6 +670,8 @@ function MappingChangeRequestPanel({ // skipcq: JS-0067, JS-R1005
   );
 
   return (
+    // skipcq: JS-0415 — form layout: panel > header+grid > row > label+control;
+    // extracting sub-components would add abstraction without reuse value here.
     <section className="panel">
       <div className="panel-header">
         <div className="panel-title">
@@ -798,6 +802,7 @@ function AccountLinkProposalPanel({ // skipcq: JS-0067, JS-R1005
     contentOwnerId.trim() !== "" && effectiveMonthStart !== "" &&
     reason.trim() !== "";
 
+  /** Submit the account-link proposal POST; latched against concurrent double-clicks. */
   const submit = async () => {
     if (!canSubmit) return;
     if (inFlightRef.current) return;
