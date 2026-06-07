@@ -2,7 +2,10 @@ import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AuditEventListResponse } from "@/lib/api/types";
-import { useAuditEvents } from "@/lib/api/useAudit";
+import {
+  buildAuditEventsExportUrl,
+  useAuditEvents,
+} from "@/lib/api/useAudit";
 import { TenantProvider } from "@/contexts/TenantContext";
 
 function wrapper({ children }: { children: React.ReactNode }) { // skipcq: JS-0067
@@ -153,6 +156,18 @@ describe("useAuditEvents", () => {
     const url = urlOf(requireFetchArgs()[0]);
     expect(url).not.toContain("cursor_created_at");
     expect(url).not.toContain("cursor_id");
+  });
+
+  it("builds /audit/events/export URL with event_type/entity_type/entity_id filters", () => {
+    expect(
+      buildAuditEventsExportUrl("EXPORT_DOWNLOADED", "export", "exp-1"),
+    ).toBe("/audit/events/export?event_type=EXPORT_DOWNLOADED&entity_type=export&entity_id=exp-1");
+  });
+
+  it("builds /audit/events/export URL without query params when no filters are provided", () => {
+    expect(buildAuditEventsExportUrl(undefined, undefined, undefined)).toBe(
+      "/audit/events/export",
+    );
   });
 
   it("reload() re-runs the fetch", async () => {

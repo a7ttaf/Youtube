@@ -22,13 +22,34 @@ function appendParam(params: URLSearchParams, key: string, value: string | numbe
   if (value != null) params.append(key, String(value));
 }
 
+/** Build a shared URLSearchParams object for /audit/events and /audit/events/export. */
+function buildAuditEventSearchParams(
+  event_type: string | undefined,
+  entity_type: string | undefined,
+  entity_id: string | undefined,
+  cursor_created_at: string | undefined,
+  cursor_id: string | undefined,
+  limit: number | undefined,
+): URLSearchParams {
+  const params = new URLSearchParams();
+  appendParam(params, "event_type", event_type);
+  appendParam(params, "entity_type", entity_type);
+  appendParam(params, "entity_id", entity_id);
+  appendParam(params, "limit", limit);
+  if (cursor_created_at != null && cursor_id != null) {
+    params.set("cursor_created_at", cursor_created_at);
+    params.set("cursor_id", cursor_id);
+  }
+  return params;
+}
+
 /**
  * Build the GET /audit/events URL with optional filter and pagination params.
  * Cursor params are both-or-neither — a half-cursor 422s on the backend.
- * appendParam centralises the null-guard for each scalar field, keeping this
- * function's branching to the cursor pair and the qs-suffix check only.
+ * Extracted as reusable helper so /audit/events/export can share the exact
+ * filter behavior.
  */
-function buildAuditEventsUrl( // skipcq: JS-0067
+export function buildAuditEventsUrl(
   event_type: string | undefined,
   entity_type: string | undefined,
   entity_id: string | undefined,
@@ -36,18 +57,38 @@ function buildAuditEventsUrl( // skipcq: JS-0067
   cursor_id: string | undefined,
   limit: number | undefined,
 ): string {
-  const params = new URLSearchParams();
-  appendParam(params, "event_type", event_type);
-  appendParam(params, "entity_type", entity_type);
-  appendParam(params, "entity_id", entity_id);
-  appendParam(params, "limit", limit);
-  // Both-or-neither: only append cursor when both halves are present.
-  if (cursor_created_at != null && cursor_id != null) {
-    params.set("cursor_created_at", cursor_created_at);
-    params.set("cursor_id", cursor_id);
-  }
+  const params = buildAuditEventSearchParams(
+    event_type,
+    entity_type,
+    entity_id,
+    cursor_created_at,
+    cursor_id,
+    limit,
+  );
   const qs = params.toString();
   return qs ? `/audit/events?${qs}` : "/audit/events";
+}
+
+/**
+ * Build the GET /audit/events/export URL with the same event/type/entity filters
+ * currently supported on /audit/events (no cursor). This is used by the audit
+ * view download action.
+ */
+export function buildAuditEventsExportUrl( // skipcq: JS-0067
+  event_type: string | undefined,
+  entity_type: string | undefined,
+  entity_id: string | undefined,
+): string {
+  const params = buildAuditEventSearchParams(
+    event_type,
+    entity_type,
+    entity_id,
+    undefined,
+    undefined,
+    undefined,
+  );
+  const qs = params.toString();
+  return qs ? `/audit/events/export?${qs}` : "/audit/events/export";
 }
 
 // ============================================================================
@@ -91,7 +132,14 @@ export function useAuditEvents( // skipcq: JS-0067
   const run = useCallback(
     () =>
       client.get<AuditEventListResponse>(
-        buildAuditEventsUrl(event_type, entity_type, entity_id, cursor_created_at, cursor_id, limit),
+        buildAuditEventsUrl(
+          event_type,
+          entity_type,
+          entity_id,
+          cursor_created_at,
+          cursor_id,
+          limit,
+        ),
       ),
     [client, event_type, entity_type, entity_id, cursor_created_at, cursor_id, limit],
   );

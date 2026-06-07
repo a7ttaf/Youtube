@@ -16,6 +16,7 @@ import {
   ISSUES,
 } from "@/lib/mock/data";
 import type { Severity } from "@/lib/mock/data";
+import { confidenceDisplay } from "@/lib/confidence";
 import { LockIcon } from "../icons";
 import {
   Badge,
@@ -84,6 +85,22 @@ function statusTone(status: string): Severity { // skipcq: JS-0067, JS-R1005
     if (normalized.includes(keyword)) return tone;
   }
   return "blue";
+}
+
+/**
+ * Human-readable confidence badge. Renders the resolved label + tone from the
+ * shared confidenceDisplay helper while preserving the RAW backend code in the
+ * title and aria-label so the underlying value is never lost for power users or
+ * assistive tech. Channel rows carry no separate API human label, so the helper
+ * falls back to its prefix map for these.
+ */
+function ConfidenceBadge({ code }: { code: string }) { // skipcq: JS-0067
+  const { label, tone } = confidenceDisplay(code);
+  return (
+    <span title={code} aria-label={`Confidence: ${code}`}>
+      <Badge tone={tone}>{label}</Badge>
+    </span>
+  );
 }
 
 // Map an alert severity to a design-system badge tone (HIGH -> red, MEDIUM ->
@@ -412,7 +429,7 @@ function ExplainCard({ // skipcq: JS-0067
           <p>Net revenue explanation, {month}</p>
         </div>
         {selectedChannel ? (
-          <Badge tone={statusTone(selectedChannel.status)}>{selectedChannel.confidence}</Badge>
+          <ConfidenceBadge code={selectedChannel.confidence} />
         ) : (
           <Badge tone="blue">—</Badge>
         )}
@@ -938,7 +955,7 @@ function ChannelRow({ // skipcq: JS-0067
         {financeDisplay(channel.net_revenue_usd, canViewFinance, { currency })}
       </td>
       <td>
-        <Badge tone={statusTone(channel.status)}>{channel.confidence}</Badge>
+        <ConfidenceBadge code={channel.confidence} />
       </td>
       <td>
         {channel.issues.length > 0 ? (

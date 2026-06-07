@@ -1,10 +1,23 @@
-import { ApiError } from "@/lib/api/client";
-import type { AuditLogEntry } from "@/lib/api/types";
+import { ApiError, useApiClient } from "@/lib/api/client";
+import { type AuditEventPagination, type AuditLogEntry } from "@/lib/api/types";
 import { useAuditEvents } from "@/lib/api/useAudit";
+import { useEffect, useState } from "react";
 import type { Severity } from "@/lib/mock/data";
 import { AUDIT_SUMMARY } from "@/lib/mock/data";
 import { Badge, Dot, ItemRow, SummaryTile, formatTimestamp } from "../shared";
 import { describeError } from "./CommandView";
+import { buildAuditEventsExportUrl } from "@/lib/api/useAudit";
+
+// Event-type filter options use REAL AuditEventType values (no severity facet
+// exists). Labels and values match the Track C spec section 2 table exactly.
+const AUDIT_EVENT_TYPE_OPTIONS = [
+  { label: "All event types", value: "" },
+  { label: "Exports", value: "EXPORT_DOWNLOADED" },
+  { label: "Mapping changes", value: "CHANNEL_UPDATED" },
+  { label: "Month locks", value: "MONTH_LOCKED" },
+  { label: "Allocations committed", value: "ALLOCATION_COMMITTED" },
+  { label: "Logins", value: "LOGIN" },
+];
 
 // ============================================================================
 // Purpose: The REAL-data Audit Log screen, extracted from AppShell. The timeline
@@ -65,26 +78,105 @@ export default function AuditView({ // skipcq: JS-0067
 }
 
 /**
- * The audit-log main panel: header (title + severity filter / download actions)
+ * The audit-log main panel: header (title + event-type filter / download actions)
  * and the live audit timeline. Extracted so the AuditView JSX tree stays shallow.
  */
 function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) { // skipcq: JS-0067
+  const [eventType, setEventType] = useState("");
+
   return (
     <section className="panel">
-      <AuditLogPanelHeader />
-      <AuditTimeline canViewAudit={canViewAudit} />
+      <AuditLogPanelHeader
+        eventType={eventType}
+        onEventType={setEventType}
+        canViewAudit={canViewAudit}
+      />
+      <AuditTimeline canViewAudit={canViewAudit} eventType={eventType || undefined} />
     </section>
   );
 }
 
 /**
- * Audit-log panel header: title/subtitle and the severity filter + download
- * actions. Neither control is wired yet — there is no server-side severity facet
- * and no audit-export route/handler — so BOTH stay UNCONDITIONALLY disabled
- * placeholders rather than presenting a control that does nothing. (`canViewAudit`
- * is no longer needed here: a non-audit viewer never reaches the live panel.)
+ * Trigger a browser save of a blob via a temporary object URL + <a download>.
+ * Revokes the URL afterward to avoid leaking it. Extracted so the download hook
+ * stays readable.
  */
-function AuditLogPanelHeader() { // skipcq: JS-0067
+function saveBlobAsFile(blob: Blob, filename: string): void { // skipcq: JS-0067
+  const objectUrl = URL.createObjectURL(blob);
+  const anchor = document.createElement("a");
+  anchor.href = objectUrl;
+  anchor.download = filename;
+  document.body.appendChild(anchor);
+  anchor.click();
+  anchor.remove();
+  URL.revokeObjectURL(objectUrl);
+}
+
+// ============================================================================
+// Purpose: Download-the-audit-CSV hook. Fetches GET /audit/events/export as a
+//   BLOB with ONLY the current event_type filter (never cursor params — the
+//   export always represents the full filtered set from the beginning), triggers
+//   a browser save, and reads the X-Truncated response header. Silent truncation
+//   is unacceptable for audit work, so a truncation notice is surfaced when the
+//   server caps the result; it persists until the next download attempt.
+// Database/ORM: None (frontend) — consumes the read-only CSV route.
+// Standards: Same auth/tenant mechanics as the JSON client (client.getBlob ->
+//   buildHeaders). In-flight latch prevents double-fire; errors surface via the
+//   shared describeError pattern. No client-side authorization is invented.
+// Blast Radius: Audit read/export only. No finance math, no mutation, no Neo4j.
+// Connections:
+//   - File: frontend/src/lib/api/client.ts -> useApiClient().getBlob.
+//   - File: frontend/src/lib/api/useAudit.ts -> buildAuditEventsExportUrl.
+//   - File: backend/ums_smart_revenue/api/audit.py -> export route + X-Truncated.
+// ============================================================================
+function useAuditExportDownload(eventType: string) { // skipcq: JS-0067
+  const client = useApiClient();
+  const [busy, setBusy] = useState(false);
+  const [truncated, setTruncated] = useState(false);
+  const [errorDetail, setErrorDetail] = useState<string | null>(null);
+
+  const download = async () => {
+    if (busy) return;
+    setBusy(true);
+    setErrorDetail(null);
+    setTruncated(false);
+    try {
+      const url = buildAuditEventsExportUrl(eventType || undefined, undefined, undefined);
+      const { blob, headers } = await client.getBlob(url);
+      saveBlobAsFile(blob, "audit-events.csv");
+      if ((headers.get("X-Truncated") ?? "").toLowerCase() === "true") {
+        setTruncated(true);
+      }
+    } catch (caught) {
+      const asError = caught instanceof Error ? caught : new Error("Download failed");
+      setErrorDetail(describeError(asError).detail);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return { download, busy, truncated, errorDetail };
+}
+
+/**
+ * Audit-log panel header: title/subtitle and event-type filtering + download
+ * controls. The dropdown is wired to the server-supported `event_type` query
+ * param (no new backend facet schema), and the Download button fetches GET
+ * /audit/events/export as a blob (current filter only, no cursor) so it can read
+ * X-Truncated and surface truncation instead of silently dropping rows.
+ */
+function AuditLogPanelHeader({ // skipcq: JS-0067
+  canViewAudit,
+  eventType,
+  onEventType,
+}: {
+  canViewAudit: boolean;
+  eventType: string;
+  onEventType: (eventType: string) => void;
+}) {
+  const isDisabled = !canViewAudit;
+  const { download, busy, truncated, errorDetail } = useAuditExportDownload(eventType);
+
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -92,12 +184,41 @@ function AuditLogPanelHeader() { // skipcq: JS-0067
         <span>Every sensitive action records actor, permission, scope, target, and result</span>
       </div>
       <div className="view-actions">
-        <select className="control" aria-label="Audit severity" disabled>
-          <option>All sensitive</option><option>Denied</option><option>Exports</option>
+        <label className="sr-only" htmlFor="auditEventTypeFilter">
+          Audit event type
+        </label>
+        <select
+          id="auditEventTypeFilter"
+          className="control"
+          aria-label="Audit event type"
+          value={eventType}
+          onChange={(e) => onEventType(e.currentTarget.value)}
+          disabled={isDisabled}
+        >
+          {AUDIT_EVENT_TYPE_OPTIONS.map((option) => (
+            <option value={option.value} key={option.value || "ALL"}>
+              {option.label}
+            </option>
+          ))}
         </select>
-        {/* No audit-export route exists yet — disabled for ALL users (a button
-            that did nothing was misleading) until a real handler is built. */}
-        <button className="ghost-button" type="button" disabled>Download Audit View</button>
+        <button
+          className="ghost-button"
+          type="button"
+          onClick={download}
+          disabled={isDisabled || busy}
+        >
+          {busy ? "Downloading…" : "Download Audit View"}
+        </button>
+        {truncated && (
+          <span className="item-sub" role="status" style={{ color: "var(--amber, #b45309)" }}>
+            Export truncated at 10,000 rows — narrow the filter
+          </span>
+        )}
+        {errorDetail && (
+          <span className="item-sub" role="alert" style={{ color: "var(--red, #b91c1c)" }}>
+            {errorDetail}
+          </span>
+        )}
       </div>
     </div>
   );
@@ -130,7 +251,13 @@ function TimelinePlaceholderRow({ tone, title, sub, badge }: { // skipcq: JS-006
  * fetch fires (fail-closed). Only when permitted is the always-fetching feed
  * mounted, keeping the useAuditEvents call unconditional (rules-of-hooks safe).
  */
-function AuditTimeline({ canViewAudit }: { canViewAudit: boolean }) { // skipcq: JS-0067
+function AuditTimeline({
+  canViewAudit,
+  eventType,
+}: { // skipcq: JS-0067
+  canViewAudit: boolean;
+  eventType: string | undefined;
+}) {
   if (!canViewAudit) {
     return (
       <div className="timeline" role="list">
@@ -145,21 +272,61 @@ function AuditTimeline({ canViewAudit }: { canViewAudit: boolean }) { // skipcq:
       </div>
     );
   }
-  return <AuditTimelineFeed />;
+  return <AuditTimelineFeed eventType={eventType} />;
 }
 
 /**
  * The live audit-event feed. ALWAYS calls useAuditEvents() (it is only mounted
  * when the viewer may see the audit log), so the hook stays unconditional. Maps
- * loading / error (403 -> "No permission") / empty / loaded states.
- *
- * FIRST PAGE ONLY: this renders the default page (newest first, backend default
- * limit) and does NOT yet consume `pagination.next_cursor`. A future "Load More"
- * would pass `next_cursor.{created_at, id}` back as `cursor_created_at`/`cursor_id`
- * to `useAuditEvents` to fetch the next page.
+ * loading / error (403 -> "No permission") / empty / loaded states, and
+ * consumes backend `pagination.next_cursor` for a "Load More" append flow.
  */
-function AuditTimelineFeed() { // skipcq: JS-0067, JS-R1005
-  const { data, loading, error } = useAuditEvents();
+function AuditTimelineFeed({ // skipcq: JS-0067, JS-R1005
+  eventType,
+}: {
+  eventType: string | undefined;
+}) {
+  const [rows, setRows] = useState<AuditLogEntry[]>([]);
+  const [pagination, setPagination] = useState<AuditEventPagination | null>(null);
+  const [cursorCreatedAt, setCursorCreatedAt] = useState<string | undefined>(undefined);
+  const [cursorId, setCursorId] = useState<string | undefined>(undefined);
+
+  const { data, loading, error } = useAuditEvents({
+    event_type: eventType,
+    cursor_created_at: cursorCreatedAt,
+    cursor_id: cursorId,
+  });
+
+  useEffect(() => {
+    setRows([]);
+    setPagination(null);
+    setCursorCreatedAt(undefined);
+    setCursorId(undefined);
+  }, [eventType]);
+
+  useEffect(() => {
+    if (!data) return;
+    setRows((previous) => {
+      // First page (no cursor) replaces; subsequent pages append. Dedupe by
+      // event id so a StrictMode double-invoke or an overlapping cursor window
+      // can never render the same audit row twice.
+      if (!(cursorCreatedAt && cursorId)) return data.items;
+      const seen = new Set(previous.map((row) => row.id));
+      const appended = data.items.filter((row) => !seen.has(row.id));
+      return [...previous, ...appended];
+    });
+    setPagination(data.pagination);
+  }, [data, cursorCreatedAt, cursorId]);
+
+  const hasMore = Boolean(pagination?.has_more && pagination.next_cursor);
+  const nextCursor = pagination?.next_cursor;
+  const loadMoreLabel = loading ? "Loading more…" : "Load More";
+
+  const loadMore = () => {
+    if (!nextCursor || loading) return;
+    setCursorCreatedAt(nextCursor.created_at);
+    setCursorId(nextCursor.id);
+  };
 
   if (error) {
     const described = describeError(error);
@@ -188,7 +355,7 @@ function AuditTimelineFeed() { // skipcq: JS-0067, JS-R1005
     );
   }
 
-  if (loading && !data) {
+  if (loading && rows.length === 0) {
     return (
       <div className="timeline" role="list" aria-busy="true">
         <div className="timeline-item" role="listitem">
@@ -203,7 +370,7 @@ function AuditTimelineFeed() { // skipcq: JS-0067, JS-R1005
     );
   }
 
-  const events = data?.items ?? [];
+  const events = rows;
   if (events.length === 0) {
     return (
       <div className="timeline" role="list">
@@ -224,16 +391,25 @@ function AuditTimelineFeed() { // skipcq: JS-0067, JS-R1005
       {events.map((event) => (
         <AuditTimelineItem key={event.id} event={event} />
       ))}
-      {/* When the backend has more pages, surface a clear truncation indicator
-          so operators investigating a security incident know to build a paginated
-          view rather than assuming the list is complete. */}
-      {data?.pagination?.has_more && (
+      {hasMore && (
+        <div className="timeline-item" role="listitem">
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={loadMore}
+            disabled={loading}
+          >
+            {loadMoreLabel}
+          </button>
+        </div>
+      )}
+      {loading && rows.length > 0 && (
         <div className="timeline-item" role="listitem">
           <TimelinePlaceholderRow
-            tone="amber"
-            title="More audit events available"
-            sub="Showing first page only — cursor pagination coming"
-            badge="Truncated"
+            tone="blue"
+            title="Loading more events"
+            sub="Continue fetching the next cursor window."
+            badge="Loading"
           />
         </div>
       )}

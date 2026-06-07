@@ -130,6 +130,21 @@ describe("CommandView wired to net-revenue", () => {
     expect(screen.getAllByText("Restricted").length).toBeGreaterThan(0);
   });
 
+  it("renders the human confidence label with the raw code in title/aria", async () => {
+    routeFetch(() => jsonResponse(NET_REVENUE_BODY));
+    renderCommandView(true);
+
+    // Code "B" maps to the human label "Reconciled" (table + explain card).
+    await waitFor(() =>
+      expect(screen.getAllByText("Reconciled").length).toBeGreaterThan(0),
+    );
+    // The raw code is never shown as the visible label.
+    expect(screen.queryByText(/^B$/)).not.toBeInTheDocument();
+    // The raw code is preserved for power users / assistive tech.
+    expect(screen.getAllByTitle("B").length).toBeGreaterThan(0);
+    expect(screen.getAllByLabelText("Confidence: B").length).toBeGreaterThan(0);
+  });
+
   it("shows a no-permission message on a 403 ApiError", async () => {
     // Net-revenue 403; smart-alerts stays CLEAR so this asserts net-revenue's
     // own no-permission rendering (not the panel's).

@@ -1,5 +1,6 @@
 import { StrictMode } from "react";
 import { render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import AuditView from "@/components/srcc/views/AuditView";
@@ -34,6 +35,33 @@ const EVENTS: AuditEventListResponse = {
       details_redacted: false,
       sensitive: false,
       created_at: "2026-03-21T02:18:44Z",
+    },
+  ],
+  pagination: { limit: 50, returned: 1, has_more: false, next_cursor: null },
+  audit_event: {},
+};
+
+const PAGED_EVENTS_FIRST: AuditEventListResponse = {
+  ...EVENTS,
+  pagination: { limit: 50, returned: 1, has_more: true, next_cursor: { created_at: "2026-03-21T02:18:44Z", id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" } },
+};
+
+const PAGED_EVENTS_SECOND: AuditEventListResponse = {
+  items: [
+    {
+      id: "cccccccc-cccc-cccc-cccc-cccccccccccc",
+      user_id: "security.admin@ums",
+      event_type: "CONNECTOR_JOB_RUN",
+      entity_type: "connector_job",
+      entity_id: "job-1",
+      scope_type: "global",
+      scope_id: null,
+      request_id: "req-3",
+      reason: "connector reconciliation run",
+      details: { status: "completed" },
+      details_redacted: false,
+      sensitive: false,
+      created_at: "2026-03-21T02:18:00Z",
     },
   ],
   pagination: { limit: 50, returned: 1, has_more: false, next_cursor: null },
@@ -76,6 +104,13 @@ function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   });
 }
 
+function csvResponse(body: string, extraHeaders: Record<string, string> = {}) { // skipcq: JS-0067
+  return new Response(body, {
+    status: 200,
+    headers: { "Content-Type": "text/csv", ...extraHeaders },
+  });
+}
+
 function urlOf(input: unknown): string { // skipcq: JS-0067
   if (typeof input === "string") return input;
   if (input instanceof URL) return input.toString();
@@ -96,6 +131,23 @@ function routeEvents( // skipcq: JS-0067
     const custom = responder(url);
     if (custom) return Promise.resolve(custom);
     if (url.startsWith("/audit/events")) {
+      if (url.includes("cursor_created_at=")) {
+        return Promise.resolve(jsonResponse(PAGED_EVENTS_SECOND));
+      }
+      if (url.includes("event_type=CHANNEL_UPDATED")) {
+        return Promise.resolve(
+          jsonResponse({
+            ...EVENTS,
+            items: [
+              {
+                ...EVENTS.items[0],
+                event_type: "CHANNEL_UPDATED",
+                id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+              },
+            ],
+          }),
+        );
+      }
       return Promise.resolve(jsonResponse(EVENTS));
     }
     return Promise.resolve(jsonResponse({}, 200));
@@ -235,36 +287,222 @@ describe("AuditView wired to GET /audit/events", () => {
     expect(auditCalls()).toHaveLength(1);
   });
 
-  it("keeps Download Audit View disabled even for an audit viewer (no audit-export route exists yet)", async () => {
-    fetchMock().mockImplementation(routeEvents(() => null));
+  it("downloads the export as a blob (no truncation header => no notice) and never sends cursor params", async () => {
+    const createObjectURL = vi.fn(() => "blob:audit-1");
+    const revokeObjectURL = vi.fn();
+    vi.stubGlobal("URL", { ...URL, createObjectURL, revokeObjectURL });
+
+    fetchMock().mockImplementation((input: unknown) => {
+      const url = urlOf(input);
+      if (url.startsWith("/audit/events/export")) {
+        return Promise.resolve(csvResponse("created_at,event_type\n2026,LOGIN\n"));
+      }
+      return routeEvents(() => null)(input);
+    });
     renderAuditView(true);
 
     await waitFor(() =>
       expect(screen.getByText("REVENUE_EXPORTED")).toBeInTheDocument(),
     );
-    // The control is a disabled placeholder, not a button that does nothing.
-    expect(
-      screen.getByRole("button", { name: /download audit view/i }),
-    ).toBeDisabled();
+    await userEvent.click(screen.getByRole("button", { name: /download audit view/i }));
+
+    await waitFor(() => expect(createObjectURL).toHaveBeenCalledTimes(1));
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:audit-1");
+    // No X-Truncated header => no truncation notice.
+    expect(screen.queryByText(/truncated at 10,000/i)).not.toBeInTheDocument();
+    // The export request carried no cursor params.
+    const exportCall = fetchMock().mock.calls.find(([i]) =>
+      urlOf(i).startsWith("/audit/events/export"),
+    );
+    expect(exportCall).toBeDefined();
+    expect(urlOf(exportCall?.[0])).not.toContain("cursor_created_at");
+    expect(urlOf(exportCall?.[0])).not.toContain("cursor_id");
   });
 
-  it("shows a truncation indicator when the backend reports has_more: true", async () => {
-    const moreEvents: AuditEventListResponse = {
-      ...EVENTS,
-      pagination: { limit: 50, returned: 1, has_more: true, next_cursor: { created_at: "2026-03-21T02:18:44Z", id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" } },
-    };
+  it("surfaces a truncation notice only when the export sets X-Truncated: true", async () => {
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:audit-2"),
+      revokeObjectURL: vi.fn(),
+    });
+
+    fetchMock().mockImplementation((input: unknown) => {
+      const url = urlOf(input);
+      if (url.startsWith("/audit/events/export")) {
+        return Promise.resolve(
+          csvResponse("created_at,event_type\n2026,LOGIN\n", { "X-Truncated": "true" }),
+        );
+      }
+      return routeEvents(() => null)(input);
+    });
+    renderAuditView(true);
+
+    await waitFor(() =>
+      expect(screen.getByText("REVENUE_EXPORTED")).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /download audit view/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText(/truncated at 10,000 rows/i)).toBeInTheDocument(),
+    );
+  });
+
+  it("disables the download button when the viewer cannot view the audit log", () => {
+    fetchMock().mockImplementation(routeEvents(() => null));
+    renderAuditView(false);
+    expect(screen.getByRole("button", { name: /download audit view/i })).toBeDisabled();
+  });
+
+  it("wires the event-type selector to `event_type` and updates the list query", async () => {
     fetchMock().mockImplementation(
-      routeEvents((url) =>
-        url.startsWith("/audit/events") ? jsonResponse(moreEvents) : null,
-      ),
+      routeEvents((url) => {
+        if (url.startsWith("/audit/events?event_type=CHANNEL_UPDATED")) {
+          return jsonResponse({
+            ...EVENTS,
+            items: [
+              {
+                ...EVENTS.items[0],
+                event_type: "CHANNEL_UPDATED",
+                id: "dddddddd-dddd-dddd-dddd-dddddddddddd",
+              },
+            ],
+            pagination: { ...EVENTS.pagination, has_more: false, next_cursor: null },
+          });
+        }
+        return null;
+      }),
     );
     renderAuditView();
 
     await waitFor(() =>
       expect(screen.getByText("REVENUE_EXPORTED")).toBeInTheDocument(),
     );
-    // Operators must know more pages exist so they don't close an investigation early.
-    expect(screen.getByText(/More audit events available/i)).toBeInTheDocument();
-    expect(screen.getByText(/Showing first page only/i)).toBeInTheDocument();
+    const filter = screen.getByRole("combobox", { name: /audit event type/i });
+    await userEvent.selectOptions(filter, "CHANNEL_UPDATED");
+
+    await waitFor(() =>
+      expect(screen.getByText("CHANNEL_UPDATED")).toBeInTheDocument(),
+    );
+    const lastRequest = fetchMock().mock.calls.at(-1);
+    if (!lastRequest) {
+      throw new Error("expected fetch to have been called");
+    }
+    expect(urlOf(lastRequest[0])).toContain("event_type=CHANNEL_UPDATED");
+  });
+
+  it("loads another page via Load More and appends rows using next_cursor", async () => {
+    fetchMock().mockImplementation(
+      (input: unknown) => {
+        const url = urlOf(input);
+        if (url.startsWith("/audit/events")) {
+          if (url.includes("cursor_created_at=")) {
+            return Promise.resolve(jsonResponse(PAGED_EVENTS_SECOND));
+          }
+          return Promise.resolve(
+            jsonResponse({
+              ...PAGED_EVENTS_FIRST,
+              items: [
+                {
+                  ...EVENTS.items[0],
+                  id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
+                  event_type: "REVENUE_EXPORTED",
+                },
+              ],
+            }),
+          );
+        }
+        return Promise.resolve(jsonResponse({}, 200));
+      },
+    );
+    renderAuditView();
+
+    await waitFor(() =>
+      expect(screen.getByText("REVENUE_EXPORTED")).toBeInTheDocument(),
+    );
+    expect(screen.getByRole("button", { name: /load more/i })).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("button", { name: /load more/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText("CONNECTOR_JOB_RUN")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("REVENUE_EXPORTED")).toBeInTheDocument();
+  });
+
+  it("dedupes appended rows by event id when a page repeats an id", async () => {
+    fetchMock().mockImplementation((input: unknown) => {
+      const url = urlOf(input);
+      if (url.startsWith("/audit/events")) {
+        if (url.includes("cursor_created_at=")) {
+          // Second page repeats the first page's id plus a new row.
+          return Promise.resolve(
+            jsonResponse({
+              ...PAGED_EVENTS_SECOND,
+              items: [
+                { ...EVENTS.items[0], id: "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa" },
+                ...PAGED_EVENTS_SECOND.items,
+              ],
+            }),
+          );
+        }
+        return Promise.resolve(PAGED_EVENTS_FIRST).then((b) => jsonResponse(b));
+      }
+      return Promise.resolve(jsonResponse({}, 200));
+    });
+    renderAuditView();
+
+    await waitFor(() =>
+      expect(screen.getByText("REVENUE_EXPORTED")).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /load more/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText("CONNECTOR_JOB_RUN")).toBeInTheDocument(),
+    );
+    // The duplicated first-page id renders exactly once after the append.
+    expect(screen.getAllByText("REVENUE_EXPORTED")).toHaveLength(1);
+  });
+
+  it("includes event_type in the export request but never cursor params", async () => {
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: vi.fn(() => "blob:audit-3"),
+      revokeObjectURL: vi.fn(),
+    });
+    fetchMock().mockImplementation((input: unknown) => {
+      const url = urlOf(input);
+      if (url.startsWith("/audit/events/export")) {
+        return Promise.resolve(csvResponse("created_at\n2026\n"));
+      }
+      if (url.startsWith("/audit/events?event_type=CHANNEL_UPDATED")) {
+        return Promise.resolve(
+          jsonResponse({
+            ...EVENTS,
+            items: [
+              { ...EVENTS.items[0], event_type: "CHANNEL_UPDATED", id: "dddddddd-dddd-dddd-dddd-dddddddddddd" },
+            ],
+          }),
+        );
+      }
+      return routeEvents(() => null)(input);
+    });
+    renderAuditView();
+
+    await waitFor(() =>
+      expect(screen.getByText("REVENUE_EXPORTED")).toBeInTheDocument(),
+    );
+    await userEvent.selectOptions(
+      screen.getByRole("combobox", { name: /audit event type/i }),
+      "CHANNEL_UPDATED",
+    );
+    await waitFor(() =>
+      expect(screen.getByText("CHANNEL_UPDATED")).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /download audit view/i }));
+
+    const exportCall = fetchMock().mock.calls.find(([i]) =>
+      urlOf(i).startsWith("/audit/events/export"),
+    );
+    expect(urlOf(exportCall?.[0])).toContain("event_type=CHANNEL_UPDATED");
+    expect(urlOf(exportCall?.[0])).not.toContain("cursor");
   });
 });
