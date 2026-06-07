@@ -48,8 +48,7 @@ import {
 // ---- Client-side derivation helpers ----------------------------------------
 
 /** Compute up to 2-char initials from a channel display name. */
-const avatarFromName = (name: string): string => // skipcq: JS-0067
-  name
+const avatarFromName = (name: string): string =>  name
     .split(/\s+/)
     .filter(Boolean)
     .slice(0, 2)
@@ -148,8 +147,7 @@ const sectorLabel = (
 };
 
 /** Map a mutation failure to operator-facing copy (typed ApiError aware). */
-const describeMutationError = (err: unknown): string => { // skipcq: JS-R1005
-  if (err instanceof ApiError) {
+const describeMutationError = (err: unknown): string => {  if (err instanceof ApiError) {
     const body = err.body as { detail?: unknown } | null;
     const detail = typeof body?.detail === "string" ? body.detail : null;
     if (err.status === 403) {
@@ -200,8 +198,7 @@ const buildSummaryTiles = (
  * duplicate the GET. Row actions set the side-panel targets (Map/Assign) or
  * navigate to Trace (Review).
  */
-export default function RegistryView({ // skipcq: JS-0067
-  canManageRegistry,
+export default function RegistryView({  canManageRegistry,
   canViewFinance,
   onOpenTrace,
 }: {
@@ -289,8 +286,7 @@ type RowActions = {
 };
 
 /** The registry main panel: header + mapping band + registry table. */
-function RegistryMainPanel({ // skipcq: JS-0067
-  canManageRegistry,
+function RegistryMainPanel({  canManageRegistry,
   channelState,
   unitsById,
   ...rowActions
@@ -314,8 +310,7 @@ function RegistryMainPanel({ // skipcq: JS-0067
 }
 
 /** Registry panel header: title/subtitle and the bulk-import action. */
-function RegistryPanelHeader() { // skipcq: JS-0067
-  return (
+function RegistryPanelHeader() {  return (
     <div className="panel-header">
       <div className="panel-title">
         <strong id="registryTitle">Channel Registry</strong>
@@ -332,8 +327,7 @@ function RegistryPanelHeader() { // skipcq: JS-0067
 }
 
 /** Finance-visible mapping band; the scope badge reflects registry-edit access. */
-function RegistryMappingBand({ canManageRegistry }: { canManageRegistry: boolean }) { // skipcq: JS-0067
-  return (
+function RegistryMappingBand({ canManageRegistry }: { canManageRegistry: boolean }) {  return (
     <div className="permission-band">
       <Dot tone="green" />
       <span>
@@ -348,8 +342,7 @@ function RegistryMappingBand({ canManageRegistry }: { canManageRegistry: boolean
 }
 
 /** Column header row. Extracted to keep nesting shallow. */
-function RegistryTableHead() { // skipcq: JS-0067
-  return (
+function RegistryTableHead() {  return (
     <thead>
       <tr>
         <th>Channel</th><th>Company</th><th>Sector</th><th>CMS</th>
@@ -360,8 +353,7 @@ function RegistryTableHead() { // skipcq: JS-0067
 }
 
 /** Single-row message cell inside the registry table shell (loading, error, empty). */
-function RegistryTableMessageRow({ // skipcq: JS-0067
-  title,
+function RegistryTableMessageRow({  title,
   sub,
 }: {
   title: string;
@@ -383,8 +375,7 @@ function RegistryTableMessageRow({ // skipcq: JS-0067
  * no-permission row), empty, and loaded states. Trace keys stay withheld from
  * non-registry viewers (fail-closed: RESTRICTED_FINANCE_VALUE).
  */
-function RegistryTable({ // skipcq: JS-R1005, JS-0067
-  canManageRegistry,
+function RegistryTable({  canManageRegistry,
   channelState,
   unitsById,
   ...rowActions
@@ -471,8 +462,7 @@ function RegistryTable({ // skipcq: JS-R1005, JS-0067
 }
 
 /** A single channel registry row; derives all display fields from the API shape. */
-function RegistryRow({ // skipcq: JS-0067
-  channel: ch,
+function RegistryRow({  channel: ch,
   canManageRegistry,
   unitsById,
   hasTraceNav,
@@ -534,8 +524,7 @@ function RegistryRow({ // skipcq: JS-0067
 }
 
 /** Channel cell: avatar + name + channel ID stacked. */
-function RegistryChannelCell({ // skipcq: JS-0067
-  name,
+function RegistryChannelCell({  name,
   code,
   avatar,
 }: {
@@ -557,8 +546,7 @@ function RegistryChannelCell({ // skipcq: JS-0067
 }
 
 /** Registry side panels: the live mapping-change form, the account-link proposal form, and registry controls. */
-function RegistrySidePanels({ // skipcq: JS-0067
-  canManageRegistry,
+function RegistrySidePanels({  canManageRegistry,
   channels,
   companies,
   mapPreset,
@@ -606,8 +594,7 @@ function RegistrySidePanels({ // skipcq: JS-0067
 //   retry. canManageRegistry disables inputs; the backend dual
 //   MANAGE_ORG_MAPPING check stays the authority.
 // ============================================================================
-function MappingChangeRequestPanel({ // skipcq: JS-0067, JS-R1005
-  canManageRegistry,
+function MappingChangeRequestPanel({  canManageRegistry,
   channels,
   companies,
   preset,
@@ -677,9 +664,26 @@ function MappingChangeRequestPanel({ // skipcq: JS-0067, JS-R1005
     (ch) => ch.youtube_channel_id === channelId,
   );
 
+  // Hoist option lists out of the return to keep JSX nesting ≤ 4 levels deep.
+  const channelOpts = [
+    <option key="_ph" value="">Select channel…</option>,
+    ...(selectedChannelMissing
+      ? [<option key={channelId} value={channelId}>{channelId}</option>]
+      : []),
+    ...channels.map((ch) => (
+      <option key={ch.youtube_channel_id} value={ch.youtube_channel_id}>
+        {ch.channel_name} ({ch.youtube_channel_id})
+      </option>
+    )),
+  ];
+  const companyOpts = [
+    <option key="_ph" value="">Select company…</option>,
+    ...companies.map((unit) => (
+      <option key={unit.id} value={unit.id}>{unit.name}</option>
+    )),
+  ];
+
   return (
-    // skipcq: JS-0415 — form layout: panel > header+grid > row > label+control;
-    // extracting sub-components would add abstraction without reuse value here.
     <section className="panel">
       <div className="panel-header">
         <div className="panel-title">
@@ -697,13 +701,7 @@ function MappingChangeRequestPanel({ // skipcq: JS-0067, JS-R1005
             value={channelId}
             onChange={(e) => setChannelId(e.target.value)}
           >
-            <option value="">Select channel…</option>
-            {selectedChannelMissing ? <option value={channelId}>{channelId}</option> : null}
-            {channels.map((ch) => (
-              <option key={ch.youtube_channel_id} value={ch.youtube_channel_id}>
-                {ch.channel_name} ({ch.youtube_channel_id})
-              </option>
-            ))}
+            {channelOpts}
           </select>
         </div>
         <div className="field-row">
@@ -714,12 +712,7 @@ function MappingChangeRequestPanel({ // skipcq: JS-0067, JS-R1005
             value={companyId}
             onChange={(e) => setCompanyId(e.target.value)}
           >
-            <option value="">Select company…</option>
-            {companies.map((unit) => (
-              <option key={unit.id} value={unit.id}>
-                {unit.name}
-              </option>
-            ))}
+            {companyOpts}
           </select>
         </div>
         <div className="field-row">
@@ -771,8 +764,7 @@ const currentMonth = (): string => {
 //   reason, in-flight ref latch, inline typed errors, reload on success).
 //   Backend gate: MANAGE_ORG_MAPPING@global.
 // ============================================================================
-function AccountLinkProposalPanel({ // skipcq: JS-0067, JS-R1005
-  canManageRegistry,
+function AccountLinkProposalPanel({  canManageRegistry,
   context,
   onProposed,
 }: {
@@ -920,8 +912,7 @@ function AccountLinkProposalPanel({ // skipcq: JS-0067, JS-R1005
 }
 
 /** The registry-controls panel listing the expected production behaviors. */
-function RegistryControlsPanel() { // skipcq: JS-0067
-  return (
+function RegistryControlsPanel() {  return (
     <section className="panel">
       <div className="panel-header">
         <div className="panel-title">

@@ -55,8 +55,7 @@ const METRIC_OPTIONS: Array<{ value: ExplanationMetric; label: string }> = [
 ];
 
 /** Map a confidence label (HIGH/MEDIUM/LOW) to the badge tone, blue otherwise. */
-function confidenceTone(label: string | undefined): Severity { // skipcq: JS-0067
-  switch ((label ?? "").toUpperCase()) {
+function confidenceTone(label: string | undefined): Severity {  switch ((label ?? "").toUpperCase()) {
     case "HIGH":
       return "green";
     case "MEDIUM":
@@ -70,8 +69,7 @@ function confidenceTone(label: string | undefined): Severity { // skipcq: JS-006
 
 // Component breakdown tone: the value row (positive contribution) is green,
 // deductions/overrides amber/blue; falls back to blue for unknown keys.
-function componentTone(key: string): Severity { // skipcq: JS-0067
-  if (key.includes("deduction")) return "amber";
+function componentTone(key: string): Severity {  if (key.includes("deduction")) return "amber";
   if (key.includes("override")) return "blue";
   return "green";
 }
@@ -107,8 +105,7 @@ const PERMISSION_DETAILS: Record<Role, Array<{ label: string; value: string }>> 
  * Trace / Explain-Number screen: pick month + channel + metric, then POST to the
  * guarded explain endpoint and render the source-linked, permission-gated breakdown.
  */
-export default function TraceView({ // skipcq: JS-0067, JS-R1005
-  canViewFinance,
+export default function TraceView({  canViewFinance,
   role,
   presetChannelId,
 }: {
@@ -219,8 +216,7 @@ export default function TraceView({ // skipcq: JS-0067, JS-R1005
 }
 
 /** Title block for the Explain Number panel. */
-function TraceHeader() { // skipcq: JS-0067
-  return (
+function TraceHeader() {  return (
     <div className="panel-header">
       <div className="panel-title">
         <strong id="traceViewTitle">Explain Number</strong>
@@ -235,8 +231,7 @@ function TraceHeader() { // skipcq: JS-0067
 }
 
 /** Month / channel / metric selectors plus the Explain trigger for the trace screen. */
-function ExplanationFilters({ // skipcq: JS-0067
-  month,
+function ExplanationFilters({  month,
   onMonthChange,
   effectiveChannelId,
   channels,
@@ -310,8 +305,7 @@ function ExplanationFilters({ // skipcq: JS-0067
 }
 
 /** Option list for the channel selector: a placeholder when empty, otherwise rows. */
-function ChannelOptions({ // skipcq: JS-0067
-  channels,
+function ChannelOptions({  channels,
   channelsLoading,
 }: {
   channels: ChannelNetRevenue[];
@@ -336,8 +330,7 @@ function ChannelOptions({ // skipcq: JS-0067
 }
 
 /** Static role-context side panel describing the scope applied before authorization. */
-function PermissionFilterPanel({ // skipcq: JS-0067
-  details,
+function PermissionFilterPanel({  details,
 }: {
   details: Array<{ label: string; value: string }>;
 }) {
@@ -356,8 +349,7 @@ function PermissionFilterPanel({ // skipcq: JS-0067
 }
 
 /** Title block for the permission-filter side panel. */
-function PermissionFilterHeader() { // skipcq: JS-0067
-  return (
+function PermissionFilterHeader() {  return (
     <div className="panel-header">
       <div className="panel-title">
         <strong>Permission Filter</strong>
@@ -369,8 +361,7 @@ function PermissionFilterHeader() { // skipcq: JS-0067
 }
 
 /** A single label/value cell in the permission-filter detail grid. */
-function PermissionDetailCell({ // skipcq: JS-0067
-  label,
+function PermissionDetailCell({  label,
   value,
 }: {
   label: string;
@@ -385,8 +376,7 @@ function PermissionDetailCell({ // skipcq: JS-0067
 }
 
 /** Error band shown when the channel directory (net-revenue summary) fails to load. */
-function ChannelLoadError({ error }: { error: ApiError | Error }) { // skipcq: JS-0067
-  const { title, detail } = describeError(error);
+function ChannelLoadError({ error }: { error: ApiError | Error }) {  const { title, detail } = describeError(error);
   return (
     <div
       className="permission-band"
@@ -404,8 +394,7 @@ function ChannelLoadError({ error }: { error: ApiError | Error }) { // skipcq: J
 }
 
 /** Render the explain hook's state: error, loading, idle prompt, or the result. */
-function ExplanationPanel({ // skipcq: JS-0067
-  state,
+function ExplanationPanel({  state,
   canViewFinance,
   currency,
 }: {
@@ -458,8 +447,7 @@ function ExplanationPanel({ // skipcq: JS-0067
 }
 
 /** Render a returned explanation: value, confidence, formula, components, warnings. */
-function ExplanationResult({ // skipcq: JS-0067
-  explanation,
+function ExplanationResult({  explanation,
   canViewFinance,
   currency,
 }: {
@@ -536,8 +524,7 @@ function ExplanationResult({ // skipcq: JS-0067
 }
 
 /** Build a component row subtitle from its source kind/report, item count, or key. */
-function componentSubtitle(component: ExplanationComponent): string { // skipcq: JS-0067
-  if (component.source_kind) {
+function componentSubtitle(component: ExplanationComponent): string {  if (component.source_kind) {
     return component.source_report_id
       ? `${component.source_kind} · ${component.source_report_id}`
       : component.source_kind;
@@ -550,8 +537,7 @@ function componentSubtitle(component: ExplanationComponent): string { // skipcq:
 }
 
 /** One explanation component row with a permission-gated money cell. */
-function ComponentRow({ // skipcq: JS-0067
-  component,
+function ComponentRow({  component,
   canViewFinance,
   currency,
 }: {
