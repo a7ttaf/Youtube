@@ -101,15 +101,16 @@ const deriveState = (ch: ChannelRegistryEntry): { text: string; tone: Severity }
  * affordances (gated by canManageRegistry; the backend stays the authority);
  * Review is read-only navigation to the Trace view.
  *
- * Map is only offered for unmapped channels (no primary_company_id): a mapped
- * channel with MISSING_REVENUE_SOURCE needs investigation, not a company remap
- * that would audit an unrelated mapping change.
+ * Any channel without a primary_company_id (including PERFORMANCE_ONLY and
+ * other non-Export-block shapes) needs Map first; a company assignment is
+ * the prerequisite for all downstream actions. Mapped channels with a missing
+ * revenue source need Review, not a remap that would audit an unrelated change.
  */
 const deriveAction = (
   state: { text: string },
   ch: ChannelRegistryEntry,
 ): string => {
-  if (state.text === "Export block" && !ch.primary_company_id) return "Map";
+  if (!ch.primary_company_id) return "Map";
   if (state.text === "Evidence due") return "Assign";
   return "Review";
 };

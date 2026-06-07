@@ -17,9 +17,11 @@ NET_REVENUE_REQUIRED_METHODS = frozenset({"post_tax_revenue_proportional"})
 COMPANY_MAPPING_REQUIRED_METHODS = frozenset({"company_level"})
 # no_allocation withholds every component without reading facts, so a factless
 # month must not block its preview (the commit engine ignores facts entirely).
-# manual skips the proportional engine entirely and reads only deduction
-# components, so a fact-free month must also not block the manual preview.
-SOURCE_FACTS_OPTIONAL_METHODS = frozenset({"no_allocation", "manual"})
+# manual is NOT exempt: the recalculation route rejects dry_run=false/manual
+# with 422 (see _validate_recalculation_write_request), so a manual dry-run
+# that returns READY_FOR_REVIEW with no facts would be a false positive with
+# no actionable commit path via this endpoint.
+SOURCE_FACTS_OPTIONAL_METHODS = frozenset({"no_allocation"})
 
 
 class RevenueRecalculationValidationError(ValueError):
