@@ -204,9 +204,7 @@ def test_finish_run_rejects_non_terminal_or_unknown_status(
 def test_finish_run_rejects_counts_with_missing_or_extra_keys(
     session: Session,
 ) -> None:
-    """
-    Validate finish_run raises error when counts dict has missing or extra keys.
-    """
+    """Validate finish_run raises error when counts dict has missing or extra keys."""
     entry = _start_default_run(session)
     bad_counts = _zero_counts()
     bad_counts.pop("reports_failed")
@@ -244,9 +242,7 @@ def test_finish_run_rejects_counts_with_negative_or_non_int_values(
 
 
 def test_finish_run_rejects_cross_tenant_run_id(session: Session) -> None:
-    """
-    Check that finish_run raises LookupError for connector_run_id belonging to another tenant.
-    """
+    """Check that finish_run raises LookupError for connector_run_id belonging to another tenant."""
     entry = _start_default_run(session)
 
     with pytest.raises(LookupError, match="Connector run not found"):
@@ -396,9 +392,7 @@ def _zero_counts() -> dict[str, int]:
 
 
 def _start_default_run(session: Session):
-    """
-    Start a default connector run for tests with predefined tenant and report parameters.
-    """
+    """Start a default connector run for tests with predefined tenant and report parameters."""
     return start_run(
         session,
         tenant_id=TENANT_ID,
