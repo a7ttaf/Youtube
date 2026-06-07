@@ -143,7 +143,11 @@ function AuditTimeline({
  * actions) and the live audit timeline. Extracted so the AuditView JSX tree
  * stays shallow.
  */
-function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) {
+const AuditLogPanel = function AuditLogPanel({
+  canViewAudit,
+}: {
+  canViewAudit: boolean;
+}) {
   const [eventType, setEventType] = useState("");
 
   return (
@@ -160,14 +164,17 @@ function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) {
       />
     </section>
   );
-}
+};
 
 /**
  * Trigger a browser save of a blob via a temporary object URL + <a download>.
  * Revokes the URL afterward to avoid leaking it. Extracted so the download hook
  * stays readable.
  */
-function saveBlobAsFile(blob: Blob, filename: string): void { // skipcq: JS-0067
+const saveBlobAsFile = function saveBlobAsFile(
+  blob: Blob,
+  filename: string,
+): void { // skipcq: JS-0067
   const objectUrl = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = objectUrl;
@@ -176,7 +183,7 @@ function saveBlobAsFile(blob: Blob, filename: string): void { // skipcq: JS-0067
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(objectUrl);
-}
+};
 
 type AuditExportClient = {
   getBlob(path: string): Promise<{ blob: Blob; headers: Headers }>;
