@@ -148,10 +148,6 @@ const AuditTimeline = ({
  * The audit-log main panel: header (title + event-type filter / download
  * actions) and the live audit timeline. Extracted so the AuditView JSX tree
  * stays shallow.
-  /**
-   * Download the audit events as a CSV file and update truncated state.
-   * @returns Promise<void> resolving when download completes.
-   */
  */
 function AuditLogPanel({ canViewAudit }: { canViewAudit: boolean }) { // skipcq: JS-0067
   const [eventType, setEventType] = useState("");
