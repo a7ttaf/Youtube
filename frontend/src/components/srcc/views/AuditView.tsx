@@ -19,11 +19,10 @@ const AUDIT_EVENT_TYPE_OPTIONS = [
 ];
 
 /**
- * Checks whether the response headers indicate a truncated export.
- * @param headers - The Headers object from the fetch response.
- * @returns True if the X-Truncated header equals "true", case-insensitive; otherwise false.
+ * Read the CSV export truncation flag from the backend response headers.
+ * @param headers The response headers to inspect.
+ * @returns True when X-Truncated equals "true", ignoring case.
  */
-/** Read the CSV export truncation flag from the backend response headers. */
 function hasTruncatedExportHeader(headers: Headers): boolean { // skipcq: JS-0067
   return (headers.get("X-Truncated") ?? "").toLowerCase() === "true";
 }
@@ -115,13 +114,13 @@ function TimelinePlaceholderRow({ tone, title, sub, badge }: { // skipcq: JS-006
  * always-fetching feed mounted, keeping the useAuditEvents call unconditional
  * (rules-of-hooks safe).
  */
-const AuditTimeline = ({
+function AuditTimeline({
   canViewAudit,
   eventType,
 }: {
   canViewAudit: boolean;
   eventType: string | undefined;
-}): JSX.Element => {
+}): JSX.Element {
   if (!canViewAudit) {
     return (
       <div className="timeline" role="list">
@@ -137,12 +136,7 @@ const AuditTimeline = ({
     );
   }
   return <AuditTimelineFeed eventType={eventType} />;
-/**
- * Hook to handle downloading audit event CSV exports.
- * @param eventType The type of audit events to export.
- * @returns An object containing the download function and related state flags.
- */
-};
+}
 
 /**
  * The audit-log main panel: header (title + event-type filter / download
@@ -184,6 +178,27 @@ function saveBlobAsFile(blob: Blob, filename: string): void { // skipcq: JS-0067
   URL.revokeObjectURL(objectUrl);
 }
 
+type AuditExportClient = {
+  getBlob(path: string): Promise<{ blob: Blob; headers: Headers }>;
+};
+
+/**
+ * Read the current audit slice as CSV, save it, and mark truncation state.
+ * @param client The audit API client used to fetch the export blob.
+ * @param eventType The currently selected audit event type filter.
+ * @param setTruncated State setter for the truncation banner flag.
+ */
+async function downloadAuditCsv(
+  client: AuditExportClient,
+  eventType: string,
+  setTruncated: (value: boolean) => void,
+): Promise<void> {
+  const url = buildAuditEventsExportUrl(eventType);
+  const { blob, headers } = await client.getBlob(url);
+  saveBlobAsFile(blob, "audit-events.csv");
+  setTruncated(hasTruncatedExportHeader(headers));
+}
+
 // ============================================================================
 // Purpose: Download-the-audit-CSV hook. Fetches GET /audit/events/export as a
 //   BLOB with ONLY the current event_type filter (never cursor params — the
@@ -207,15 +222,6 @@ function useAuditExportDownload(eventType: string) { // skipcq: JS-0067
   const [truncated, setTruncated] = useState(false);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
 
-  /** Read the current audit slice as CSV, save it, and mark truncation state. */
-  function downloadAuditCsv(): Promise<void> {
-    const url = buildAuditEventsExportUrl(eventType);
-    return client.getBlob(url).then(({ blob, headers }) => {
-      saveBlobAsFile(blob, "audit-events.csv");
-      setTruncated(hasTruncatedExportHeader(headers));
-    });
-  }
-
   /** Normalize the download failure into the shared audit-screen detail copy. */
   const describeDownloadError = (caught: unknown): string => {
     const asError = caught instanceof Error ? caught : new Error("Download failed");
@@ -228,7 +234,7 @@ function useAuditExportDownload(eventType: string) { // skipcq: JS-0067
     setBusy(true);
     setErrorDetail(null);
     setTruncated(false);
-    void downloadAuditCsv()
+    downloadAuditCsv(client, eventType, setTruncated)
       .catch((caught) => {
         setErrorDetail(describeDownloadError(caught));
       })
