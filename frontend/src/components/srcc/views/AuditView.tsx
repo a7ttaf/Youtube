@@ -65,6 +65,8 @@ export default function AuditView({ // skipcq: JS-0067
   canViewAudit: boolean;
   canViewFinance: boolean;
 }) {
+  const [eventType, setEventType] = useState("");
+
   return (
     <section className="view-page" aria-labelledby="auditTitle">
       <div className="view-summary" aria-label="Audit summary (static context)">
@@ -78,7 +80,18 @@ export default function AuditView({ // skipcq: JS-0067
       </span>
 
       <div className="view-grid">
-        <AuditLogPanel canViewAudit={canViewAudit} />
+        <section className="panel">
+          <AuditLogPanelHeader
+            eventType={eventType}
+            onEventType={setEventType}
+            canViewAudit={canViewAudit}
+          />
+          <AuditTimeline
+            key={eventType || "all"}
+            canViewAudit={canViewAudit}
+            eventType={eventType || undefined}
+          />
+        </section>
         <AuditCoveragePanel />
       </div>
     </section>
@@ -137,33 +150,6 @@ function AuditTimeline({
   }
   return <AuditTimelineFeed eventType={eventType} />;
 }
-
-/**
- * The audit-log main panel: header (title + event-type filter / download
- * actions) and the live audit timeline. Extracted so the AuditView JSX tree
- * stays shallow.
- */
-const AuditLogPanel = function AuditLogPanel(props: {
-  canViewAudit: boolean;
-}) {
-  const { canViewAudit } = props;
-  const [eventType, setEventType] = useState("");
-
-  return (
-    <section className="panel">
-      <AuditLogPanelHeader
-        eventType={eventType}
-        onEventType={setEventType}
-        canViewAudit={canViewAudit}
-      />
-      <AuditTimeline
-        key={eventType || "all"}
-        canViewAudit={canViewAudit}
-        eventType={eventType || undefined}
-      />
-    </section>
-  );
-};
 
 /**
  * Trigger a browser save of a blob via a temporary object URL + <a download>.
