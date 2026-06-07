@@ -1,4 +1,5 @@
 """FastAPI route handlers for connector credential management and test-connection probing."""
+# pylint: disable=too-many-arguments, too-many-positional-arguments
 from datetime import datetime
 from typing import Annotated
 from uuid import UUID
@@ -169,7 +170,7 @@ def list_connector_runs(
     #   - File: backend/ums_smart_revenue/api/audit.py -> mirrored envelope.
     # ========================================================================
     allowed_connector_ids = connector_health_connector_ids(user)
-    _require_connector_health(user, allowed_connector_ids)
+    _require_connector_health(allowed_connector_ids)
 
     # FIX: Mirror the test-connection route's tenant resolution so a truthy but
     # non-UUID tenant_id falls back to the bootstrap tenant instead of raising a
@@ -396,7 +397,6 @@ def _require_connector_permission(
 
 
 def _require_connector_health(
-    user: UserPrincipal,
     allowed_connector_ids: frozenset[str] | None = None,
 ) -> None:
     """Raise 403 unless the user holds VIEW_CONNECTOR_HEALTH at any allowed scope.

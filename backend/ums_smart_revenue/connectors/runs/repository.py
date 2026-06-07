@@ -1,4 +1,5 @@
 """Repository helpers for tenant-scoped connector run history."""
+# pylint: disable=too-many-instance-attributes, too-many-arguments
 
 import re
 from collections.abc import Iterable
@@ -99,7 +100,8 @@ class ConnectorRunNotFoundError(LookupError):
 # Blast Radius: Audit/operator run tracking only. Finance facts untouched.
 # Connections:
 #   - File: backend/ums_smart_revenue/db/connector_models.py -> ORM table.
-#   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md -> B2.3 contract.
+#   - File: Docs/superpowers/specs/
+#     2026-05-26-spec-b2-google-live-connector-design.md -> B2.3 contract.
 # ============================================================================
 def start_run(
     session: Session,
@@ -176,7 +178,8 @@ def link_raw_file(
 # Blast Radius: Audit/operator run tracking only. Finance facts untouched.
 # Connections:
 #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> future caller.
-#   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md -> B2.3 contract.
+#   - File: Docs/superpowers/specs/
+#     2026-05-26-spec-b2-google-live-connector-design.md -> B2.3 contract.
 # ============================================================================
 def finish_run(
     session: Session,

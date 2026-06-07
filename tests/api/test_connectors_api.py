@@ -19,13 +19,16 @@ from ums_smart_revenue.connectors.google.errors import (
     OAuthRefreshError,
     SecretFetchError,
 )
+from ums_smart_revenue.db.connector_models import ConnectorRunORM
 from ums_smart_revenue.db.org_models import OrgBase
+from ums_smart_revenue.db.report_models import ReportBase
 from ums_smart_revenue.db.security_models import (
     ApiConnectorCredentialORM,
     AuditLogORM,
     SecurityBase,
     UserORM,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 USER_ID = UUID("00000000-0000-0000-0000-000000004001")
 
@@ -73,7 +76,7 @@ def seed_database(database_url: str) -> None:
 def test_connector_admin_can_create_credential_reference_without_exposing_secret_ref(
     tmp_path,
 ):
-    """connector_admin can register a secret ref; the ref is stored but not returned in the response."""
+    """connector_admin can register a secret ref and keep it out of the response."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -247,7 +250,7 @@ def test_assistant_cannot_create_connector_credential(tmp_path):
 
 
 def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
-    """revenue_operations_admin can enqueue a connector job; audit row is written with CONNECTOR_JOB_RUN."""
+    """revenue_operations_admin can enqueue a connector job and write CONNECTOR_JOB_RUN audit."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -310,7 +313,10 @@ def test_connector_admin_can_test_connection_ok(tmp_path):
 
 
 def test_test_connection_returns_404_for_missing_credential(tmp_path):
-    """Missing credential probe returns 404, includes 'not found' detail, and writes CONNECTOR_TESTED audit."""
+    """Missing credential probe returns 404.
+
+    It includes 'not found' detail and writes CONNECTOR_TESTED audit.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -392,7 +398,10 @@ def test_test_connection_returns_error_for_generic_google_connector_error(tmp_pa
 
     with patch(
         "ums_smart_revenue.api.connectors.resolve_connector_credentials",
-        side_effect=SecretFetchError(ref="gcp-secret://project/key", inner=Exception("backend unavailable")),
+        side_effect=SecretFetchError(
+            ref="gcp-secret://project/key",
+            inner=Exception("backend unavailable"),
+        ),
     ):
         response = client.post(
             "/connectors/credentials/youtube_reporting/content-owner-1/test",
@@ -430,6 +439,7 @@ def test_test_connection_requires_manage_connectors_permission(tmp_path):
 def test_credential_integrity_classifier_uses_duplicate_constraint_only():
     """Integrity classifier returns True only for the unique-constraint violation, not FK errors."""
 
+    # pylint: disable=too-few-public-methods
     class DuplicateDiag:
         """Minimal constraint diagnostic stub for testing the integrity classifier."""
 
@@ -450,14 +460,6 @@ def test_credential_integrity_classifier_uses_duplicate_constraint_only():
     assert _is_duplicate_credential_integrity_error(duplicate_error)
     assert not _is_duplicate_credential_integrity_error(foreign_key_error)
 
-
-# ---------------------------------------------------------------------------
-# GET /connectors/runs (run history)
-# ---------------------------------------------------------------------------
-
-from ums_smart_revenue.db.connector_models import ConnectorRunORM  # noqa: E402
-from ums_smart_revenue.db.report_models import ReportBase  # noqa: E402
-from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID  # noqa: E402
 
 RUN_COUNTS = {
     "reports_attempted": 2,

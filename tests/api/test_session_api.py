@@ -5,6 +5,7 @@ derivation; database-mode cases exercise the SQL-backed enriched principal
 plus fail-closed behavior (disabled/unknown). Fixtures mirror
 tests/api/test_tenants_api.py and tests/api/test_database_principals.py.
 """
+# pylint: disable=redefined-outer-name, too-many-arguments
 
 from __future__ import annotations
 
