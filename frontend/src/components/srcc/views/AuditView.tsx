@@ -1,11 +1,12 @@
 import { ApiError, useApiClient } from "@/lib/api/client";
 import { type AuditEventPagination, type AuditLogEntry } from "@/lib/api/types";
-import { useEffect, useState } from "react";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 import type { Severity } from "@/lib/mock/data";
 import { AUDIT_SUMMARY } from "@/lib/mock/data";
 import { Badge, Dot, ItemRow, SummaryTile, formatTimestamp } from "../shared";
 import { describeError } from "./CommandView";
 import { buildAuditEventsExportUrl, useAuditEvents } from "@/lib/api/useAudit";
+import AuditTimelineFeed from "./AuditTimelineFeed";
 
 // Event-type filter options use REAL AuditEventType values (no severity facet
 // exists). Labels and values match the Track C spec section 2 table exactly.
@@ -276,7 +277,7 @@ const AuditTimelineFeedList = ({
  * branching small and delegates the row rendering to the specialized state
  * components above.
  */
-const AuditTimelineFeedContent = ({
+export const AuditTimelineFeedContent = ({
   error,
   events,
   loading,
@@ -302,17 +303,52 @@ const AuditTimelineFeedContent = ({
   );
 };
 
-/**
- * The live audit-event feed. ALWAYS calls useAuditEvents() (it is only mounted
- * when the viewer may see the audit log), so the hook stays unconditional.
- * Maps loading / error (403 -> "No permission") / empty / loaded states, and
- * consumes backend `pagination.next_cursor` for a "Load More" append flow.
- */
-const AuditTimelineFeed = ({
-  eventType,
-}: {
-  eventType: string | undefined;
-}) => {
+// ============================================================================
+// Purpose: Own the audit-timeline cursor state, page stitching, and pagination
+//   actions behind a small hook so the visual component stays simple. The hook
+//   still calls useAuditEvents() unconditionally and preserves the existing
+//   append-more behavior.
+// Database/ORM: None.
+// Standards: Keep fetch/state orchestration separate from rendering; preserve
+//   the read-only audit flow and fail-closed behavior.
+// Blast Radius: Audit read only.
+// ============================================================================
+type AuditTimelineFeedState = {
+  error: ApiError | Error | null;
+  events: AuditLogEntry[];
+  hasMore: boolean;
+  loading: boolean;
+  loadMore: () => void;
+};
+
+type AuditTimelinePage = {
+  items: AuditLogEntry[];
+  pagination: AuditEventPagination;
+};
+
+const syncAuditTimelinePage = (
+  page: AuditTimelinePage,
+  cursorCreatedAt: string | undefined,
+  cursorId: string | undefined,
+  setRows: Dispatch<SetStateAction<AuditLogEntry[]>>,
+  setPagination: Dispatch<SetStateAction<AuditEventPagination | null>>,
+): void => {
+  setRows((previous) => appendAuditRows(previous, page.items, cursorCreatedAt, cursorId));
+  setPagination(page.pagination);
+};
+
+const advanceAuditTimelineCursor = (
+  nextCursor: AuditEventPagination["next_cursor"] | undefined,
+  loading: boolean,
+  setCursorCreatedAt: Dispatch<SetStateAction<string | undefined>>,
+  setCursorId: Dispatch<SetStateAction<string | undefined>>,
+): void => {
+  if (!nextCursor || loading) return;
+  setCursorCreatedAt(nextCursor.created_at);
+  setCursorId(nextCursor.id);
+};
+
+export const useAuditTimelineFeedState = (eventType: string | undefined): AuditTimelineFeedState => {
   const [rows, setRows] = useState<AuditLogEntry[]>([]);
   const [pagination, setPagination] = useState<AuditEventPagination | null>(null);
   const [cursorCreatedAt, setCursorCreatedAt] = useState<string>();
@@ -326,31 +362,30 @@ const AuditTimelineFeed = ({
 
   useEffect(() => {
     if (!data) return;
-    setRows((previous) => appendAuditRows(previous, data.items, cursorCreatedAt, cursorId));
-    setPagination(data.pagination);
+    syncAuditTimelinePage(data, cursorCreatedAt, cursorId, setRows, setPagination);
   }, [data, cursorCreatedAt, cursorId]);
 
   const hasMore = Boolean(pagination?.has_more && pagination.next_cursor);
   const nextCursor = pagination?.next_cursor;
-
-  /** Advance to the next cursor page when the backend exposes one. */
   const loadMore = (): void => {
-    if (!nextCursor || loading) return;
-    setCursorCreatedAt(nextCursor.created_at);
-    setCursorId(nextCursor.id);
+    advanceAuditTimelineCursor(nextCursor, loading, setCursorCreatedAt, setCursorId);
   };
 
-  return (
-    <AuditTimelineFeedContent
-      error={error}
-      events={rows}
-      loading={loading}
-      hasMore={hasMore}
-      loadMore={loadMore}
-    />
-  );
+  return {
+    error,
+    events: rows,
+    hasMore,
+    loading,
+    loadMore,
+  };
 };
 
+/**
+ * The live audit-event feed. ALWAYS calls useAuditEvents() (it is only mounted
+ * when the viewer may see the audit log), so the hook stays unconditional.
+ * Maps loading / error (403 -> "No permission") / empty / loaded states, and
+ * consumes backend `pagination.next_cursor` for a "Load More" append flow.
+ */
 // ============================================================================
 // Purpose: Download-the-audit-CSV hook. Fetches GET /audit/events/export as a
 //   BLOB with ONLY the current event_type filter (never cursor params - the
