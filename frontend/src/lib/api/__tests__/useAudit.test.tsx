@@ -165,7 +165,7 @@ describe("useAuditEvents", () => {
   });
 
   it("builds /audit/events/export URL without query params when no filters are provided", () => {
-    expect(buildAuditEventsExportUrl(undefined, undefined, undefined)).toBe(
+    expect(buildAuditEventsExportUrl()).toBe(
       "/audit/events/export",
     );
   });

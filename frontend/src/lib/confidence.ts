@@ -1,5 +1,3 @@
-import type { Severity } from "@/lib/mock/data";
-
 // ============================================================================
 // Purpose: Shared, display-only confidence resolver. Turns a backend confidence
 //   CODE (e.g. "B_RECONCILED") and/or an API-provided human label (HIGH/MEDIUM/
@@ -28,7 +26,7 @@ export type ConfidenceDisplay = {
 };
 
 /** Map an API human label (HIGH/MEDIUM/LOW) to a tone — matches TraceView. */
-function toneFromApiLabel(label: string): ConfidenceTone {
+export function toneFromApiLabel(label: string): ConfidenceTone {
   switch (label.toUpperCase()) {
     case "HIGH":
       return "green";
@@ -55,18 +53,13 @@ export function confidenceDisplay( // skipcq: JS-0067
   if (trimmedLabel) {
     return { label: trimmedLabel, tone: toneFromApiLabel(trimmedLabel) };
   }
+  const confidenceMap: Record<string, ConfidenceDisplay> = {
+    A: { label: "Verified", tone: "green" },
+    B: { label: "Reconciled", tone: "green" },
+    C: { label: "Estimated", tone: "amber" },
+    D: { label: "Estimated", tone: "amber" },
+    E: { label: "Missing", tone: "red" },
+  };
   const prefix = (code ?? "").trim().charAt(0).toUpperCase();
-  switch (prefix) {
-    case "A":
-      return { label: "Verified", tone: "green" };
-    case "B":
-      return { label: "Reconciled", tone: "green" };
-    case "C":
-    case "D":
-      return { label: "Estimated", tone: "amber" };
-    case "E":
-      return { label: "Missing", tone: "red" };
-    default:
-      return { label: code || "—", tone: "blue" };
-  }
+  return confidenceMap[prefix] ?? { label: code || "—", tone: "blue" };
 }

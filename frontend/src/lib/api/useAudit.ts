@@ -23,7 +23,7 @@ function appendParam(params: URLSearchParams, key: string, value: string | numbe
 }
 
 /** Build a shared URLSearchParams object for /audit/events and /audit/events/export. */
-function buildAuditEventSearchParams(
+export function buildAuditEventSearchParams(
   event_type: string | undefined,
   entity_type: string | undefined,
   entity_id: string | undefined,
@@ -82,10 +82,7 @@ export function buildAuditEventsExportUrl( // skipcq: JS-0067
   const params = buildAuditEventSearchParams(
     event_type,
     entity_type,
-    entity_id,
-    undefined,
-    undefined,
-    undefined,
+    entity_id
   );
   const qs = params.toString();
   return qs ? `/audit/events/export?${qs}` : "/audit/events/export";

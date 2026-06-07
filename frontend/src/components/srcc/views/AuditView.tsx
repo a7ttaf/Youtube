@@ -1,12 +1,11 @@
 import { ApiError, useApiClient } from "@/lib/api/client";
 import { type AuditEventPagination, type AuditLogEntry } from "@/lib/api/types";
-import { useAuditEvents } from "@/lib/api/useAudit";
+import { useAuditEvents, buildAuditEventsExportUrl } from "@/lib/api/useAudit";
 import { useEffect, useState } from "react";
 import type { Severity } from "@/lib/mock/data";
 import { AUDIT_SUMMARY } from "@/lib/mock/data";
 import { Badge, Dot, ItemRow, SummaryTile, formatTimestamp } from "../shared";
 import { describeError } from "./CommandView";
-import { buildAuditEventsExportUrl } from "@/lib/api/useAudit";
 
 // Event-type filter options use REAL AuditEventType values (no severity facet
 // exists). Labels and values match the Track C spec section 2 table exactly.
@@ -129,24 +128,42 @@ function saveBlobAsFile(blob: Blob, filename: string): void { // skipcq: JS-0067
 //   - File: frontend/src/lib/api/useAudit.ts -> buildAuditEventsExportUrl.
 //   - File: backend/ums_smart_revenue/api/audit.py -> export route + X-Truncated.
 // ============================================================================
+/**
+ * Provides download functionality for audit event exports.
+ *
+ * @param eventType - The type of audit events to export.
+ * @returns An object containing:
+ *   - download: Function to initiate download.
+ *   - busy: Indicates if a download is in progress.
+ *   - truncated: Indicates if the response was truncated.
+ *   - errorDetail: Detailed error message if download failed.
+ */
 function useAuditExportDownload(eventType: string) { // skipcq: JS-0067
   const client = useApiClient();
   const [busy, setBusy] = useState(false);
   const [truncated, setTruncated] = useState(false);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
 
+  /**
+   * Initiates the download of the audit events CSV file.
+   *
+   * @returns Promise that resolves when the download completes.
+   */
   const download = async () => {
     if (busy) return;
     setBusy(true);
     setErrorDetail(null);
     setTruncated(false);
     try {
-      const url = buildAuditEventsExportUrl(eventType || undefined, undefined, undefined);
+      const url = buildAuditEventsExportUrl(eventType);
       const { blob, headers } = await client.getBlob(url);
       saveBlobAsFile(blob, "audit-events.csv");
-      if ((headers.get("X-Truncated") ?? "").toLowerCase() === "true") {
-        setTruncated(true);
-      }
+      const truncatedLookup: { [key: string]: boolean } = {
+        'true': true,
+        'false': false,
+      };
+      const headerValue = (headers.get("X-Truncated") ?? "").toLowerCase();
+      setTruncated(truncatedLookup[headerValue] ?? false);
     } catch (caught) {
       const asError = caught instanceof Error ? caught : new Error("Download failed");
       setErrorDetail(describeError(asError).detail);
@@ -251,7 +268,7 @@ function TimelinePlaceholderRow({ tone, title, sub, badge }: { // skipcq: JS-006
  * fetch fires (fail-closed). Only when permitted is the always-fetching feed
  * mounted, keeping the useAuditEvents call unconditional (rules-of-hooks safe).
  */
-function AuditTimeline({
+export function AuditTimeline({
   canViewAudit,
   eventType,
 }: { // skipcq: JS-0067
@@ -288,8 +305,8 @@ function AuditTimelineFeed({ // skipcq: JS-0067, JS-R1005
 }) {
   const [rows, setRows] = useState<AuditLogEntry[]>([]);
   const [pagination, setPagination] = useState<AuditEventPagination | null>(null);
-  const [cursorCreatedAt, setCursorCreatedAt] = useState<string | undefined>(undefined);
-  const [cursorId, setCursorId] = useState<string | undefined>(undefined);
+  const [cursorCreatedAt, setCursorCreatedAt] = useState<string | undefined>();
+  const [cursorId, setCursorId] = useState<string | undefined>();
 
   const { data, loading, error } = useAuditEvents({
     event_type: eventType,
@@ -322,6 +339,11 @@ function AuditTimelineFeed({ // skipcq: JS-0067, JS-R1005
   const nextCursor = pagination?.next_cursor;
   const loadMoreLabel = loading ? "Loading more…" : "Load More";
 
+  /**
+   * Loads additional audit log entries by updating the cursor states if available.
+   *
+   * @returns void
+   */
   const loadMore = () => {
     if (!nextCursor || loading) return;
     setCursorCreatedAt(nextCursor.created_at);
