@@ -219,6 +219,19 @@ def finish_run(
 #   - File: backend/ums_smart_revenue/api/connectors.py -> GET /connectors/runs.
 #   - File: backend/ums_smart_revenue/auth/audit_log.py -> mirrored cursor shape.
 # ============================================================================
+# ============================================================================
+# Purpose: List tenant-scoped connector run history, newest-first, with
+#          optional connector_key/account_id filters and (started_at, id)
+#          cursor pagination. Read-only: never mutates run state.
+# Database/ORM: ConnectorRunORM (read only).
+# Standards: Tenant filter always applied; both-or-neither cursor and limit
+#            bounds raise ConnectorRunValidationError (translated to 422 at the
+#            route). Fetches limit+1 to compute has_more / next_cursor.
+# Blast Radius: Connector operational metadata read only. No finance, auth,
+#               audit, or graph projection impact detected.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> GET /connectors/runs.
+# ============================================================================
 def list_runs(
     session: Session,
     *,
