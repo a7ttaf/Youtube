@@ -120,7 +120,7 @@ function AuditTimeline({
 }: {
   canViewAudit: boolean;
   eventType: string | undefined;
-}): JSX.Element {
+}) {
   if (!canViewAudit) {
     return (
       <div className="timeline" role="list">
@@ -182,23 +182,6 @@ type AuditExportClient = {
   getBlob(path: string): Promise<{ blob: Blob; headers: Headers }>;
 };
 
-/**
- * Read the current audit slice as CSV, save it, and mark truncation state.
- * @param client The audit API client used to fetch the export blob.
- * @param eventType The currently selected audit event type filter.
- * @param setTruncated State setter for the truncation banner flag.
- */
-async function downloadAuditCsv(
-  client: AuditExportClient,
-  eventType: string,
-  setTruncated: (value: boolean) => void,
-): Promise<void> {
-  const url = buildAuditEventsExportUrl(eventType);
-  const { blob, headers } = await client.getBlob(url);
-  saveBlobAsFile(blob, "audit-events.csv");
-  setTruncated(hasTruncatedExportHeader(headers));
-}
-
 // ============================================================================
 // Purpose: Download-the-audit-CSV hook. Fetches GET /audit/events/export as a
 //   BLOB with ONLY the current event_type filter (never cursor params — the
@@ -217,7 +200,7 @@ async function downloadAuditCsv(
 //   - File: backend/ums_smart_revenue/api/audit.py -> export route + X-Truncated.
 // ============================================================================
 function useAuditExportDownload(eventType: string) { // skipcq: JS-0067
-  const client = useApiClient();
+  const client: AuditExportClient = useApiClient();
   const [busy, setBusy] = useState(false);
   const [truncated, setTruncated] = useState(false);
   const [errorDetail, setErrorDetail] = useState<string | null>(null);
@@ -234,7 +217,13 @@ function useAuditExportDownload(eventType: string) { // skipcq: JS-0067
     setBusy(true);
     setErrorDetail(null);
     setTruncated(false);
-    downloadAuditCsv(client, eventType, setTruncated)
+    const downloadAuditCsv = async (): Promise<void> => {
+      const url = buildAuditEventsExportUrl(eventType);
+      const { blob, headers } = await client.getBlob(url);
+      saveBlobAsFile(blob, "audit-events.csv");
+      setTruncated(hasTruncatedExportHeader(headers));
+    };
+    downloadAuditCsv()
       .catch((caught) => {
         setErrorDetail(describeDownloadError(caught));
       })

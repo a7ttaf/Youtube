@@ -31,7 +31,7 @@ router = APIRouter(prefix="/audit", tags=["audit"])
 AUDIT_EXPORT_MAX_ROWS = 10_000
 
 # Characters that trigger CSV/Excel formula injection when they lead a cell.
-_CSV_INJECTION_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+_CSV_INJECTION_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
 
 
 def current_audit_log_repository(
