@@ -29,9 +29,7 @@ USER_ID = UUID("00000000-0000-0000-0000-000000082303")
 
 @pytest.fixture
 def session() -> Session:
-    """
-    Provide an in-memory SQLite database session with initialized metadata for tests.
-    """
+    """Provide an in-memory SQLite session with initialized metadata."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     ReportBase.metadata.create_all(engine)
     with Session(engine) as session:
@@ -39,17 +37,13 @@ def session() -> Session:
 
 
 def test_connector_run_models_are_registered_on_report_base() -> None:
-    """
-    Verify that ConnectorRunORM and ConnectorRunRawFileORM tables are registered in ReportBase.
-    """
+    """Verify that the connector run tables are registered in ReportBase."""
     assert "connector_runs" in ReportBase.metadata.tables
     assert "connector_run_raw_files" in ReportBase.metadata.tables
 
 
 def test_connector_run_constraints_and_indexes_match_contract() -> None:
-    """
-    Ensure constraints and indexes on connector_runs table match the repository contract.
-    """
+    """Ensure connector_runs constraints and indexes match the contract."""
     constraints = {c.name for c in ConnectorRunORM.__table__.constraints}
     indexes = {i.name for i in ConnectorRunORM.__table__.indexes}
 
@@ -65,18 +59,14 @@ def test_connector_run_constraints_and_indexes_match_contract() -> None:
 
 
 def test_raw_report_file_has_tenant_id_composite_unique_for_b2_3_fk() -> None:
-    """
-    Confirm the RawReportFileORM has a composite unique constraint on tenant_id and id.
-    """
+    """Confirm RawReportFileORM has the expected composite unique constraint."""
     constraints = {c.name for c in RawReportFileORM.__table__.constraints}
 
     assert "uq_raw_report_files_tenant_id_id" in constraints
 
 
 def test_connector_run_raw_file_constraints_and_indexes_match_contract() -> None:
-    """
-    Validate constraints and indexes on connector_run_raw_files table per contract.
-    """
+    """Validate connector_run_raw_files constraints and indexes."""
     constraints = {c.name for c in ConnectorRunRawFileORM.__table__.constraints}
     indexes = {i.name for i in ConnectorRunRawFileORM.__table__.indexes}
 
@@ -108,9 +98,7 @@ def test_start_run_inserts_running_row_with_zero_counts(session: Session) -> Non
 
 
 def test_start_run_accepts_null_triggered_by_user_id(session: Session) -> None:
-    """
-    Ensure start_run allows None for triggered_by_user_id without error.
-    """
+    """Ensure start_run allows None for triggered_by_user_id."""
     entry = start_run(
         session,
         tenant_id=TENANT_ID,
@@ -128,9 +116,7 @@ def test_start_run_accepts_null_triggered_by_user_id(session: Session) -> None:
 def test_start_run_rejects_malformed_report_month(
     session: Session, month: str
 ) -> None:
-    """
-    Check that start_run raises validation error for malformed report_month formats.
-    """
+    """Check that start_run rejects malformed report_month values."""
     with pytest.raises(ConnectorRunValidationError, match="report_month"):
         start_run(
             session,
@@ -145,9 +131,7 @@ def test_start_run_rejects_malformed_report_month(
 def test_finish_run_sets_terminal_status_counts_and_finished_at(
     session: Session,
 ) -> None:
-    """
-    Verify finish_run correctly updates status, counts, and sets finished_at.
-    """
+    """Verify finish_run updates status, counts, and finished_at."""
     entry = _start_default_run(session)
     counts = {
         "reports_attempted": 2,
@@ -177,9 +161,7 @@ def test_finish_run_sets_terminal_status_counts_and_finished_at(
 def test_finish_run_truncates_error_summary_to_500_chars(
     session: Session,
 ) -> None:
-    """
-    Ensure finish_run trims error_summary longer than 500 characters.
-    """
+    """Ensure finish_run trims error_summary to 500 characters."""
     entry = _start_default_run(session)
 
     finished = finish_run(
@@ -197,9 +179,7 @@ def test_finish_run_truncates_error_summary_to_500_chars(
 def test_finish_run_rejects_non_terminal_or_unknown_status(
     session: Session, status: str
 ) -> None:
-    """
-    Check that finish_run rejects statuses that are not terminal or are invalid.
-    """
+    """Check that finish_run rejects non-terminal or invalid statuses."""
     entry = _start_default_run(session)
 
     with pytest.raises(ConnectorRunValidationError, match="terminal"):
@@ -216,9 +196,7 @@ def test_finish_run_rejects_non_terminal_or_unknown_status(
 def test_finish_run_rejects_counts_with_missing_or_extra_keys(
     session: Session,
 ) -> None:
-    """
-    Validate finish_run raises error when counts dict has missing or extra keys.
-    """
+    """Validate finish_run rejects counts with missing or extra keys."""
     entry = _start_default_run(session)
     bad_counts = _zero_counts()
     bad_counts.pop("reports_failed")
@@ -237,9 +215,7 @@ def test_finish_run_rejects_counts_with_missing_or_extra_keys(
 def test_finish_run_rejects_counts_with_negative_or_non_int_values(
     session: Session,
 ) -> None:
-    """
-    Ensure finish_run rejects counts containing negative or non-integer values.
-    """
+    """Ensure finish_run rejects negative or non-integer counts."""
     entry = _start_default_run(session)
     bad_counts = _zero_counts()
     bad_counts["reports_failed"] = -1

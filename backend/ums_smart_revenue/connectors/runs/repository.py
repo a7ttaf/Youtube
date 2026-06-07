@@ -309,17 +309,17 @@ def _next_cursor(items: list[ConnectorRunEntry]) -> dict[str, str] | None:
     }
 
 
- # ============================================================================
- # Purpose: Fetch a tenant-scoped connector run, optionally locking it for the
- #          terminal status transition.
- # Database/ORM: ConnectorRunORM.
- # Standards: Tenant filter always applied; with_for_update protects
- #            finish_run from double terminal writes where the DB supports it.
- # Blast Radius: Connector run lifecycle only. Finance facts untouched.
- # Connections:
- #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
- #     Calls finish_run from success, partial, and failure paths.
- # ============================================================================
+# ============================================================================
+# Purpose: Fetch a tenant-scoped connector run, optionally locking it for the
+#          terminal status transition.
+# Database/ORM: ConnectorRunORM.
+# Standards: Tenant filter always applied; with_for_update protects
+#            finish_run from double terminal writes where the DB supports it.
+# Blast Radius: Connector run lifecycle only. Finance facts untouched.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     Calls finish_run from success, partial, and failure paths.
+# ============================================================================
 def _get_run(
     session: Session,
     *,
@@ -340,15 +340,15 @@ def _get_run(
     return row
 
 
- # ============================================================================
- # Purpose: Validate deterministic raw-file ordering before join-row insert.
- # Database/ORM: ConnectorRunRawFileORM.
- # Standards: Reject bools, non-integers, and negative indexes fail closed.
- # Blast Radius: Connector run evidence ordering only. Finance facts untouched.
- # Connections:
- #   - File: backend/ums_smart_revenue/db/connector_models.py ->
- #     ConnectorRunRawFileORM.ordering_index.
- # ============================================================================
+# ============================================================================
+# Purpose: Validate deterministic raw-file ordering before join-row insert.
+# Database/ORM: ConnectorRunRawFileORM.
+# Standards: Reject bools, non-integers, and negative indexes fail closed.
+# Blast Radius: Connector run evidence ordering only. Finance facts untouched.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/connector_models.py ->
+#     ConnectorRunRawFileORM.ordering_index.
+# ============================================================================
 def _validate_ordering_index(ordering_index: int) -> None:
     """Validate that ordering_index is a non-negative integer."""
     if (
@@ -376,18 +376,18 @@ def _get_raw_file(
     return row
 
 
- # ============================================================================
- # Purpose: Validate the connector run month before any run-row write or
- #          orchestrator dispatch.
- # Database/ORM: None.
- # Standards: ASCII-only YYYY-MM guard shared by the repository and orchestrator.
- # Blast Radius: Connector run identity only; finance, audit, Neo4j, and exports
- #               are unaffected until a valid month reaches ingestion.
- # Connections:
- #   - Function: start_run -> validates before inserting ConnectorRunORM.
- #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
- #     validates dry-run and live-run inputs before credential/network work.
- # ============================================================================
+# ============================================================================
+# Purpose: Validate the connector run month before any run-row write or
+#          orchestrator dispatch.
+# Database/ORM: None.
+# Standards: ASCII-only YYYY-MM guard shared by the repository and orchestrator.
+# Blast Radius: Connector run identity only; finance, audit, Neo4j, and exports
+#               are unaffected until a valid month reaches ingestion.
+# Connections:
+#   - Function: start_run -> validates before inserting ConnectorRunORM.
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     validates dry-run and live-run inputs before credential/network work.
+# ============================================================================
 def validate_report_month(report_month: str) -> None:
     """Validate report_month as a YYYY-MM month."""
     if not MONTH_PATTERN.fullmatch(report_month):
