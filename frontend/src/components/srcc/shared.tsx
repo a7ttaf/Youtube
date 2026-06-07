@@ -119,7 +119,7 @@ export function Dot({ tone }: { tone?: Severity }) { // skipcq: JS-0067
 // Standards: Presentation-only helper; no side effects.
 // Blast Radius: Audit read only.
 // ============================================================================
-export function TimelinePlaceholderRow({
+export const TimelinePlaceholderRow = ({
   tone,
   title,
   sub,
@@ -129,7 +129,7 @@ export function TimelinePlaceholderRow({
   title: string;
   sub: string;
   badge: string;
-}) {
+}) => {
   return (
     <>
       <span className="timeline-time">--:--</span>
@@ -141,7 +141,7 @@ export function TimelinePlaceholderRow({
       <Badge tone={tone}>{badge}</Badge>
     </>
   );
-}
+};
 
 /** Map a workflow tone to a Dot severity; "primary" renders an untoned dot. */
 export function workflowDotTone(tone: WorkflowTone): Severity | undefined { // skipcq: JS-0067

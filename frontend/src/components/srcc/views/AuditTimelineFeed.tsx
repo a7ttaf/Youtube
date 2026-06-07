@@ -307,8 +307,8 @@ export const useAuditTimelineFeedState = (eventType: string | undefined): AuditT
   useEffect(() => {
     setRows([]);
     setPagination(null);
-    setCursorCreatedAt(undefined);
-    setCursorId(undefined);
+    setCursorCreatedAt(() => undefined);
+    setCursorId(() => undefined);
   }, [eventType]);
 
   const { data, loading, error } = useAuditEvents({
