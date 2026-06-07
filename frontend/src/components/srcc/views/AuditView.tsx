@@ -23,9 +23,9 @@ const AUDIT_EVENT_TYPE_OPTIONS = [
  * @param headers The response headers to inspect.
  * @returns True when X-Truncated equals "true", ignoring case.
  */
-function hasTruncatedExportHeader(headers: Headers): boolean { // skipcq: JS-0067
+const hasTruncatedExportHeader = (headers: Headers): boolean => {
   return (headers.get("X-Truncated") ?? "").toLowerCase() === "true";
-}
+};
 
 // ============================================================================
 // Purpose: The REAL-data Audit Log screen, extracted from AppShell. The timeline
@@ -58,13 +58,13 @@ function hasTruncatedExportHeader(headers: Headers): boolean { // skipcq: JS-006
  * fetch); `canViewFinance` only drives the finance summary tiles' restricted
  * sentinel — it does NOT decide audit-payload visibility (that is server-driven).
  */
-export default function AuditView({ // skipcq: JS-0067
+const AuditView = ({
   canViewAudit,
   canViewFinance,
 }: {
   canViewAudit: boolean;
   canViewFinance: boolean;
-}) {
+}) => {
   const [eventType, setEventType] = useState("");
 
   return (
@@ -96,7 +96,9 @@ export default function AuditView({ // skipcq: JS-0067
       </div>
     </section>
   );
-}
+};
+
+export default AuditView;
 
 /**
  * Reusable inner content for timeline placeholder rows (restricted, error,
@@ -104,9 +106,9 @@ export default function AuditView({ // skipcq: JS-0067
  * div so each state can control its own wrapper attributes (role, aria-busy,
  * etc.) independently.
  */
-function TimelinePlaceholderRow({ tone, title, sub, badge }: { // skipcq: JS-0067
+const TimelinePlaceholderRow = ({ tone, title, sub, badge }: {
   tone: Severity; title: string; sub: string; badge: string;
-}) {
+}) => {
   return (
     <>
       <span className="timeline-time">--:--</span>
@@ -127,13 +129,13 @@ function TimelinePlaceholderRow({ tone, title, sub, badge }: { // skipcq: JS-006
  * always-fetching feed mounted, keeping the useAuditEvents call unconditional
  * (rules-of-hooks safe).
  */
-function AuditTimeline({
+const AuditTimeline = ({
   canViewAudit,
   eventType,
 }: {
   canViewAudit: boolean;
   eventType: string | undefined;
-}) {
+}) => {
   if (!canViewAudit) {
     return (
       <div className="timeline" role="list">
@@ -149,17 +151,17 @@ function AuditTimeline({
     );
   }
   return <AuditTimelineFeed eventType={eventType} />;
-}
+};
 
 /**
  * Trigger a browser save of a blob via a temporary object URL + <a download>.
  * Revokes the URL afterward to avoid leaking it. Extracted so the download hook
  * stays readable.
  */
-const saveBlobAsFile = function saveBlobAsFile(
+const saveBlobAsFile = (
   blob: Blob,
   filename: string,
-): void { // skipcq: JS-0067
+): void => {
   const objectUrl = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = objectUrl;
@@ -191,7 +193,7 @@ type AuditExportClient = {
 //   - File: frontend/src/lib/api/useAudit.ts -> buildAuditEventsExportUrl.
 //   - File: backend/ums_smart_revenue/api/audit.py -> export route + X-Truncated.
 // ============================================================================
-function useAuditExportDownload(eventType: string) { // skipcq: JS-0067
+const useAuditExportDownload = (eventType: string) => {
   const client: AuditExportClient = useApiClient();
   const [busy, setBusy] = useState(false);
   const [truncated, setTruncated] = useState(false);
@@ -212,12 +214,12 @@ function useAuditExportDownload(eventType: string) { // skipcq: JS-0067
     /**
      * Read the current audit slice as CSV, save it, and mark truncation state.
      */
-    async function downloadAuditCsv(): Promise<void> {
+    const downloadAuditCsv = async (): Promise<void> => {
       const url = buildAuditEventsExportUrl(eventType);
       const { blob, headers } = await client.getBlob(url);
       saveBlobAsFile(blob, "audit-events.csv");
       setTruncated(hasTruncatedExportHeader(headers));
-    }
+    };
     downloadAuditCsv()
       .catch((caught) => {
         setErrorDetail(describeDownloadError(caught));
@@ -228,7 +230,7 @@ function useAuditExportDownload(eventType: string) { // skipcq: JS-0067
   };
 
   return { download, busy, truncated, errorDetail };
-}
+};
 
 /**
  * Audit-log panel header: title/subtitle and event-type filtering + download
@@ -237,7 +239,7 @@ function useAuditExportDownload(eventType: string) { // skipcq: JS-0067
  * /audit/events/export as a blob (current filter only, no cursor) so it can read
  * X-Truncated and surface truncation instead of silently dropping rows.
  */
-function AuditLogPanelHeader({ // skipcq: JS-0067
+const AuditLogPanelHeader = ({
   canViewAudit,
   eventType,
   onEventType,
@@ -245,7 +247,7 @@ function AuditLogPanelHeader({ // skipcq: JS-0067
   canViewAudit: boolean;
   eventType: string;
   onEventType: (eventType: string) => void;
-}) {
+}) => {
   const isDisabled = !canViewAudit;
   const { download, busy, truncated, errorDetail } = useAuditExportDownload(eventType);
 
@@ -294,7 +296,7 @@ function AuditLogPanelHeader({ // skipcq: JS-0067
       </div>
     </div>
   );
-}
+};
 
 /**
  * The live audit-event feed. ALWAYS calls useAuditEvents() (it is only mounted
@@ -302,11 +304,11 @@ function AuditLogPanelHeader({ // skipcq: JS-0067
  * loading / error (403 -> "No permission") / empty / loaded states, and
  * consumes backend `pagination.next_cursor` for a "Load More" append flow.
  */
-function AuditTimelineFeed({ // skipcq: JS-0067, JS-R1005
+const AuditTimelineFeed = ({
   eventType,
 }: {
   eventType: string | undefined;
-}) {
+}) => {
   const [rows, setRows] = useState<AuditLogEntry[]>([]);
   const [pagination, setPagination] = useState<AuditEventPagination | null>(null);
   const [cursorCreatedAt, setCursorCreatedAt] = useState<string>();
@@ -430,25 +432,25 @@ function AuditTimelineFeed({ // skipcq: JS-0067, JS-R1005
       )}
     </div>
   );
-}
+};
 
 /** Format the entity portion of the event subtitle (entity_type + optional id). */
-function fmtEntityPart(entity_type: string | null, entity_id: string | null): string | null { // skipcq: JS-0067
+const fmtEntityPart = (entity_type: string | null, entity_id: string | null): string | null => {
   if (!entity_type) return null;
   return entity_id ? `${entity_type}=${entity_id}` : entity_type;
-}
+};
 
 /** Format the scope portion of the event subtitle (scope_type + optional id). */
-function fmtScopePart(scope_type: string | null, scope_id: string | null): string | null { // skipcq: JS-0067
+const fmtScopePart = (scope_type: string | null, scope_id: string | null): string | null => {
   if (!scope_type) return null;
   return scope_id ? `${scope_type}:${scope_id}` : `scope=${scope_type}`;
-}
+};
 
 /**
  * Build the subtitle line from the audit event's REAL non-null fields only — no
  * invented data. Renders the entity, scope, actor, and reason that are present.
  */
-function buildEventSub(event: AuditLogEntry): string { // skipcq: JS-0067
+const buildEventSub = (event: AuditLogEntry): string => {
   const parts = [
     fmtEntityPart(event.entity_type, event.entity_id),
     fmtScopePart(event.scope_type, event.scope_id),
@@ -457,19 +459,19 @@ function buildEventSub(event: AuditLogEntry): string { // skipcq: JS-0067
   ].filter(Boolean) as string[];
   // Honest fallback when the event carries no contextual fields at all.
   return parts.length > 0 ? parts.join(" · ") : "No additional context recorded";
-}
+};
 
 /**
  * Render a safe summary of non-redacted event details — top-level primitive
  * values only (string, number, boolean). Nested objects are intentionally skipped
  * to avoid surfacing raw structured data in the UI without schema knowledge.
  */
-function renderDetailsLine(details: Record<string, unknown>): string | null { // skipcq: JS-0067
+const renderDetailsLine = (details: Record<string, unknown>): string | null => {
   const pairs = Object.entries(details)
     .filter(([, v]) => v !== null && v !== undefined && typeof v !== "object")
     .map(([k, v]) => `${k}=${String(v)}`);
   return pairs.length > 0 ? pairs.join(" · ") : null;
-}
+};
 
 /**
  * Optional details note for a timeline entry. When details_redacted is true,
@@ -478,7 +480,7 @@ function renderDetailsLine(details: Record<string, unknown>): string | null { //
  * Extracted from AuditTimelineItem to keep its cyclomatic complexity below the
  * analysis threshold.
  */
-function DetailsNote({ event }: { event: AuditLogEntry }) { // skipcq: JS-0067
+const DetailsNote = ({ event }: { event: AuditLogEntry }) => {
   if (event.details_redacted) {
     return (
       <span className="item-sub" role="note">
@@ -489,7 +491,7 @@ function DetailsNote({ event }: { event: AuditLogEntry }) { // skipcq: JS-0067
   const line = renderDetailsLine(event.details);
   if (!line) return null;
   return <span className="item-sub" role="note">{line}</span>;
-}
+};
 
 /**
  * A single live audit timeline entry. The tone reflects the server-driven
@@ -499,7 +501,7 @@ function DetailsNote({ event }: { event: AuditLogEntry }) { // skipcq: JS-0067
  * When `details_redacted` is false and the details object is non-empty, the
  * top-level primitive fields are rendered as a safe key=value summary.
  */
-function AuditTimelineItem({ event }: { event: AuditLogEntry }) { // skipcq: JS-0067
+const AuditTimelineItem = ({ event }: { event: AuditLogEntry }) => {
   const tone: Severity = event.sensitive ? "red" : "green";
   return (
     <div className="timeline-item" role="listitem">
@@ -513,10 +515,10 @@ function AuditTimelineItem({ event }: { event: AuditLogEntry }) { // skipcq: JS-
       <Badge tone={tone}>{event.sensitive ? "Sensitive" : "Logged"}</Badge>
     </div>
   );
-}
+};
 
 /** Static audit coverage panel listing the always-audited sensitive surfaces. */
-function AuditCoveragePanel() { // skipcq: JS-0067
+const AuditCoveragePanel = () => {
   return (
     <aside className="view-stack">
       <section className="panel" aria-labelledby="auditCoverageTitle">
@@ -532,10 +534,10 @@ function AuditCoveragePanel() { // skipcq: JS-0067
       </section>
     </aside>
   );
-}
+};
 
 /** Audit coverage panel header (title + subtitle). Extracted to keep nesting shallow. */
-function AuditCoverageHeader() { // skipcq: JS-0067
+const AuditCoverageHeader = () => {
   return (
     <div className="panel-header">
       <div className="panel-title">
@@ -544,4 +546,4 @@ function AuditCoverageHeader() { // skipcq: JS-0067
       </div>
     </div>
   );
-}
+};
