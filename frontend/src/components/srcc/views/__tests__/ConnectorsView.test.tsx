@@ -1,10 +1,12 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import ConnectorsView from "@/components/srcc/views/ConnectorsView";
 import type {
   AdsensePaymentListResponse,
   ConnectorCredentialListResponse,
+  ConnectorRunListResponse,
 } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
 
@@ -65,6 +67,74 @@ const EMPTY_PAYMENTS: AdsensePaymentListResponse = {
   audit_event: {},
 };
 
+// Real-shaped connector-run page (ConnectorRunEntry.to_api() + cursor pagination).
+const RUNS: ConnectorRunListResponse = {
+  items: [
+    {
+      id: "33333333-3333-3333-3333-333333333333",
+      connector_key: "youtube_reporting",
+      account_id: "acct-1",
+      report_month: "2026-03",
+      triggered_by_user_id: "ops@ums",
+      started_at: "2026-03-21T02:00:00Z",
+      finished_at: "2026-03-21T02:05:00Z",
+      status: "SUCCEEDED",
+      counts: {
+        reports_attempted: 3,
+        reports_succeeded: 3,
+        reports_failed: 0,
+        rows_upserted_total: 120,
+        rows_upserted_created: 100,
+        rows_upserted_updated: 20,
+        rows_upserted_unchanged: 0,
+      },
+      error_summary: null,
+    },
+  ],
+  pagination: { limit: 50, returned: 1, has_more: false, next_cursor: null },
+};
+
+const EMPTY_RUNS: ConnectorRunListResponse = {
+  items: [],
+  pagination: { limit: 50, returned: 0, has_more: false, next_cursor: null },
+};
+
+const PAGED_RUNS_FIRST: ConnectorRunListResponse = {
+  ...RUNS,
+  pagination: {
+    limit: 50,
+    returned: 1,
+    has_more: true,
+    next_cursor: { started_at: "2026-03-21T02:00:00Z", id: "33333333-3333-3333-3333-333333333333" },
+  },
+};
+
+const PAGED_RUNS_SECOND: ConnectorRunListResponse = {
+  items: [
+    {
+      id: "44444444-4444-4444-4444-444444444444",
+      connector_key: "adsense",
+      account_id: "pub-9",
+      report_month: "2026-02",
+      triggered_by_user_id: null,
+      started_at: "2026-03-21T01:00:00Z",
+      finished_at: null,
+      status: "FAILED",
+      counts: {
+        reports_attempted: 2,
+        reports_succeeded: 0,
+        reports_failed: 2,
+        rows_upserted_total: 0,
+        rows_upserted_created: 0,
+        rows_upserted_updated: 0,
+        rows_upserted_unchanged: 0,
+      },
+      error_summary: "auth expired",
+    },
+  ],
+  pagination: { limit: 50, returned: 1, has_more: false, next_cursor: null },
+};
+
 function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   return new Response(JSON.stringify(body), {
     status,
@@ -96,6 +166,11 @@ function routeBoth( // skipcq: JS-0067
     const url = urlOf(input);
     const custom = responder(url, init);
     if (custom) return Promise.resolve(custom);
+    // /connectors/runs is checked BEFORE /connectors/credentials would never
+    // match it (different path), but keep it explicit and first.
+    if (url.startsWith("/connectors/runs")) {
+      return Promise.resolve(jsonResponse(RUNS));
+    }
     if (url.startsWith("/connectors/credentials")) {
       return Promise.resolve(jsonResponse(CREDENTIALS));
     }
@@ -106,12 +181,23 @@ function routeBoth( // skipcq: JS-0067
   };
 }
 
-function renderConnectorsView(canRunConnectors = true, canViewFinance = true) { // skipcq: JS-0067
+function runCalls() { // skipcq: JS-0067
+  return fetchMock().mock.calls.filter(([input]) =>
+    urlOf(input).startsWith("/connectors/runs"),
+  );
+}
+
+function renderConnectorsView( // skipcq: JS-0067
+  canRunConnectors = true,
+  canViewFinance = true,
+  canViewConnectorHealth = true,
+) {
   return render(
     <TenantProvider initialSlug="ums">
       <ConnectorsView
         canRunConnectors={canRunConnectors}
         canViewFinance={canViewFinance}
+        canViewConnectorHealth={canViewConnectorHealth}
       />
     </TenantProvider>,
   );
@@ -186,15 +272,232 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     ).toBeInTheDocument();
   });
 
-  it("always surfaces the run-history honesty note", async () => {
+  it("renders the live run-history feed from GET /connectors/runs", async () => {
     fetchMock().mockImplementation(routeBoth(() => null));
     renderConnectorsView();
 
     await waitFor(() =>
       expect(
-        screen.getByText(/Run history not yet available/i),
+        screen.getByText("youtube_reporting · acct-1"),
       ).toBeInTheDocument(),
     );
+    // Status badge + month + counts breakdown all render from real fields.
+    expect(screen.getByText("SUCCEEDED")).toBeInTheDocument();
+    expect(screen.getByText(/month=2026-03/)).toBeInTheDocument();
+    expect(screen.getByText(/reports 3\/3 ok/)).toBeInTheDocument();
+  });
+
+  it("shows an honest empty state when there are no connector runs", async () => {
+    fetchMock().mockImplementation(
+      routeBoth((url) =>
+        url.startsWith("/connectors/runs") ? jsonResponse(EMPTY_RUNS) : null,
+      ),
+    );
+    renderConnectorsView();
+
+    await waitFor(() =>
+      expect(
+        screen.getByText(/No connector runs recorded/i),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("maps a 403 on the runs read to a no-permission message in an alert", async () => {
+    fetchMock().mockImplementation(
+      routeBoth((url) =>
+        url.startsWith("/connectors/runs")
+          ? jsonResponse({ detail: "Missing permission: connectors.view_health" }, 403)
+          : null,
+      ),
+    );
+    renderConnectorsView();
+
+    await waitFor(() =>
+      expect(screen.getByText("No permission")).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText(/cannot view connector run history/i),
+    ).toBeInTheDocument();
+  });
+
+  it("fail-closed: renders the restricted placeholder and fires NO /connectors/runs fetch when lacking the connector-health capability", async () => {
+    fetchMock().mockImplementation(routeBoth(() => null));
+    renderConnectorsView(true, true, false);
+
+    await waitFor(() =>
+      expect(screen.getByText("Run history restricted")).toBeInTheDocument(),
+    );
+    expect(screen.getByText(/VIEW_CONNECTOR_HEALTH permission/i)).toBeInTheDocument();
+    // The gated branch mounts no hook, so no /connectors/runs request is issued.
+    expect(runCalls()).toHaveLength(0);
+  });
+
+  it("loads another run page via Load More, appends, and dedupes a repeated id", async () => {
+    fetchMock().mockImplementation((input: unknown, init?: unknown) => {
+      const url = urlOf(input);
+      if (url.startsWith("/connectors/runs")) {
+        if (url.includes("cursor_started_at=")) {
+          // Second page repeats the first page's id plus a new row.
+          return Promise.resolve(
+            jsonResponse({
+              ...PAGED_RUNS_SECOND,
+              items: [RUNS.items[0], ...PAGED_RUNS_SECOND.items],
+            }),
+          );
+        }
+        return Promise.resolve(jsonResponse(PAGED_RUNS_FIRST));
+      }
+      return routeBoth(() => null)(input, init);
+    });
+    renderConnectorsView();
+
+    await waitFor(() =>
+      expect(screen.getByText("youtube_reporting · acct-1")).toBeInTheDocument(),
+    );
+    // First page only carries the limit (no cursor); cursor appears on page 2.
+    const firstRunCall = runCalls()[0];
+    expect(urlOf(firstRunCall?.[0])).not.toContain("cursor_started_at");
+
+    await userEvent.click(screen.getByRole("button", { name: /load more/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText("adsense · pub-9")).toBeInTheDocument(),
+    );
+    // The repeated first-page row renders exactly once after the append.
+    expect(screen.getAllByText("youtube_reporting · acct-1")).toHaveLength(1);
+    // The second request carried BOTH cursor halves (both-or-neither).
+    const pagedCall = runCalls().find(([i]) =>
+      urlOf(i).includes("cursor_started_at="),
+    );
+    expect(urlOf(pagedCall?.[0])).toContain("cursor_id=");
+  });
+
+  it("tests a credential connection (ok) and shows a green status badge + detail", async () => {
+    fetchMock().mockImplementation(
+      routeBoth((url, init) => {
+        if (
+          url === "/connectors/credentials/youtube_reporting/acct-1/test" &&
+          methodOf(init) === "POST"
+        ) {
+          return jsonResponse({
+            connector_key: "youtube_reporting",
+            account_id: "acct-1",
+            status: "ok",
+            detail: "Credential is active and refreshed.",
+            audit_event: {},
+          });
+        }
+        return null;
+      }),
+    );
+    renderConnectorsView();
+
+    await waitFor(() =>
+      expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /^test$/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText("ok")).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByText("Credential is active and refreshed."),
+    ).toBeInTheDocument();
+    // The POST carried the FIXED audited reason.
+    const testCall = fetchMock().mock.calls.find(
+      ([i, init]) =>
+        urlOf(i) === "/connectors/credentials/youtube_reporting/acct-1/test" &&
+        methodOf(init) === "POST",
+    );
+    const body = JSON.parse(
+      String((testCall?.[1] as RequestInit | undefined)?.body ?? "{}"),
+    );
+    expect(body.reason).toBe("operator connection health check");
+  });
+
+  it("shows a red badge when the test reports auth_failed", async () => {
+    fetchMock().mockImplementation(
+      routeBoth((url, init) => {
+        if (url.endsWith("/test") && methodOf(init) === "POST") {
+          return jsonResponse({
+            connector_key: "youtube_reporting",
+            account_id: "acct-1",
+            status: "auth_failed",
+            detail: "OAuth token rejected.",
+            audit_event: {},
+          });
+        }
+        return null;
+      }),
+    );
+    renderConnectorsView();
+
+    await waitFor(() =>
+      expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /^test$/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText("auth_failed")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("OAuth token rejected.")).toBeInTheDocument();
+  });
+
+  it("maps a 404 test response to a not_found result instead of an unhandled error", async () => {
+    fetchMock().mockImplementation(
+      routeBoth((url, init) => {
+        if (url.endsWith("/test") && methodOf(init) === "POST") {
+          return jsonResponse({ detail: "Credential not found." }, 404);
+        }
+        return null;
+      }),
+    );
+    renderConnectorsView();
+
+    await waitFor(() =>
+      expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
+    );
+    await userEvent.click(screen.getByRole("button", { name: /^test$/i }));
+
+    await waitFor(() =>
+      expect(screen.getByText("not_found")).toBeInTheDocument(),
+    );
+    expect(screen.getByText("Credential not found.")).toBeInTheDocument();
+  });
+
+  it("latches the Test button disabled while a probe is in flight", async () => {
+    let resolveTest: ((r: Response) => void) | undefined;
+    fetchMock().mockImplementation((input: unknown, init?: unknown) => {
+      const url = urlOf(input);
+      if (url.endsWith("/test") && methodOf(init) === "POST") {
+        return new Promise<Response>((res) => {
+          resolveTest = res;
+        });
+      }
+      return routeBoth(() => null)(input, init);
+    });
+    renderConnectorsView();
+
+    await waitFor(() =>
+      expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
+    );
+    const testButton = screen.getByRole("button", { name: /^test$/i });
+    await userEvent.click(testButton);
+
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /testing…/i })).toBeDisabled(),
+    );
+
+    resolveTest?.(
+      jsonResponse({
+        connector_key: "youtube_reporting",
+        account_id: "acct-1",
+        status: "ok",
+        detail: "Active.",
+        audit_event: {},
+      }),
+    );
+    await waitFor(() => expect(screen.getByText("ok")).toBeInTheDocument());
   });
 
   it("requests a connector job (POST /connectors/jobs) with the inline reason and shows the recorded-not-executed result", async () => {

@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
@@ -6,10 +7,12 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.runs.repository import (
     CONNECTOR_RUN_COUNT_KEYS,
+    MAX_CONNECTOR_RUN_PAGE_SIZE,
     ConnectorRunLinkConflictError,
     ConnectorRunValidationError,
     finish_run,
     link_raw_file,
+    list_runs,
     start_run,
 )
 from ums_smart_revenue.db import connector_models as _connector_models  # noqa: F401
@@ -367,6 +370,170 @@ def _start_default_run(session: Session):
         report_month="2026-04",
         triggered_by_user_id=None,
     )
+
+
+_TERMINAL_COUNTS = {
+    "reports_attempted": 2,
+    "reports_succeeded": 2,
+    "reports_failed": 0,
+    "rows_upserted_total": 10,
+    "rows_upserted_created": 6,
+    "rows_upserted_updated": 3,
+    "rows_upserted_unchanged": 1,
+}
+
+
+def _seed_run(
+    session: Session,
+    *,
+    tenant_id: UUID = TENANT_ID,
+    connector_key: str = "youtube-reporting",
+    account_id: str = "acct-test-1",
+    started_at: datetime,
+    status: str = "SUCCEEDED",
+) -> ConnectorRunORM:
+    # Insert a fully-formed connector run row with an explicit started_at so
+    # ordering and cursor-walk assertions are deterministic at sqlite resolution.
+    row = ConnectorRunORM(
+        id=uuid4(),
+        tenant_id=tenant_id,
+        connector_key=connector_key,
+        account_id=account_id,
+        report_month="2026-04",
+        triggered_by_user_id=USER_ID,
+        started_at=started_at,
+        finished_at=started_at,
+        status=status,
+        counts_json=dict(_TERMINAL_COUNTS),
+        error_summary=None,
+    )
+    session.add(row)
+    session.flush()
+    return row
+
+
+def test_list_runs_returns_newest_first(session: Session) -> None:
+    base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
+    oldest = _seed_run(session, started_at=base)
+    middle = _seed_run(session, started_at=base.replace(hour=13))
+    newest = _seed_run(session, started_at=base.replace(hour=14))
+
+    page = list_runs(session, tenant_id=TENANT_ID, limit=10)
+
+    assert [item.id for item in page.items] == [
+        str(newest.id),
+        str(middle.id),
+        str(oldest.id),
+    ]
+    assert page.next_cursor is None
+    assert page.limit == 10
+
+
+def test_list_runs_cursor_walk_returns_next_page(session: Session) -> None:
+    base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
+    rows = [_seed_run(session, started_at=base.replace(minute=m)) for m in range(5)]
+    # rows[4] is newest; newest-first order = reversed.
+    ordered = list(reversed(rows))
+
+    first = list_runs(session, tenant_id=TENANT_ID, limit=2)
+    assert [i.id for i in first.items] == [str(ordered[0].id), str(ordered[1].id)]
+    assert first.next_cursor is not None
+    assert first.next_cursor["id"] == str(ordered[1].id)
+    assert first.next_cursor["started_at"] == ordered[1].started_at.isoformat()
+
+    second = list_runs(
+        session,
+        tenant_id=TENANT_ID,
+        limit=2,
+        cursor_started_at=datetime.fromisoformat(first.next_cursor["started_at"]),
+        cursor_id=first.next_cursor["id"],
+    )
+    assert [i.id for i in second.items] == [str(ordered[2].id), str(ordered[3].id)]
+
+
+def test_list_runs_half_cursor_raises(session: Session) -> None:
+    with pytest.raises(ConnectorRunValidationError):
+        list_runs(
+            session,
+            tenant_id=TENANT_ID,
+            limit=10,
+            cursor_started_at=datetime.now(UTC),
+        )
+    with pytest.raises(ConnectorRunValidationError):
+        list_runs(session, tenant_id=TENANT_ID, limit=10, cursor_id=str(uuid4()))
+
+
+def test_list_runs_limit_out_of_range_raises(session: Session) -> None:
+    with pytest.raises(ConnectorRunValidationError):
+        list_runs(session, tenant_id=TENANT_ID, limit=0)
+    with pytest.raises(ConnectorRunValidationError):
+        list_runs(
+            session, tenant_id=TENANT_ID, limit=MAX_CONNECTOR_RUN_PAGE_SIZE + 1
+        )
+
+
+def test_list_runs_excludes_other_tenant(session: Session) -> None:
+    base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
+    mine = _seed_run(session, started_at=base)
+    _seed_run(session, tenant_id=OTHER_TENANT_ID, started_at=base.replace(hour=13))
+
+    page = list_runs(session, tenant_id=TENANT_ID, limit=10)
+
+    assert [item.id for item in page.items] == [str(mine.id)]
+
+
+def test_list_runs_connector_key_filter(session: Session) -> None:
+    base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
+    yt = _seed_run(session, connector_key="youtube-reporting", started_at=base)
+    _seed_run(session, connector_key="adsense", started_at=base.replace(hour=13))
+
+    page = list_runs(
+        session, tenant_id=TENANT_ID, connector_key="youtube-reporting", limit=10
+    )
+
+    assert [item.id for item in page.items] == [str(yt.id)]
+
+
+def test_list_runs_account_id_filter(session: Session) -> None:
+    base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
+    a = _seed_run(session, account_id="acct-a", started_at=base)
+    _seed_run(session, account_id="acct-b", started_at=base.replace(hour=13))
+
+    page = list_runs(session, tenant_id=TENANT_ID, account_id="acct-a", limit=10)
+
+    assert [item.id for item in page.items] == [str(a.id)]
+
+
+def test_list_runs_has_more_boundary(session: Session) -> None:
+    base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
+    for m in range(3):
+        _seed_run(session, started_at=base.replace(minute=m))
+
+    exact = list_runs(session, tenant_id=TENANT_ID, limit=3)
+    assert len(exact.items) == 3
+    assert exact.next_cursor is None
+
+    over = list_runs(session, tenant_id=TENANT_ID, limit=2)
+    assert len(over.items) == 2
+    assert over.next_cursor is not None
+
+
+def test_to_api_shape_excludes_tenant_id(session: Session) -> None:
+    base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
+    _seed_run(session, started_at=base)
+
+    page = list_runs(session, tenant_id=TENANT_ID, limit=10)
+    api = page.items[0].to_api()
+
+    assert "tenant_id" not in api
+    assert api["status"] == "SUCCEEDED"
+    assert api["counts"] == _TERMINAL_COUNTS
+    assert api["started_at"] == page.items[0].started_at.isoformat()
+    assert api["finished_at"] == page.items[0].finished_at.isoformat()
+    assert api["connector_key"] == "youtube-reporting"
+    assert api["account_id"] == "acct-test-1"
+    assert api["report_month"] == "2026-04"
+    assert api["triggered_by_user_id"] == str(USER_ID)
 
 
 def _raw_file(

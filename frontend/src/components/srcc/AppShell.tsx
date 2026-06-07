@@ -46,6 +46,7 @@ type AccessPermissions = {
   canExportAnalyticsReports: boolean;
   canRunConnectors: boolean;
   canViewAudit: boolean;
+  canViewConnectorHealth: boolean;
 };
 
 // FIX: Session capabilities are now hydrated from GET /session/me (see
@@ -116,6 +117,11 @@ function capabilitiesToPermissions( // skipcq: JS-0067
     // finance admin does not hold — so canViewRevenue must NOT enable them.
     canRunConnectors: capabilities.canRunConnectorJobs,
     canViewAudit: capabilities.canViewAudit,
+    // The run-history panel gates on the backend's read permission exactly:
+    // /session/me now exposes canViewConnectorHealth (VIEW_CONNECTOR_HEALTH),
+    // mirroring the GET /connectors/runs route gate. Narrower principals see the
+    // restricted placeholder and fire no fetch; the route 403 stays authoritative.
+    canViewConnectorHealth: capabilities.canViewConnectorHealth,
   };
 }
 
@@ -693,6 +699,7 @@ function ViewRouter({ // skipcq: JS-0067, JS-R1005
         <ConnectorsView
           canRunConnectors={permissions.canRunConnectors}
           canViewFinance={permissions.canViewFinance}
+          canViewConnectorHealth={permissions.canViewConnectorHealth}
         />
       )}
       {view === "audit" && (

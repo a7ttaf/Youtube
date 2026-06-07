@@ -62,6 +62,7 @@ class SessionCapabilities(BaseModel):
     can_export_analytics_reports: bool
     can_manage_registry: bool
     can_manage_connectors: bool
+    can_view_connector_health: bool
     can_run_connector_jobs: bool
     can_view_audit: bool
 
@@ -122,6 +123,10 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
         # live Map/Assign controls that silently 403 on every write.
         can_manage_registry=_can(Permission.MANAGE_ORG_MAPPING),
         can_manage_connectors=_can(Permission.MANAGE_CONNECTORS),
+        # Read-only run-history / health visibility — gates the ConnectorsView
+        # run-history panel; mirrors GET /connectors/runs (VIEW_CONNECTOR_HEALTH)
+        # so the SPA gate matches the route gate exactly (not MANAGE_CONNECTORS).
+        can_view_connector_health=_can(Permission.VIEW_CONNECTOR_HEALTH),
         can_run_connector_jobs=_can(Permission.RUN_CONNECTOR_JOBS),
         can_view_audit=_can(Permission.VIEW_AUDIT_LOG),
     )

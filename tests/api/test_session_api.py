@@ -193,6 +193,7 @@ def test_session_me_header_mode_connector_admin_manages_and_runs(client_headers_
     caps = response.json()["capabilities"]
     assert caps["canRunConnectorJobs"] is True
     assert caps["canManageConnectors"] is True
+    assert caps["canViewConnectorHealth"] is True
 
 
 # ---------------------------------------------------------------------------

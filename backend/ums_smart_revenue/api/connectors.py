@@ -1,4 +1,5 @@
 """FastAPI route handlers for connector credential management and test-connection probing."""
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -30,6 +31,11 @@ from ums_smart_revenue.connectors.google.errors import (
     OAuthRefreshError,
 )
 from ums_smart_revenue.connectors.runs.orchestrator import resolve_connector_credentials
+from ums_smart_revenue.connectors.runs.repository import (
+    MAX_CONNECTOR_RUN_PAGE_SIZE,
+    ConnectorRunValidationError,
+    list_runs,
+)
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
@@ -105,6 +111,70 @@ def list_connector_credentials(
             "offset": page.offset,
             "returned": len(page.items),
             "has_more": page.has_more,
+        },
+    }
+
+
+@router.get("/runs")
+def list_connector_runs(
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    session: Annotated[Session, Depends(current_db_session)],
+    connector_key: str | None = None,
+    account_id: str | None = None,
+    cursor_started_at: datetime | None = None,
+    cursor_id: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=MAX_CONNECTOR_RUN_PAGE_SIZE)] = 50,
+) -> dict[str, object]:
+    """Return a newest-first page of tenant-scoped connector run history."""
+    # ========================================================================
+    # Purpose: Surface read-only connector run history for the dashboard, with
+    #   optional connector/account filters and a both-or-neither keyset cursor.
+    #   Fail-closed behind VIEW_CONNECTOR_HEALTH at global scope; no audit
+    #   emission (operational metadata read, mirrors the credential-list route).
+    # Database/ORM: ConnectorRunORM via connectors.runs.repository.list_runs
+    #   (read only).
+    # Standards: Boundary permission gate; typed ConnectorRunValidationError ->
+    #   HTTP 422; FastAPI Query bounds the limit at 1..MAX page size.
+    # Blast Radius: Connector run read surface only. Finance/auth/audit/Neo4j
+    #   untouched.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/runs/repository.py ->
+    #     list_runs.
+    #   - File: backend/ums_smart_revenue/api/audit.py -> mirrored envelope.
+    # ========================================================================
+    _require_connector_health(user)
+
+    # FIX: Mirror the test-connection route's tenant resolution so a truthy but
+    # non-UUID tenant_id falls back to the bootstrap tenant instead of raising a
+    # raw ValueError that would surface as an unhandled 500.
+    try:
+        tenant_uuid = UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
+    except ValueError:
+        tenant_uuid = UUID(UMS_TENANT_ID)
+
+    try:
+        page = list_runs(
+            session,
+            tenant_id=tenant_uuid,
+            connector_key=connector_key,
+            account_id=account_id,
+            cursor_started_at=cursor_started_at,
+            cursor_id=cursor_id,
+            limit=limit,
+        )
+    except ConnectorRunValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+    items = [entry.to_api() for entry in page.items]
+    return {
+        "items": items,
+        "pagination": {
+            "limit": page.limit,
+            "returned": len(items),
+            "has_more": page.next_cursor is not None,
+            "next_cursor": page.next_cursor,
         },
     }
 
@@ -296,6 +366,14 @@ def _require_connector_permission(
     """Raise 403 if the user lacks the given permission at the connector scope."""
     if not has_permission(user, permission, scope):
         _raise_missing_connector_permission(permission)
+
+
+def _require_connector_health(user: UserPrincipal) -> None:
+    """Raise 403 unless the user holds VIEW_CONNECTOR_HEALTH at global scope."""
+    if not has_permission(
+        user, Permission.VIEW_CONNECTOR_HEALTH, AccessScope.global_scope()
+    ):
+        _raise_missing_connector_permission(Permission.VIEW_CONNECTOR_HEALTH)
 
 
 def _raise_missing_connector_permission(permission: Permission) -> None:

@@ -66,6 +66,7 @@ export type SessionCapabilities = {
   canExportAnalyticsReports: boolean;
   canManageRegistry: boolean;
   canManageConnectors: boolean;
+  canViewConnectorHealth: boolean;
   canRunConnectorJobs: boolean;
   canViewAudit: boolean;
 };
@@ -524,6 +525,86 @@ export type ConnectorJobResponse = {
   connector_key: string;
   account_id: string;
   execution_status: string;
+  audit_event: Record<string, unknown>;
+};
+
+// ============================================================================
+// Purpose: TypeScript mirror of the connector run-history read contract
+//   (GET /connectors/runs) and the test-connection probe result
+//   (POST /connectors/credentials/{key}/{account}/test). Connector run rows are
+//   operational metadata only — NOT finance numbers. Counts are integers; the
+//   cursor/pagination shape mirrors the audit log's cursor pagination
+//   (both-or-neither {started_at, id}), distinct from the offset PaginationMeta.
+// Standards: Read-only typed boundary at the API surface; no logic here. Fields
+//   are matched 1:1 against the backend serializers (ConnectorRunEntry.to_api()
+//   and the test-connection route), not guessed.
+// Connections:
+//   - File: backend/ums_smart_revenue/connectors/runs/repository.py
+//       ConnectorRunEntry.to_api() -> ConnectorRun
+//   - File: backend/ums_smart_revenue/api/connectors.py
+//       list_connector_runs() -> ConnectorRunListResponse
+//       test_connector_connection() -> ConnectorTestResult
+// ============================================================================
+
+// Per-run upsert/report counters. All integers (no float / money math here).
+// Source: ConnectorRunEntry counts (connectors/runs/repository.py).
+export type ConnectorRunCounts = {
+  reports_attempted: number;
+  reports_succeeded: number;
+  reports_failed: number;
+  rows_upserted_total: number;
+  rows_upserted_created: number;
+  rows_upserted_updated: number;
+  rows_upserted_unchanged: number;
+};
+
+// One connector run-history row. status reflects the run lifecycle; timestamps
+// are ISO-8601; error_summary is present only on a failed/partial run.
+// Source: ConnectorRunEntry.to_api() (connectors/runs/repository.py).
+export type ConnectorRun = {
+  id: string;
+  connector_key: string;
+  account_id: string;
+  report_month: string;
+  triggered_by_user_id: string | null;
+  started_at: string; // ISO-8601
+  finished_at: string | null; // ISO-8601, null while RUNNING
+  status: "RUNNING" | "SUCCEEDED" | "PARTIAL" | "FAILED";
+  counts: ConnectorRunCounts;
+  error_summary: string | null;
+};
+
+// Cursor pagination for /connectors/runs (both-or-neither {started_at, id}).
+// Mirrors AuditEventCursor; distinct from the offset PaginationMeta.
+// Source: ConnectorRunPage.next_cursor (connectors/runs/repository.py).
+export type ConnectorRunCursor = { started_at: string; id: string };
+export type ConnectorRunPagination = {
+  limit: number;
+  returned: number;
+  has_more: boolean;
+  next_cursor: ConnectorRunCursor | null;
+};
+
+// GET /connectors/runs. Source: list_connector_runs() (api/connectors.py).
+export type ConnectorRunListResponse = {
+  items: ConnectorRun[];
+  pagination: ConnectorRunPagination;
+};
+
+// POST /connectors/credentials/{key}/{account}/test result. status drives the
+// result badge tone. not_found arrives as HTTP 404 (mapped client-side); the
+// other statuses arrive as HTTP 200. Source: test_connector_connection().
+export type ConnectorTestStatus =
+  | "ok"
+  | "inactive_credential"
+  | "auth_failed"
+  | "error"
+  | "not_found";
+export type ConnectorTestResult = {
+  connector_key: string;
+  account_id: string;
+  status: ConnectorTestStatus;
+  detail: string;
   audit_event: Record<string, unknown>;
 };
 

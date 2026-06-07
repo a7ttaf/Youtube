@@ -448,3 +448,147 @@ def test_credential_integrity_classifier_uses_duplicate_constraint_only():
 
     assert _is_duplicate_credential_integrity_error(duplicate_error)
     assert not _is_duplicate_credential_integrity_error(foreign_key_error)
+
+
+# ---------------------------------------------------------------------------
+# GET /connectors/runs (run history)
+# ---------------------------------------------------------------------------
+
+from datetime import UTC, datetime  # noqa: E402
+from uuid import uuid4  # noqa: E402
+
+from ums_smart_revenue.db.connector_models import ConnectorRunORM  # noqa: E402
+from ums_smart_revenue.db.report_models import ReportBase  # noqa: E402
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID  # noqa: E402
+
+RUN_COUNTS = {
+    "reports_attempted": 2,
+    "reports_succeeded": 2,
+    "reports_failed": 0,
+    "rows_upserted_total": 9,
+    "rows_upserted_created": 5,
+    "rows_upserted_updated": 3,
+    "rows_upserted_unchanged": 1,
+}
+
+
+def seed_runs(database_url: str) -> None:
+    """Create the connector_runs table and seed three runs for the bootstrap tenant."""
+    engine = create_engine(database_url)
+    try:
+        ReportBase.metadata.create_all(engine)
+        tenant = UUID(UMS_TENANT_ID)
+        base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
+        with Session(engine) as session:
+            for idx, (key, acct) in enumerate(
+                [
+                    ("youtube-reporting", "acct-a"),
+                    ("youtube-reporting", "acct-b"),
+                    ("adsense", "acct-a"),
+                ]
+            ):
+                session.add(
+                    ConnectorRunORM(
+                        id=uuid4(),
+                        tenant_id=tenant,
+                        connector_key=key,
+                        account_id=acct,
+                        report_month="2026-04",
+                        triggered_by_user_id=USER_ID,
+                        started_at=base.replace(minute=idx),
+                        finished_at=base.replace(minute=idx),
+                        status="SUCCEEDED",
+                        counts_json=dict(RUN_COUNTS),
+                        error_summary=None,
+                    )
+                )
+            session.commit()
+    finally:
+        engine.dispose()
+
+
+def test_list_runs_returns_envelope_and_item_shape(tmp_path):
+    """connector_admin (has VIEW_CONNECTOR_HEALTH) gets the run-history envelope."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_runs(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get("/connectors/runs", headers=auth_headers("connector_admin"))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pagination"]["limit"] == 50
+    assert body["pagination"]["returned"] == 3
+    assert body["pagination"]["has_more"] is False
+    assert body["pagination"]["next_cursor"] is None
+    item = body["items"][0]
+    assert "tenant_id" not in item
+    assert item["status"] == "SUCCEEDED"
+    assert item["counts"] == RUN_COUNTS
+    assert item["report_month"] == "2026-04"
+
+
+def test_list_runs_forbidden_without_view_connector_health(tmp_path):
+    """audit_viewer lacks VIEW_CONNECTOR_HEALTH and is fail-closed with 403."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_runs(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get("/connectors/runs", headers=auth_headers("audit_viewer"))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: connectors.view_health"
+
+
+def test_list_runs_honors_filters(tmp_path):
+    """connector_key + account_id query filters narrow the run history result."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_runs(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/runs",
+        headers=auth_headers("connector_admin"),
+        params={"connector_key": "adsense", "account_id": "acct-a"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pagination"]["returned"] == 1
+    assert body["items"][0]["connector_key"] == "adsense"
+    assert body["items"][0]["account_id"] == "acct-a"
+
+
+def test_list_runs_half_cursor_returns_422(tmp_path):
+    """Supplying only cursor_started_at (no cursor_id) is a 422 validation error."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_runs(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/runs",
+        headers=auth_headers("connector_admin"),
+        params={"cursor_started_at": "2026-04-01T12:00:00+00:00"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_list_runs_limit_over_cap_returns_422(tmp_path):
+    """limit above the 100 cap is rejected by FastAPI Query validation with 422."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_runs(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/runs",
+        headers=auth_headers("connector_admin"),
+        params={"limit": 101},
+    )
+
+    assert response.status_code == 422

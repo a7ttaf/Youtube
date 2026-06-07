@@ -1,10 +1,13 @@
-import { useState } from "react";
+import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
 
 import { ApiError } from "@/lib/api/client";
 import type {
   AdsensePayment,
   ConnectorCredential,
   ConnectorJobResponse,
+  ConnectorRun,
+  ConnectorRunPagination,
+  ConnectorTestStatus,
 } from "@/lib/api/types";
 import {
   useAdsensePayments,
@@ -14,12 +17,15 @@ import {
   useConnectorCredentials,
   useConnectorJobActions,
 } from "@/lib/api/useConnectors";
+import { useConnectorRuns } from "@/lib/api/useConnectorRuns";
+import { useConnectorTest } from "@/lib/api/useConnectorTest";
 import type { Severity } from "@/lib/mock/data";
 import {
   Badge,
   DEFAULT_MONTH,
   Dot,
   financeDisplay,
+  formatTimestamp,
   MONTH_OPTIONS,
 } from "../shared";
 import { describeError } from "./CommandView";
@@ -127,15 +133,18 @@ function formatDate(value: string): string { // skipcq: JS-0067
 export default function ConnectorsView({ // skipcq: JS-0067
   canRunConnectors,
   canViewFinance,
+  canViewConnectorHealth,
 }: {
   canRunConnectors: boolean;
   canViewFinance: boolean;
+  canViewConnectorHealth: boolean;
 }) {
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   const [reason, setReason] = useState<string>("");
 
   const credentials = useConnectorCredentials();
   const jobActions = useConnectorJobActions();
+  const connectorTest = useConnectorTest();
 
   const payments = useAdsensePayments({ month });
   const syncActions = useAdsenseSyncActions();
@@ -180,6 +189,7 @@ export default function ConnectorsView({ // skipcq: JS-0067
           jobResult={jobActions.data}
           requestingJob={jobActions.loading}
           onRequestSync={onRequestSync}
+          connectorTest={connectorTest}
           month={month}
           onMonth={setMonth}
           payments={paymentRows}
@@ -192,6 +202,7 @@ export default function ConnectorsView({ // skipcq: JS-0067
         <ConnectorSidebar
           month={month}
           canRunConnectors={canRunConnectors}
+          canViewConnectorHealth={canViewConnectorHealth}
           syncActions={syncActions}
           onSynced={() => payments.reload()}
         />
@@ -217,6 +228,7 @@ function DataSourcesPanel({ // skipcq: JS-0067
   jobResult,
   requestingJob,
   onRequestSync,
+  connectorTest,
   month,
   onMonth,
   payments,
@@ -236,6 +248,7 @@ function DataSourcesPanel({ // skipcq: JS-0067
   jobResult: ConnectorJobResponse | null;
   requestingJob: boolean;
   onRequestSync: (credential: ConnectorCredential) => void;
+  connectorTest: ReturnType<typeof useConnectorTest>;
   month: string;
   onMonth: (value: string) => void;
   payments: AdsensePayment[];
@@ -282,6 +295,7 @@ function DataSourcesPanel({ // skipcq: JS-0067
         reason={reason}
         requestingJob={requestingJob}
         onRequestSync={onRequestSync}
+        connectorTest={connectorTest}
       />
 
       <AdsensePaymentsSection
@@ -337,11 +351,13 @@ function SyncReasonField({ // skipcq: JS-0067
 function ConnectorSidebar({ // skipcq: JS-0067
   month,
   canRunConnectors,
+  canViewConnectorHealth,
   syncActions,
   onSynced,
 }: {
   month: string;
   canRunConnectors: boolean;
+  canViewConnectorHealth: boolean;
   syncActions: ReturnType<typeof useAdsenseSyncActions>;
   onSynced: () => void;
 }) {
@@ -357,7 +373,7 @@ function ConnectorSidebar({ // skipcq: JS-0067
         />
       </section>
 
-      <RunHistoryNote />
+      <RunHistory canViewConnectorHealth={canViewConnectorHealth} />
     </aside>
   );
 }
@@ -381,36 +397,249 @@ function AdsenseSyncHeader({ canRunConnectors }: { canRunConnectors: boolean }) 
   );
 }
 
+/** Map a connector run lifecycle status to a tone for its display badge. */
+function runStatusTone(status: ConnectorRun["status"]): Severity { // skipcq: JS-0067
+  switch (status) {
+    case "SUCCEEDED":
+      return "green";
+    case "PARTIAL":
+      return "amber";
+    case "FAILED":
+      return "red";
+    case "RUNNING":
+    default:
+      return "blue";
+  }
+}
+
 /**
- * The run-history panel. No connector-runs read endpoint exists yet, so this
- * states the gap honestly rather than faking a timeline.
+ * The run-history panel. Fail-closed: a viewer lacking the connector-health
+ * capability sees a restricted placeholder and NO fetch fires — the live feed
+ * subcomponent (which mounts the run-history hook) is only rendered when
+ * permitted, mirroring the AuditTimeline -> AuditTimelineFeed gate. The backend
+ * VIEW_CONNECTOR_HEALTH 403 remains authoritative and surfaces as no-permission
+ * copy inside the feed.
  */
-function RunHistoryNote() { // skipcq: JS-0067
+function RunHistory({ // skipcq: JS-0067
+  canViewConnectorHealth,
+}: {
+  canViewConnectorHealth: boolean;
+}) {
   return (
-    <section className="panel">
+    <section className="panel" aria-labelledby="runHistoryTitle">
       <div className="panel-header">
         <div className="panel-title">
-          <strong>Run History</strong>
-          <span>Status available today: credentials + last request result</span>
+          <strong id="runHistoryTitle">Run History</strong>
+          <span>Connector pull runs, newest first — read-only operational log</span>
         </div>
-        <Badge tone="blue">Status</Badge>
+        <Badge tone={canViewConnectorHealth ? "blue" : "red"}>
+          {canViewConnectorHealth ? "Live" : "Restricted"}
+        </Badge>
       </div>
-      {/* The ConnectorRunORM table exists but has NO read route yet, so a
-          live run-history feed cannot be shown without inventing an
-          endpoint. State the gap honestly instead of faking a timeline. */}
+      {canViewConnectorHealth ? (
+        <RunHistoryFeed />
+      ) : (
+        <div className="permission-band" role="note">
+          <Dot tone="red" />
+          <span>
+            <strong>Run history restricted</strong>
+            <span>
+              Connector run history requires the VIEW_CONNECTOR_HEALTH
+              permission.
+            </span>
+          </span>
+          <Badge tone="red">Restricted</Badge>
+        </div>
+      )}
+    </section>
+  );
+}
+
+/**
+ * Append a fetched run page to the accumulated rows, deduping by run id when the
+ * cursor window repeats a row. With no active cursor the page replaces the set.
+ */
+function appendRunRows( // skipcq: JS-0067
+  previous: ConnectorRun[],
+  items: ConnectorRun[],
+  cursorStartedAt: string | undefined,
+  cursorId: string | undefined,
+): ConnectorRun[] {
+  if (!(cursorStartedAt && cursorId)) return items;
+  const seen = new Set(previous.map((row) => row.id));
+  const appended = items.filter((row) => !seen.has(row.id));
+  return [...previous, ...appended];
+}
+
+// ============================================================================
+// Purpose: Own the run-history cursor state, page stitching, and pagination
+//   actions behind a small hook so the visual feed stays simple. ALWAYS calls
+//   useConnectorRuns() unconditionally (it is only mounted when permitted), so
+//   the hook stays rules-of-hooks safe. Append + dedupe by run id; reset on
+//   filter change (no filters in this first surface, but the reset effect keeps
+//   the pattern consistent with the audit feed).
+// Database/ORM: None (frontend).
+// Standards: cursor is both-or-neither; loadMore advances only when idle and a
+//   next page exists. Read-only operational metadata.
+// Blast Radius: Connector run read only.
+// ============================================================================
+type RunHistoryFeedState = {
+  error: ApiError | Error | null;
+  runs: ConnectorRun[];
+  hasMore: boolean;
+  loading: boolean;
+  loadMore: () => void;
+};
+
+/** Merge a fetched run page into the accumulated rows + capture pagination. */
+function syncRunPage( // skipcq: JS-0067
+  page: { items: ConnectorRun[]; pagination: ConnectorRunPagination },
+  cursorStartedAt: string | undefined,
+  cursorId: string | undefined,
+  setRows: Dispatch<SetStateAction<ConnectorRun[]>>,
+  setPagination: Dispatch<SetStateAction<ConnectorRunPagination | null>>,
+): void {
+  setRows((previous) => appendRunRows(previous, page.items, cursorStartedAt, cursorId));
+  setPagination(page.pagination);
+}
+
+/** Resolve the run-history feed state (rows, cursor, loadMore). Unconditional hook. */
+function useRunHistoryFeedState(): RunHistoryFeedState { // skipcq: JS-0067
+  const [rows, setRows] = useState<ConnectorRun[]>([]);
+  const [pagination, setPagination] = useState<ConnectorRunPagination | null>(null);
+  const [cursorStartedAt, setCursorStartedAt] = useState<string>();
+  const [cursorId, setCursorId] = useState<string>();
+
+  const { data, loading, error } = useConnectorRuns({
+    cursor_started_at: cursorStartedAt,
+    cursor_id: cursorId,
+  });
+
+  useEffect(() => {
+    if (!data) return;
+    syncRunPage(data, cursorStartedAt, cursorId, setRows, setPagination);
+  }, [data, cursorStartedAt, cursorId]);
+
+  const hasMore = Boolean(pagination?.has_more && pagination.next_cursor);
+  const nextCursor = pagination?.next_cursor;
+
+  /** Advance the cursor to the next window when idle and a next page exists. */
+  const loadMore = (): void => {
+    if (!nextCursor || loading) return;
+    setCursorStartedAt(nextCursor.started_at);
+    setCursorId(nextCursor.id);
+  };
+
+  return { error, runs: rows, hasMore, loading, loadMore };
+}
+
+/**
+ * The live connector run-history feed: maps loading / error (403 -> no-permission
+ * copy) / empty / loaded states and consumes pagination.next_cursor for a
+ * "Load More" append flow (dedupe by run id).
+ */
+function RunHistoryFeed() { // skipcq: JS-0067
+  const { error, runs, hasMore, loading, loadMore } = useRunHistoryFeedState();
+
+  if (error) return <RunHistoryError error={error} />;
+  if (loading && runs.length === 0) {
+    return (
+      <div className="permission-band" role="note" aria-busy="true">
+        <Dot tone="blue" />
+        <span>
+          <strong>Loading run history…</strong>
+          <span>Reading the connector run log.</span>
+        </span>
+        <Badge tone="blue">Loading</Badge>
+      </div>
+    );
+  }
+  if (runs.length === 0) {
+    return (
       <div className="permission-band" role="note">
         <Dot tone="amber" />
         <span>
-          <strong>Run history not yet available</strong>
-          <span>
-            No connector-runs read endpoint exists yet. A &quot;Request
-            sync&quot; records and audits the intent (recorded, not executed);
-            the last result appears above when you trigger one.
-          </span>
+          <strong>No connector runs recorded</strong>
+          <span>No connector pull runs have been recorded yet.</span>
         </span>
-        <Badge tone="amber">Gap</Badge>
+        <Badge tone="amber">Empty</Badge>
       </div>
-    </section>
+    );
+  }
+  return (
+    <div className="timeline" role="list">
+      {runs.map((run) => (
+        <RunHistoryRow key={run.id} run={run} />
+      ))}
+      {hasMore && (
+        <div className="timeline-item" role="listitem">
+          <button
+            className="ghost-button"
+            type="button"
+            onClick={loadMore}
+            disabled={loading}
+          >
+            {loading ? "Loading more…" : "Load More"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Error state for the run-history feed; 403 maps to connector-health copy. */
+function RunHistoryError({ error }: { error: ApiError | Error }) { // skipcq: JS-0067
+  const described = describeError(error);
+  const is403 = error instanceof ApiError && error.status === 403;
+  const detail = is403
+    ? "Your role cannot view connector run history."
+    : described.detail;
+  return (
+    <div className="permission-band" role="alert">
+      <Dot tone="red" />
+      <span>
+        <strong>{described.title}</strong>
+        <span>{detail}</span>
+      </span>
+      <Badge tone="red">Error</Badge>
+    </div>
+  );
+}
+
+/**
+ * A single connector run-history row: connector_key + account, status badge,
+ * report month, started/finished timestamps, the counts breakdown, and the
+ * error_summary when the run failed or partially failed.
+ */
+function RunHistoryRow({ run }: { run: ConnectorRun }) { // skipcq: JS-0067
+  const c = run.counts;
+  return (
+    <div className="timeline-item" role="listitem">
+      <span className="timeline-time">{formatTimestamp(run.started_at)}</span>
+      <Dot tone={runStatusTone(run.status)} />
+      <span>
+        <span className="item-title">
+          {run.connector_key} · {run.account_id}
+        </span>
+        <span className="item-sub">
+          {`month=${run.report_month} · started ${formatTimestamp(
+            run.started_at,
+          )} · finished ${formatTimestamp(run.finished_at)}`}
+        </span>
+        <span className="item-sub" role="note">
+          {`reports ${c.reports_succeeded}/${c.reports_attempted} ok` +
+            `${c.reports_failed > 0 ? ` · ${c.reports_failed} failed` : ""}` +
+            ` · rows +${c.rows_upserted_created}/~${c.rows_upserted_updated}/=` +
+            `${c.rows_upserted_unchanged} (${c.rows_upserted_total} total)`}
+        </span>
+        {run.error_summary ? (
+          <span className="item-sub" role="note">
+            {`error: ${run.error_summary}`}
+          </span>
+        ) : null}
+      </span>
+      <Badge tone={runStatusTone(run.status)}>{run.status}</Badge>
+    </div>
   );
 }
 
@@ -466,6 +695,7 @@ function ConnectorCredentialsTable({ // skipcq: JS-0067, JS-R1005
   reason,
   requestingJob,
   onRequestSync,
+  connectorTest,
 }: {
   credentials: ConnectorCredential[];
   loading: boolean;
@@ -474,6 +704,7 @@ function ConnectorCredentialsTable({ // skipcq: JS-0067, JS-R1005
   reason: string;
   requestingJob: boolean;
   onRequestSync: (credential: ConnectorCredential) => void;
+  connectorTest: ReturnType<typeof useConnectorTest>;
 }) {
   if (error) {
     const { title, detail } = describeError(error);
@@ -525,6 +756,7 @@ function ConnectorCredentialsTable({ // skipcq: JS-0067, JS-R1005
               requestDisabled={requestDisabled}
               requestingJob={requestingJob}
               onRequestSync={onRequestSync}
+              connectorTest={connectorTest}
             />
           ))}
         </tbody>
@@ -543,6 +775,7 @@ function ConnectorCredentialsTableHead() { // skipcq: JS-0067
         <th scope="col">Status</th>
         <th scope="col">Secret</th>
         <th scope="col">Action</th>
+        <th scope="col">Test</th>
       </tr>
     </thead>
   );
@@ -559,12 +792,14 @@ function ConnectorCredentialRow({ // skipcq: JS-0067
   requestDisabled,
   requestingJob,
   onRequestSync,
+  connectorTest,
 }: {
   credential: ConnectorCredential;
   canRunConnectors: boolean;
   requestDisabled: boolean;
   requestingJob: boolean;
   onRequestSync: (credential: ConnectorCredential) => void;
+  connectorTest: ReturnType<typeof useConnectorTest>;
 }) {
   return (
     <tr>
@@ -595,7 +830,89 @@ function ConnectorCredentialRow({ // skipcq: JS-0067
           </span>
         )}
       </td>
+      <td>
+        <ConnectorTestCell
+          credential={credential}
+          canRunConnectors={canRunConnectors}
+          connectorTest={connectorTest}
+        />
+      </td>
     </tr>
+  );
+}
+
+/**
+ * Per-credential Test Connection cell. Fires the one-click probe (fixed audited
+ * reason) and surfaces the result as a status badge + detail. The button is
+ * latched disabled while this row's probe is in flight; a non-404 failure
+ * surfaces via the shared describeError pattern. Surfaced only where the
+ * management-gated credentials table is shown.
+ */
+function ConnectorTestCell({ // skipcq: JS-0067
+  credential,
+  canRunConnectors,
+  connectorTest,
+}: {
+  credential: ConnectorCredential;
+  canRunConnectors: boolean;
+  connectorTest: ReturnType<typeof useConnectorTest>;
+}) {
+  const key = `${credential.connector_key}::${credential.account_id}`;
+  const result = connectorTest.results[key];
+  const error = connectorTest.errors[key];
+  const pending = Boolean(connectorTest.pending[key]);
+  const onTest = () => {
+    if (!canRunConnectors || pending) return;
+    connectorTest.test(credential.connector_key, credential.account_id).catch(() => {
+      // The hook already captured the typed error in connectorTest.errors;
+      // the cell renders it below. Nothing more to do here.
+    });
+  };
+  return (
+    <>
+      <button
+        className="mini-button"
+        type="button"
+        disabled={!canRunConnectors || pending}
+        onClick={onTest}
+      >
+        {pending ? "Testing…" : "Test"}
+      </button>
+      {result ? (
+        <span style={{ display: "block", marginTop: 4 }}>
+          <Badge tone={testStatusTone(result.status)}>{result.status}</Badge>
+          <span className="item-sub" role="status">
+            {result.detail}
+          </span>
+        </span>
+      ) : null}
+      {error ? <ConnectorTestError error={error} /> : null}
+    </>
+  );
+}
+
+/** Map a test-connection probe status to a tone for its result badge. */
+function testStatusTone(status: ConnectorTestStatus): Severity { // skipcq: JS-0067
+  switch (status) {
+    case "ok":
+      return "green";
+    case "inactive_credential":
+      return "amber";
+    case "auth_failed":
+    case "error":
+    case "not_found":
+    default:
+      return "red";
+  }
+}
+
+/** Inline error note for a failed (non-404) test-connection probe. */
+function ConnectorTestError({ error }: { error: ApiError | Error }) { // skipcq: JS-0067
+  const { title, detail } = describeError(error);
+  return (
+    <span className="item-sub" role="alert" style={{ display: "block", marginTop: 4 }}>
+      {`${title} — ${detail}`}
+    </span>
   );
 }
 

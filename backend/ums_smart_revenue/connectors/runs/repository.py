@@ -26,6 +26,7 @@ CONNECTOR_RUN_COUNT_KEYS = (
 TERMINAL_STATUSES = frozenset({"SUCCEEDED", "PARTIAL", "FAILED"})
 MONTH_PATTERN = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
 ERROR_SUMMARY_MAX_CHARS = 500
+MAX_CONNECTOR_RUN_PAGE_SIZE = 100
 
 
 @dataclass(frozen=True)
@@ -41,6 +42,37 @@ class ConnectorRunEntry:
     status: str
     counts: dict[str, int]
     error_summary: str | None
+
+    def to_api(self) -> dict[str, object]:
+        # ====================================================================
+        # Purpose: Serialize a connector run for the read API, exposing
+        #   operational metadata with ISO-8601 timestamps. tenant_id is
+        #   intentionally withheld (single-tenant boundary, never client-facing).
+        # Database/ORM: None (operates on the immutable entry).
+        # Standards: Stable key set mirrored by the GET /connectors/runs route.
+        # Blast Radius: Connector run read surface only. Finance untouched.
+        # ====================================================================
+        return {
+            "id": self.id,
+            "connector_key": self.connector_key,
+            "account_id": self.account_id,
+            "report_month": self.report_month,
+            "triggered_by_user_id": self.triggered_by_user_id,
+            "started_at": self.started_at.isoformat(),
+            "finished_at": (
+                self.finished_at.isoformat() if self.finished_at is not None else None
+            ),
+            "status": self.status,
+            "counts": dict(self.counts),
+            "error_summary": self.error_summary,
+        }
+
+
+@dataclass(frozen=True)
+class ConnectorRunPage:
+    items: list[ConnectorRunEntry]
+    limit: int
+    next_cursor: dict[str, str] | None
 
 
 class ConnectorRunError(ValueError):
@@ -172,6 +204,86 @@ def finish_run(
     )
     session.flush()
     return _to_entry(row)
+
+
+# ============================================================================
+# Purpose: Return a tenant-scoped, newest-first page of connector runs for the
+#          read-only run-history API, with optional connector/account filters
+#          and a both-or-neither (started_at, id) keyset cursor.
+# Database/ORM: ConnectorRunORM (read only).
+# Standards: Tenant filter always applied; limit validated 1..MAX page size;
+#            fetch limit+1 to derive has_more/next_cursor; typed validation
+#            errors surface as ConnectorRunValidationError at the boundary.
+# Blast Radius: Connector run read surface only. Finance/auth/audit untouched.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> GET /connectors/runs.
+#   - File: backend/ums_smart_revenue/auth/audit_log.py -> mirrored cursor shape.
+# ============================================================================
+def list_runs(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    connector_key: str | None = None,
+    account_id: str | None = None,
+    cursor_started_at: datetime | None = None,
+    cursor_id: str | None = None,
+    limit: int,
+) -> ConnectorRunPage:
+    if limit < 1 or limit > MAX_CONNECTOR_RUN_PAGE_SIZE:
+        raise ConnectorRunValidationError(
+            f"limit must be between 1 and {MAX_CONNECTOR_RUN_PAGE_SIZE}"
+        )
+    if (cursor_started_at is None) != (cursor_id is None):
+        raise ConnectorRunValidationError(
+            "cursor_started_at and cursor_id must be provided together"
+        )
+
+    stmt = (
+        select(ConnectorRunORM)
+        .where(ConnectorRunORM.tenant_id == tenant_id)
+        .order_by(ConnectorRunORM.started_at.desc(), ConnectorRunORM.id.desc())
+    )
+    if connector_key is not None:
+        stmt = stmt.where(ConnectorRunORM.connector_key == connector_key)
+    if account_id is not None:
+        stmt = stmt.where(ConnectorRunORM.account_id == account_id)
+    if cursor_started_at is not None and cursor_id is not None:
+        cursor_uuid = _parse_cursor_uuid(cursor_id)
+        stmt = stmt.where(
+            sa.or_(
+                ConnectorRunORM.started_at < cursor_started_at,
+                sa.and_(
+                    ConnectorRunORM.started_at == cursor_started_at,
+                    ConnectorRunORM.id < cursor_uuid,
+                ),
+            )
+        )
+
+    rows = session.scalars(stmt.limit(limit + 1)).all()
+    items = [_to_entry(row) for row in rows[:limit]]
+    has_more = len(rows) > limit
+    return ConnectorRunPage(
+        items=items,
+        limit=limit,
+        next_cursor=_next_cursor(items) if has_more else None,
+    )
+
+
+def _parse_cursor_uuid(value: str) -> UUID:
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise ConnectorRunValidationError("cursor_id must be a valid UUID") from exc
+
+
+def _next_cursor(items: list[ConnectorRunEntry]) -> dict[str, str] | None:
+    if not items:
+        return None
+    last_item = items[-1]
+    return {
+        "started_at": last_item.started_at.isoformat(),
+        "id": last_item.id,
+    }
 
 
 # ============================================================================

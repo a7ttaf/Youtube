@@ -664,6 +664,15 @@ now wired to `GET /audit/events` (see below).
   200 with `status` field (`ok` / `inactive_credential` / `auth_failed` / `error`) and
   string `detail` otherwise. `CONNECTOR_TESTED` audit event. 5 TDD tests, `MANAGE_CONNECTORS`
   gate. Backend only; no migration. Merged to main as PR #72 (28da1a6).
+- ⏳ Connector run history + Test Connection (Track D buildable chunk, branch
+  `feat/connector-run-history`): read-only `GET /connectors/runs`
+  (`VIEW_CONNECTOR_HEALTH` gate, tenant-scoped, connector_key/account_id filters,
+  newest-first cursor pagination, no audit write) + new `list_runs` repository
+  read; ConnectorsView run-history panel replaces the placeholder (status/counts/
+  error_summary + Load More id-dedupe); per-credential Test Connection button
+  surfaces the existing probe; `/session/me` gains `canViewConnectorHealth` so the
+  SPA gate mirrors the route. No migration. Rest of Track D (OAuth consent, live
+  pulls, token-expiry schema + background monitoring) stays creds/schema-blocked.
 - ✅ Registry Phase 1 wiring — merged to main as PR #73 (56bf9a8): the Channel
   Registry table is wired to `GET /channels` (replacing `REGISTRY_ROWS` mock).
   Client-side derivation: avatar initials, CMS badge tone from `cms_status`,
