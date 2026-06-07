@@ -63,9 +63,7 @@ def test_connector_run_constraints_and_indexes_match_contract() -> None:
 
 
 def test_raw_report_file_has_tenant_id_composite_unique_for_b2_3_fk() -> None:
-    """
-    Confirm the RawReportFileORM has a composite unique constraint on tenant_id and id.
-    """
+    """Confirm the RawReportFileORM has a composite unique constraint on tenant_id and id."""
     constraints = {c.name for c in RawReportFileORM.__table__.constraints}
 
     assert "uq_raw_report_files_tenant_id_id" in constraints
@@ -351,9 +349,7 @@ def test_link_raw_file_rejects_cross_tenant_run_id(session: Session) -> None:
 def test_link_raw_file_duplicate_is_rejected_by_unique_constraint(
     session: Session,
 ) -> None:
-    """
-    Ensure duplicate links raise ConnectorRunLinkConflictError as per unique constraint.
-    """
+    """Ensure duplicate links raise ConnectorRunLinkConflictError as per unique constraint."""
     entry = _start_default_run(session)
     raw_file = _raw_file(session, tenant_id=TENANT_ID, report_type="rt-a")
 
