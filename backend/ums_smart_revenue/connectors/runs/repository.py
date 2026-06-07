@@ -1,3 +1,5 @@
+"""Repository helpers for tenant-scoped connector run history."""
+
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -31,6 +33,8 @@ MAX_CONNECTOR_RUN_PAGE_SIZE = 100
 
 @dataclass(frozen=True)
 class ConnectorRunEntry:
+    """Immutable connector run row projected into the read API payload."""
+
     id: str
     tenant_id: str
     connector_key: str
@@ -79,11 +83,11 @@ class ConnectorRunValidationError(ConnectorRunError):
 
 
 class ConnectorRunLinkConflictError(ConnectorRunError):
-    pass
+    """Raised when a run cannot be linked to the requested raw report file."""
 
 
 class ConnectorRunNotFoundError(LookupError):
-    pass
+    """Raised when a requested connector run cannot be found for the tenant."""
 
 
 # ============================================================================
