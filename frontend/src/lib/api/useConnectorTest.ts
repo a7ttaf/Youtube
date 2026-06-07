@@ -14,14 +14,14 @@ const probeKey = (connector_key: string, account_id: string): string =>
 /**
  * Remove a single key from a record without mutating the original object.
  */
-function omitRecordKey<T extends Record<string, unknown>>( // skipcq: JS-0067
+const omitRecordKey = <T extends Record<string, unknown>>(
   record: T,
   key: string,
-): T {
+): T => {
   return Object.fromEntries(
     Object.entries(record).filter(([entryKey]) => entryKey !== key),
   ) as T;
-}
+};
 
 export type UseConnectorTestState = {
   // Per-row latest probe result, keyed by `${connector_key}::${account_id}`.

@@ -405,7 +405,7 @@ function AdsenseSyncHeader({ canRunConnectors }: { canRunConnectors: boolean }) 
 }
 
 /** Map a connector run lifecycle status to a tone for its display badge. */
-function runStatusTone(status: ConnectorRun["status"]): Severity { // skipcq: JS-0067
+const runStatusTone = (status: ConnectorRun["status"]): Severity => {
   switch (status) {
     case "SUCCEEDED":
       return "green";
