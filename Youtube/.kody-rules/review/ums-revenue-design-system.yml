@@ -1,0 +1,44 @@
+title: Enforce UMS Revenue design system on frontend changes
+rule: |
+  Review frontend and mockup changes against the UMS Revenue Design System.
+
+  Use these repository references when evaluating the PR:
+  - @file:DESIGN.md
+  - @file:PRODUCT.md
+  - @file:Docs/kody/ums-revenue-design-system.md
+  - @file:frontend/src/styles.css
+  - @file:frontend/src/components/srcc/shared.tsx
+  - @file:frontend/src/components/srcc/icons.tsx
+  - @file:frontend/src/components/srcc/AppShell.tsx
+  - @file:mockups/ums-smart-revenue-command-center-soft-dark.html
+
+  Flag changes that drift from the design system:
+  - UI becomes marketing-like, decorative, sparse, or generic SaaS instead of a
+    dense internal finance command center.
+  - Money, KPI, or reconciliation views hide source, formula, confidence,
+    permissions, lock state, export readiness, or unresolved issues.
+  - Withheld money is rendered as blank, zero, or a fake value instead of
+    `Restricted`.
+  - Status is communicated only by color without a clear label.
+  - Typography, palette, radii, shadows, icon style, or motion contradict the
+    Soft Dark system.
+  - Panels are nested, cards replace table-first workflows, or controls obscure
+    month-close and reconciliation flow.
+
+  Suggestions should be concrete and cite the specific UI contract that was
+  violated. Do not request cosmetic changes that do not improve finance
+  clarity, permissions, accessibility, or operational scanning.
+severity: high
+scope: pull_request
+path: frontend/**
+examples:
+  - snippet: |
+      <span className="money">$0</span>
+    isCorrect: false
+  - snippet: |
+      <span className="money" aria-label="Restricted revenue">Restricted</span>
+    isCorrect: true
+inheritance:
+  inheritable: true
+  exclude: []
+  include: []
