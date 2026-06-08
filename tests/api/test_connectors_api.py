@@ -506,6 +506,42 @@ def seed_runs(database_url: str) -> None:
         engine.dispose()
 
 
+def seed_connector_run(
+    database_url: str,
+    *,
+    connector_key: str,
+    account_id: str,
+    status: str,
+    error_summary: str | None,
+    started_at: datetime,
+    finished_at: datetime | None = None,
+    report_month: str = "2026-04",
+) -> None:
+    """Seed one connector run row with explicit status and error summary values."""
+    engine = create_engine(database_url)
+    try:
+        ReportBase.metadata.create_all(engine)
+        with Session(engine) as session:
+            session.add(
+                ConnectorRunORM(
+                    id=uuid4(),
+                    tenant_id=UUID(UMS_TENANT_ID),
+                    connector_key=connector_key,
+                    account_id=account_id,
+                    report_month=report_month,
+                    triggered_by_user_id=USER_ID,
+                    started_at=started_at,
+                    finished_at=finished_at if finished_at is not None else started_at,
+                    status=status,
+                    counts_json=dict(RUN_COUNTS),
+                    error_summary=error_summary,
+                )
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+
 def test_list_runs_returns_envelope_and_item_shape(tmp_path):
     """connector_admin (has VIEW_CONNECTOR_HEALTH) gets the run-history envelope."""
     database_url = build_database_url(tmp_path)
@@ -548,6 +584,35 @@ def test_list_runs_allows_connector_scoped_health_access(tmp_path):
     }
 
 
+def test_list_runs_redacts_internal_error_summary_details(tmp_path):
+    """Run-history responses redact internal storage and path locators from failures."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_connector_run(
+        database_url,
+        connector_key="youtube-reporting",
+        account_id="acct-secret",
+        status="FAILED",
+        error_summary=(
+            "BlobDownloadError: failed to read storage_uri=gs://private-bucket/"
+            "secret/path.csv from C:\\temp\\connector\\dump.txt"
+        ),
+        started_at=datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC),
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get("/connectors/runs", headers=auth_headers("connector_admin"))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pagination"]["returned"] == 1
+    item = body["items"][0]
+    assert item["error_summary"] is not None
+    assert "gs://private-bucket/secret/path.csv" not in item["error_summary"]
+    assert "C:\\temp\\connector\\dump.txt" not in item["error_summary"]
+    assert "storage_uri=[redacted]" in item["error_summary"]
+
+
 def test_list_runs_rejects_connector_outside_scoped_health_access(tmp_path):
     """Connector-scoped connector_admin cannot request another connector's runs."""
     database_url = build_database_url(tmp_path)
@@ -576,6 +641,40 @@ def test_list_runs_forbidden_without_view_connector_health(tmp_path):
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: connectors.view_health"
+
+
+def test_list_runs_includes_adsense_management_runs_for_adsense_scope(tmp_path):
+    """Legacy adsense scope includes AdSense management run-history keys."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_connector_run(
+        database_url,
+        connector_key="adsense-management",
+        account_id="acct-adsense",
+        status="SUCCEEDED",
+        error_summary=None,
+        started_at=datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC),
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/runs",
+        headers=auth_headers("connector_admin", "connector", "adsense"),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pagination"]["returned"] == 1
+    assert body["items"][0]["connector_key"] == "adsense-management"
+
+    explicit_response = client.get(
+        "/connectors/runs",
+        headers=auth_headers("connector_admin", "connector", "adsense"),
+        params={"connector_key": "adsense-management"},
+    )
+
+    assert explicit_response.status_code == 200
+    assert explicit_response.json()["pagination"]["returned"] == 1
 
 
 def test_list_runs_honors_filters(tmp_path):

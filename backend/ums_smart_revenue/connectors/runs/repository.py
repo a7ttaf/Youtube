@@ -63,7 +63,9 @@ class ConnectorRunEntry:
             ),
             "status": self.status,
             "counts": dict(self.counts),
-            "error_summary": self.error_summary,
+            # FIX: Keep the raw DB value internal and redact locators before
+            # exposing run-history summaries through the API boundary.
+            "error_summary": _sanitize_error_summary(self.error_summary),
         }
 
 
@@ -472,3 +474,31 @@ def _to_entry(row: ConnectorRunORM) -> ConnectorRunEntry:
         counts=dict(row.counts_json),
         error_summary=row.error_summary,
     )
+
+
+def _sanitize_error_summary(error_summary: str | None) -> str | None:
+    """Redact internal locators from operator-facing connector error summaries."""
+    if error_summary is None:
+        return None
+
+    sanitized = re.sub(
+        r"\bstorage_uri(?:=|: )\S+",
+        "storage_uri=[redacted]",
+        error_summary,
+    )
+    sanitized = re.sub(
+        r"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+",
+        "[redacted-uri]",
+        sanitized,
+    )
+    sanitized = re.sub(
+        r"\b[A-Za-z]:\\[^\s'\"<>]+",
+        "[redacted-path]",
+        sanitized,
+    )
+    sanitized = re.sub(
+        r"(?<!\S)/[^\s'\"<>]+",
+        "[redacted-path]",
+        sanitized,
+    )
+    return sanitized[:ERROR_SUMMARY_MAX_CHARS]

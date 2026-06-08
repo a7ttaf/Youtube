@@ -18,6 +18,9 @@ _CONNECTOR_KEY_ALIASES = MappingProxyType({
     "youtube_reporting": ("youtube-reporting",),
     "youtube-analytics": ("youtube_analytics",),
     "youtube_analytics": ("youtube-analytics",),
+    # FIX: Treat the legacy AdSense connector scope as an umbrella for the
+    # AdSense management run-history keys so scoped health reads stay complete.
+    "adsense": ("adsense-management", "adsense_management"),
     "adsense-management": ("adsense_management",),
     "adsense_management": ("adsense-management",),
 })
