@@ -1,10 +1,10 @@
-"""Postgres-only tenant-isolation matrix exercised as ``app_tenant``.
+"""Postgres-only tenant-isolation matrix exercised through the trusted context.
 
 Proves the database boundary holds even when application-level tenant filters
 are deliberately bypassed: bare ``SELECT``s with no ``WHERE tenant_id`` are
 filtered by RLS, cross-tenant writes are rejected by ``WITH CHECK``, an unset
-GUC fails closed (errors, not empty), and the ``app_platform`` lane does not
-gain a hidden tenant-table bypass. One representative table (``org_units``) is
+tenant context returns no rows, and the ``app_platform`` lane does not gain a
+hidden tenant-table bypass. One representative table (``org_units``) is
 sufficient — the migration test already proves every tenant table carries the
 policy.
 """
@@ -24,6 +24,16 @@ B = "00000000-0000-0000-0000-000000000002"
 # Fixed ids (distinct from app data) keep reruns idempotent with ON CONFLICT.
 ORG_A = "00000000-0000-0000-0000-0000000000a1"
 ORG_B = "00000000-0000-0000-0000-0000000000b2"
+
+
+def _set_trusted_tenant(conn: sa.Connection, tenant_id: str) -> None:
+    """Populate the trusted tenant context through the platform lane."""
+    conn.execute(sa.text('SET ROLE "app_platform"'))
+    conn.execute(
+        sa.text("SELECT set_app_current_tenant_id(:a)"),
+        {"a": tenant_id},
+    )
+    conn.execute(sa.text('SET ROLE "app_tenant"'))
 
 
 def _upgrade(url: str) -> None:
@@ -71,13 +81,7 @@ def test_app_tenant_cannot_read_other_tenant_rows():
     try:
         _seed(engine)
         with engine.connect() as conn:
-            conn.execute(sa.text('SET ROLE "app_tenant"'))
-            # set_config(name, value, is_local=false) -> session-scoped GUC;
-            # parameterized so the tenant id flows as data, not literal SQL.
-            conn.execute(
-                sa.text("SELECT set_config('app.current_tenant_id', :a, false)"),
-                {"a": A},
-            )
+            _set_trusted_tenant(conn, A)
             # Bare select, NO WHERE tenant_id — RLS must filter to A only.
             rows = conn.execute(
                 sa.text("SELECT tenant_id FROM org_units")
@@ -96,13 +100,9 @@ def test_with_check_blocks_cross_tenant_insert():
     try:
         _seed(engine)
         with engine.connect() as conn:
-            conn.execute(sa.text('SET ROLE "app_tenant"'))
-            conn.execute(
-                sa.text("SELECT set_config('app.current_tenant_id', :a, false)"),
-                {"a": A},
-            )
+            _set_trusted_tenant(conn, A)
             with pytest.raises(Exception):
-                # Inserting a B-owned row while GUC=A violates WITH CHECK.
+                # Inserting a B-owned row while trusted context=A violates WITH CHECK.
                 conn.execute(
                     sa.text(
                         "INSERT INTO org_units "
@@ -117,18 +117,16 @@ def test_with_check_blocks_cross_tenant_insert():
         engine.dispose()
 
 
-def test_missing_guc_fails_closed():
-    """Verify the tenant lane fails closed when the tenant GUC is absent."""
+def test_missing_context_fails_closed():
+    """Verify the tenant lane fails closed when the trusted context is absent."""
     url = require_postgres_url()
     _upgrade(url)
     engine = sa.create_engine(url)
     try:
         with engine.connect() as conn:
             conn.execute(sa.text('SET ROLE "app_tenant"'))
-            # No GUC set: current_setting without missing_ok must error,
-            # not silently return an empty result set.
-            with pytest.raises(Exception):
-                conn.execute(sa.text("SELECT * FROM org_units")).all()
+            rows = conn.execute(sa.text("SELECT * FROM org_units")).all()
+            assert rows == []
     finally:
         engine.dispose()
 
@@ -142,7 +140,7 @@ def test_app_platform_does_not_bypass_tenant_rls():
         _seed(engine)
         with engine.connect() as conn:
             conn.execute(sa.text('SET ROLE "app_platform"'))
-            with pytest.raises(Exception):
-                conn.execute(sa.text("SELECT COUNT(*) FROM org_units")).scalar()
+            count = conn.execute(sa.text("SELECT COUNT(*) FROM org_units")).scalar()
+            assert count == 0
     finally:
         engine.dispose()

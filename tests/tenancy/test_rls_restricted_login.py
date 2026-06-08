@@ -11,8 +11,9 @@ and proves:
       the resolver ran on the bare login and got permission-denied.
   (b) platform lane — SET ROLE app_platform can read ``tenants`` (what the
       resolver actually does before tenant context exists).
-  (c) tenant lane — SET ROLE app_tenant + the tenant GUC reads an RLS-scoped
-      table without permission error.
+  (c) tenant lane — SET ROLE app_tenant after populating the trusted tenant
+      context through the platform lane reads an RLS-scoped table without
+      permission error.
 
 Run as the superuser test connection (it must CREATE/DROP ROLE). The throwaway
 login is created idempotently and dropped in teardown; the DB is left at head.
@@ -122,15 +123,16 @@ def test_restricted_login_lane_model_end_to_end():
             ).scalar()
             assert count is not None
 
-        # (c) tenant lane: SET ROLE app_tenant + GUC -> RLS-scoped read works.
+        # (c) tenant lane: populate trusted context, then SET ROLE app_tenant.
         with login_engine.connect() as conn:
-            conn.execute(sa.text('SET ROLE "app_tenant"'))
+            conn.execute(sa.text('SET ROLE "app_platform"'))
             conn.execute(
                 sa.text(
-                    "SELECT set_config('app.current_tenant_id', :t, false)"
+                    "SELECT set_app_current_tenant_id(:t)"
                 ),
                 {"t": _UMS_TENANT},
             )
+            conn.execute(sa.text('SET ROLE "app_tenant"'))
             count = conn.execute(
                 sa.text("SELECT count(*) FROM org_units")
             ).scalar()

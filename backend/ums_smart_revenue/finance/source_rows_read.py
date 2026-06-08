@@ -21,6 +21,23 @@ MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 _VALID_SOURCE_SYSTEMS = frozenset(
     {"youtube_reporting", "youtube_analytics", "adsense_management"}
 )
+_SOURCE_ROW_LOAD_ONLY = load_only(
+    GoogleRevenueSourceRowORM.id,
+    GoogleRevenueSourceRowORM.source_system,
+    GoogleRevenueSourceRowORM.source_account_id,
+    GoogleRevenueSourceRowORM.content_owner_id,
+    GoogleRevenueSourceRowORM.youtube_channel_id,
+    GoogleRevenueSourceRowORM.report_type,
+    GoogleRevenueSourceRowORM.report_month,
+    GoogleRevenueSourceRowORM.period_start,
+    GoogleRevenueSourceRowORM.period_end,
+    GoogleRevenueSourceRowORM.metric_key,
+    GoogleRevenueSourceRowORM.value_kind,
+    GoogleRevenueSourceRowORM.amount_native,
+    GoogleRevenueSourceRowORM.currency_code,
+    GoogleRevenueSourceRowORM.source_report_id,
+    GoogleRevenueSourceRowORM.ingested_at,
+)
 
 
 class SourceRowReadError(Exception):
@@ -179,25 +196,7 @@ def list_source_rows(
     # can stay index-friendly without re-reading the whole month slice.
     stmt = (
         sa.select(orm)
-        .options(
-            load_only(
-                orm.id,
-                orm.source_system,
-                orm.source_account_id,
-                orm.content_owner_id,
-                orm.youtube_channel_id,
-                orm.report_type,
-                orm.report_month,
-                orm.period_start,
-                orm.period_end,
-                orm.metric_key,
-                orm.value_kind,
-                orm.amount_native,
-                orm.currency_code,
-                orm.source_report_id,
-                orm.ingested_at,
-            )
-        )
+        .options(_SOURCE_ROW_LOAD_ONLY)
         .where(orm.tenant_id == tenant_id, orm.report_month == month)
         .order_by(orm.ingested_at.desc(), orm.id.desc())
     )
@@ -232,25 +231,7 @@ def get_source_row(
     orm = GoogleRevenueSourceRowORM
     row = session.scalars(
         sa.select(orm)
-        .options(
-            load_only(
-                orm.id,
-                orm.source_system,
-                orm.source_account_id,
-                orm.content_owner_id,
-                orm.youtube_channel_id,
-                orm.report_type,
-                orm.report_month,
-                orm.period_start,
-                orm.period_end,
-                orm.metric_key,
-                orm.value_kind,
-                orm.amount_native,
-                orm.currency_code,
-                orm.source_report_id,
-                orm.ingested_at,
-            )
-        )
+        .options(_SOURCE_ROW_LOAD_ONLY)
         .where(orm.id == parsed, orm.tenant_id == tenant_id)
     ).first()
     return _to_entry(row) if row is not None else None

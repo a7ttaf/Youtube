@@ -5,7 +5,11 @@ from threading import Lock
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 
-from ums_smart_revenue.db.rls import APP_PLATFORM_ROLE, APP_TENANT_ROLE, TENANT_GUC
+from ums_smart_revenue.db.rls import (
+    APP_PLATFORM_ROLE,
+    APP_TENANT_ROLE,
+    TENANT_CONTEXT_SETTER,
+)
 
 SessionFactory = sessionmaker[Session]
 
@@ -60,40 +64,45 @@ def build_platform_session_factory(
 
 
 # ============================================================================
-# Purpose: Per-transaction tenant isolation hook. On Postgres only, switch the
-#   transaction role and set app.current_tenant_id so RLS policies filter rows.
+# Purpose: Per-transaction tenant isolation hook. On Postgres only, write the
+#   current tenant into a backend-owned context row, then switch the role that
+#   the transaction runs under. RLS policies read the trusted context row,
+#   never a tenant-settable setting.
 # Database/ORM: All tenant-scoped tables (RLS policies created in 20260608_0001).
 # Standards: SET LOCAL (transaction-scoped, auto-reset on commit/rollback);
-#   fail-closed (no tenant context on the tenant lane => no GUC => RLS errors).
+#   fail-closed (missing tenant context => no row => RLS policy rejects access).
 # Blast Radius: Authorization/finance reads+writes at the DB boundary. No-op on
 #   SQLite and on tenant-lane sessions opened without a resolved tenant, so the
 #   existing test suite and pre-S2.4 non-tenant paths are unaffected.
 # Connections:
 #   - File: backend/ums_smart_revenue/tenancy/context.py -> tenant in contextvar.
-#   - File: backend/ums_smart_revenue/db/rls.py -> role names + GUC key.
+#   - File: backend/ums_smart_revenue/db/rls.py -> role names + tenant context helpers.
 # ============================================================================
 @event.listens_for(Session, "after_begin")
 def _apply_tenant_isolation(session, _transaction, connection):
-    """Set transaction role + tenant GUC for Postgres sessions when warranted."""
+    """Set transaction role + trusted tenant context for Postgres sessions."""
     if connection.dialect.name != "postgresql":
         return
     role = session.info.get(_SESSION_ROLE_KEY, APP_TENANT_ROLE)
-    if role == APP_PLATFORM_ROLE:
-        connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"')
-        return
     # Default app_tenant lane: only act when a tenant is in context.
     from ums_smart_revenue.tenancy.context import get_current_tenant
 
     tenant = get_current_tenant()
-    if tenant is None:
-        return
-    # ROLE is an identifier (cannot be a bind param) but is an internal
-    # constant, never user input. The tenant id IS data -> set via parameterized
-    # set_config (is_local=true => transaction-scoped, same lifetime as SET LOCAL).
-    connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_TENANT_ROLE}"')
-    connection.exec_driver_sql(
-        "SELECT set_config(%s, %s, true)", (TENANT_GUC, str(tenant.id))
-    )
+    connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"')
+    if tenant is not None:
+        # The setter runs while app_platform is active, so tenant code cannot
+        # mutate the trusted context through the tenant lane.
+        connection.exec_driver_sql(
+            f"SELECT {TENANT_CONTEXT_SETTER}(%s)",
+            (str(tenant.id),),
+        )
+    else:
+        # Clear any stale row on pooled connections before the next request.
+        connection.exec_driver_sql(
+            "DELETE FROM app_tenant_context WHERE backend_pid = pg_backend_pid()"
+        )
+    if role == APP_TENANT_ROLE:
+        connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_TENANT_ROLE}"')
 
 
 def session_dependency(

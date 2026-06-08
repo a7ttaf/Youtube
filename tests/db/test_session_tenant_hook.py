@@ -23,7 +23,7 @@ def _tenant(uuid_str: str) -> Tenant:
 
 def test_sqlite_session_issues_no_set_statements():
     """Verify the SQLite session hook stays a no-op for tenant context."""
-    # On SQLite the hook must be a complete no-op (no SET ROLE / GUC).
+    # On SQLite the hook must be a complete no-op (no SET ROLE / tenant context).
     factory = build_session_factory("sqlite+pysqlite:///:memory:")
     token = TENANT_CTX.set(_tenant("00000000-0000-0000-0000-000000000001"))
     try:
@@ -34,8 +34,8 @@ def test_sqlite_session_issues_no_set_statements():
         TENANT_CTX.reset(token)
 
 
-def test_postgres_tenant_lane_sets_role_and_guc():
-    """Verify the tenant lane sets app_tenant and the tenant GUC."""
+def test_postgres_tenant_lane_sets_role_and_trusted_tenant_context():
+    """Verify the tenant lane sets app_tenant and the trusted tenant context."""
     url = require_postgres_url()
     factory = build_session_factory(url)
     tid = "00000000-0000-0000-0000-000000000001"
@@ -43,7 +43,7 @@ def test_postgres_tenant_lane_sets_role_and_guc():
     try:
         with factory() as session:
             assert session.execute(
-                sa.text("SELECT current_setting('app.current_tenant_id', true)")
+                sa.text("SELECT app_current_tenant_id()")
             ).scalar() == tid
             assert session.execute(
                 sa.text("SELECT current_user")
@@ -52,21 +52,21 @@ def test_postgres_tenant_lane_sets_role_and_guc():
         TENANT_CTX.reset(token)
 
 
-def test_postgres_no_context_leaves_login_role_and_unset_guc():
+def test_postgres_no_context_leaves_login_role_and_unset_context():
     """Verify the tenant lane leaves bare sessions on the login role."""
     url = require_postgres_url()
     factory = build_session_factory(url)
-    # No TENANT_CTX → hook must not switch role or set the GUC.
+    # No TENANT_CTX → hook must not switch role or set the trusted context row.
     with factory() as session:
         assert session.execute(
-            sa.text("SELECT current_setting('app.current_tenant_id', true)")
-        ).scalar() in (None, "")
+            sa.text("SELECT app_current_tenant_id()")
+        ).scalar() is None
         assert session.execute(
             sa.text("SELECT current_user")
         ).scalar() != "app_tenant"
 
 
-def test_platform_lane_uses_app_platform_and_no_guc():
+def test_platform_lane_uses_app_platform_and_no_tenant_context():
     """Verify the platform lane uses app_platform without tenant context."""
     url = require_postgres_url()
     factory = build_platform_session_factory(url)
@@ -75,14 +75,14 @@ def test_platform_lane_uses_app_platform_and_no_guc():
             sa.text("SELECT current_user")
         ).scalar() == "app_platform"
         assert session.execute(
-            sa.text("SELECT current_setting('app.current_tenant_id', true)")
-        ).scalar() in (None, "")
+            sa.text("SELECT app_current_tenant_id()")
+        ).scalar() is None
 
 
-def test_pooled_connection_does_not_leak_role_or_guc():
+def test_pooled_connection_does_not_leak_role_or_context():
     """Verify a reused pooled connection does not retain tenant session state."""
     # Transaction 1 sets tenant lane; transaction 2 on the SAME pooled
-    # connection (no context) must see no leaked role/GUC.
+    # connection (no context) must see no leaked role/tenant context.
     url = require_postgres_url()
     engine = sa.create_engine(url, pool_size=1, max_overflow=0)
     factory = build_session_factory(url, engine=engine)
@@ -98,6 +98,6 @@ def test_pooled_connection_does_not_leak_role_or_guc():
     with factory() as s2:
         assert s2.execute(sa.text("SELECT current_user")).scalar() != "app_tenant"
         assert s2.execute(
-            sa.text("SELECT current_setting('app.current_tenant_id', true)")
-        ).scalar() in (None, "")
+            sa.text("SELECT app_current_tenant_id()")
+        ).scalar() is None
     engine.dispose()

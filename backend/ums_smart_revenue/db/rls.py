@@ -43,7 +43,12 @@ TENANT_SCOPED_TABLES: tuple[str, ...] = (
 
 APP_TENANT_ROLE = "app_tenant"
 APP_PLATFORM_ROLE = "app_platform"
-TENANT_GUC = "app.current_tenant_id"
+# Trusted tenant-context helpers owned by the database, not by the tenant lane.
+# The session hook writes the current backend's tenant row through a privileged
+# setter; RLS policies read it back through the getter.
+TENANT_CONTEXT_TABLE = "app_tenant_context"
+TENANT_CONTEXT_SETTER = "set_app_current_tenant_id"
+TENANT_CONTEXT_GETTER = "app_current_tenant_id"
 
 
 def tenant_rls_policy_name(table: str) -> str:

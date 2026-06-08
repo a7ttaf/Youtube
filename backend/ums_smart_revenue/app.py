@@ -28,6 +28,7 @@ from ums_smart_revenue.api.connectors import router as connectors_router
 from ums_smart_revenue.api.dependencies import (
     authenticated_session_dependency,
     current_db_session,
+    current_platform_db_session,
     current_principal_from_database,
     current_principal_from_headers,
     current_trusted_gateway_identity,
@@ -100,13 +101,22 @@ def create_app(
 
     if resolved_database_url:
         session_factory = build_session_factory(resolved_database_url)
+        platform_session_factory = build_platform_session_factory(
+            resolved_database_url
+        )
         overrides = _app.dependency_overrides
         if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
             overrides[current_db_session] = authenticated_session_dependency(
                 session_factory
             )
+            overrides[current_platform_db_session] = authenticated_session_dependency(
+                platform_session_factory
+            )
         else:
             overrides[current_db_session] = session_dependency(session_factory)
+            overrides[current_platform_db_session] = session_dependency(
+                platform_session_factory
+            )
             _app.add_middleware(DefaultTenantMiddleware)
         overrides[current_channel_registry] = sql_channel_registry_from_session
         overrides[current_group_registry] = sql_group_registry_from_session
@@ -124,12 +134,9 @@ def create_app(
             # Blast Radius: Authorization/tenant resolution; reads platform
             #   `tenants` only (no RLS table), so BYPASSRLS is immaterial here.
             # ============================================================
-            resolver_session_factory = build_platform_session_factory(
-                resolved_database_url
-            )
             _app.add_middleware(
                 TrustedGatewayTenantResolverMiddleware,
-                session_factory=resolver_session_factory,
+                session_factory=platform_session_factory,
                 authorize_tenant=_allow_database_auth_tenant,
             )
 

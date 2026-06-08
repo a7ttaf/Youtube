@@ -33,6 +33,9 @@ _NON_TENANT_READ_TABLES = (
 )
 
 _PLATFORM_ONLY_WRITE_TABLES = (
+    "audit_logs",
+    "finance_month_close",
+    "monthly_channel_revenue_facts",
     "committed_allocation_lines",
     "committed_allocation_notes",
     "committed_allocation_unallocated",
@@ -54,14 +57,6 @@ def test_app_tenant_can_reach_non_tenant_tables():
     try:
         with engine.connect() as conn:
             conn.execute(sa.text('SET ROLE "app_tenant"'))
-            # A GUC is still set so any incidentally RLS-protected table would
-            # not fail closed; these target tables are non-tenant though.
-            conn.execute(
-                sa.text(
-                    "SELECT set_config('app.current_tenant_id', :a, false)"
-                ),
-                {"a": "00000000-0000-0000-0000-000000000001"},
-            )
             for table in _NON_TENANT_READ_TABLES:
                 # count(*) on possibly-empty tables: success == no
                 # permission-denied; a privilege gap would raise here.
@@ -114,6 +109,29 @@ def test_app_tenant_is_denied_dml_on_committed_allocation_children():
                 assert granted is False, (
                     f"app_tenant unexpectedly holds INSERT on {table}; "
                     "committed-allocation child writes must stay platform-only"
+            )
+    finally:
+        engine.dispose()
+
+
+def test_app_tenant_is_denied_dml_on_tenant_platform_only_write_tables():
+    """Verify app_tenant cannot mutate system-owned finance/audit write tables."""
+    url = require_postgres_url()
+    _upgrade(url)
+    engine = sa.create_engine(url)
+    try:
+        with engine.connect() as conn:
+            for table in _PLATFORM_ONLY_WRITE_TABLES[:3]:
+                granted = conn.execute(
+                    sa.text(
+                        "SELECT has_table_privilege("
+                        "'app_tenant', :table, 'INSERT')"
+                    ),
+                    {"table": table},
+                ).scalar()
+                assert granted is False, (
+                    f"app_tenant unexpectedly holds INSERT on {table}; "
+                    "system-owned finance/audit writes must stay platform-only"
                 )
     finally:
         engine.dispose()
@@ -172,5 +190,28 @@ def test_app_tenant_is_denied_dml_on_platform_catalog():
             assert select_granted is True, (
                 "app_tenant lost broad SELECT on the permissions catalog"
             )
+    finally:
+        engine.dispose()
+
+
+def test_app_platform_has_write_grant_on_system_owned_write_tables():
+    """Verify app_platform retains INSERT on audit/finance system-owned tables."""
+    url = require_postgres_url()
+    _upgrade(url)
+    engine = sa.create_engine(url)
+    try:
+        with engine.connect() as conn:
+            for table in _PLATFORM_ONLY_WRITE_TABLES[:3]:
+                granted = conn.execute(
+                    sa.text(
+                        "SELECT has_table_privilege("
+                        "'app_platform', :table, 'INSERT')"
+                    ),
+                    {"table": table},
+                ).scalar()
+                assert granted is True, (
+                    f"app_platform lost INSERT on {table}; "
+                    "system-owned finance/audit writes need the platform lane"
+                )
     finally:
         engine.dispose()

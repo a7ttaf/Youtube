@@ -24,8 +24,9 @@ section is authoritative where it conflicts with the planning text further down.
   loud migration failure, not a silent leak.
 - **Isolation policies**: created by migration `20260608_0001` on all 25 tables,
   each named `<table>_tenant_isolation`, with `USING`/`WITH CHECK` on
-  `tenant_id = current_setting('app.current_tenant_id')::uuid`. `current_setting`
-  omits `missing_ok`, so an unset GUC raises and the policy fails closed.
+  `tenant_id = app_current_tenant_id()`. The helper returns `NULL` when no
+  trusted tenant is registered for the current backend, so the policy fails
+  closed without trusting tenant-settable session state.
 - **Single-pool `SET LOCAL ROLE` realization (not dual-pool)**: there is one
   connection pool. The lane is selected per session, not per pool. The platform
   lane uses `build_platform_session_factory` in `db/session.py`, which tags the
@@ -37,11 +38,11 @@ section is authoritative where it conflicts with the planning text further down.
   `_apply_tenant_isolation` in `db/session.py` is a **no-op on SQLite** (it
   returns unless `dialect.name == "postgresql"`) and a **no-op on tenant-lane
   sessions opened without a resolved tenant** (no tenant in the
-  `tenancy.context` contextvar => no `SET LOCAL ROLE`, no GUC). This keeps the
-  pre-S2.4 non-tenant paths and the SQLite test suite unaffected. The platform
-  lane always issues `SET LOCAL ROLE "app_platform"`. The tenant id is applied
-  with parameterized `set_config(..., true)` (transaction-scoped), never string
-  interpolation.
+  `tenancy.context` contextvar => no trusted tenant row, no tenant-specific
+  privileges). The platform lane always issues `SET LOCAL ROLE "app_platform"`
+  and populates the trusted tenant context through backend-owned helper
+  functions before switching to `app_tenant` when needed. This keeps the
+  pre-S2.4 non-tenant paths and the SQLite test suite unaffected.
 - **Runtime login membership requirement**: the application connects as a
   dedicated login role that must be granted membership in the lane roles with
   `GRANT app_tenant TO <login> WITH INHERIT FALSE, SET TRUE` and
@@ -64,13 +65,16 @@ The two app roles receive a **least-privilege** grant surface, not blanket CRUD:
   `GRANT USAGE, SELECT ON ALL SEQUENCES`. Reads are harmless under RLS and the
   app lane needs to read non-tenant platform catalogs, so SELECT is granted
   broadly.
-- **DML (INSERT/UPDATE/DELETE)** is granted on **only** two sets of tables:
+- **DML (INSERT/UPDATE/DELETE)** is granted on **only** three sets of tables:
   1. the **25 tenant-scoped tables** (per-table CRUD, isolated by RLS), and
   2. the enumerated **`NON_TENANT_WRITE_TABLES`** the app writes at runtime that
      carry no `tenant_id`: `currency_exchange_rates`,
-     `committed_allocation_lines`, `committed_allocation_notes`,
-     `committed_allocation_unallocated` (constant in migration
-     `20260608_0001`).
+   3. the platform-only operational tables `audit_logs`,
+      `finance_month_close`, and `monthly_channel_revenue_facts`, plus the
+      committed-allocation child evidence tables
+      `committed_allocation_lines`, `committed_allocation_notes`,
+      `committed_allocation_unallocated` (all constant in migration
+      `20260608_0001`).
 
 App DML therefore **cannot touch platform catalogs** (`permissions`, `roles`,
 `role_permission_assignments`, `currencies`, ...): those get SELECT only. Tenant
@@ -87,9 +91,9 @@ RLS policy) but that the app lane reads include:
 Under the restricted runtime login (non-owner/non-superuser), `app_tenant` only
 holds what the migration grants it. Without broad SELECT those endpoints would
 fail with `permission denied` once RLS is enforced. If a future endpoint writes
-another non-tenant table, add it to `NON_TENANT_WRITE_TABLES` (otherwise it
-`permission denies` under the restricted login — covered by
-`tests/tenancy/test_rls_restricted_login.py`). Runtime authorization remains the
+another non-tenant table, add it to the relevant platform-write allowlist
+otherwise it `permission denies` under the restricted login — covered by
+`tests/tenancy/test_rls_restricted_login.py`. Runtime authorization remains the
 **application permission system**, not table grants.
 
 ### Resolver runs on the platform lane
@@ -189,13 +193,13 @@ ALTER TABLE monthly_channel_revenue_facts ENABLE ROW LEVEL SECURITY;
 
 CREATE POLICY monthly_channel_revenue_facts_tenant_isolation
     ON monthly_channel_revenue_facts
-    USING       (tenant_id = current_setting('app.current_tenant_id')::uuid)
-    WITH CHECK  (tenant_id = current_setting('app.current_tenant_id')::uuid);
+    USING       (tenant_id = app_current_tenant_id())
+    WITH CHECK  (tenant_id = app_current_tenant_id());
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON monthly_channel_revenue_facts TO app_tenant;
 ```
 
-The same policy template applies to all tenant-scoped tables. Migration files generate them with a helper function. `current_setting('app.current_tenant_id')` intentionally omits `missing_ok`; if the GUC is not set, Postgres raises an error and the policy fails closed instead of leaking rows.
+The same policy template applies to all tenant-scoped tables. Migration files generate them with a helper function. `app_current_tenant_id()` returns `NULL` when the backend has no trusted tenant context row, so the policy fails closed instead of leaking rows.
 
 ### The two Postgres roles
 
@@ -221,15 +225,14 @@ PrincipalResolver dependency        (validates user belongs to tenant)
     │
     ▼
 Session opened on `app_tenant` ────▶ executes
-    `SET LOCAL app.current_tenant_id = '<uuid>'`
-    once per transaction
+    backend-owned trusted tenant context
     │
     ▼
 Router → repository → ORM
     │
     ▼
 Postgres applies RLS using
-    `app.current_tenant_id` GUC
+    `app_current_tenant_id()`
 ```
 
 ### Tenant resolver
@@ -255,9 +258,9 @@ class TenantResolverMiddleware(BaseHTTPMiddleware):
 
 Tenant resolution is cached in Redis with a short TTL keyed by `slug`.
 
-### Setting the GUC
+### Setting the trusted tenant context
 
-A SQLAlchemy transaction-begin hook issues `SET LOCAL app.current_tenant_id = ...` once per transaction, using the tenant from the `contextvars.ContextVar`. Do **not** use `before_cursor_execute`: it is statement-scoped and would re-run a transaction-scoped setting on every query. Always use `SET LOCAL`, not plain `SET`: `SET LOCAL` is cleared automatically on commit or rollback, while plain `SET` can persist tenant context across pooled connections and route later requests to the wrong tenant.
+A SQLAlchemy transaction-begin hook populates the backend-owned tenant context once per transaction, using the tenant from the `contextvars.ContextVar`. Do **not** use `before_cursor_execute`: it is statement-scoped and would re-run a transaction-scoped setting on every query. The trusted setter runs while `app_platform` is active, then the transaction switches to `app_tenant` for normal tenant-scoped work. The context row is cleared automatically when the pooled connection has no tenant in context, so later requests do not inherit a previous tenant.
 
 ---
 
@@ -330,7 +333,7 @@ The index migration is reversible in isolation with `DROP INDEX CONCURRENTLY`. O
 1. Add `backend/ums_smart_revenue/tenancy/` package (`models.py`, `resolver.py`, `context.py`, `repository.py`).
 2. Extend `UserPrincipal` with `tenant_id`.
 3. Insert `TenantResolverMiddleware` into the app factory.
-4. Add the transaction-begin `SET LOCAL app.current_tenant_id` hook in `db/session.py`.
+4. Add the transaction-begin trusted-context hook in `db/session.py`.
 5. Update every repository to assert `tenant_id == principal.tenant_id` on writes (defense-in-depth even though RLS will block).
 6. Add `tests/tenancy/test_isolation.py` — a full matrix proving tenant A cannot access tenant B via any endpoint.
 

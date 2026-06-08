@@ -5,11 +5,12 @@ Revises: 20260606_0001
 Create Date: 2026-06-08
 
 Postgres-only in effect (SQLite has no RLS/roles; the whole body is guarded and
-no-ops there). Creates the two roles idempotently, enables RLS + an isolation
-policy on every tenant-scoped table, and grants the tenant CRUD surface to
-app_tenant. A drift guard fails the migration if the live set of tenant_id
-tables does not equal db.rls.TENANT_SCOPED_TABLES, so a new tenant table cannot
-ship unprotected.
+no-ops there). Creates the two roles idempotently, installs the backend-owned
+tenant-context helpers, enables RLS + an isolation policy on every
+tenant-scoped table, and grants the least-privilege tenant/platform DML
+surface. A drift guard fails the migration if the live set of tenant_id tables
+does not equal db.rls.TENANT_SCOPED_TABLES, so a new tenant table cannot ship
+unprotected.
 
 Deploy precondition: the migration/bootstrap DB user needs role-management
 privilege (CREATEROLE or membership-admin on these roles), OR a DBA pre-creates
@@ -28,6 +29,9 @@ from alembic import op
 from ums_smart_revenue.db.rls import (
     APP_PLATFORM_ROLE,
     APP_TENANT_ROLE,
+    TENANT_CONTEXT_GETTER,
+    TENANT_CONTEXT_SETTER,
+    TENANT_CONTEXT_TABLE,
     TENANT_SCOPED_TABLES,
     discover_tenant_tables_sql,
     tenant_rls_policy_name,
@@ -45,6 +49,11 @@ depends_on = None
 # but only app_platform may write them, and the commit service elevates into the
 # privileged lane just for that short child-row insert block.
 NON_TENANT_WRITE_TABLES: tuple[str, ...] = ("currency_exchange_rates",)
+TENANT_PLATFORM_ONLY_WRITE_TABLES: tuple[str, ...] = (
+    "audit_logs",
+    "finance_month_close",
+    "monthly_channel_revenue_facts",
+)
 PLATFORM_ONLY_WRITE_TABLES: tuple[str, ...] = (
     "committed_allocation_lines",
     "committed_allocation_notes",
@@ -93,6 +102,83 @@ def _assert_no_drift(bind) -> None:
         )
 
 
+def _create_tenant_context_helpers(bind) -> None:
+    """Create the backend-owned tenant-context table and helper functions."""
+    bind.execute(
+        sa.text(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TENANT_CONTEXT_TABLE} (
+                backend_pid integer PRIMARY KEY,
+                tenant_id uuid NOT NULL,
+                updated_at timestamptz NOT NULL DEFAULT now()
+            )
+            """
+        )
+    )
+    bind.execute(
+        sa.text(
+            f"""
+            CREATE OR REPLACE FUNCTION {TENANT_CONTEXT_SETTER}(tenant uuid)
+            RETURNS void
+            LANGUAGE sql
+            SECURITY DEFINER
+            SET search_path = pg_catalog, public
+            AS $$
+                INSERT INTO {TENANT_CONTEXT_TABLE} (
+                    backend_pid, tenant_id, updated_at
+                )
+                VALUES (pg_backend_pid(), tenant, now())
+                ON CONFLICT (backend_pid) DO UPDATE
+                SET tenant_id = EXCLUDED.tenant_id,
+                    updated_at = EXCLUDED.updated_at
+            $$;
+            """
+        )
+    )
+    bind.execute(
+        sa.text(
+            f"""
+            CREATE OR REPLACE FUNCTION {TENANT_CONTEXT_GETTER}()
+            RETURNS uuid
+            LANGUAGE sql
+            SECURITY DEFINER
+            STABLE
+            SET search_path = pg_catalog, public
+            AS $$
+                SELECT tenant_id
+                FROM {TENANT_CONTEXT_TABLE}
+                WHERE backend_pid = pg_backend_pid()
+            $$;
+            """
+        )
+    )
+    bind.execute(
+        sa.text(
+            f'REVOKE ALL ON FUNCTION {TENANT_CONTEXT_SETTER}(uuid) FROM PUBLIC'
+        )
+    )
+    bind.execute(
+        sa.text(
+            f'REVOKE ALL ON FUNCTION {TENANT_CONTEXT_GETTER}() FROM PUBLIC'
+        )
+    )
+    bind.execute(
+        sa.text(
+            f'GRANT EXECUTE ON FUNCTION {TENANT_CONTEXT_SETTER}(uuid) TO "{APP_PLATFORM_ROLE}"'
+        )
+    )
+    bind.execute(
+        sa.text(
+            f'GRANT EXECUTE ON FUNCTION {TENANT_CONTEXT_GETTER}() TO "{APP_TENANT_ROLE}"'
+        )
+    )
+    bind.execute(
+        sa.text(
+            f'GRANT EXECUTE ON FUNCTION {TENANT_CONTEXT_GETTER}() TO "{APP_PLATFORM_ROLE}"'
+        )
+    )
+
+
 def upgrade() -> None:
     """Create roles and enable tenant-isolation RLS on all tenant tables."""
     bind = op.get_bind()
@@ -101,6 +187,7 @@ def upgrade() -> None:
     _assert_no_drift(bind)
     _create_role(bind, APP_TENANT_ROLE)
     _create_role(bind, APP_PLATFORM_ROLE)
+    _create_tenant_context_helpers(bind)
     bind.execute(
         sa.text(f'GRANT USAGE ON SCHEMA public TO "{APP_TENANT_ROLE}"')
     )
@@ -118,17 +205,19 @@ def upgrade() -> None:
         bind.execute(
             sa.text(
                 f"CREATE POLICY {policy} ON {table} USING "
-                "(tenant_id = current_setting('app.current_tenant_id')::uuid) "
+                f"(tenant_id = {TENANT_CONTEXT_GETTER}()) "
                 "WITH CHECK "
-                "(tenant_id = current_setting('app.current_tenant_id')::uuid)"
+                f"(tenant_id = {TENANT_CONTEXT_GETTER}())"
             )
         )
-        bind.execute(
-            sa.text(
-                f"GRANT SELECT, INSERT, UPDATE, DELETE ON {table} "
-                f'TO "{APP_TENANT_ROLE}"'
+        bind.execute(sa.text(f"GRANT SELECT ON {table} TO \"{APP_TENANT_ROLE}\""))
+        if table not in TENANT_PLATFORM_ONLY_WRITE_TABLES:
+            bind.execute(
+                sa.text(
+                    f"GRANT INSERT, UPDATE, DELETE ON {table} "
+                    f'TO "{APP_TENANT_ROLE}"'
+                )
             )
-        )
         bind.execute(
             sa.text(
                 f"GRANT SELECT, INSERT, UPDATE, DELETE ON {table} "
@@ -144,8 +233,9 @@ def upgrade() -> None:
     #   committed_allocation_* evidence tables are writable only from the
     #   privileged platform lane.
     # Database/ORM: SELECT on all public tables/sequences; DML on
-    #   NON_TENANT_WRITE_TABLES for both app roles and PLATFORM_ONLY_WRITE_TABLES
-    #   for app_platform only.
+    #   NON_TENANT_WRITE_TABLES for both app roles, on
+    #   TENANT_PLATFORM_ONLY_WRITE_TABLES + PLATFORM_ONLY_WRITE_TABLES for
+    #   app_platform only, and on the remaining tenant tables for both roles.
     # Standards: Enumerated DML keeps DB least-privilege; role names + table list
     #   are internal constants. If a future endpoint writes another non-tenant
     #   table, add it to NON_TENANT_WRITE_TABLES (else it 'permission denies'
@@ -169,6 +259,13 @@ def upgrade() -> None:
                     f"GRANT INSERT, UPDATE, DELETE ON {table} TO \"{role}\""
                 )
             )
+    for table in TENANT_PLATFORM_ONLY_WRITE_TABLES:
+        bind.execute(
+            sa.text(
+                f"GRANT INSERT, UPDATE, DELETE ON {table} "
+                f'TO "{APP_PLATFORM_ROLE}"'
+            )
+        )
     for table in PLATFORM_ONLY_WRITE_TABLES:
         bind.execute(
             sa.text(
@@ -189,10 +286,36 @@ def downgrade() -> None:
         bind.execute(
             sa.text(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY")
         )
+    bind.execute(
+        sa.text(
+            f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_SETTER}(uuid)'
+        )
+    )
+    bind.execute(
+        sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_GETTER}()')
+    )
+    bind.execute(sa.text(f'DROP TABLE IF EXISTS {TENANT_CONTEXT_TABLE}'))
     # Blanket REVOKE mirrors the blanket GRANT in upgrade(); DROP ROLE fails
     # while dependent privileges remain, so all table/sequence/schema privs
     # must be revoked first.
     for role in (APP_TENANT_ROLE, APP_PLATFORM_ROLE):
+        # FIX: Revoke any current memberships before dropping the lane role.
+        # The deployed restricted-login model grants these roles to runtime
+        # logins, so a downgrade must clear the membership graph first.
+        member_roles = bind.execute(
+            sa.text(
+                "SELECT rolname "
+                "FROM pg_auth_members "
+                "JOIN pg_roles ON pg_roles.oid = pg_auth_members.member "
+                "WHERE pg_auth_members.roleid = ("
+                "SELECT oid FROM pg_roles WHERE rolname = :role)"
+            ),
+            {"role": role},
+        ).scalars()
+        for member_role in member_roles:
+            bind.execute(
+                sa.text(f'REVOKE "{role}" FROM "{member_role}"')
+            )
         bind.execute(
             sa.text(
                 "REVOKE ALL PRIVILEGES "

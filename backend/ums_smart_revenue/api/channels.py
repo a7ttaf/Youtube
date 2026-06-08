@@ -6,6 +6,7 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
+    current_platform_db_session,
     current_principal_from_headers,
 )
 from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
@@ -96,7 +97,7 @@ def current_audit_sink() -> InMemoryAuditSink:
 
 
 def sql_audit_sink_from_session(
-    session: Annotated[Session, Depends(current_db_session)],
+    session: Annotated[Session, Depends(current_platform_db_session)],
 ) -> SqlAlchemyAuditSink:
     return SqlAlchemyAuditSink(session)
 
