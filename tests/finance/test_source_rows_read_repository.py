@@ -171,6 +171,12 @@ def test_limit_out_of_range_raises(session):
         )
 
 
+def test_invalid_month_raises(session):
+    """Verify malformed month filters fail before the SQL query runs."""
+    with pytest.raises(SourceRowValidationError, match="month must use YYYY-MM"):
+        list_source_rows(session, tenant_id=A, month="2026-13", limit=50)
+
+
 def test_get_returns_none_for_other_tenant(session, seed_rows):
     """Verify a cross-tenant row lookup returns None instead of leaking data."""
     # An id owned by tenant B is invisible to tenant A (=> route 404).

@@ -23,6 +23,7 @@ from ums_smart_revenue.finance.source_rows_read import (
     SourceRowValidationError,
     get_source_row,
     list_source_rows,
+    normalize_source_row_month,
 )
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
@@ -73,6 +74,7 @@ def list_revenue_source_rows(
     """Return a newest-first page of tenant-scoped Google source rows."""
     _require_view_revenue(user)
     try:
+        month = normalize_source_row_month(month)
         page = list_source_rows(
             session,
             tenant_id=_tenant_uuid(user),

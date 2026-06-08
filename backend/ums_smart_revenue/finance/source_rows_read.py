@@ -5,16 +5,18 @@ into the API entry (spec §3.3: never returned in this PR for any caller).
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime
 from uuid import UUID
 
 import sqlalchemy as sa
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from ums_smart_revenue.db.source_models import GoogleRevenueSourceRowORM
 
 MAX_SOURCE_ROW_PAGE_SIZE = 100
+MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
 
 _VALID_SOURCE_SYSTEMS = frozenset(
     {"youtube_reporting", "youtube_analytics", "adsense_management"}
@@ -27,6 +29,27 @@ class SourceRowReadError(Exception):
 
 class SourceRowValidationError(SourceRowReadError):
     """Invalid filter, limit, or cursor for a source-row read."""
+
+
+# ============================================================================
+# Purpose: Normalize and validate source-row month filters once at the data-
+#   access boundary so both the API and direct repository callers fail closed
+#   before any SQL is built.
+# Database/ORM: None.
+# Standards: Typed validation; returns canonical YYYY-MM or raises a typed
+#   repository error; no DB side effects.
+# Blast Radius: Finance read input validation only.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/source_rows.py -> route boundary.
+# ============================================================================
+def normalize_source_row_month(month: str) -> str:
+    """Return a stripped YYYY-MM month or raise a typed validation error."""
+    normalized = month.strip()
+    if not MONTH_PATTERN.fullmatch(normalized):
+        raise SourceRowValidationError(
+            "month must use YYYY-MM with a calendar month from 01 to 12"
+        )
+    return normalized
 
 
 @dataclass(frozen=True)
@@ -138,6 +161,7 @@ def list_source_rows(
     limit: int,
 ) -> SourceRowPage:
     """List tenant-scoped source rows for a month, newest-first, keyset-paged."""
+    month = normalize_source_row_month(month)
     if limit < 1 or limit > MAX_SOURCE_ROW_PAGE_SIZE:
         raise SourceRowValidationError(
             f"limit must be between 1 and {MAX_SOURCE_ROW_PAGE_SIZE}"
@@ -155,6 +179,25 @@ def list_source_rows(
     # can stay index-friendly without re-reading the whole month slice.
     stmt = (
         sa.select(orm)
+        .options(
+            load_only(
+                orm.id,
+                orm.source_system,
+                orm.source_account_id,
+                orm.content_owner_id,
+                orm.youtube_channel_id,
+                orm.report_type,
+                orm.report_month,
+                orm.period_start,
+                orm.period_end,
+                orm.metric_key,
+                orm.value_kind,
+                orm.amount_native,
+                orm.currency_code,
+                orm.source_report_id,
+                orm.ingested_at,
+            )
+        )
         .where(orm.tenant_id == tenant_id, orm.report_month == month)
         .order_by(orm.ingested_at.desc(), orm.id.desc())
     )
@@ -188,6 +231,26 @@ def get_source_row(
         raise SourceRowValidationError("id must be a valid UUID") from exc
     orm = GoogleRevenueSourceRowORM
     row = session.scalars(
-        sa.select(orm).where(orm.id == parsed, orm.tenant_id == tenant_id)
+        sa.select(orm)
+        .options(
+            load_only(
+                orm.id,
+                orm.source_system,
+                orm.source_account_id,
+                orm.content_owner_id,
+                orm.youtube_channel_id,
+                orm.report_type,
+                orm.report_month,
+                orm.period_start,
+                orm.period_end,
+                orm.metric_key,
+                orm.value_kind,
+                orm.amount_native,
+                orm.currency_code,
+                orm.source_report_id,
+                orm.ingested_at,
+            )
+        )
+        .where(orm.id == parsed, orm.tenant_id == tenant_id)
     ).first()
     return _to_entry(row) if row is not None else None

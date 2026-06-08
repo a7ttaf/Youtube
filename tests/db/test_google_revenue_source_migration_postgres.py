@@ -117,8 +117,17 @@ def test_indexes_present_on_google_revenue_source_rows(
     inspector = inspect(fresh_engine)
     indexes = {i["name"] for i in inspector.get_indexes("google_revenue_source_rows")}
     assert "ix_google_revenue_source_rows_tenant_month_source" in indexes
-    assert "ix_google_revenue_source_rows_tenant_month_ingested_id" in indexes
     assert "ix_google_revenue_source_rows_tenant_channel_month" in indexes
+
+
+def test_cursor_index_added_in_followup_migration(
+    alembic_config: Config, fresh_engine: object
+) -> None:
+    """Test that the cursor index arrives in the forward migration."""
+    command.upgrade(alembic_config, "20260608_0002")
+    inspector = inspect(fresh_engine)
+    indexes = {i["name"] for i in inspector.get_indexes("google_revenue_source_rows")}
+    assert "ix_google_revenue_source_rows_tenant_month_ingested_id" in indexes
 
 
 def test_partial_channel_month_index_has_where_clause(

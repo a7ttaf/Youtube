@@ -191,3 +191,15 @@ def test_half_cursor_is_422(tmp_path):
         headers=auth_headers("finance_viewer"),
     )
     assert resp.status_code == 422
+
+
+def test_invalid_month_is_422(tmp_path):
+    """Malformed month input is rejected before the source-row query runs."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    resp = client.get(
+        "/revenue/source-rows?month=2026-13",
+        headers=auth_headers("finance_viewer"),
+    )
+    assert resp.status_code == 422

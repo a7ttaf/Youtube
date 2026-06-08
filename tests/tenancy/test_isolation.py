@@ -3,9 +3,10 @@
 Proves the database boundary holds even when application-level tenant filters
 are deliberately bypassed: bare ``SELECT``s with no ``WHERE tenant_id`` are
 filtered by RLS, cross-tenant writes are rejected by ``WITH CHECK``, an unset
-GUC fails closed (errors, not empty), and the ``app_platform`` bypass lane can
-read across tenants. One representative table (``org_units``) is sufficient —
-the migration test already proves every tenant table carries the policy.
+GUC fails closed (errors, not empty), and the ``app_platform`` lane does not
+gain a hidden tenant-table bypass. One representative table (``org_units``) is
+sufficient — the migration test already proves every tenant table carries the
+policy.
 """
 
 import pytest
@@ -132,8 +133,8 @@ def test_missing_guc_fails_closed():
         engine.dispose()
 
 
-def test_app_platform_reads_across_tenants():
-    """Verify app_platform bypasses RLS and can read across tenants."""
+def test_app_platform_does_not_bypass_tenant_rls():
+    """Verify app_platform still needs tenant context for tenant-scoped tables."""
     url = require_postgres_url()
     _upgrade(url)
     engine = sa.create_engine(url)
@@ -141,10 +142,7 @@ def test_app_platform_reads_across_tenants():
         _seed(engine)
         with engine.connect() as conn:
             conn.execute(sa.text('SET ROLE "app_platform"'))
-            # BYPASSRLS: no GUC needed; can see all tenants.
-            total = conn.execute(
-                sa.text("SELECT COUNT(*) FROM org_units")
-            ).scalar()
-            assert total >= 2
+            with pytest.raises(Exception):
+                conn.execute(sa.text("SELECT COUNT(*) FROM org_units")).scalar()
     finally:
         engine.dispose()

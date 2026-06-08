@@ -33,13 +33,12 @@ def test_rls_migration_creates_roles_policies_and_grants():
             )
             assert APP_TENANT_ROLE in roles
             assert APP_PLATFORM_ROLE in roles
-            # app_platform bypasses RLS; app_tenant does not.
             bypass = dict(
                 conn.execute(
                     sa.text("SELECT rolname, rolbypassrls FROM pg_roles")
                 ).all()
             )
-            assert bypass[APP_PLATFORM_ROLE] is True
+            assert bypass[APP_PLATFORM_ROLE] is False
             assert bypass[APP_TENANT_ROLE] is False
             # Every allowlisted table has RLS enabled + the isolation policy.
             for table in TENANT_SCOPED_TABLES:

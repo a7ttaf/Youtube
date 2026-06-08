@@ -52,17 +52,30 @@ PLATFORM_ONLY_WRITE_TABLES: tuple[str, ...] = (
 )
 
 
-def _create_role(bind, role: str, *, bypassrls: bool) -> None:
-    """Create a NOLOGIN role idempotently; set BYPASSRLS as requested."""
+def _create_role(bind, role: str) -> None:
+    """Create a NOLOGIN role idempotently without special RLS bypass."""
     exists = bind.execute(
         sa.text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": role}
     ).first()
-    bypass = "BYPASSRLS" if bypassrls else "NOBYPASSRLS"
     if exists is None:
         # Role names are internal constants, not user input.
-        bind.execute(sa.text(f'CREATE ROLE "{role}" NOLOGIN {bypass}'))
-    else:
-        bind.execute(sa.text(f'ALTER ROLE "{role}" {bypass}'))
+        bind.execute(sa.text(f'CREATE ROLE "{role}" NOLOGIN'))
+        return
+    bypass = bind.execute(
+        sa.text("SELECT rolbypassrls FROM pg_roles WHERE rolname = :r"),
+        {"r": role},
+    ).scalar_one()
+    if not bypass:
+        return
+    is_superuser = bind.execute(
+        sa.text("SELECT rolsuper FROM pg_roles WHERE rolname = current_user")
+    ).scalar_one()
+    if not is_superuser:
+        raise RuntimeError(
+            f"Role {role} already has BYPASSRLS and the migrator is not a "
+            "superuser; clear the attribute before upgrading."
+        )
+    bind.execute(sa.text(f'ALTER ROLE "{role}" NOBYPASSRLS'))
 
 
 def _assert_no_drift(bind) -> None:
@@ -86,8 +99,8 @@ def upgrade() -> None:
     if bind.dialect.name != "postgresql":
         return
     _assert_no_drift(bind)
-    _create_role(bind, APP_TENANT_ROLE, bypassrls=False)
-    _create_role(bind, APP_PLATFORM_ROLE, bypassrls=True)
+    _create_role(bind, APP_TENANT_ROLE)
+    _create_role(bind, APP_PLATFORM_ROLE)
     bind.execute(
         sa.text(f'GRANT USAGE ON SCHEMA public TO "{APP_TENANT_ROLE}"')
     )
