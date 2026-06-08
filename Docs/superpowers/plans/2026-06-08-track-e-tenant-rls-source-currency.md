@@ -21,8 +21,13 @@
 - Validation commands: `python -m pytest ...` (never bare `pytest`), `python -m ruff check backend tests scripts`, `git diff --check`.
 - **Keep ALL touched Python lines ≤ 100 chars** (DeepSource FLK-E501 enforces 100, not 120).
 - Do **not** use `git checkout`/`restore`/`reset` on files.
+- **Shell is PowerShell 7+ on Windows.** Commands below use PowerShell syntax.
+  Env vars: `$env:NAME = "value"` (not `export`). Chain with `;` or `&&`.
+  Multi-line Python is passed via a temp `.py` file run with `python file.py`,
+  **not** a bash `<<'PY'` heredoc (heredocs are not PowerShell).
 - Postgres-tier tests need `UMS_TEST_DATABASE_URL` → disposable container `ums-mig-pg-test`:
-  `postgresql+psycopg://postgres:ums@localhost:55432/test_ums`.
+  set it with
+  `$env:UMS_TEST_DATABASE_URL = "postgresql+psycopg://postgres:ums@localhost:55432/test_ums"`.
 - Do **not** push, open a PR, or merge. Mahmoud handles that.
 - **Re-confirm every line number against current code before editing** (read first); anchors below were captured 2026-06-08 but may drift.
 
@@ -59,35 +64,35 @@
 
 The allowlist is the authoritative list of every table carrying a `tenant_id` column. Build it from the live schema (do not trust memory).
 
-- [ ] **Step 1: Capture the real tenant-table set.** Run this to enumerate every ORM table with a `tenant_id` column:
+- [ ] **Step 1: Capture the real tenant-table set.** Write a temp script `_scan_tenant_tables.py` at the repo root (PowerShell has no bash heredoc), then run and delete it:
 
-```bash
-python -c "from ums_smart_revenue.db import metadata_all as m" 2>/dev/null; \
-python - <<'PY'
-import importlib, pkgutil
+```python
+# _scan_tenant_tables.py
+import importlib
+import pkgutil
+
 import ums_smart_revenue.db as db
+
 for mod in pkgutil.iter_modules(db.__path__):
     if mod.name.endswith("_models"):
         importlib.import_module(f"ums_smart_revenue.db.{mod.name}")
-from sqlalchemy.orm import DeclarativeBase
-from ums_smart_revenue.db import tenant_models, finance_models, source_models
-# Collect every mapped table that has a tenant_id column.
+
+from sqlalchemy.orm import DeclarativeBase  # noqa: E402
+
 seen = set()
 for base in DeclarativeBase.__subclasses__():
-    for table in getattr(base, "metadata").tables.values():
+    for table in base.metadata.tables.values():
         if "tenant_id" in table.columns and table.name != "tenants":
             seen.add(table.name)
 print(sorted(seen))
-PY
 ```
 
-If the import-discovery above is awkward in this codebase, instead grep for `tenant_id` column declarations:
-
-```bash
-python -m grep_tenant_tables 2>/dev/null || true
+```powershell
+python _scan_tenant_tables.py
+Remove-Item _scan_tenant_tables.py
 ```
 
-Then confirm by reading each `*_models.py` under `backend/ums_smart_revenue/db/` and listing every `__tablename__` whose class declares a `tenant_id` mapped column. Write the exact sorted list down — it becomes `TENANT_SCOPED_TABLES` below. Expected to include at least: the 18 from migration `20260517_0001` (`users`, `access_scopes`, `user_role_assignments`, `user_permission_grants`, `audit_logs`, `api_connector_credentials`, `org_units`, `youtube_channels`, `channel_groups`, `channel_group_members`, `finance_month_close`, `monthly_channel_revenue_facts`, `revenue_manual_overrides`, `adsense_payments`, `bank_reconciliation_entries`, `raw_report_files`, `number_explanations`, `export_jobs`) **plus** every later tenant table: `google_revenue_source_rows`, `channel_account_map`, the committed-allocation tables (e.g. `committed_allocation_runs` and its child tables), and the deduction-component tables. `currencies` is platform-wide and is **excluded**.
+If that import-discovery is awkward (e.g. multiple declarative bases not all imported), instead confirm by reading each `*_models.py` under `backend/ums_smart_revenue/db/` and listing every `__tablename__` whose class declares a `tenant_id` mapped column (use the Grep tool for `tenant_id`). Write the exact sorted list down — it becomes `TENANT_SCOPED_TABLES` below. Expected to include at least: the 18 from migration `20260517_0001` (`users`, `access_scopes`, `user_role_assignments`, `user_permission_grants`, `audit_logs`, `api_connector_credentials`, `org_units`, `youtube_channels`, `channel_groups`, `channel_group_members`, `finance_month_close`, `monthly_channel_revenue_facts`, `revenue_manual_overrides`, `adsense_payments`, `bank_reconciliation_entries`, `raw_report_files`, `number_explanations`, `export_jobs`) **plus** every later tenant table: `google_revenue_source_rows`, `channel_account_map`, the committed-allocation tables (e.g. `committed_allocation_runs` and its child tables), and the deduction-component tables. `currencies` is platform-wide and is **excluded**.
 
 - [ ] **Step 2: Write the failing test** (`tests/db/test_rls_helpers.py`):
 
@@ -267,7 +272,7 @@ def test_rls_migration_creates_roles_policies_and_grants():
                 assert enabled is True, f"{table} RLS not enabled"
                 policy = conn.execute(
                     sa.text(
-                        "SELECT polname FROM pg_policies "
+                        "SELECT policyname FROM pg_policies "
                         "WHERE tablename = :t AND policyname = :p"
                     ).bindparams(t=table, p=tenant_rls_policy_name(table))
                 ).first()
@@ -276,12 +281,12 @@ def test_rls_migration_creates_roles_policies_and_grants():
         engine.dispose()
 ```
 
-> Note: `pg_policies` columns are `schemaname, tablename, policyname, ...`; adjust the query to `SELECT policyname FROM pg_policies WHERE tablename = :t AND policyname = :p`. Verify column names against the target PG version during implementation.
+> `pg_policies` columns are `schemaname, tablename, policyname, ...` — the query uses `policyname` (there is no `polname` in the `pg_policies` view; `polname` is on the underlying `pg_policy` catalog).
 
 - [ ] **Step 3: Run to verify it fails.**
 
 ```bash
-export UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/test_ums
+$env:UMS_TEST_DATABASE_URL = "postgresql+psycopg://postgres:ums@localhost:55432/test_ums"
 python -m pytest tests/db/test_tenant_rls_migration.py -q
 ```
 
@@ -605,23 +610,26 @@ def _apply_tenant_isolation(session, transaction, connection):
     tenant = get_current_tenant()
     if tenant is None:
         return
+    # ROLE is an identifier (cannot be a bind param) but is an internal
+    # constant, never user input. The tenant id IS data -> set via parameterized
+    # set_config (is_local=true => transaction-scoped, same lifetime as SET LOCAL).
     connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_TENANT_ROLE}"')
     connection.exec_driver_sql(
-        f"SET LOCAL {TENANT_GUC} = '%s'" % str(tenant.id)
+        "SELECT set_config(%s, %s, true)", (TENANT_GUC, str(tenant.id))
     )
 ```
 
-> The tenant id is a `UUID` (validated upstream), so the f-string is safe; if you prefer, use `connection.exec_driver_sql("SET LOCAL app.current_tenant_id = %s", (str(tenant.id),))` — confirm the psycopg paramstyle accepts `SET LOCAL ... = %s` (it does for `exec_driver_sql` with a positional tuple). Use whichever the driver accepts cleanly; keep the UUID stringified.
+> Postgres `SET LOCAL <name> = <value>` does **not** accept bind parameters (the value must be a literal/identifier). `set_config(setting, value, is_local)` is the function form and **does** take parameters, so the tenant id flows as data, never string-interpolated SQL. `is_local=true` matches `SET LOCAL` (cleared on commit/rollback). The `SET LOCAL ROLE` statement keeps the constant role name (identifiers cannot be bound).
 
 - [ ] **Step 4: Run to verify passes.** SQLite test (no DB needed), then the Postgres-tier tests with the container up:
 
 ```bash
 python -m pytest tests/db/test_session_tenant_hook.py::test_sqlite_session_issues_no_set_statements -q
-export UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/test_ums
+$env:UMS_TEST_DATABASE_URL = "postgresql+psycopg://postgres:ums@localhost:55432/test_ums"
 python -m pytest tests/db/test_session_tenant_hook.py -q
 ```
 
-Both → PASS. (The Postgres tests require Task 2's migration to have created the roles; run `cd backend && python -m alembic -x url=$UMS_TEST_DATABASE_URL upgrade head` first if the test DB is fresh, or rely on the migration test having run.)
+Both → PASS. (The Postgres tests require Task 2's migration to have created the roles; if the test DB is fresh, run the migration test first — `python -m pytest tests/db/test_tenant_rls_migration.py -q` — which upgrades the DB to head via Alembic `command.upgrade`, or rely on it having run earlier in the suite.)
 
 - [ ] **Step 5: Guard against import cycles + lint.** Confirm `python -c "import ums_smart_revenue.db.session"` imports cleanly (the `get_current_tenant` import is lazy inside the hook to avoid a cycle). Then:
 
@@ -1163,8 +1171,8 @@ from ums_smart_revenue.api.dependencies import (
 )
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
-from ums_smart_revenue.authz import has_permission  # confirm import path
-from ums_smart_revenue.auth.scopes import AccessScope  # confirm import path
+from ums_smart_revenue.auth.policy import has_permission
+from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.finance.source_rows_read import (
     MAX_SOURCE_ROW_PAGE_SIZE,
     SourceRowValidationError,
@@ -1178,7 +1186,7 @@ router = APIRouter(prefix="/revenue", tags=["revenue"])
 
 def _require_view_revenue(user: UserPrincipal) -> None:
     """Raise 403 unless the principal can view revenue (global scope)."""
-    if not has_permission(user, Permission.VIEW_REVENUE, AccessScope.global_()):
+    if not has_permission(user, Permission.VIEW_REVENUE, AccessScope.global_scope()):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail=f"Missing permission: {Permission.VIEW_REVENUE.value}",
@@ -1251,7 +1259,7 @@ def get_revenue_source_row(
     return entry.to_api()
 ```
 
-> Confirm the exact import paths for `has_permission`, `AccessScope`, `current_db_session`, `current_principal_from_headers`, and `UMS_TENANT_ID` against the live tree (anchors: `api/revenue.py` uses `_require_permission` + `has_permission`; `tenancy/constants.py` holds `UMS_TENANT_ID`). If the codebase's revenue reads use a scope narrower than global, mirror that scope here; otherwise global read is correct for a tenant-wide month listing.
+> Import paths verified against live tree (2026-06-08): `has_permission` in `ums_smart_revenue.auth.policy`; `AccessScope.global_scope()` in `ums_smart_revenue.auth.scopes`; `UMS_TENANT_ID` in `tenancy/constants.py`. Confirm `current_db_session` / `current_principal_from_headers` import locations in `api/dependencies.py`. If the codebase's revenue reads use a scope narrower than global, mirror that scope here; otherwise global read is correct for a tenant-wide month listing.
 
 - [ ] **Step 4: Register the router in `app.py`.** Add the import near the other `api.*` imports and `_app.include_router(source_rows_router)` in `create_app`:
 
@@ -1313,7 +1321,12 @@ def test_app_tenant_cannot_read_other_tenant_rows():
             # ... seed one org_units row for A and one for B ...
         with engine.connect() as conn:
             conn.execute(sa.text('SET ROLE "app_tenant"'))
-            conn.execute(sa.text("SET app.current_tenant_id = :a"), {"a": A})
+            # set_config(name, value, is_local=false) -> session-scoped GUC;
+            # parameterized so the tenant id flows as data, not literal SQL.
+            conn.execute(
+                sa.text("SELECT set_config('app.current_tenant_id', :a, false)"),
+                {"a": A},
+            )
             # Bare select, NO WHERE tenant_id — RLS must filter to A only.
             rows = conn.execute(sa.text("SELECT tenant_id FROM org_units")).scalars().all()
             assert all(str(t) == A for t in rows)
@@ -1328,7 +1341,10 @@ def test_with_check_blocks_cross_tenant_insert():
     try:
         with engine.connect() as conn:
             conn.execute(sa.text('SET ROLE "app_tenant"'))
-            conn.execute(sa.text("SET app.current_tenant_id = :a"), {"a": A})
+            conn.execute(
+                sa.text("SELECT set_config('app.current_tenant_id', :a, false)"),
+                {"a": A},
+            )
             with pytest.raises(Exception):
                 # Inserting a B-owned row while GUC=A violates WITH CHECK.
                 conn.execute(sa.text(
@@ -1372,7 +1388,7 @@ def test_app_platform_reads_across_tenants():
 - [ ] **Step 2: Run to verify (then implement-fix as needed).**
 
 ```bash
-export UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/test_ums
+$env:UMS_TEST_DATABASE_URL = "postgresql+psycopg://postgres:ums@localhost:55432/test_ums"
 python -m pytest tests/tenancy/test_isolation.py -q
 ```
 
@@ -1412,7 +1428,7 @@ git diff --check
 ```bash
 python -m ruff check backend tests scripts
 git diff --check
-export UMS_TEST_DATABASE_URL=postgresql+psycopg://postgres:ums@localhost:55432/test_ums
+$env:UMS_TEST_DATABASE_URL = "postgresql+psycopg://postgres:ums@localhost:55432/test_ums"
 python -m pytest -q
 ```
 
