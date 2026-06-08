@@ -118,6 +118,14 @@ def current_db_session() -> Session:
     )
 
 
+def current_platform_db_session() -> Session:
+    """Fail closed until the app factory wires the privileged platform session."""
+    raise HTTPException(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        detail="platform database session not configured",
+    )
+
+
 def current_trusted_gateway_identity(
     x_user_id: Annotated[str | None, Header()] = None,
     x_ums_trusted_gateway_token: Annotated[str | None, Header()] = None,

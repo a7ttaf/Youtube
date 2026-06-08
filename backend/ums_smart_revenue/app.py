@@ -28,6 +28,7 @@ from ums_smart_revenue.api.connectors import router as connectors_router
 from ums_smart_revenue.api.dependencies import (
     authenticated_session_dependency,
     current_db_session,
+    current_platform_db_session,
     current_principal_from_database,
     current_principal_from_headers,
     current_trusted_gateway_identity,
@@ -51,6 +52,7 @@ from ums_smart_revenue.api.revenue import (
 from ums_smart_revenue.api.revenue import router as revenue_router
 from ums_smart_revenue.api.security import router as security_router
 from ums_smart_revenue.api.session import router as session_router
+from ums_smart_revenue.api.source_rows import router as source_rows_router
 from ums_smart_revenue.api.tenants import router as tenants_router
 from ums_smart_revenue.api.users import router as users_router
 from ums_smart_revenue.config.settings import (
@@ -59,7 +61,11 @@ from ums_smart_revenue.config.settings import (
     load_app_settings,
 )
 from ums_smart_revenue.config.version_baseline import STACK_VERSION_BASELINE
-from ums_smart_revenue.db.session import build_session_factory, session_dependency
+from ums_smart_revenue.db.session import (
+    build_platform_session_factory,
+    build_session_factory,
+    session_dependency,
+)
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
@@ -95,13 +101,22 @@ def create_app(
 
     if resolved_database_url:
         session_factory = build_session_factory(resolved_database_url)
+        platform_session_factory = build_platform_session_factory(
+            resolved_database_url
+        )
         overrides = _app.dependency_overrides
         if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
             overrides[current_db_session] = authenticated_session_dependency(
                 session_factory
             )
+            overrides[current_platform_db_session] = authenticated_session_dependency(
+                platform_session_factory
+            )
         else:
             overrides[current_db_session] = session_dependency(session_factory)
+            overrides[current_platform_db_session] = session_dependency(
+                platform_session_factory
+            )
             _app.add_middleware(DefaultTenantMiddleware)
         overrides[current_channel_registry] = sql_channel_registry_from_session
         overrides[current_group_registry] = sql_group_registry_from_session
@@ -109,9 +124,19 @@ def create_app(
         overrides[current_revenue_audit_sink] = sql_revenue_audit_sink_from_session
         if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
             overrides[current_principal_from_headers] = current_principal_from_database
+            # ============================================================
+            # Purpose: The tenant resolver reads `tenants` to map slug->tenant
+            #   BEFORE TENANT_CTX is set, so its session has no tenant and the
+            #   app_tenant lane never activates. Run that lookup on the platform
+            #   lane (app_platform) which the session hook switches to via
+            #   session.info regardless of context, so it holds the grants a
+            #   restricted (INHERIT FALSE) login otherwise lacks.
+            # Blast Radius: Authorization/tenant resolution; reads platform
+            #   `tenants` only (no RLS table), so BYPASSRLS is immaterial here.
+            # ============================================================
             _app.add_middleware(
                 TrustedGatewayTenantResolverMiddleware,
-                session_factory=session_factory,
+                session_factory=platform_session_factory,
                 authorize_tenant=_allow_database_auth_tenant,
             )
 
@@ -130,6 +155,7 @@ def create_app(
     _app.include_router(revenue_router)
     _app.include_router(security_router)
     _app.include_router(session_router)
+    _app.include_router(source_rows_router)
     _app.include_router(tenants_router)
     _app.include_router(users_router)
 

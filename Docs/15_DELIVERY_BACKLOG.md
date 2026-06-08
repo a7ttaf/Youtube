@@ -583,6 +583,27 @@ single P-tier above.
   scaffolding-only honesty rule — no live data source yet. See
   `Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md`
   and `Docs/superpowers/plans/2026-05-25-spec-c1-google-source-normalizer.md`.
+- ✅ Track E (2026-06-08) — **Postgres RLS enforcement DONE** (S3 storage-layer
+  hardening). Migration `20260608_0001` creates the `app_tenant`/`app_platform`
+  roles and a `<table>_tenant_isolation` policy on all 25 tenant-scoped tables
+  (allowlist drift-checked against live `information_schema`). Single-pool
+  `SET LOCAL ROLE` realization (not dual-pool) via a Postgres-only,
+  context-gated `after_begin` hook in `db/session.py` (no-op on SQLite and on
+  tenant-lane sessions without tenant context), `build_platform_session_factory`,
+  and the `assert_tenant_match` write-path helper (write-path classification =
+  all COVERED-ELSEWHERE). Runtime login needs
+  `GRANT app_tenant/app_platform TO <login> WITH INHERIT FALSE, SET TRUE`;
+  migration is idempotent and does not assume superuser. `FORCE ROW LEVEL
+  SECURITY` is a named follow-up. See
+  `Docs/superpowers/plans/2026-06-08-track-e-tenant-rls-source-currency.md`.
+- ✅ Track E (2026-06-08) — **B1 source-rows read API DONE.**
+  `GET /revenue/source-rows?month=&source_system=` + `/{id}`,
+  `finance.view_revenue`-gated, tenant-scoped, keyset-paged
+  (`{items, pagination:{limit, returned, has_more, next_cursor}}`);
+  `raw_payload` never returned (`raw_payload_redacted` always true);
+  half-cursor/bad input -> 422, missing/cross-tenant id -> 404. The
+  paired-column `*_usd` -> native migration is still ⏳ PENDING as a separate
+  future spec (out of scope for Track E).
 
 ## Hard problems to solve early
 

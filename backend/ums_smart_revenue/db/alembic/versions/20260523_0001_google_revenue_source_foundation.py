@@ -22,6 +22,7 @@ _SUPPORTED_V1_CODES = ("AED", "USD", "EUR", "GBP", "SAR", "EGP")
 
 
 def upgrade() -> None:
+    """Create currencies and source-row foundation tables and indexes."""
     _create_currencies_table()
     _seed_currencies()
     _flip_v1_supported_set()
@@ -29,6 +30,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    """Drop the source-row foundation tables and their indexes."""
     op.drop_index(
         "ix_google_revenue_source_rows_tenant_channel_month",
         table_name="google_revenue_source_rows",
@@ -42,6 +44,7 @@ def downgrade() -> None:
 
 
 def _create_currencies_table() -> None:
+    """Create the currencies lookup table used by source-row ingestion."""
     op.create_table(
         "currencies",
         sa.Column("code", sa.Text(), primary_key=True),
@@ -84,6 +87,7 @@ def _create_currencies_table() -> None:
 
 
 def _seed_currencies() -> None:
+    """Seed the currencies table from the frozen ISO-4217 snapshot."""
     currencies_table = sa.table(
         "currencies",
         sa.column("code", sa.Text()),
@@ -109,6 +113,7 @@ def _seed_currencies() -> None:
 
 
 def _flip_v1_supported_set() -> None:
+    """Mark the initial supported currency subset as active."""
     # Dialect-safe UPDATE: let SQLAlchemy render now() and bind the IN(...)
     # values per dialect, instead of hard-coding PostgreSQL now() and manually
     # interpolating the code list into raw SQL (which is not portable to the
@@ -127,6 +132,7 @@ def _flip_v1_supported_set() -> None:
 
 
 def _create_google_revenue_source_rows_table() -> None:
+    """Create the tenant-scoped Google revenue source-row fact table."""
     op.create_table(
         "google_revenue_source_rows",
         sa.Column(

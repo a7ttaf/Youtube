@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.dependencies import (
     current_db_session,
+    current_platform_db_session,
     current_principal_from_headers,
 )
 
@@ -342,35 +343,35 @@ class RevenueRecalculationRequest(BaseModel):
 
 
 def current_adsense_payment_repository(
-    session: Annotated[Session, Depends(current_db_session)],
+    session: Annotated[Session, Depends(current_platform_db_session)],
 ) -> SqlAlchemyAdSensePaymentRepository:
     """Build the AdSense payment repository bound to the current database session."""
     return SqlAlchemyAdSensePaymentRepository(session)
 
 
 def current_manual_override_repository(
-    session: Annotated[Session, Depends(current_db_session)],
+    session: Annotated[Session, Depends(current_platform_db_session)],
 ) -> SqlAlchemyManualOverrideRepository:
     """Build the manual-override repository bound to the current database session."""
     return SqlAlchemyManualOverrideRepository(session)
 
 
 def current_bank_reconciliation_repository(
-    session: Annotated[Session, Depends(current_db_session)],
+    session: Annotated[Session, Depends(current_platform_db_session)],
 ) -> SqlAlchemyBankReconciliationRepository:
     """Build the bank-reconciliation repository bound to the current database session."""
     return SqlAlchemyBankReconciliationRepository(session)
 
 
 def current_finance_month_close_repository(
-    session: Annotated[Session, Depends(current_db_session)],
+    session: Annotated[Session, Depends(current_platform_db_session)],
 ) -> SqlAlchemyFinanceMonthCloseRepository:
     """Build the finance-month-close repository bound to the current database session."""
     return SqlAlchemyFinanceMonthCloseRepository(session)
 
 
 def current_number_explanation_repository(
-    session: Annotated[Session, Depends(current_db_session)],
+    session: Annotated[Session, Depends(current_platform_db_session)],
 ) -> SqlAlchemyNumberExplanationRepository:
     """Build the tenant-aware number-explanation repository for a request."""
     return SqlAlchemyNumberExplanationRepository(session)
@@ -382,7 +383,7 @@ def current_revenue_audit_sink() -> InMemoryAuditSink:
 
 
 def sql_revenue_audit_sink_from_session(
-    session: Annotated[Session, Depends(current_db_session)],
+    session: Annotated[Session, Depends(current_platform_db_session)],
 ) -> SqlAlchemyAuditSink:
     """Build a SQLAlchemy-backed audit sink bound to the current database session."""
     return SqlAlchemyAuditSink(session)

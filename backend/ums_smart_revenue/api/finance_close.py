@@ -7,7 +7,11 @@ from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
-from ums_smart_revenue.api.dependencies import current_db_session, current_principal_from_headers
+from ums_smart_revenue.api.dependencies import (
+    current_db_session,
+    current_platform_db_session,
+    current_principal_from_headers,
+)
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
@@ -52,7 +56,7 @@ class AllocationRuleRequest(BaseModel):
 
 
 def current_finance_month_close_repository(
-    session: Annotated[Session, Depends(current_db_session)],
+    session: Annotated[Session, Depends(current_platform_db_session)],
 ) -> SqlAlchemyFinanceMonthCloseRepository:
     return SqlAlchemyFinanceMonthCloseRepository(session)
 

@@ -133,6 +133,9 @@ POST /revenue/facts
 GET /revenue/channels/{channel_id}/months/{month}/facts
 POST /revenue/channels/{channel_id}/months/{month}/explain?metric=adjusted_gross_revenue_usd
 POST /revenue/recalculate
+GET /revenue/source-rows?month=2026-03&source_system=adsense_management&limit=50
+GET /revenue/source-rows?month=2026-03&cursor_ingested_at=2026-05-10T12:00:00Z&cursor_id=<uuid>
+GET /revenue/source-rows/{id}
 ```
 
 `POST /revenue/facts` is an implemented connector-controlled import endpoint
@@ -224,6 +227,27 @@ coverage counts, reports blockers such as missing net revenue for post-tax
 methods, and returns `NO_WRITES_PERFORMED`. It intentionally does not persist
 calculated revenue rows, apply allocation deltas, invent tax data, or mutate
 month-close allocation metadata.
+
+`GET /revenue/source-rows` is an implemented read-only, tenant-scoped list of
+Google source evidence rows (Track E, 2026-06-08). It requires global
+`finance.view_revenue` and performs no audit write. `month` is required;
+`source_system` is an optional enum filter
+(`youtube_reporting`/`youtube_analytics`/`adsense_management`) and any other
+value returns `422`. It uses newest-first (`ingested_at`, `id`) cursor
+pagination: `limit` defaults to `50` and must be `1..100`; `cursor_ingested_at`
+and `cursor_id` are both-or-neither (supplying only one half returns `422`). The
+response envelope is `{items, pagination:{limit, returned, has_more,
+next_cursor}}`, where `next_cursor` is `{ingested_at, id}` (or `null`). Each item
+exposes `id`, `source_system`, `source_account_id`, `content_owner_id`,
+`youtube_channel_id`, `report_type`, `report_month`, `period_start`,
+`period_end`, `metric_key`, `value_kind`, `amount_native`, `currency_code`,
+`source_report_id`, `ingested_at`, and `raw_payload_redacted` (always `true`).
+The original `raw_payload` is **never** returned for any caller.
+
+`GET /revenue/source-rows/{id}` is the implemented single-row read with the same
+`finance.view_revenue` gate, tenant scoping, and redaction. It returns the same
+item shape (no pagination envelope). A non-UUID id returns `422`; an id that is
+missing or belongs to another tenant returns `404` with no existence leak.
 
 ### Finance close
 
