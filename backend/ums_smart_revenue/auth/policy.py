@@ -1,5 +1,7 @@
 """Authorization predicates for tenant users and platform admins."""
 
+from types import MappingProxyType
+
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.platform_admin import (
@@ -11,14 +13,14 @@ from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 
 EMPTY_ORG_INDEX = OrgAccessIndex()
-_CONNECTOR_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+_CONNECTOR_KEY_ALIASES = MappingProxyType({
     "youtube-reporting": ("youtube_reporting",),
     "youtube_reporting": ("youtube-reporting",),
     "youtube-analytics": ("youtube_analytics",),
     "youtube_analytics": ("youtube-analytics",),
     "adsense-management": ("adsense_management",),
     "adsense_management": ("adsense-management",),
-}
+})
 
 
 def has_permission(

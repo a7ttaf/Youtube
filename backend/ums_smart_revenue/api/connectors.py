@@ -405,6 +405,7 @@ def _require_connector_health(
         HTTPException: If the caller has neither global nor connector-scoped
             VIEW_CONNECTOR_HEALTH access.
     """
+
     if allowed_connector_ids is None:
         return
     if allowed_connector_ids:
