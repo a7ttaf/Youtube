@@ -793,14 +793,64 @@ def test_record_fact_rejects_cross_tenant_target(revenue_repo_tenant_a):
 
 - [ ] **Step 4: Implement the asserts** in each `ASSERTED` path (insert `assert_tenant_match(...)` before the write) and ensure the owning route maps `TenantIsolationError` → `HTTPException(403)` (mirror `_require_permission`'s 403 shape).
 
-- [ ] **Step 5: Fill the classification table** in this plan file under this task (replace the inventory with resolved rows):
+- [x] **Step 5: Classification table (resolved 2026-06-08).**
 
-```markdown
-| Write path | File:line | Classification | Evidence/mechanism |
+**Result: every tenant-scoped write path is `COVERED-ELSEWHERE`. No
+`assert_tenant_match` calls were added.** The honesty rule in §2.6 forbids
+manufacturing self-comparison asserts. Investigation (live tree, 2026-06-08)
+established a single uniform mechanism across all 25 tenant tables:
+
+1. Every write repository pins its tenant once in `__init__` via
+   `_resolve_tenant_id(tenant_id)` (explicit param → ambient
+   `get_current_tenant()` → default UMS), storing `self._tenant_id`.
+2. Every INSERT/UPDATE stamps `tenant_id=self._tenant_id` (or threads the same
+   resolved value into child-table rows). No write *method* accepts a separate
+   `target_tenant_id` from caller input.
+3. At the only HTTP call sites, the FastAPI DI factories construct repositories
+   with **`session` only** (e.g. `api/users.py:255,262,269`,
+   `api/connectors.py:88`) — no request-body `tenant_id` is ever passed, so the
+   row tenant and the principal tenant are the same `TENANT_CTX` value by
+   construction.
+4. The two write *methods* that take an explicit `tenant_id` arg
+   (`GoogleRevenueSourceRowRepository.upsert_many` and the connector-run
+   repository `start_run`/`record_raw_file`/`finish_run`) are reached only from
+   the connector orchestrator `run_one` (`connectors/runs/orchestrator.py:367`),
+   a CLI/orchestration entry — **not** an HTTP route — whose `tenant_id` is the
+   orchestration-provided principal tenant, never divergent request input. It
+   even self-guards cross-tenant reads (`orchestrator.py:918`,
+   `repository.py:385`).
+
+Because no write path accepts a tenant-bearing value from caller input that
+could differ from the acting principal, the §2.6 starting inventory's `ASSERTED`
+cells resolve to `COVERED-ELSEWHERE`. RLS (Task 2) + the context-gated session
+GUC (Task 3) remain the DB-level enforcement; `assert_tenant_match` (Task 4)
+stays available for any *future* write that does accept divergent tenant input.
+
+| Write path | File:line (stamp) | Classification | Evidence / pinning test |
 |---|---|---|---|
-| record_fact | finance/revenue_facts.py:NNN | ASSERTED | assert added before record |
-| ... | ... | ... | ... |
-```
+| `SqlAlchemyRevenueFactRepository.record_fact` (monthly_channel_revenue_facts) | finance/revenue_facts.py:157,291 | COVERED-ELSEWHERE | stamps `self._tenant_id` (resolved in `__init__` via `_resolve_tenant_id`, revenue_facts.py:346); ctor-tenant scoping proven by tests/finance/test_revenue_facts.py::test_revenue_fact_rejects_locked_month_in_bound_tenant |
+| manual-override write (revenue_manual_overrides) | finance/manual_overrides.py:106,253 | COVERED-ELSEWHERE | stamps `self._tenant_id`; tests/finance/test_manual_overrides.py::test_manual_override_rejects_locked_month_in_bound_tenant |
+| account-allocation commit (committed_allocation_runs + child lines) | finance/committed_allocation.py:219,308 | COVERED-ELSEWHERE | run + child lines stamp `self._tenant_id` (line 304 reads `link_repository.tenant_id`); tests/finance/test_committed_allocation.py::test_tenant_id_property_exposes_resolved_tenant + ::test_first_commit_creates_version_1 |
+| account-allocation recalc (committed_allocation_runs) | finance/committed_allocation.py:219 | COVERED-ELSEWHERE | same repo/tenant path as commit; same tests |
+| Google source-row `upsert_many` (google_revenue_source_rows) | connectors/google_source_rows/repository.py:451,480 | COVERED-ELSEWHERE | `tenant_id` arg threaded from orchestrator `run_one` (orchestrator.py:367/1138), a CLI/orchestration entry, never an HTTP request body; cross-tenant raw-file guard repository.py:893; tests/connectors/google_source_rows/test_repository.py::test_tenant_isolation, ::test_rejects_cross_tenant_raw_file |
+| AdSense payment sync write (adsense_payments) | finance/adsense_payments.py:148,255 | COVERED-ELSEWHERE | `sync_payments` takes no tenant arg, stamps `self._tenant_id`; HTTP route api/adsense.py:153 passes no tenant; tests/finance/test_adsense_payments_tenant_scope.py::test_sync_payments_uses_request_tenant_context_by_default |
+| bank-reconciliation write (bank_reconciliation_entries) | finance/bank_reconciliation.py:166,242 | COVERED-ELSEWHERE | `record_entry` takes no tenant arg, stamps `self._tenant_id`; tests/finance/test_bank_reconciliation_tenant_scope.py::test_record_entry_uses_request_tenant_context_by_default |
+| finance month-close write (finance_month_close) | finance/month_close.py:131,182 | COVERED-ELSEWHERE | stamps `self._tenant_id` / `resolved_tenant_id` (= `_resolve_tenant_id`); tests/finance/test_month_close_locking.py::test_get_or_create_month_close_row_uses_request_tenant_context |
+| channel-account-map write (adsense_content_owner_links, content_owner_channel_links) | finance/channel_account_links.py:322,645 | COVERED-ELSEWHERE | propose/verify/reject take no tenant arg, stamp `self._tenant_id`; tests/finance/test_channel_account_links.py::test_verify_marks_verified_and_stamps, ::test_read_contract_is_tenant_isolated |
+| deduction-component write (deduction_components) | finance/deduction_ingestion.py:204 | COVERED-ELSEWHERE | stamps `self._tenant_id`; tests/finance/test_deduction_ingestion.py::test_repository_uses_request_tenant_context_by_default |
+| raw-report-file write (raw_report_files) | reports/raw_files.py:99 | COVERED-ELSEWHERE | `register_file` takes no tenant arg, stamps `self._tenant_id`; tests/reports/test_raw_files.py::test_register_file_uses_ambient_tenant_context |
+| export-job write (export_jobs) | reports/exports.py:180 | COVERED-ELSEWHERE | `request_export` takes no tenant arg, stamps `self._tenant_id`; tests/reports/test_export_jobs_repository.py::test_request_export_uses_ambient_tenant_context |
+| number-explanation write (number_explanations) | finance/explanations.py:124 | COVERED-ELSEWHERE | `record_explanation` takes no tenant arg, stamps `self._tenant_id`; tests/finance/test_explanations.py::test_record_explanation_uses_ambient_tenant_context, ::test_record_explanation_isolates_writes_between_tenants |
+| audit-log write (audit_logs) | auth/sql_audit_sink.py:43 | COVERED-ELSEWHERE | `append` stamps `self._tenant_id` (sink resolved from principal tenant at construction, sql_audit_sink.py:76); tests/auth/test_audit_tenant_scope.py::test_audit_repository_uses_request_tenant_context_by_default |
+| user-account write (users) | auth/users.py:159 | COVERED-ELSEWHERE | `create_user` takes no tenant arg, stamps `self._tenant_id` (require_current_tenant fail-closed, users.py:587); tests/auth/test_user_account_tenant_scope.py::test_user_repository_persists_current_tenant_on_create |
+| role-assignment write (user_role_assignments) | auth/user_roles.py:138,314 | COVERED-ELSEWHERE | `assign_role` takes no tenant arg, stamps `self._tenant_id`; tests/auth/test_user_roles_repository.py |
+| permission-grant write (user_permission_grants) | auth/user_permissions.py:177,340 | COVERED-ELSEWHERE | `grant_permission` takes no tenant arg, stamps `self._tenant_id`; tests/auth/test_user_permissions_repository.py |
+| access-scope write (access_scopes) | auth/user_roles.py:314 (`_get_or_create_scope`); same pattern in auth/user_permissions.py | COVERED-ELSEWHERE | scope rows stamp `tenant_id=self._tenant_id` and are read-filtered to it (user_roles.py:300); reached only via role/permission writes (no tenant arg); covered by the role/permission repository tests above |
+| connector-credential write (api_connector_credentials) | connectors/credentials.py:142 | COVERED-ELSEWHERE | `create_credential` takes no tenant arg, stamps `self._tenant_id`; cross-tenant actor rejected (tests/connectors/test_credentials.py::test_create_credential_rejects_actor_user_from_another_tenant); ::test_create_credential_uses_ambient_tenant_context |
+| org-unit / channel write (org_units, youtube_channels) | org/sql_channel_registry.py:83 | COVERED-ELSEWHERE | stamps `self._tenant_id`; cross-tenant company_id rejected (tests/org/test_sql_channel_registry.py::test_sql_channel_registry_rejects_cross_tenant_company_id); ::test_sql_channel_registry_explicit_tenant_writes_are_isolated |
+| channel-group / member write (channel_groups, channel_group_members) | org/sql_channel_groups.py:59,105,128,163 | COVERED-ELSEWHERE | group + member rows stamp `self._tenant_id`; cross-tenant channel rejected (tests/org/test_sql_channel_groups.py::test_create_group_rejects_cross_tenant_channel_external_id); ::test_create_group_uses_request_tenant_context_by_default |
+| connector-run write (connector_runs) | connectors/runs/repository.py:121,200 | COVERED-ELSEWHERE | `start_run`/`finish_run` `tenant_id` arg threaded from orchestrator `run_one` (CLI/orchestration, not HTTP request body); cross-tenant guards repository.py:347,385; tests/connectors/runs/test_repository.py |
+| connector-run raw-file link write (connector_run_raw_files) | connectors/runs/repository.py:162 | COVERED-ELSEWHERE | `record_raw_file` re-fetches run + raw file under the same `tenant_id` (repository.py:156-157) before insert; same orchestration-tenant provenance; tests/connectors/runs/test_repository.py |
 
 - [ ] **Step 6: Run targeted tests + lint + commit.**
 
