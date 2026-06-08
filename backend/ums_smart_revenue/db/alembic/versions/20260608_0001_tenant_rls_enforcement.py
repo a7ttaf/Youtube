@@ -109,6 +109,32 @@ def upgrade() -> None:
                 f'TO "{APP_PLATFORM_ROLE}"'
             )
         )
+    # ========================================================================
+    # Purpose: Grant the full table/sequence surface to both app roles so a
+    #   restricted (non-owner/non-superuser) runtime login can reach the
+    #   NON-tenant tables the app also touches (authz catalogs, currencies,
+    #   exchange rates, the committed_allocation_* child tables with no
+    #   tenant_id). RLS still isolates the 25 tenant tables; non-tenant tables
+    #   are platform-shared by design and runtime authz stays in the app
+    #   permission system, not table grants.
+    # Database/ORM: All tables/sequences in schema public.
+    # Standards: Idempotent blanket GRANT; role names are internal constants.
+    # Blast Radius: Authorization (DB privilege surface only — app permission
+    #   checks unchanged); finance/audit reads of platform-shared catalogs.
+    # ========================================================================
+    for role in (APP_TENANT_ROLE, APP_PLATFORM_ROLE):
+        bind.execute(
+            sa.text(
+                "GRANT SELECT, INSERT, UPDATE, DELETE "
+                f'ON ALL TABLES IN SCHEMA public TO "{role}"'
+            )
+        )
+        bind.execute(
+            sa.text(
+                "GRANT USAGE, SELECT "
+                f'ON ALL SEQUENCES IN SCHEMA public TO "{role}"'
+            )
+        )
 
 
 def downgrade() -> None:
@@ -122,14 +148,22 @@ def downgrade() -> None:
         bind.execute(
             sa.text(f"ALTER TABLE {table} DISABLE ROW LEVEL SECURITY")
         )
-        for role in (APP_TENANT_ROLE, APP_PLATFORM_ROLE):
-            bind.execute(
-                sa.text(
-                    f"REVOKE SELECT, INSERT, UPDATE, DELETE ON {table} "
-                    f'FROM "{role}"'
-                )
-            )
+    # Blanket REVOKE mirrors the blanket GRANT in upgrade(); DROP ROLE fails
+    # while dependent privileges remain, so all table/sequence/schema privs
+    # must be revoked first.
     for role in (APP_TENANT_ROLE, APP_PLATFORM_ROLE):
+        bind.execute(
+            sa.text(
+                "REVOKE ALL PRIVILEGES "
+                f'ON ALL TABLES IN SCHEMA public FROM "{role}"'
+            )
+        )
+        bind.execute(
+            sa.text(
+                "REVOKE ALL PRIVILEGES "
+                f'ON ALL SEQUENCES IN SCHEMA public FROM "{role}"'
+            )
+        )
         bind.execute(
             sa.text(f'REVOKE USAGE ON SCHEMA public FROM "{role}"')
         )

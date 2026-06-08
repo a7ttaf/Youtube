@@ -58,3 +58,26 @@ def test_rls_migration_creates_roles_policies_and_grants():
                 assert policy is not None, f"{table} missing policy"
     finally:
         engine.dispose()
+
+
+def test_rls_migration_downgrade_drops_roles_then_upgrade_restores():
+    # Downgrade must revoke every dependent privilege before DROP ROLE; if the
+    # blanket grants are not revoked, DROP ROLE fails. Leave the DB at head.
+    url = require_postgres_url()
+    cfg = _alembic_config(url)
+    command.upgrade(cfg, "head")
+    command.downgrade(cfg, "20260606_0001")
+    engine = sa.create_engine(url)
+    try:
+        with engine.connect() as conn:
+            roles = set(
+                conn.execute(
+                    sa.text("SELECT rolname FROM pg_roles")
+                ).scalars()
+            )
+            assert APP_TENANT_ROLE not in roles
+            assert APP_PLATFORM_ROLE not in roles
+    finally:
+        engine.dispose()
+    # Restore head so the rest of the PG tier sees the expected schema/roles.
+    command.upgrade(cfg, "head")

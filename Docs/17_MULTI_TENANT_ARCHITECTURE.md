@@ -55,6 +55,33 @@ section is authoritative where it conflicts with the planning text further down.
   membership out of band per the runbook. The migration is **idempotent** and
   **does not assume superuser** — it tolerates pre-existing roles/grants.
 
+### Grant model — broad table grants, RLS provides isolation
+
+The two app roles receive **broad table/sequence grants** across the whole
+`public` schema (`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA
+public`, plus `GRANT USAGE, SELECT ON ALL SEQUENCES`), not just the 25 tenant
+tables. Tenant isolation is enforced by **RLS on the 25 tenant-scoped tables**,
+not by withholding table privileges. The blanket grant exists because the app
+lane (`app_tenant`) also touches **non-tenant, platform-shared** tables that
+carry no `tenant_id` and therefore have no RLS policy:
+
+- authz catalogs: `permissions`, `roles`, `role_permission_assignments`,
+- `currencies`, `currency_exchange_rates`,
+- the committed-allocation child tables `committed_allocation_lines`,
+  `committed_allocation_notes`, `committed_allocation_unallocated`.
+
+Under the restricted runtime login (non-owner/non-superuser), `app_tenant` only
+holds what the migration grants it. Without the blanket grant those endpoints
+would fail with `permission denied` once RLS is enforced (latent today because
+deploys still connect as owner/superuser). Runtime authorization remains the
+**application permission system**, not table grants; the DB grant surface is
+deliberately broad and isolation is delegated to RLS.
+
+> **Follow-up (future spec):** the three `committed_allocation_*` child tables
+> carry no `tenant_id` and are isolated only **transitively** via the `run_id`
+> FK to `committed_allocation_runs` (which IS RLS-protected). A future spec
+> should add `tenant_id` to these child tables for direct DB-level isolation.
+
 ### FORCE ROW LEVEL SECURITY follow-up
 
 RLS is enabled but **not** `FORCE`d yet. Evaluate `FORCE ROW LEVEL SECURITY`
