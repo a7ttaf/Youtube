@@ -12,12 +12,14 @@ from ums_smart_revenue.db.rls import (
 
 
 def _alembic_config(url: str) -> Config:
+    """Build an Alembic config bound to the supplied database URL."""
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", url)
     return cfg
 
 
 def test_rls_migration_creates_roles_policies_and_grants():
+    """Verify the migration creates the RLS roles, policies, and grants."""
     url = require_postgres_url()
     cfg = _alembic_config(url)
     command.upgrade(cfg, "head")
@@ -61,6 +63,7 @@ def test_rls_migration_creates_roles_policies_and_grants():
 
 
 def test_rls_migration_downgrade_drops_roles_then_upgrade_restores():
+    """Verify downgrade removes roles and upgrade restores the schema state."""
     # Downgrade must revoke every dependent privilege before DROP ROLE; if the
     # blanket grants are not revoked, DROP ROLE fails. Leave the DB at head.
     url = require_postgres_url()

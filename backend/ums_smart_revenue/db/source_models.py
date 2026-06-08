@@ -233,6 +233,10 @@ class GoogleRevenueSourceRowORM(FinanceBase):
             "tenant_id", "report_month", "source_system",
         ),
         Index(
+            "ix_google_revenue_source_rows_tenant_month_ingested_id",
+            "tenant_id", "report_month", "ingested_at", "id",
+        ),
+        Index(
             "ix_google_revenue_source_rows_tenant_channel_month",
             "tenant_id", "youtube_channel_id", "report_month",
             postgresql_where=text("youtube_channel_id IS NOT NULL"),

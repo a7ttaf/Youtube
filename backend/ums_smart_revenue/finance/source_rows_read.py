@@ -150,6 +150,9 @@ def list_source_rows(
         raise SourceRowValidationError("invalid source_system")
 
     orm = GoogleRevenueSourceRowORM
+    # The keyset sort is backed by the composite source-row index on
+    # (tenant_id, report_month, ingested_at, id), so the newest-first page
+    # can stay index-friendly without re-reading the whole month slice.
     stmt = (
         sa.select(orm)
         .where(orm.tenant_id == tenant_id, orm.report_month == month)

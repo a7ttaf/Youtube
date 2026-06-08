@@ -30,12 +30,14 @@ _UMS_TENANT = "00000000-0000-0000-0000-000000000001"
 
 
 def _upgrade(url: str) -> None:
+    """Apply the tenant-RLS migration to the test database."""
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", url)
     command.upgrade(cfg, "head")
 
 
 def _login_url(admin_url: str) -> str:
+    """Swap admin credentials for the throwaway restricted login."""
     # Swap the userinfo of the admin URL for the throwaway login's credentials,
     # keeping host/port/db identical.
     eng_url = sa.make_url(admin_url)
@@ -45,6 +47,7 @@ def _login_url(admin_url: str) -> str:
 
 
 def _create_login(admin_engine: sa.Engine) -> None:
+    """Create the throwaway restricted login and grant its lane memberships."""
     # AUTOCOMMIT: CREATE/DROP ROLE and GRANT are not transactional-friendly here.
     with admin_engine.connect().execution_options(
         isolation_level="AUTOCOMMIT"
@@ -70,6 +73,7 @@ def _create_login(admin_engine: sa.Engine) -> None:
 
 
 def _drop_login(conn: sa.Connection) -> None:
+    """Drop the throwaway restricted login after revoking its memberships."""
     exists = conn.execute(
         sa.text("SELECT 1 FROM pg_roles WHERE rolname = :r"), {"r": _LOGIN}
     ).first()
@@ -82,6 +86,7 @@ def _drop_login(conn: sa.Connection) -> None:
 
 
 def test_restricted_login_lane_model_end_to_end():
+    """Verify the restricted login can only act after an explicit SET ROLE."""
     admin_url = require_postgres_url()
     _upgrade(admin_url)
     admin_engine = sa.create_engine(admin_url)

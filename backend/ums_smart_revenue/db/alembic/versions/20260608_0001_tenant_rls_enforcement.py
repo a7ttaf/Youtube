@@ -39,12 +39,13 @@ branch_labels = None
 depends_on = None
 
 # NON-tenant tables the app writes at runtime (no tenant_id, so not RLS-scoped).
-# app_tenant/app_platform get DML here; all other non-tenant tables stay read-
-# only for the app roles. currency_exchange_rates: exchange-rate writes. The
-# committed_allocation_* children: written by allocation commit (isolated only
-# transitively via run_id -> committed_allocation_runs, which IS RLS-protected).
-NON_TENANT_WRITE_TABLES: tuple[str, ...] = (
-    "currency_exchange_rates",
+# currency_exchange_rates stays writable from both app roles because tenant
+# workflows update exchange rates directly. The committed_allocation_* child
+# tables are privilege-sensitive snapshot evidence: app_tenant may read them,
+# but only app_platform may write them, and the commit service elevates into the
+# privileged lane just for that short child-row insert block.
+NON_TENANT_WRITE_TABLES: tuple[str, ...] = ("currency_exchange_rates",)
+PLATFORM_ONLY_WRITE_TABLES: tuple[str, ...] = (
     "committed_allocation_lines",
     "committed_allocation_notes",
     "committed_allocation_unallocated",
@@ -126,10 +127,12 @@ def upgrade() -> None:
     #   tables already got per-table CRUD (above) and are isolated by RLS. Reads
     #   are harmless, so grant SELECT broadly (covers authz catalogs, currencies,
     #   etc. a restricted INHERIT-FALSE login otherwise cannot read). DML is
-    #   granted ONLY on the enumerated NON-tenant tables the app writes at
-    #   runtime, so DML cannot be exercised against platform catalogs.
+    #   granted on the runtime-write non-tenant tables, while the
+    #   committed_allocation_* evidence tables are writable only from the
+    #   privileged platform lane.
     # Database/ORM: SELECT on all public tables/sequences; DML on
-    #   NON_TENANT_WRITE_TABLES only.
+    #   NON_TENANT_WRITE_TABLES for both app roles and PLATFORM_ONLY_WRITE_TABLES
+    #   for app_platform only.
     # Standards: Enumerated DML keeps DB least-privilege; role names + table list
     #   are internal constants. If a future endpoint writes another non-tenant
     #   table, add it to NON_TENANT_WRITE_TABLES (else it 'permission denies'
@@ -153,6 +156,13 @@ def upgrade() -> None:
                     f"GRANT INSERT, UPDATE, DELETE ON {table} TO \"{role}\""
                 )
             )
+    for table in PLATFORM_ONLY_WRITE_TABLES:
+        bind.execute(
+            sa.text(
+                f"GRANT INSERT, UPDATE, DELETE ON {table} "
+                f'TO "{APP_PLATFORM_ROLE}"'
+            )
+        )
 
 
 def downgrade() -> None:

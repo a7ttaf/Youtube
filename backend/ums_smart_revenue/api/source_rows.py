@@ -1,5 +1,7 @@
-"""Read-only Google source-rows API (spec §3). Finance-gated, tenant-scoped,
-raw_payload never returned."""
+"""Read-only Google source-rows API (spec §3).
+
+Finance-gated, tenant-scoped, raw_payload never returned.
+"""
 from __future__ import annotations
 
 from typing import Annotated

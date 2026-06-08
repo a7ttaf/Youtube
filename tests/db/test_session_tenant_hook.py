@@ -10,6 +10,7 @@ from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 
 def _tenant(uuid_str: str) -> Tenant:
+    """Build a deterministic tenant object for session-hook tests."""
     from datetime import UTC, datetime
     from uuid import UUID
     now = datetime(2026, 1, 1, tzinfo=UTC)
@@ -21,6 +22,7 @@ def _tenant(uuid_str: str) -> Tenant:
 
 
 def test_sqlite_session_issues_no_set_statements():
+    """Verify the SQLite session hook stays a no-op for tenant context."""
     # On SQLite the hook must be a complete no-op (no SET ROLE / GUC).
     factory = build_session_factory("sqlite+pysqlite:///:memory:")
     token = TENANT_CTX.set(_tenant("00000000-0000-0000-0000-000000000001"))
@@ -33,6 +35,7 @@ def test_sqlite_session_issues_no_set_statements():
 
 
 def test_postgres_tenant_lane_sets_role_and_guc():
+    """Verify the tenant lane sets app_tenant and the tenant GUC."""
     url = require_postgres_url()
     factory = build_session_factory(url)
     tid = "00000000-0000-0000-0000-000000000001"
@@ -50,6 +53,7 @@ def test_postgres_tenant_lane_sets_role_and_guc():
 
 
 def test_postgres_no_context_leaves_login_role_and_unset_guc():
+    """Verify the tenant lane leaves bare sessions on the login role."""
     url = require_postgres_url()
     factory = build_session_factory(url)
     # No TENANT_CTX → hook must not switch role or set the GUC.
@@ -63,6 +67,7 @@ def test_postgres_no_context_leaves_login_role_and_unset_guc():
 
 
 def test_platform_lane_uses_app_platform_and_no_guc():
+    """Verify the platform lane uses app_platform without tenant context."""
     url = require_postgres_url()
     factory = build_platform_session_factory(url)
     with factory() as session:
@@ -75,6 +80,7 @@ def test_platform_lane_uses_app_platform_and_no_guc():
 
 
 def test_pooled_connection_does_not_leak_role_or_guc():
+    """Verify a reused pooled connection does not retain tenant session state."""
     # Transaction 1 sets tenant lane; transaction 2 on the SAME pooled
     # connection (no context) must see no leaked role/GUC.
     url = require_postgres_url()

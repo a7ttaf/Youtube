@@ -230,40 +230,64 @@ class SqlAlchemyCommittedAllocationRepository:
         )
         self._session.add(run)
         self._session.flush()  # assign run.id
-
-        lines = tuple(
-            CommittedAllocationLineORM(
-                run_id=run.id, adsense_account_id=ln.adsense_account_id,
-                youtube_channel_id=ln.youtube_channel_id,
-                component_kind=ln.component_kind, source_system=ln.source_system,
-                component_key=ln.component_key, basis_source_kind=ln.basis_source_kind,
-                basis_amount_usd=ln.basis_amount_usd, basis_share=ln.basis_share,
-                allocated_amount_usd=ln.allocated_amount_usd,
-                net_applicable=ln.net_applicable,
+        # ====================================================================
+        # Purpose: Elevate only the child-row evidence writes that live outside
+        #   the tenant RLS surface. The run row itself stays on app_tenant; the
+        #   committed_allocation_* child tables are written under app_platform
+        #   so the grant surface can stay narrow for restricted tenant lanes.
+        # Database/ORM: committed_allocation_lines/_notes/_unallocated.
+        # Standards: Postgres-only role swap, scoped to the child insert block;
+        #   SQLite stays a no-op. The transaction remains single-session and
+        #   atomic, so a later failure still rolls back the whole commit.
+        # Blast Radius: Authorization and finance write privileges only.
+        # ====================================================================
+        is_postgres = self._session.get_bind().dialect.name == "postgresql"
+        if is_postgres:
+            self._session.connection().exec_driver_sql('SET LOCAL ROLE "app_platform"')
+        wrote_children = False
+        try:
+            lines = tuple(
+                CommittedAllocationLineORM(
+                    run_id=run.id, adsense_account_id=ln.adsense_account_id,
+                    youtube_channel_id=ln.youtube_channel_id,
+                    component_kind=ln.component_kind, source_system=ln.source_system,
+                    component_key=ln.component_key,
+                    basis_source_kind=ln.basis_source_kind,
+                    basis_amount_usd=ln.basis_amount_usd, basis_share=ln.basis_share,
+                    allocated_amount_usd=ln.allocated_amount_usd,
+                    net_applicable=ln.net_applicable,
+                )
+                for ln in result.lines
             )
-            for ln in result.lines
-        )
-        notes = tuple(
-            CommittedAllocationNoteORM(
-                run_id=run.id, note_code=note.note_code,
-                youtube_channel_id=note.youtube_channel_id, detail=note.detail,
+            notes = tuple(
+                CommittedAllocationNoteORM(
+                    run_id=run.id, note_code=note.note_code,
+                    youtube_channel_id=note.youtube_channel_id, detail=note.detail,
+                )
+                for note in result.notes
             )
-            for note in result.notes
-        )
-        # result.unallocated is empty here for every method except
-        # no_allocation (reject-on-unallocated above); a no_allocation run
-        # snapshots its full INTENTIONAL_NO_ALLOCATION set as evidence.
-        unallocated = tuple(
-            CommittedAllocationUnallocatedORM(
-                run_id=run.id, scope_id=iss.scope_id, component_kind=iss.component_kind,
-                component_key=iss.component_key, amount_usd=iss.amount_usd,
-                issue_code=iss.issue_code, detail=iss.detail,
+            # result.unallocated is empty here for every method except
+            # no_allocation (reject-on-unallocated above); a no_allocation run
+            # snapshots its full INTENTIONAL_NO_ALLOCATION set as evidence.
+            unallocated = tuple(
+                CommittedAllocationUnallocatedORM(
+                    run_id=run.id, scope_id=iss.scope_id,
+                    component_kind=iss.component_kind,
+                    component_key=iss.component_key, amount_usd=iss.amount_usd,
+                    issue_code=iss.issue_code, detail=iss.detail,
+                )
+                for iss in result.unallocated
             )
-            for iss in result.unallocated
-        )
-        for child in (*lines, *notes, *unallocated):
-            self._session.add(child)
-        self._session.flush()
+            for child in (*lines, *notes, *unallocated):
+                self._session.add(child)
+            self._session.flush()
+            wrote_children = True
+        finally:
+            if is_postgres:
+                if wrote_children:
+                    self._session.connection().exec_driver_sql(
+                        'SET LOCAL ROLE "app_tenant"'
+                    )
         return CommitAllocationOutcome(
             run=run, lines=lines, unallocated=unallocated, notes=notes, created=True
         )

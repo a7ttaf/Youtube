@@ -32,14 +32,22 @@ _NON_TENANT_READ_TABLES = (
     "committed_allocation_lines",
 )
 
+_PLATFORM_ONLY_WRITE_TABLES = (
+    "committed_allocation_lines",
+    "committed_allocation_notes",
+    "committed_allocation_unallocated",
+)
+
 
 def _upgrade(url: str) -> None:
+    """Apply the tenant-RLS migration to the test database."""
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", url)
     command.upgrade(cfg, "head")
 
 
 def test_app_tenant_can_reach_non_tenant_tables():
+    """Verify app_tenant can read the non-tenant public catalog tables."""
     url = require_postgres_url()
     _upgrade(url)
     engine = sa.create_engine(url)
@@ -66,6 +74,7 @@ def test_app_tenant_can_reach_non_tenant_tables():
 
 
 def test_app_tenant_has_write_grant_on_non_tenant_write_table():
+    """Verify app_tenant retains INSERT on the exchange-rate write table."""
     # currency_exchange_rates is a NON_TENANT_WRITE_TABLES member: the app
     # writes exchange rates at runtime, so INSERT must be granted.
     url = require_postgres_url()
@@ -87,7 +96,54 @@ def test_app_tenant_has_write_grant_on_non_tenant_write_table():
         engine.dispose()
 
 
+def test_app_tenant_is_denied_dml_on_committed_allocation_children():
+    """Verify app_tenant cannot mutate committed-allocation evidence tables."""
+    url = require_postgres_url()
+    _upgrade(url)
+    engine = sa.create_engine(url)
+    try:
+        with engine.connect() as conn:
+            for table in _PLATFORM_ONLY_WRITE_TABLES:
+                granted = conn.execute(
+                    sa.text(
+                        "SELECT has_table_privilege("
+                        "'app_tenant', :table, 'INSERT')"
+                    ),
+                    {"table": table},
+                ).scalar()
+                assert granted is False, (
+                    f"app_tenant unexpectedly holds INSERT on {table}; "
+                    "committed-allocation child writes must stay platform-only"
+                )
+    finally:
+        engine.dispose()
+
+
+def test_app_platform_has_write_grant_on_committed_allocation_children():
+    """Verify app_platform retains INSERT on committed-allocation evidence tables."""
+    url = require_postgres_url()
+    _upgrade(url)
+    engine = sa.create_engine(url)
+    try:
+        with engine.connect() as conn:
+            for table in _PLATFORM_ONLY_WRITE_TABLES:
+                granted = conn.execute(
+                    sa.text(
+                        "SELECT has_table_privilege("
+                        "'app_platform', :table, 'INSERT')"
+                    ),
+                    {"table": table},
+                ).scalar()
+                assert granted is True, (
+                    f"app_platform lost INSERT on {table}; "
+                    "commit path needs the privileged child-table write lane"
+                )
+    finally:
+        engine.dispose()
+
+
 def test_app_tenant_is_denied_dml_on_platform_catalog():
+    """Verify app_tenant cannot mutate the platform permissions catalog."""
     # permissions is a platform definition catalog. The narrowed model grants
     # SELECT broadly but NOT DML, so INSERT must NOT be granted. A regression to
     # the old blanket DML grant would flip this to True.

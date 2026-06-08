@@ -30,6 +30,10 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     op.drop_index(
+        "ix_google_revenue_source_rows_tenant_month_ingested_id",
+        table_name="google_revenue_source_rows",
+    )
+    op.drop_index(
         "ix_google_revenue_source_rows_tenant_channel_month",
         table_name="google_revenue_source_rows",
     )
@@ -218,6 +222,11 @@ def _create_google_revenue_source_rows_table() -> None:
             "length(source_row_key) = 64",
             name="ck_google_revenue_source_rows_source_row_key_length",
         ),
+    )
+    op.create_index(
+        "ix_google_revenue_source_rows_tenant_month_ingested_id",
+        "google_revenue_source_rows",
+        ["tenant_id", "report_month", "ingested_at", "id"],
     )
     # PostgreSQL is the financial source of truth; these two CHECKs keep
     # non-repository write paths (direct SQL, future services, backfills) aligned

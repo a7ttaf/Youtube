@@ -27,6 +27,7 @@ B = UUID("00000000-0000-0000-0000-000000000002")
 
 @pytest.fixture
 def session() -> Session:
+    """Create an isolated in-memory session for source-row repository tests."""
     engine = create_engine("sqlite+pysqlite:///:memory:")
     TenantBase.metadata.create_all(engine)
     FinanceBase.metadata.create_all(engine)
@@ -38,6 +39,7 @@ def session() -> Session:
 
 
 def _seed_tenants_and_currency(session: Session) -> None:
+    """Seed the minimum tenant and currency rows required by the fixtures."""
     activated = datetime.now(UTC)
     session.add(TenantORM(id=A, slug="tenant-a", display_name="A"))
     session.add(TenantORM(id=B, slug="tenant-b", display_name="B"))
@@ -62,6 +64,7 @@ def _row(
     ingested_at: datetime,
     row_id: UUID | None = None,
 ) -> GoogleRevenueSourceRowORM:
+    """Build a source-row ORM instance with redaction-sensitive payload data."""
     resolved_id = row_id or uuid4()
     return GoogleRevenueSourceRowORM(
         id=resolved_id,
@@ -120,6 +123,7 @@ def seed_many(session: Session) -> dict[str, UUID]:
 
 
 def test_list_filters_by_tenant_and_month(session, seed_rows):
+    """Verify list_source_rows filters to the tenant and month."""
     page = list_source_rows(session, tenant_id=A, month="2026-03", limit=50)
     assert all(e.report_month == "2026-03" for e in page.items)
     # No tenant B row leaks.
@@ -128,6 +132,7 @@ def test_list_filters_by_tenant_and_month(session, seed_rows):
 
 
 def test_entry_never_exposes_raw_payload(session, seed_rows):
+    """Verify raw payload data stays redacted from the API projection."""
     page = list_source_rows(session, tenant_id=A, month="2026-03", limit=50)
     api = page.items[0].to_api()
     assert "raw_payload" not in api
@@ -136,6 +141,7 @@ def test_entry_never_exposes_raw_payload(session, seed_rows):
 
 
 def test_source_system_filter(session, seed_rows):
+    """Verify the source-system filter limits the projected rows."""
     page = list_source_rows(
         session, tenant_id=A, month="2026-03",
         source_system="adsense_management", limit=50,
@@ -144,6 +150,7 @@ def test_source_system_filter(session, seed_rows):
 
 
 def test_half_cursor_raises(session):
+    """Verify a half-specified cursor is rejected as invalid input."""
     with pytest.raises(SourceRowValidationError):
         list_source_rows(
             session, tenant_id=A, month="2026-03",
@@ -152,6 +159,7 @@ def test_half_cursor_raises(session):
 
 
 def test_limit_out_of_range_raises(session):
+    """Verify invalid page sizes are rejected before querying."""
     with pytest.raises(SourceRowValidationError):
         list_source_rows(session, tenant_id=A, month="2026-03", limit=0)
     with pytest.raises(SourceRowValidationError):
@@ -162,11 +170,13 @@ def test_limit_out_of_range_raises(session):
 
 
 def test_get_returns_none_for_other_tenant(session, seed_rows):
+    """Verify a cross-tenant row lookup returns None instead of leaking data."""
     # An id owned by tenant B is invisible to tenant A (=> route 404).
     assert get_source_row(session, tenant_id=A, row_id=str(seed_rows["b_id"])) is None
 
 
 def test_pagination_has_more_and_cursor(session, seed_many):
+    """Verify keyset pagination returns a cursor when more rows remain."""
     page = list_source_rows(session, tenant_id=A, month="2026-03", limit=2)
     assert len(page.items) == 2
     assert page.next_cursor is not None

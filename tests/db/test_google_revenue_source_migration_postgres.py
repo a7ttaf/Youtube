@@ -117,6 +117,7 @@ def test_indexes_present_on_google_revenue_source_rows(
     inspector = inspect(fresh_engine)
     indexes = {i["name"] for i in inspector.get_indexes("google_revenue_source_rows")}
     assert "ix_google_revenue_source_rows_tenant_month_source" in indexes
+    assert "ix_google_revenue_source_rows_tenant_month_ingested_id" in indexes
     assert "ix_google_revenue_source_rows_tenant_channel_month" in indexes
 
 

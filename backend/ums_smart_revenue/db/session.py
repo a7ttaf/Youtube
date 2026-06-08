@@ -73,7 +73,7 @@ def build_platform_session_factory(
 #   - File: backend/ums_smart_revenue/db/rls.py -> role names + GUC key.
 # ============================================================================
 @event.listens_for(Session, "after_begin")
-def _apply_tenant_isolation(session, transaction, connection):
+def _apply_tenant_isolation(session, _transaction, connection):
     """Set transaction role + tenant GUC for Postgres sessions when warranted."""
     if connection.dialect.name != "postgresql":
         return

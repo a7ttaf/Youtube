@@ -26,12 +26,14 @@ ORG_B = "00000000-0000-0000-0000-0000000000b2"
 
 
 def _upgrade(url: str) -> None:
+    """Apply the tenant-RLS migration to the test database."""
     cfg = Config("alembic.ini")
     cfg.set_main_option("sqlalchemy.url", url)
     command.upgrade(cfg, "head")
 
 
 def _seed(engine: sa.Engine) -> None:
+    """Seed tenant B and representative org-unit rows for isolation checks."""
     # Seed tenant B + an A-owned and a B-owned org_units root row (parent_id
     # NULL to sidestep the composite self-FK) as the owner connection.
     with engine.begin() as conn:
@@ -61,6 +63,7 @@ def _seed(engine: sa.Engine) -> None:
 
 
 def test_app_tenant_cannot_read_other_tenant_rows():
+    """Verify app_tenant reads only the rows for the configured tenant."""
     url = require_postgres_url()
     _upgrade(url)
     engine = sa.create_engine(url)
@@ -85,6 +88,7 @@ def test_app_tenant_cannot_read_other_tenant_rows():
 
 
 def test_with_check_blocks_cross_tenant_insert():
+    """Verify WITH CHECK blocks inserting rows for another tenant."""
     url = require_postgres_url()
     _upgrade(url)
     engine = sa.create_engine(url)
@@ -113,6 +117,7 @@ def test_with_check_blocks_cross_tenant_insert():
 
 
 def test_missing_guc_fails_closed():
+    """Verify the tenant lane fails closed when the tenant GUC is absent."""
     url = require_postgres_url()
     _upgrade(url)
     engine = sa.create_engine(url)
@@ -128,6 +133,7 @@ def test_missing_guc_fails_closed():
 
 
 def test_app_platform_reads_across_tenants():
+    """Verify app_platform bypasses RLS and can read across tenants."""
     url = require_postgres_url()
     _upgrade(url)
     engine = sa.create_engine(url)
