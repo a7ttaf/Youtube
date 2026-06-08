@@ -1,0 +1,47 @@
+title: Preserve UMS finance UI permission and explainability contracts
+rule: |
+  Review PRs for finance, authorization, audit, export, and graph-projection UI
+  contract drift.
+
+  Required contracts:
+  - PostgreSQL or the operational warehouse remains the financial source of
+    truth. Frontend code must not compute official finance results directly.
+  - Neo4j or graph views must remain read-only exploration surfaces, not
+    authorization, payment, lock, override, allocation, or export authorities.
+  - Sensitive values must keep permission-aware rendering. Restricted money
+    displays `Restricted`, not `$0`, empty text, placeholder dashes, or hidden
+    cells that imply missing data.
+  - Money and KPI surfaces must preserve source, formula, confidence tier,
+    lock/export state, and trace or explain affordances when relevant.
+  - Export blockers, evidence gaps, month locks, accepted exceptions, and audit
+    consequences must stay visible near the affected action or value.
+  - Disabled actions must explain whether the reason is permission, lock state,
+    incomplete evidence, missing mapping, or unresolved alert.
+  - Status and confidence indicators must pair color with labels and remain
+    accessible under WCAG 2.2 AA expectations.
+
+  Escalate as critical when a change can make unauthorized data appear
+  available, make restricted money look like zero, hide an export blocker, or
+  let the UI appear to mutate source-of-truth finance or graph state.
+severity: critical
+scope: pull_request
+path: frontend/**
+examples:
+  - snippet: |
+      const officialNet = gross - deductions;
+      return <Kpi value={formatCurrency(officialNet)} />;
+    isCorrect: false
+  - snippet: |
+      return (
+        <MoneyCell
+          value={netRevenue}
+          source={source}
+          confidence={confidence}
+          restrictedLabel="Restricted"
+        />
+      );
+    isCorrect: true
+inheritance:
+  inheritable: true
+  exclude: []
+  include: []
