@@ -60,7 +60,11 @@ from ums_smart_revenue.config.settings import (
     load_app_settings,
 )
 from ums_smart_revenue.config.version_baseline import STACK_VERSION_BASELINE
-from ums_smart_revenue.db.session import build_session_factory, session_dependency
+from ums_smart_revenue.db.session import (
+    build_platform_session_factory,
+    build_session_factory,
+    session_dependency,
+)
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
@@ -110,9 +114,22 @@ def create_app(
         overrides[current_revenue_audit_sink] = sql_revenue_audit_sink_from_session
         if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
             overrides[current_principal_from_headers] = current_principal_from_database
+            # ============================================================
+            # Purpose: The tenant resolver reads `tenants` to map slug->tenant
+            #   BEFORE TENANT_CTX is set, so its session has no tenant and the
+            #   app_tenant lane never activates. Run that lookup on the platform
+            #   lane (app_platform) which the session hook switches to via
+            #   session.info regardless of context, so it holds the grants a
+            #   restricted (INHERIT FALSE) login otherwise lacks.
+            # Blast Radius: Authorization/tenant resolution; reads platform
+            #   `tenants` only (no RLS table), so BYPASSRLS is immaterial here.
+            # ============================================================
+            resolver_session_factory = build_platform_session_factory(
+                resolved_database_url
+            )
             _app.add_middleware(
                 TrustedGatewayTenantResolverMiddleware,
-                session_factory=session_factory,
+                session_factory=resolver_session_factory,
                 authorize_tenant=_allow_database_auth_tenant,
             )
 

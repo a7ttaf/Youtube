@@ -1,14 +1,20 @@
-"""Postgres-only proof that the RLS rollout grants app roles the full table
-surface, so a restricted runtime login does not break on NON-tenant tables.
+"""Postgres-only proof of the LEAST-PRIVILEGE grant surface for the app roles.
 
 The application request lane runs as ``app_tenant`` whenever a tenant is in
 context. Under the documented restricted login (non-owner/non-superuser),
-``app_tenant`` only has privileges that the migration grants. These tables have
-no tenant_id and are platform-shared, so they are reachable by privilege (not
-RLS): authz catalogs (``permissions``), ``currencies``,
-``currency_exchange_rates``, and the ``committed_allocation_*`` child tables.
-Isolation of the 25 tenant tables is proved separately in test_isolation.py and
-the migration test; here we only prove reachability.
+``app_tenant`` only holds privileges the migration grants. The narrowed model
+is:
+
+  * **Broad SELECT** across the whole ``public`` schema (so the app can read
+    platform-shared catalogs that carry no ``tenant_id`` and thus no RLS:
+    ``permissions``, ``currencies``, ``currency_exchange_rates``, the
+    ``committed_allocation_*`` child tables, ...).
+  * **DML (INSERT/UPDATE/DELETE) ONLY** on the enumerated
+    ``NON_TENANT_WRITE_TABLES`` plus the 25 RLS-isolated tenant tables. DML is
+    NOT granted on platform catalogs (e.g. ``permissions``).
+
+This test proves both halves: reads are broad, writes are narrow. Isolation of
+the 25 tenant tables is proved separately in test_isolation.py.
 """
 
 import sqlalchemy as sa
@@ -17,8 +23,8 @@ from alembic.config import Config
 
 from tests.db._postgres_helpers import require_postgres_url
 
-# Representative NON-tenant tables the app lane touches; none carry tenant_id,
-# so RLS does not apply and only the blanket GRANT keeps them reachable.
+# Catalog/non-tenant tables the app lane reads; none carry tenant_id, so RLS
+# does not apply and only the broad SELECT grant keeps them reachable.
 _NON_TENANT_READ_TABLES = (
     "permissions",
     "currencies",
@@ -55,5 +61,60 @@ def test_app_tenant_can_reach_non_tenant_tables():
                     sa.text(f"SELECT count(*) FROM {table}")
                 ).scalar()
                 assert count is not None, f"{table} unreachable as app_tenant"
+    finally:
+        engine.dispose()
+
+
+def test_app_tenant_has_write_grant_on_non_tenant_write_table():
+    # currency_exchange_rates is a NON_TENANT_WRITE_TABLES member: the app
+    # writes exchange rates at runtime, so INSERT must be granted.
+    url = require_postgres_url()
+    _upgrade(url)
+    engine = sa.create_engine(url)
+    try:
+        with engine.connect() as conn:
+            granted = conn.execute(
+                sa.text(
+                    "SELECT has_table_privilege("
+                    "'app_tenant', 'currency_exchange_rates', 'INSERT')"
+                )
+            ).scalar()
+            assert granted is True, (
+                "app_tenant lost INSERT on currency_exchange_rates "
+                "(NON_TENANT_WRITE_TABLES member)"
+            )
+    finally:
+        engine.dispose()
+
+
+def test_app_tenant_is_denied_dml_on_platform_catalog():
+    # permissions is a platform definition catalog. The narrowed model grants
+    # SELECT broadly but NOT DML, so INSERT must NOT be granted. A regression to
+    # the old blanket DML grant would flip this to True.
+    url = require_postgres_url()
+    _upgrade(url)
+    engine = sa.create_engine(url)
+    try:
+        with engine.connect() as conn:
+            insert_granted = conn.execute(
+                sa.text(
+                    "SELECT has_table_privilege("
+                    "'app_tenant', 'permissions', 'INSERT')"
+                )
+            ).scalar()
+            assert insert_granted is False, (
+                "app_tenant unexpectedly holds INSERT on the permissions "
+                "catalog; DML must be narrowed to NON_TENANT_WRITE_TABLES"
+            )
+            # Sanity: SELECT on the same catalog IS granted (broad reads).
+            select_granted = conn.execute(
+                sa.text(
+                    "SELECT has_table_privilege("
+                    "'app_tenant', 'permissions', 'SELECT')"
+                )
+            ).scalar()
+            assert select_granted is True, (
+                "app_tenant lost broad SELECT on the permissions catalog"
+            )
     finally:
         engine.dispose()

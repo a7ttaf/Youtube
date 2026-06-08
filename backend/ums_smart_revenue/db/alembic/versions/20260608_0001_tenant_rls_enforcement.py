@@ -38,6 +38,18 @@ down_revision = "20260606_0001"
 branch_labels = None
 depends_on = None
 
+# NON-tenant tables the app writes at runtime (no tenant_id, so not RLS-scoped).
+# app_tenant/app_platform get DML here; all other non-tenant tables stay read-
+# only for the app roles. currency_exchange_rates: exchange-rate writes. The
+# committed_allocation_* children: written by allocation commit (isolated only
+# transitively via run_id -> committed_allocation_runs, which IS RLS-protected).
+NON_TENANT_WRITE_TABLES: tuple[str, ...] = (
+    "currency_exchange_rates",
+    "committed_allocation_lines",
+    "committed_allocation_notes",
+    "committed_allocation_unallocated",
+)
+
 
 def _create_role(bind, role: str, *, bypassrls: bool) -> None:
     """Create a NOLOGIN role idempotently; set BYPASSRLS as requested."""
@@ -110,24 +122,24 @@ def upgrade() -> None:
             )
         )
     # ========================================================================
-    # Purpose: Grant the full table/sequence surface to both app roles so a
-    #   restricted (non-owner/non-superuser) runtime login can reach the
-    #   NON-tenant tables the app also touches (authz catalogs, currencies,
-    #   exchange rates, the committed_allocation_* child tables with no
-    #   tenant_id). RLS still isolates the 25 tenant tables; non-tenant tables
-    #   are platform-shared by design and runtime authz stays in the app
-    #   permission system, not table grants.
-    # Database/ORM: All tables/sequences in schema public.
-    # Standards: Idempotent blanket GRANT; role names are internal constants.
+    # Purpose: Least-privilege grant surface for the app roles. The 25 tenant
+    #   tables already got per-table CRUD (above) and are isolated by RLS. Reads
+    #   are harmless, so grant SELECT broadly (covers authz catalogs, currencies,
+    #   etc. a restricted INHERIT-FALSE login otherwise cannot read). DML is
+    #   granted ONLY on the enumerated NON-tenant tables the app writes at
+    #   runtime, so DML cannot be exercised against platform catalogs.
+    # Database/ORM: SELECT on all public tables/sequences; DML on
+    #   NON_TENANT_WRITE_TABLES only.
+    # Standards: Enumerated DML keeps DB least-privilege; role names + table list
+    #   are internal constants. If a future endpoint writes another non-tenant
+    #   table, add it to NON_TENANT_WRITE_TABLES (else it 'permission denies'
+    #   under a restricted login — caught by the non-owner-login RLS test).
     # Blast Radius: Authorization (DB privilege surface only — app permission
     #   checks unchanged); finance/audit reads of platform-shared catalogs.
     # ========================================================================
     for role in (APP_TENANT_ROLE, APP_PLATFORM_ROLE):
         bind.execute(
-            sa.text(
-                "GRANT SELECT, INSERT, UPDATE, DELETE "
-                f'ON ALL TABLES IN SCHEMA public TO "{role}"'
-            )
+            sa.text(f'GRANT SELECT ON ALL TABLES IN SCHEMA public TO "{role}"')
         )
         bind.execute(
             sa.text(
@@ -135,6 +147,12 @@ def upgrade() -> None:
                 f'ON ALL SEQUENCES IN SCHEMA public TO "{role}"'
             )
         )
+        for table in NON_TENANT_WRITE_TABLES:
+            bind.execute(
+                sa.text(
+                    f"GRANT INSERT, UPDATE, DELETE ON {table} TO \"{role}\""
+                )
+            )
 
 
 def downgrade() -> None:

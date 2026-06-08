@@ -55,15 +55,29 @@ section is authoritative where it conflicts with the planning text further down.
   membership out of band per the runbook. The migration is **idempotent** and
   **does not assume superuser** — it tolerates pre-existing roles/grants.
 
-### Grant model — broad table grants, RLS provides isolation
+### Grant model — least-privilege: broad SELECT, narrow DML
 
-The two app roles receive **broad table/sequence grants** across the whole
-`public` schema (`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA
-public`, plus `GRANT USAGE, SELECT ON ALL SEQUENCES`), not just the 25 tenant
-tables. Tenant isolation is enforced by **RLS on the 25 tenant-scoped tables**,
-not by withholding table privileges. The blanket grant exists because the app
-lane (`app_tenant`) also touches **non-tenant, platform-shared** tables that
-carry no `tenant_id` and therefore have no RLS policy:
+The two app roles receive a **least-privilege** grant surface, not blanket CRUD:
+
+- **Broad SELECT** across the whole `public` schema
+  (`GRANT SELECT ON ALL TABLES IN SCHEMA public`) plus
+  `GRANT USAGE, SELECT ON ALL SEQUENCES`. Reads are harmless under RLS and the
+  app lane needs to read non-tenant platform catalogs, so SELECT is granted
+  broadly.
+- **DML (INSERT/UPDATE/DELETE)** is granted on **only** two sets of tables:
+  1. the **25 tenant-scoped tables** (per-table CRUD, isolated by RLS), and
+  2. the enumerated **`NON_TENANT_WRITE_TABLES`** the app writes at runtime that
+     carry no `tenant_id`: `currency_exchange_rates`,
+     `committed_allocation_lines`, `committed_allocation_notes`,
+     `committed_allocation_unallocated` (constant in migration
+     `20260608_0001`).
+
+App DML therefore **cannot touch platform catalogs** (`permissions`, `roles`,
+`role_permission_assignments`, `currencies`, ...): those get SELECT only. Tenant
+isolation is still enforced by **RLS on the 25 tenant-scoped tables**.
+
+The non-tenant, platform-shared tables that carry no `tenant_id` (and so have no
+RLS policy) but that the app lane reads include:
 
 - authz catalogs: `permissions`, `roles`, `role_permission_assignments`,
 - `currencies`, `currency_exchange_rates`,
@@ -71,11 +85,24 @@ carry no `tenant_id` and therefore have no RLS policy:
   `committed_allocation_notes`, `committed_allocation_unallocated`.
 
 Under the restricted runtime login (non-owner/non-superuser), `app_tenant` only
-holds what the migration grants it. Without the blanket grant those endpoints
-would fail with `permission denied` once RLS is enforced (latent today because
-deploys still connect as owner/superuser). Runtime authorization remains the
-**application permission system**, not table grants; the DB grant surface is
-deliberately broad and isolation is delegated to RLS.
+holds what the migration grants it. Without broad SELECT those endpoints would
+fail with `permission denied` once RLS is enforced. If a future endpoint writes
+another non-tenant table, add it to `NON_TENANT_WRITE_TABLES` (otherwise it
+`permission denies` under the restricted login — covered by
+`tests/tenancy/test_rls_restricted_login.py`). Runtime authorization remains the
+**application permission system**, not table grants.
+
+### Resolver runs on the platform lane
+
+The trusted-gateway tenant resolver middleware reads the `tenants` table to map
+slug → tenant **before** tenant context (`TENANT_CTX`) is set. On the tenant
+lane the `after_begin` session hook no-ops when no tenant is in context, so the
+session would run as the **bare login** — which, under `INHERIT FALSE`, holds no
+grants and gets `permission denied`. The resolver is therefore wired with
+`build_platform_session_factory(...)` (`app.py`): the platform lane switches on
+via `session.info` regardless of context and holds the grants needed to read
+`tenants`. `tenants` is not an RLS table, so `app_platform`'s `BYPASSRLS` is
+immaterial here — only its grant surface matters.
 
 > **Follow-up (future spec):** the three `committed_allocation_*` child tables
 > carry no `tenant_id` and are isolated only **transitively** via the `run_id`
