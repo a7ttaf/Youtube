@@ -92,6 +92,7 @@ def _row(
 
 @pytest.fixture
 def seed_rows(session: Session) -> dict[str, UUID]:
+    """Seed a small cross-tenant row set for filter and leak tests."""
     _seed_tenants_and_currency(session)
     base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
     b_id = uuid4()
@@ -113,6 +114,7 @@ def seed_rows(session: Session) -> dict[str, UUID]:
 
 @pytest.fixture
 def seed_many(session: Session) -> dict[str, UUID]:
+    """Seed multiple tenant-A rows for pagination tests."""
     _seed_tenants_and_currency(session)
     base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
     session.add_all(

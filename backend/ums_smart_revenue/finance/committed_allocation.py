@@ -103,6 +103,7 @@ class SqlAlchemyCommittedAllocationRepository:
     """Persist committed allocation runs on the shared request session."""
 
     def __init__(self, session: Session, *, tenant_id: UUID | str | None = None) -> None:
+        """Bind the repository to a shared session and resolved tenant scope."""
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
@@ -283,11 +284,8 @@ class SqlAlchemyCommittedAllocationRepository:
             self._session.flush()
             wrote_children = True
         finally:
-            if is_postgres:
-                if wrote_children:
-                    self._session.connection().exec_driver_sql(
-                        'SET LOCAL ROLE "app_tenant"'
-                    )
+            if is_postgres and wrote_children:
+                self._session.connection().exec_driver_sql('SET LOCAL ROLE "app_tenant"')
         return CommitAllocationOutcome(
             run=run, lines=lines, unallocated=unallocated, notes=notes, created=True
         )
