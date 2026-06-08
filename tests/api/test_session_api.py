@@ -5,6 +5,7 @@ derivation; database-mode cases exercise the SQL-backed enriched principal
 plus fail-closed behavior (disabled/unknown). Fixtures mirror
 tests/api/test_tenants_api.py and tests/api/test_database_principals.py.
 """
+# pylint: disable=redefined-outer-name, too-many-arguments
 
 from __future__ import annotations
 
@@ -57,6 +58,8 @@ def _header_principal(
     role: str,
     user_id: UUID = FINANCE_ADMIN_ID,
     email: str = "session@example.invalid",
+    scope_type: str = "global",
+    scope_id: str | None = None,
     include_token: bool = True,
     include_identity: bool = True,
 ) -> dict[str, str]:
@@ -64,7 +67,7 @@ def _header_principal(
 
     current_principal_from_headers (active in headers mode) requires
     X-User-ID, X-User-Email, X-Role, X-Scope-Type, and the gateway token.
-    X-Scope-Id is omitted because X-Scope-Type="global" forbids a scope_id.
+    X-Scope-Id is included when the requested scope type needs one.
     """
     headers: dict[str, str] = {}
     if include_identity:
@@ -73,9 +76,11 @@ def _header_principal(
                 "X-User-ID": str(user_id),
                 "X-User-Email": email,
                 "X-Role": role,
-                "X-Scope-Type": "global",
+                "X-Scope-Type": scope_type,
             }
         )
+        if scope_id is not None:
+            headers["X-Scope-Id"] = scope_id
     if include_token:
         headers["X-UMS-Trusted-Gateway-Token"] = _token()
     return headers
@@ -193,6 +198,25 @@ def test_session_me_header_mode_connector_admin_manages_and_runs(client_headers_
     caps = response.json()["capabilities"]
     assert caps["canRunConnectorJobs"] is True
     assert caps["canManageConnectors"] is True
+    assert caps["canViewConnectorHealth"] is True
+
+
+def test_session_me_header_mode_connector_scoped_connector_admin_can_view_health(
+    client_headers_mode,
+):
+    """Connector-scoped connector_admin still exposes the run-history panel."""
+    response = client_headers_mode.get(
+        "/session/me",
+        headers=_header_principal(
+            role="connector_admin",
+            user_id=CONNECTOR_OPS_ID,
+            scope_type="connector",
+            scope_id="youtube_reporting",
+        ),
+    )
+    assert response.status_code == 200, response.text
+    caps = response.json()["capabilities"]
+    assert caps["canViewConnectorHealth"] is True
 
 
 # ---------------------------------------------------------------------------

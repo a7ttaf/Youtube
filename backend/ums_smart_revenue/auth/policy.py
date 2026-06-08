@@ -1,5 +1,7 @@
 """Authorization predicates for tenant users and platform admins."""
 
+from types import MappingProxyType
+
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.platform_admin import (
@@ -7,10 +9,21 @@ from ums_smart_revenue.auth.platform_admin import (
     PlatformAdminStatus,
     Principal,
 )
-from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
+from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 
 EMPTY_ORG_INDEX = OrgAccessIndex()
+_CONNECTOR_KEY_ALIASES = MappingProxyType({
+    "youtube-reporting": ("youtube_reporting",),
+    "youtube_reporting": ("youtube-reporting",),
+    "youtube-analytics": ("youtube_analytics",),
+    "youtube_analytics": ("youtube-analytics",),
+    # FIX: Treat the legacy AdSense connector scope as an umbrella for the
+    # AdSense management run-history keys so scoped health reads stay complete.
+    "adsense": ("adsense-management", "adsense_management"),
+    "adsense-management": ("adsense_management",),
+    "adsense_management": ("adsense-management",),
+})
 
 
 def has_permission(
@@ -41,6 +54,66 @@ def has_permission(
             return True
 
     return False
+
+
+# ============================================================================
+# Purpose: Return the connector IDs that are allowed to view connector health,
+#          or None when the caller has global VIEW_CONNECTOR_HEALTH access.
+# Database/ORM: None — pure policy evaluation over the already-loaded principal.
+# Standards: Fail closed for disabled users and malformed/empty connector scope
+#            grants. Global access is represented by None so callers can
+#            distinguish unfiltered reads from scoped filtering.
+# Blast Radius: Authorization read path only. No write, finance, audit, or
+#               graph impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> GET /connectors/runs
+#     must filter run-history reads to these IDs.
+#   - File: backend/ums_smart_revenue/api/session.py -> /session/me capability
+#     derivation uses the same decision for the SPA.
+# ============================================================================
+def connector_health_connector_ids(user: UserPrincipal) -> frozenset[str] | None:
+    """Return allowed connector IDs for VIEW_CONNECTOR_HEALTH, or None for global access."""
+    global_scope = AccessScope.global_scope()
+    if has_permission(user, Permission.VIEW_CONNECTOR_HEALTH, global_scope):
+        return None
+
+    connector_ids: set[str] = set()
+
+    for grant in user.direct_permissions:
+        if (
+            grant.active
+            and grant.permission == Permission.VIEW_CONNECTOR_HEALTH
+            and grant.scope.type == ScopeType.CONNECTOR
+            and grant.scope.id
+            and has_permission(
+                user,
+                Permission.VIEW_CONNECTOR_HEALTH,
+                AccessScope.connector(grant.scope.id),
+            )
+        ):
+            connector_ids.update(_connector_key_candidates(grant.scope.id))
+
+    for assignment in user.role_assignments:
+        if (
+            assignment.active
+            and assignment.scope.type == ScopeType.CONNECTOR
+            and assignment.scope.id
+            and has_permission(
+                user,
+                Permission.VIEW_CONNECTOR_HEALTH,
+                AccessScope.connector(assignment.scope.id),
+            )
+        ):
+            connector_ids.update(_connector_key_candidates(assignment.scope.id))
+
+    return frozenset(connector_ids)
+
+
+def _connector_key_candidates(connector_id: str) -> tuple[str, ...]:
+    """Return the connector id plus its alias form for permission filtering."""
+    candidates = [connector_id]
+    candidates.extend(_CONNECTOR_KEY_ALIASES.get(connector_id, ()))
+    return tuple(dict.fromkeys(candidates))
 
 
 def can_view_channel_analytics(

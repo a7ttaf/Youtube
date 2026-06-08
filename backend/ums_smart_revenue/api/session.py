@@ -11,7 +11,10 @@ from pydantic.alias_generators import to_camel
 from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
-from ums_smart_revenue.auth.policy import has_permission
+from ums_smart_revenue.auth.policy import (
+    connector_health_connector_ids,
+    has_permission,
+)
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
@@ -47,6 +50,8 @@ class SessionCapabilities(BaseModel):
 
     Python attributes stay snake_case (lint-clean); the wire/JSON keys are
     camelCase via the alias generator so the SPA consumes canViewRevenue etc.
+    Most capabilities are global-scope checks; connector health is scope-aware
+    so scoped users can open the run-history panel without over-broadening it.
     """
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
@@ -62,6 +67,7 @@ class SessionCapabilities(BaseModel):
     can_export_analytics_reports: bool
     can_manage_registry: bool
     can_manage_connectors: bool
+    can_view_connector_health: bool
     can_run_connector_jobs: bool
     can_view_audit: bool
 
@@ -80,7 +86,7 @@ class SessionMe(BaseModel):
 
 
 def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
-    """Derive global-scope UI capabilities from the principal's permission grants."""
+    """Derive UI capabilities from the principal's permission grants."""
     # ========================================================================
     # Purpose: Evaluate each UI capability against the principal in-memory at
     #          GLOBAL scope. A GLOBAL grant satisfies a global target; a
@@ -104,6 +110,8 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
         """Return True if principal holds permission at global scope."""
         return has_permission(principal, permission, global_scope)
 
+    connector_health_ids = connector_health_connector_ids(principal)
+
     return SessionCapabilities(
         can_view_revenue=_can(Permission.VIEW_REVENUE),
         can_view_confidence=_can(Permission.VIEW_CONFIDENCE),
@@ -122,6 +130,12 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
         # live Map/Assign controls that silently 403 on every write.
         can_manage_registry=_can(Permission.MANAGE_ORG_MAPPING),
         can_manage_connectors=_can(Permission.MANAGE_CONNECTORS),
+        # Read-only run-history / health visibility — gates the ConnectorsView
+        # run-history panel; mirrors GET /connectors/runs. This one capability
+        # is scope-aware so connector-scoped users can open the panel while the
+        # backend still restricts the row set to their granted connector IDs.
+        can_view_connector_health=connector_health_ids is None
+        or bool(connector_health_ids),
         can_run_connector_jobs=_can(Permission.RUN_CONNECTOR_JOBS),
         can_view_audit=_can(Permission.VIEW_AUDIT_LOG),
     )

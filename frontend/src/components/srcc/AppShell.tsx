@@ -37,6 +37,7 @@ type AccessPermissions = {
   role: Role;
   canViewFinance: boolean;
   canManageRegistry: boolean;
+  canManageConnectors: boolean;
   canCloseMonth: boolean;
   canUnlockMonth: boolean;
   canCreateGlobalExports: boolean;
@@ -46,6 +47,7 @@ type AccessPermissions = {
   canExportAnalyticsReports: boolean;
   canRunConnectors: boolean;
   canViewAudit: boolean;
+  canViewConnectorHealth: boolean;
 };
 
 // FIX: Session capabilities are now hydrated from GET /session/me (see
@@ -85,16 +87,19 @@ function canPreviewRoles(): boolean { // skipcq: JS-0067
 //            (global/scoped/raw/report) to EXPORT_REVENUE_REPORT; analytics CSV
 //            exports to EXPORT_ANALYTICS_REPORT (a distinct permission held by 8
 //            of 10 roles, incl. ops-admin, that don't hold revenue-export);
-//            audit to VIEW_AUDIT_LOG; connector job controls to RUN_CONNECTOR_JOBS
-//            (NOT to finance, honoring that a finance admin must not trigger
-//            connector jobs). Registry management uses canManageRegistry derived
-//            from MANAGE_CHANNELS (corporate_admin and revenue_operations_admin
-//            hold registry permissions without VIEW_REVENUE; finance_admin holds
-//            VIEW_REVENUE without registry permissions — the two are disjoint).
+//            audit to VIEW_AUDIT_LOG; connector management UI to MANAGE_CONNECTORS;
+//            connector job controls to RUN_CONNECTOR_JOBS (NOT to finance,
+//            honoring that a finance admin must not trigger connector jobs).
+//            Registry management uses canManageRegistry derived from
+//            MANAGE_CHANNELS (corporate_admin and revenue_operations_admin
+//            hold registry permissions without VIEW_REVENUE; finance_admin
+//            holds VIEW_REVENUE without registry permissions — the two are
+//            disjoint).
 // Blast Radius: Authorization (UI gating). No graph projection impact detected.
 // Connections:
 //   - File: backend/ums_smart_revenue/api/session.py -> SessionCapabilities.
-//   - File: frontend/src/components/srcc/views/ConnectorsView.tsx -> canRunConnectors.
+//   - File: frontend/src/components/srcc/views/ConnectorsView.tsx -> canRunConnectors,
+//     canManageConnectors.
 // ============================================================================
 function capabilitiesToPermissions( // skipcq: JS-0067
   role: Role,
@@ -105,6 +110,7 @@ function capabilitiesToPermissions( // skipcq: JS-0067
     role,
     canViewFinance: capabilities.canViewRevenue,
     canManageRegistry: capabilities.canManageRegistry,
+    canManageConnectors: capabilities.canManageConnectors,
     canCloseMonth: capabilities.canCloseMonth,
     canUnlockMonth: capabilities.canUnlockMonth,
     canCreateGlobalExports: canExport,
@@ -116,6 +122,11 @@ function capabilitiesToPermissions( // skipcq: JS-0067
     // finance admin does not hold — so canViewRevenue must NOT enable them.
     canRunConnectors: capabilities.canRunConnectorJobs,
     canViewAudit: capabilities.canViewAudit,
+    // The run-history panel gates on the backend's read permission exactly:
+    // /session/me now exposes canViewConnectorHealth (VIEW_CONNECTOR_HEALTH),
+    // mirroring the GET /connectors/runs route gate. Narrower principals see the
+    // restricted placeholder and fire no fetch; the route 403 stays authoritative.
+    canViewConnectorHealth: capabilities.canViewConnectorHealth,
   };
 }
 
@@ -692,7 +703,9 @@ function ViewRouter({ // skipcq: JS-0067, JS-R1005
       {view === "connectors" && (
         <ConnectorsView
           canRunConnectors={permissions.canRunConnectors}
+          canManageConnectors={permissions.canManageConnectors}
           canViewFinance={permissions.canViewFinance}
+          canViewConnectorHealth={permissions.canViewConnectorHealth}
         />
       )}
       {view === "audit" && (
@@ -765,9 +778,9 @@ function WorkflowRail() { // skipcq: JS-0067
 
 // ConnectorsView is the wired Connectors / data-source screen; it lives in
 // ./views/ConnectorsView.tsx and reads GET /connectors/credentials (data
-// sources) + GET /adsense/payments (synced payments) and POSTs /connectors/jobs
-// (request sync) + /adsense/sync-payments via the useConnectors / useAdsense
-// hooks. It states the run-history gap honestly (no connector-runs read route).
+// sources) + GET /connectors/runs (run history) + GET /adsense/payments
+// (synced payments) and POSTs /connectors/jobs (request sync) +
+// /adsense/sync-payments via the useConnectors / useAdsense hooks.
 
 /* ------------------------------------------------------------------ audit */
 

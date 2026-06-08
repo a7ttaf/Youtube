@@ -517,6 +517,19 @@ single P-tier above.
   event, `MANAGE_CONNECTORS@connector(connector_key)` gate, reason required).
   5 TDD tests (ok, not-found, inactive, oauth-error, 403). Backend only; no migration.
   Merged to main as PR #72 (28da1a6).
+- ⏳ Connector run history + Test Connection (Track D buildable chunk, branch
+  `feat/connector-run-history`) — new read-only `GET /connectors/runs`
+  (`VIEW_CONNECTOR_HEALTH` gate, tenant-scoped, optional connector_key/account_id
+  filters, newest-first `(started_at, id)` cursor pagination, no audit write)
+  backed by a new `list_runs`/`ConnectorRunPage` repository read method; the
+  ConnectorsView "Run history not yet available" placeholder is replaced with a
+  live run-history panel (status badges, counts breakdown, error_summary, Load
+  More with id-dedupe) and the existing test-connection probe is surfaced as a
+  per-credential Test Connection button (fixed audit reason). `/session/me` now
+  exposes `canViewConnectorHealth` so the SPA gate mirrors the route gate exactly.
+  No migration; no live credentials needed. Remaining Track D is creds/schema
+  blocked: OAuth consent flow, live pulls, token-expiry/last-error schema +
+  background monitoring.
 - ✅ Channel Registry Phase 1 wiring — merged to main as PR #73 (56bf9a8): the
   Registry table is wired to `GET /channels` (replacing the `REGISTRY_ROWS`
   mock). All display fields derived client-side (avatar, CMS badge, source

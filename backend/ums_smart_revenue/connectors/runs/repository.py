@@ -1,4 +1,8 @@
+"""Repository helpers for tenant-scoped connector run history."""
+# pylint: disable=too-many-instance-attributes, too-many-arguments
+
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
@@ -26,10 +30,13 @@ CONNECTOR_RUN_COUNT_KEYS = (
 TERMINAL_STATUSES = frozenset({"SUCCEEDED", "PARTIAL", "FAILED"})
 MONTH_PATTERN = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
 ERROR_SUMMARY_MAX_CHARS = 500
+MAX_CONNECTOR_RUN_PAGE_SIZE = 100
 
 
 @dataclass(frozen=True)
 class ConnectorRunEntry:
+    """Immutable connector run row projected into the read API payload."""
+
     id: str
     tenant_id: str
     connector_key: str
@@ -42,21 +49,49 @@ class ConnectorRunEntry:
     counts: dict[str, int]
     error_summary: str | None
 
+    def to_api(self) -> dict[str, object]:
+        """Serialize the immutable run entry into the stable read API shape."""
+        return {
+            "id": self.id,
+            "connector_key": self.connector_key,
+            "account_id": self.account_id,
+            "report_month": self.report_month,
+            "triggered_by_user_id": self.triggered_by_user_id,
+            "started_at": self.started_at.isoformat(),
+            "finished_at": (
+                self.finished_at.isoformat() if self.finished_at is not None else None
+            ),
+            "status": self.status,
+            "counts": dict(self.counts),
+            # FIX: Keep the raw DB value internal and redact locators before
+            # exposing run-history summaries through the API boundary.
+            "error_summary": _sanitize_error_summary(self.error_summary),
+        }
+
+
+@dataclass(frozen=True)
+class ConnectorRunPage:
+    """One page of tenant-scoped connector run history plus its cursor."""
+
+    items: list[ConnectorRunEntry]
+    limit: int
+    next_cursor: dict[str, str] | None
+
 
 class ConnectorRunError(ValueError):
-    pass
+    """Base validation error for connector run history operations."""
 
 
 class ConnectorRunValidationError(ConnectorRunError):
-    pass
+    """Validation failure for connector run history queries or cursors."""
 
 
 class ConnectorRunLinkConflictError(ConnectorRunError):
-    pass
+    """Raised when a run cannot be linked to the requested raw report file."""
 
 
 class ConnectorRunNotFoundError(LookupError):
-    pass
+    """Raised when a requested connector run cannot be found for the tenant."""
 
 
 # ============================================================================
@@ -67,7 +102,8 @@ class ConnectorRunNotFoundError(LookupError):
 # Blast Radius: Audit/operator run tracking only. Finance facts untouched.
 # Connections:
 #   - File: backend/ums_smart_revenue/db/connector_models.py -> ORM table.
-#   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md -> B2.3 contract.
+#   - File: Docs/superpowers/specs/
+#     2026-05-26-spec-b2-google-live-connector-design.md -> B2.3 contract.
 # ============================================================================
 def start_run(
     session: Session,
@@ -78,6 +114,7 @@ def start_run(
     report_month: str,
     triggered_by_user_id: UUID | None,
 ) -> ConnectorRunEntry:
+    """Start a RUNNING connector run and return the created entry."""
     validate_report_month(report_month)
     row = ConnectorRunORM(
         id=uuid4(),
@@ -114,6 +151,7 @@ def link_raw_file(
     raw_report_file_id: UUID,
     ordering_index: int,
 ) -> None:
+    """Link a persisted raw report file to a connector run."""
     _validate_ordering_index(ordering_index)
     _get_run(session, tenant_id=tenant_id, connector_run_id=connector_run_id)
     _get_raw_file(session, tenant_id=tenant_id, raw_report_file_id=raw_report_file_id)
@@ -142,7 +180,8 @@ def link_raw_file(
 # Blast Radius: Audit/operator run tracking only. Finance facts untouched.
 # Connections:
 #   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py -> future caller.
-#   - File: Docs/superpowers/specs/2026-05-26-spec-b2-google-live-connector-design.md -> B2.3 contract.
+#   - File: Docs/superpowers/specs/
+#     2026-05-26-spec-b2-google-live-connector-design.md -> B2.3 contract.
 # ============================================================================
 def finish_run(
     session: Session,
@@ -153,6 +192,7 @@ def finish_run(
     counts: dict[str, int],
     error_summary: str | None,
 ) -> ConnectorRunEntry:
+    """Finish a running connector run with terminal counts and an optional error summary."""
     normalized_status = _validate_terminal_status(status)
     normalized_counts = _validate_counts(counts)
     row = _get_run(
@@ -175,6 +215,116 @@ def finish_run(
 
 
 # ============================================================================
+# Purpose: Return a tenant-scoped, newest-first page of connector runs for the
+#          read-only run-history API, with optional connector/account filters
+#          and a both-or-neither (started_at, id) keyset cursor.
+# Database/ORM: ConnectorRunORM (read only).
+# Standards: Tenant filter always applied; limit validated 1..MAX page size;
+#            fetch limit+1 to derive has_more/next_cursor; typed validation
+#            errors surface as ConnectorRunValidationError at the boundary.
+# Blast Radius: Connector run read surface only. Finance/auth/audit untouched.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> GET /connectors/runs.
+#   - File: backend/ums_smart_revenue/auth/audit_log.py -> mirrored cursor shape.
+# ============================================================================
+# ============================================================================
+# Purpose: List tenant-scoped connector run history, newest-first, with
+#          optional connector_key/connectors/account_id filters and
+#          (started_at, id) cursor pagination. Read-only: never mutates run
+#          state.
+# Database/ORM: ConnectorRunORM (read only).
+# Standards: Tenant filter always applied; both-or-neither cursor and limit
+#            bounds raise ConnectorRunValidationError (translated to 422 at the
+#            route). Fetches limit+1 to compute has_more / next_cursor.
+# Blast Radius: Connector operational metadata read only. No finance, auth,
+#               audit, or graph projection impact detected.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> GET /connectors/runs.
+# ============================================================================
+def list_runs(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    connector_key: str | None = None,
+    connector_keys: Iterable[str] | None = None,
+    account_id: str | None = None,
+    cursor_started_at: datetime | None = None,
+    cursor_id: str | None = None,
+    limit: int,
+) -> ConnectorRunPage:
+    """List tenant-scoped connector runs newest-first with keyset pagination.
+
+    Raises:
+        ConnectorRunValidationError: If limit is out of range or cursor params
+            are not provided together (both-or-neither).
+
+    """
+    if limit < 1 or limit > MAX_CONNECTOR_RUN_PAGE_SIZE:
+        raise ConnectorRunValidationError(
+            f"limit must be between 1 and {MAX_CONNECTOR_RUN_PAGE_SIZE}"
+        )
+    if (cursor_started_at is None) != (cursor_id is None):
+        raise ConnectorRunValidationError(
+            "cursor_started_at and cursor_id must be provided together"
+        )
+
+    stmt = (
+        select(ConnectorRunORM)
+        .where(ConnectorRunORM.tenant_id == tenant_id)
+        .order_by(ConnectorRunORM.started_at.desc(), ConnectorRunORM.id.desc())
+    )
+    if connector_key is not None:
+        stmt = stmt.where(ConnectorRunORM.connector_key == connector_key)
+    if connector_keys is not None:
+        connector_key_values = tuple(connector_keys)
+        if connector_key_values:
+            stmt = stmt.where(ConnectorRunORM.connector_key.in_(connector_key_values))
+        else:
+            return ConnectorRunPage(items=[], limit=limit, next_cursor=None)
+    if account_id is not None:
+        stmt = stmt.where(ConnectorRunORM.account_id == account_id)
+    if cursor_started_at is not None and cursor_id is not None:
+        cursor_uuid = _parse_cursor_uuid(cursor_id)
+        stmt = stmt.where(
+            sa.or_(
+                ConnectorRunORM.started_at < cursor_started_at,
+                sa.and_(
+                    ConnectorRunORM.started_at == cursor_started_at,
+                    ConnectorRunORM.id < cursor_uuid,
+                ),
+            )
+        )
+
+    rows = session.scalars(stmt.limit(limit + 1)).all()
+    items = [_to_entry(row) for row in rows[:limit]]
+    has_more = len(rows) > limit
+    return ConnectorRunPage(
+        items=items,
+        limit=limit,
+        next_cursor=_next_cursor(items) if has_more else None,
+    )
+
+
+def _parse_cursor_uuid(value: str) -> UUID:
+    """Parse the keyset cursor UUID or raise a typed validation error."""
+    try:
+        return UUID(value)
+    except ValueError as exc:
+        raise ConnectorRunValidationError("cursor_id must be a valid UUID") from exc
+
+
+def _next_cursor(items: list[ConnectorRunEntry]) -> dict[str, str] | None:
+    """Build the next-page cursor from the last item in a non-empty page."""
+    if not items:
+        return None
+    last_item = items[-1]
+    return {
+        "started_at": last_item.started_at.isoformat(),
+        "id": last_item.id,
+    }
+
+
+# ============================================================================
 # Purpose: Fetch a tenant-scoped connector run, optionally locking it for the
 #          terminal status transition.
 # Database/ORM: ConnectorRunORM.
@@ -192,6 +342,7 @@ def _get_run(
     connector_run_id: UUID,
     for_update: bool = False,
 ) -> ConnectorRunORM:
+    """Fetch a tenant-scoped connector run with optional locking for terminal status transition."""
     stmt = select(ConnectorRunORM).where(
         ConnectorRunORM.tenant_id == tenant_id,
         ConnectorRunORM.id == connector_run_id,
@@ -214,6 +365,7 @@ def _get_run(
 #     ConnectorRunRawFileORM.ordering_index.
 # ============================================================================
 def _validate_ordering_index(ordering_index: int) -> None:
+    """Validate that ordering_index is a non-negative integer."""
     if (
         isinstance(ordering_index, bool)
         or not isinstance(ordering_index, int)
@@ -227,6 +379,7 @@ def _validate_ordering_index(ordering_index: int) -> None:
 def _get_raw_file(
     session: Session, *, tenant_id: UUID, raw_report_file_id: UUID
 ) -> RawReportFileORM:
+    """Retrieve a raw report file scoped to a tenant or raise if not found."""
     row = session.scalars(
         select(RawReportFileORM).where(
             RawReportFileORM.tenant_id == tenant_id,
@@ -251,6 +404,7 @@ def _get_raw_file(
 #     validates dry-run and live-run inputs before credential/network work.
 # ============================================================================
 def validate_report_month(report_month: str) -> None:
+    """Validate report_month as a YYYY-MM month."""
     if not MONTH_PATTERN.fullmatch(report_month):
         raise ConnectorRunValidationError(
             "report_month must use YYYY-MM with a calendar month from 01 to 12"
@@ -258,10 +412,12 @@ def validate_report_month(report_month: str) -> None:
 
 
 def _validate_month(report_month: str) -> None:
+    """Alias validate_report_month for repository callers."""
     validate_report_month(report_month)
 
 
 def _required_text(value: str, field_name: str) -> str:
+    """Strip and validate a required text field."""
     normalized = value.strip()
     if not normalized:
         raise ConnectorRunValidationError(f"{field_name} must not be blank")
@@ -269,6 +425,7 @@ def _required_text(value: str, field_name: str) -> str:
 
 
 def _validate_terminal_status(status: str) -> str:
+    """Validate that status is one of the terminal values."""
     if status not in TERMINAL_STATUSES:
         raise ConnectorRunValidationError(
             "connector run status must be terminal: SUCCEEDED, PARTIAL, or FAILED"
@@ -277,6 +434,7 @@ def _validate_terminal_status(status: str) -> str:
 
 
 def _validate_counts(counts: dict[str, int]) -> dict[str, int]:
+    """Validate the fixed connector-run counts payload."""
     expected = set(CONNECTOR_RUN_COUNT_KEYS)
     actual = set(counts)
     if actual != expected:
@@ -295,10 +453,12 @@ def _validate_counts(counts: dict[str, int]) -> dict[str, int]:
 
 
 def _zero_counts() -> dict[str, int]:
+    """Return zeroed connector-run counts."""
     return dict.fromkeys(CONNECTOR_RUN_COUNT_KEYS, 0)
 
 
 def _to_entry(row: ConnectorRunORM) -> ConnectorRunEntry:
+    """Convert a ConnectorRunORM row into a ConnectorRunEntry."""
     return ConnectorRunEntry(
         id=str(row.id),
         tenant_id=str(row.tenant_id),
@@ -314,3 +474,31 @@ def _to_entry(row: ConnectorRunORM) -> ConnectorRunEntry:
         counts=dict(row.counts_json),
         error_summary=row.error_summary,
     )
+
+
+def _sanitize_error_summary(error_summary: str | None) -> str | None:
+    """Redact internal locators from operator-facing connector error summaries."""
+    if error_summary is None:
+        return None
+
+    sanitized = re.sub(
+        r"\bstorage_uri(?:=|: )\S+",
+        "storage_uri=[redacted]",
+        error_summary,
+    )
+    sanitized = re.sub(
+        r"\b[a-zA-Z][a-zA-Z0-9+.-]*://[^\s'\"<>]+",
+        "[redacted-uri]",
+        sanitized,
+    )
+    sanitized = re.sub(
+        r"\b[A-Za-z]:\\[^\s'\"<>]+",
+        "[redacted-path]",
+        sanitized,
+    )
+    sanitized = re.sub(
+        r"(?<!\S)/[^\s'\"<>]+",
+        "[redacted-path]",
+        sanitized,
+    )
+    return sanitized[:ERROR_SUMMARY_MAX_CHARS]

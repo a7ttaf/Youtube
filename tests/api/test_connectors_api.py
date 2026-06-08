@@ -1,6 +1,7 @@
 """Integration tests for connector credential and test-connection API endpoints."""
+from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
@@ -18,13 +19,16 @@ from ums_smart_revenue.connectors.google.errors import (
     OAuthRefreshError,
     SecretFetchError,
 )
+from ums_smart_revenue.db.connector_models import ConnectorRunORM
 from ums_smart_revenue.db.org_models import OrgBase
+from ums_smart_revenue.db.report_models import ReportBase
 from ums_smart_revenue.db.security_models import (
     ApiConnectorCredentialORM,
     AuditLogORM,
     SecurityBase,
     UserORM,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 USER_ID = UUID("00000000-0000-0000-0000-000000004001")
 
@@ -72,7 +76,7 @@ def seed_database(database_url: str) -> None:
 def test_connector_admin_can_create_credential_reference_without_exposing_secret_ref(
     tmp_path,
 ):
-    """connector_admin can register a secret ref; the ref is stored but not returned in the response."""
+    """connector_admin can register a secret ref and keep it out of the response."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -246,7 +250,7 @@ def test_assistant_cannot_create_connector_credential(tmp_path):
 
 
 def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
-    """revenue_operations_admin can enqueue a connector job; audit row is written with CONNECTOR_JOB_RUN."""
+    """revenue_operations_admin can enqueue a connector job and write CONNECTOR_JOB_RUN audit."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -309,7 +313,10 @@ def test_connector_admin_can_test_connection_ok(tmp_path):
 
 
 def test_test_connection_returns_404_for_missing_credential(tmp_path):
-    """Missing credential probe returns 404, includes 'not found' detail, and writes CONNECTOR_TESTED audit."""
+    """Missing credential probe returns 404.
+
+    It includes 'not found' detail and writes CONNECTOR_TESTED audit.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -391,7 +398,10 @@ def test_test_connection_returns_error_for_generic_google_connector_error(tmp_pa
 
     with patch(
         "ums_smart_revenue.api.connectors.resolve_connector_credentials",
-        side_effect=SecretFetchError(ref="gcp-secret://project/key", inner=Exception("backend unavailable")),
+        side_effect=SecretFetchError(
+            ref="gcp-secret://project/key",
+            inner=Exception("backend unavailable"),
+        ),
     ):
         response = client.post(
             "/connectors/credentials/youtube_reporting/content-owner-1/test",
@@ -428,7 +438,7 @@ def test_test_connection_requires_manage_connectors_permission(tmp_path):
 
 def test_credential_integrity_classifier_uses_duplicate_constraint_only():
     """Integrity classifier returns True only for the unique-constraint violation, not FK errors."""
-
+    # pylint: disable=too-few-public-methods
     class DuplicateDiag:
         """Minimal constraint diagnostic stub for testing the integrity classifier."""
 
@@ -448,3 +458,272 @@ def test_credential_integrity_classifier_uses_duplicate_constraint_only():
 
     assert _is_duplicate_credential_integrity_error(duplicate_error)
     assert not _is_duplicate_credential_integrity_error(foreign_key_error)
+
+
+RUN_COUNTS = {
+    "reports_attempted": 2,
+    "reports_succeeded": 2,
+    "reports_failed": 0,
+    "rows_upserted_total": 9,
+    "rows_upserted_created": 5,
+    "rows_upserted_updated": 3,
+    "rows_upserted_unchanged": 1,
+}
+
+
+def seed_runs(database_url: str) -> None:
+    """Create the connector_runs table and seed three runs for the bootstrap tenant."""
+    engine = create_engine(database_url)
+    try:
+        ReportBase.metadata.create_all(engine)
+        tenant = UUID(UMS_TENANT_ID)
+        base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
+        with Session(engine) as session:
+            for idx, (key, acct) in enumerate(
+                [
+                    ("youtube-reporting", "acct-a"),
+                    ("youtube-reporting", "acct-b"),
+                    ("adsense", "acct-a"),
+                ]
+            ):
+                session.add(
+                    ConnectorRunORM(
+                        id=uuid4(),
+                        tenant_id=tenant,
+                        connector_key=key,
+                        account_id=acct,
+                        report_month="2026-04",
+                        triggered_by_user_id=USER_ID,
+                        started_at=base.replace(minute=idx),
+                        finished_at=base.replace(minute=idx),
+                        status="SUCCEEDED",
+                        counts_json=dict(RUN_COUNTS),
+                        error_summary=None,
+                    )
+                )
+            session.commit()
+    finally:
+        engine.dispose()
+
+
+def seed_connector_run(
+    database_url: str,
+    *,
+    connector_key: str,
+    account_id: str,
+    status: str,
+    error_summary: str | None,
+    started_at: datetime,
+    finished_at: datetime | None = None,
+    report_month: str = "2026-04",
+) -> None:
+    """Seed one connector run row with explicit status and error summary values."""
+    engine = create_engine(database_url)
+    try:
+        ReportBase.metadata.create_all(engine)
+        with Session(engine) as session:
+            session.add(
+                ConnectorRunORM(
+                    id=uuid4(),
+                    tenant_id=UUID(UMS_TENANT_ID),
+                    connector_key=connector_key,
+                    account_id=account_id,
+                    report_month=report_month,
+                    triggered_by_user_id=USER_ID,
+                    started_at=started_at,
+                    finished_at=finished_at if finished_at is not None else started_at,
+                    status=status,
+                    counts_json=dict(RUN_COUNTS),
+                    error_summary=error_summary,
+                )
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+
+def test_list_runs_returns_envelope_and_item_shape(tmp_path):
+    """connector_admin (has VIEW_CONNECTOR_HEALTH) gets the run-history envelope."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_runs(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get("/connectors/runs", headers=auth_headers("connector_admin"))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pagination"]["limit"] == 50
+    assert body["pagination"]["returned"] == 3
+    assert body["pagination"]["has_more"] is False
+    assert body["pagination"]["next_cursor"] is None
+    item = body["items"][0]
+    assert "tenant_id" not in item
+    assert item["status"] == "SUCCEEDED"
+    assert item["counts"] == RUN_COUNTS
+    assert item["report_month"] == "2026-04"
+
+
+def test_list_runs_allows_connector_scoped_health_access(tmp_path):
+    """connector-scoped connector_admin gets only the permitted connector runs."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_runs(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/runs",
+        headers=auth_headers("connector_admin", "connector", "youtube_reporting"),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pagination"]["returned"] == 2
+    assert {item["connector_key"] for item in body["items"]} == {
+        "youtube-reporting"
+    }
+
+
+def test_list_runs_redacts_internal_error_summary_details(tmp_path):
+    """Run-history responses redact internal storage and path locators from failures."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_connector_run(
+        database_url,
+        connector_key="youtube-reporting",
+        account_id="acct-secret",
+        status="FAILED",
+        error_summary=(
+            "BlobDownloadError: failed to read storage_uri=gs://private-bucket/"
+            "secret/path.csv from C:\\temp\\connector\\dump.txt"
+        ),
+        started_at=datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC),
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get("/connectors/runs", headers=auth_headers("connector_admin"))
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pagination"]["returned"] == 1
+    item = body["items"][0]
+    assert item["error_summary"] is not None
+    assert "gs://private-bucket/secret/path.csv" not in item["error_summary"]
+    assert "C:\\temp\\connector\\dump.txt" not in item["error_summary"]
+    assert "storage_uri=[redacted]" in item["error_summary"]
+
+
+def test_list_runs_rejects_connector_outside_scoped_health_access(tmp_path):
+    """Connector-scoped connector_admin cannot request another connector's runs."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_runs(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/runs",
+        headers=auth_headers("connector_admin", "connector", "youtube_reporting"),
+        params={"connector_key": "adsense"},
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: connectors.view_health"
+
+
+def test_list_runs_forbidden_without_view_connector_health(tmp_path):
+    """audit_viewer lacks VIEW_CONNECTOR_HEALTH and is fail-closed with 403."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_runs(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get("/connectors/runs", headers=auth_headers("audit_viewer"))
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: connectors.view_health"
+
+
+def test_list_runs_includes_adsense_management_runs_for_adsense_scope(tmp_path):
+    """Legacy adsense scope includes AdSense management run-history keys."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_connector_run(
+        database_url,
+        connector_key="adsense-management",
+        account_id="acct-adsense",
+        status="SUCCEEDED",
+        error_summary=None,
+        started_at=datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC),
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/runs",
+        headers=auth_headers("connector_admin", "connector", "adsense"),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pagination"]["returned"] == 1
+    assert body["items"][0]["connector_key"] == "adsense-management"
+
+    explicit_response = client.get(
+        "/connectors/runs",
+        headers=auth_headers("connector_admin", "connector", "adsense"),
+        params={"connector_key": "adsense-management"},
+    )
+
+    assert explicit_response.status_code == 200
+    assert explicit_response.json()["pagination"]["returned"] == 1
+
+
+def test_list_runs_honors_filters(tmp_path):
+    """connector_key + account_id query filters narrow the run history result."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_runs(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/runs",
+        headers=auth_headers("connector_admin"),
+        params={"connector_key": "adsense", "account_id": "acct-a"},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["pagination"]["returned"] == 1
+    assert body["items"][0]["connector_key"] == "adsense"
+    assert body["items"][0]["account_id"] == "acct-a"
+
+
+def test_list_runs_half_cursor_returns_422(tmp_path):
+    """Supplying only cursor_started_at (no cursor_id) is a 422 validation error."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_runs(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/runs",
+        headers=auth_headers("connector_admin"),
+        params={"cursor_started_at": "2026-04-01T12:00:00+00:00"},
+    )
+
+    assert response.status_code == 422
+
+
+def test_list_runs_limit_over_cap_returns_422(tmp_path):
+    """Limit above the 100 cap is rejected by FastAPI Query validation with 422."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_runs(database_url)
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/runs",
+        headers=auth_headers("connector_admin"),
+        params={"limit": 101},
+    )
+
+    assert response.status_code == 422

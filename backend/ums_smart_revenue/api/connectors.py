@@ -1,4 +1,6 @@
 """FastAPI route handlers for connector credential management and test-connection probing."""
+# pylint: disable=too-many-arguments, too-many-positional-arguments
+from datetime import datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -13,7 +15,10 @@ from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
-from ums_smart_revenue.auth.policy import has_permission
+from ums_smart_revenue.auth.policy import (
+    connector_health_connector_ids,
+    has_permission,
+)
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.connectors.credentials import (
     MAX_CREDENTIAL_PAGE_SIZE,
@@ -30,6 +35,11 @@ from ums_smart_revenue.connectors.google.errors import (
     OAuthRefreshError,
 )
 from ums_smart_revenue.connectors.runs.orchestrator import resolve_connector_credentials
+from ums_smart_revenue.connectors.runs.repository import (
+    MAX_CONNECTOR_RUN_PAGE_SIZE,
+    ConnectorRunValidationError,
+    list_runs,
+)
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
@@ -80,6 +90,27 @@ def current_connector_repository(
     return SqlAlchemyConnectorCredentialRepository(session)
 
 
+# ============================================================================
+# Purpose: Resolve a trusted tenant UUID from the authenticated principal
+#          headers and fall back to the bootstrap tenant when parsing fails.
+# Database/ORM: None.
+# Standards: Fail closed on malformed tenant strings by using the bootstrap
+#            tenant UUID rather than surfacing a raw ValueError at the route
+#            boundary.
+# Blast Radius: Authorization boundary only; no finance, audit, or graph
+#               projection impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/tenancy/constants.py -> UMS_TENANT_ID.
+#   - File: backend/ums_smart_revenue/connectors/runs/repository.py -> tenant-scoped read.
+# ============================================================================
+def _resolve_tenant_uuid(user: UserPrincipal) -> UUID:
+    """Resolve a trusted tenant UUID from the principal headers, falling back closed."""
+    try:
+        return UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
+    except ValueError:
+        return UUID(UMS_TENANT_ID)
+
+
 @router.get("/credentials")
 def list_connector_credentials(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
@@ -105,6 +136,78 @@ def list_connector_credentials(
             "offset": page.offset,
             "returned": len(page.items),
             "has_more": page.has_more,
+        },
+    }
+
+
+@router.get("/runs")
+def list_connector_runs(
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    session: Annotated[Session, Depends(current_db_session)],
+    connector_key: str | None = None,
+    account_id: str | None = None,
+    cursor_started_at: datetime | None = None,
+    cursor_id: str | None = None,
+    limit: Annotated[int, Query(ge=1, le=MAX_CONNECTOR_RUN_PAGE_SIZE)] = 50,
+) -> dict[str, object]:
+    """Return a newest-first page of tenant-scoped connector run history."""
+    # ========================================================================
+    # Purpose: Surface read-only connector run history for the dashboard, with
+    #   optional connector/account filters and a both-or-neither keyset cursor.
+    #   Fail-closed behind VIEW_CONNECTOR_HEALTH at global or connector scope;
+    #   connector-scoped callers are narrowed to their granted connector IDs.
+    #   No audit emission (operational metadata read, mirrors the
+    #   credential-list route).
+    # Database/ORM: ConnectorRunORM via connectors.runs.repository.list_runs
+    #   (read only).
+    # Standards: Boundary permission gate; typed ConnectorRunValidationError ->
+    #   HTTP 422; FastAPI Query bounds the limit at 1..MAX page size.
+    # Blast Radius: Connector run read surface only. Finance/auth/audit/Neo4j
+    #   untouched.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/runs/repository.py ->
+    #     list_runs.
+    #   - File: backend/ums_smart_revenue/api/audit.py -> mirrored envelope.
+    # ========================================================================
+    allowed_connector_ids = connector_health_connector_ids(user)
+    _require_connector_health(allowed_connector_ids)
+
+    # FIX: Mirror the test-connection route's tenant resolution so a truthy but
+    # non-UUID tenant_id falls back to the bootstrap tenant instead of raising a
+    # raw ValueError that would surface as an unhandled 500.
+    try:
+        list_runs_kwargs: dict[str, object] = {
+            "session": session,
+            "tenant_id": _resolve_tenant_uuid(user),
+            "account_id": account_id,
+            "cursor_started_at": cursor_started_at,
+            "cursor_id": cursor_id,
+            "limit": limit,
+        }
+        if allowed_connector_ids is None:
+            list_runs_kwargs["connector_key"] = connector_key
+        elif connector_key is not None:
+            if connector_key not in allowed_connector_ids:
+                _raise_missing_connector_permission(
+                    Permission.VIEW_CONNECTOR_HEALTH
+                )
+            list_runs_kwargs["connector_key"] = connector_key
+        else:
+            list_runs_kwargs["connector_keys"] = allowed_connector_ids
+        page = list_runs(**list_runs_kwargs)
+    except ConnectorRunValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+    items = [entry.to_api() for entry in page.items]
+    return {
+        "items": items,
+        "pagination": {
+            "limit": page.limit,
+            "returned": len(items),
+            "has_more": page.next_cursor is not None,
+            "next_cursor": page.next_cursor,
         },
     }
 
@@ -215,11 +318,6 @@ def test_connector_connection(
     # FIX: Wrap UUID parse so a truthy but non-UUID tenant_id string (e.g. a slug)
     # in headers mode falls back to the bootstrap tenant rather than raising a
     # raw ValueError that would produce an unhandled 500.
-    try:
-        tenant_uuid = UUID(user.tenant_id) if user.tenant_id else UUID(UMS_TENANT_ID)
-    except ValueError:
-        tenant_uuid = UUID(UMS_TENANT_ID)
-
     conn_status: str = "ok"
     detail: str | None = None
     not_found = False
@@ -227,7 +325,7 @@ def test_connector_connection(
     try:
         resolve_connector_credentials(
             session=session,
-            tenant_id=tenant_uuid,
+            tenant_id=_resolve_tenant_uuid(user),
             connector_key=connector_key,
             account_id=account_id,
         )
@@ -296,6 +394,22 @@ def _require_connector_permission(
     """Raise 403 if the user lacks the given permission at the connector scope."""
     if not has_permission(user, permission, scope):
         _raise_missing_connector_permission(permission)
+
+
+def _require_connector_health(
+    allowed_connector_ids: frozenset[str] | None = None,
+) -> None:
+    """Raise 403 unless the user holds VIEW_CONNECTOR_HEALTH at any allowed scope.
+
+    Raises:
+        HTTPException: If the caller has neither global nor connector-scoped
+            VIEW_CONNECTOR_HEALTH access.
+    """
+    if allowed_connector_ids is None:
+        return
+    if allowed_connector_ids:
+        return
+    _raise_missing_connector_permission(Permission.VIEW_CONNECTOR_HEALTH)
 
 
 def _raise_missing_connector_permission(permission: Permission) -> None:
