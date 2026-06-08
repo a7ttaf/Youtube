@@ -88,11 +88,22 @@ owner stays the table owner), so RLS applies to `app_tenant` naturally and the
 owner/superuser maintenance path is unaffected.
 
 Role switching is realized with transaction-scoped `SET LOCAL ROLE`, not two
-physical connection pools. The application's login user must be a **non-owner,
-non-superuser** member of both `app_tenant` and `app_platform`. `SET LOCAL ROLE
-app_tenant` makes RLS bite; `SET LOCAL ROLE app_platform` activates `BYPASSRLS`.
-`SET LOCAL` auto-resets on commit/rollback, so a pooled connection can never
-leak a role or tenant into the next request.
+physical connection pools. `SET LOCAL ROLE app_tenant` makes RLS bite;
+`SET LOCAL ROLE app_platform` activates `BYPASSRLS`. `SET LOCAL` auto-resets on
+commit/rollback, so a pooled connection can never leak a role or tenant into the
+next request (proven by an explicit pooled-reset test — see §2.7).
+
+**Runtime login membership (hard requirement):** the application's login user
+must be **non-owner, non-superuser**, and granted membership in both
+`app_tenant` and `app_platform` with **`INHERIT FALSE, SET TRUE`**
+(`GRANT app_tenant TO <login> WITH INHERIT FALSE, SET TRUE`; same for
+`app_platform`). `INHERIT FALSE` means the login user does **not** silently
+inherit `app_platform`'s `BYPASSRLS` (or `app_tenant`'s grants) at connect time;
+`SET TRUE` permits the explicit per-transaction `SET LOCAL ROLE` switch. The
+effect: a connection that has not yet switched role holds no tenant-table
+privileges and cannot bypass RLS — privilege is acquired only by the deliberate
+`SET LOCAL ROLE`, and only for that transaction. (PostgreSQL role-membership
+semantics, PG 16+: <https://www.postgresql.org/docs/current/role-membership.html>.)
 
 > Reconciliation with Docs/17: Docs/17 sketches "one pool per role." We
 > implement the same two-role isolation via `SET LOCAL ROLE` on a single pool
@@ -186,11 +197,41 @@ connection.
 
 Add a shared helper `assert_tenant_match(row_tenant_id, principal_tenant_id)`
 that raises a typed `TenantIsolationError` on mismatch, translated at the route
-boundary to `403`. Apply it on the tenant-scoped **write** paths:
-`SqlAlchemyRevenueFactRepository.record_fact`, manual-override writes,
-account-allocation commit/recalc writes, and the Google source-row upsert. RLS
-already blocks cross-tenant writes at the DB; this catches the bug *before* the
-round-trip and produces a clear domain error instead of a raw DB exception.
+boundary to `403`. RLS already blocks cross-tenant writes at the DB; this catches
+the bug *before* the round-trip and produces a clear domain error instead of a
+raw DB exception.
+
+**Complete enumeration of tenant-scoped write paths.** The implementation plan
+must produce, and keep current, a table that lists **every** repository/service
+write path touching a `tenant_id`-bearing table and classifies each as
+`ASSERTED` (calls `assert_tenant_match`) or `COVERED-ELSEWHERE` (with the exact
+mechanism). No write path may be left unclassified. Starting inventory
+(implementation re-confirms against the live tree before editing):
+
+| Write path | Table(s) | Classification |
+|---|---|---|
+| `SqlAlchemyRevenueFactRepository.record_fact` | monthly_channel_revenue_facts | ASSERTED |
+| manual-override write | revenue_manual_overrides | ASSERTED |
+| account-allocation commit | committed-allocation tables | ASSERTED |
+| account-allocation recalc | committed-allocation tables | ASSERTED |
+| Google source-row `upsert_many` | google_revenue_source_rows | ASSERTED |
+| AdSense payment sync write | adsense_payments | ASSERTED |
+| bank-reconciliation write | bank_reconciliation_entries | ASSERTED |
+| finance month-close write | finance_month_close | ASSERTED |
+| channel-account-map write | channel_account_map | ASSERTED |
+| deduction-component write | deduction-component tables | ASSERTED |
+| raw-report-file / export-job write | raw_report_files, export_jobs | ASSERTED or COVERED-ELSEWHERE (state mechanism) |
+| number-explanation write | number_explanations | ASSERTED or COVERED-ELSEWHERE |
+| audit-log write | audit_logs | COVERED-ELSEWHERE (tenant stamped from principal at emit; assert at the stamp site) |
+| org/channel/group writes | org_units, youtube_channels, channel_groups, channel_group_members | ASSERTED or COVERED-ELSEWHERE |
+| auth writes (users, scopes, role/permission grants) | users, access_scopes, user_role_assignments, user_permission_grants | ASSERTED or COVERED-ELSEWHERE |
+| connector-credential write | api_connector_credentials | ASSERTED or COVERED-ELSEWHERE |
+
+The plan resolves every `ASSERTED or COVERED-ELSEWHERE` cell to a single value
+with evidence (file:line). A path classified `COVERED-ELSEWHERE` must name the
+covering mechanism (e.g., "tenant_id is derived from `principal.tenant_id` at the
+only call site and never accepted from input"); "probably fine" is not a
+classification.
 
 > **Follow-up note (not this PR):** Evaluate `FORCE ROW LEVEL SECURITY` after
 > the `app_tenant`/`app_platform` rollout, the Alembic role strategy, seed
@@ -212,6 +253,13 @@ filters deliberately bypassed (raw `SELECT *`, no `WHERE tenant_id`):
 5. `app_platform` (`SET ROLE app_platform`) reads across tenants (BYPASSRLS).
 6. The allowlist/`information_schema` drift guard matches (every `tenant_id`
    table has a policy).
+7. **Pooled-connection reset:** open transaction 1 on a connection, set role +
+   GUC (tenant A), commit; reuse the **same pooled connection** for transaction 2
+   with **no** role/GUC set, and assert (a) `current_setting('app.current_tenant_id',
+   true)` is `NULL`/unset, (b) `current_user` is back to the login role (not
+   `app_tenant`/`app_platform`), and (c) a tenant-table query now fails closed
+   on the missing GUC. This proves `SET LOCAL` does not leak across transactions
+   on a pooled connection.
 
 ---
 
@@ -245,11 +293,11 @@ invent a new permission.) Fail-closed at the route boundary.
 - Reads filter by `tenant_id` from the principal (and run under RLS once §2 is
   live — defense-in-depth on both layers).
 - `to_api()` **withholds `tenant_id`** (matches `ConnectorRunEntry.to_api`).
-- `raw_payload` is **redacted by default**: list never returns it; detail
-  returns `raw_payload_redacted: true` and omits the payload body. If an
-  existing higher-sensitivity permission pattern is present (mirror the audit
-  `details`/`sensitive` model), honor it; otherwise default-redact for all
-  callers in this PR (no new sensitive-view permission invented here).
+- `raw_payload` is **never returned in this PR** — for *all* callers, on *both*
+  list and detail. There is **no** conditional/permission-gated raw-payload
+  exposure path. Detail returns `raw_payload_redacted: true` and omits the
+  payload body entirely; the serializer never reads `raw_payload` onto the wire.
+  A future sensitive-view path, if ever warranted, is a separate additive spec.
 - Cross-tenant `{id}` lookup returns **`404`**, not `403`, to avoid leaking
   existence across tenants.
 
@@ -290,6 +338,15 @@ Request → TenantResolverMiddleware sets TENANT_CTX
   deploy that keeps connecting as a superuser/owner would silently *not* enforce
   RLS — the isolation test (run as `app_tenant`) is the guard, plus an explicit
   runbook note.
+- **Deploy precondition (roles + privileges):** creating `app_tenant`/
+  `app_platform` and granting their membership is role-management DDL. Either the
+  migration/bootstrap DB user must hold role-management privilege
+  (`CREATEROLE`, or membership-admin on the target roles), **or** the roles,
+  grants, and the `INHERIT FALSE, SET TRUE` login membership must be
+  **pre-created by the DBA per a runbook** and the migration made idempotent
+  (guarded against existing roles). The migration must not assume superuser. The
+  implementation documents both the role-management privilege requirement and the
+  DBA-precreate fallback.
 - **Could Neo4j over-trust?** No graph projection impact detected (Neo4j retired
   from the active architecture).
 - **Could authz/audit become more permissive?** No — strictly more restrictive
@@ -313,8 +370,11 @@ PostgreSQL remains the sole financial source of truth.)
 - `tests/tenancy/test_isolation.py` (Postgres-only) — the §2.7 matrix.
 - Session-hook unit test: SQLite session triggers no `SET` statements;
   context-absent Postgres session triggers none; context-present sets both.
+- Pooled-connection reset test (§2.7 #7): role + GUC do not leak across
+  transactions on the same pooled connection.
 - Repository write-assert tests: cross-tenant write raises
-  `TenantIsolationError` → `403`.
+  `TenantIsolationError` → `403`, exercised for each `ASSERTED` write path in the
+  §2.6 enumeration.
 - Migration round-trip on Postgres; drift-guard assertion exercised.
 
 **B1:**
@@ -323,7 +383,8 @@ PostgreSQL remains the sole financial source of truth.)
   (app filter + RLS); cross-tenant `{id}` → 404.
 - Filters honored: `month`, `source_system`.
 - Pagination: half-cursor → 422; `has_more`/`next_cursor` correct.
-- `raw_payload` redaction: never present in list; detail flagged redacted.
+- `raw_payload` redaction: never present in list **or** detail for any caller;
+  detail flagged `raw_payload_redacted: true`.
 - Round-trip read returns source provenance fields (no `tenant_id` leak).
 
 **Full gate before push:** `python -m ruff check backend tests scripts`,
@@ -350,10 +411,13 @@ Postgres-only RLS + migration tests actually execute.
 ## 8. Open decisions (resolve during implementation, not blocking)
 
 - Exact runtime DB login user / credential wiring for the two-role membership
-  (settings + deploy runbook). The code path is role-switch via `SET LOCAL
-  ROLE`; the only external dependency is that the login user is a non-owner
-  member of both roles.
+  (settings + deploy runbook). Membership shape is fixed (§2.1): non-owner,
+  non-superuser login granted `app_tenant`/`app_platform` with
+  `INHERIT FALSE, SET TRUE`. Remaining decision is only *where* the credential
+  is configured and whether roles are migration-created or DBA-precreated (§5).
 - Exact finance read `Permission` enum for the source-rows API (mirror the
   existing facts-read gate; confirm in `api/revenue.py`).
-- Whether a future sensitive-payload view permission is warranted for
-  `raw_payload` (default-redact ships now; expansion is additive later).
+
+Resolved (no longer open): `raw_payload` is never returned in this PR
+(no conditional exposure); the two-role realization is single-pool
+`SET LOCAL ROLE`; FORCE RLS is a documented follow-up.
