@@ -1,9 +1,10 @@
 # Source-Reported Currency Policy
 
-> Status: **planned** - revised on 2026-05-23.
-> Replaces the earlier FX-rate-led multi-currency design. Official finance
-> values come from Google/YouTube/AdSense source reports, not from third-party
-> exchange-rate reconstruction.
+> Status: **partially built** - revised on 2026-05-23; source-rows read API
+> BUILT 2026-06-08 (Track E). Replaces the earlier FX-rate-led multi-currency
+> design. Official finance values come from Google/YouTube/AdSense source
+> reports, not from third-party exchange-rate reconstruction. The paired-column
+> `*_usd` -> native migration remains a SEPARATE future spec (out of scope here).
 
 ---
 
@@ -248,17 +249,25 @@ POST /revenue/facts
 POST /adsense/sync-payments
 ```
 
-Future source-row endpoints, if needed, should expose Google source evidence,
-not FX rates:
+The source-row read endpoints are **BUILT** (Track E, 2026-06-08). They expose
+Google source evidence, not FX rates:
 
 ```http
 GET /revenue/source-rows?month=2026-03&source_system=adsense_management
 GET /revenue/source-rows/{id}
 ```
 
-These reads require finance revenue visibility and must redact raw payload
-fields that could expose credentials, private account metadata, or other
-sensitive Google data.
+These reads require finance revenue visibility (`VIEW_REVENUE`) and are
+tenant-scoped. `raw_payload` is **NEVER** returned by either route for any
+caller — the serializer omits it entirely and always emits
+`raw_payload_redacted: true` (there is no conditional exposure path). A
+cross-tenant or missing id returns 404 (no existence leak). See
+`Docs/12_BACKEND_API_SPEC.md` for the full query-param, envelope, and error
+contract.
+
+The paired-column `*_usd` -> native migration that would replace the existing
+`*_usd` fields remains a **separate future spec** and is out of scope for this
+read API.
 
 ---
 

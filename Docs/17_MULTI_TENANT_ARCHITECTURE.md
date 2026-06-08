@@ -1,7 +1,67 @@
 # Multi-Tenant Architecture
 
-> Status: **planned** — to be implemented in Phase S2.
+> Status: **partially implemented** — Postgres RLS enforcement and the two
+> Postgres roles are IMPLEMENTED (Track E, migration `20260608_0001`,
+> 2026-06-08). The remaining tenant-resolver middleware / subdomain routing /
+> platform-admin model below stay planned for Phase S2.
 > Drives data-model design from day one so additional tenants (e.g. Rotana Holding) can onboard without a re-migration.
+
+---
+
+## Implementation status — RLS enforcement (Track E, IMPLEMENTED 2026-06-08)
+
+RLS enforcement and the two Postgres roles landed in Track E. The realization
+differs from the original dual-pool sketch below in a few important ways; this
+section is authoritative where it conflicts with the planning text further down.
+
+- **Roles created**: `app_tenant` and `app_platform` (both non-superuser,
+  non-owner). Defined in `backend/ums_smart_revenue/db/rls.py`
+  (`APP_TENANT_ROLE`, `APP_PLATFORM_ROLE`).
+- **Tenant-scoped tables**: **25** tables carry `tenant_id` and receive an
+  isolation policy (the older "18" figure is stale). The canonical allowlist is
+  `TENANT_SCOPED_TABLES` in `db/rls.py`; the migration cross-checks it against
+  the live `information_schema` so a new tenant table shipped without RLS is a
+  loud migration failure, not a silent leak.
+- **Isolation policies**: created by migration `20260608_0001` on all 25 tables,
+  each named `<table>_tenant_isolation`, with `USING`/`WITH CHECK` on
+  `tenant_id = current_setting('app.current_tenant_id')::uuid`. `current_setting`
+  omits `missing_ok`, so an unset GUC raises and the policy fails closed.
+- **Single-pool `SET LOCAL ROLE` realization (not dual-pool)**: there is one
+  connection pool. The lane is selected per session, not per pool. The platform
+  lane uses `build_platform_session_factory` in `db/session.py`, which tags the
+  sessionmaker `info` with the `app_platform` role; the default lane runs as
+  `app_tenant`. The lane is realized at transaction begin via
+  `SET LOCAL ROLE "<role>"` (transaction-scoped, auto-reset on commit/rollback),
+  so a pooled connection never carries a role across requests.
+- **Context-gated, Postgres-only hook**: the `after_begin` event listener
+  `_apply_tenant_isolation` in `db/session.py` is a **no-op on SQLite** (it
+  returns unless `dialect.name == "postgresql"`) and a **no-op on tenant-lane
+  sessions opened without a resolved tenant** (no tenant in the
+  `tenancy.context` contextvar => no `SET LOCAL ROLE`, no GUC). This keeps the
+  pre-S2.4 non-tenant paths and the SQLite test suite unaffected. The platform
+  lane always issues `SET LOCAL ROLE "app_platform"`. The tenant id is applied
+  with parameterized `set_config(..., true)` (transaction-scoped), never string
+  interpolation.
+- **Runtime login membership requirement**: the application connects as a
+  dedicated login role that must be granted membership in the lane roles with
+  `GRANT app_tenant TO <login> WITH INHERIT FALSE, SET TRUE` and
+  `GRANT app_platform TO <login> WITH INHERIT FALSE, SET TRUE`. `INHERIT FALSE`
+  means the login does **not** passively hold either lane's privileges; `SET TRUE`
+  lets it `SET ROLE` into the chosen lane per transaction. The login itself is
+  non-owner and non-superuser, so it cannot bypass RLS by default.
+- **Deploy precondition**: the migration/bootstrap user needs role-management
+  privilege to create the roles and grants, **or** a DBA pre-creates the
+  `app_tenant`/`app_platform` roles, their table grants, and the login
+  membership out of band per the runbook. The migration is **idempotent** and
+  **does not assume superuser** — it tolerates pre-existing roles/grants.
+
+### FORCE ROW LEVEL SECURITY follow-up
+
+RLS is enabled but **not** `FORCE`d yet. Evaluate `FORCE ROW LEVEL SECURITY`
+after `app_tenant`/`app_platform` rollout, the Alembic role strategy, the seed
+scripts, and the Postgres test fixtures make privileged-data work explicit (so
+the migration/bootstrap/seed paths that legitimately need to write across the
+policy are accounted for before forcing RLS on table owners too).
 
 ---
 

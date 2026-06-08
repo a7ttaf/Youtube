@@ -128,8 +128,14 @@ running on the operator's workstation.
 - **S3 — Tenant hardening at storage layer.**
   `Docs/17_MULTI_TENANT_ARCHITECTURE.md` specifies row-level security
   (RLS) + Postgres GUC + composite foreign keys + tenant-scoped unique
-  keys + `app_tenant` / `app_platform` Postgres roles. None implemented
-  in code. Spec for the S3 PR series not yet written.
+  keys + `app_tenant` / `app_platform` Postgres roles.
+    - ✅ Track E (2026-06-08): **RLS enforcement DONE.** Migration
+      `20260608_0001` creates the `app_tenant`/`app_platform` roles and an
+      isolation policy on all 25 tenant-scoped tables; a single-pool
+      `SET LOCAL ROLE` realization with a Postgres-only, context-gated
+      `after_begin` hook in `db/session.py` plus `build_platform_session_factory`
+      and the `assert_tenant_match` write-path helper. Composite FKs /
+      tenant-scoped unique keys / `FORCE ROW LEVEL SECURITY` remain follow-ups.
 - **Source-reported currency foundation.**
   `Docs/18_MULTI_CURRENCY_ENGINE.md` was revised on 2026-05-23 to make
   Google/YouTube/AdSense reported money the official finance source. The next
@@ -151,6 +157,12 @@ running on the operator's workstation.
       between PR #43 substrate and existing `MonthlyChannelRevenueFactORM`
       write path. See spec at
       `Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md`.
+    - ✅ Track E (2026-06-08): **B1 source-rows read API DONE.**
+      `GET /revenue/source-rows?month=&source_system=` + `/{id}`,
+      `finance.view_revenue`-gated, tenant-scoped, keyset-paged; `raw_payload`
+      never returned (`raw_payload_redacted` always true); cross-tenant/missing
+      id returns 404. The paired-column `*_usd` -> native migration remains
+      ⏳ PENDING as a separate future spec (out of scope for Track E).
 ---
 
 ## Phase 0 — Foundation decisions
