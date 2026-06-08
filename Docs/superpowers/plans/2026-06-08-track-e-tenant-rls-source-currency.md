@@ -380,6 +380,9 @@ def upgrade() -> None:
     for table in TENANT_SCOPED_TABLES:
         policy = tenant_rls_policy_name(table)
         bind.execute(sa.text(f"ALTER TABLE {table} ENABLE ROW LEVEL SECURITY"))
+        # DROP-then-CREATE so a half-applied dev run / re-run does not wedge on
+        # an existing policy (CREATE POLICY has no IF NOT EXISTS).
+        bind.execute(sa.text(f"DROP POLICY IF EXISTS {policy} ON {table}"))
         bind.execute(
             sa.text(
                 f"CREATE POLICY {policy} ON {table} "
