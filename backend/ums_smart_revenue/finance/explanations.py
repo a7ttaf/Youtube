@@ -28,7 +28,10 @@ from ums_smart_revenue.tenancy.context import get_current_tenant
 
 ADJUSTED_GROSS_REVENUE_METRIC = "adjusted_gross_revenue_usd"
 NET_REVENUE_METRIC = "net_revenue_usd"
-SUPPORTED_METRICS = frozenset({ADJUSTED_GROSS_REVENUE_METRIC, NET_REVENUE_METRIC})
+REVENUE_RECONCILIATION_METRIC = "revenue_reconciliation_usd"
+SUPPORTED_METRICS = frozenset(
+    {ADJUSTED_GROSS_REVENUE_METRIC, NET_REVENUE_METRIC, REVENUE_RECONCILIATION_METRIC}
+)
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 _NET_CONFIDENCE_TO_EXPLAIN: dict[str, dict[str, str]] = {
