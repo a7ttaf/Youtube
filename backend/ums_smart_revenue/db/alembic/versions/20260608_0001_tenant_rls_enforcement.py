@@ -295,13 +295,27 @@ def downgrade() -> None:
         sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_GETTER}()')
     )
     bind.execute(sa.text(f'DROP TABLE IF EXISTS {TENANT_CONTEXT_TABLE}'))
-    # Blanket REVOKE mirrors the blanket GRANT in upgrade(); DROP ROLE fails
-    # while dependent privileges remain, so all table/sequence/schema privs
-    # must be revoked first.
+    # ========================================================================
+    # Purpose: Strip every dependent privilege/object before DROP ROLE.
+    #   Postgres refuses DROP ROLE while the role still holds (or was granted)
+    #   any privilege in the DB — notably the EXECUTE grants on the SECURITY
+    #   DEFINER tenant-context functions, which the blanket table/sequence/
+    #   schema REVOKEs do not cover. DROP OWNED BY clears all
+    #   privileges-granted-to and objects-owned-by the role in the current DB,
+    #   so DROP ROLE then succeeds. The schema/table REVOKEs are kept as
+    #   harmless belt-and-suspenders; the membership revoke clears the
+    #   restricted-login grant graph.
+    # Database/ORM: cluster-global app_tenant/app_platform roles; all public
+    #   tables/sequences; the tenant-context SECURITY DEFINER functions.
+    # Standards: Postgres-only (guarded by dialect at function top); role names
+    #   are internal constants, not user input.
+    # Blast Radius: dev/test-only downgrade path (never run in prod); no
+    #   finance/audit/Neo4j impact.
+    # ========================================================================
     for role in (APP_TENANT_ROLE, APP_PLATFORM_ROLE):
-        # FIX: Revoke any current memberships before dropping the lane role.
-        # The deployed restricted-login model grants these roles to runtime
-        # logins, so a downgrade must clear the membership graph first.
+        # Revoke any current memberships before dropping the lane role. The
+        # deployed restricted-login model grants these roles to runtime logins,
+        # so a downgrade must clear the membership graph first.
         member_roles = bind.execute(
             sa.text(
                 "SELECT rolname "
@@ -331,4 +345,8 @@ def downgrade() -> None:
         bind.execute(
             sa.text(f'REVOKE USAGE ON SCHEMA public FROM "{role}"')
         )
+        # FIX: DROP OWNED BY clears the function EXECUTE grants (and any other
+        # privilege granted to the role) that the blanket REVOKEs above miss;
+        # without it DROP ROLE raised DependentObjectsStillExist.
+        bind.execute(sa.text(f'DROP OWNED BY "{role}"'))
         bind.execute(sa.text(f'DROP ROLE IF EXISTS "{role}"'))
