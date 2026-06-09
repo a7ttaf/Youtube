@@ -74,6 +74,7 @@ _SOURCE_KIND_TO_SOURCE_SYSTEM: dict[RevenueFactSourceKind, str] = {
     RevenueFactSourceKind.YOUTUBE_CMS: "youtube_reporting",
     RevenueFactSourceKind.ADSENSE: "adsense_management",
     RevenueFactSourceKind.YOUTUBE_ANALYTICS: "youtube_analytics",
+    RevenueFactSourceKind.MANUAL_UPLOAD: _SOURCE_SYSTEM,
     RevenueFactSourceKind.ALLOCATION: _SOURCE_SYSTEM,
 }
 
@@ -81,9 +82,10 @@ _SOURCE_KIND_TO_SOURCE_SYSTEM: dict[RevenueFactSourceKind, str] = {
 def _source_system_for_source_kind(source_kind: str) -> str:
     """Return the deduction source_system aligned to a revenue fact source_kind."""
     try:
-        return _SOURCE_KIND_TO_SOURCE_SYSTEM[RevenueFactSourceKind(source_kind)]
+        normalized_source_kind = RevenueFactSourceKind(source_kind)
     except ValueError:
         return _SOURCE_SYSTEM
+    return _SOURCE_KIND_TO_SOURCE_SYSTEM.get(normalized_source_kind, _SOURCE_SYSTEM)
 
 
 class MonthLockedError(Exception):
@@ -139,10 +141,11 @@ class ReconciliationWorkflowService:
         # ====================================================================
         # Purpose: Smart-reconciliation entry point. Refuses LOCKED months
         #   (fail-closed, no writes/audit), attributes outside-CMS 1:1 account
-        #   revenue, gathers CMS gross + AdSense + bank evidence, runs the pure
-        #   compute core, persists per-channel deduction_components (replacing
-        #   prior reconciliation rows) and reconciliation explanations, then
-        #   records one summary-only REVENUE_RECONCILED audit event.
+        #   revenue as ALLOCATION facts, gathers source-backed gross + verified
+        #   AdSense + bank evidence, runs the pure compute core, persists
+        #   per-channel deduction_components (replacing prior reconciliation rows)
+        #   and reconciliation explanations, then records one summary-only
+        #   REVENUE_RECONCILED audit event.
         # Database/ORM: reads monthly_channel_revenue_facts, adsense_payments,
         #   bank_reconciliation_entries, youtube_channels, account/channel links;
         #   writes monthly_channel_revenue_facts (ALLOCATION), deduction_components,
@@ -163,10 +166,11 @@ class ReconciliationWorkflowService:
             raise MonthLockedError(f"Finance month {month!r} is locked")
 
         try:
-            outside_warnings = self._attribute_outside_cms(month=month, actor=actor)
+            outside_warnings, adsense_total = self._attribute_outside_cms(
+                month=month, actor=actor
+            )
 
             channel_gross, primary_source = self._gather_channel_gross(month)
-            adsense_total = self._gather_adsense_total(month)
             bank_total, fx_total = self._gather_bank_totals(month)
             us_view_shares = {
                 channel: self._us_view.us_view_share(month, channel)
@@ -227,10 +231,12 @@ class ReconciliationWorkflowService:
     def _gather_channel_gross(
         self, month: str
     ) -> tuple[dict[str, Decimal], dict[str, str]]:
-        """Select each channel's primary gross fact using source priority."""
+        """Select source-backed primary gross facts using source priority."""
         facts_by_channel: dict[str, list] = defaultdict(list)
         primary: dict[str, str] = {}
         for fact in self._facts.list_month_facts(month=month):
+            if fact.source_kind == RevenueFactSourceKind.ALLOCATION.value:
+                continue
             facts_by_channel[fact.youtube_channel_id].append(fact)
 
         gross: dict[str, Decimal] = {}
@@ -245,13 +251,6 @@ class ReconciliationWorkflowService:
             gross[channel] = primary_fact.gross_revenue_usd
             primary[channel] = primary_fact.source_kind
         return gross, primary
-
-    def _gather_adsense_total(self, month: str) -> Decimal | None:
-        """Sum PAID USD AdSense payment amounts for the month (None when absent)."""
-        payments = self._list_paid_usd_payments(month)
-        if not payments:
-            return None
-        return sum((pay.payment_amount for pay in payments), Decimal("0"))
 
     def _list_paid_usd_payments(self, month: str) -> list[AdSensePaymentEntry]:
         """Return PAID USD AdSense payments for a month."""
@@ -326,15 +325,17 @@ class ReconciliationWorkflowService:
 
     def _attribute_outside_cms(
         self, *, month: str, actor: UserPrincipal
-    ) -> list[dict[str, str]]:
-        """Write ALLOCATION facts for OUTSIDE_CMS channels mapped 1:1 to a PAID account.
+    ) -> tuple[list[dict[str, str]], Decimal | None]:
+        """Write ALLOCATION facts and return the source-backed AdSense total.
 
-        For each PAID AdSense account, resolve verified account->channel links to
-        OUTSIDE_CMS channels that have no existing source gross fact. When exactly
-        one such channel maps, record its account total as an ALLOCATION revenue
-        fact; when several no-gross channels map, skip (fail-closed) and warn.
-        Stale ALLOCATION facts from prior runs are deleted when the current
-        payment/link/channel state no longer authorizes them.
+        For each PAID AdSense account, resolve verified account->channel links.
+        Payments that map wholly to source-backed channels feed the residual
+        YouTube->AdSense total. Payments that map exactly 1:1 to one active
+        OUTSIDE_CMS channel with no source gross are persisted as pass-through
+        ALLOCATION facts and excluded from residual math. Unmapped, mixed, or
+        ambiguous no-gross mappings are skipped fail-closed and warned. Stale
+        ALLOCATION facts from prior runs are deleted when the current state no
+        longer authorizes them.
         """
         warnings: list[dict[str, str]] = []
         outside = self._outside_cms_channels()
@@ -354,29 +355,53 @@ class ReconciliationWorkflowService:
         paid_by_account: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
         for pay in self._list_paid_usd_payments(month):
             paid_by_account[pay.source_account_id] += pay.payment_amount
-        current_allocation_channels: set[str] = set()
+        allocation_by_channel: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+        residual_adsense_total = Decimal("0")
+        residual_account_count = 0
         for account, total in paid_by_account.items():
-            channels = [
-                channel
-                for channel in self._links.list_verified_adsense_account_channels(
+            channels = set(
+                self._links.list_verified_adsense_account_channels(
                     tenant_id=self._tenant_id, month=month, adsense_account_id=account
                 )
-                if channel in outside and channel not in source_gross_channels
-            ]
-            if len(channels) == 1:
-                channel = channels[0]
-                current_allocation_channels.add(channel)
-                self._record_allocation_fact(month, channel, total, actor)
-            elif len(channels) > 1:
+            )
+            if not channels:
                 warnings.append(
                     {
                         "code": "MISSING_REVENUE_SOURCE",
                         "message": (
-                            f"Account {account} maps to multiple OUTSIDE_CMS "
-                            "channels without gross; allocation skipped"
+                            f"Account {account} has no verified channel mapping; "
+                            "payment excluded from reconciliation"
                         ),
                     }
                 )
+                continue
+
+            outside_no_gross = (channels & outside) - source_gross_channels
+            unknown_no_gross = channels - outside - source_gross_channels
+            if len(channels) == 1 and len(outside_no_gross) == 1:
+                channel = next(iter(outside_no_gross))
+                allocation_by_channel[channel] += total
+                continue
+
+            if not outside_no_gross and not unknown_no_gross:
+                residual_adsense_total += total
+                residual_account_count += 1
+                continue
+
+            warnings.append(
+                {
+                    "code": "MISSING_REVENUE_SOURCE",
+                    "message": (
+                        f"Account {account} does not resolve to a single "
+                        "source-backed or 1:1 OUTSIDE_CMS channel; payment "
+                        "excluded from reconciliation"
+                    ),
+                }
+            )
+
+        current_allocation_channels = set(allocation_by_channel)
+        for channel, total in allocation_by_channel.items():
+            self._record_allocation_fact(month, channel, total, actor)
         stale_channels = existing_allocation_channels - current_allocation_channels
         if stale_channels:
             self._facts.delete_month_facts(
@@ -384,7 +409,9 @@ class ReconciliationWorkflowService:
                 source_kind=RevenueFactSourceKind.ALLOCATION.value,
                 youtube_channel_ids=stale_channels,
             )
-        return warnings
+        if residual_account_count == 0:
+            return warnings, None
+        return warnings, residual_adsense_total
 
     def _record_allocation_fact(
         self, month: str, channel: str, gross: Decimal, actor: UserPrincipal

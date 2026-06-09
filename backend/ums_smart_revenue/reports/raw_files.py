@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -206,17 +206,45 @@ class SqlAlchemyRawReportFileRepository:
         """Set parse_status=PURGED, clear file_url, stamp purged_at/purged_by."""
         if not reason or not reason.strip():
             raise RawReportFileValidationError("reason must not be blank")
-        row = self._get_row(raw_file_id)
-        if row.parse_status == PURGED_PARSE_STATUS:
-            raise RawReportFilePurgeConflictError(
-                "Raw report file is already purged"
-            )
+        raw_file_uuid = _parse_uuid(raw_file_id, field_name="raw_report_file_id")
         actor_uuid = _actor_identity_uuid(actor_user_id)
-        row.parse_status = PURGED_PARSE_STATUS
-        row.file_url = ""
-        row.purged_by = actor_uuid
-        row.purged_at = datetime.now(UTC)
+        now = datetime.now(UTC)
+        result = self._session.execute(
+            update(RawReportFileORM)
+            .where(
+                RawReportFileORM.tenant_id == self._tenant_id,
+                RawReportFileORM.id == raw_file_uuid,
+                RawReportFileORM.parse_status != PURGED_PARSE_STATUS,
+            )
+            .values(
+                parse_status=PURGED_PARSE_STATUS,
+                file_url="",
+                purged_by=actor_uuid,
+                purged_at=now,
+                updated_at=now,
+            )
+        )
         self._session.flush()
+        if result.rowcount != 1:
+            row = self._session.scalars(
+                select(RawReportFileORM).where(
+                    RawReportFileORM.tenant_id == self._tenant_id,
+                    RawReportFileORM.id == raw_file_uuid,
+                )
+            ).one_or_none()
+            if row is None:
+                raise RawReportFileNotFoundError("Raw report file not found")
+            if row.parse_status == PURGED_PARSE_STATUS:
+                raise RawReportFilePurgeConflictError(
+                    "Raw report file is already purged"
+                )
+            raise RawReportFileConflictError("Raw report file purge was not applied")
+        row = self._session.scalars(
+            select(RawReportFileORM).where(
+                RawReportFileORM.tenant_id == self._tenant_id,
+                RawReportFileORM.id == raw_file_uuid,
+            )
+        ).one()
         return self._to_entry(row)
 
     @staticmethod
@@ -230,10 +258,18 @@ class SqlAlchemyRawReportFileRepository:
             checksum=row.checksum,
             parse_status=row.parse_status,
             downloaded_by=str(row.downloaded_by) if row.downloaded_by else None,
-            downloaded_at=row.downloaded_at,
+            downloaded_at=_ensure_utc(row.downloaded_at),
             purged_by=str(row.purged_by) if row.purged_by else None,
-            purged_at=row.purged_at,
+            purged_at=_ensure_utc(row.purged_at) if row.purged_at else None,
         )
+
+
+# FIX: SQLite drops timezone metadata for DateTime(timezone=True); repository
+# entries keep the same UTC-aware contract that Postgres timestamptz returns.
+def _ensure_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _validate_month(month: str) -> None:

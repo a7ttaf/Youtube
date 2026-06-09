@@ -18,6 +18,14 @@ def _money(value: Decimal) -> str:
     return f"{value.quantize(Decimal('0.01'))}"
 
 
+def _signed_fx_adjustment(value: Decimal) -> str:
+    """Render FX as a signed prose adjustment without double-negative money."""
+    amount = abs(value)
+    if value < 0:
+        return f"+${_money(amount)} FX"
+    return f"-${_money(amount)} FX"
+
+
 def _component(key: str, label: str, value: Decimal) -> dict[str, object]:
     """One numeric explanation component."""
     return {"key": key, "label": label, "value": str(value)}
@@ -46,7 +54,7 @@ def build_reconciliation_explanation(
         f"${_money(line.gross_usd)}; -${_money(line.us_tax_usd)} US tax "
         f"({share_txt}); -${_money(line.yt_adsense_fee_usd)} YouTube->AdSense "
         f"transfer; -${_money(line.adsense_bank_fee_usd)} AdSense->bank fee "
-        f"and -${_money(line.fx_variance_usd)} FX => "
+        f"and {_signed_fx_adjustment(line.fx_variance_usd)} => "
         f"${_money(line.net_received_usd)} received."
     )
     components: list[dict[str, object]] = [

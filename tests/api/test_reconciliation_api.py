@@ -16,8 +16,10 @@ from ums_smart_revenue.db.explanation_models import (
     NumberExplanationORM,
 )
 from ums_smart_revenue.db.finance_models import (
+    AdsenseContentOwnerLinkORM,
     AdSensePaymentORM,
     BankReconciliationEntryORM,
+    ContentOwnerChannelLinkORM,
     FinanceBase,
     FinanceMonthCloseORM,
     MonthlyChannelRevenueFactORM,
@@ -110,6 +112,25 @@ def seed_database(database_url: str, *, locked: bool = False) -> None:
                     payment_amount=Decimal("800.00"),
                     payment_currency="USD",
                     payment_status="PAID",
+                ),
+                AdsenseContentOwnerLinkORM(
+                    id=uuid4(),
+                    adsense_account_id="pub-1",
+                    content_owner_id="owner-recon-a",
+                    verification_status="VERIFIED",
+                    provenance_kind="MANUAL",
+                    provenance_payload={},
+                    effective_month_start=MONTH,
+                    effective_month_end=None,
+                ),
+                ContentOwnerChannelLinkORM(
+                    id=uuid4(),
+                    content_owner_id="owner-recon-a",
+                    youtube_channel_id=CHANNEL,
+                    provenance_kind="MANUAL",
+                    active=True,
+                    effective_month_start=MONTH,
+                    effective_month_end=None,
                 ),
                 BankReconciliationEntryORM(
                     id=uuid4(),

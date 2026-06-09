@@ -2,10 +2,10 @@ from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
-from ums_smart_revenue.db.report_models import ReportBase
+from ums_smart_revenue.db.report_models import RawReportFileORM, ReportBase
 from ums_smart_revenue.reports.raw_files import (
     RawReportFileNotFoundError,
     RawReportFilePurgeConflictError,
@@ -15,6 +15,7 @@ from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 ACTOR_USER_ID = "00000000-0000-0000-0000-000000071001"
+SECOND_ACTOR_USER_ID = "00000000-0000-0000-0000-000000071002"
 
 
 def build_session() -> Session:
@@ -71,6 +72,49 @@ def test_repurge_raises_conflict():
         repo.purge_file(
             raw_file_id=registered.id, actor_user_id=ACTOR_USER_ID, reason="second"
         )
+
+
+def test_purge_status_transition_is_conditional_under_stale_session(tmp_path):
+    """A stale session must not overwrite another transaction's PURGED stamp."""
+    engine = create_engine(f"sqlite+pysqlite:///{tmp_path / 'raw-files.db'}")
+    ReportBase.metadata.create_all(engine)
+
+    with Session(engine, expire_on_commit=False) as first_session:
+        first_repo = SqlAlchemyRawReportFileRepository(
+            first_session, tenant_id=DEFAULT_TENANT_UUID
+        )
+        registered = register_default(first_repo)
+        first_session.commit()
+        first_session.scalars(
+            select(RawReportFileORM).where(
+                RawReportFileORM.id == UUID(registered.id)
+            )
+        ).one()
+        first_session.commit()
+
+        with Session(engine) as second_session:
+            second_repo = SqlAlchemyRawReportFileRepository(
+                second_session, tenant_id=DEFAULT_TENANT_UUID
+            )
+            second_repo.purge_file(
+                raw_file_id=registered.id,
+                actor_user_id=SECOND_ACTOR_USER_ID,
+                reason="first purge wins",
+            )
+            second_session.commit()
+
+        with pytest.raises(RawReportFilePurgeConflictError):
+            first_repo.purge_file(
+                raw_file_id=registered.id,
+                actor_user_id=ACTOR_USER_ID,
+                reason="stale retry",
+            )
+
+    with Session(engine) as check_session:
+        row = check_session.scalars(
+            select(RawReportFileORM).where(RawReportFileORM.id == UUID(registered.id))
+        ).one()
+        assert row.purged_by == UUID(SECOND_ACTOR_USER_ID)
 
 
 def test_purge_unknown_id_raises_not_found():

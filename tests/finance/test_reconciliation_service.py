@@ -111,6 +111,27 @@ def _add_payment(session, account, amount, *, status="PAID", currency="USD"):
     )
 
 
+def _link_account_channel(session, account, owner, channel):
+    """Insert one VERIFIED account->owner->channel mapping for the test month."""
+    session.add(
+        AdsenseContentOwnerLinkORM(
+            id=uuid4(), tenant_id=DEFAULT_TENANT_ID,
+            adsense_account_id=account, content_owner_id=owner,
+            verification_status="VERIFIED", provenance_kind="MANUAL",
+            provenance_payload={}, effective_month_start=MONTH,
+            effective_month_end=None,
+        )
+    )
+    session.add(
+        ContentOwnerChannelLinkORM(
+            id=uuid4(), tenant_id=DEFAULT_TENANT_ID,
+            content_owner_id=owner, youtube_channel_id=channel,
+            provenance_kind="MANUAL", active=True,
+            effective_month_start=MONTH, effective_month_end=None,
+        )
+    )
+
+
 def _add_bank(session, amount_usd, fx):
     """Insert one bank reconciliation entry."""
     session.add(
@@ -145,6 +166,7 @@ def _seed_standard(session):
     _add_channel(session, "c1")
     _add_cms_fact(session, "c1", "100")
     _add_payment(session, "pub-1", "80")
+    _link_account_channel(session, "pub-1", "owner-1", "c1")
     _add_bank(session, "60", "5")
     session.commit()
 
@@ -325,6 +347,7 @@ def test_run_uses_primary_revenue_fact_instead_of_summing_sources():
             source_kind=RevenueFactSourceKind.ADSENSE.value,
         )
         _add_payment(session, "pub-1", "80")
+        _link_account_channel(session, "pub-1", "owner-1", "c1")
         session.commit()
 
         svc = _service(session)
@@ -353,6 +376,7 @@ def test_run_ignores_non_usd_paid_adsense_payments():
         _add_cms_fact(session, "c1", "100")
         _add_payment(session, "pub-1", "80")
         _add_payment(session, "pub-eur", "50", currency="EUR")
+        _link_account_channel(session, "pub-1", "owner-1", "c1")
         session.commit()
 
         result = _service(session).run(month=MONTH, actor=_actor(), reason="r")
@@ -366,23 +390,7 @@ def test_run_deletes_stale_outside_cms_allocation_when_payment_invalidates():
     with Session(engine) as session:
         _add_channel(session, "outside-1", cms_status="OUTSIDE_CMS")
         _add_payment(session, "pub-9", "42")
-        session.add(
-            AdsenseContentOwnerLinkORM(
-                id=uuid4(), tenant_id=DEFAULT_TENANT_ID,
-                adsense_account_id="pub-9", content_owner_id="owner-9",
-                verification_status="VERIFIED", provenance_kind="MANUAL",
-                provenance_payload={}, effective_month_start=MONTH,
-                effective_month_end=None,
-            )
-        )
-        session.add(
-            ContentOwnerChannelLinkORM(
-                id=uuid4(), tenant_id=DEFAULT_TENANT_ID,
-                content_owner_id="owner-9", youtube_channel_id="outside-1",
-                provenance_kind="MANUAL", active=True,
-                effective_month_start=MONTH, effective_month_end=None,
-            )
-        )
+        _link_account_channel(session, "pub-9", "owner-9", "outside-1")
         session.commit()
 
         svc = _service(session)
@@ -410,23 +418,7 @@ def test_run_deletes_stale_allocation_when_channel_leaves_outside_cms():
     with Session(engine) as session:
         _add_channel(session, "outside-1", cms_status="OUTSIDE_CMS")
         _add_payment(session, "pub-9", "42")
-        session.add(
-            AdsenseContentOwnerLinkORM(
-                id=uuid4(), tenant_id=DEFAULT_TENANT_ID,
-                adsense_account_id="pub-9", content_owner_id="owner-9",
-                verification_status="VERIFIED", provenance_kind="MANUAL",
-                provenance_payload={}, effective_month_start=MONTH,
-                effective_month_end=None,
-            )
-        )
-        session.add(
-            ContentOwnerChannelLinkORM(
-                id=uuid4(), tenant_id=DEFAULT_TENANT_ID,
-                content_owner_id="owner-9", youtube_channel_id="outside-1",
-                provenance_kind="MANUAL", active=True,
-                effective_month_start=MONTH, effective_month_end=None,
-            )
-        )
+        _link_account_channel(session, "pub-9", "owner-9", "outside-1")
         session.commit()
 
         svc = _service(session)
@@ -479,23 +471,7 @@ def test_outside_cms_one_to_one_writes_allocation_fact():
     with Session(engine) as session:
         _add_channel(session, "outside-1", cms_status="OUTSIDE_CMS")
         _add_payment(session, "pub-9", "42")
-        session.add(
-            AdsenseContentOwnerLinkORM(
-                id=uuid4(), tenant_id=DEFAULT_TENANT_ID,
-                adsense_account_id="pub-9", content_owner_id="owner-9",
-                verification_status="VERIFIED", provenance_kind="MANUAL",
-                provenance_payload={}, effective_month_start=MONTH,
-                effective_month_end=None,
-            )
-        )
-        session.add(
-            ContentOwnerChannelLinkORM(
-                id=uuid4(), tenant_id=DEFAULT_TENANT_ID,
-                content_owner_id="owner-9", youtube_channel_id="outside-1",
-                provenance_kind="MANUAL", active=True,
-                effective_month_start=MONTH, effective_month_end=None,
-            )
-        )
+        _link_account_channel(session, "pub-9", "owner-9", "outside-1")
         session.commit()
         svc = ReconciliationWorkflowService(
             session,
@@ -525,9 +501,125 @@ def test_outside_cms_one_to_one_writes_allocation_fact():
     ]
     assert len(alloc) == 1
     assert alloc[0].gross_revenue_usd == Decimal("42")
-    assert len(tax_components) == 1
-    assert tax_components[0].source_system == "reconciliation"
-    assert summary.net_revenue_usd == Decimal("35.70")
+    assert tax_components == []
+    assert summary.status == "NET_REVENUE_SOURCE_MISSING"
+    assert summary.net_revenue_usd is None
+
+
+def test_outside_cms_allocation_excluded_from_cms_residual_fee_basis():
+    """Pass-through OUTSIDE_CMS payments do not reduce CMS residual attribution."""
+    engine = _engine()
+    with Session(engine) as session:
+        _add_channel(session, "c1")
+        _add_cms_fact(session, "c1", "100")
+        _add_payment(session, "pub-cms", "80")
+        _link_account_channel(session, "pub-cms", "owner-cms", "c1")
+        _add_channel(session, "outside-1", cms_status="OUTSIDE_CMS")
+        _add_payment(session, "pub-out", "40")
+        _link_account_channel(session, "pub-out", "owner-out", "outside-1")
+        session.commit()
+        svc = ReconciliationWorkflowService(
+            session,
+            audit_sink=InMemoryAuditSink(),
+            us_view_share_provider=_FixedShareProvider(Decimal("0.5")),
+        )
+
+        result = svc.run(month=MONTH, actor=_actor(), reason="r")
+        session.commit()
+
+        components = SqlAlchemyDeductionComponentRepository(session).list_month_components(
+            month=MONTH
+        )
+
+    assert [line.youtube_channel_id for line in result.channels] == ["c1"]
+    assert result.gross_total_usd == Decimal("100.000000")
+    assert result.yt_adsense_fee_total_usd == Decimal("5.000000")
+    outside_components = [c for c in components if c.scope_id == "outside-1"]
+    assert outside_components == []
+
+
+def test_outside_cms_multiple_accounts_same_channel_sum_before_allocation():
+    """Multiple 1:1 AdSense accounts for one OUTSIDE_CMS channel are aggregated."""
+    engine = _engine()
+    with Session(engine) as session:
+        _add_channel(session, "outside-1", cms_status="OUTSIDE_CMS")
+        _add_payment(session, "pub-9", "42")
+        _add_payment(session, "pub-10", "8")
+        _link_account_channel(session, "pub-9", "owner-9", "outside-1")
+        _link_account_channel(session, "pub-10", "owner-10", "outside-1")
+        session.commit()
+
+        _service(session).run(month=MONTH, actor=_actor(), reason="r")
+        session.commit()
+
+        facts = SqlAlchemyRevenueFactRepository(session).list_channel_month_facts(
+            month=MONTH, youtube_channel_id="outside-1"
+        )
+
+    alloc = [f for f in facts if f.source_kind == RevenueFactSourceKind.ALLOCATION.value]
+    assert len(alloc) == 1
+    assert alloc[0].gross_revenue_usd == Decimal("50")
+
+
+def test_mixed_source_backed_account_does_not_allocate_outside_channel():
+    """An account must be wholly 1:1 OUTSIDE_CMS before writing ALLOCATION."""
+    engine = _engine()
+    with Session(engine) as session:
+        _add_channel(session, "c1")
+        _add_cms_fact(session, "c1", "100")
+        _add_channel(session, "outside-1", cms_status="OUTSIDE_CMS")
+        _add_payment(session, "pub-mixed", "80")
+        _link_account_channel(session, "pub-mixed", "owner-mixed-cms", "c1")
+        _link_account_channel(session, "pub-mixed", "owner-mixed-out", "outside-1")
+        session.commit()
+
+        result = _service(session).run(month=MONTH, actor=_actor(), reason="r")
+        session.commit()
+
+        facts = SqlAlchemyRevenueFactRepository(session).list_channel_month_facts(
+            month=MONTH, youtube_channel_id="outside-1"
+        )
+
+    assert facts == []
+    assert any(w["code"] == "MISSING_REVENUE_SOURCE" for w in result.warnings)
+
+
+def test_unmapped_adsense_payment_excluded_from_cms_residual_total():
+    """Unverified AdSense payments cannot clamp fees for mapped source-backed channels."""
+    engine = _engine()
+    with Session(engine) as session:
+        _add_channel(session, "c1")
+        _add_cms_fact(session, "c1", "100")
+        _add_payment(session, "pub-cms", "80")
+        _link_account_channel(session, "pub-cms", "owner-cms", "c1")
+        _add_payment(session, "pub-unmapped", "50")
+        session.commit()
+
+        result = _service(session).run(month=MONTH, actor=_actor(), reason="r")
+
+    assert result.yt_adsense_fee_total_usd == Decimal("20.000000")
+    assert any(w["code"] == "MISSING_REVENUE_SOURCE" for w in result.warnings)
+
+
+def test_manual_upload_primary_fact_reconciles_without_source_mapping_error():
+    """MANUAL_UPLOAD primary facts are valid reconciliation inputs, not 500s."""
+    engine = _engine()
+    with Session(engine) as session:
+        _add_channel(session, "c1")
+        _add_cms_fact(
+            session,
+            "c1",
+            "100",
+            source_kind=RevenueFactSourceKind.MANUAL_UPLOAD.value,
+        )
+        _add_payment(session, "pub-cms", "80")
+        _link_account_channel(session, "pub-cms", "owner-cms", "c1")
+        session.commit()
+
+        result = _service(session).run(month=MONTH, actor=_actor(), reason="r")
+
+    assert result.gross_total_usd == Decimal("100.000000")
+    assert result.yt_adsense_fee_total_usd == Decimal("20.000000")
 
 
 def test_outside_cms_ambiguous_account_skips_and_warns():
