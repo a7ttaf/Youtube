@@ -26,6 +26,7 @@ from ums_smart_revenue.db.finance_models import (
 )
 from ums_smart_revenue.db.org_models import OrgBase, YouTubeChannelORM
 from ums_smart_revenue.finance.deduction_ingestion import (
+    DeductionComponentLockedMonthError,
     SqlAlchemyDeductionComponentRepository,
 )
 from ums_smart_revenue.finance.explanations import REVENUE_RECONCILIATION_METRIC
@@ -196,6 +197,21 @@ def test_run_rejects_locked_month():
         assert sink.records == []
 
 
+def test_run_normalizes_repository_lock_race_to_month_locked_error():
+    """Repository lock guards raised after preflight still surface as MonthLockedError."""
+    engine = _engine()
+    with Session(engine) as session:
+        _seed_standard(session)
+        sink = InMemoryAuditSink()
+        svc = ReconciliationWorkflowService(session, audit_sink=sink)
+        svc._deductions = _LockedDeductionRepository()
+
+        with pytest.raises(MonthLockedError):
+            svc.run(month=MONTH, actor=_actor(), reason="race")
+
+    assert sink.records == []
+
+
 def test_recompute_is_idempotent():
     """A second run replaces, never duplicates, reconciliation components."""
     engine = _engine()
@@ -212,6 +228,53 @@ def test_recompute_is_idempotent():
         recon = [c for c in comps if c.source_table == "reconciliation_workflow"]
     keys = [c.component_key for c in recon]
     assert len(keys) == len(set(keys))
+
+
+def test_run_prunes_stale_reconciliation_explanations():
+    """A recompute deletes channel explanations that left the current result."""
+    engine = _engine()
+    with Session(engine) as session:
+        _seed_standard(session)
+        session.add(
+            NumberExplanationORM(
+                id=uuid4(),
+                tenant_id=DEFAULT_TENANT_ID,
+                month=MONTH,
+                entity_type="channel",
+                entity_id="stale-channel",
+                metric=REVENUE_RECONCILIATION_METRIC,
+                value=Decimal("99.00"),
+                currency="USD",
+                formula="stale",
+                confidence="LOW",
+                components=[],
+                warnings=[],
+            )
+        )
+        session.commit()
+
+        _service(session).run(month=MONTH, actor=_actor(), reason="rerun")
+        session.commit()
+
+        stale = session.scalars(
+            select(NumberExplanationORM).where(
+                NumberExplanationORM.month == MONTH,
+                NumberExplanationORM.entity_type == "channel",
+                NumberExplanationORM.entity_id == "stale-channel",
+                NumberExplanationORM.metric == REVENUE_RECONCILIATION_METRIC,
+            )
+        ).one_or_none()
+        current = session.scalars(
+            select(NumberExplanationORM).where(
+                NumberExplanationORM.month == MONTH,
+                NumberExplanationORM.entity_type == "channel",
+                NumberExplanationORM.entity_id == "c1",
+                NumberExplanationORM.metric == REVENUE_RECONCILIATION_METRIC,
+            )
+        ).one_or_none()
+
+    assert stale is None
+    assert current is not None
 
 
 def test_reconciliation_deductions_feed_net_revenue():
@@ -339,6 +402,64 @@ def test_run_deletes_stale_outside_cms_allocation_when_payment_invalidates():
         f for f in facts
         if f.source_kind == RevenueFactSourceKind.ALLOCATION.value
     ] == []
+
+
+def test_run_deletes_stale_allocation_when_channel_leaves_outside_cms():
+    """Recompute removes ALLOCATION facts when a channel is no longer OUTSIDE_CMS."""
+    engine = _engine()
+    with Session(engine) as session:
+        _add_channel(session, "outside-1", cms_status="OUTSIDE_CMS")
+        _add_payment(session, "pub-9", "42")
+        session.add(
+            AdsenseContentOwnerLinkORM(
+                id=uuid4(), tenant_id=DEFAULT_TENANT_ID,
+                adsense_account_id="pub-9", content_owner_id="owner-9",
+                verification_status="VERIFIED", provenance_kind="MANUAL",
+                provenance_payload={}, effective_month_start=MONTH,
+                effective_month_end=None,
+            )
+        )
+        session.add(
+            ContentOwnerChannelLinkORM(
+                id=uuid4(), tenant_id=DEFAULT_TENANT_ID,
+                content_owner_id="owner-9", youtube_channel_id="outside-1",
+                provenance_kind="MANUAL", active=True,
+                effective_month_start=MONTH, effective_month_end=None,
+            )
+        )
+        session.commit()
+
+        svc = _service(session)
+        svc.run(month=MONTH, actor=_actor(), reason="first")
+        channel = session.scalars(
+            select(YouTubeChannelORM).where(
+                YouTubeChannelORM.youtube_channel_id == "outside-1"
+            )
+        ).one()
+        channel.cms_status = "INSIDE_CMS"
+        session.commit()
+
+        svc.run(month=MONTH, actor=_actor(), reason="second")
+        session.commit()
+
+        facts = SqlAlchemyRevenueFactRepository(session).list_channel_month_facts(
+            month=MONTH, youtube_channel_id="outside-1"
+        )
+
+    assert [
+        f for f in facts
+        if f.source_kind == RevenueFactSourceKind.ALLOCATION.value
+    ] == []
+
+
+class _LockedDeductionRepository:
+    """Test double that simulates a repository month-lock race."""
+
+    def upsert_components(
+        self, *, month, components, replace_source_tables=None
+    ):
+        """Raise the same locked-month error as the real repository."""
+        raise DeductionComponentLockedMonthError("race locked")
 
 
 class _FixedShareProvider:

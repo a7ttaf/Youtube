@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.explanation_models import NumberExplanationORM
@@ -174,6 +174,39 @@ class SqlAlchemyNumberExplanationRepository:
         row.updated_at = now
         self._session.flush()
         return explanation
+
+    # ============================================================================
+    # Purpose: Prune stale explanations for one month/entity/metric while keeping
+    #   the live entity ids from the current recomputation.
+    # Database/ORM: number_explanations / NumberExplanationORM.
+    # Standards: Tenant-scoped delete; caller owns transaction and recomputation.
+    # Blast Radius: Finance explanation rows only. No authorization or Neo4j.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/finance/reconciliation_service.py ->
+    #     Removes channel reconciliation explanations that left result.channels.
+    # ============================================================================
+    def delete_month_metric_explanations_except(
+        self,
+        *,
+        month: str,
+        entity_type: str,
+        metric: str,
+        keep_entity_ids: set[str],
+    ) -> int:
+        """Delete stale explanation rows for one metric in a tenant month."""
+        statement = delete(NumberExplanationORM).where(
+            NumberExplanationORM.tenant_id == self._tenant_id,
+            NumberExplanationORM.month == month,
+            NumberExplanationORM.entity_type == entity_type,
+            NumberExplanationORM.metric == metric,
+        )
+        if keep_entity_ids:
+            statement = statement.where(
+                ~NumberExplanationORM.entity_id.in_(sorted(keep_entity_ids))
+            )
+        result = self._session.execute(statement)
+        self._session.flush()
+        return int(result.rowcount or 0)
 
 
 def build_channel_month_revenue_explanation(

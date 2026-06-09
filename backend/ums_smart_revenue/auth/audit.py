@@ -113,6 +113,11 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
         reason_required=True,
         permission=Permission.CHANGE_ALLOCATION_RULE,
     ),
+    AuditEventType.REVENUE_RECONCILED: AuditEventDefinition(
+        AuditEventType.REVENUE_RECONCILED,
+        reason_required=True,
+        permission=Permission.CHANGE_ALLOCATION_RULE,
+    ),
     AuditEventType.EXPORT_CREATED: AuditEventDefinition(
         AuditEventType.EXPORT_CREATED,
         permission=Permission.EXPORT_REVENUE_REPORT,

@@ -21,6 +21,7 @@ from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.finance.adsense_payments import (
+    AdSensePaymentEntry,
     SqlAlchemyAdSensePaymentRepository,
 )
 from ums_smart_revenue.finance.bank_reconciliation import (
@@ -31,9 +32,11 @@ from ums_smart_revenue.finance.channel_account_links import (
 )
 from ums_smart_revenue.finance.deduction_components import DeductionComponentInput
 from ums_smart_revenue.finance.deduction_ingestion import (
+    DeductionComponentLockedMonthError,
     SqlAlchemyDeductionComponentRepository,
 )
 from ums_smart_revenue.finance.explanations import (
+    REVENUE_RECONCILIATION_METRIC,
     SqlAlchemyNumberExplanationRepository,
 )
 from ums_smart_revenue.finance.month_close import get_month_close_status
@@ -49,6 +52,7 @@ from ums_smart_revenue.finance.reconciliation_workflow import (
     compute_month_reconciliation,
 )
 from ums_smart_revenue.finance.revenue_facts import (
+    RevenueFactLockedMonthError,
     RevenueFactSourceKind,
     SqlAlchemyRevenueFactRepository,
 )
@@ -59,6 +63,7 @@ _SOURCE_TABLE = "reconciliation_workflow"
 _SOURCE_SYSTEM = "reconciliation"
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 _ALLOCATION_CONFIDENCE = Decimal("0.80")
+_LOCKED_WRITE_ERRORS = (DeductionComponentLockedMonthError, RevenueFactLockedMonthError)
 
 # Inverse of SOURCE_SYSTEM_TO_SOURCE_KIND: pick a source_system whose mapping a
 # reconciliation channel-direct component must adopt so the net-revenue resolver
@@ -157,37 +162,49 @@ class ReconciliationWorkflowService:
         ) == "LOCKED":
             raise MonthLockedError(f"Finance month {month!r} is locked")
 
-        outside_warnings = self._attribute_outside_cms(month=month, actor=actor)
+        try:
+            outside_warnings = self._attribute_outside_cms(month=month, actor=actor)
 
-        channel_gross, primary_source = self._gather_channel_gross(month)
-        adsense_total = self._gather_adsense_total(month)
-        bank_total, fx_total = self._gather_bank_totals(month)
-        us_view_shares = {
-            channel: self._us_view.us_view_share(month, channel)
-            for channel in channel_gross
-        }
+            channel_gross, primary_source = self._gather_channel_gross(month)
+            adsense_total = self._gather_adsense_total(month)
+            bank_total, fx_total = self._gather_bank_totals(month)
+            us_view_shares = {
+                channel: self._us_view.us_view_share(month, channel)
+                for channel in channel_gross
+            }
 
-        result = compute_month_reconciliation(
-            month=month,
-            channel_gross=channel_gross,
-            us_view_shares=us_view_shares,
-            adsense_received_usd=adsense_total,
-            bank_received_usd=bank_total,
-            fx_total_usd=fx_total,
-        )
-
-        components = self._build_components(month, result, primary_source)
-        self._deductions.upsert_components(
-            month=month,
-            components=components,
-            replace_source_tables={_SOURCE_TABLE},
-        )
-        for line in result.channels:
-            self._explanations.record_explanation(
-                build_reconciliation_explanation(
-                    month=month, line=line, warnings=result.warnings,
-                )
+            result = compute_month_reconciliation(
+                month=month,
+                channel_gross=channel_gross,
+                us_view_shares=us_view_shares,
+                adsense_received_usd=adsense_total,
+                bank_received_usd=bank_total,
+                fx_total_usd=fx_total,
             )
+
+            components = self._build_components(month, result, primary_source)
+            self._deductions.upsert_components(
+                month=month,
+                components=components,
+                replace_source_tables={_SOURCE_TABLE},
+            )
+            live_channels = {line.youtube_channel_id for line in result.channels}
+            self._explanations.delete_month_metric_explanations_except(
+                month=month,
+                entity_type="channel",
+                metric=REVENUE_RECONCILIATION_METRIC,
+                keep_entity_ids=live_channels,
+            )
+            for line in result.channels:
+                self._explanations.record_explanation(
+                    build_reconciliation_explanation(
+                        month=month, line=line, warnings=result.warnings,
+                    )
+                )
+        # FIX: Repository write guards also run under row locks; if a month locks
+        # after the service preflight, normalize those races to the API's 409 path.
+        except _LOCKED_WRITE_ERRORS as exc:
+            raise MonthLockedError(f"Finance month {month!r} is locked") from exc
 
         record_audit_event(
             sink=self._audit_sink,
@@ -231,16 +248,20 @@ class ReconciliationWorkflowService:
 
     def _gather_adsense_total(self, month: str) -> Decimal | None:
         """Sum PAID USD AdSense payment amounts for the month (None when absent)."""
-        repo = SqlAlchemyAdSensePaymentRepository(
-            self._session, tenant_id=self._tenant_id
-        )
-        payments = [
-            pay for pay in repo.list_month_payments(month=month)
-            if pay.payment_status == "PAID" and pay.payment_currency == "USD"
-        ]
+        payments = self._list_paid_usd_payments(month)
         if not payments:
             return None
         return sum((pay.payment_amount for pay in payments), Decimal("0"))
+
+    def _list_paid_usd_payments(self, month: str) -> list[AdSensePaymentEntry]:
+        """Return PAID USD AdSense payments for a month."""
+        repo = SqlAlchemyAdSensePaymentRepository(
+            self._session, tenant_id=self._tenant_id
+        )
+        return [
+            pay for pay in repo.list_month_payments(month=month)
+            if pay.payment_status == "PAID" and pay.payment_currency == "USD"
+        ]
 
     def _gather_bank_totals(self, month: str) -> tuple[Decimal | None, Decimal]:
         """Sum bank receipts (None when absent) and FX differences for the month."""
@@ -317,28 +338,22 @@ class ReconciliationWorkflowService:
         """
         warnings: list[dict[str, str]] = []
         outside = self._outside_cms_channels()
-        if not outside:
-            return warnings
-
         month_facts = self._facts.list_month_facts(month=month)
         source_gross_channels = {
             fact.youtube_channel_id
             for fact in month_facts
             if fact.source_kind != RevenueFactSourceKind.ALLOCATION.value
         }
+        # FIX: Do not limit stale candidates to the current OUTSIDE_CMS set. A
+        # channel that moved back inside CMS must lose its prior ALLOCATION fact.
         existing_allocation_channels = {
             fact.youtube_channel_id
             for fact in month_facts
             if fact.source_kind == RevenueFactSourceKind.ALLOCATION.value
-            and fact.youtube_channel_id in outside
         }
-        repo = SqlAlchemyAdSensePaymentRepository(
-            self._session, tenant_id=self._tenant_id
-        )
         paid_by_account: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-        for pay in repo.list_month_payments(month=month):
-            if pay.payment_status == "PAID" and pay.payment_currency == "USD":
-                paid_by_account[pay.source_account_id] += pay.payment_amount
+        for pay in self._list_paid_usd_payments(month):
+            paid_by_account[pay.source_account_id] += pay.payment_amount
         current_allocation_channels: set[str] = set()
         for account, total in paid_by_account.items():
             channels = [
