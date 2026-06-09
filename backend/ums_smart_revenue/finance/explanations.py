@@ -107,6 +107,38 @@ class SqlAlchemyNumberExplanationRepository:
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
+    def get_explanation(
+        self, *, month: str, entity_type: str, entity_id: str, metric: str
+    ) -> NumberExplanationEntry | None:
+        """Read a persisted explanation for the tenant, or None if absent.
+
+        Tenant-scoped read keyed on the unique
+        (tenant_id, month, entity_type, entity_id, metric) identity.
+        """
+        row = self._session.scalars(
+            select(NumberExplanationORM).where(
+                NumberExplanationORM.tenant_id == self._tenant_id,
+                NumberExplanationORM.month == month,
+                NumberExplanationORM.entity_type == entity_type,
+                NumberExplanationORM.entity_id == entity_id,
+                NumberExplanationORM.metric == metric,
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        return NumberExplanationEntry(
+            month=row.month,
+            entity_type=row.entity_type,
+            entity_id=row.entity_id,
+            metric=row.metric,
+            value=row.value,
+            currency=row.currency,
+            formula=row.formula,
+            confidence={"label": row.confidence},
+            components=list(row.components),
+            warnings=list(row.warnings),
+        )
+
     def record_explanation(
         self, explanation: NumberExplanationEntry
     ) -> NumberExplanationEntry:

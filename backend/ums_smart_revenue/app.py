@@ -40,6 +40,7 @@ from ums_smart_revenue.api.groups import (
     router as groups_router,
 )
 from ums_smart_revenue.api.org_units import router as org_units_router
+from ums_smart_revenue.api.reconciliation import router as reconciliation_router
 from ums_smart_revenue.api.registry_dependencies import (
     current_group_registry,
     sql_group_registry_from_session,
@@ -151,6 +152,7 @@ def create_app(
     _app.include_router(finance_close_router)
     _app.include_router(groups_router)
     _app.include_router(org_units_router)
+    _app.include_router(reconciliation_router)
     _app.include_router(reports_router)
     _app.include_router(revenue_router)
     _app.include_router(security_router)
