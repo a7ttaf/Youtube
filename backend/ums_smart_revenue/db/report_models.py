@@ -65,6 +65,10 @@ class RawReportFileORM(ReportBase):
         default=_TENANT_ID_DEFAULT_VALUE,
         server_default=_TENANT_ID_DEFAULT,
     )
+    purged_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    purged_by: Mapped[UUID | None] = mapped_column(Uuid(as_uuid=True), nullable=True)
 
     __table_args__ = (
         UniqueConstraint(
@@ -90,7 +94,8 @@ class RawReportFileORM(ReportBase):
             name="ck_raw_report_files_report_month_format",
         ),
         CheckConstraint(
-            "parse_status IN ('DOWNLOADED', 'PARSED', 'FAILED', 'QUARANTINED')",
+            "parse_status IN "
+            "('DOWNLOADED', 'PARSED', 'FAILED', 'QUARANTINED', 'PURGED')",
             name="ck_raw_report_files_parse_status",
         ),
         Index("ix_raw_report_files_source_month", "source", "report_month"),

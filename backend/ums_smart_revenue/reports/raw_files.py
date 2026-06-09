@@ -13,7 +13,10 @@ from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
-ALLOWED_PARSE_STATUSES = frozenset({"DOWNLOADED", "PARSED", "FAILED", "QUARANTINED"})
+ALLOWED_PARSE_STATUSES = frozenset(
+    {"DOWNLOADED", "PARSED", "FAILED", "QUARANTINED", "PURGED"}
+)
+PURGED_PARSE_STATUS = "PURGED"
 ALLOWED_STORAGE_PREFIXES = ("s3://", "gs://", "azure://", "blob://", "file-store://")
 MAX_RAW_REPORT_FILE_PAGE_SIZE = 100
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
@@ -30,6 +33,8 @@ class RawReportFileEntry:
     parse_status: str
     downloaded_by: str | None
     downloaded_at: datetime
+    purged_by: str | None = None
+    purged_at: datetime | None = None
 
     def to_api(self) -> dict[str, object]:
         return {
@@ -66,6 +71,10 @@ class RawReportFileNotFoundError(RawReportFileError):
 
 
 class RawReportFileValidationError(RawReportFileError):
+    pass
+
+
+class RawReportFilePurgeConflictError(RawReportFileError):
     pass
 
 
@@ -181,6 +190,35 @@ class SqlAlchemyRawReportFileRepository:
             raise RawReportFileNotFoundError("Raw report file not found")
         return row
 
+    # ========================================================================
+    # Purpose: Mark one raw report file PURGED on explicit authorized request;
+    #   clear the storage pointer while keeping all metadata for the audit
+    #   trail. Default policy is retain-forever, so this is the only delete path.
+    # Database/ORM: RawReportFileORM (raw_report_files); tenant-scoped UPDATE.
+    # Standards: Typed domain errors; fail-closed on cross-tenant/unknown ids.
+    # Blast Radius: Audit (caller emits REPORT_PURGED); no finance/Neo4j impact.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/reports.py -> DELETE route caller.
+    # ========================================================================
+    def purge_file(
+        self, *, raw_file_id: str, actor_user_id: str, reason: str
+    ) -> RawReportFileEntry:
+        """Set parse_status=PURGED, clear file_url, stamp purged_at/purged_by."""
+        if not reason or not reason.strip():
+            raise RawReportFileValidationError("reason must not be blank")
+        row = self._get_row(raw_file_id)
+        if row.parse_status == PURGED_PARSE_STATUS:
+            raise RawReportFilePurgeConflictError(
+                "Raw report file is already purged"
+            )
+        actor_uuid = _actor_identity_uuid(actor_user_id)
+        row.parse_status = PURGED_PARSE_STATUS
+        row.file_url = ""
+        row.purged_by = actor_uuid
+        row.purged_at = datetime.now(UTC)
+        self._session.flush()
+        return self._to_entry(row)
+
     @staticmethod
     def _to_entry(row: RawReportFileORM) -> RawReportFileEntry:
         return RawReportFileEntry(
@@ -193,6 +231,8 @@ class SqlAlchemyRawReportFileRepository:
             parse_status=row.parse_status,
             downloaded_by=str(row.downloaded_by) if row.downloaded_by else None,
             downloaded_at=row.downloaded_at,
+            purged_by=str(row.purged_by) if row.purged_by else None,
+            purged_at=row.purged_at,
         )
 
 
