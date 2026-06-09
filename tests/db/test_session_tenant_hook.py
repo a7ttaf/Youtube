@@ -1,3 +1,5 @@
+from uuid import UUID
+
 import pytest
 import sqlalchemy as sa
 from alembic import command
@@ -65,9 +67,11 @@ def test_postgres_tenant_lane_sets_role_and_trusted_tenant_context():
     token = TENANT_CTX.set(_tenant(tid))
     try:
         with factory() as session:
+            # Typed boundary: the getter is RETURNS uuid (context column is
+            # uuid), so the driver yields a UUID — compare against UUID(tid).
             assert session.execute(
                 sa.text("SELECT app_current_tenant_id()")
-            ).scalar() == tid
+            ).scalar() == UUID(tid)
             assert session.execute(
                 sa.text("SELECT current_user")
             ).scalar() == "app_tenant"
