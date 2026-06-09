@@ -83,6 +83,31 @@ def _register(client: TestClient) -> str:
     return response.json()["id"]
 
 
+def test_register_rejects_purged_parse_status(app_env):
+    client, engine = app_env
+
+    response = client.post(
+        "/reports/raw-files",
+        headers=auth_headers(
+            "system_integration_user", "connector", "youtube_reporting"
+        ),
+        json={
+            "source": "youtube_reporting",
+            "report_type": "YOUTUBE_CMS_REVENUE",
+            "report_month": "2026-03",
+            "storage_uri": "s3://ums-raw-reports/youtube/2026-03/cms.csv",
+            "checksum": "sha256:83f8b7d92d8a",
+            "parse_status": "PURGED",
+            "reason": "Register downloaded report",
+        },
+    )
+
+    assert response.status_code == 422
+    with Session(engine) as session:
+        rows = session.scalars(select(RawReportFileORM)).all()
+    assert rows == []
+
+
 def test_connector_admin_purges_raw_report_file_with_audit(app_env):
     client, engine = app_env
     raw_file_id = _register(client)

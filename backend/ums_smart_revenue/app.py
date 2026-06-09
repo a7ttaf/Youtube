@@ -4,7 +4,9 @@ from collections.abc import Iterable
 from datetime import UTC, datetime
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException
+from fastapi import Depends, FastAPI, HTTPException
+from sqlalchemy.engine import make_url
+from sqlalchemy.orm import Session
 from starlette.datastructures import Headers
 from starlette.responses import JSONResponse
 from starlette.types import ASGIApp, Receive, Scope, Send
@@ -102,6 +104,7 @@ def create_app(
 
     if resolved_database_url:
         session_factory = build_session_factory(resolved_database_url)
+        sqlite_database = _is_sqlite_database_url(resolved_database_url)
         platform_session_factory = build_platform_session_factory(
             resolved_database_url
         )
@@ -110,13 +113,17 @@ def create_app(
             overrides[current_db_session] = authenticated_session_dependency(
                 session_factory
             )
-            overrides[current_platform_db_session] = authenticated_session_dependency(
-                platform_session_factory
+            overrides[current_platform_db_session] = (
+                _sqlite_platform_session_from_request
+                if sqlite_database
+                else authenticated_session_dependency(platform_session_factory)
             )
         else:
             overrides[current_db_session] = session_dependency(session_factory)
-            overrides[current_platform_db_session] = session_dependency(
-                platform_session_factory
+            overrides[current_platform_db_session] = (
+                _sqlite_platform_session_from_request
+                if sqlite_database
+                else session_dependency(platform_session_factory)
             )
             _app.add_middleware(DefaultTenantMiddleware)
         overrides[current_channel_registry] = sql_channel_registry_from_session
@@ -189,6 +196,31 @@ def create_app(
 def _allow_database_auth_tenant(_scope: object, _tenant_slug: str) -> bool:
     """Allow active tenant resolution before SQL principal loading checks identity."""
     return True
+
+
+def _is_sqlite_database_url(database_url: str) -> bool:
+    """Return whether the configured database URL targets SQLite."""
+    return make_url(database_url).get_backend_name() == "sqlite"
+
+
+# ============================================================================
+# Purpose: SQLite test apps cannot hold separate operational and platform write
+#   sessions in the same request without risking file-level lock contention.
+#   Reuse the already-open request session for platform-only dependencies while
+#   Postgres production paths keep the dedicated app_platform session factory.
+# Database/ORM: SQLAlchemy request Session; no table shape changes.
+# Standards: FastAPI dependency caching preserves one commit/rollback owner.
+# Blast Radius: Test SQLite audit writes only; no authorization, finance, Neo4j,
+#   or export behavior changes on Postgres.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/dependencies.py -> dependency target.
+#   - File: backend/ums_smart_revenue/auth/sql_audit_sink.py -> audit sink session.
+# ============================================================================
+def _sqlite_platform_session_from_request(
+    session: Session = Depends(current_db_session),
+) -> Session:
+    """Return the current request session for SQLite platform dependencies."""
+    return session
 
 
 class TrustedGatewayTenantResolverMiddleware:

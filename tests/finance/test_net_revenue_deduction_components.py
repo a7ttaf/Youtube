@@ -105,6 +105,17 @@ def test_cross_source_components_excluded_from_derived_net():
     assert summary.net_revenue_usd is None
 
 
+def test_allocation_source_components_apply_to_allocation_fact():
+    """Reconciliation ALLOCATION facts use reconciliation TAX components for net derivation."""
+    summary = _channel(
+        facts=[fact(source_kind="ALLOCATION", gross="42.00", net=None)],
+        components=[component(kind="TAX", amount="6.30", source_system="reconciliation")],
+    )
+    assert summary.status == "COMPONENT_DERIVED"
+    assert summary.net_revenue_usd == Decimal("35.70")
+    assert summary.deduction_amount_usd == Decimal("6.30")
+
+
 def test_account_scoped_components_never_affect_net():
     """ACCOUNT-scoped components are never applied to channel net derivation."""
     summary = _channel(

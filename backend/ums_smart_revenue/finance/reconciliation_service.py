@@ -37,6 +37,7 @@ from ums_smart_revenue.finance.explanations import (
     SqlAlchemyNumberExplanationRepository,
 )
 from ums_smart_revenue.finance.month_close import get_month_close_status
+from ums_smart_revenue.finance.reconciliation import SOURCE_PRIORITY
 from ums_smart_revenue.finance.reconciliation_explanation import (
     build_reconciliation_explanation,
 )
@@ -64,11 +65,20 @@ _ALLOCATION_CONFIDENCE = Decimal("0.80")
 # (_applicable_deduction_components) treats it as source-aligned to the channel's
 # primary fact source_kind. Only net-applicable kinds (TAX) actually reduce net;
 # the others carry the channel's source_system for provenance consistency.
-_SOURCE_KIND_TO_SOURCE_SYSTEM: dict[str, str] = {
-    "YOUTUBE_CMS": "youtube_reporting",
-    "ADSENSE": "adsense_management",
-    "YOUTUBE_ANALYTICS": "youtube_analytics",
+_SOURCE_KIND_TO_SOURCE_SYSTEM: dict[RevenueFactSourceKind, str] = {
+    RevenueFactSourceKind.YOUTUBE_CMS: "youtube_reporting",
+    RevenueFactSourceKind.ADSENSE: "adsense_management",
+    RevenueFactSourceKind.YOUTUBE_ANALYTICS: "youtube_analytics",
+    RevenueFactSourceKind.ALLOCATION: _SOURCE_SYSTEM,
 }
+
+
+def _source_system_for_source_kind(source_kind: str) -> str:
+    """Return the deduction source_system aligned to a revenue fact source_kind."""
+    try:
+        return _SOURCE_KIND_TO_SOURCE_SYSTEM[RevenueFactSourceKind(source_kind)]
+    except ValueError:
+        return _SOURCE_SYSTEM
 
 
 class MonthLockedError(Exception):
@@ -200,22 +210,33 @@ class ReconciliationWorkflowService:
     def _gather_channel_gross(
         self, month: str
     ) -> tuple[dict[str, Decimal], dict[str, str]]:
-        """Sum gross per channel and capture each channel's primary source kind."""
-        gross: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
+        """Select each channel's primary gross fact using source priority."""
+        facts_by_channel: dict[str, list] = defaultdict(list)
         primary: dict[str, str] = {}
         for fact in self._facts.list_month_facts(month=month):
-            gross[fact.youtube_channel_id] += fact.gross_revenue_usd
-            primary.setdefault(fact.youtube_channel_id, fact.source_kind)
-        return dict(gross), primary
+            facts_by_channel[fact.youtube_channel_id].append(fact)
+
+        gross: dict[str, Decimal] = {}
+        for channel, facts in facts_by_channel.items():
+            primary_fact = min(
+                facts,
+                key=lambda fact: (
+                    SOURCE_PRIORITY.get(fact.source_kind, 99),
+                    fact.source_kind,
+                ),
+            )
+            gross[channel] = primary_fact.gross_revenue_usd
+            primary[channel] = primary_fact.source_kind
+        return gross, primary
 
     def _gather_adsense_total(self, month: str) -> Decimal | None:
-        """Sum PAID AdSense payment amounts for the month (None when absent)."""
+        """Sum PAID USD AdSense payment amounts for the month (None when absent)."""
         repo = SqlAlchemyAdSensePaymentRepository(
             self._session, tenant_id=self._tenant_id
         )
         payments = [
             pay for pay in repo.list_month_payments(month=month)
-            if pay.payment_status == "PAID"
+            if pay.payment_status == "PAID" and pay.payment_currency == "USD"
         ]
         if not payments:
             return None
@@ -244,8 +265,8 @@ class ReconciliationWorkflowService:
         """Map non-zero per-channel hops to typed deduction-component inputs."""
         components: list[DeductionComponentInput] = []
         for line in result.channels:
-            source_system = _SOURCE_KIND_TO_SOURCE_SYSTEM.get(
-                primary_source.get(line.youtube_channel_id, ""), _SOURCE_SYSTEM
+            source_system = _source_system_for_source_kind(
+                primary_source.get(line.youtube_channel_id, "")
             )
             for kind, amount, suffix in _channel_hops(line):
                 if amount == 0:
@@ -288,35 +309,49 @@ class ReconciliationWorkflowService:
         """Write ALLOCATION facts for OUTSIDE_CMS channels mapped 1:1 to a PAID account.
 
         For each PAID AdSense account, resolve verified account->channel links to
-        OUTSIDE_CMS channels that have no existing CMS gross fact. When exactly one
-        such channel maps, record its account total as an ALLOCATION revenue fact;
-        when several no-gross channels map, skip (fail-closed) and warn.
+        OUTSIDE_CMS channels that have no existing source gross fact. When exactly
+        one such channel maps, record its account total as an ALLOCATION revenue
+        fact; when several no-gross channels map, skip (fail-closed) and warn.
+        Stale ALLOCATION facts from prior runs are deleted when the current
+        payment/link/channel state no longer authorizes them.
         """
         warnings: list[dict[str, str]] = []
         outside = self._outside_cms_channels()
         if not outside:
             return warnings
-        with_gross = {
+
+        month_facts = self._facts.list_month_facts(month=month)
+        source_gross_channels = {
             fact.youtube_channel_id
-            for fact in self._facts.list_month_facts(month=month)
+            for fact in month_facts
+            if fact.source_kind != RevenueFactSourceKind.ALLOCATION.value
+        }
+        existing_allocation_channels = {
+            fact.youtube_channel_id
+            for fact in month_facts
+            if fact.source_kind == RevenueFactSourceKind.ALLOCATION.value
+            and fact.youtube_channel_id in outside
         }
         repo = SqlAlchemyAdSensePaymentRepository(
             self._session, tenant_id=self._tenant_id
         )
         paid_by_account: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
         for pay in repo.list_month_payments(month=month):
-            if pay.payment_status == "PAID":
+            if pay.payment_status == "PAID" and pay.payment_currency == "USD":
                 paid_by_account[pay.source_account_id] += pay.payment_amount
+        current_allocation_channels: set[str] = set()
         for account, total in paid_by_account.items():
             channels = [
                 channel
                 for channel in self._links.list_verified_adsense_account_channels(
                     tenant_id=self._tenant_id, month=month, adsense_account_id=account
                 )
-                if channel in outside and channel not in with_gross
+                if channel in outside and channel not in source_gross_channels
             ]
             if len(channels) == 1:
-                self._record_allocation_fact(month, channels[0], total, actor)
+                channel = channels[0]
+                current_allocation_channels.add(channel)
+                self._record_allocation_fact(month, channel, total, actor)
             elif len(channels) > 1:
                 warnings.append(
                     {
@@ -327,6 +362,13 @@ class ReconciliationWorkflowService:
                         ),
                     }
                 )
+        stale_channels = existing_allocation_channels - current_allocation_channels
+        if stale_channels:
+            self._facts.delete_month_facts(
+                month=month,
+                source_kind=RevenueFactSourceKind.ALLOCATION.value,
+                youtube_channel_ids=stale_channels,
+            )
         return warnings
 
     def _record_allocation_fact(

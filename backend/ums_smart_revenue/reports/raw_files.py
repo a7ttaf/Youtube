@@ -13,10 +13,10 @@ from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
-ALLOWED_PARSE_STATUSES = frozenset(
-    {"DOWNLOADED", "PARSED", "FAILED", "QUARANTINED", "PURGED"}
-)
 PURGED_PARSE_STATUS = "PURGED"
+ALLOWED_PARSE_STATUSES = frozenset(
+    {"DOWNLOADED", "PARSED", "FAILED", "QUARANTINED"}
+)
 ALLOWED_STORAGE_PREFIXES = ("s3://", "gs://", "azure://", "blob://", "file-store://")
 MAX_RAW_REPORT_FILE_PAGE_SIZE = 100
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
@@ -263,6 +263,10 @@ def _normalize_storage_uri(value: str) -> str:
 def _normalize_parse_status(value: str) -> str:
     normalized = _normalize_required_string(value, "parse_status")
     if normalized not in ALLOWED_PARSE_STATUSES:
+        if normalized == PURGED_PARSE_STATUS:
+            raise RawReportFileValidationError(
+                "parse_status PURGED is only allowed through the purge endpoint"
+            )
         raise RawReportFileValidationError(f"Unknown raw report parse_status: {value}")
     return normalized
 

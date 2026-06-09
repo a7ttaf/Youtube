@@ -152,6 +152,10 @@ def _reconcile_principal() -> UserPrincipal:
             Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(MONTH)
         ),
         PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()),
+        PermissionGrant(Permission.VIEW_CONFIDENCE, AccessScope.global_scope()),
+        PermissionGrant(
+            Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(MONTH)
+        ),
     )
 
 
@@ -220,6 +224,62 @@ def test_reconcile_missing_permission_is_forbidden(tmp_path):
     )
 
 
+def test_reconcile_requires_revenue_read_permission(tmp_path):
+    """POST reconcile requires revenue read access before exposing totals."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    _with_principal(
+        client,
+        _principal(
+            PermissionGrant(
+                Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(MONTH)
+            ),
+            PermissionGrant(
+                Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(MONTH)
+            ),
+        ),
+    )
+    try:
+        response = client.post(
+            f"/revenue/months/{MONTH}/reconcile",
+            json={"reason": "monthly close"},
+        )
+    finally:
+        _clear_principal(client)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
+def test_reconcile_requires_payment_read_permission(tmp_path):
+    """POST reconcile requires finalized payment read access for payment-derived data."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    _with_principal(
+        client,
+        _principal(
+            PermissionGrant(
+                Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(MONTH)
+            ),
+            PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()),
+        ),
+    )
+    try:
+        response = client.post(
+            f"/revenue/months/{MONTH}/reconcile",
+            json={"reason": "monthly close"},
+        )
+    finally:
+        _clear_principal(client)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Missing permission: finance.view_finalized_payments"
+    )
+
+
 def test_reconcile_locked_month_conflicts(tmp_path):
     """Reconciling a LOCKED month returns 409."""
     database_url = build_database_url(tmp_path)
@@ -247,6 +307,23 @@ def test_reconcile_bad_month_is_unprocessable(tmp_path):
         response = client.post(
             "/revenue/months/2026-3/reconcile",
             json={"reason": "monthly close"},
+        )
+    finally:
+        _clear_principal(client)
+
+    assert response.status_code == 422
+
+
+def test_reconcile_blank_reason_is_unprocessable(tmp_path):
+    """Whitespace-only audit reasons are rejected before reconciliation."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    _with_principal(client, _reconcile_principal())
+    try:
+        response = client.post(
+            f"/revenue/months/{MONTH}/reconcile",
+            json={"reason": "   "},
         )
     finally:
         _clear_principal(client)
@@ -345,3 +422,50 @@ def test_get_reconciliation_missing_permission_is_forbidden(tmp_path):
         _clear_principal(client)
 
     assert response.status_code == 403
+
+
+def test_get_reconciliation_requires_confidence_permission(tmp_path):
+    """GET explanations require confidence access, not revenue alone."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    _with_principal(
+        client,
+        _principal(PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope())),
+    )
+    try:
+        response = client.get(
+            f"/revenue/channels/{CHANNEL}/months/{MONTH}/reconciliation",
+        )
+    finally:
+        _clear_principal(client)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Missing permission: analytics.view_confidence"
+    )
+
+
+def test_get_reconciliation_requires_payment_permission(tmp_path):
+    """GET explanations require finalized-payment access for payment provenance."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    _with_principal(
+        client,
+        _principal(
+            PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()),
+            PermissionGrant(Permission.VIEW_CONFIDENCE, AccessScope.global_scope()),
+        ),
+    )
+    try:
+        response = client.get(
+            f"/revenue/channels/{CHANNEL}/months/{MONTH}/reconciliation",
+        )
+    finally:
+        _clear_principal(client)
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == (
+        "Missing permission: finance.view_finalized_payments"
+    )

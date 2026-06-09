@@ -81,7 +81,7 @@ def _attribute(
     total: Decimal, gross: dict[str, Decimal], g: Decimal
 ) -> dict[str, Decimal]:
     """Split ``total`` across channels ∝ gross; remainder to largest gross."""
-    if total <= 0 or g <= 0:
+    if total == 0 or g <= 0:
         return {c: Decimal("0.000000") for c in gross}
     out = {c: _q(total * (gross[c] / g)) for c in gross}
     drift = total - sum(out.values(), Decimal("0"))
@@ -148,7 +148,7 @@ def compute_month_reconciliation(
     yt_fee = _attribute(yt_fee_total, gross, g)
 
     # Hop 3 — AdSense->bank fee + FX.
-    fx_total = max(Decimal("0"), fx_total_usd)
+    fx_total = _q(fx_total_usd)
     if adsense_received_usd is None or bank_received_usd is None:
         if bank_received_usd is None:
             warnings.append(
@@ -161,16 +161,18 @@ def compute_month_reconciliation(
         fx_part = Decimal("0")
     else:
         delta = adsense_received_usd - bank_received_usd
-        if delta < 0:
+        fx_part = fx_total
+        fee_part = _q(delta - fx_part)
+        if fee_part < 0:
             warnings.append(
                 {
                     "code": "RECONCILIATION_ANOMALY",
-                    "message": "Bank exceeds AdSense; bank fee clamped to 0",
+                    "message": (
+                        "Bank exceeds AdSense after FX; bank fee clamped to 0"
+                    ),
                 }
             )
-            delta = Decimal("0")
-        fx_part = min(fx_total, delta)
-        fee_part = _q(delta - fx_part)
+            fee_part = Decimal("0")
     adsense_bank_fee = _attribute(fee_part, gross, g)
     fx_variance = _attribute(fx_part, gross, g)
 

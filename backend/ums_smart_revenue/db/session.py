@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from ums_smart_revenue.db.rls import (
     APP_PLATFORM_ROLE,
     APP_TENANT_ROLE,
+    TENANT_CONTEXT_CLEARER,
     TENANT_CONTEXT_SETTER,
 )
 
@@ -97,10 +98,16 @@ def _apply_tenant_isolation(session, _transaction, connection):
             (str(tenant.id),),
         )
     else:
-        # Clear any stale row on pooled connections before the next request.
-        connection.exec_driver_sql(
-            "DELETE FROM app_tenant_context WHERE backend_pid = pg_backend_pid()"
-        )
+        helper_exists = connection.exec_driver_sql(
+            "SELECT to_regprocedure(%s) IS NOT NULL",
+            (f"{TENANT_CONTEXT_CLEARER}()",),
+        ).scalar()
+        if helper_exists:
+            # Clear any stale row through the privileged helper before the next request.
+            connection.exec_driver_sql(f"SELECT {TENANT_CONTEXT_CLEARER}()")
+        if role == APP_TENANT_ROLE:
+            connection.exec_driver_sql("SET LOCAL ROLE NONE")
+            return
     if role == APP_TENANT_ROLE:
         connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_TENANT_ROLE}"')
 

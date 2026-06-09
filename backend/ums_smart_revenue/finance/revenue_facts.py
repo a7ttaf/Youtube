@@ -7,7 +7,7 @@ from decimal import Decimal
 from enum import StrEnum
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.actor_identity import actor_identity_uuid
@@ -237,6 +237,41 @@ class SqlAlchemyRevenueFactRepository:
             statement = statement.limit(limit)
 
         return [self._to_entry(row) for row in self._session.scalars(statement).all()]
+
+    # ============================================================================
+    # Purpose: Remove stale monthly revenue facts for one source kind after a
+    #   reconciliation rerun proves those derived facts are no longer valid.
+    # Database/ORM: MonthlyChannelRevenueFactORM (monthly_channel_revenue_facts).
+    # Standards: Repository-owned SQLAlchemy DELETE; validates month/source and
+    #   refuses locked months before mutating source-of-truth finance rows.
+    # Blast Radius: Finance source-of-truth rows; no authorization, audit, exports,
+    #   or Neo4j projection writes from this repository method.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/finance/reconciliation_service.py -> stale
+    #     OUTSIDE_CMS ALLOCATION cleanup caller.
+    # ============================================================================
+    def delete_month_facts(
+        self,
+        *,
+        month: str,
+        source_kind: str,
+        youtube_channel_ids: set[str],
+    ) -> int:
+        """Delete source-kind facts for selected tenant channels in an open month."""
+        _validate_month(month)
+        if not youtube_channel_ids:
+            return 0
+        normalized_source_kind = _normalize_source_kind(source_kind)
+        self._require_month_open(month)
+        statement = delete(MonthlyChannelRevenueFactORM).where(
+            MonthlyChannelRevenueFactORM.tenant_id == self._tenant_id,
+            MonthlyChannelRevenueFactORM.month == month,
+            MonthlyChannelRevenueFactORM.source_kind == normalized_source_kind,
+            MonthlyChannelRevenueFactORM.youtube_channel_id.in_(youtube_channel_ids),
+        )
+        result = self._session.execute(statement)
+        self._session.flush()
+        return int(result.rowcount or 0)
 
     def list_month_channel_ids(
         self,

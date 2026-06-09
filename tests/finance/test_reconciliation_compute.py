@@ -84,6 +84,23 @@ def test_adsense_bank_split_fee_and_fx():
     assert line.adsense_bank_fee_usd == D("15.000000")  # 20 - 5
 
 
+def test_negative_fx_variance_preserves_sign_and_adjusts_fee():
+    res = compute_month_reconciliation(
+        month="2026-03",
+        channel_gross=_gross(c1="100"),
+        us_view_shares={"c1": None},
+        adsense_received_usd=D("80"),
+        bank_received_usd=D("60"),
+        fx_total_usd=D("-5"),
+        withholding_rate=D("0.30"),
+    )
+    line = res.channels[0]
+    assert line.fx_variance_usd == D("-5.000000")
+    assert line.adsense_bank_fee_usd == D("25.000000")
+    assert line.net_received_usd == D("60.000000")
+    assert res.fx_total_usd == D("-5.000000")
+
+
 def test_net_sum_reconciles_to_bank_when_data_present():
     res = compute_month_reconciliation(
         month="2026-03",

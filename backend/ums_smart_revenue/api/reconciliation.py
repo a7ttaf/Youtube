@@ -11,7 +11,7 @@ import re
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.dependencies import (
@@ -51,6 +51,15 @@ class ReconcileMonthRequest(BaseModel):
     """Request body for a month reconciliation run."""
 
     reason: str = Field(min_length=1)
+
+    @field_validator("reason")
+    @classmethod
+    def reason_must_not_be_blank(cls, value: str) -> str:
+        """Trim and reject blank reconciliation audit reasons."""
+        normalized = value.strip()
+        if not normalized:
+            raise ValueError("reason must not be blank")
+        return normalized
 
 
 def _require_valid_month(month: str) -> None:
@@ -119,13 +128,12 @@ def reconcile_month(
     #   work to ReconciliationWorkflowService, and serializes the result.
     # Database/ORM: None directly; the service reads facts/adsense/bank and writes
     #   deduction_components + number_explanations (+ ALLOCATION facts).
-    # Standards: Thin route; fail-closed gate before any data access; typed
+    # Standards: Thin route; fail-closed gates before any data access; typed
     #   MonthLockedError -> 409; logic owned by the finance service.
     # Blast Radius: Authorization, finance source-of-truth writes, one audit event.
-    #   Gate reuses CHANGE_ALLOCATION_RULE@finance_month: reconciliation attributes
-    #   account-level deltas (tax/transfer-fee/FX) across channels proportional to
-    #   gross, an allocation-class write, so it shares the allocation permission
-    #   rather than introducing a new one.
+    #   Gate requires CHANGE_ALLOCATION_RULE plus finance read privileges because
+    #   the response exposes channel totals, finalized payment-derived deltas,
+    #   confidence/explanation warnings, and may write ALLOCATION facts.
     # Connections:
     #   - File: backend/ums_smart_revenue/finance/reconciliation_service.py
     #   - File: Docs/superpowers/plans/2026-06-09-track-f-smart-reconciliation.md
@@ -133,6 +141,10 @@ def reconcile_month(
     _require_valid_month(month)
     _require_permission(
         user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.finance_month(month)
+    )
+    _require_permission(user, Permission.VIEW_REVENUE, AccessScope.global_scope())
+    _require_permission(
+        user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month)
     )
     service = ReconciliationWorkflowService(session, audit_sink=audit_sink)
     try:
@@ -155,8 +167,9 @@ def get_channel_month_reconciliation(
     """Return the persisted reconciliation explanation for a channel-month."""
     # ========================================================================
     # Purpose: Read boundary for a channel-month reconciliation explanation.
-    #   Gates VIEW_REVENUE at the channel scope and returns the persisted
-    #   revenue_reconciliation_usd explanation (404 when none exists).
+    #   Gates VIEW_REVENUE + VIEW_CONFIDENCE at channel scope and
+    #   VIEW_FINALIZED_PAYMENTS at finance-month scope before returning the
+    #   persisted revenue_reconciliation_usd explanation (404 when none exists).
     # Database/ORM: reads number_explanations via the explanation repository.
     # Standards: Thin route; fail-closed gate before any data access; missing
     #   explanation -> 404; no writes.
@@ -167,6 +180,10 @@ def get_channel_month_reconciliation(
     _require_valid_month(month)
     target_scope = AccessScope.channel(channel_id)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    _require_permission(
+        user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month)
+    )
     repository = SqlAlchemyNumberExplanationRepository(session)
     explanation = repository.get_explanation(
         month=month,
