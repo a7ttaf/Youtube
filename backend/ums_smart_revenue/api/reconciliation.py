@@ -34,6 +34,7 @@ from ums_smart_revenue.finance.decimal_formatting import (
 )
 from ums_smart_revenue.finance.explanations import (
     REVENUE_RECONCILIATION_METRIC,
+    NumberExplanationEntry,
     SqlAlchemyNumberExplanationRepository,
 )
 from ums_smart_revenue.finance.reconciliation_service import (
@@ -265,14 +266,11 @@ def get_channel_month_reconciliation(
 
 
 def _explanation_includes_bank_components(
-    explanation: object,
+    explanation: NumberExplanationEntry,
 ) -> bool:
     """Return True when the explanation surfaces bank-derived hop-3 components."""
-    components = getattr(explanation, "components", None) or []
     bank_keys = {"adsense_bank_fee_usd", "fx_variance_usd"}
-    for component in components:
-        if not isinstance(component, dict):
-            continue
+    for component in explanation.components:
         if component.get("key") in bank_keys:
             value = component.get("value")
             if value is not None and str(value) not in {"", "0", "0.000000"}:

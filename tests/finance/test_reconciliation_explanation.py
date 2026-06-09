@@ -88,3 +88,78 @@ def test_negative_fx_variance_renders_as_positive_benefit_not_double_negative():
     )
     assert "$-" not in narrative
     assert "+$5.00 FX" in narrative
+
+
+def test_low_confidence_for_reconciliation_anomaly_warning():
+    """Non-MISSING serious warnings lower persisted confidence to LOW."""
+    entry = build_reconciliation_explanation(
+        month="2026-03",
+        line=_line(),
+        warnings=[
+            {
+                "code": "RECONCILIATION_ANOMALY",
+                "message": "Bank exceeds AdSense after FX; bank fee clamped to 0",
+            }
+        ],
+    )
+    assert entry.confidence == {"label": "LOW", "score": "0"}
+
+
+def test_low_confidence_for_unscoped_bank_basis_warning():
+    """BANK_BASIS_UNSCOPED (suppressed bank/FX evidence) lowers confidence to LOW."""
+    entry = build_reconciliation_explanation(
+        month="2026-03",
+        line=_line(),
+        warnings=[
+            {
+                "code": "BANK_BASIS_UNSCOPED",
+                "message": "Bank basis does not match AdSense basis",
+            }
+        ],
+    )
+    assert entry.confidence == {"label": "LOW", "score": "0"}
+
+
+def test_low_confidence_for_zero_gross_basis_warning():
+    """ZERO_GROSS_RECONCILIATION_BASIS lowers confidence to LOW."""
+    entry = build_reconciliation_explanation(
+        month="2026-03",
+        line=_line(),
+        warnings=[
+            {
+                "code": "ZERO_GROSS_RECONCILIATION_BASIS",
+                "message": "Hop 3 totals suppressed",
+            }
+        ],
+    )
+    assert entry.confidence == {"label": "LOW", "score": "0"}
+
+
+def test_medium_confidence_for_unrelated_warning():
+    """Unrelated info-only warning codes keep MEDIUM confidence."""
+    entry = build_reconciliation_explanation(
+        month="2026-03",
+        line=_line(),
+        warnings=[
+            {
+                "code": "INFO_BANK_FEE_LARGER_THAN_DELTA",
+                "message": "Bank fee larger than expected; reviewed by analyst",
+            }
+        ],
+    )
+    assert entry.confidence == {"label": "MEDIUM", "score": "0.80"}
+
+
+def test_low_confidence_for_missing_us_view_share():
+    """MISSING-prefixed warnings keep the prior LOW behaviour for missing inputs."""
+    entry = build_reconciliation_explanation(
+        month="2026-03",
+        line=_line(),
+        warnings=[
+            {
+                "code": "MISSING_US_VIEW_DATA",
+                "message": "US-view share missing; tax may be understated",
+            }
+        ],
+    )
+    assert entry.confidence == {"label": "LOW", "score": "0"}

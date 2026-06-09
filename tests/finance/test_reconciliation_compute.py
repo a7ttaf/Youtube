@@ -100,8 +100,12 @@ def test_zero_gross_with_bank_evidence_warns_and_suppresses_hop_three_totals():
     assert line.fx_variance_usd == D("0.000000")
     assert res.adsense_bank_fee_total_usd == D("0.000000")
     assert res.fx_total_usd == D("0.000000")
+    # Hop 2 already clamped the over-estimate AdSense to the (zero) estimate
+    # basis, so hop 3 now sees bank > effective_adsense and emits a
+    # RECONCILIATION_ANOMALY warning instead of the older
+    # ZERO_GROSS_RECONCILIATION_BASIS path.
     assert any(
-        w["code"] == "ZERO_GROSS_RECONCILIATION_BASIS" for w in res.warnings
+        w["code"] == "RECONCILIATION_ANOMALY" for w in res.warnings
     )
 
 
@@ -222,6 +226,39 @@ def test_anomaly_when_adsense_exceeds_estimate_clamps_and_warns():
     )
     assert res.channels[0].yt_adsense_fee_usd == D("0.000000")
     assert any(w["code"] == "RECONCILIATION_ANOMALY" for w in res.warnings)
+
+
+def test_overestimate_adsense_uses_estimate_basis_for_bank_fee_residual():
+    """When Hop 2 clamps an over-estimate AdSense, Hop 3 must derive the bank
+    fee from the *effective* (estimate) basis, not the raw AdSense receipt.
+    Otherwise the overage is published as a phantom bank fee and the channel
+    net drifts below observed bank cash."""
+    res = compute_month_reconciliation(
+        month="2026-03",
+        channel_gross=_gross(c1="100"),
+        us_view_shares={"c1": None},
+        adsense_received_usd=D("120"),  # over-receipt vs estimate
+        bank_received_usd=D("100"),
+        fx_total_usd=D("0"),
+        withholding_rate=D("0.30"),
+    )
+    line = res.channels[0]
+    # Hop 2 clamps YT->AdSense fee to 0 because adsense > gross.
+    assert line.yt_adsense_fee_usd == D("0.000000")
+    # Hop 3 uses effective_adsense = gross = 100, so delta = 0 and the
+    # bank-fee residual is zero, not the phantom $20 the raw receipt
+    # would otherwise produce.
+    assert line.adsense_bank_fee_usd == D("0.000000")
+    assert line.fx_variance_usd == D("0.000000")
+    # Net reconciles to observed bank cash, not the inflated estimate.
+    assert line.net_received_usd == D("100.000000")
+    total_net = sum((c.net_received_usd for c in res.channels), D("0"))
+    assert total_net == D("100.000000")
+    assert any(
+        w["code"] == "RECONCILIATION_ANOMALY"
+        and "AdSense received exceeds estimate" in w["message"]
+        for w in res.warnings
+    )
 
 
 def test_null_provider_returns_none():

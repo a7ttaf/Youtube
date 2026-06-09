@@ -123,6 +123,7 @@ def compute_month_reconciliation(
         )
 
     # Hop 2 — YouTube->AdSense residual fee.
+    adsense_clamped: bool = False
     if adsense_received_usd is None:
         warnings.append(
             {
@@ -138,9 +139,14 @@ def compute_month_reconciliation(
             warnings.append(
                 {
                     "code": "RECONCILIATION_ANOMALY",
-                    "message": "AdSense received exceeds estimate; fee clamped to 0",
+                    "message": (
+                        "AdSense received exceeds estimate; YouTube->AdSense "
+                        "fee clamped to 0 and bank-fee math uses the estimate "
+                        "basis so the residual does not penalize CMS channels"
+                    ),
                 }
             )
+            adsense_clamped = True
             yt_fee_total = Decimal("0")
         else:
             yt_fee_total = _q(base - adsense_received_usd)
@@ -148,8 +154,18 @@ def compute_month_reconciliation(
     yt_fee = _attribute(yt_fee_total, gross, g)
 
     # Hop 3 — AdSense->bank fee + FX.
+    # FIX: When Hop 2 already clamped an over-estimate AdSense receipt to a
+    # zero YouTube->AdSense fee, the bank-fee residual must be derived from
+    # the *effective* (clamped) AdSense basis, not the raw over-receipt.
+    # Otherwise Hop 3 turns the overage into a phantom bank fee and the
+    # channel net drifts below observed bank cash.
+    if adsense_clamped:
+        base = g - tax_total
+        effective_adsense_usd: Decimal | None = _q(base)
+    else:
+        effective_adsense_usd = adsense_received_usd
     fx_total = _q(fx_total_usd)
-    if adsense_received_usd is None or bank_received_usd is None:
+    if effective_adsense_usd is None or bank_received_usd is None:
         if bank_received_usd is None:
             warnings.append(
                 {
@@ -160,7 +176,7 @@ def compute_month_reconciliation(
         fee_part = Decimal("0")
         fx_part = Decimal("0")
     else:
-        delta = adsense_received_usd - bank_received_usd
+        delta = effective_adsense_usd - bank_received_usd
         fx_part = fx_total
         fee_part = _q(delta - fx_part)
         if fee_part < 0:

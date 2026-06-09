@@ -54,6 +54,35 @@ def _gross_source_label(source_kind: str | None) -> str:
     return _GROSS_SOURCE_LABELS.get(source_kind, "Source-backed gross")
 
 
+# Warning codes that indicate the reconciliation basis is not fully reliable
+# (suppressed bank/FX evidence, clamped totals, or anomalous residuals).
+# Any of these lower the persisted confidence to LOW because the explanation
+# surfaces only a partial picture of the month.
+_LOW_CONFIDENCE_WARNING_PREFIXES = (
+    "MISSING",
+    "BANK_BASIS_UNSCOPED",
+    "UNSUPPORTED_PAYMENT_CURRENCY",
+    "ZERO_GROSS_RECONCILIATION_BASIS",
+    "RECONCILIATION_ANOMALY",
+)
+
+
+def _confidence_for_warnings(
+    warnings: list[dict[str, str]],
+) -> dict[str, str]:
+    """Pick a confidence label for the persisted explanation.
+
+    LOW when any warning indicates the reconciliation basis was suppressed
+    or clamped; MEDIUM otherwise.
+    """
+    if any(
+        w["code"].startswith(_LOW_CONFIDENCE_WARNING_PREFIXES)
+        for w in warnings
+    ):
+        return {"label": "LOW", "score": "0"}
+    return {"label": "MEDIUM", "score": "0.80"}
+
+
 def build_reconciliation_explanation(
     *,
     month: str,
@@ -103,11 +132,7 @@ def build_reconciliation_explanation(
         _component("net_received_usd", "Net received", line.net_received_usd),
         {"key": "narrative", "label": "Reconciliation narrative", "text": narrative},
     ]
-    confidence = (
-        {"label": "LOW", "score": "0"}
-        if any(w["code"].startswith("MISSING") for w in warnings)
-        else {"label": "MEDIUM", "score": "0.80"}
-    )
+    confidence = _confidence_for_warnings(warnings)
     return NumberExplanationEntry(
         month=month,
         entity_type="channel",
