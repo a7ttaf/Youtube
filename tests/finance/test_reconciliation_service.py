@@ -132,11 +132,11 @@ def _link_account_channel(session, account, owner, channel):
     )
 
 
-def _add_bank(session, amount_usd, fx):
+def _add_bank(session, amount_usd, fx, *, reference="BANK-1"):
     """Insert one bank reconciliation entry."""
     session.add(
         BankReconciliationEntryORM(
-            id=uuid4(), month=MONTH, bank_reference="BANK-1",
+            id=uuid4(), month=MONTH, bank_reference=reference,
             bank_received_date=date(2026, 4, 25),
             bank_received_amount=Decimal(amount_usd), bank_received_currency="USD",
             bank_received_amount_usd=Decimal(amount_usd),
@@ -538,6 +538,43 @@ def test_outside_cms_allocation_excluded_from_cms_residual_fee_basis():
     assert outside_components == []
 
 
+def test_outside_cms_allocation_skips_unscoped_bank_basis():
+    """Filtered AdSense totals must not be compared with unfiltered bank cash."""
+    engine = _engine()
+    with Session(engine) as session:
+        _add_channel(session, "c1")
+        _add_cms_fact(session, "c1", "100")
+        _add_payment(session, "pub-cms", "80")
+        _link_account_channel(session, "pub-cms", "owner-cms", "c1")
+        _add_channel(session, "outside-1", cms_status="OUTSIDE_CMS")
+        _add_payment(session, "pub-out", "40")
+        _link_account_channel(session, "pub-out", "owner-out", "outside-1")
+        _add_bank(session, "60", "5", reference="BANK-CMS")
+        _add_bank(session, "40", "0", reference="BANK-OUT")
+        session.commit()
+        svc = ReconciliationWorkflowService(
+            session,
+            audit_sink=InMemoryAuditSink(),
+            us_view_share_provider=_FixedShareProvider(Decimal("0.5")),
+        )
+
+        result = svc.run(month=MONTH, actor=_actor(), reason="r")
+        session.commit()
+
+        components = SqlAlchemyDeductionComponentRepository(session).list_month_components(
+            month=MONTH
+        )
+
+    assert result.adsense_bank_fee_total_usd == Decimal("0.000000")
+    assert result.fx_total_usd == Decimal("0.000000")
+    assert any(w["code"] == "BANK_BASIS_UNSCOPED" for w in result.warnings)
+    bank_components = [
+        c for c in components
+        if c.component_key.endswith((":adsense_bank_fee", ":fx_variance"))
+    ]
+    assert bank_components == []
+
+
 def test_outside_cms_multiple_accounts_same_channel_sum_before_allocation():
     """Multiple 1:1 AdSense accounts for one OUTSIDE_CMS channel are aggregated."""
     engine = _engine()
@@ -599,6 +636,35 @@ def test_unmapped_adsense_payment_excluded_from_cms_residual_total():
 
     assert result.yt_adsense_fee_total_usd == Decimal("20.000000")
     assert any(w["code"] == "MISSING_REVENUE_SOURCE" for w in result.warnings)
+
+
+def test_outside_cms_warnings_persist_to_reconciliation_explanation():
+    """Returned outside-CMS warnings are also stored in the channel explanation."""
+    engine = _engine()
+    with Session(engine) as session:
+        _add_channel(session, "c1")
+        _add_cms_fact(session, "c1", "100")
+        _add_payment(session, "pub-cms", "80")
+        _link_account_channel(session, "pub-cms", "owner-cms", "c1")
+        _add_payment(session, "pub-unmapped", "50")
+        session.commit()
+
+        result = _service(session).run(month=MONTH, actor=_actor(), reason="r")
+        session.commit()
+
+        persisted = session.scalars(
+            select(NumberExplanationORM).where(
+                NumberExplanationORM.month == MONTH,
+                NumberExplanationORM.entity_type == "channel",
+                NumberExplanationORM.entity_id == "c1",
+                NumberExplanationORM.metric == REVENUE_RECONCILIATION_METRIC,
+            )
+        ).one()
+
+    assert any(w["code"] == "MISSING_REVENUE_SOURCE" for w in result.warnings)
+    assert any(
+        w["code"] == "MISSING_REVENUE_SOURCE" for w in persisted.warnings
+    )
 
 
 def test_manual_upload_primary_fact_reconciles_without_source_mapping_error():

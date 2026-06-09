@@ -173,6 +173,18 @@ def compute_month_reconciliation(
                 }
             )
             fee_part = Decimal("0")
+        if g <= 0 and (fee_part != 0 or fx_part != 0):
+            warnings.append(
+                {
+                    "code": "ZERO_GROSS_RECONCILIATION_BASIS",
+                    "message": (
+                        "Bank fee/FX evidence cannot be attributed with a zero "
+                        "source-backed gross basis; hop 3 totals suppressed"
+                    ),
+                }
+            )
+            fee_part = Decimal("0")
+            fx_part = Decimal("0")
     adsense_bank_fee = _attribute(fee_part, gross, g)
     fx_variance = _attribute(fx_part, gross, g)
 

@@ -14,6 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, field_validator
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.api.channels import audit_record_to_api
 from ums_smart_revenue.api.dependencies import (
     current_platform_db_session,
     current_principal_from_headers,
@@ -23,7 +24,8 @@ from ums_smart_revenue.api.revenue import (
     _require_permission,
     current_revenue_audit_sink,
 )
-from ums_smart_revenue.auth.audit_service import AuditSink
+from ums_smart_revenue.auth.audit import AuditEventType
+from ums_smart_revenue.auth.audit_service import AuditSink, record_audit_event
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex
@@ -163,6 +165,7 @@ def get_channel_month_reconciliation(
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
     org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
     session: Annotated[Session, Depends(current_platform_db_session)],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
     """Return the persisted reconciliation explanation for a channel-month."""
     # ========================================================================
@@ -170,12 +173,14 @@ def get_channel_month_reconciliation(
     #   Gates VIEW_REVENUE + VIEW_CONFIDENCE at channel scope and
     #   VIEW_FINALIZED_PAYMENTS at finance-month scope before returning the
     #   persisted revenue_reconciliation_usd explanation (404 when none exists).
-    # Database/ORM: reads number_explanations via the explanation repository.
+    # Database/ORM: reads number_explanations via the explanation repository;
+    #   appends REVENUE_VIEWED and PAYMENT_VIEWED rows to audit_logs.
     # Standards: Thin route; fail-closed gate before any data access; missing
-    #   explanation -> 404; no writes.
-    # Blast Radius: Authorization (read), finance explanation read. None other.
+    #   explanation -> 404; audit details avoid component/payment payloads.
+    # Blast Radius: Authorization (read), finance explanation read, audit writes.
     # Connections:
     #   - File: backend/ums_smart_revenue/finance/explanations.py -> get method.
+    #   - File: backend/ums_smart_revenue/auth/audit_service.py -> audit sink.
     # ========================================================================
     _require_valid_month(month)
     target_scope = AccessScope.channel(channel_id)
@@ -198,4 +203,32 @@ def get_channel_month_reconciliation(
                 f"No reconciliation explanation for {channel_id} in {month}"
             ),
         )
-    return explanation.to_api()
+    details = {
+        "month": month,
+        "channel_id": channel_id,
+        "metric": REVENUE_RECONCILIATION_METRIC,
+    }
+    revenue_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="channel_reconciliation_explanation",
+        entity_id=f"{channel_id}:{month}",
+        scope=target_scope,
+        details=details,
+    )
+    payment_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.PAYMENT_VIEWED,
+        entity_type="channel_reconciliation_explanation",
+        entity_id=f"{channel_id}:{month}",
+        scope=AccessScope.finance_month(month),
+        details=details,
+    )
+    response = explanation.to_api()
+    response["audit_events"] = [
+        audit_record_to_api(revenue_record),
+        audit_record_to_api(payment_record),
+    ]
+    return response

@@ -3,7 +3,7 @@ from decimal import Decimal
 from uuid import UUID, uuid4
 
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.dependencies import current_principal_from_headers
@@ -25,7 +25,7 @@ from ums_smart_revenue.db.finance_models import (
     MonthlyChannelRevenueFactORM,
 )
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
-from ums_smart_revenue.db.security_models import SecurityBase, UserORM
+from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
 from ums_smart_revenue.db.tenant_models import TenantBase, TenantORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
@@ -353,7 +353,7 @@ def test_reconcile_blank_reason_is_unprocessable(tmp_path):
 
 
 def test_get_reconciliation_returns_persisted_explanation(tmp_path):
-    """GET reconciliation returns the explanation persisted by a prior reconcile."""
+    """GET reconciliation returns the persisted explanation and audits the read."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     client = TestClient(create_app(database_url=database_url))
@@ -375,6 +375,25 @@ def test_get_reconciliation_returns_persisted_explanation(tmp_path):
     assert body["metric"] == "revenue_reconciliation_usd"
     assert body["currency"] == "USD"
     assert isinstance(body["components"], list)
+    assert [event["event_type"] for event in body["audit_events"]] == [
+        "REVENUE_VIEWED",
+        "PAYMENT_VIEWED",
+    ]
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_logs = session.scalars(
+            select(AuditLogORM).where(
+                AuditLogORM.event_type.in_(("REVENUE_VIEWED", "PAYMENT_VIEWED"))
+            )
+        ).all()
+    audit_by_type = {log.event_type: log for log in audit_logs}
+    assert set(audit_by_type) == {"REVENUE_VIEWED", "PAYMENT_VIEWED"}
+    assert audit_by_type["REVENUE_VIEWED"].scope_type == "channel"
+    assert audit_by_type["REVENUE_VIEWED"].scope_id == CHANNEL
+    assert audit_by_type["PAYMENT_VIEWED"].scope_type == "finance-month"
+    assert audit_by_type["PAYMENT_VIEWED"].scope_id == MONTH
+    assert all(log.sensitive is True for log in audit_logs)
 
 
 def test_get_reconciliation_missing_is_not_found(tmp_path):

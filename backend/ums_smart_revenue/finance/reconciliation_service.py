@@ -166,12 +166,30 @@ class ReconciliationWorkflowService:
             raise MonthLockedError(f"Finance month {month!r} is locked")
 
         try:
-            outside_warnings, adsense_total = self._attribute_outside_cms(
+            (
+                outside_warnings,
+                adsense_total,
+                bank_basis_scoped,
+            ) = self._attribute_outside_cms(
                 month=month, actor=actor
             )
 
             channel_gross, primary_source = self._gather_channel_gross(month)
             bank_total, fx_total = self._gather_bank_totals(month)
+            precompute_warnings = list(outside_warnings)
+            if not bank_basis_scoped and bank_total is not None:
+                precompute_warnings.append(
+                    {
+                        "code": "BANK_BASIS_UNSCOPED",
+                        "message": (
+                            "Bank receipts are month-level while AdSense basis "
+                            "excluded outside-CMS or unmapped payments; bank "
+                            "fee/FX not derived"
+                        ),
+                    }
+                )
+                bank_total = None
+                fx_total = Decimal("0")
             us_view_shares = {
                 channel: self._us_view.us_view_share(month, channel)
                 for channel in channel_gross
@@ -185,6 +203,7 @@ class ReconciliationWorkflowService:
                 bank_received_usd=bank_total,
                 fx_total_usd=fx_total,
             )
+            merged_warnings = list(result.warnings) + precompute_warnings
 
             components = self._build_components(month, result, primary_source)
             self._deductions.upsert_components(
@@ -202,7 +221,7 @@ class ReconciliationWorkflowService:
             for line in result.channels:
                 self._explanations.record_explanation(
                     build_reconciliation_explanation(
-                        month=month, line=line, warnings=result.warnings,
+                        month=month, line=line, warnings=merged_warnings,
                     )
                 )
         # FIX: Repository write guards also run under row locks; if a month locks
@@ -225,8 +244,7 @@ class ReconciliationWorkflowService:
                 "net_total_usd": str(result.net_total_usd),
             },
         )
-        merged = list(result.warnings) + outside_warnings
-        return _with_warnings(result, merged)
+        return _with_warnings(result, merged_warnings)
 
     def _gather_channel_gross(
         self, month: str
@@ -325,7 +343,7 @@ class ReconciliationWorkflowService:
 
     def _attribute_outside_cms(
         self, *, month: str, actor: UserPrincipal
-    ) -> tuple[list[dict[str, str]], Decimal | None]:
+    ) -> tuple[list[dict[str, str]], Decimal | None, bool]:
         """Write ALLOCATION facts and return the source-backed AdSense total.
 
         For each PAID AdSense account, resolve verified account->channel links.
@@ -338,6 +356,7 @@ class ReconciliationWorkflowService:
         longer authorizes them.
         """
         warnings: list[dict[str, str]] = []
+        bank_basis_scoped = True
         outside = self._outside_cms_channels()
         month_facts = self._facts.list_month_facts(month=month)
         source_gross_channels = {
@@ -365,6 +384,7 @@ class ReconciliationWorkflowService:
                 )
             )
             if not channels:
+                bank_basis_scoped = False
                 warnings.append(
                     {
                         "code": "MISSING_REVENUE_SOURCE",
@@ -381,6 +401,7 @@ class ReconciliationWorkflowService:
             if len(channels) == 1 and len(outside_no_gross) == 1:
                 channel = next(iter(outside_no_gross))
                 allocation_by_channel[channel] += total
+                bank_basis_scoped = False
                 continue
 
             if not outside_no_gross and not unknown_no_gross:
@@ -388,6 +409,7 @@ class ReconciliationWorkflowService:
                 residual_account_count += 1
                 continue
 
+            bank_basis_scoped = False
             warnings.append(
                 {
                     "code": "MISSING_REVENUE_SOURCE",
@@ -410,8 +432,8 @@ class ReconciliationWorkflowService:
                 youtube_channel_ids=stale_channels,
             )
         if residual_account_count == 0:
-            return warnings, None
-        return warnings, residual_adsense_total
+            return warnings, None, bank_basis_scoped
+        return warnings, residual_adsense_total, bank_basis_scoped
 
     def _record_allocation_fact(
         self, month: str, channel: str, gross: Decimal, actor: UserPrincipal

@@ -84,6 +84,27 @@ def test_adsense_bank_split_fee_and_fx():
     assert line.adsense_bank_fee_usd == D("15.000000")  # 20 - 5
 
 
+def test_zero_gross_with_bank_evidence_warns_and_suppresses_hop_three_totals():
+    """Nonzero bank/FX evidence cannot be published against a zero gross basis."""
+    res = compute_month_reconciliation(
+        month="2026-03",
+        channel_gross=_gross(c1="0"),
+        us_view_shares={"c1": None},
+        adsense_received_usd=D("80"),
+        bank_received_usd=D("60"),
+        fx_total_usd=D("5"),
+        withholding_rate=D("0.30"),
+    )
+    line = res.channels[0]
+    assert line.adsense_bank_fee_usd == D("0.000000")
+    assert line.fx_variance_usd == D("0.000000")
+    assert res.adsense_bank_fee_total_usd == D("0.000000")
+    assert res.fx_total_usd == D("0.000000")
+    assert any(
+        w["code"] == "ZERO_GROSS_RECONCILIATION_BASIS" for w in res.warnings
+    )
+
+
 def test_negative_fx_variance_preserves_sign_and_adjusts_fee():
     res = compute_month_reconciliation(
         month="2026-03",
