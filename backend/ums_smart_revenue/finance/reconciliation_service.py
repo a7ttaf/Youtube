@@ -264,7 +264,7 @@ class ReconciliationWorkflowService:
         facts_by_channel: dict[str, list] = defaultdict(list)
         primary: dict[str, str] = {}
         for fact in self._facts.list_month_facts(month=month):
-            if fact.source_kind == RevenueFactSourceKind.ALLOCATION.value:
+            if _is_reconciliation_allocation_fact(fact):
                 continue
             facts_by_channel[fact.youtube_channel_id].append(fact)
 

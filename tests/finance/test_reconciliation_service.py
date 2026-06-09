@@ -474,6 +474,45 @@ def test_run_preserves_connector_allocation_fact_when_no_payment_qualifies():
     assert alloc[0].gross_revenue_usd == Decimal("42.000000")
 
 
+def test_run_includes_connector_allocation_fact_in_reconciliation_basis():
+    """Source-loaded ALLOCATION facts participate in residual reconciliation."""
+    engine = _engine()
+    with Session(engine) as session:
+        _add_channel(session, "outside-1", cms_status="OUTSIDE_CMS")
+        _add_cms_fact(
+            session,
+            "outside-1",
+            "40",
+            source_kind=RevenueFactSourceKind.ALLOCATION.value,
+            source_report_id="connector-allocation-report",
+        )
+        _add_payment(session, "pub-alloc", "30")
+        _link_account_channel(session, "pub-alloc", "owner-alloc", "outside-1")
+        session.commit()
+
+        svc = ReconciliationWorkflowService(
+            session,
+            audit_sink=InMemoryAuditSink(),
+            us_view_share_provider=_FixedShareProvider(Decimal("0")),
+        )
+        result = svc.run(month=MONTH, actor=_actor(), reason="r")
+        session.commit()
+
+        comps = SqlAlchemyDeductionComponentRepository(session).list_month_components(
+            month=MONTH
+        )
+
+    assert [line.youtube_channel_id for line in result.channels] == ["outside-1"]
+    assert result.gross_total_usd == Decimal("40.000000")
+    assert result.yt_adsense_fee_total_usd == Decimal("10.000000")
+    transfer_fee = [
+        c
+        for c in comps
+        if c.scope_id == "outside-1" and c.component_kind == "TRANSFER_FEE"
+    ]
+    assert transfer_fee and transfer_fee[0].source_system == "reconciliation"
+
+
 class _LockedDeductionRepository:
     """Test double that simulates a repository month-lock race."""
 
