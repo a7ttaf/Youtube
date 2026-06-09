@@ -279,11 +279,7 @@ def purge_raw_report_file(
             actor_user_id=user.user_id,
             reason=payload.reason,
         )
-    except RawReportFilePurgeConflictError as exc:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
-        ) from exc
-    except RawReportFileConflictError as exc:
+    except (RawReportFilePurgeConflictError, RawReportFileConflictError) as exc:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail=str(exc)
         ) from exc
