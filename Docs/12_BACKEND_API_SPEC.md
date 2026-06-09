@@ -488,11 +488,14 @@ contains its own event; one `EXPORT_DOWNLOADED` event (entity_type
 
 `POST /revenue/months/{month}/reconcile` computes and persists the month's smart
 revenue reconciliation, then audits it (`REVENUE_RECONCILED`). Gates:
-`CHANGE_ALLOCATION_RULE` at `finance_month(month)`, `VIEW_REVENUE` globally, and
-`VIEW_FINALIZED_PAYMENTS` at `finance_month(month)`. Reconciliation attributes
-account-level tax/transfer-fee/FX deltas across channels proportional to gross
-and may write ALLOCATION revenue facts, so it reuses the allocation permission
-and requires read gates for the finance values returned in the response. The JSON body requires a non-empty `reason`. The response is
+`CHANGE_ALLOCATION_RULE` at `finance_month(month)`, `VIEW_REVENUE` globally,
+`VIEW_FINALIZED_PAYMENTS` and `VIEW_BANK_RECONCILIATION` at `finance_month(month)`,
+and `VIEW_CONFIDENCE` globally (confidence/warnings surface in the response).
+Reconciliation attributes account-level tax/transfer-fee/FX deltas across
+channels proportional to gross and may write ALLOCATION revenue facts, so it
+reuses the allocation permission and requires read gates for the finance
+values returned in the response. The JSON body requires a non-empty `reason`.
+The response is
 `{month, channels:[{youtube_channel_id, gross_usd, us_tax_usd, yt_adsense_fee_usd,
 adsense_bank_fee_usd, fx_variance_usd, net_received_usd, us_view_share}],
 totals:{gross_total_usd, us_tax_total_usd, yt_adsense_fee_total_usd,
@@ -505,7 +508,11 @@ month 01-12) -> **422**; missing permission -> **403**. The run persists typed
 `GET /revenue/channels/{channel_id}/months/{month}/reconciliation` returns the
 persisted `revenue_reconciliation_usd` explanation for that channel-month. Gates:
 `VIEW_REVENUE` and `VIEW_CONFIDENCE` at `channel(channel_id)`, plus
-`VIEW_FINALIZED_PAYMENTS` at `finance_month(month)`. Malformed month -> **422**;
+`VIEW_FINALIZED_PAYMENTS` and `VIEW_BANK_RECONCILIATION` at
+`finance_month(month)`. The read path audits `REVENUE_VIEWED` and
+`PAYMENT_VIEWED` events; when the persisted explanation includes non-zero
+bank-derived components (`adsense_bank_fee_usd` or `fx_variance_usd`), a
+`BANK_RECONCILIATION_VIEWED` event is also recorded. Malformed month -> **422**;
 no persisted explanation for the channel-month -> **404**.
 
 `DELETE /reports/raw-files/{raw_file_id}` purges a raw report file. Gate:

@@ -174,6 +174,16 @@ def compute_month_reconciliation(
                     "FX exceeds AdSense-bank delta; unmatched FX suppressed "
                     "and bank fee clamped to 0"
                 )
+            elif fx_part > delta:
+                # FIX: A favorable (negative) FX variance smaller than the
+                # AdSense-to-bank overage cannot be published after the fee
+                # residual clamps; cap it to the cash delta so net does not
+                # drift above observed bank cash.
+                fx_part = _q(delta)
+                warning_message = (
+                    "FX insufficient to explain AdSense-bank overage; "
+                    "unmatched FX suppressed and bank fee clamped to 0"
+                )
             warnings.append(
                 {
                     "code": "RECONCILIATION_ANOMALY",

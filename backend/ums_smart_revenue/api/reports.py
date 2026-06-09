@@ -301,7 +301,6 @@ def purge_raw_report_file(
         entity_id=purged.id,
         scope=scope,
         reason=payload.reason,
-        permission_override=Permission.MANAGE_CONNECTORS,
         details={
             "source": purged.source,
             "report_type": purged.report_type,

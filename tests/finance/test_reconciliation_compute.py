@@ -147,6 +147,40 @@ def test_positive_fx_above_adsense_bank_delta_is_suppressed_with_fee_clamp():
     )
 
 
+def test_negative_fx_below_adsense_bank_overage_is_suppressed_with_fee_clamp():
+    """Favorable FX smaller than the bank overage cannot lift net above bank cash.
+
+    With gross=100, adsense=80, bank=90, fx=-5: Hop 2 takes 20 of fee; Hop 3
+    delta = -10, but favorable fx (-5) cannot fully explain the overage, so
+    fee must clamp to 0 and fx must cap to the cash delta (-10) so the
+    channel net equals observed bank cash (90), not an inflated 85.
+    """
+    res = compute_month_reconciliation(
+        month="2026-03",
+        channel_gross=_gross(c1="100"),
+        us_view_shares={"c1": None},
+        adsense_received_usd=D("80"),
+        bank_received_usd=D("90"),
+        fx_total_usd=D("-5"),
+        withholding_rate=D("0.30"),
+    )
+
+    line = res.channels[0]
+    assert line.yt_adsense_fee_usd == D("20.000000")
+    assert line.adsense_bank_fee_usd == D("0.000000")
+    assert line.fx_variance_usd == D("-10.000000")
+    assert line.net_received_usd == D("90.000000")
+    assert res.adsense_bank_fee_total_usd == D("0.000000")
+    assert res.fx_total_usd == D("-10.000000")
+    assert any(
+        w["code"] == "RECONCILIATION_ANOMALY"
+        and "FX insufficient to explain AdSense-bank overage" in w["message"]
+        for w in res.warnings
+    )
+    total_net = sum((c.net_received_usd for c in res.channels), D("0"))
+    assert total_net == D("90.000000")  # equals bank received exactly
+
+
 def test_net_sum_reconciles_to_bank_when_data_present():
     res = compute_month_reconciliation(
         month="2026-03",

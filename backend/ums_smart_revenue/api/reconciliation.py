@@ -135,7 +135,8 @@ def reconcile_month(
     # Blast Radius: Authorization, finance source-of-truth writes, one audit event.
     #   Gate requires CHANGE_ALLOCATION_RULE plus finance read privileges because
     #   the response exposes channel totals, finalized payment-derived deltas,
-    #   confidence/explanation warnings, and may write ALLOCATION facts.
+    #   bank reconciliation deltas, confidence/explanation warnings, and may
+    #   write ALLOCATION facts.
     # Connections:
     #   - File: backend/ums_smart_revenue/finance/reconciliation_service.py
     #   - File: Docs/superpowers/plans/2026-06-09-track-f-smart-reconciliation.md
@@ -147,6 +148,14 @@ def reconcile_month(
     _require_permission(user, Permission.VIEW_REVENUE, AccessScope.global_scope())
     _require_permission(
         user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month)
+    )
+    _require_permission(
+        user,
+        Permission.VIEW_BANK_RECONCILIATION,
+        AccessScope.finance_month(month),
+    )
+    _require_permission(
+        user, Permission.VIEW_CONFIDENCE, AccessScope.global_scope()
     )
     service = ReconciliationWorkflowService(session, audit_sink=audit_sink)
     try:
@@ -170,11 +179,15 @@ def get_channel_month_reconciliation(
     """Return the persisted reconciliation explanation for a channel-month."""
     # ========================================================================
     # Purpose: Read boundary for a channel-month reconciliation explanation.
-    #   Gates VIEW_REVENUE + VIEW_CONFIDENCE at channel scope and
-    #   VIEW_FINALIZED_PAYMENTS at finance-month scope before returning the
-    #   persisted revenue_reconciliation_usd explanation (404 when none exists).
+    #   Gates VIEW_REVENUE + VIEW_CONFIDENCE at channel scope,
+    #   VIEW_FINALIZED_PAYMENTS + VIEW_BANK_RECONCILIATION at finance-month
+    #   scope, and VIEW_CONFIDENCE at channel scope before returning the
+    #   persisted revenue_reconciliation_usd explanation (404 when none
+    #   exists). When the persisted explanation contains bank-derived
+    #   components, also records a BANK_RECONCILIATION_VIEWED event.
     # Database/ORM: reads number_explanations via the explanation repository;
-    #   appends REVENUE_VIEWED and PAYMENT_VIEWED rows to audit_logs.
+    #   appends REVENUE_VIEWED, PAYMENT_VIEWED, and (when applicable)
+    #   BANK_RECONCILIATION_VIEWED rows to audit_logs.
     # Standards: Thin route; fail-closed gate before any data access; missing
     #   explanation -> 404; audit details avoid component/payment payloads.
     # Blast Radius: Authorization (read), finance explanation read, audit writes.
@@ -188,6 +201,11 @@ def get_channel_month_reconciliation(
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
     _require_permission(
         user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month)
+    )
+    _require_permission(
+        user,
+        Permission.VIEW_BANK_RECONCILIATION,
+        AccessScope.finance_month(month),
     )
     repository = SqlAlchemyNumberExplanationRepository(session)
     explanation = repository.get_explanation(
@@ -226,9 +244,37 @@ def get_channel_month_reconciliation(
         scope=AccessScope.finance_month(month),
         details=details,
     )
-    response = explanation.to_api()
-    response["audit_events"] = [
+    audit_events = [
         audit_record_to_api(revenue_record),
         audit_record_to_api(payment_record),
     ]
+    if _explanation_includes_bank_components(explanation):
+        bank_record = record_audit_event(
+            sink=audit_sink,
+            actor=user,
+            event_type=AuditEventType.BANK_RECONCILIATION_VIEWED,
+            entity_type="channel_reconciliation_explanation",
+            entity_id=f"{channel_id}:{month}",
+            scope=AccessScope.finance_month(month),
+            details=details,
+        )
+        audit_events.append(audit_record_to_api(bank_record))
+    response = explanation.to_api()
+    response["audit_events"] = audit_events
     return response
+
+
+def _explanation_includes_bank_components(
+    explanation: object,
+) -> bool:
+    """Return True when the explanation surfaces bank-derived hop-3 components."""
+    components = getattr(explanation, "components", None) or []
+    bank_keys = {"adsense_bank_fee_usd", "fx_variance_usd"}
+    for component in components:
+        if not isinstance(component, dict):
+            continue
+        if component.get("key") in bank_keys:
+            value = component.get("value")
+            if value is not None and str(value) not in {"", "0", "0.000000"}:
+                return True
+    return False

@@ -2,7 +2,9 @@
 channel-month from a ChannelReconciliation. Deterministic; no LLM."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from decimal import Decimal
+from types import MappingProxyType
 
 from ums_smart_revenue.finance.explanations import (
     REVENUE_RECONCILIATION_METRIC,
@@ -12,13 +14,19 @@ from ums_smart_revenue.finance.reconciliation_workflow import ChannelReconciliat
 
 __all__ = ["REVENUE_RECONCILIATION_METRIC", "build_reconciliation_explanation"]
 
-_GROSS_SOURCE_LABELS = {
-    "YOUTUBE_CMS": "Estimated gross (CMS)",
-    "YOUTUBE_ANALYTICS": "Gross (YouTube analytics)",
-    "ADSENSE": "Gross (AdSense)",
-    "MANUAL_UPLOAD": "Gross (manual upload)",
-    "ALLOCATION": "Gross (allocation)",
-}
+# FIX: Module-level mapping is read-only at runtime. The wrapped proxy prevents
+# any caller (including future test or integration code) from mutating the
+# labels, mirroring the immutable-dict convention used in
+# google_source_normalizer.py (see lines 74-80).
+_GROSS_SOURCE_LABELS: Mapping[str, str] = MappingProxyType(
+    {
+        "YOUTUBE_CMS": "Estimated gross (CMS)",
+        "YOUTUBE_ANALYTICS": "Gross (YouTube analytics)",
+        "ADSENSE": "Gross (AdSense)",
+        "MANUAL_UPLOAD": "Gross (manual upload)",
+        "ALLOCATION": "Gross (allocation)",
+    }
+)
 
 
 def _money(value: Decimal) -> str:
