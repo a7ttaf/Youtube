@@ -232,7 +232,10 @@ class ReconciliationWorkflowService:
             for line in result.channels:
                 self._explanations.record_explanation(
                     build_reconciliation_explanation(
-                        month=month, line=line, warnings=merged_warnings,
+                        month=month,
+                        line=line,
+                        warnings=merged_warnings,
+                        gross_source_kind=primary_source.get(line.youtube_channel_id),
                     )
                 )
         # FIX: Repository write guards also run under row locks; if a month locks

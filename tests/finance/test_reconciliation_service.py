@@ -810,12 +810,25 @@ def test_manual_upload_primary_fact_reconciles_without_source_mapping_error():
             month=MONTH,
             youtube_channel_id="c1",
         )
+        persisted = session.scalars(
+            select(NumberExplanationORM).where(
+                NumberExplanationORM.month == MONTH,
+                NumberExplanationORM.entity_type == "channel",
+                NumberExplanationORM.entity_id == "c1",
+                NumberExplanationORM.metric == REVENUE_RECONCILIATION_METRIC,
+            )
+        ).one()
 
     assert result.gross_total_usd == Decimal("100.000000")
     assert result.us_tax_total_usd == Decimal("15.000000")
     assert result.yt_adsense_fee_total_usd == Decimal("5.000000")
     tax_components = [c for c in components if c.component_kind == "TAX"]
     assert {c.source_system for c in tax_components} == {"manual_upload"}
+    gross_component = next(
+        component for component in persisted.components
+        if component["key"] == "estimated_gross_usd"
+    )
+    assert gross_component["label"] == "Gross (manual upload)"
     assert summary.status == "COMPONENT_DERIVED"
     assert summary.net_revenue_usd == Decimal("85.000000")
 

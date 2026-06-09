@@ -122,6 +122,31 @@ def test_negative_fx_variance_preserves_sign_and_adjusts_fee():
     assert res.fx_total_usd == D("-5.000000")
 
 
+def test_positive_fx_above_adsense_bank_delta_is_suppressed_with_fee_clamp():
+    """Unmatched positive FX cannot reduce net after the bank-fee residual clamps."""
+    res = compute_month_reconciliation(
+        month="2026-03",
+        channel_gross=_gross(c1="100"),
+        us_view_shares={"c1": None},
+        adsense_received_usd=D("80"),
+        bank_received_usd=D("80"),
+        fx_total_usd=D("5"),
+        withholding_rate=D("0.30"),
+    )
+
+    line = res.channels[0]
+    assert line.adsense_bank_fee_usd == D("0.000000")
+    assert line.fx_variance_usd == D("0.000000")
+    assert line.net_received_usd == D("80.000000")
+    assert res.adsense_bank_fee_total_usd == D("0.000000")
+    assert res.fx_total_usd == D("0.000000")
+    assert any(
+        w["code"] == "RECONCILIATION_ANOMALY"
+        and "unmatched FX suppressed" in w["message"]
+        for w in res.warnings
+    )
+
+
 def test_net_sum_reconciles_to_bank_when_data_present():
     res = compute_month_reconciliation(
         month="2026-03",

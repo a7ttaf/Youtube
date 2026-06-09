@@ -3,7 +3,9 @@ from alembic import command
 from alembic.config import Config
 from tests.db._postgres_helpers import require_postgres_url
 
+from ums_smart_revenue.db.rls import TENANT_CONTEXT_TABLE
 from ums_smart_revenue.db.session import (
+    _apply_tenant_isolation,
     build_platform_session_factory,
     build_session_factory,
 )
@@ -81,6 +83,42 @@ def test_postgres_no_context_stays_on_tenant_role_and_unset_context():
         assert session.execute(
             sa.text("SELECT current_user")
         ).scalar() == "app_tenant"
+
+
+def test_no_context_clears_stale_context_when_clear_helper_is_absent():
+    """Missing clear helper must not leave a stale tenant row on pooled backends."""
+
+    class _Result:
+        def __init__(self, value=None):
+            self._value = value
+
+        def scalar(self):
+            return self._value
+
+    class _Connection:
+        dialect = type("Dialect", (), {"name": "postgresql"})()
+
+        def __init__(self):
+            self.calls = []
+
+        def exec_driver_sql(self, sql, parameters=None):
+            self.calls.append((sql, parameters))
+            if sql == "SELECT to_regprocedure(%s) IS NOT NULL":
+                return _Result(False)
+            return _Result()
+
+    session = type("Session", (), {"info": {"ums_db_role": "app_tenant"}})()
+    connection = _Connection()
+    token = TENANT_CTX.set(None)
+    try:
+        _apply_tenant_isolation(session, None, connection)
+    finally:
+        TENANT_CTX.reset(token)
+
+    assert any(
+        sql == f"DELETE FROM {TENANT_CONTEXT_TABLE} WHERE backend_pid = pg_backend_pid()"
+        for sql, _parameters in connection.calls
+    )
 
 
 def test_platform_lane_uses_app_platform_and_no_tenant_context():

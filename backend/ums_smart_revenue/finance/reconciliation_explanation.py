@@ -12,6 +12,14 @@ from ums_smart_revenue.finance.reconciliation_workflow import ChannelReconciliat
 
 __all__ = ["REVENUE_RECONCILIATION_METRIC", "build_reconciliation_explanation"]
 
+_GROSS_SOURCE_LABELS = {
+    "YOUTUBE_CMS": "Estimated gross (CMS)",
+    "YOUTUBE_ANALYTICS": "Gross (YouTube analytics)",
+    "ADSENSE": "Gross (AdSense)",
+    "MANUAL_UPLOAD": "Gross (manual upload)",
+    "ALLOCATION": "Gross (allocation)",
+}
+
 
 def _money(value: Decimal) -> str:
     """Render a Decimal as a plain 2dp money string for prose."""
@@ -31,8 +39,19 @@ def _component(key: str, label: str, value: Decimal) -> dict[str, object]:
     return {"key": key, "label": label, "value": str(value)}
 
 
+def _gross_source_label(source_kind: str | None) -> str:
+    """Return the user-facing gross provenance label for the selected fact."""
+    if source_kind is None:
+        return _GROSS_SOURCE_LABELS["YOUTUBE_CMS"]
+    return _GROSS_SOURCE_LABELS.get(source_kind, "Source-backed gross")
+
+
 def build_reconciliation_explanation(
-    *, month: str, line: ChannelReconciliation, warnings: list[dict[str, str]]
+    *,
+    month: str,
+    line: ChannelReconciliation,
+    warnings: list[dict[str, str]],
+    gross_source_kind: str | None = None,
 ) -> NumberExplanationEntry:
     """Assemble the persisted explanation for one channel-month reconciliation."""
     # ========================================================================
@@ -58,7 +77,11 @@ def build_reconciliation_explanation(
         f"${_money(line.net_received_usd)} received."
     )
     components: list[dict[str, object]] = [
-        _component("estimated_gross_usd", "Estimated gross (CMS)", line.gross_usd),
+        _component(
+            "estimated_gross_usd",
+            _gross_source_label(gross_source_kind),
+            line.gross_usd,
+        ),
         _component("us_tax_usd", "US tax", line.us_tax_usd),
         _component(
             "yt_adsense_fee_usd", "YouTube->AdSense transfer fee",

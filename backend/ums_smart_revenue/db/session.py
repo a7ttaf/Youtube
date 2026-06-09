@@ -10,6 +10,7 @@ from ums_smart_revenue.db.rls import (
     APP_TENANT_ROLE,
     TENANT_CONTEXT_CLEARER,
     TENANT_CONTEXT_SETTER,
+    TENANT_CONTEXT_TABLE,
 )
 
 SessionFactory = sessionmaker[Session]
@@ -126,6 +127,12 @@ def _apply_tenant_isolation(session, _transaction, connection):
         if helper_exists:
             # Clear any stale row through the privileged helper before the next request.
             connection.exec_driver_sql(f"SELECT {TENANT_CONTEXT_CLEARER}()")
+        else:
+            # FIX: During a rolling migration gap, clear the trusted context row
+            # directly instead of leaving a pooled backend pinned to a prior tenant.
+            connection.exec_driver_sql(
+                f"DELETE FROM {TENANT_CONTEXT_TABLE} WHERE backend_pid = pg_backend_pid()"
+            )
     if role == APP_TENANT_ROLE:
         # FIX: Keep tenant-lane sessions restricted even when TENANT_CTX is
         # absent; missing trusted context is the fail-closed RLS signal.
