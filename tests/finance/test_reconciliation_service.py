@@ -474,6 +474,46 @@ def test_run_preserves_connector_allocation_fact_when_no_payment_qualifies():
     assert alloc[0].gross_revenue_usd == Decimal("42.000000")
 
 
+def test_rerun_scopes_stale_allocation_delete_to_reconciliation_source_report():
+    """Stale cleanup must pass the reconciliation ownership marker to deletion."""
+    engine = _engine()
+    with Session(engine) as session:
+        _add_channel(session, "outside-1", cms_status="OUTSIDE_CMS")
+        _add_payment(session, "pub-9", "42")
+        _link_account_channel(session, "pub-9", "owner-9", "outside-1")
+        session.commit()
+
+        svc = _service(session)
+        svc.run(month=MONTH, actor=_actor(), reason="first")
+        session.commit()
+
+        channel = session.scalars(
+            select(YouTubeChannelORM).where(
+                YouTubeChannelORM.youtube_channel_id == "outside-1"
+            )
+        ).one()
+        channel.cms_status = "INSIDE_CMS"
+        session.commit()
+
+        delete_calls = []
+        original_delete = svc._facts.delete_month_facts
+
+        def spy_delete_month_facts(**kwargs):
+            delete_calls.append(kwargs)
+            return original_delete(**kwargs)
+
+        svc._facts.delete_month_facts = spy_delete_month_facts
+
+        svc.run(month=MONTH, actor=_actor(), reason="second")
+        session.commit()
+
+    assert delete_calls
+    assert (
+        delete_calls[0].get("source_report_id")
+        == "reconciliation_workflow:outside_cms_allocation"
+    )
+
+
 def test_run_includes_connector_allocation_fact_in_reconciliation_basis():
     """Source-loaded ALLOCATION facts participate in residual reconciliation."""
     engine = _engine()

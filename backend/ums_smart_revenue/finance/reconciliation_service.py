@@ -460,6 +460,7 @@ class ReconciliationWorkflowService:
             self._facts.delete_month_facts(
                 month=month,
                 source_kind=RevenueFactSourceKind.ALLOCATION.value,
+                source_report_id=_ALLOCATION_SOURCE_REPORT_ID,
                 youtube_channel_ids=stale_channels,
             )
         if residual_account_count == 0:

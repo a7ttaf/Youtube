@@ -240,7 +240,8 @@ class SqlAlchemyRevenueFactRepository:
 
     # ============================================================================
     # Purpose: Remove stale monthly revenue facts for one source kind after a
-    #   reconciliation rerun proves those derived facts are no longer valid.
+    #   reconciliation rerun proves those derived facts are no longer valid,
+    #   with optional source report scoping for provenance-owned derived rows.
     # Database/ORM: MonthlyChannelRevenueFactORM (monthly_channel_revenue_facts).
     # Standards: Repository-owned SQLAlchemy DELETE; validates month/source and
     #   refuses locked months before mutating source-of-truth finance rows.
@@ -255,9 +256,13 @@ class SqlAlchemyRevenueFactRepository:
         *,
         month: str,
         source_kind: str,
+        source_report_id: str | None = None,
         youtube_channel_ids: set[str],
     ) -> int:
-        """Delete source-kind facts for selected tenant channels in an open month."""
+        """Delete selected source-kind facts in an open month.
+
+        When provided, source_report_id scopes the delete to one provenance marker.
+        """
         _validate_month(month)
         if not youtube_channel_ids:
             return 0
@@ -269,6 +274,10 @@ class SqlAlchemyRevenueFactRepository:
             MonthlyChannelRevenueFactORM.source_kind == normalized_source_kind,
             MonthlyChannelRevenueFactORM.youtube_channel_id.in_(youtube_channel_ids),
         )
+        if source_report_id is not None:
+            statement = statement.where(
+                MonthlyChannelRevenueFactORM.source_report_id == source_report_id
+            )
         result = self._session.execute(statement)
         self._session.flush()
         return int(result.rowcount or 0)

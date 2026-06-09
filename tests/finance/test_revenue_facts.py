@@ -191,6 +191,83 @@ def test_revenue_fact_repository_rejects_invalid_amounts_and_non_finite_metrics(
             )
 
 
+def test_delete_month_facts_can_scope_by_source_report_id():
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+    OrgBase.metadata.create_all(engine)
+    FinanceBase.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                YouTubeChannelORM(
+                    id=uuid4(),
+                    youtube_channel_id="channel-rec",
+                    channel_name="Reconciliation Allocation",
+                    cms_status="OUTSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                YouTubeChannelORM(
+                    id=uuid4(),
+                    youtube_channel_id="channel-connector",
+                    channel_name="Connector Allocation",
+                    cms_status="OUTSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+            ]
+        )
+        session.commit()
+
+        repository = SqlAlchemyRevenueFactRepository(session)
+        repository.record_fact(
+            month="2026-03",
+            youtube_channel_id="channel-rec",
+            source_kind="ALLOCATION",
+            source_report_id="reconciliation_workflow:outside_cms_allocation",
+            gross_revenue_usd=Decimal("42.00"),
+            net_revenue_usd=None,
+            views=0,
+            watch_time_minutes=Decimal("0"),
+            confidence_score=Decimal("0.9000"),
+            actor_user_id=USER_ID,
+        )
+        repository.record_fact(
+            month="2026-03",
+            youtube_channel_id="channel-connector",
+            source_kind="ALLOCATION",
+            source_report_id="connector:allocation_report",
+            gross_revenue_usd=Decimal("84.00"),
+            net_revenue_usd=None,
+            views=0,
+            watch_time_minutes=Decimal("0"),
+            confidence_score=Decimal("0.9000"),
+            actor_user_id=USER_ID,
+        )
+        session.commit()
+
+        deleted = repository.delete_month_facts(
+            month="2026-03",
+            source_kind="ALLOCATION",
+            source_report_id="reconciliation_workflow:outside_cms_allocation",
+            youtube_channel_ids={"channel-rec", "channel-connector"},
+        )
+        session.commit()
+
+        assert deleted == 1
+        assert (
+            repository.list_channel_month_facts(
+                month="2026-03", youtube_channel_id="channel-rec"
+            )
+            == []
+        )
+        connector_facts = repository.list_channel_month_facts(
+            month="2026-03", youtube_channel_id="channel-connector"
+        )
+        assert len(connector_facts) == 1
+        assert connector_facts[0].source_report_id == "connector:allocation_report"
+        assert connector_facts[0].gross_revenue_usd == Decimal("84.000000")
+
+
 def test_revenue_fact_rejects_locked_month_in_bound_tenant():
     engine = create_engine("sqlite+pysqlite:///:memory:")
     OrgBase.metadata.create_all(engine)
