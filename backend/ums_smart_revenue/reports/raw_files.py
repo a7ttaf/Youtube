@@ -223,14 +223,20 @@ class SqlAlchemyRawReportFileRepository:
                 purged_at=now,
                 updated_at=now,
             )
+            .execution_options(synchronize_session=False)
         )
         self._session.flush()
         if result.rowcount != 1:
+            # FIX: DELETE routes preload this row for authorization; force this
+            # reread to bypass the identity map so concurrent PURGED state maps
+            # to the documented 409 instead of a stale generic conflict.
             row = self._session.scalars(
-                select(RawReportFileORM).where(
+                select(RawReportFileORM)
+                .where(
                     RawReportFileORM.tenant_id == self._tenant_id,
                     RawReportFileORM.id == raw_file_uuid,
                 )
+                .execution_options(populate_existing=True)
             ).one_or_none()
             if row is None:
                 raise RawReportFileNotFoundError("Raw report file not found")
@@ -240,10 +246,12 @@ class SqlAlchemyRawReportFileRepository:
                 )
             raise RawReportFileConflictError("Raw report file purge was not applied")
         row = self._session.scalars(
-            select(RawReportFileORM).where(
+            select(RawReportFileORM)
+            .where(
                 RawReportFileORM.tenant_id == self._tenant_id,
                 RawReportFileORM.id == raw_file_uuid,
             )
+            .execution_options(populate_existing=True)
         ).one()
         return self._to_entry(row)
 

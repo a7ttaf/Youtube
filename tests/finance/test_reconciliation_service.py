@@ -80,7 +80,9 @@ def _add_channel(session, channel_id, *, cms_status="INSIDE_CMS"):
     )
 
 
-def _add_cms_fact(session, channel_id, gross, *, source_kind=None):
+def _add_cms_fact(
+    session, channel_id, gross, *, source_kind=None, source_report_id=None
+):
     """Insert a gross fact with no net (component-derived path)."""
     session.add(
         MonthlyChannelRevenueFactORM(
@@ -89,6 +91,7 @@ def _add_cms_fact(session, channel_id, gross, *, source_kind=None):
             month=MONTH,
             youtube_channel_id=channel_id,
             source_kind=source_kind or RevenueFactSourceKind.YOUTUBE_CMS.value,
+            source_report_id=source_report_id,
             gross_revenue_usd=Decimal(gross),
             net_revenue_usd=None,
             views=0,
@@ -442,6 +445,33 @@ def test_run_deletes_stale_allocation_when_channel_leaves_outside_cms():
         f for f in facts
         if f.source_kind == RevenueFactSourceKind.ALLOCATION.value
     ] == []
+
+
+def test_run_preserves_connector_allocation_fact_when_no_payment_qualifies():
+    """Recompute must not delete source-loaded ALLOCATION revenue facts."""
+    engine = _engine()
+    with Session(engine) as session:
+        _add_channel(session, "outside-1", cms_status="OUTSIDE_CMS")
+        _add_cms_fact(
+            session,
+            "outside-1",
+            "42",
+            source_kind=RevenueFactSourceKind.ALLOCATION.value,
+            source_report_id="connector-allocation-report",
+        )
+        session.commit()
+
+        _service(session).run(month=MONTH, actor=_actor(), reason="recompute")
+        session.commit()
+
+        facts = SqlAlchemyRevenueFactRepository(session).list_channel_month_facts(
+            month=MONTH, youtube_channel_id="outside-1"
+        )
+
+    alloc = [f for f in facts if f.source_kind == RevenueFactSourceKind.ALLOCATION.value]
+    assert len(alloc) == 1
+    assert alloc[0].source_report_id == "connector-allocation-report"
+    assert alloc[0].gross_revenue_usd == Decimal("42.000000")
 
 
 class _LockedDeductionRepository:

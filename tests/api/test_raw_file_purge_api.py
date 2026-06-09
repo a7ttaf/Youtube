@@ -10,6 +10,10 @@ import ums_smart_revenue.db.session as db_session
 from ums_smart_revenue.app import create_app
 from ums_smart_revenue.db.report_models import RawReportFileORM, ReportBase
 from ums_smart_revenue.db.security_models import AuditLogORM, SecurityBase, UserORM
+from ums_smart_revenue.reports.raw_files import (
+    RawReportFileConflictError,
+    SqlAlchemyRawReportFileRepository,
+)
 
 USER_ID = UUID("00000000-0000-0000-0000-000000010001")
 
@@ -136,6 +140,26 @@ def test_connector_admin_purges_raw_report_file_with_audit(app_env):
     assert row.checksum == "sha256:83f8b7d92d8a"
     assert purge_log.reason == "Operator-requested deletion"
     assert purge_log.sensitive is True
+
+
+def test_purge_conflict_returns_409(app_env, monkeypatch):
+    client, _ = app_env
+    raw_file_id = _register(client)
+
+    def raise_conflict(self, *, raw_file_id, actor_user_id, reason):
+        raise RawReportFileConflictError("Raw report file purge was not applied")
+
+    monkeypatch.setattr(SqlAlchemyRawReportFileRepository, "purge_file", raise_conflict)
+
+    response = client.request(
+        "DELETE",
+        f"/reports/raw-files/{raw_file_id}",
+        headers=auth_headers("connector_admin", "connector", "youtube_reporting"),
+        json={"reason": "Operator-requested deletion"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == "Raw report file purge was not applied"
 
 
 def test_purge_missing_permission_returns_403(app_env):

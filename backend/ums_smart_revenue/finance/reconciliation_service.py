@@ -52,6 +52,7 @@ from ums_smart_revenue.finance.reconciliation_workflow import (
     compute_month_reconciliation,
 )
 from ums_smart_revenue.finance.revenue_facts import (
+    RevenueFactEntry,
     RevenueFactLockedMonthError,
     RevenueFactSourceKind,
     SqlAlchemyRevenueFactRepository,
@@ -62,6 +63,7 @@ from ums_smart_revenue.tenancy.context import get_current_tenant
 _SOURCE_TABLE = "reconciliation_workflow"
 _SOURCE_SYSTEM = "reconciliation"
 _MANUAL_UPLOAD_SOURCE_SYSTEM = "manual_upload"
+_ALLOCATION_SOURCE_REPORT_ID = f"{_SOURCE_TABLE}:outside_cms_allocation"
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 _ALLOCATION_CONFIDENCE = Decimal("0.80")
 _LOCKED_WRITE_ERRORS = (DeductionComponentLockedMonthError, RevenueFactLockedMonthError)
@@ -87,6 +89,14 @@ def _source_system_for_source_kind(source_kind: str) -> str:
     except ValueError:
         return _SOURCE_SYSTEM
     return _SOURCE_KIND_TO_SOURCE_SYSTEM.get(normalized_source_kind, _SOURCE_SYSTEM)
+
+
+def _is_reconciliation_allocation_fact(fact: RevenueFactEntry) -> bool:
+    """Return True only for ALLOCATION facts owned by this reconciliation service."""
+    return (
+        fact.source_kind == RevenueFactSourceKind.ALLOCATION.value
+        and fact.source_report_id == _ALLOCATION_SOURCE_REPORT_ID
+    )
 
 
 class MonthLockedError(Exception):
@@ -345,7 +355,7 @@ class ReconciliationWorkflowService:
     def _attribute_outside_cms(
         self, *, month: str, actor: UserPrincipal
     ) -> tuple[list[dict[str, str]], Decimal | None, bool]:
-        """Write ALLOCATION facts and return the source-backed AdSense total.
+        """Write ALLOCATION facts and return outside-CMS attribution results.
 
         For each PAID AdSense account, resolve verified account->channel links.
         Payments that map wholly to source-backed channels feed the residual
@@ -353,8 +363,9 @@ class ReconciliationWorkflowService:
         OUTSIDE_CMS channel with no source gross are persisted as pass-through
         ALLOCATION facts and excluded from residual math. Unmapped, mixed, or
         ambiguous no-gross mappings are skipped fail-closed and warned. Stale
-        ALLOCATION facts from prior runs are deleted when the current state no
-        longer authorizes them.
+        reconciliation-owned ALLOCATION facts from prior runs are deleted when
+        the current state no longer authorizes them. The returned bool is false
+        when the AdSense basis is not safe for month-level bank/FX derivation.
         """
         warnings: list[dict[str, str]] = []
         bank_basis_scoped = True
@@ -364,13 +375,15 @@ class ReconciliationWorkflowService:
             fact.youtube_channel_id
             for fact in month_facts
             if fact.source_kind != RevenueFactSourceKind.ALLOCATION.value
+            or not _is_reconciliation_allocation_fact(fact)
         }
-        # FIX: Do not limit stale candidates to the current OUTSIDE_CMS set. A
-        # channel that moved back inside CMS must lose its prior ALLOCATION fact.
+        # FIX: Scope stale cleanup to reconciliation-owned ALLOCATION facts. A
+        # connector-loaded ALLOCATION fact is source evidence, not a derived row
+        # this workflow may delete or overwrite.
         existing_allocation_channels = {
             fact.youtube_channel_id
             for fact in month_facts
-            if fact.source_kind == RevenueFactSourceKind.ALLOCATION.value
+            if _is_reconciliation_allocation_fact(fact)
         }
         paid_by_account: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
         for pay in self._list_paid_payments(month):
@@ -461,7 +474,7 @@ class ReconciliationWorkflowService:
             month=month,
             youtube_channel_id=channel,
             source_kind=RevenueFactSourceKind.ALLOCATION.value,
-            source_report_id=None,
+            source_report_id=_ALLOCATION_SOURCE_REPORT_ID,
             gross_revenue_usd=gross,
             net_revenue_usd=None,
             views=0,
