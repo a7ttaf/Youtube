@@ -61,6 +61,7 @@ from ums_smart_revenue.tenancy.context import get_current_tenant
 
 _SOURCE_TABLE = "reconciliation_workflow"
 _SOURCE_SYSTEM = "reconciliation"
+_MANUAL_UPLOAD_SOURCE_SYSTEM = "manual_upload"
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 _ALLOCATION_CONFIDENCE = Decimal("0.80")
 _LOCKED_WRITE_ERRORS = (DeductionComponentLockedMonthError, RevenueFactLockedMonthError)
@@ -74,7 +75,7 @@ _SOURCE_KIND_TO_SOURCE_SYSTEM: dict[RevenueFactSourceKind, str] = {
     RevenueFactSourceKind.YOUTUBE_CMS: "youtube_reporting",
     RevenueFactSourceKind.ADSENSE: "adsense_management",
     RevenueFactSourceKind.YOUTUBE_ANALYTICS: "youtube_analytics",
-    RevenueFactSourceKind.MANUAL_UPLOAD: _SOURCE_SYSTEM,
+    RevenueFactSourceKind.MANUAL_UPLOAD: _MANUAL_UPLOAD_SOURCE_SYSTEM,
     RevenueFactSourceKind.ALLOCATION: _SOURCE_SYSTEM,
 }
 
@@ -270,14 +271,14 @@ class ReconciliationWorkflowService:
             primary[channel] = primary_fact.source_kind
         return gross, primary
 
-    def _list_paid_usd_payments(self, month: str) -> list[AdSensePaymentEntry]:
-        """Return PAID USD AdSense payments for a month."""
+    def _list_paid_payments(self, month: str) -> list[AdSensePaymentEntry]:
+        """Return PAID AdSense payments for a month."""
         repo = SqlAlchemyAdSensePaymentRepository(
             self._session, tenant_id=self._tenant_id
         )
         return [
             pay for pay in repo.list_month_payments(month=month)
-            if pay.payment_status == "PAID" and pay.payment_currency == "USD"
+            if pay.payment_status == "PAID"
         ]
 
     def _gather_bank_totals(self, month: str) -> tuple[Decimal | None, Decimal]:
@@ -372,7 +373,24 @@ class ReconciliationWorkflowService:
             if fact.source_kind == RevenueFactSourceKind.ALLOCATION.value
         }
         paid_by_account: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
-        for pay in self._list_paid_usd_payments(month):
+        for pay in self._list_paid_payments(month):
+            currency = str(pay.payment_currency or "").upper()
+            if currency != "USD":
+                # FIX: Bank receipts are month-level USD rows. If reconciliation
+                # skips a paid non-USD AdSense payment, bank fee/FX attribution
+                # is no longer source-scoped to the computed AdSense basis.
+                bank_basis_scoped = False
+                warnings.append(
+                    {
+                        "code": "UNSUPPORTED_PAYMENT_CURRENCY",
+                        "message": (
+                            f"Account {pay.source_account_id} has a PAID "
+                            f"{currency or 'unknown-currency'} payment; "
+                            "payment excluded from USD reconciliation"
+                        ),
+                    }
+                )
+                continue
             paid_by_account[pay.source_account_id] += pay.payment_amount
         allocation_by_channel: dict[str, Decimal] = defaultdict(lambda: Decimal("0"))
         residual_adsense_total = Decimal("0")

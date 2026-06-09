@@ -25,16 +25,34 @@ def build_engine(database_url: str) -> Engine:
     return create_engine(database_url, pool_pre_ping=True)
 
 
+# ============================================================================
+# Purpose: Build the default app tenant-lane session factory. Sessions produced
+#   here opt into the Postgres RLS role hook through session.info; raw SQLAlchemy
+#   Sessions used by migrations/tests remain owner sessions unless explicitly
+#   marked.
+# Database/ORM: SQLAlchemy Session factory metadata only.
+# Standards: explicit role marker; no ambient global role changes for unmarked
+#   sessions.
+# Blast Radius: Authorization/RLS role selection at the DB boundary.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/rls.py -> app_tenant role name.
+#   - File: backend/ums_smart_revenue/app.py -> request session factory.
+# ============================================================================
 def build_session_factory(
     database_url: str, engine: Engine | None = None
 ) -> SessionFactory:
-    """Return a sessionmaker bound to a per-URL cached engine (or the given one)."""
+    """Return a tenant-lane sessionmaker bound to a cached or given engine."""
     if engine is None:
         with _engine_cache_lock:
             if database_url not in _engine_cache:
                 _engine_cache[database_url] = build_engine(database_url)
             engine = _engine_cache[database_url]
-    return sessionmaker(bind=engine, autoflush=True, expire_on_commit=False)
+    return sessionmaker(
+        bind=engine,
+        autoflush=True,
+        expire_on_commit=False,
+        info={_SESSION_ROLE_KEY: APP_TENANT_ROLE},
+    )
 
 
 # ============================================================================
@@ -72,9 +90,9 @@ def build_platform_session_factory(
 # Database/ORM: All tenant-scoped tables (RLS policies created in 20260608_0001).
 # Standards: SET LOCAL (transaction-scoped, auto-reset on commit/rollback);
 #   fail-closed (missing tenant context => no row => RLS policy rejects access).
-# Blast Radius: Authorization/finance reads+writes at the DB boundary. No-op on
-#   SQLite and on tenant-lane sessions opened without a resolved tenant, so the
-#   existing test suite and pre-S2.4 non-tenant paths are unaffected.
+# Blast Radius: Authorization/finance reads+writes at the DB boundary. SQLite
+#   is unaffected; Postgres tenant-lane sessions without a resolved tenant stay
+#   on app_tenant with no trusted context, so RLS rejects tenant rows.
 # Connections:
 #   - File: backend/ums_smart_revenue/tenancy/context.py -> tenant in contextvar.
 #   - File: backend/ums_smart_revenue/db/rls.py -> role names + tenant context helpers.
@@ -84,8 +102,11 @@ def _apply_tenant_isolation(session, _transaction, connection):
     """Set transaction role + trusted tenant context for Postgres sessions."""
     if connection.dialect.name != "postgresql":
         return
-    role = session.info.get(_SESSION_ROLE_KEY, APP_TENANT_ROLE)
-    # Default app_tenant lane: only act when a tenant is in context.
+    role = session.info.get(_SESSION_ROLE_KEY)
+    if role is None:
+        return
+    # Default app_tenant lane: set tenant context when present and stay
+    # restricted when it is absent.
     from ums_smart_revenue.tenancy.context import get_current_tenant
 
     tenant = get_current_tenant()
@@ -105,10 +126,9 @@ def _apply_tenant_isolation(session, _transaction, connection):
         if helper_exists:
             # Clear any stale row through the privileged helper before the next request.
             connection.exec_driver_sql(f"SELECT {TENANT_CONTEXT_CLEARER}()")
-        if role == APP_TENANT_ROLE:
-            connection.exec_driver_sql("SET LOCAL ROLE NONE")
-            return
     if role == APP_TENANT_ROLE:
+        # FIX: Keep tenant-lane sessions restricted even when TENANT_CTX is
+        # absent; missing trusted context is the fail-closed RLS signal.
         connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_TENANT_ROLE}"')
 
 

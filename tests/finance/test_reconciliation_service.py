@@ -668,7 +668,7 @@ def test_outside_cms_warnings_persist_to_reconciliation_explanation():
 
 
 def test_manual_upload_primary_fact_reconciles_without_source_mapping_error():
-    """MANUAL_UPLOAD primary facts are valid reconciliation inputs, not 500s."""
+    """MANUAL_UPLOAD reconciliation components remain net-revenue aligned."""
     engine = _engine()
     with Session(engine) as session:
         _add_channel(session, "c1")
@@ -681,11 +681,62 @@ def test_manual_upload_primary_fact_reconciles_without_source_mapping_error():
         _add_payment(session, "pub-cms", "80")
         _link_account_channel(session, "pub-cms", "owner-cms", "c1")
         session.commit()
+        svc = ReconciliationWorkflowService(
+            session,
+            audit_sink=InMemoryAuditSink(),
+            us_view_share_provider=_FixedShareProvider(Decimal("0.5")),
+        )
 
-        result = _service(session).run(month=MONTH, actor=_actor(), reason="r")
+        result = svc.run(month=MONTH, actor=_actor(), reason="r")
+        components = SqlAlchemyDeductionComponentRepository(session).list_month_components(
+            month=MONTH
+        )
+        facts = SqlAlchemyRevenueFactRepository(session).list_channel_month_facts(
+            month=MONTH, youtube_channel_id="c1"
+        )
+        summary = build_channel_net_revenue_summary(
+            facts=facts,
+            manual_overrides=[],
+            deduction_components=components,
+            month=MONTH,
+            youtube_channel_id="c1",
+        )
 
     assert result.gross_total_usd == Decimal("100.000000")
-    assert result.yt_adsense_fee_total_usd == Decimal("20.000000")
+    assert result.us_tax_total_usd == Decimal("15.000000")
+    assert result.yt_adsense_fee_total_usd == Decimal("5.000000")
+    tax_components = [c for c in components if c.component_kind == "TAX"]
+    assert {c.source_system for c in tax_components} == {"manual_upload"}
+    assert summary.status == "COMPONENT_DERIVED"
+    assert summary.net_revenue_usd == Decimal("85.000000")
+
+
+def test_non_usd_paid_payment_skips_unscoped_bank_basis():
+    """Skipping PAID non-USD AdSense rows also makes month-level bank totals unsafe."""
+    engine = _engine()
+    with Session(engine) as session:
+        _add_channel(session, "c1")
+        _add_cms_fact(session, "c1", "100")
+        _add_payment(session, "pub-usd", "80")
+        _link_account_channel(session, "pub-usd", "owner-usd", "c1")
+        _add_payment(session, "pub-eur", "40", currency="EUR")
+        _add_bank(session, "60", "5", reference="BANK-USD")
+        _add_bank(session, "40", "0", reference="BANK-EUR")
+        session.commit()
+
+        result = _service(session).run(month=MONTH, actor=_actor(), reason="r")
+        components = SqlAlchemyDeductionComponentRepository(session).list_month_components(
+            month=MONTH
+        )
+
+    assert result.adsense_bank_fee_total_usd == Decimal("0.000000")
+    assert result.fx_total_usd == Decimal("0.000000")
+    assert any(w["code"] == "BANK_BASIS_UNSCOPED" for w in result.warnings)
+    bank_components = [
+        c for c in components
+        if c.component_key.endswith((":adsense_bank_fee", ":fx_variance"))
+    ]
+    assert bank_components == []
 
 
 def test_outside_cms_ambiguous_account_skips_and_warns():

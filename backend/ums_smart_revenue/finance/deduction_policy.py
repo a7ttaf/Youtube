@@ -20,6 +20,9 @@ SOURCE_SYSTEM_TO_SOURCE_KIND: dict[str, str] = {
     # already special-cased this, but _applicable_account_allocations and
     # _applicable_deduction_components use this map directly and silently dropped it.
     "adsense_payment_gap": "ADSENSE",
+    # FIX: reconciliation writes TAX for channel-direct MANUAL_UPLOAD facts
+    # through this source_system, so net-revenue readers can source-align it.
+    "manual_upload": "MANUAL_UPLOAD",
     "reconciliation": "ALLOCATION",
     "youtube_reporting": "YOUTUBE_CMS",
     "youtube_analytics": "YOUTUBE_ANALYTICS",

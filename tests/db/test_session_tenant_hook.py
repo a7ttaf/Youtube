@@ -67,19 +67,20 @@ def test_postgres_tenant_lane_sets_role_and_trusted_tenant_context():
         TENANT_CTX.reset(token)
 
 
-def test_postgres_no_context_leaves_login_role_and_unset_context():
-    """Verify the tenant lane leaves bare sessions on the login role."""
+def test_postgres_no_context_stays_on_tenant_role_and_unset_context():
+    """Verify the tenant lane fails closed without trusted tenant context."""
     url = require_postgres_url()
     _ensure_upgraded(url)
     factory = build_session_factory(url)
-    # No TENANT_CTX → hook must not switch role or set the trusted context row.
+    # No TENANT_CTX leaves app_tenant active, but clears the trusted context row
+    # so RLS policies reject tenant rows instead of falling back to the owner role.
     with factory() as session:
         assert session.execute(
             sa.text("SELECT app_current_tenant_id()")
         ).scalar() is None
         assert session.execute(
             sa.text("SELECT current_user")
-        ).scalar() != "app_tenant"
+        ).scalar() == "app_tenant"
 
 
 def test_platform_lane_uses_app_platform_and_no_tenant_context():
@@ -112,9 +113,9 @@ def test_pooled_connection_does_not_leak_role_or_context():
             s1.commit()
     finally:
         TENANT_CTX.reset(token)
-    # Reuse the pool with no context.
+    # Reuse the pool with no context; role stays restricted and context is empty.
     with factory() as s2:
-        assert s2.execute(sa.text("SELECT current_user")).scalar() != "app_tenant"
+        assert s2.execute(sa.text("SELECT current_user")).scalar() == "app_tenant"
         assert s2.execute(
             sa.text("SELECT app_current_tenant_id()")
         ).scalar() is None
