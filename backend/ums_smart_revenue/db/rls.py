@@ -49,6 +49,10 @@ APP_PLATFORM_ROLE = "app_platform"
 TENANT_CONTEXT_TABLE = "app_tenant_context"
 TENANT_CONTEXT_SETTER = "set_app_current_tenant_id"
 TENANT_CONTEXT_GETTER = "app_current_tenant_id"
+# Privileged SECURITY DEFINER clearer: the tenant lane only holds SELECT on the
+# context table, so the session hook clears its row via this function (which runs
+# as the function owner) instead of a raw DELETE that would permission-deny.
+TENANT_CONTEXT_CLEARER = "clear_app_current_tenant_id"
 
 
 def tenant_rls_policy_name(table: str) -> str:

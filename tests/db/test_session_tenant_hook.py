@@ -1,4 +1,7 @@
+import pytest
 import sqlalchemy as sa
+from alembic import command
+from alembic.config import Config
 from tests.db._postgres_helpers import require_postgres_url
 
 from ums_smart_revenue.db.session import (
@@ -7,6 +10,26 @@ from ums_smart_revenue.db.session import (
 )
 from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
+
+
+@pytest.fixture(autouse=True)
+def _schema_at_head():
+    """Bring the shared test DB to head so the RLS context helpers exist.
+
+    Sibling PostgreSQL migration tests downgrade/drop the public schema, so
+    these hook tests cannot assume a head schema. Upgrading here makes the
+    suite order-independent without skipping (UMS_TEST_DATABASE_URL absent =>
+    require_postgres_url raises, so SQLite-only runs are unaffected).
+    """
+    import os
+
+    if not os.environ.get("UMS_TEST_DATABASE_URL"):
+        yield
+        return
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", require_postgres_url())
+    command.upgrade(cfg, "head")
+    yield
 
 
 def _tenant(uuid_str: str) -> Tenant:

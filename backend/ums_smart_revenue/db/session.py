@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from ums_smart_revenue.db.rls import (
     APP_PLATFORM_ROLE,
     APP_TENANT_ROLE,
+    TENANT_CONTEXT_CLEARER,
     TENANT_CONTEXT_SETTER,
 )
 
@@ -88,21 +89,45 @@ def _apply_tenant_isolation(session, _transaction, connection):
     from ums_smart_revenue.tenancy.context import get_current_tenant
 
     tenant = get_current_tenant()
-    connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"')
     if tenant is not None:
-        # The setter runs while app_platform is active, so tenant code cannot
-        # mutate the trusted context through the tenant lane.
-        connection.exec_driver_sql(
-            f"SELECT {TENANT_CONTEXT_SETTER}(%s)",
-            (str(tenant.id),),
-        )
-    else:
-        # Clear any stale row on pooled connections before the next request.
-        connection.exec_driver_sql(
-            "DELETE FROM app_tenant_context WHERE backend_pid = pg_backend_pid()"
-        )
-    if role == APP_TENANT_ROLE:
+        # Tolerate schemas built via metadata.create_all (no RLS migration): the
+        # hook no-ops when the setter function is absent rather than erroring.
+        if _tenant_context_fn_exists(connection, f"{TENANT_CONTEXT_SETTER}(uuid)"):
+            # Elevate to app_platform only to run the trusted setter, so tenant
+            # code cannot mutate the context through the tenant lane.
+            connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"')
+            connection.exec_driver_sql(
+                f"SELECT {TENANT_CONTEXT_SETTER}(%s)",
+                (str(tenant.id),),
+            )
+    elif _tenant_context_fn_exists(connection, f"{TENANT_CONTEXT_CLEARER}()"):
+        # FIX: Clear any stale pooled-connection context via the SECURITY DEFINER
+        # clearer (runs as its owner) instead of a raw DELETE; the app lanes hold
+        # only SELECT on the context table, so the prior DELETE permission-denied.
+        # No role elevation needed; tolerant of the absent function
+        # (metadata.create_all PG schemas) by skipping the call.
+        connection.exec_driver_sql(f"SELECT {TENANT_CONTEXT_CLEARER}()")
+    if role == APP_PLATFORM_ROLE:
+        connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"')
+    elif tenant is not None:
+        # Drop into the restricted app_tenant lane only once a tenant context row
+        # is set; a context-less tenant-lane session stays on the login role
+        # (fail-closed: no context row => RLS exposes no rows), and the
+        # pooled-reset path leaves a reused connection off app_tenant.
         connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_TENANT_ROLE}"')
+
+
+def _tenant_context_fn_exists(connection, signature: str) -> bool:
+    """Return True if the named public tenant-context function is installed."""
+    # Cheap per-call to_regprocedure probe (accepts a full arg signature): NULL
+    # when the function is absent (e.g. a metadata.create_all schema with no RLS
+    # migration applied), so the hook no-ops instead of erroring.
+    return (
+        connection.exec_driver_sql(
+            f"SELECT to_regprocedure('public.{signature}') IS NOT NULL"
+        ).scalar()
+        is True
+    )
 
 
 def session_dependency(
