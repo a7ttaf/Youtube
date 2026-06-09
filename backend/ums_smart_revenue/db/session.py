@@ -4,6 +4,7 @@ from threading import Lock
 
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 from ums_smart_revenue.db.rls import (
     APP_PLATFORM_ROLE,
@@ -20,8 +21,33 @@ _engine_cache: dict[str, Engine] = {}
 _engine_cache_lock = Lock()
 
 
+# ============================================================================
+# Purpose: Build the per-URL SQLAlchemy Engine. Postgres (production) keeps the
+#   normal connection pool so the dual-lane design hands the tenant lane and the
+#   privileged app_platform/audit lane DISTINCT role-switched connections.
+# Database/ORM: All ORM models (engine is the shared connection source).
+# Standards: typed boundary; no error swallowing; pool_pre_ping retained.
+# Blast Radius: DB connection topology. SQLite branch is test-only; Postgres
+#   path is intentionally unchanged so RLS role switching is not weakened.
+# Connections:
+#   - File: backend/ums_smart_revenue/app.py -> wires request + platform factories.
+# ============================================================================
 def build_engine(database_url: str) -> Engine:
-    """Create a connection-pooled SQLAlchemy Engine for ``database_url``."""
+    """Create a SQLAlchemy Engine; SQLite shares one connection, others pool."""
+    if database_url.startswith("sqlite"):
+        # FIX: SQLite permits only ONE writer at a time. The request session and
+        # the audit/platform session bind to the same engine but, under the
+        # default pool, would each grab a DISTINCT DBAPI connection -> the audit
+        # INSERT on connection #2 blocks on the request's open write txn on
+        # connection #1 ("database is locked"). StaticPool forces a single shared
+        # connection so both sessions serialize through one writer (file-based
+        # and in-memory SQLite alike). Postgres needs distinct connections for
+        # its two role-switched lanes, so this branch is SQLite-only.
+        return create_engine(
+            database_url,
+            poolclass=StaticPool,
+            connect_args={"check_same_thread": False},
+        )
     return create_engine(database_url, pool_pre_ping=True)
 
 
