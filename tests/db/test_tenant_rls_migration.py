@@ -15,6 +15,8 @@ from ums_smart_revenue.db.rls import (
     tenant_rls_policy_name,
 )
 
+_FAKE_CROSS_BACKEND_PID = -1
+
 
 def _alembic_config(url: str) -> Config:
     """Build an Alembic config bound to the supplied database URL.
@@ -103,14 +105,15 @@ def _assert_app_platform_cross_backend_delete_rejected(url: str) -> None:
             cur.execute(
                 "INSERT INTO app_tenant_context "
                 "(backend_pid, tenant_id) VALUES (%s, gen_random_uuid())",
-                (-1,),
+                (_FAKE_CROSS_BACKEND_PID,),
             )
             try:
                 cur.execute("SET ROLE app_platform")
                 try:
                     cur.execute(
                         "DELETE FROM app_tenant_context "
-                        "WHERE backend_pid = -1"
+                        "WHERE backend_pid = %s",
+                        (_FAKE_CROSS_BACKEND_PID,),
                     )
                 except psycopg.errors.RaiseException as exc:
                     assert (
@@ -127,7 +130,8 @@ def _assert_app_platform_cross_backend_delete_rejected(url: str) -> None:
                 # migration runner is a superuser in the disposable PG DB.
                 cur.execute("SET session_replication_role = replica")
                 cur.execute(
-                    "DELETE FROM app_tenant_context WHERE backend_pid = -1"
+                    "DELETE FROM app_tenant_context WHERE backend_pid = %s",
+                    (_FAKE_CROSS_BACKEND_PID,),
                 )
                 cur.execute("SET session_replication_role = origin")
 
