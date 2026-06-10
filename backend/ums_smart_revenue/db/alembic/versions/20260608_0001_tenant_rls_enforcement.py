@@ -29,7 +29,6 @@ from alembic import op
 from ums_smart_revenue.db.rls import (
     APP_PLATFORM_ROLE,
     APP_TENANT_ROLE,
-    TENANT_CONTEXT_CLEARER,
     TENANT_CONTEXT_GETTER,
     TENANT_CONTEXT_SETTER,
     TENANT_CONTEXT_TABLE,
@@ -153,25 +152,17 @@ def _create_tenant_context_helpers(bind) -> None:
             """
         )
     )
-    # FIX: Install the privileged clearer in the same migration as the rest
-    # of the helper surface so no rolling-migration gap can leave the
-    # session hook falling back to a direct DELETE under the app_platform
-    # role (which lacks DELETE on app_tenant_context).
-    bind.execute(
-        sa.text(
-            f"""
-            CREATE OR REPLACE FUNCTION {TENANT_CONTEXT_CLEARER}()
-            RETURNS void
-            LANGUAGE sql
-            SECURITY DEFINER
-            SET search_path = pg_catalog, public
-            AS $$
-                DELETE FROM {TENANT_CONTEXT_TABLE}
-                WHERE backend_pid = pg_backend_pid()
-            $$;
-            """
-        )
-    )
+    # FIX: The privileged clearer (`clear_app_current_tenant_id`) is NOT
+    # installed here on purpose. Its sole owner is `20260609_0002`, which
+    # creates the function in upgrade() and drops it in downgrade(). A fresh
+    # DB at this revision (20260608_0001) will not have the helper yet — the
+    # session hook tolerates that via its `to_regprocedure` probe and falls
+    # back to a direct DELETE on the trusted-context row, so the helper is
+    # only required once 20260609_0002 has run. Installing it here too would
+    # leave two migrations claiming ownership of the same function, so a
+    # downgrade past 20260609_0002 would drop a helper this earlier revision
+    # still claims to have created (the Alembic ownership double-claim bug
+    # flagged by Codex P2 review on PR #88).
     bind.execute(
         sa.text(
             f'REVOKE ALL ON FUNCTION {TENANT_CONTEXT_SETTER}(uuid) FROM PUBLIC'
@@ -180,11 +171,6 @@ def _create_tenant_context_helpers(bind) -> None:
     bind.execute(
         sa.text(
             f'REVOKE ALL ON FUNCTION {TENANT_CONTEXT_GETTER}() FROM PUBLIC'
-        )
-    )
-    bind.execute(
-        sa.text(
-            f'REVOKE ALL ON FUNCTION {TENANT_CONTEXT_CLEARER}() FROM PUBLIC'
         )
     )
     bind.execute(
@@ -200,11 +186,6 @@ def _create_tenant_context_helpers(bind) -> None:
     bind.execute(
         sa.text(
             f'GRANT EXECUTE ON FUNCTION {TENANT_CONTEXT_GETTER}() TO "{APP_PLATFORM_ROLE}"'
-        )
-    )
-    bind.execute(
-        sa.text(
-            f'GRANT EXECUTE ON FUNCTION {TENANT_CONTEXT_CLEARER}() TO "{APP_PLATFORM_ROLE}"'
         )
     )
 
@@ -324,9 +305,11 @@ def downgrade() -> None:
     bind.execute(
         sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_GETTER}()')
     )
-    bind.execute(
-        sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_CLEARER}()')
-    )
+    # FIX: The privileged clearer is owned by `20260609_0002`, not by this
+    # migration. Its downgrade in `20260609_0002` will drop it as part of
+    # rolling back past that revision; we must NOT drop it here, otherwise
+    # two migrations would race to remove the same object (the Alembic
+    # ownership double-claim bug flagged by Codex P2 review on PR #88).
     bind.execute(sa.text(f'DROP TABLE IF EXISTS {TENANT_CONTEXT_TABLE}'))
     # ========================================================================
     # Purpose: Strip every dependent privilege/object before DROP ROLE.

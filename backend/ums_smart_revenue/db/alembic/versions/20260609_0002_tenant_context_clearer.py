@@ -1,4 +1,30 @@
-"""Add privileged helper for clearing the trusted tenant context."""
+"""Sole owner of the privileged helper that clears the trusted tenant context.
+
+The helper (``clear_app_current_tenant_id``) was introduced so the session hook
+can wipe a stale trusted-context row on a pooled backend before the next
+request lands. The app lanes (``app_tenant`` / ``app_platform``) only hold
+``SELECT`` on the ``app_tenant_context`` table, so a raw ``DELETE`` would
+permission-deny; this SECURITY DEFINER function runs as its owner (the
+migration runner / a DBA-precreated role) and bypasses the lane-level grant
+restriction.
+
+Ownership contract:
+
+* This migration is the **only** Alembic revision that creates or drops
+  ``clear_app_current_tenant_id``. ``20260608_0001_tenant_rls_enforcement``
+  deliberately does NOT install the helper — it pre-dates the helper, and
+  dual-ownership between two revisions would let a downgrade past this
+  revision drop a function that an earlier revision still claims to have
+  installed (Codex P2 review on PR #88).
+* The session hook tolerates the missing-helper state with a
+  ``to_regprocedure`` probe and falls back to a direct ``DELETE`` on the
+  trusted-context row under the elevated ``app_platform`` role, so a fresh
+  DB at ``20260608_0001`` (before this revision runs) is not broken.
+* ``GRANT EXECUTE`` is only granted to ``app_platform`` because the session
+  hook always elevates to ``app_platform`` first before invoking the helper
+  (``db/session.py::_apply_tenant_isolation``); ``app_tenant`` does not need
+  direct EXECUTE on the clearer.
+"""
 
 import sqlalchemy as sa
 from alembic import op
@@ -16,7 +42,7 @@ depends_on = None
 
 
 def upgrade() -> None:
-    """Create the platform-only tenant-context cleanup helper."""
+    """Create the privileged tenant-context cleanup helper (sole owner)."""
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
@@ -48,7 +74,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the platform-only tenant-context cleanup helper."""
+    """Drop the privileged tenant-context cleanup helper (sole owner)."""
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
