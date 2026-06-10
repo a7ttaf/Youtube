@@ -227,5 +227,49 @@ def test_tenant_context_clearer_is_owned_only_by_20260609_0002():
     command.upgrade(cfg, "head")
     with _db_conn(url) as conn:
         assert _function_exists(conn, TENANT_CONTEXT_CLEARER) is True
+        # The BEFORE DELETE guard trigger installed in 20260609_0002
+        # bounds the platform lane's mutation surface over the RLS
+        # context table: even with the DELETE grant, `app_platform`
+        # can only delete its own backend's row, never another
+        # backend's. The session hook's missing-helper fallback and
+        # the privileged clearer both filter on the current backend,
+        # so they continue to succeed under the trigger.
+        import psycopg
+        libpq_url = url.replace("postgresql+psycopg://", "postgresql://")
+        with psycopg.connect(libpq_url, autocommit=True) as raw_conn:
+            with raw_conn.cursor() as cur:
+                # Seed a row under postgres (trigger's whitelisted role)
+                cur.execute(
+                    "INSERT INTO app_tenant_context "
+                    "(backend_pid, tenant_id) VALUES (%s, gen_random_uuid())",
+                    (-1,),
+                )
+                # Switch to app_platform and attempt a cross-backend DELETE
+                cur.execute("SET LOCAL ROLE app_platform")
+                try:
+                    cur.execute(
+                        "DELETE FROM app_tenant_context "
+                        "WHERE backend_pid = -1"
+                    )
+                    assert False, (
+                        "guard trigger should reject cross-backend DELETE"
+                    )
+                except psycopg.errors.RaiseException as exc:
+                    assert (
+                        "app_tenant_context DELETE restricted" in str(exc)
+                    ), f"unexpected error: {exc}"
+                # Cleanup as a privileged role. `session_replication_role
+                # = replica` disables user-defined triggers so the test's
+                # own cleanup row can be removed without tripping the
+                # guard. This switch is a Postgres superuser-only GUC,
+                # but the test runs as the migration runner (postgres),
+                # so it is permitted here.
+                cur.execute("RESET ROLE")
+                cur.execute("SET session_replication_role = replica")
+                cur.execute(
+                    "DELETE FROM app_tenant_context "
+                    "WHERE backend_pid = -1"
+                )
+                cur.execute("SET session_replication_role = origin")
     # Leave the DB at head for any subsequent test that depends on the
     # baseline schema/role state.

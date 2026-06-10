@@ -46,15 +46,62 @@ def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
+    # FIX: install a BEFORE DELETE trigger on the context table that
+    # raises if a row's `backend_pid` does not match the current
+    # backend. This bounds the platform lane's mutation surface over
+    # the RLS context table at steady state: even with the DELETE grant
+    # in place, `app_platform` (and the session hook's missing-helper
+    # fallback) can only ever delete its OWN row, never another
+    # backend's. The privileged `clear_app_current_tenant_id()` helper
+    # also runs under this trigger, but its body filters on
+    # `backend_pid = pg_backend_pid()` so the trigger's predicate is
+    # satisfied and the DELETE goes through.
+    bind.execute(
+        sa.text(
+            f"""
+            CREATE OR REPLACE FUNCTION {TENANT_CONTEXT_CLEARER}_guard_delete()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF OLD.backend_pid <> pg_backend_pid() THEN
+                    RAISE EXCEPTION
+                        'app_tenant_context DELETE restricted to current backend';
+                END IF;
+                RETURN OLD;
+            END;
+            $$
+            """
+        )
+    )
+    bind.execute(
+        sa.text(
+            f"""
+            DROP TRIGGER IF EXISTS {TENANT_CONTEXT_CLEARER}_guard_delete_trg
+            ON {TENANT_CONTEXT_TABLE}
+            """
+        )
+    )
+    bind.execute(
+        sa.text(
+            f"""
+            CREATE TRIGGER {TENANT_CONTEXT_CLEARER}_guard_delete_trg
+            BEFORE DELETE ON {TENANT_CONTEXT_TABLE}
+            FOR EACH ROW
+            EXECUTE FUNCTION {TENANT_CONTEXT_CLEARER}_guard_delete()
+            """
+        )
+    )
     # FIX: grant DELETE on the context table to app_platform so the
     # session hook's missing-helper fallback (a direct DELETE under
     # app_platform) permission-succeeds during a rolling migration gap.
     # This grant is installed in 20260609_0002 (not 20260608_0001) so
     # databases that already ran the previous version of 20260608_0001
     # pick it up on their next upgrade without re-running 20260608_0001.
-    # Without this, a no-context session on a previously-migrated DB
-    # would permission-deny on the fallback path after downgrading
-    # 20260609_0002 (Codex P2 review on PR #88).
+    # The BEFORE DELETE trigger above bounds the mutation surface to
+    # the caller's own backend row, so widening the platform lane's
+    # DELETE privilege here does NOT widen its effective blast radius
+    # (Codex P2 review on PR #88).
     bind.execute(
         sa.text(
             f'GRANT DELETE ON {TENANT_CONTEXT_TABLE} TO "{APP_PLATFORM_ROLE}"'
@@ -101,6 +148,23 @@ def downgrade() -> None:
     bind.execute(
         sa.text(
             f'REVOKE DELETE ON {TENANT_CONTEXT_TABLE} FROM "{APP_PLATFORM_ROLE}"'
+        )
+    )
+    # FIX: drop the BEFORE DELETE guard trigger installed in upgrade()
+    # so the table returns to its pre-migration state (no extra
+    # triggers, no helper, no DELETE grant). The trigger function is
+    # dropped after the trigger to avoid an "in use" error.
+    bind.execute(
+        sa.text(
+            f"""
+            DROP TRIGGER IF EXISTS {TENANT_CONTEXT_CLEARER}_guard_delete_trg
+            ON {TENANT_CONTEXT_TABLE}
+            """
+        )
+    )
+    bind.execute(
+        sa.text(
+            f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_CLEARER}_guard_delete()'
         )
     )
     bind.execute(sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_CLEARER}()'))
