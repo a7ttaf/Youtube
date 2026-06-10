@@ -236,7 +236,9 @@ def test_revenue_explanation_rejects_unsupported_metric(tmp_path):
     )
 
     assert response.status_code == 422
-    assert response.json()["detail"] == "Unsupported explanation metric: bogus_metric"
+    detail = response.json()["detail"]
+    assert detail.startswith("Unsupported explanation metric: bogus_metric")
+    assert "Supported:" in detail
 
 
 def _finance_month_net_principal() -> UserPrincipal:

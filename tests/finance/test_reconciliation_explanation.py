@@ -2,7 +2,13 @@
 
 from decimal import Decimal
 
-from ums_smart_revenue.finance.explanations import SUPPORTED_METRICS
+import pytest
+
+from ums_smart_revenue.finance.explanations import (
+    SUPPORTED_METRICS,
+    NumberExplanationValidationError,
+    build_channel_month_revenue_explanation,
+)
 from ums_smart_revenue.finance.reconciliation_explanation import (
     REVENUE_RECONCILIATION_METRIC,
     build_reconciliation_explanation,
@@ -26,7 +32,34 @@ def _line():
 
 
 def test_metric_registered():
-    assert REVENUE_RECONCILIATION_METRIC in SUPPORTED_METRICS
+    """The reconciliation metric is intentionally NOT in the generic SUPPORTED_METRICS set.
+
+    Regression for chatgpt-codex-connector PRRT_kwDOSZIgN86IT-bX: removing the
+    reconciliation metric from the generic supported set closes the gap where
+    a caller with only channel revenue/confidence access could overwrite the
+    smart reconciliation row through the generic
+    ``POST /revenue/channels/{id}/months/{month}/explain?metric=...`` endpoint.
+    The metric is built and persisted only by ``build_reconciliation_explanation``
+    via the dedicated ``ReconciliationWorkflowService`` workflow.
+    """
+    assert REVENUE_RECONCILIATION_METRIC not in SUPPORTED_METRICS
+
+
+def test_generic_builder_rejects_reconciliation_metric():
+    """The generic builder raises a typed validation error for the reconciliation metric.
+
+    Belt-and-braces: even if a future caller bypasses the route-level guard,
+    the finance builder refuses to construct an adjusted-gross-shaped
+    explanation under the smart reconciliation metric.
+    """
+    with pytest.raises(NumberExplanationValidationError):
+        build_channel_month_revenue_explanation(
+            facts=[],
+            manual_overrides=[],
+            month="2026-03",
+            youtube_channel_id="c1",
+            metric=REVENUE_RECONCILIATION_METRIC,
+        )
 
 
 def test_explanation_shape():

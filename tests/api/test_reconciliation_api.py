@@ -378,6 +378,11 @@ def test_get_reconciliation_returns_persisted_explanation(tmp_path):
     assert body["metric"] == "revenue_reconciliation_usd"
     assert body["currency"] == "USD"
     assert isinstance(body["components"], list)
+    # Regression for chatgpt-codex-connector PRRT_kwDOSZIgN86IT-bT: the
+    # persisted confidence object must keep the numeric score that the build
+    # path computed, not just the label string.
+    assert "score" in body["confidence"]
+    assert body["confidence"]["label"] in {"HIGH", "MEDIUM", "LOW"}
     assert [event["event_type"] for event in body["audit_events"]] == [
         "REVENUE_VIEWED",
         "PAYMENT_VIEWED",
@@ -619,3 +624,45 @@ def test_get_reconciliation_requires_bank_reconciliation_permission(tmp_path):
     assert response.json()["detail"] == (
         "Missing permission: finance.view_bank_reconciliation"
     )
+
+
+def test_generic_explain_rejects_reconciliation_metric(tmp_path):
+    """The generic explain endpoint refuses the smart reconciliation metric.
+
+    Regression for chatgpt-codex-connector PRRT_kwDOSZIgN86IT-bX: a caller
+    with only VIEW_REVENUE+VIEW_CONFIDENCE@channel must not be able to
+    overwrite the smart reconciliation row through the generic
+    ``POST /revenue/channels/{id}/months/{month}/explain?metric=...`` route.
+    The dedicated POST /revenue/months/{month}/reconcile endpoint enforces
+    the stricter CHANGE_ALLOCATION_RULE + VIEW_BANK_RECONCILIATION +
+    VIEW_FINALIZED_PAYMENTS + VIEW_CONFIDENCE gates and is the only writer
+    for revenue_reconciliation_usd.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    client = TestClient(create_app(database_url=database_url))
+    _with_principal(
+        client,
+        _principal(
+            PermissionGrant(Permission.VIEW_REVENUE, AccessScope.global_scope()),
+            PermissionGrant(Permission.VIEW_CONFIDENCE, AccessScope.global_scope()),
+            PermissionGrant(
+                Permission.VIEW_FINALIZED_PAYMENTS,
+                AccessScope.finance_month(MONTH),
+            ),
+        ),
+    )
+    try:
+        response = client.post(
+            (
+                f"/revenue/channels/{CHANNEL}/months/{MONTH}/explain"
+                "?metric=revenue_reconciliation_usd"
+            ),
+        )
+    finally:
+        _clear_principal(client)
+
+    assert response.status_code == 422
+    detail = response.json()["detail"]
+    assert "revenue_reconciliation_usd" in detail
+    assert "POST /revenue/months/" in detail and "/reconcile" in detail
