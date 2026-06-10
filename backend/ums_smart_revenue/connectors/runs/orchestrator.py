@@ -49,6 +49,7 @@ parser/repo (PR #43) are *not* touched here — T27 is additive.
 from __future__ import annotations
 
 import json
+import logging
 import os
 import tempfile
 import types as _types  # SimpleNamespace used for dry-run tenant_id proxy
@@ -143,6 +144,11 @@ from ums_smart_revenue.connectors.runs.repository import (
 )
 from ums_smart_revenue.db.report_models import RawReportFileORM
 from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM
+from ums_smart_revenue.finance.google_source_normalizer import GoogleSourceNormalizer
+from ums_smart_revenue.finance.month_close import get_month_close_status
+from ums_smart_revenue.finance.revenue_facts import RevenueFactLockedMonthError
+
+logger = logging.getLogger(__name__)
 
 __all__ = [
     "AdSenseManagementRunner",
@@ -379,7 +385,7 @@ def run_one(
     # these surface to the caller and are recorded only at the CLI/audit
     # layer (B2.6, T37). The orchestrator never half-creates a run.
     validate_report_month(report_month)
-    return _run_one_with_credentials(
+    outcome = _run_one_with_credentials(
         session=session,
         tenant_id=tenant_id,
         connector_key=connector_key,
@@ -394,6 +400,122 @@ def run_one(
             account_id=account_id,
         ),
     )
+    _normalize_ingested_source_rows(
+        session=session,
+        tenant_id=tenant_id,
+        report_month=report_month,
+        dry_run=dry_run,
+        triggered_by_user_id=triggered_by_user_id,
+        outcome=outcome,
+    )
+    return outcome
+
+
+# ============================================================================
+# Purpose: Post-run finance projection stage. After a live connector run
+#          commits its google_revenue_source_rows, collapse ALL source rows for
+#          (tenant, report_month) into MonthlyChannelRevenueFactORM via the C1
+#          GoogleSourceNormalizer, so a real ingest actually produces revenue
+#          facts. Runs ONCE per (tenant, report_month) -- the normalizer reads
+#          every source row for the month, not just this run's reports.
+# Database/ORM: MonthlyChannelRevenueFactORM (WRITE via the normalizer's
+#               record_fact upsert). Reads google_revenue_source_rows,
+#               youtube_channels, finance_month_close. No schema change.
+# Standards: Typed-error contract. The caller owns the transaction:
+#            normalize_month does NOT commit, so a successful normalize is
+#            committed here. Fail-closed locked-month policy (below) and
+#            fail-LOUD on real data errors -- silently producing no facts is the
+#            bug this stage fixes, so a non-lock error rolls back and re-raises.
+#            No bare except; no secrets/PII logged (the normalizer redacts).
+# Blast Radius: FINANCE -- writes MonthlyChannelRevenueFactORM (the dashboard,
+#               allocation, reconciliation, net-revenue, and exports all read
+#               it). Locked-month facts are NEVER overwritten: a pure-SELECT
+#               prefilter skips LOCKED months, and the normalizer's own upfront
+#               + per-write fail-closed guard catches any lock acquired
+#               mid-flight. ALLOCATION / MANUAL_UPLOAD facts use disjoint
+#               source_kind values and are untouched. No graph projection
+#               impact detected.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py ->
+#     GoogleSourceNormalizer.normalize_month (the only source-rows -> facts path).
+#   - File: backend/ums_smart_revenue/finance/month_close.py ->
+#     get_month_close_status (pure-SELECT locked-month prefilter).
+#   - File: backend/ums_smart_revenue/finance/revenue_facts.py ->
+#     RevenueFactLockedMonthError (mid-flight lock -> skip).
+#   - File: Docs/superpowers/specs/2026-06-10-ingestion-source-rows-to-facts-design.md
+#     -> integration point, locked-month policy, blast-radius review.
+# ============================================================================
+def _normalize_ingested_source_rows(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    report_month: str,
+    dry_run: bool,
+    triggered_by_user_id: UUID | None,
+    outcome: ConnectorRunOutcome,
+) -> None:
+    """Project this run's ingested source rows into revenue facts (fail-closed on locks)."""
+    # Skip on dry-run (no committed source rows) and on any run that did not
+    # reach a terminal SUCCEEDED/PARTIAL status (FAILED runs committed no new
+    # source rows worth projecting; prior month state stays intact).
+    if dry_run:
+        return
+    run = outcome.run
+    if run is None or run.status not in ("SUCCEEDED", "PARTIAL"):
+        return
+
+    # Locked-month prefilter (pure SELECT -- no row creation, no lock
+    # contention). A connector legitimately ingesting late data for a locked
+    # month must not fail the run or mutate locked facts: skip the projection,
+    # leave the run status unchanged.
+    if get_month_close_status(session, report_month, tenant_id=tenant_id) == "LOCKED":
+        logger.info(
+            "ingestion normalize skipped (month locked) tenant_id=%s month=%s",
+            tenant_id,
+            report_month,
+        )
+        return
+
+    # Actor: prefer the user who triggered the run; otherwise reuse the same
+    # connector service principal the run's audit rows were attributed to.
+    if triggered_by_user_id is not None:
+        actor_user_id = str(triggered_by_user_id)
+    else:
+        actor_user_id = build_connector_service_principal(tenant_id=tenant_id).user_id
+
+    try:
+        GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+            month=report_month,
+            actor_user_id=actor_user_id,
+        )
+        # normalize_month does NOT commit (caller owns the txn); persist the
+        # facts the post-commit session staged.
+        session.commit()
+    except RevenueFactLockedMonthError:
+        # A lock acquired between the prefilter and the write. The normalizer
+        # fails closed before (or per) any fact write, so no locked-month fact
+        # is ever persisted. Treat as a skip -- this must NEVER flip a
+        # SUCCEEDED/PARTIAL run into an exception.
+        session.rollback()
+        logger.info(
+            "ingestion normalize skipped (month locked mid-flight) "
+            "tenant_id=%s month=%s",
+            tenant_id,
+            report_month,
+        )
+    except Exception:
+        # Any other normalize error (e.g. an unknown/inactive channel or value
+        # validation) is a real data problem. Roll back the partial projection
+        # and re-raise -- silently producing no facts is exactly the bug this
+        # stage fixes, so a genuine failure must be visible. No bare except;
+        # no secrets/PII logged (the normalizer already redacts).
+        session.rollback()
+        logger.exception(
+            "ingestion normalize failed tenant_id=%s month=%s",
+            tenant_id,
+            report_month,
+        )
+        raise
 
 
 # ============================================================================

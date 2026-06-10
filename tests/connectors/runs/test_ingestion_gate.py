@@ -620,11 +620,11 @@ def test_three_connectors_end_to_end_on_mocks(
     )
 
     # ============================================================================
-    # Assertion 2 + 3: C1 normalize_month produces YT facts and skips AdSense.
+    # Assertion 2 + 3: the orchestrator now normalizes source rows into facts as
+    # the final stage of a successful run (no manual normalize_month call). The
+    # YT Reporting + YT Analytics rows must already be MonthlyChannelRevenueFactORM
+    # entries after run_one returns; AdSense is skipped (MISSING_CHANNEL_ID).
     # ============================================================================
-    result = GoogleSourceNormalizer(session, tenant_id=TENANT_ID).normalize_month(
-        month=REPORT_MONTH, actor_user_id=ACTOR_USER_ID,
-    )
     facts = list(
         session.scalars(
             select(MonthlyChannelRevenueFactORM).where(
@@ -649,6 +649,22 @@ def test_three_connectors_end_to_end_on_mocks(
         f"(1 channel x {{YOUTUBE_CMS, YOUTUBE_ANALYTICS}}); got {len(facts)}"
     )
     assert {fact.youtube_channel_id for fact in facts} == {channel_id}
+
+    # Direct normalizer-semantics coverage: the AdSense rows must classify as
+    # MISSING_CHANNEL_ID (the wiring's NormalizationResult is internal to the
+    # orchestrator, so re-run normalize_month explicitly to inspect skips). This
+    # re-run is idempotent against the facts the wiring already wrote — the two
+    # YT facts come back UNCHANGED — so it does not perturb the count above.
+    result = GoogleSourceNormalizer(session, tenant_id=TENANT_ID).normalize_month(
+        month=REPORT_MONTH, actor_user_id=ACTOR_USER_ID,
+    )
+    assert not result.created, (
+        "re-running normalize after the wiring must not create new facts; "
+        f"result.created={result.created!r}"
+    )
+    assert {fact.youtube_channel_id for fact in result.unchanged} == {channel_id}, (
+        "the wiring-written YT facts must re-classify as UNCHANGED on re-run"
+    )
     # The C1 normalizer flags the AdSense rows as MISSING_CHANNEL_ID because
     # the AdSense parser leaves ``youtube_channel_id=None``.
     missing_channel_skips = [
