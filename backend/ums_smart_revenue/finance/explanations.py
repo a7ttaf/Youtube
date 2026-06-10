@@ -1,10 +1,11 @@
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.explanation_models import NumberExplanationORM
@@ -28,7 +29,20 @@ from ums_smart_revenue.tenancy.context import get_current_tenant
 
 ADJUSTED_GROSS_REVENUE_METRIC = "adjusted_gross_revenue_usd"
 NET_REVENUE_METRIC = "net_revenue_usd"
-SUPPORTED_METRICS = frozenset({ADJUSTED_GROSS_REVENUE_METRIC, NET_REVENUE_METRIC})
+REVENUE_RECONCILIATION_METRIC = "revenue_reconciliation_usd"
+# FIX: ``revenue_reconciliation_usd`` is intentionally NOT a member of
+# ``SUPPORTED_METRICS``. The reconciliation explanation is built and persisted
+# only by ``build_reconciliation_explanation`` via the dedicated
+# ``ReconciliationWorkflowService`` workflow, which enforces the
+# finalized-payment + bank-reconciliation + confidence permission gates. Adding
+# it here would expose the generic
+# ``POST /revenue/channels/{channel_id}/months/{month}/explain?metric=...``
+# path to a caller with only VIEW_REVENUE+VIEW_CONFIDENCE@channel, letting them
+# overwrite the smart reconciliation row with an adjusted-gross explanation and
+# corrupt the persisted explanation returned by the new GET endpoint.
+SUPPORTED_METRICS = frozenset(
+    {ADJUSTED_GROSS_REVENUE_METRIC, NET_REVENUE_METRIC}
+)
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
 
 _NET_CONFIDENCE_TO_EXPLAIN: dict[str, dict[str, str]] = {
@@ -104,6 +118,38 @@ class SqlAlchemyNumberExplanationRepository:
         self._session = session
         self._tenant_id = _resolve_tenant_id(tenant_id)
 
+    def get_explanation(
+        self, *, month: str, entity_type: str, entity_id: str, metric: str
+    ) -> NumberExplanationEntry | None:
+        """Read a persisted explanation for the tenant, or None if absent.
+
+        Tenant-scoped read keyed on the unique
+        (tenant_id, month, entity_type, entity_id, metric) identity.
+        """
+        row = self._session.scalars(
+            select(NumberExplanationORM).where(
+                NumberExplanationORM.tenant_id == self._tenant_id,
+                NumberExplanationORM.month == month,
+                NumberExplanationORM.entity_type == entity_type,
+                NumberExplanationORM.entity_id == entity_id,
+                NumberExplanationORM.metric == metric,
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        return NumberExplanationEntry(
+            month=row.month,
+            entity_type=row.entity_type,
+            entity_id=row.entity_id,
+            metric=row.metric,
+            value=row.value,
+            currency=row.currency,
+            formula=row.formula,
+            confidence=_load_confidence(row.confidence),
+            components=list(row.components),
+            warnings=list(row.warnings),
+        )
+
     def record_explanation(
         self, explanation: NumberExplanationEntry
     ) -> NumberExplanationEntry:
@@ -133,12 +179,49 @@ class SqlAlchemyNumberExplanationRepository:
         row.value = explanation.value
         row.currency = explanation.currency
         row.formula = explanation.formula
-        row.confidence = str(explanation.confidence["label"])
+        # FIX: Preserve the full confidence dict (label + score + any future keys)
+        # on persistence so the GET endpoint can return the operator-visible score
+        # that the build path computed. Legacy rows stored only the label string
+        # and the reader falls back to a label-only dict for those.
+        row.confidence = _dump_confidence(explanation.confidence)
         row.components = explanation.components
         row.warnings = explanation.warnings
         row.updated_at = now
         self._session.flush()
         return explanation
+
+    # ============================================================================
+    # Purpose: Prune stale explanations for one month/entity/metric while keeping
+    #   the live entity ids from the current recomputation.
+    # Database/ORM: number_explanations / NumberExplanationORM.
+    # Standards: Tenant-scoped delete; caller owns transaction and recomputation.
+    # Blast Radius: Finance explanation rows only. No authorization or Neo4j.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/finance/reconciliation_service.py ->
+    #     Removes channel reconciliation explanations that left result.channels.
+    # ============================================================================
+    def delete_month_metric_explanations_except(
+        self,
+        *,
+        month: str,
+        entity_type: str,
+        metric: str,
+        keep_entity_ids: set[str],
+    ) -> int:
+        """Delete stale explanation rows for one metric in a tenant month."""
+        statement = delete(NumberExplanationORM).where(
+            NumberExplanationORM.tenant_id == self._tenant_id,
+            NumberExplanationORM.month == month,
+            NumberExplanationORM.entity_type == entity_type,
+            NumberExplanationORM.metric == metric,
+        )
+        if keep_entity_ids:
+            statement = statement.where(
+                ~NumberExplanationORM.entity_id.in_(sorted(keep_entity_ids))
+            )
+        result = self._session.execute(statement)
+        self._session.flush()
+        return int(result.rowcount or 0)
 
 
 def build_channel_month_revenue_explanation(
@@ -428,6 +511,35 @@ def _confidence(
         "label": label,
         "score": _decimal_to_api(score),
     }
+
+
+def _dump_confidence(confidence: dict[str, object]) -> str:
+    """Serialize a confidence dict to the persistence column (JSON text).
+
+    The ``number_explanations.confidence`` column is TEXT (see
+    ``explanation_models.NumberExplanationORM``), so the dict is encoded as
+    JSON. ``sort_keys`` keeps the on-disk representation deterministic for
+    golden tests and debugging.
+    """
+    return json.dumps(dict(confidence), sort_keys=True, default=str)
+
+
+def _load_confidence(stored: str) -> dict[str, object]:
+    """Reconstruct the confidence dict from the persistence column.
+
+    Backward compatible with rows persisted before the score was kept: those
+    rows contain only the label string, so any non-dict payload falls back to
+    ``{"label": <stored>}`` instead of crashing the GET path.
+    """
+    if not stored:
+        return {"label": "LOW", "score": "0"}
+    try:
+        parsed = json.loads(stored)
+    except (TypeError, ValueError):
+        return {"label": str(stored), "score": "0"}
+    if isinstance(parsed, dict):
+        return parsed
+    return {"label": str(parsed), "score": "0"}
 
 
 def _resolve_tenant_id(tenant_id: UUID | str | None) -> UUID:

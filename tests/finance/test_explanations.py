@@ -1,3 +1,4 @@
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
@@ -283,7 +284,7 @@ def test_record_explanation_inserts_new_row_with_tenant_stamp_and_all_fields():
         assert row.value == Decimal("1125.50")
         assert row.currency == "USD"
         assert row.formula == "baseline + override"
-        assert row.confidence == "HIGH"
+        assert json.loads(row.confidence) == {"label": "HIGH", "score": "0.98"}
         assert row.components == [{"key": "baseline", "value": "1000"}]
         assert row.warnings == [{"code": "PENDING"}]
         assert row.created_at is not None
@@ -365,7 +366,7 @@ def test_record_explanation_updates_existing_row_in_place():
         assert row.created_at == original_created_at
         assert row.value == Decimal("1125.50")
         assert row.formula == "baseline + override"
-        assert row.confidence == "HIGH"
+        assert json.loads(row.confidence) == {"label": "HIGH", "score": "0.98"}
         assert row.components == [
             {"key": "baseline", "value": "1000"},
             {"key": "override", "value": "125.5"},
@@ -803,7 +804,7 @@ def test_build_then_record_persists_full_explanation_into_database():
         assert row.tenant_id == DEFAULT_TENANT_UUID
         assert row.metric == ADJUSTED_GROSS_REVENUE_METRIC
         assert row.value == Decimal("1125.50")
-        assert row.confidence == "HIGH"
+        assert json.loads(row.confidence) == {"label": "HIGH", "score": "0.98"}
         assert row.components[0]["key"] == "baseline_gross_revenue_usd"
         assert row.components[1]["key"] == "approved_manual_override_total_usd"
         assert row.warnings == []
@@ -825,6 +826,103 @@ def test_repository_rejects_malformed_tenant_id():
         ),
     ):
         SqlAlchemyNumberExplanationRepository(session, tenant_id="not-a-uuid")
+
+
+# -----------------------------------------------------------------------------
+# SqlAlchemyNumberExplanationRepository.get_explanation -- confidence round-trip
+# -----------------------------------------------------------------------------
+
+
+def test_get_explanation_round_trips_full_confidence_dict_with_score():
+    """record_explanation + get_explanation preserves the full confidence dict.
+
+    Regression for chatgpt-codex-connector PRRT_kwDOSZIgN86IT-bT: the previous
+    writer stored only the label string, so the reader reconstructed
+    ``{"label": "..."}`` and dropped the score that build_reconciliation_explanation
+    had computed for the persisted explanation.
+    """
+    with build_session() as session:
+        repo = SqlAlchemyNumberExplanationRepository(session)
+        entry = NumberExplanationEntry(
+            month="2026-03",
+            entity_type="channel",
+            entity_id="channel-tv-a",
+            metric=ADJUSTED_GROSS_REVENUE_METRIC,
+            value=Decimal("1125.50"),
+            currency="USD",
+            formula="baseline + override",
+            confidence={"label": "MEDIUM", "score": "0.80"},
+            components=[{"key": "baseline", "value": "1000"}],
+            warnings=[],
+        )
+        repo.record_explanation(entry)
+        session.commit()
+
+        loaded = repo.get_explanation(
+            month="2026-03",
+            entity_type="channel",
+            entity_id="channel-tv-a",
+            metric=ADJUSTED_GROSS_REVENUE_METRIC,
+        )
+        assert loaded is not None
+        assert loaded.confidence == {"label": "MEDIUM", "score": "0.80"}
+        # The to_api serialization must also surface the score, since that is
+        # what the GET reconciliation endpoint emits to operators.
+        assert loaded.to_api()["confidence"] == {"label": "MEDIUM", "score": "0.80"}
+
+
+def test_get_explanation_reads_legacy_label_only_rows_without_crashing():
+    """Rows persisted before the score fix stay readable as label-only dicts.
+
+    Pre-fix rows wrote ``row.confidence = "HIGH"`` (label string). The reader
+    must still serve those rows instead of 500-ing on the GET path.
+    """
+    with build_session() as session:
+        repo = SqlAlchemyNumberExplanationRepository(session)
+        repo.record_explanation(
+            NumberExplanationEntry(
+                month="2026-03",
+                entity_type="channel",
+                entity_id="channel-tv-a",
+                metric=ADJUSTED_GROSS_REVENUE_METRIC,
+                value=Decimal("1000.00"),
+                currency="USD",
+                formula="baseline",
+                confidence={"label": "HIGH", "score": "0.95"},
+                components=[],
+                warnings=[],
+            )
+        )
+        session.commit()
+
+        # Simulate a legacy row by overwriting the on-disk label to plain text.
+        row = session.scalars(select(NumberExplanationORM)).one()
+        row.confidence = "LOW"
+        session.commit()
+
+        loaded = repo.get_explanation(
+            month="2026-03",
+            entity_type="channel",
+            entity_id="channel-tv-a",
+            metric=ADJUSTED_GROSS_REVENUE_METRIC,
+        )
+        assert loaded is not None
+        assert loaded.confidence == {"label": "LOW", "score": "0"}
+
+
+def test_get_explanation_returns_none_for_missing_row():
+    """A missing explanation row returns None (route turns that into 404)."""
+    with build_session() as session:
+        repo = SqlAlchemyNumberExplanationRepository(session)
+        assert (
+            repo.get_explanation(
+                month="2026-03",
+                entity_type="channel",
+                entity_id="absent",
+                metric=ADJUSTED_GROSS_REVENUE_METRIC,
+            )
+            is None
+        )
 
 
 # -----------------------------------------------------------------------------

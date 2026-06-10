@@ -1,12 +1,18 @@
 import sqlalchemy as sa
+from alembic import command
+from alembic.config import Config
 from tests.db._postgres_helpers import require_postgres_url
 
+from ums_smart_revenue.db.rls import TENANT_CONTEXT_TABLE
 from ums_smart_revenue.db.session import (
+    _apply_tenant_isolation,
     build_platform_session_factory,
     build_session_factory,
 )
 from ums_smart_revenue.tenancy.context import TENANT_CTX
 from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
+
+_UPGRADED_URLS: set[str] = set()
 
 
 def _tenant(uuid_str: str) -> Tenant:
@@ -19,6 +25,16 @@ def _tenant(uuid_str: str) -> Tenant:
         primary_currency="USD", status=TenantStatus.ACTIVE,
         onboarding_at=now, created_at=now, updated_at=now,
     )
+
+
+def _ensure_upgraded(url: str) -> None:
+    """Upgrade the disposable Postgres database before session-hook assertions."""
+    if url in _UPGRADED_URLS:
+        return
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", url)
+    command.upgrade(cfg, "head")
+    _UPGRADED_URLS.add(url)
 
 
 def test_sqlite_session_issues_no_set_statements():
@@ -37,14 +53,15 @@ def test_sqlite_session_issues_no_set_statements():
 def test_postgres_tenant_lane_sets_role_and_trusted_tenant_context():
     """Verify the tenant lane sets app_tenant and the trusted tenant context."""
     url = require_postgres_url()
+    _ensure_upgraded(url)
     factory = build_session_factory(url)
     tid = "00000000-0000-0000-0000-000000000001"
     token = TENANT_CTX.set(_tenant(tid))
     try:
         with factory() as session:
-            assert session.execute(
+            assert str(session.execute(
                 sa.text("SELECT app_current_tenant_id()")
-            ).scalar() == tid
+            ).scalar()) == tid
             assert session.execute(
                 sa.text("SELECT current_user")
             ).scalar() == "app_tenant"
@@ -52,23 +69,62 @@ def test_postgres_tenant_lane_sets_role_and_trusted_tenant_context():
         TENANT_CTX.reset(token)
 
 
-def test_postgres_no_context_leaves_login_role_and_unset_context():
-    """Verify the tenant lane leaves bare sessions on the login role."""
+def test_postgres_no_context_stays_on_tenant_role_and_unset_context():
+    """Verify the tenant lane fails closed without trusted tenant context."""
     url = require_postgres_url()
+    _ensure_upgraded(url)
     factory = build_session_factory(url)
-    # No TENANT_CTX → hook must not switch role or set the trusted context row.
+    # No TENANT_CTX leaves app_tenant active, but clears the trusted context row
+    # so RLS policies reject tenant rows instead of falling back to the owner role.
     with factory() as session:
         assert session.execute(
             sa.text("SELECT app_current_tenant_id()")
         ).scalar() is None
         assert session.execute(
             sa.text("SELECT current_user")
-        ).scalar() != "app_tenant"
+        ).scalar() == "app_tenant"
+
+
+def test_no_context_clears_stale_context_when_clear_helper_is_absent():
+    """Missing clear helper must not leave a stale tenant row on pooled backends."""
+
+    class _Result:
+        def __init__(self, value=None):
+            self._value = value
+
+        def scalar(self):
+            return self._value
+
+    class _Connection:
+        dialect = type("Dialect", (), {"name": "postgresql"})()
+
+        def __init__(self):
+            self.calls = []
+
+        def exec_driver_sql(self, sql, parameters=None):
+            self.calls.append((sql, parameters))
+            if sql == "SELECT to_regprocedure(%s) IS NOT NULL":
+                return _Result(False)
+            return _Result()
+
+    session = type("Session", (), {"info": {"ums_db_role": "app_tenant"}})()
+    connection = _Connection()
+    token = TENANT_CTX.set(None)
+    try:
+        _apply_tenant_isolation(session, None, connection)
+    finally:
+        TENANT_CTX.reset(token)
+
+    assert any(
+        sql == f"DELETE FROM {TENANT_CONTEXT_TABLE} WHERE backend_pid = pg_backend_pid()"
+        for sql, _parameters in connection.calls
+    )
 
 
 def test_platform_lane_uses_app_platform_and_no_tenant_context():
     """Verify the platform lane uses app_platform without tenant context."""
     url = require_postgres_url()
+    _ensure_upgraded(url)
     factory = build_platform_session_factory(url)
     with factory() as session:
         assert session.execute(
@@ -84,6 +140,7 @@ def test_pooled_connection_does_not_leak_role_or_context():
     # Transaction 1 sets tenant lane; transaction 2 on the SAME pooled
     # connection (no context) must see no leaked role/tenant context.
     url = require_postgres_url()
+    _ensure_upgraded(url)
     engine = sa.create_engine(url, pool_size=1, max_overflow=0)
     factory = build_session_factory(url, engine=engine)
     tid = "00000000-0000-0000-0000-000000000001"
@@ -94,9 +151,9 @@ def test_pooled_connection_does_not_leak_role_or_context():
             s1.commit()
     finally:
         TENANT_CTX.reset(token)
-    # Reuse the pool with no context.
+    # Reuse the pool with no context; role stays restricted and context is empty.
     with factory() as s2:
-        assert s2.execute(sa.text("SELECT current_user")).scalar() != "app_tenant"
+        assert s2.execute(sa.text("SELECT current_user")).scalar() == "app_tenant"
         assert s2.execute(
             sa.text("SELECT app_current_tenant_id()")
         ).scalar() is None

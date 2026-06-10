@@ -605,6 +605,23 @@ single P-tier above.
   paired-column `*_usd` -> native migration is still ⏳ PENDING as a separate
   future spec (out of scope for Track E).
 
+- ✅ Track F (2026-06-09) — **Smart revenue reconciliation workflow DONE.**
+  Pure compute core derives US tax + YouTube->AdSense fee + AdSense->bank fee+FX
+  from actual figures, attributed per channel proportional to CMS gross with a
+  rounding-remainder rule; persists typed `deduction_components` +
+  `revenue_reconciliation_usd` explanation (deterministic prose; only TAX feeds
+  `net_revenue_usd`, transfer-fee/FX are evidence-only).
+  `POST /revenue/months/{month}/reconcile` (`CHANGE_ALLOCATION_RULE@finance_month`,
+  409 locked / 422 bad month) + `GET .../reconciliation` (`VIEW_REVENUE@channel`,
+  404 none). **Outside-CMS 1:1 ALLOCATION attribution DONE** (single verified
+  account->channel link writes the gross fact; many -> skip + warn).
+- ✅ Track F (2026-06-09) — **Manual report purge DONE.**
+  `DELETE /reports/raw-files/{id}` (`MANAGE_CONNECTORS@connector(source)`,
+  reason-required -> 422, 404 unknown/cross-tenant, 409 re-purge) marks PURGED
+  keeping metadata; additive `purged_at`/`purged_by` columns + CHECK swap.
+  ⏳ Refine-later: real US-view-share feed, withholding-rate calibration, and
+  multi-API-key ingestion scaling.
+
 ## Hard problems to solve early
 
 1. ⏳ Revenue source for 70 outside-CMS channels — still open; not solved

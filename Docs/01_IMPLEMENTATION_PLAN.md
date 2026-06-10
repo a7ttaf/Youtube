@@ -163,6 +163,21 @@ running on the operator's workstation.
       never returned (`raw_payload_redacted` always true); cross-tenant/missing
       id returns 404. The paired-column `*_usd` -> native migration remains
       ⏳ PENDING as a separate future spec (out of scope for Track E).
+    - ✅ Track F (2026-06-09): **Smart revenue reconciliation workflow DONE.**
+      Month-level engine derives the three reductions (US tax, YouTube->AdSense
+      transfer fee, AdSense->bank fee+FX) from actual figures and attributes the
+      aggregate ones per channel proportional to CMS gross; persists typed
+      `deduction_components` + a `revenue_reconciliation_usd` explanation (only
+      TAX feeds `net_revenue_usd`). `POST /revenue/months/{month}/reconcile`
+      (`CHANGE_ALLOCATION_RULE@finance_month`) +
+      `GET /revenue/channels/{id}/months/{month}/reconciliation`
+      (`VIEW_REVENUE@channel`). **Outside-CMS 1:1 ALLOCATION attribution DONE**
+      (single verified account->channel link writes the gross fact; many ->
+      skip + warn). **Manual report purge DONE** —
+      `DELETE /reports/raw-files/{id}` (`MANAGE_CONNECTORS@connector`,
+      reason-required, marks PURGED keeping metadata). ⏳ Refine-later: real
+      US-view-share feed, withholding-rate calibration, and multi-API-key
+      ingestion scaling.
 ---
 
 ## Phase 0 — Foundation decisions

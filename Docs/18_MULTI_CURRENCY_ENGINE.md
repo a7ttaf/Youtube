@@ -370,3 +370,56 @@ from display FX.
 - How bank receipt variance should be explained when it reflects bank timing,
   fees, or local currency settlement rather than a Google-reported revenue
   difference.
+
+---
+
+## Smart revenue reconciliation workflow (Track F, 2026-06-09)
+
+The reconciliation workflow derives the month's estimated-to-received shrinkage
+from the actual figures and attributes it per channel, so each channel carries a
+defensible share of every reduction without inventing per-channel source data.
+
+### Three derived reductions
+
+1. **US tax** (per channel, direct): `us_view_share x gross x withholding_rate`.
+   `withholding_rate` defaults to `DEFAULT_US_WITHHOLDING_RATE` (0.30).
+2. **YouTube to AdSense transfer fee** (aggregate residual): the gap between the
+   post-tax estimate `(gross - tax)` and the AdSense total received, attributed
+   across channels proportional to CMS gross.
+3. **AdSense to bank fee + FX** (aggregate residual, split): the gap between the
+   AdSense total and the bank total received, split into an FX component (from
+   the bank-entry FX deltas) and a residual transfer fee, both attributed
+   proportional to CMS gross.
+
+All amounts use `Decimal` quantized to 6dp. Each attributed aggregate's rounding
+remainder lands on the largest-gross channel so per-channel sums equal the
+aggregate exactly. Anomalies (received exceeds estimate) clamp the derived fee to
+zero and emit a warning rather than producing a negative reduction.
+
+### Persistence and the net-revenue boundary
+
+Per channel-month the workflow persists:
+
+- Typed `deduction_components` (`source_table = "reconciliation_workflow"`):
+  one `TAX`, two `TRANSFER_FEE` (yt->adsense, adsense->bank), and one
+  `FX_VARIANCE` row, skipping zero amounts. The components are source-aligned so
+  the net-revenue resolver can select them.
+- A `revenue_reconciliation_usd` `number_explanation` with deterministic prose
+  (no LLM): same inputs always yield identical text, plus per-hop components and
+  a `net_received_usd` value.
+
+Only the **TAX** component feeds the existing `net_revenue_usd` metric. The
+`TRANSFER_FEE` and `FX_VARIANCE` components are recorded as evidence only and
+never reduce net (per the deduction_policy). The full estimated-to-received
+shrinkage lives in the reconciliation metric's `net_received` value, not in
+`net_revenue_usd`.
+
+### Refine-later inputs
+
+- **US-view-share feed:** the workflow consumes US-view shares through a
+  `UsViewShareProvider` protocol. The current `NullUsViewShareProvider` always
+  returns `None` (no geography feed ingested yet), so tax is currently understated
+  and the run emits a `MISSING_US_VIEW_DATA` warning. Wiring a real per-channel
+  US-view feed is a future refinement.
+- **Withholding rate:** `DEFAULT_US_WITHHOLDING_RATE` is a flat placeholder.
+  Calibrating it (per treaty / per entity) is a future refinement.

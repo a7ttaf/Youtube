@@ -70,6 +70,8 @@ from ums_smart_revenue.finance.deduction_ingestion import (
 )
 from ums_smart_revenue.finance.explanations import (
     NET_REVENUE_METRIC,
+    REVENUE_RECONCILIATION_METRIC,
+    SUPPORTED_METRICS,
     NumberExplanationValidationError,
     SqlAlchemyNumberExplanationRepository,
     build_channel_month_revenue_explanation,
@@ -1620,6 +1622,33 @@ def explain_channel_month_revenue_metric(
     target_scope = AccessScope.channel(channel_id)
     _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
     _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    # FIX: refuse the smart reconciliation metric on the generic explain route.
+    # The reconciliation explanation is built and persisted only by the
+    # dedicated ReconciliationWorkflowService workflow (see
+    # backend/ums_smart_revenue/finance/reconciliation_service.py), which
+    # enforces VIEW_FINALIZED_PAYMENTS + VIEW_BANK_RECONCILIATION +
+    # VIEW_CONFIDENCE + CHANGE_ALLOCATION_RULE. Routing the metric through
+    # this generic endpoint would let a caller with only channel revenue +
+    # confidence access overwrite the smart reconciliation row with an
+    # adjusted-gross explanation and corrupt the persisted explanation
+    # returned by GET /revenue/channels/{id}/months/{month}/reconciliation.
+    if metric == REVENUE_RECONCILIATION_METRIC:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"{REVENUE_RECONCILIATION_METRIC} is not writable through the "
+                "generic explain endpoint; use POST "
+                f"/revenue/months/{month}/reconcile instead."
+            ),
+        )
+    if metric not in SUPPORTED_METRICS:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"Unsupported explanation metric: {metric}. Supported: "
+                f"{sorted(SUPPORTED_METRICS)}."
+            ),
+        )
     is_net_metric = metric == NET_REVENUE_METRIC
     if is_net_metric:
         # Net explanations expose finalized-payment-derived deduction provenance,

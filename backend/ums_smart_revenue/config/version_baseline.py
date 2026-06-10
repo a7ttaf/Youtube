@@ -6,7 +6,7 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
     "backend": {
         "fastapi": "0.136.3",
         "pydantic": "2.13.4",
-        "uvicorn": "0.48.0",
+        "uvicorn": "0.49.0",
         "sqlalchemy": "2.0.50",
         "alembic": "1.18.4",
         "psycopg": "3.3.4",
@@ -15,11 +15,11 @@ STACK_VERSION_BASELINE: dict[str, dict[str, str]] = {
         "openpyxl": "3.1.5",
         "reportlab": "4.5.1",
         "python_pptx": "1.0.2",
-        "google_cloud_secret_manager": "2.28.0",
-        "google_cloud_storage": "3.10.1",
+        "google_cloud_secret_manager": "2.29.0",
+        "google_cloud_storage": "3.11.0",
         "pytest": "9.0.3",
         "httpx": "0.28.1",
-        "pypdf": "6.12.2",
+        "pypdf": "6.13.1",
     },
     "datastores": {
         "postgresql": "18.3",
