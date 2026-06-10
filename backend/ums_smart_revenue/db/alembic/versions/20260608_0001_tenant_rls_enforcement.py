@@ -103,6 +103,59 @@ def _assert_no_drift(bind) -> None:
         )
 
 
+# ============================================================================
+# Purpose: Bound direct DELETE fallback access to the caller's backend context
+#          row before app_platform receives DELETE on app_tenant_context.
+# Database/ORM: PostgreSQL table app_tenant_context; no SQLAlchemy ORM models.
+# Standards: Migration-owned SQL is explicit, idempotent, and fail-closed by
+#            raising on cross-backend DELETE attempts.
+# Blast Radius: Authorization and audit-adjacent tenant isolation guard.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/session.py -> Uses direct DELETE
+#     fallback when clear_app_current_tenant_id is absent.
+#   - File: backend/ums_smart_revenue/db/alembic/versions/20260609_0002_tenant_context_clearer.py
+#     -> Reinstalls the same guard for databases that already ran 20260608_0001.
+# ============================================================================
+def _create_tenant_context_delete_guard(bind) -> None:
+    """Install the backend-row guard for direct context DELETE fallback."""
+    bind.execute(
+        sa.text(
+            f"""
+            CREATE OR REPLACE FUNCTION {TENANT_CONTEXT_CLEARER}_guard_delete()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF OLD.backend_pid <> pg_backend_pid() THEN
+                    RAISE EXCEPTION
+                        'app_tenant_context DELETE restricted to current backend';
+                END IF;
+                RETURN OLD;
+            END;
+            $$
+            """
+        )
+    )
+    bind.execute(
+        sa.text(
+            f"""
+            DROP TRIGGER IF EXISTS {TENANT_CONTEXT_CLEARER}_guard_delete_trg
+            ON {TENANT_CONTEXT_TABLE}
+            """
+        )
+    )
+    bind.execute(
+        sa.text(
+            f"""
+            CREATE TRIGGER {TENANT_CONTEXT_CLEARER}_guard_delete_trg
+            BEFORE DELETE ON {TENANT_CONTEXT_TABLE}
+            FOR EACH ROW
+            EXECUTE FUNCTION {TENANT_CONTEXT_CLEARER}_guard_delete()
+            """
+        )
+    )
+
+
 def _create_tenant_context_helpers(bind) -> None:
     """Create the backend-owned tenant-context table and helper functions."""
     bind.execute(
@@ -116,15 +169,17 @@ def _create_tenant_context_helpers(bind) -> None:
             """
         )
     )
+    _create_tenant_context_delete_guard(bind)
     # FIX: Grant DELETE on the context table to app_platform so the
     # session hook can fall back to a direct DELETE during a rolling
     # migration gap (i.e. when 20260609_0002 has not yet installed the
     # privileged `clear_app_current_tenant_id` helper). The helper
     # itself runs SECURITY DEFINER and bypasses these grants, but the
     # fallback path runs as the caller role, so app_platform needs
-    # DELETE explicitly. Without this, no-context sessions on a fresh
-    # 20260608_0001 install would permission-deny on the missing-helper
-    # fallback flagged by Codex P2 review on PR #88.
+    # DELETE explicitly. The BEFORE DELETE guard above limits that grant
+    # to the caller's own backend row; without the grant, no-context
+    # sessions on a fresh 20260608_0001 install would permission-deny on
+    # the missing-helper fallback flagged by Codex P2 review on PR #88.
     bind.execute(
         sa.text(
             f'GRANT DELETE ON {TENANT_CONTEXT_TABLE} TO "{APP_PLATFORM_ROLE}"'
@@ -344,6 +399,9 @@ def downgrade() -> None:
         sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_CLEARER}()')
     )
     bind.execute(sa.text(f'DROP TABLE IF EXISTS {TENANT_CONTEXT_TABLE}'))
+    bind.execute(
+        sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_CLEARER}_guard_delete()')
+    )
     # ========================================================================
     # Purpose: Strip every dependent privilege/object before DROP ROLE.
     #   Postgres refuses DROP ROLE while the role still holds (or was granted)

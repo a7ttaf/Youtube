@@ -51,6 +51,19 @@ def _function_exists(conn: sa.Connection, function_name: str) -> bool:
     )
 
 
+def _get_delete_grantees(conn: sa.Connection, table: str) -> set[str]:
+    """Return roles that hold DELETE on ``table``."""
+    return set(
+        conn.execute(
+            sa.text(
+                "SELECT grantee FROM information_schema.role_table_grants "
+                "WHERE table_name = :t AND privilege_type = 'DELETE'"
+            ),
+            {"t": table},
+        ).scalars()
+    )
+
+
 @contextmanager
 def _db_conn(url: str) -> Iterator[sa.Connection]:
     """Yield a SQLAlchemy Connection from a short-lived engine.
@@ -78,6 +91,45 @@ def _drop_public_schema(url: str) -> None:
             conn.execute(sa.text("CREATE SCHEMA public"))
     finally:
         engine.dispose()
+
+
+def _assert_app_platform_cross_backend_delete_rejected(url: str) -> None:
+    """Verify the context-table DELETE guard blocks cross-backend deletion."""
+    import psycopg
+
+    libpq_url = url.replace("postgresql+psycopg://", "postgresql://")
+    with psycopg.connect(libpq_url, autocommit=True) as raw_conn:
+        with raw_conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO app_tenant_context "
+                "(backend_pid, tenant_id) VALUES (%s, gen_random_uuid())",
+                (-1,),
+            )
+            try:
+                cur.execute("SET ROLE app_platform")
+                try:
+                    cur.execute(
+                        "DELETE FROM app_tenant_context "
+                        "WHERE backend_pid = -1"
+                    )
+                except psycopg.errors.RaiseException as exc:
+                    assert (
+                        "app_tenant_context DELETE restricted" in str(exc)
+                    ), f"unexpected error: {exc}"
+                else:
+                    raise AssertionError(
+                        "guard trigger should reject cross-backend DELETE"
+                    )
+                finally:
+                    cur.execute("RESET ROLE")
+            finally:
+                # Disable user-defined triggers only for test cleanup. The
+                # migration runner is a superuser in the disposable PG DB.
+                cur.execute("SET session_replication_role = replica")
+                cur.execute(
+                    "DELETE FROM app_tenant_context WHERE backend_pid = -1"
+                )
+                cur.execute("SET session_replication_role = origin")
 
 
 def test_rls_migration_creates_roles_policies_and_grants():
@@ -177,20 +229,13 @@ def test_tenant_context_clearer_is_owned_only_by_20260609_0002():
         # rolling-migration gap (helper is not installed yet). The
         # helper itself is SECURITY DEFINER and bypasses this grant,
         # but the fallback runs as the caller role.
-        delete_grants = set(
-            conn.execute(
-                sa.text(
-                    "SELECT grantee FROM information_schema.role_table_grants "
-                    "WHERE table_name = :t AND privilege_type = 'DELETE'"
-                ),
-                {"t": TENANT_CONTEXT_TABLE},
-            ).scalars()
-        )
+        delete_grants = _get_delete_grantees(conn, TENANT_CONTEXT_TABLE)
         assert APP_PLATFORM_ROLE in delete_grants, (
             "app_platform must hold DELETE on app_tenant_context at "
             "20260608_0001 so the missing-helper fallback in the "
             "session hook can clear stale rows."
         )
+    _assert_app_platform_cross_backend_delete_rejected(url)
 
     # 2) Upgrade to head (20260609_0002): helper IS installed and GRANTed to
     #    app_platform.
@@ -225,14 +270,8 @@ def test_tenant_context_clearer_is_owned_only_by_20260609_0002():
             "Downgrading 20260609_0002 must drop clear_app_current_tenant_id "
             "— that is its sole-owner contract."
         )
-        delete_grants_after_downgrade = set(
-            conn.execute(
-                sa.text(
-                    "SELECT grantee FROM information_schema.role_table_grants "
-                    "WHERE table_name = :t AND privilege_type = 'DELETE'"
-                ),
-                {"t": TENANT_CONTEXT_TABLE},
-            ).scalars()
+        delete_grants_after_downgrade = _get_delete_grantees(
+            conn, TENANT_CONTEXT_TABLE
         )
         assert APP_PLATFORM_ROLE in delete_grants_after_downgrade, (
             "Downgrading 20260609_0002 must NOT revoke the platform "
@@ -240,54 +279,19 @@ def test_tenant_context_clearer_is_owned_only_by_20260609_0002():
             "missing-helper fallback will permission-deny on this "
             "intermediate revision."
         )
+    _assert_app_platform_cross_backend_delete_rejected(url)
 
     # 4) Re-upgrade to head: helper is reinstalled cleanly (no stale object).
     command.upgrade(cfg, "head")
     with _db_conn(url) as conn:
         assert _function_exists(conn, TENANT_CONTEXT_CLEARER) is True
-        # The BEFORE DELETE guard trigger installed in 20260609_0002
-        # bounds the platform lane's mutation surface over the RLS
-        # context table: even with the DELETE grant, `app_platform`
-        # can only delete its own backend's row, never another
-        # backend's. The session hook's missing-helper fallback and
-        # the privileged clearer both filter on the current backend,
-        # so they continue to succeed under the trigger.
-        import psycopg
-        libpq_url = url.replace("postgresql+psycopg://", "postgresql://")
-        with psycopg.connect(libpq_url, autocommit=True) as raw_conn:
-            with raw_conn.cursor() as cur:
-                # Seed a row under postgres (trigger's whitelisted role)
-                cur.execute(
-                    "INSERT INTO app_tenant_context "
-                    "(backend_pid, tenant_id) VALUES (%s, gen_random_uuid())",
-                    (-1,),
-                )
-                # Switch to app_platform and attempt a cross-backend DELETE
-                cur.execute("SET LOCAL ROLE app_platform")
-                try:
-                    cur.execute(
-                        "DELETE FROM app_tenant_context "
-                        "WHERE backend_pid = -1"
-                    )
-                    assert False, (
-                        "guard trigger should reject cross-backend DELETE"
-                    )
-                except psycopg.errors.RaiseException as exc:
-                    assert (
-                        "app_tenant_context DELETE restricted" in str(exc)
-                    ), f"unexpected error: {exc}"
-                # Cleanup as a privileged role. `session_replication_role
-                # = replica` disables user-defined triggers so the test's
-                # own cleanup row can be removed without tripping the
-                # guard. This switch is a Postgres superuser-only GUC,
-                # but the test runs as the migration runner (postgres),
-                # so it is permitted here.
-                cur.execute("RESET ROLE")
-                cur.execute("SET session_replication_role = replica")
-                cur.execute(
-                    "DELETE FROM app_tenant_context "
-                    "WHERE backend_pid = -1"
-                )
-                cur.execute("SET session_replication_role = origin")
+        # The BEFORE DELETE guard trigger owned by 20260608_0001 and
+        # repaired by 20260609_0002 bounds the platform lane's mutation
+        # surface over the RLS context table: even with the DELETE
+        # grant, `app_platform` can only delete its own backend's row,
+        # never another backend's. The session hook's missing-helper
+        # fallback and the privileged clearer both filter on the current
+        # backend, so they continue to succeed under the trigger.
+        _assert_app_platform_cross_backend_delete_rejected(url)
     # Leave the DB at head for any subsequent test that depends on the
     # baseline schema/role state.
