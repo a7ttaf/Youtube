@@ -34,6 +34,9 @@ def alembic_config(postgres_url: str) -> Config:
 def fresh_engine(postgres_url: str) -> object:
     engine = create_engine(postgres_url)
     with engine.begin() as conn:
+        # Fail fast (don't hang) if a stray connection holds a public-schema
+        # lock: without lock_timeout, DROP SCHEMA waits indefinitely.
+        conn.execute(text("SET LOCAL lock_timeout = '30s'"))
         conn.execute(text("DROP SCHEMA public CASCADE"))
         conn.execute(text("CREATE SCHEMA public"))
     yield engine

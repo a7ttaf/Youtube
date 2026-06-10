@@ -89,6 +89,9 @@ def _drop_public_schema(url: str) -> None:
     engine = sa.create_engine(url)
     try:
         with engine.begin() as conn:
+            # Fail fast (don't hang) if a stray connection holds a public-schema
+            # lock: without lock_timeout, DROP SCHEMA waits indefinitely.
+            conn.execute(sa.text("SET LOCAL lock_timeout = '30s'"))
             conn.execute(sa.text("DROP SCHEMA public CASCADE"))
             conn.execute(sa.text("CREATE SCHEMA public"))
     finally:
