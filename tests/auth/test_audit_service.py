@@ -90,6 +90,36 @@ def test_record_audit_event_marks_sensitive_event_and_scope():
     assert sink.records == [record]
 
 
+def test_revenue_reconciled_event_is_sensitive_and_reason_required():
+    sink = InMemoryAuditSink()
+
+    with pytest.raises(ValueError, match="requires a reason"):
+        record_audit_event(
+            sink=sink,
+            actor=principal(),
+            event_type=AuditEventType.REVENUE_RECONCILED,
+            entity_type="finance_month",
+            entity_id="2026-03",
+            scope=AccessScope.finance_month("2026-03"),
+            details={"channel_count": 1},
+        )
+
+    record = record_audit_event(
+        sink=sink,
+        actor=principal(),
+        event_type=AuditEventType.REVENUE_RECONCILED,
+        entity_type="finance_month",
+        entity_id="2026-03",
+        scope=AccessScope.finance_month("2026-03"),
+        reason="monthly close",
+        details={"channel_count": 1},
+    )
+
+    assert record.sensitive is True
+    assert record.permission == Permission.CHANGE_ALLOCATION_RULE.value
+    assert sink.records == [record]
+
+
 def test_record_audit_event_accepts_permission_override():
     sink = InMemoryAuditSink()
 

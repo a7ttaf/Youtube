@@ -16,6 +16,8 @@ class AuditEventType(StrEnum):
     REPORT_IMPORTED = "REPORT_IMPORTED"
     ADSENSE_PAYMENT_SYNCED = "ADSENSE_PAYMENT_SYNCED"
     DEDUCTION_COMPONENTS_INGESTED = "DEDUCTION_COMPONENTS_INGESTED"
+    REVENUE_RECONCILED = "REVENUE_RECONCILED"
+    REPORT_PURGED = "REPORT_PURGED"
     MONTH_CLOSE_UPDATED = "MONTH_CLOSE_UPDATED"
     MONTH_CLOSE_VIEWED = "MONTH_CLOSE_VIEWED"
     MONTH_LOCKED = "MONTH_LOCKED"
@@ -110,6 +112,16 @@ AUDIT_EVENT_DEFINITIONS: dict[AuditEventType, AuditEventDefinition] = {
         AuditEventType.RECALCULATION_REQUESTED,
         reason_required=True,
         permission=Permission.CHANGE_ALLOCATION_RULE,
+    ),
+    AuditEventType.REVENUE_RECONCILED: AuditEventDefinition(
+        AuditEventType.REVENUE_RECONCILED,
+        reason_required=True,
+        permission=Permission.CHANGE_ALLOCATION_RULE,
+    ),
+    AuditEventType.REPORT_PURGED: AuditEventDefinition(
+        AuditEventType.REPORT_PURGED,
+        reason_required=True,
+        permission=Permission.MANAGE_CONNECTORS,
     ),
     AuditEventType.EXPORT_CREATED: AuditEventDefinition(
         AuditEventType.EXPORT_CREATED,

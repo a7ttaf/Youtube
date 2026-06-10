@@ -29,6 +29,7 @@ from alembic import op
 from ums_smart_revenue.db.rls import (
     APP_PLATFORM_ROLE,
     APP_TENANT_ROLE,
+    TENANT_CONTEXT_CLEARER,
     TENANT_CONTEXT_GETTER,
     TENANT_CONTEXT_SETTER,
     TENANT_CONTEXT_TABLE,
@@ -152,6 +153,25 @@ def _create_tenant_context_helpers(bind) -> None:
             """
         )
     )
+    # FIX: Install the privileged clearer in the same migration as the rest
+    # of the helper surface so no rolling-migration gap can leave the
+    # session hook falling back to a direct DELETE under the app_platform
+    # role (which lacks DELETE on app_tenant_context).
+    bind.execute(
+        sa.text(
+            f"""
+            CREATE OR REPLACE FUNCTION {TENANT_CONTEXT_CLEARER}()
+            RETURNS void
+            LANGUAGE sql
+            SECURITY DEFINER
+            SET search_path = pg_catalog, public
+            AS $$
+                DELETE FROM {TENANT_CONTEXT_TABLE}
+                WHERE backend_pid = pg_backend_pid()
+            $$;
+            """
+        )
+    )
     bind.execute(
         sa.text(
             f'REVOKE ALL ON FUNCTION {TENANT_CONTEXT_SETTER}(uuid) FROM PUBLIC'
@@ -160,6 +180,11 @@ def _create_tenant_context_helpers(bind) -> None:
     bind.execute(
         sa.text(
             f'REVOKE ALL ON FUNCTION {TENANT_CONTEXT_GETTER}() FROM PUBLIC'
+        )
+    )
+    bind.execute(
+        sa.text(
+            f'REVOKE ALL ON FUNCTION {TENANT_CONTEXT_CLEARER}() FROM PUBLIC'
         )
     )
     bind.execute(
@@ -175,6 +200,11 @@ def _create_tenant_context_helpers(bind) -> None:
     bind.execute(
         sa.text(
             f'GRANT EXECUTE ON FUNCTION {TENANT_CONTEXT_GETTER}() TO "{APP_PLATFORM_ROLE}"'
+        )
+    )
+    bind.execute(
+        sa.text(
+            f'GRANT EXECUTE ON FUNCTION {TENANT_CONTEXT_CLEARER}() TO "{APP_PLATFORM_ROLE}"'
         )
     )
 
@@ -293,6 +323,9 @@ def downgrade() -> None:
     )
     bind.execute(
         sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_GETTER}()')
+    )
+    bind.execute(
+        sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_CLEARER}()')
     )
     bind.execute(sa.text(f'DROP TABLE IF EXISTS {TENANT_CONTEXT_TABLE}'))
     # ========================================================================

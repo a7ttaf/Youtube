@@ -11,6 +11,7 @@ from ums_smart_revenue.db.rls import (
     APP_TENANT_ROLE,
     TENANT_CONTEXT_CLEARER,
     TENANT_CONTEXT_SETTER,
+    TENANT_CONTEXT_TABLE,
 )
 
 SessionFactory = sessionmaker[Session]
@@ -22,9 +23,12 @@ _engine_cache_lock = Lock()
 
 
 # ============================================================================
-# Purpose: Build the per-URL SQLAlchemy Engine. Postgres (production) keeps the
-#   normal connection pool so the dual-lane design hands the tenant lane and the
-#   privileged app_platform/audit lane DISTINCT role-switched connections.
+# Purpose: Build the per-URL SQLAlchemy Engine. SQLite (test-only) shares one
+#   connection via StaticPool so the request session and the audit/platform
+#   session serialize through a single writer (SQLite allows only one writer
+#   at a time). Postgres (production) keeps the normal connection pool so the
+#   dual-lane design hands the tenant lane and the privileged app_platform/
+#   audit lane DISTINCT role-switched connections.
 # Database/ORM: All ORM models (engine is the shared connection source).
 # Standards: typed boundary; no error swallowing; pool_pre_ping retained.
 # Blast Radius: DB connection topology. SQLite branch is test-only; Postgres
@@ -51,16 +55,49 @@ def build_engine(database_url: str) -> Engine:
     return create_engine(database_url, pool_pre_ping=True)
 
 
+# ============================================================================
+# Purpose: Build the default app tenant-lane session factory. Sessions produced
+#   here opt into the Postgres RLS role hook through session.info; raw SQLAlchemy
+#   Sessions used by migrations/tests remain owner sessions unless explicitly
+#   marked. For SQLite (StaticPool) we force every new Session to open a
+#   SAVEPOINT so its commit/rollback lands on its own sub-transaction instead
+#   of the shared outer one — without this, two sessions on the same connection
+#   could clobber each other's uncommitted writes.
+# Database/ORM: SQLAlchemy Session factory metadata only.
+# Standards: explicit role marker; no ambient global role changes for unmarked
+#   sessions; SAVEPOINT isolation scoped to the SQLite engine only.
+# Blast Radius: Authorization/RLS role selection at the DB boundary (Postgres
+#   path); SQLite transaction-isolation discipline (test-only).
+# Connections:
+#   - File: backend/ums_smart_revenue/db/rls.py -> app_tenant role name.
+#   - File: backend/ums_smart_revenue/app.py -> request session factory.
+# ============================================================================
 def build_session_factory(
     database_url: str, engine: Engine | None = None
 ) -> SessionFactory:
-    """Return a sessionmaker bound to a per-URL cached engine (or the given one)."""
+    """Return a tenant-lane sessionmaker bound to a cached or given engine."""
     if engine is None:
         with _engine_cache_lock:
             if database_url not in _engine_cache:
                 _engine_cache[database_url] = build_engine(database_url)
             engine = _engine_cache[database_url]
-    return sessionmaker(bind=engine, autoflush=True, expire_on_commit=False)
+    kwargs: dict[str, object] = {
+        "autoflush": True,
+        "expire_on_commit": False,
+        "info": {_SESSION_ROLE_KEY: APP_TENANT_ROLE},
+    }
+    if database_url.startswith("sqlite"):
+        # FIX: StaticPool shares one DBAPI connection across every Session, so
+        # without per-session SAVEPOINTs, every Session's commit/rollback lands
+        # on the same underlying transaction (one Session's commit can promote
+        # another Session's uncommitted writes, one Session's rollback can
+        # discard another Session's writes). join_transaction_mode="create_savepoint"
+        # forces each new Session to open a SAVEPOINT for isolated commit/
+        # rollback semantics, leaving the outer transaction in the static
+        # connection intact. Postgres keeps the default ("conditional_savepoint")
+        # because each Session gets a distinct pooled connection.
+        kwargs["join_transaction_mode"] = "create_savepoint"
+    return sessionmaker(bind=engine, **kwargs)
 
 
 # ============================================================================
@@ -97,10 +134,13 @@ def build_platform_session_factory(
 #   never a tenant-settable setting.
 # Database/ORM: All tenant-scoped tables (RLS policies created in 20260608_0001).
 # Standards: SET LOCAL (transaction-scoped, auto-reset on commit/rollback);
-#   fail-closed (missing tenant context => no row => RLS policy rejects access).
-# Blast Radius: Authorization/finance reads+writes at the DB boundary. No-op on
-#   SQLite and on tenant-lane sessions opened without a resolved tenant, so the
-#   existing test suite and pre-S2.4 non-tenant paths are unaffected.
+#   fail-closed (missing tenant context => no row => RLS policy rejects access);
+#   always switch tenant-lane sessions into the restricted app_tenant role so
+#   that an unset TENANT_CTX (or an owner/superuser login that bypasses RLS on
+#   the raw login role) cannot read tenant tables.
+# Blast Radius: Authorization/finance reads+writes at the DB boundary. SQLite
+#   is unaffected; Postgres tenant-lane sessions stay on app_tenant with or
+#   without a trusted context row, so RLS is the only authorization gate.
 # Connections:
 #   - File: backend/ums_smart_revenue/tenancy/context.py -> tenant in contextvar.
 #   - File: backend/ums_smart_revenue/db/rls.py -> role names + tenant context helpers.
@@ -110,50 +150,45 @@ def _apply_tenant_isolation(session, _transaction, connection):
     """Set transaction role + trusted tenant context for Postgres sessions."""
     if connection.dialect.name != "postgresql":
         return
-    role = session.info.get(_SESSION_ROLE_KEY, APP_TENANT_ROLE)
-    # Default app_tenant lane: only act when a tenant is in context.
+    role = session.info.get(_SESSION_ROLE_KEY)
+    if role is None:
+        return
+    # Default app_tenant lane: set tenant context when present and stay
+    # restricted when it is absent. Always elevate to app_platform first so the
+    # privileged helpers (setter, clearer) can run under a role that holds
+    # EXECUTE on them; the runtime login does not inherit EXECUTE under the
+    # restricted-login (WITH INHERIT FALSE) deployment model.
     from ums_smart_revenue.tenancy.context import get_current_tenant
 
     tenant = get_current_tenant()
+    connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"')
     if tenant is not None:
-        # Tolerate schemas built via metadata.create_all (no RLS migration): the
-        # hook no-ops when the setter function is absent rather than erroring.
-        if _tenant_context_fn_exists(connection, f"{TENANT_CONTEXT_SETTER}(uuid)"):
-            # Elevate to app_platform only to run the trusted setter, so tenant
-            # code cannot mutate the context through the tenant lane.
-            connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"')
-            connection.exec_driver_sql(
-                f"SELECT {TENANT_CONTEXT_SETTER}(%s)",
-                (str(tenant.id),),
-            )
-    elif _tenant_context_fn_exists(connection, f"{TENANT_CONTEXT_CLEARER}()"):
-        # FIX: Clear any stale pooled-connection context via the SECURITY DEFINER
-        # clearer (runs as its owner) instead of a raw DELETE; the app lanes hold
-        # only SELECT on the context table, so the prior DELETE permission-denied.
-        # No role elevation needed; tolerant of the absent function
-        # (metadata.create_all PG schemas) by skipping the call.
-        connection.exec_driver_sql(f"SELECT {TENANT_CONTEXT_CLEARER}()")
-    if role == APP_PLATFORM_ROLE:
-        connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"')
-    elif tenant is not None:
-        # Drop into the restricted app_tenant lane only once a tenant context row
-        # is set; a context-less tenant-lane session stays on the login role
-        # (fail-closed: no context row => RLS exposes no rows), and the
-        # pooled-reset path leaves a reused connection off app_tenant.
-        connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_TENANT_ROLE}"')
-
-
-def _tenant_context_fn_exists(connection, signature: str) -> bool:
-    """Return True if the named public tenant-context function is installed."""
-    # Cheap per-call to_regprocedure probe (accepts a full arg signature): NULL
-    # when the function is absent (e.g. a metadata.create_all schema with no RLS
-    # migration applied), so the hook no-ops instead of erroring.
-    return (
+        # The setter runs while app_platform is active, so tenant code cannot
+        # mutate the trusted context through the tenant lane.
         connection.exec_driver_sql(
-            f"SELECT to_regprocedure('public.{signature}') IS NOT NULL"
+            f"SELECT {TENANT_CONTEXT_SETTER}(%s)",
+            (str(tenant.id),),
+        )
+    else:
+        helper_exists = connection.exec_driver_sql(
+            "SELECT to_regprocedure(%s) IS NOT NULL",
+            (f"{TENANT_CONTEXT_CLEARER}()",),
         ).scalar()
-        is True
-    )
+        if helper_exists:
+            # Clear any stale row through the privileged helper before the next request.
+            connection.exec_driver_sql(f"SELECT {TENANT_CONTEXT_CLEARER}()")
+        else:
+            # FIX: During a rolling migration gap, clear the trusted context row
+            # directly instead of leaving a pooled backend pinned to a prior tenant.
+            connection.exec_driver_sql(
+                f"DELETE FROM {TENANT_CONTEXT_TABLE} WHERE backend_pid = pg_backend_pid()"
+            )
+    if role == APP_TENANT_ROLE:
+        # FIX: Keep tenant-lane sessions restricted even when TENANT_CTX is
+        # absent; missing trusted context is the fail-closed RLS signal.
+        # Always switch into app_tenant so an unset context row (or an owner
+        # login that bypasses RLS on the raw role) cannot leak tenant data.
+        connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_TENANT_ROLE}"')
 
 
 def session_dependency(

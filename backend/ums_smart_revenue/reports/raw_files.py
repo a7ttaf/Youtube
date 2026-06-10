@@ -3,7 +3,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from uuid import UUID, uuid4
 
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -13,7 +13,10 @@ from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
 MONTH_PATTERN = re.compile(r"^\d{4}-(0[1-9]|1[0-2])$")
-ALLOWED_PARSE_STATUSES = frozenset({"DOWNLOADED", "PARSED", "FAILED", "QUARANTINED"})
+PURGED_PARSE_STATUS = "PURGED"
+ALLOWED_PARSE_STATUSES = frozenset(
+    {"DOWNLOADED", "PARSED", "FAILED", "QUARANTINED"}
+)
 ALLOWED_STORAGE_PREFIXES = ("s3://", "gs://", "azure://", "blob://", "file-store://")
 MAX_RAW_REPORT_FILE_PAGE_SIZE = 100
 _DEFAULT_TENANT_UUID = UUID(UMS_TENANT_ID)
@@ -30,6 +33,8 @@ class RawReportFileEntry:
     parse_status: str
     downloaded_by: str | None
     downloaded_at: datetime
+    purged_by: str | None = None
+    purged_at: datetime | None = None
 
     def to_api(self) -> dict[str, object]:
         return {
@@ -66,6 +71,10 @@ class RawReportFileNotFoundError(RawReportFileError):
 
 
 class RawReportFileValidationError(RawReportFileError):
+    pass
+
+
+class RawReportFilePurgeConflictError(RawReportFileError):
     pass
 
 
@@ -181,6 +190,71 @@ class SqlAlchemyRawReportFileRepository:
             raise RawReportFileNotFoundError("Raw report file not found")
         return row
 
+    # ========================================================================
+    # Purpose: Mark one raw report file PURGED on explicit authorized request;
+    #   clear the storage pointer while keeping all metadata for the audit
+    #   trail. Default policy is retain-forever, so this is the only delete path.
+    # Database/ORM: RawReportFileORM (raw_report_files); tenant-scoped UPDATE.
+    # Standards: Typed domain errors; fail-closed on cross-tenant/unknown ids.
+    # Blast Radius: Audit (caller emits REPORT_PURGED); no finance/Neo4j impact.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/reports.py -> DELETE route caller.
+    # ========================================================================
+    def purge_file(
+        self, *, raw_file_id: str, actor_user_id: str, reason: str
+    ) -> RawReportFileEntry:
+        """Set parse_status=PURGED, clear file_url, stamp purged_at/purged_by."""
+        if not reason or not reason.strip():
+            raise RawReportFileValidationError("reason must not be blank")
+        raw_file_uuid = _parse_uuid(raw_file_id, field_name="raw_report_file_id")
+        actor_uuid = _actor_identity_uuid(actor_user_id)
+        now = datetime.now(UTC)
+        result = self._session.execute(
+            update(RawReportFileORM)
+            .where(
+                RawReportFileORM.tenant_id == self._tenant_id,
+                RawReportFileORM.id == raw_file_uuid,
+                RawReportFileORM.parse_status != PURGED_PARSE_STATUS,
+            )
+            .values(
+                parse_status=PURGED_PARSE_STATUS,
+                file_url="",
+                purged_by=actor_uuid,
+                purged_at=now,
+                updated_at=now,
+            )
+            .execution_options(synchronize_session=False)
+        )
+        self._session.flush()
+        if result.rowcount != 1:
+            # FIX: DELETE routes preload this row for authorization; force this
+            # reread to bypass the identity map so concurrent PURGED state maps
+            # to the documented 409 instead of a stale generic conflict.
+            row = self._session.scalars(
+                select(RawReportFileORM)
+                .where(
+                    RawReportFileORM.tenant_id == self._tenant_id,
+                    RawReportFileORM.id == raw_file_uuid,
+                )
+                .execution_options(populate_existing=True)
+            ).one_or_none()
+            if row is None:
+                raise RawReportFileNotFoundError("Raw report file not found")
+            if row.parse_status == PURGED_PARSE_STATUS:
+                raise RawReportFilePurgeConflictError(
+                    "Raw report file is already purged"
+                )
+            raise RawReportFileConflictError("Raw report file purge was not applied")
+        row = self._session.scalars(
+            select(RawReportFileORM)
+            .where(
+                RawReportFileORM.tenant_id == self._tenant_id,
+                RawReportFileORM.id == raw_file_uuid,
+            )
+            .execution_options(populate_existing=True)
+        ).one()
+        return self._to_entry(row)
+
     @staticmethod
     def _to_entry(row: RawReportFileORM) -> RawReportFileEntry:
         return RawReportFileEntry(
@@ -192,8 +266,18 @@ class SqlAlchemyRawReportFileRepository:
             checksum=row.checksum,
             parse_status=row.parse_status,
             downloaded_by=str(row.downloaded_by) if row.downloaded_by else None,
-            downloaded_at=row.downloaded_at,
+            downloaded_at=_ensure_utc(row.downloaded_at),
+            purged_by=str(row.purged_by) if row.purged_by else None,
+            purged_at=_ensure_utc(row.purged_at) if row.purged_at else None,
         )
+
+
+# FIX: SQLite drops timezone metadata for DateTime(timezone=True); repository
+# entries keep the same UTC-aware contract that Postgres timestamptz returns.
+def _ensure_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _validate_month(month: str) -> None:
@@ -223,6 +307,10 @@ def _normalize_storage_uri(value: str) -> str:
 def _normalize_parse_status(value: str) -> str:
     normalized = _normalize_required_string(value, "parse_status")
     if normalized not in ALLOWED_PARSE_STATUSES:
+        if normalized == PURGED_PARSE_STATUS:
+            raise RawReportFileValidationError(
+                "parse_status PURGED is only allowed through the purge endpoint"
+            )
         raise RawReportFileValidationError(f"Unknown raw report parse_status: {value}")
     return normalized
 

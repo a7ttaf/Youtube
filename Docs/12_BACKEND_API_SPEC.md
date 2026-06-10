@@ -484,6 +484,47 @@ contains its own event; one `EXPORT_DOWNLOADED` event (entity_type
 
 `GET /audit/events` uses newest-first cursor pagination. `limit` defaults to `50` and is capped at `100`; when `pagination.has_more` is true, clients pass `pagination.next_cursor.created_at` as `cursor_created_at` and `pagination.next_cursor.id` as `cursor_id` to continue from the same `(created_at, id)` position. Older unpaginated and `page`/`page_size` examples are outdated. `AUDIT_LOG_VIEWED` records created by audit reads are stored, but this listing excludes them from the paginated result set so read-generated audit entries cannot shift the pages a client is iterating. `audit.view` and `audit.view_sensitive_payloads` only affect visibility within that filtered result set.
 
+## Smart revenue reconciliation (Track F)
+
+`POST /revenue/months/{month}/reconcile` computes and persists the month's smart
+revenue reconciliation, then audits it (`REVENUE_RECONCILED`). Gates:
+`CHANGE_ALLOCATION_RULE` at `finance_month(month)`, `VIEW_REVENUE` globally,
+`VIEW_FINALIZED_PAYMENTS` and `VIEW_BANK_RECONCILIATION` at `finance_month(month)`,
+and `VIEW_CONFIDENCE` globally (confidence/warnings surface in the response).
+Reconciliation attributes account-level tax/transfer-fee/FX deltas across
+channels proportional to gross and may write ALLOCATION revenue facts, so it
+reuses the allocation permission and requires read gates for the finance
+values returned in the response. The JSON body requires a non-empty `reason`.
+The response is
+`{month, channels:[{youtube_channel_id, gross_usd, us_tax_usd, yt_adsense_fee_usd,
+adsense_bank_fee_usd, fx_variance_usd, net_received_usd, us_view_share}],
+totals:{gross_total_usd, us_tax_total_usd, yt_adsense_fee_total_usd,
+adsense_bank_fee_total_usd, fx_total_usd, net_total_usd, yt_adsense_fee_pct},
+warnings:[...]}`. Errors: locked month -> **409**; malformed month (not YYYY-MM,
+month 01-12) -> **422**; missing permission -> **403**. The run persists typed
+`deduction_components` plus a `revenue_reconciliation_usd` explanation; only the
+`TAX` component feeds `net_revenue_usd` (transfer-fee/FX are evidence-only).
+
+`GET /revenue/channels/{channel_id}/months/{month}/reconciliation` returns the
+persisted `revenue_reconciliation_usd` explanation for that channel-month. Gates:
+`VIEW_REVENUE` and `VIEW_CONFIDENCE` at `channel(channel_id)`, plus
+`VIEW_FINALIZED_PAYMENTS` and `VIEW_BANK_RECONCILIATION` at
+`finance_month(month)`. The read path audits `REVENUE_VIEWED` and
+`PAYMENT_VIEWED` events; when the persisted explanation includes non-zero
+bank-derived components (`adsense_bank_fee_usd` or `fx_variance_usd`), a
+`BANK_RECONCILIATION_VIEWED` event is also recorded. Malformed month -> **422**;
+no persisted explanation for the channel-month -> **404**.
+
+`DELETE /reports/raw-files/{raw_file_id}` purges a raw report file. Gate:
+`MANAGE_CONNECTORS` at `connector(source)` (the source is resolved from the file;
+a boundary any-scope check runs first so unauthorized callers cannot probe
+existence, then the connector-scoped check applies). The JSON body requires a
+non-empty `reason` (missing/blank -> **422**). The purge marks the row `PURGED`
+and clears `file_url` while keeping all metadata (source, report_type,
+report_month, checksum) for the audit trail; it sets `purged_at`/`purged_by` and
+emits a `REPORT_PURGED` audit event. Unknown id or a cross-tenant id (no
+connector-scope grant) -> **404**; re-purging an already-PURGED row -> **409**.
+
 ## API rules
 
 - Backend enforces permissions.

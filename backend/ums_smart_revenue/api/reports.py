@@ -20,6 +20,7 @@ from ums_smart_revenue.reports.raw_files import (
     MAX_RAW_REPORT_FILE_PAGE_SIZE,
     RawReportFileConflictError,
     RawReportFileNotFoundError,
+    RawReportFilePurgeConflictError,
     RawReportFileValidationError,
     SqlAlchemyRawReportFileRepository,
 )
@@ -48,6 +49,20 @@ class RawReportFileRegisterRequest(BaseModel):
     )
     @classmethod
     def strip_required_strings(cls, value):
+        if isinstance(value, str):
+            stripped = value.strip()
+            if not stripped:
+                raise ValueError("must not be blank")
+            return stripped
+        return value
+
+
+class RawReportFilePurgeRequest(BaseModel):
+    reason: str = Field(min_length=1)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def strip_reason(cls, value):
         if isinstance(value, str):
             stripped = value.strip()
             if not stripped:
@@ -208,6 +223,95 @@ def get_raw_report_file(
         },
     )
     response = raw_file.to_api()
+    response["audit_event"] = audit_record_to_api(record)
+    return response
+
+
+# ============================================================================
+# Purpose: Manual report purge endpoint. Retain-forever is the default; this is
+#   the only delete path and is reason-required + audited. Metadata is kept
+#   (status flips to PURGED, file_url cleared) for the audit trail.
+# Database/ORM: RawReportFileORM via SqlAlchemyRawReportFileRepository.
+# Standards: Thin route; MANAGE_CONNECTORS gate at connector scope (resolved
+#   from the row, mirroring get_raw_report_file); typed errors -> HTTPException.
+# Blast Radius: Authorization + audit (REPORT_PURGED). No finance/Neo4j impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/reports/raw_files.py -> purge_file.
+#   - File: backend/ums_smart_revenue/auth/audit.py -> REPORT_PURGED definition.
+# ============================================================================
+@router.delete("/raw-files/{raw_file_id}")
+def purge_raw_report_file(
+    raw_file_id: str,
+    payload: RawReportFilePurgeRequest,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[
+        SqlAlchemyRawReportFileRepository, Depends(current_raw_report_file_repository)
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+) -> dict[str, object]:
+    # Boundary check first: deny without revealing existence to unauthorized
+    # callers; the connector-scoped check below uses the resolved source.
+    if not _has_any_permission_scope(user, Permission.MANAGE_CONNECTORS):
+        _raise_missing_permission(Permission.MANAGE_CONNECTORS)
+
+    try:
+        raw_file = repository.get_file(raw_file_id)
+    except RawReportFileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Raw report file not found",
+        ) from exc
+    except RawReportFileValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+    scope = AccessScope.connector(raw_file.source)
+    if not has_permission(user, Permission.MANAGE_CONNECTORS, scope):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Raw report file not found",
+        )
+
+    try:
+        purged = repository.purge_file(
+            raw_file_id=raw_file_id,
+            actor_user_id=user.user_id,
+            reason=payload.reason,
+        )
+    except (RawReportFilePurgeConflictError, RawReportFileConflictError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
+    except RawReportFileNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Raw report file not found",
+        ) from exc
+    except RawReportFileValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+    record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REPORT_PURGED,
+        entity_type="raw_report_file",
+        entity_id=purged.id,
+        scope=scope,
+        reason=payload.reason,
+        details={
+            "source": purged.source,
+            "report_type": purged.report_type,
+            "report_month": purged.report_month,
+        },
+    )
+    response = purged.to_api()
+    response["purged_by"] = purged.purged_by
+    response["purged_at"] = (
+        purged.purged_at.isoformat() if purged.purged_at else None
+    )
     response["audit_event"] = audit_record_to_api(record)
     return response
 

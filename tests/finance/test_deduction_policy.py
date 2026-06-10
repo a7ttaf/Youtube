@@ -6,6 +6,8 @@ def test_deduction_policy_holds_net_policy_constants():
     assert deduction_policy.SOURCE_SYSTEM_TO_SOURCE_KIND == {
         "adsense_management": "ADSENSE",
         "adsense_payment_gap": "ADSENSE",
+        "manual_upload": "MANUAL_UPLOAD",
+        "reconciliation": "ALLOCATION",
         "youtube_reporting": "YOUTUBE_CMS",
         "youtube_analytics": "YOUTUBE_ANALYTICS",
     }
