@@ -68,6 +68,31 @@ Files changed (all test-harness fixtures; no product code, no migration):
   = **184 passed**.
 - `python -m ruff check` clean on all changed files; `git diff --check` clean.
 
+## Alternatives considered (and why they were rejected)
+
+- **`statement_timeout` instead of `lock_timeout`.** `statement_timeout` caps the total execution
+  time of a statement, including the cascade object drops. On a large or contended schema, a valid
+  `DROP SCHEMA … CASCADE` can legitimately take longer than the cap, producing a false-positive
+  timeout. `lock_timeout` is narrowly scoped to the lock-wait phase, which is the only place the
+  original hang was observable. Rejected: wrong scope, higher false-positive risk.
+- **`pg_terminate_backend()` to kill orphan lock holders before the drop.** Would clear the
+  contention source directly. Rejected: requires superuser / `pg_terminate_backend` privilege
+  (the test DB role may not have it), and on a shared cluster it can kill legitimate sessions the
+  test did not intend to disturb. It also masks a real connection-leak signal we want surfaced.
+- **Centralised `reset_schema()` helper used by all 9 fixtures.** Would remove the 9-way
+  duplication and make the timeout (and any future tuning) a single line. Rejected for this PR:
+  the duplicate-fixture surface is a much broader refactor (it would also fold in the RLS helper
+  `_drop_public_schema` and touch all 9 test imports). Tracked as a follow-up rather than
+  bundled into a fail-fast fix.
+- **Shorter `lock_timeout` (e.g. 5 s).** Would fail faster on real contention. Rejected: on slow
+  or loaded CI hosts, a legitimate lock-wait of a few seconds is not abnormal; 5 s would convert
+  ordinary contention into a flapping test. 30 s keeps the fail-fast bound while remaining well
+  above the normal wait envelope.
+- **Ephemeral per-test database / schema (no `DROP SCHEMA public` at all).** Removes the lock
+  contention class entirely. Rejected for this PR: large fixture/infra change (per-test
+  `create database` / `search_path` plumbing) that belongs in a dedicated PR; the fail-fast bound
+  is sufficient for the immediate "log stops, no progress" CI failure mode.
+
 ## Recommendations (not done here — out of scope of this fix)
 
 1. **Reset the shared `ums-mig-pg` / `test_ums` cluster** (drop the orphan `app_tenant`/`app_platform`

@@ -51,15 +51,41 @@ def alembic_config(postgres_url: str) -> Config:
 @pytest.fixture
 def fresh_engine(postgres_url: str) -> object:
     """Fixture to create a fresh database engine by resetting the public schema."""
+    # ============================================================================
+    # Purpose: Provide a fresh SQLAlchemy engine with a clean `public` schema
+    # for one migration round-trip test. Bounded by
+    # `SET LOCAL lock_timeout = '30s'` so a contended reset (e.g. an orphan
+    # `idle in transaction` connection from a prior killed/hung run on a
+    # shared/reused cluster) fails fast with a diagnosable `LockNotAvailable`
+    # error instead of hanging indefinitely.
+    # Database/ORM: PostgreSQL `public` schema via raw SQLAlchemy `text()`.
+    # Standards: `SET LOCAL` is transaction-scoped (reverts on
+    # `engine.begin()` commit), so the existing lock-blocking tests that set
+    # their own `statement_timeout='750ms'` on contender connections are
+    # unaffected. The `try/finally` wrapper guarantees `engine.dispose()`
+    # runs even when the schema reset raises — no leaked pool on the
+    # contended-reset failure path.
+    # Blast Radius: None detected — test-harness fixture only; no product
+    # code, no migration, no `alembic/env.py` change.
+    # Connections:
+    #   - File: tests/_postgres_helpers.py -> `require_postgres_url()`
+    #     supplies the disposable test DB URL.
+    #   - File: AGENTS.md -> "Professional Commenting Standard" (this block).
+    #   - File: tests/db/test_tenant_rls_migration.py -> `_drop_public_schema`
+    #     is the reference try/finally engine-disposal pattern.
+    # ============================================================================
     engine = create_engine(postgres_url)
-    with engine.begin() as conn:
-        # Fail fast (don't hang) if a stray connection holds a public-schema
-        # lock: without lock_timeout, DROP SCHEMA waits indefinitely.
-        conn.execute(text("SET LOCAL lock_timeout = '30s'"))
-        conn.execute(text("DROP SCHEMA public CASCADE"))
-        conn.execute(text("CREATE SCHEMA public"))
-    yield engine
-    engine.dispose()
+    try:
+        with engine.begin() as conn:
+            # Fail fast (don't hang) if a stray connection holds a
+            # public-schema lock: without lock_timeout, DROP SCHEMA waits
+            # indefinitely.
+            conn.execute(text("SET LOCAL lock_timeout = '30s'"))
+            conn.execute(text("DROP SCHEMA public CASCADE"))
+            conn.execute(text("CREATE SCHEMA public"))
+        yield engine
+    finally:
+        engine.dispose()
 
 
 def test_source_account_migration_rekeys_uniqueness(
