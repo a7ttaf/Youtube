@@ -216,11 +216,29 @@ def test_tenant_context_clearer_is_owned_only_by_20260609_0002():
     # 3) Downgrade to 20260609_0001: helper is dropped by 20260609_0002's
     #    downgrade (its sole-owner contract). The DB still has the trusted
     #    context table and the setter/getter (owned by 20260608_0001).
+    #    The DELETE grant is intentionally preserved so the session hook's
+    #    missing-helper fallback can still clear its own row at this
+    #    revision.
     command.downgrade(cfg, "20260609_0001")
     with _db_conn(url) as conn:
         assert _function_exists(conn, TENANT_CONTEXT_CLEARER) is False, (
             "Downgrading 20260609_0002 must drop clear_app_current_tenant_id "
             "— that is its sole-owner contract."
+        )
+        delete_grants_after_downgrade = set(
+            conn.execute(
+                sa.text(
+                    "SELECT grantee FROM information_schema.role_table_grants "
+                    "WHERE table_name = :t AND privilege_type = 'DELETE'"
+                ),
+                {"t": TENANT_CONTEXT_TABLE},
+            ).scalars()
+        )
+        assert APP_PLATFORM_ROLE in delete_grants_after_downgrade, (
+            "Downgrading 20260609_0002 must NOT revoke the platform "
+            "DELETE grant on app_tenant_context, or the session hook's "
+            "missing-helper fallback will permission-deny on this "
+            "intermediate revision."
         )
 
     # 4) Re-upgrade to head: helper is reinstalled cleanly (no stale object).

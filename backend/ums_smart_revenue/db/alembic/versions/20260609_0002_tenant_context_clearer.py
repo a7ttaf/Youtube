@@ -139,21 +139,20 @@ def downgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
-    # FIX: revoke the DELETE grant installed in upgrade() so the role
-    # does not retain a privilege on the table after this revision
-    # rolls back. The table itself is owned by 20260608_0001 and
-    # persists past this downgrade; the grant must be removed in lock
-    # step with the helper so the previous "no raw DELETE permission"
-    # state is fully restored.
-    bind.execute(
-        sa.text(
-            f'REVOKE DELETE ON {TENANT_CONTEXT_TABLE} FROM "{APP_PLATFORM_ROLE}"'
-        )
-    )
+    # FIX: we deliberately do NOT revoke the DELETE grant here. After
+    # this downgrade the helper is gone but the session hook's
+    # missing-helper fallback still needs to be able to clear its own
+    # row, so the platform lane must keep the DELETE privilege on the
+    # context table. The BEFORE DELETE guard trigger installed in
+    # upgrade() is what actually bounds the mutation surface at
+    # steady state — a cross-backend DELETE raises, regardless of
+    # whether the grant is present — so removing the grant here would
+    # re-break the fallback without buying any security (Codex P2
+    # review on PR #88).
     # FIX: drop the BEFORE DELETE guard trigger installed in upgrade()
     # so the table returns to its pre-migration state (no extra
-    # triggers, no helper, no DELETE grant). The trigger function is
-    # dropped after the trigger to avoid an "in use" error.
+    # triggers, no helper). The trigger function is dropped after the
+    # trigger to avoid an "in use" error.
     bind.execute(
         sa.text(
             f"""
