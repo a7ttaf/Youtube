@@ -1,4 +1,30 @@
-"""Add privileged helper for clearing the trusted tenant context."""
+"""Sole owner of the privileged helper that clears the trusted tenant context.
+
+The helper (``clear_app_current_tenant_id``) was introduced so the session hook
+can wipe a stale trusted-context row on a pooled backend before the next
+request lands. The app lanes (``app_tenant`` / ``app_platform``) only hold
+``SELECT`` on the ``app_tenant_context`` table, so a raw ``DELETE`` would
+permission-deny; this SECURITY DEFINER function runs as its owner (the
+migration runner / a DBA-precreated role) and bypasses the lane-level grant
+restriction.
+
+Ownership contract:
+
+* This migration is the **only** Alembic revision that creates or drops
+  ``clear_app_current_tenant_id``. ``20260608_0001_tenant_rls_enforcement``
+  deliberately does NOT install the helper — it pre-dates the helper, and
+  dual-ownership between two revisions would let a downgrade past this
+  revision drop a function that an earlier revision still claims to have
+  installed (Codex P2 review on PR #88).
+* The session hook tolerates the missing-helper state with a
+  ``to_regprocedure`` probe and falls back to a direct ``DELETE`` on the
+  trusted-context row under the elevated ``app_platform`` role, so a fresh
+  DB at ``20260608_0001`` (before this revision runs) is not broken.
+* ``GRANT EXECUTE`` is only granted to ``app_platform`` because the session
+  hook always elevates to ``app_platform`` first before invoking the helper
+  (``db/session.py::_apply_tenant_isolation``); ``app_tenant`` does not need
+  direct EXECUTE on the clearer.
+"""
 
 import sqlalchemy as sa
 from alembic import op
@@ -16,10 +42,69 @@ depends_on = None
 
 
 def upgrade() -> None:
-    """Create the platform-only tenant-context cleanup helper."""
+    """Create the privileged tenant-context cleanup helper (sole owner)."""
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
+    # FIX: reinstall the BEFORE DELETE guard for databases that already
+    # ran an older 20260608_0001 before that revision owned the guard.
+    # The trigger raises if a row's `backend_pid` does not match the
+    # current backend, so `app_platform` can use its direct DELETE
+    # fallback only for its own row. The privileged
+    # `clear_app_current_tenant_id()` helper also runs under this
+    # trigger, but its body filters on `backend_pid = pg_backend_pid()`
+    # so the predicate is satisfied and the DELETE goes through.
+    bind.execute(
+        sa.text(
+            f"""
+            CREATE OR REPLACE FUNCTION {TENANT_CONTEXT_CLEARER}_guard_delete()
+            RETURNS trigger
+            LANGUAGE plpgsql
+            AS $$
+            BEGIN
+                IF OLD.backend_pid <> pg_backend_pid() THEN
+                    RAISE EXCEPTION
+                        'app_tenant_context DELETE restricted to current backend';
+                END IF;
+                RETURN OLD;
+            END;
+            $$
+            """
+        )
+    )
+    bind.execute(
+        sa.text(
+            f"""
+            DROP TRIGGER IF EXISTS {TENANT_CONTEXT_CLEARER}_guard_delete_trg
+            ON {TENANT_CONTEXT_TABLE}
+            """
+        )
+    )
+    bind.execute(
+        sa.text(
+            f"""
+            CREATE TRIGGER {TENANT_CONTEXT_CLEARER}_guard_delete_trg
+            BEFORE DELETE ON {TENANT_CONTEXT_TABLE}
+            FOR EACH ROW
+            EXECUTE FUNCTION {TENANT_CONTEXT_CLEARER}_guard_delete()
+            """
+        )
+    )
+    # FIX: grant DELETE on the context table to app_platform so the
+    # session hook's missing-helper fallback (a direct DELETE under
+    # app_platform) permission-succeeds during a rolling migration gap.
+    # Re-apply the DELETE grant here for databases that already ran the
+    # previous version of 20260608_0001 before that earlier revision
+    # granted it directly. The BEFORE DELETE guard owned by
+    # 20260608_0001 (and repaired above for existing DBs) bounds the
+    # mutation surface to the caller's own backend row, so widening the
+    # platform lane's DELETE privilege here does NOT widen its effective
+    # blast radius (Codex P2 review on PR #88).
+    bind.execute(
+        sa.text(
+            f'GRANT DELETE ON {TENANT_CONTEXT_TABLE} TO "{APP_PLATFORM_ROLE}"'
+        )
+    )
     bind.execute(
         sa.text(
             f"""
@@ -48,8 +133,17 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the platform-only tenant-context cleanup helper."""
+    """Drop the privileged tenant-context cleanup helper (sole owner)."""
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
+    # FIX: we deliberately do NOT revoke the DELETE grant here. After
+    # this downgrade the helper is gone but the session hook's
+    # missing-helper fallback still needs to be able to clear its own
+    # row, so the platform lane must keep the DELETE privilege on the
+    # context table. The BEFORE DELETE guard is deliberately left in
+    # place because this downgraded 20260609_0001 state still has the
+    # DELETE grant. 20260608_0001 owns final cleanup of the table,
+    # trigger, and guard function when rolling back below the trusted
+    # context-table revision.
     bind.execute(sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_CLEARER}()'))

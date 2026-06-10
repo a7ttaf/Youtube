@@ -604,6 +604,15 @@ single P-tier above.
   half-cursor/bad input -> 422, missing/cross-tenant id -> 404. The
   paired-column `*_usd` -> native migration is still ⏳ PENDING as a separate
   future spec (out of scope for Track E).
+- ✅ Main red-gate fix (2026-06-09) — **merged Track-E PG suite restored to green.**
+  Five clusters fixed on `fix/main-red-gate`: session hook cleared tenant context
+  via a new SECURITY DEFINER `clear_app_current_tenant_id()` fn (migration
+  `20260609_0002`) + tolerated absent context objects (was a raw `DELETE` →
+  permission denied); RLS migration `downgrade()` now `DROP OWNED BY` before
+  `DROP ROLE`; SQLite engine uses `StaticPool` (single writer) to end the
+  audit-session "database is locked" contention; tenant-context getter test
+  compares typed `uuid`; version baseline realigned to pyproject pins. Full
+  suite 1956 passed.
 
 - ✅ Track F (2026-06-09) — **Smart revenue reconciliation workflow DONE.**
   Pure compute core derives US tax + YouTube->AdSense fee + AdSense->bank fee+FX

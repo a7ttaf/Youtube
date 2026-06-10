@@ -50,6 +50,31 @@ def test_sqlite_session_issues_no_set_statements():
         TENANT_CTX.reset(token)
 
 
+def test_sqlite_engine_uses_static_pool_for_shared_connection():
+    """Verify the SQLite engine shares one DBAPI connection via StaticPool.
+
+    Codex P2 review on PR #88 confirmed that
+    ``join_transaction_mode="create_savepoint"`` does not actually open a
+    SAVEPOINT for engine-bound sessions on a StaticPool engine, so the
+    production app must NOT rely on SAVEPOINT-based session isolation for
+    SQLite. The codebase instead wires
+    ``_sqlite_platform_session_from_request`` so the platform lane reuses
+    the request session (no concurrent Session contention). This test
+    pins the StaticPool choice so any future refactor that drops it gets
+    caught before it can reintroduce the original "database is locked"
+    contention.
+    """
+    from sqlalchemy.pool import StaticPool
+    factory = build_session_factory("sqlite+pysqlite:///:memory:")
+    # The sessionmaker keeps a reference to its bound engine, which is
+    # the same one build_engine() returns for the URL.
+    bound_engine = factory.kw["bind"]
+    assert isinstance(bound_engine.pool, StaticPool), (
+        "SQLite must use StaticPool so the request session and any "
+        "co-tenanted use share one DBAPI connection."
+    )
+
+
 def test_postgres_tenant_lane_sets_role_and_trusted_tenant_context():
     """Verify the tenant lane sets app_tenant and the trusted tenant context."""
     url = require_postgres_url()
