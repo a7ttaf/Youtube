@@ -448,3 +448,201 @@ def test_assistant_cannot_view_audit_events(tmp_path):
 
     assert response.status_code == 403
     assert response.json()["detail"] == "Missing permission: audit.view"
+
+
+def _add_audit_row(
+    database_url: str,
+    *,
+    event_type: str,
+    sensitive: bool = False,
+    created_at: datetime | None = None,
+    tenant_id: UUID | None = None,
+) -> None:
+    """Append a single audit row to the seeded test database."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        kwargs: dict[str, object] = dict(
+            id=uuid4(),
+            user_id=USER_ID if tenant_id is None else None,
+            event_type=event_type,
+            entity_type="user_session",
+            entity_id=str(USER_ID),
+            scope_type="global",
+            scope_id=None,
+            reason=None,
+            details={},
+            sensitive=sensitive,
+            created_at=created_at or datetime.now(UTC).replace(microsecond=0),
+        )
+        if tenant_id is not None:
+            kwargs["tenant_id"] = tenant_id
+        session.add(AuditLogORM(**kwargs))
+        session.commit()
+
+
+def _audit_table_count(database_url: str) -> int:
+    """Return the total number of audit rows across all tenants."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        return len(session.scalars(select(AuditLogORM)).all())
+
+
+def test_audit_summary_returns_counts_for_viewer(tmp_path):
+    """Return aggregate counts with the four contract fields for a viewer."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        response = client.get(
+            "/audit/summary", headers=auth_headers("audit_viewer")
+        )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body.keys()) == {
+        "total_events",
+        "sensitive_events",
+        "recent_count",
+        "window_hours",
+    }
+    assert isinstance(body["total_events"], int)
+    assert isinstance(body["sensitive_events"], int)
+    assert isinstance(body["recent_count"], int)
+    assert isinstance(body["window_hours"], int)
+    # Seed: one sensitive REVENUE_VIEWED + one LOGIN, both recent.
+    assert body["total_events"] == 2
+    assert body["sensitive_events"] == 1
+    assert body["recent_count"] == 2
+    assert body["window_hours"] == 24
+
+
+def test_audit_summary_denied_for_assistant_analyst(tmp_path):
+    """Return 403 fail-closed and write no audit row for the analyst role."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    before = _audit_table_count(database_url)
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        response = client.get(
+            "/audit/summary", headers=auth_headers("assistant_analyst")
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: audit.view"
+    # Fail-closed: denial writes no audit row.
+    assert _audit_table_count(database_url) == before
+
+
+def test_audit_summary_counts_sensitive_rows(tmp_path):
+    """Count only sensitive rows in the sensitive_events aggregate."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _add_audit_row(database_url, event_type="OVERRIDE_APPLIED", sensitive=True)
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        body = client.get(
+            "/audit/summary", headers=auth_headers("audit_viewer")
+        ).json()
+
+    # Two sensitive rows (seeded REVENUE_VIEWED + added OVERRIDE_APPLIED).
+    assert body["total_events"] == 3
+    assert body["sensitive_events"] == 2
+
+
+def test_audit_summary_recent_count_respects_window_hours(tmp_path):
+    """Exclude rows outside the window, include them under a wider window."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    old_created = datetime.now(UTC).replace(microsecond=0) - timedelta(hours=48)
+    _add_audit_row(database_url, event_type="LOGIN", created_at=old_created)
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        narrow = client.get(
+            "/audit/summary?window_hours=24", headers=auth_headers("audit_viewer")
+        ).json()
+        wide = client.get(
+            "/audit/summary?window_hours=168", headers=auth_headers("audit_viewer")
+        ).json()
+
+    # Total lifetime is window-independent: 2 seeded + 1 old = 3.
+    assert narrow["total_events"] == 3
+    assert wide["total_events"] == 3
+    # The 48h-old row is excluded at 24h, included at 168h.
+    assert narrow["recent_count"] == 2
+    assert narrow["window_hours"] == 24
+    assert wide["recent_count"] == 3
+    assert wide["window_hours"] == 168
+
+
+def test_audit_summary_excludes_audit_log_viewed(tmp_path):
+    """Exclude AUDIT_LOG_VIEWED rows from every summary count."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _add_audit_row(database_url, event_type="AUDIT_LOG_VIEWED", sensitive=True)
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        body = client.get(
+            "/audit/summary", headers=auth_headers("audit_viewer")
+        ).json()
+
+    # The AUDIT_LOG_VIEWED row is not counted in any aggregate.
+    assert body["total_events"] == 2
+    assert body["sensitive_events"] == 1
+    assert body["recent_count"] == 2
+
+
+def test_audit_summary_rejects_out_of_range_window_hours(tmp_path):
+    """Return 422 for window_hours below 1 or above 8760."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        too_small = client.get(
+            "/audit/summary?window_hours=0", headers=auth_headers("audit_viewer")
+        )
+        too_large = client.get(
+            "/audit/summary?window_hours=8761",
+            headers=auth_headers("audit_viewer"),
+        )
+
+    assert too_small.status_code == 422
+    assert too_large.status_code == 422
+
+
+def test_audit_summary_writes_no_audit_row(tmp_path):
+    """Verify the summary endpoint emits no self-audit row on success."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    before = _audit_table_count(database_url)
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        response = client.get(
+            "/audit/summary", headers=auth_headers("audit_viewer")
+        )
+
+    assert response.status_code == 200
+    # No self-audit: the audit table count is unchanged by the summary call.
+    assert _audit_table_count(database_url) == before
+
+
+def test_audit_summary_is_tenant_scoped(tmp_path):
+    """Exclude rows owned by a different tenant from the summary counts."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    other_tenant = UUID("00000000-0000-0000-0000-0000000000ff")
+    _add_audit_row(
+        database_url,
+        event_type="LOGIN",
+        sensitive=True,
+        tenant_id=other_tenant,
+    )
+
+    with TestClient(create_app(database_url=database_url)) as client:
+        body = client.get(
+            "/audit/summary", headers=auth_headers("audit_viewer")
+        ).json()
+
+    # Cross-tenant row is invisible: counts stay at the seeded tenant totals.
+    assert body["total_events"] == 2
+    assert body["sensitive_events"] == 1
+    assert body["recent_count"] == 2
