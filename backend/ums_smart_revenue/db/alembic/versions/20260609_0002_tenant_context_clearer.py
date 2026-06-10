@@ -46,6 +46,20 @@ def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
+    # FIX: grant DELETE on the context table to app_platform so the
+    # session hook's missing-helper fallback (a direct DELETE under
+    # app_platform) permission-succeeds during a rolling migration gap.
+    # This grant is installed in 20260609_0002 (not 20260608_0001) so
+    # databases that already ran the previous version of 20260608_0001
+    # pick it up on their next upgrade without re-running 20260608_0001.
+    # Without this, a no-context session on a previously-migrated DB
+    # would permission-deny on the fallback path after downgrading
+    # 20260609_0002 (Codex P2 review on PR #88).
+    bind.execute(
+        sa.text(
+            f'GRANT DELETE ON {TENANT_CONTEXT_TABLE} TO "{APP_PLATFORM_ROLE}"'
+        )
+    )
     bind.execute(
         sa.text(
             f"""
@@ -78,4 +92,15 @@ def downgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return
+    # FIX: revoke the DELETE grant installed in upgrade() so the role
+    # does not retain a privilege on the table after this revision
+    # rolls back. The table itself is owned by 20260608_0001 and
+    # persists past this downgrade; the grant must be removed in lock
+    # step with the helper so the previous "no raw DELETE permission"
+    # state is fully restored.
+    bind.execute(
+        sa.text(
+            f'REVOKE DELETE ON {TENANT_CONTEXT_TABLE} FROM "{APP_PLATFORM_ROLE}"'
+        )
+    )
     bind.execute(sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_CLEARER}()'))

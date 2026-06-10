@@ -29,6 +29,7 @@ from alembic import op
 from ums_smart_revenue.db.rls import (
     APP_PLATFORM_ROLE,
     APP_TENANT_ROLE,
+    TENANT_CONTEXT_CLEARER,
     TENANT_CONTEXT_GETTER,
     TENANT_CONTEXT_SETTER,
     TENANT_CONTEXT_TABLE,
@@ -326,9 +327,22 @@ def downgrade() -> None:
     )
     # FIX: The privileged clearer is owned by `20260609_0002`, not by this
     # migration. Its downgrade in `20260609_0002` will drop it as part of
-    # rolling back past that revision; we must NOT drop it here, otherwise
-    # two migrations would race to remove the same object (the Alembic
-    # ownership double-claim bug flagged by Codex P2 review on PR #88).
+    # rolling back past that revision; we must NOT drop it here as part of
+    # the normal new-install path, otherwise two migrations would race to
+    # remove the same object (the Alembic ownership double-claim bug
+    # flagged by Codex P2 review on PR #88). We DO add an IF EXISTS drop
+    # here as a legacy-cleanup safety net: databases that already ran the
+    # previous version of this revision had `clear_app_current_tenant_id`
+    # installed by it, and rolling such a database back past
+    # `20260608_0001` without first passing through `20260609_0002` would
+    # otherwise leave the stale helper referencing a dropped table — a
+    # later no-context session would call the helper and fail against the
+    # missing `app_tenant_context` instead of taking the absent-helper
+    # fallback (Codex P2 review on PR #88). The IF EXISTS makes this a
+    # no-op for new installs that never created the helper here.
+    bind.execute(
+        sa.text(f'DROP FUNCTION IF EXISTS {TENANT_CONTEXT_CLEARER}()')
+    )
     bind.execute(sa.text(f'DROP TABLE IF EXISTS {TENANT_CONTEXT_TABLE}'))
     # ========================================================================
     # Purpose: Strip every dependent privilege/object before DROP ROLE.

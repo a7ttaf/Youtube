@@ -1,3 +1,6 @@
+from collections.abc import Iterator
+from contextlib import contextmanager
+
 import sqlalchemy as sa
 from alembic import command
 from alembic.config import Config
@@ -32,7 +35,7 @@ def _alembic_config(url: str) -> Config:
     return cfg
 
 
-def _function_exists(conn, function_name: str) -> bool:
+def _function_exists(conn: sa.Connection, function_name: str) -> bool:
     """Return True when ``function_name`` is present in the current DB.
 
     ``to_regprocedure`` resolves a function by its full signature, so the
@@ -46,6 +49,24 @@ def _function_exists(conn, function_name: str) -> bool:
             {"name": f"{function_name}()"},
         ).scalar()
     )
+
+
+@contextmanager
+def _db_conn(url: str) -> Iterator[sa.Connection]:
+    """Yield a SQLAlchemy Connection from a short-lived engine.
+
+    Centralises the ``create_engine`` / ``connect`` / ``dispose`` lifecycle
+    so the migration round-trip tests do not duplicate the same try/finally
+    block on every assertion step. The engine is disposed on context exit
+    so each step gets a fresh pool (the ``StaticPool`` is not used here;
+    the disposable Postgres test DB is a real server with its own pool).
+    """
+    engine = sa.create_engine(url)
+    try:
+        with engine.connect() as conn:
+            yield conn
+    finally:
+        engine.dispose()
 
 
 def _drop_public_schema(url: str) -> None:
@@ -146,81 +167,65 @@ def test_tenant_context_clearer_is_owned_only_by_20260609_0002():
     #    deliberately does not own it). The session hook tolerates the
     #    missing-helper state via its `to_regprocedure` probe.
     command.upgrade(cfg, "20260608_0001")
-    engine = sa.create_engine(url)
-    try:
-        with engine.connect() as conn:
-            assert _function_exists(conn, TENANT_CONTEXT_CLEARER) is False, (
-                "20260608_0001 must not install clear_app_current_tenant_id; "
-                "its sole owner is 20260609_0002."
-            )
-            # app_platform must hold DELETE on the context table so the
-            # session hook can fall back to a direct DELETE during a
-            # rolling-migration gap (helper is not installed yet). The
-            # helper itself is SECURITY DEFINER and bypasses this grant,
-            # but the fallback runs as the caller role.
-            delete_grants = set(
-                conn.execute(
-                    sa.text(
-                        "SELECT grantee FROM information_schema.role_table_grants "
-                        "WHERE table_name = :t AND privilege_type = 'DELETE'"
-                    ),
-                    {"t": TENANT_CONTEXT_TABLE},
-                ).scalars()
-            )
-            assert APP_PLATFORM_ROLE in delete_grants, (
-                "app_platform must hold DELETE on app_tenant_context at "
-                "20260608_0001 so the missing-helper fallback in the "
-                "session hook can clear stale rows."
-            )
-    finally:
-        engine.dispose()
+    with _db_conn(url) as conn:
+        assert _function_exists(conn, TENANT_CONTEXT_CLEARER) is False, (
+            "20260608_0001 must not install clear_app_current_tenant_id; "
+            "its sole owner is 20260609_0002."
+        )
+        # app_platform must hold DELETE on the context table so the
+        # session hook can fall back to a direct DELETE during a
+        # rolling-migration gap (helper is not installed yet). The
+        # helper itself is SECURITY DEFINER and bypasses this grant,
+        # but the fallback runs as the caller role.
+        delete_grants = set(
+            conn.execute(
+                sa.text(
+                    "SELECT grantee FROM information_schema.role_table_grants "
+                    "WHERE table_name = :t AND privilege_type = 'DELETE'"
+                ),
+                {"t": TENANT_CONTEXT_TABLE},
+            ).scalars()
+        )
+        assert APP_PLATFORM_ROLE in delete_grants, (
+            "app_platform must hold DELETE on app_tenant_context at "
+            "20260608_0001 so the missing-helper fallback in the "
+            "session hook can clear stale rows."
+        )
 
     # 2) Upgrade to head (20260609_0002): helper IS installed and GRANTed to
     #    app_platform.
     command.upgrade(cfg, "head")
-    engine = sa.create_engine(url)
-    try:
-        with engine.connect() as conn:
-            assert _function_exists(conn, TENANT_CONTEXT_CLEARER) is True, (
-                "head must expose clear_app_current_tenant_id; "
-                "20260609_0002 is its sole owner."
-            )
-            grant_holder = conn.execute(
-                sa.text(
-                    "SELECT grantee FROM information_schema.routine_privileges "
-                    "WHERE routine_name = :fn AND privilege_type = 'EXECUTE'"
-                ),
-                {"fn": TENANT_CONTEXT_CLEARER},
-            ).scalars()
-            grants = set(grant_holder)
-            assert APP_PLATFORM_ROLE in grants, (
-                "app_platform must hold EXECUTE on clear_app_current_tenant_id "
-                "so the elevated session hook can call it."
-            )
-    finally:
-        engine.dispose()
+    with _db_conn(url) as conn:
+        assert _function_exists(conn, TENANT_CONTEXT_CLEARER) is True, (
+            "head must expose clear_app_current_tenant_id; "
+            "20260609_0002 is its sole owner."
+        )
+        grant_holder = conn.execute(
+            sa.text(
+                "SELECT grantee FROM information_schema.routine_privileges "
+                "WHERE routine_name = :fn AND privilege_type = 'EXECUTE'"
+            ),
+            {"fn": TENANT_CONTEXT_CLEARER},
+        ).scalars()
+        grants = set(grant_holder)
+        assert APP_PLATFORM_ROLE in grants, (
+            "app_platform must hold EXECUTE on clear_app_current_tenant_id "
+            "so the elevated session hook can call it."
+        )
 
     # 3) Downgrade to 20260609_0001: helper is dropped by 20260609_0002's
     #    downgrade (its sole-owner contract). The DB still has the trusted
     #    context table and the setter/getter (owned by 20260608_0001).
     command.downgrade(cfg, "20260609_0001")
-    engine = sa.create_engine(url)
-    try:
-        with engine.connect() as conn:
-            assert _function_exists(conn, TENANT_CONTEXT_CLEARER) is False, (
-                "Downgrading 20260609_0002 must drop clear_app_current_tenant_id "
-                "— that is its sole-owner contract."
-            )
-    finally:
-        engine.dispose()
+    with _db_conn(url) as conn:
+        assert _function_exists(conn, TENANT_CONTEXT_CLEARER) is False, (
+            "Downgrading 20260609_0002 must drop clear_app_current_tenant_id "
+            "— that is its sole-owner contract."
+        )
 
     # 4) Re-upgrade to head: helper is reinstalled cleanly (no stale object).
     command.upgrade(cfg, "head")
-    engine = sa.create_engine(url)
-    try:
-        with engine.connect() as conn:
-            assert _function_exists(conn, TENANT_CONTEXT_CLEARER) is True
-    finally:
-        engine.dispose()
+    with _db_conn(url) as conn:
+        assert _function_exists(conn, TENANT_CONTEXT_CLEARER) is True
     # Leave the DB at head for any subsequent test that depends on the
     # baseline schema/role state.
