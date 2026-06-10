@@ -295,13 +295,7 @@ export const CREDENTIAL_CONTROLS = [
   { tone: "red" as Severity, title: "No password storage", sub: "OAuth grants only; revoked accounts disable jobs", badge: { text: "Enforced", tone: "red" as Severity } },
 ];
 
-export const AUDIT_SUMMARY = [
-  { label: "Events today", value: "184", note: "Sensitive actions, reads, exports, and mapping changes" },
-  { label: "High sensitivity", value: "23", note: "Revenue, payment, raw file, and override events" },
-  { label: "Denied attempts", value: "7", note: "Permission failures retained for review" },
-  { label: "Retention", value: "7 years", note: "Finance audit policy baseline" },
-];
-
-// AUDIT_EVENTS removed: the Audit timeline is now wired to GET /audit/events via
-// views/AuditView (real, server-audited rows). AUDIT_SUMMARY stays as static
-// context — the endpoint exposes no aggregate counts.
+// AUDIT_EVENTS and AUDIT_SUMMARY removed: the Audit timeline is wired to
+// GET /audit/events and the summary tiles to GET /audit/summary (real,
+// tenant-scoped aggregate counts) via views/AuditView. The mock no longer
+// carries any audit data.

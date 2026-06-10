@@ -1,11 +1,24 @@
 import { useState } from "react";
 
-import { AUDIT_SUMMARY } from "@/lib/mock/data";
+import { useAuditSummary } from "@/lib/api/useAuditSummary";
 
 import { Badge, ItemRow, SummaryTile, TimelinePlaceholderRow } from "../shared";
 
 import AuditLogPanelHeader from "./AuditLogPanelHeader";
 import AuditTimelineFeed from "./AuditTimelineFeed";
+
+// Static finance audit-retention policy text. This is a frontend constant, NOT
+// an aggregate from GET /audit/summary — the endpoint returns counts only.
+const AUDIT_RETENTION_NOTE = {
+  label: "Retention",
+  value: "7 years",
+  note: "Finance audit policy baseline",
+};
+
+// Placeholder shown in a numeric tile while its live count is loading, errored,
+// or withheld. Keeps the tile honest instead of rendering a stale or invented
+// figure.
+const TILE_VALUE_PLACEHOLDER = "—";
 
 // ============================================================================
 // Purpose: Render the audit log screen shell, summary tiles, and the gated
@@ -96,13 +109,87 @@ const AuditTimeline = ({
 };
 
 /**
- * The audit log screen: static summary tiles plus the gated live timeline.
- * `canViewAudit` controls only whether the timeline mounts; `canViewFinance`
- * only affects the summary tiles.
+ * Render the four summary tiles from a resolved set of live count strings plus
+ * the static retention policy tile. Pure presentation — the caller resolves the
+ * count strings (live value, placeholder while loading/errored, or restricted).
+ */
+const AuditSummaryTilesRow = ({
+  recentCount,
+  sensitiveEvents,
+  totalEvents,
+  note,
+}: {
+  recentCount: string;
+  sensitiveEvents: string;
+  totalEvents: string;
+  note: string;
+}) => {
+  return (
+    <>
+      <SummaryTile label="Events (24h)" value={recentCount} note="Audit events in the last 24 hours" />
+      <SummaryTile label="High sensitivity" value={sensitiveEvents} note={note} />
+      <SummaryTile label="Total events" value={totalEvents} note="Lifetime audited events for this tenant" />
+      <SummaryTile {...AUDIT_RETENTION_NOTE} />
+    </>
+  );
+};
+
+/**
+ * Live audit summary tiles. ALWAYS calls useAuditSummary() (it is only mounted
+ * when the viewer may see the audit log, mirroring the events feed), so the hook
+ * stays unconditional. Numeric tiles render a placeholder on loading/error and
+ * the formatted live count on success; the count read exposes no per-row payload
+ * and is gated by the same VIEW_AUDIT_LOG permission as the events list.
+ */
+const AuditSummaryTilesLive = () => {
+  const { data, loading, error } = useAuditSummary();
+  // Until a live count arrives (loading) or when the read failed (error/403),
+  // show the placeholder rather than a stale or invented figure.
+  const fmt = (value: number | undefined): string =>
+    !data || loading || error || value == null
+      ? TILE_VALUE_PLACEHOLDER
+      : value.toLocaleString();
+  const sensitiveNote = error
+    ? "Audit summary unavailable"
+    : "Revenue, payment, and override events flagged sensitive";
+  return (
+    <AuditSummaryTilesRow
+      recentCount={fmt(data?.recent_count)}
+      sensitiveEvents={fmt(data?.sensitive_events)}
+      totalEvents={fmt(data?.total_events)}
+      note={sensitiveNote}
+    />
+  );
+};
+
+/**
+ * The audit summary tile band. A non-audit viewer fires NO summary fetch — the
+ * live-tiles component (which owns the useAuditSummary hook) is simply not
+ * mounted; restricted numeric tiles show a placeholder and the static retention
+ * tile still renders. This mirrors the timeline's fail-closed gate exactly.
+ */
+const AuditSummaryTiles = ({ canViewAudit }: { canViewAudit: boolean }) => {
+  if (!canViewAudit) {
+    return (
+      <AuditSummaryTilesRow
+        recentCount={TILE_VALUE_PLACEHOLDER}
+        sensitiveEvents={TILE_VALUE_PLACEHOLDER}
+        totalEvents={TILE_VALUE_PLACEHOLDER}
+        note="Audit summary restricted for this role"
+      />
+    );
+  }
+  return <AuditSummaryTilesLive />;
+};
+
+/**
+ * The audit log screen: live summary tiles plus the gated live timeline.
+ * `canViewAudit` gates both the summary fetch and whether the timeline mounts;
+ * `canViewFinance` is retained for parity with the shell prop contract but the
+ * audit tiles are not finance-gated (they carry no money values).
  */
 const AuditView = ({
   canViewAudit,
-  canViewFinance,
 }: {
   canViewAudit: boolean;
   canViewFinance: boolean;
@@ -111,15 +198,9 @@ const AuditView = ({
 
   return (
     <section className="view-page" aria-labelledby="auditTitle">
-      <div className="view-summary" aria-label="Audit summary (static context)">
-        {AUDIT_SUMMARY.map((s) => (
-          <SummaryTile key={s.label} {...s} canViewFinance={canViewFinance} />
-        ))}
+      <div className="view-summary" aria-label="Audit summary">
+        <AuditSummaryTiles canViewAudit={canViewAudit} />
       </div>
-      {/* Summary counts above are static context - no live aggregate endpoint yet. */}
-      <span className="item-sub" role="note" style={{ marginBottom: "0.5rem", display: "block" }}>
-        Summary counts above are reference figures - live aggregate endpoint coming.
-      </span>
 
       <div className="view-grid">
         <section className="panel">
