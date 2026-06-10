@@ -416,8 +416,9 @@ def run_one(
 #          commits its google_revenue_source_rows, collapse ALL source rows for
 #          (tenant, report_month) into MonthlyChannelRevenueFactORM via the C1
 #          GoogleSourceNormalizer, so a real ingest actually produces revenue
-#          facts. Runs ONCE per (tenant, report_month) -- the normalizer reads
-#          every source row for the month, not just this run's reports.
+#          facts. Runs once per successful run over ALL source rows for
+#          (tenant, report_month); re-normalizing an already-normalized month is
+#          idempotent (unchanged facts), so repeated runs for a month are safe.
 # Database/ORM: MonthlyChannelRevenueFactORM (WRITE via the normalizer's
 #               record_fact upsert). Reads google_revenue_source_rows,
 #               youtube_channels, finance_month_close. No schema change.
@@ -504,11 +505,12 @@ def _normalize_ingested_source_rows(
             report_month,
         )
     except Exception:
-        # Any other normalize error (e.g. an unknown/inactive channel or value
-        # validation) is a real data problem. Roll back the partial projection
-        # and re-raise -- silently producing no facts is exactly the bug this
-        # stage fixes, so a genuine failure must be visible. No bare except;
-        # no secrets/PII logged (the normalizer already redacts).
+        # Any other normalize error (e.g. an unsupported source_system or an
+        # amount/value validation error) is a real data problem. Roll back the
+        # partial projection and re-raise -- silently producing no facts is
+        # exactly the bug this stage fixes, so a genuine failure must be
+        # visible. No bare except; no secrets/PII logged (the normalizer
+        # already redacts).
         session.rollback()
         logger.exception(
             "ingestion normalize failed tenant_id=%s month=%s",
