@@ -106,14 +106,27 @@ def _require_allocation_permission_for_range(
     must not be able to approve (or reject) a mapping that changes allocations
     in later months they were not granted. An open-ended link (end=None) spans
     an unbounded set of future months that no finite set of month-scoped grants
-    can cover, so only a global allocation grant authorizes it. The bounded path
-    falls back to the start month if the stored range is empty so it never
-    authorizes without at least one explicit month check (fail closed).
+    can cover, so only a global allocation grant authorizes it. A caller holding
+    the grant at GLOBAL scope authorizes every covered month, so the bounded path
+    short-circuits that case with one check; otherwise it checks each month
+    (falling back to the start month if the stored range is empty, so it never
+    authorizes a non-global caller without at least one explicit month check).
     """
     if end is None:
         _require_permission(
             user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()
         )
+        return
+    # FIX (PR #57 N10): a CHANGE_ALLOCATION_RULE grant at global scope authorizes
+    # every finance month (OrgAccessIndex.contains returns True for a GLOBAL
+    # granted scope against any target), so it is a strict superset of the
+    # per-month checks below. Short-circuit it once to avoid ~95k in-memory authz
+    # iterations for an authorized far-future bounded effective_month_end (e.g.
+    # 9999-12). Use the NON-raising has_permission so a non-global caller falls
+    # through to the per-month loop and is still gated month-by-month.
+    if has_permission(
+        user, Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()
+    ):
         return
     for month in _iter_months(start, end) or [start]:
         _require_permission(
