@@ -5,6 +5,7 @@ from io import StringIO
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
@@ -32,6 +33,15 @@ AUDIT_EXPORT_MAX_ROWS = 10_000
 
 # Characters that trigger CSV/Excel formula injection when they lead a cell.
 _CSV_INJECTION_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
+
+
+class AuditSummaryResponse(BaseModel):
+    """Aggregate audit counts surfaced by the GET /audit/summary tiles."""
+
+    total_events: int
+    sensitive_events: int
+    recent_count: int
+    window_hours: int
 
 
 def current_audit_log_repository(
@@ -107,6 +117,51 @@ def list_audit_events(
         },
         "audit_event": audit_record_to_api(record),
     }
+
+
+@router.get("/summary")
+def get_audit_summary(
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[
+        SqlAlchemyAuditLogRepository, Depends(current_audit_log_repository)
+    ],
+    window_hours: Annotated[int, Query(ge=1, le=8760)] = 24,
+) -> AuditSummaryResponse:
+    """Return tenant-scoped aggregate audit counts for the summary tiles."""
+    # ========================================================================
+    # Purpose: Serve the Audit screen's summary tiles (total / sensitive /
+    #   recent counts) from a single tenant-scoped aggregate query. Counts
+    #   only — no per-row payload — so it is redaction-safe for a plain
+    #   audit viewer.
+    # Database/ORM: SqlAlchemyAuditLogRepository.count_summary over
+    #   AuditLogORM (read-only COUNT aggregates; no write).
+    # Standards: Same fail-closed VIEW_AUDIT_LOG@global gate as /events;
+    #   thin route (gate -> repo -> shape); typed AuditLogValidationError ->
+    #   HTTPException(422) at the boundary. No self-audit (no AUDIT_LOG_VIEWED
+    #   row) so the aggregate cannot pollute its own counts.
+    # Blast Radius: Audit read-only aggregate; no write, no schema change, no
+    #   migration; same fail-closed gate as /events. No graph/finance impact.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/auth/audit_log.py -> count_summary.
+    #   - File: backend/ums_smart_revenue/api/audit.py -> list_audit_events
+    #     gate parity.
+    # ========================================================================
+    audit_scope = AccessScope.global_scope()
+    # Fail-closed permission check; counts disclose no payload, so the
+    # sensitive-payload gate is intentionally NOT required here.
+    _require_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope)
+    try:
+        counts = repository.count_summary(window_hours=window_hours)
+    except AuditLogValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    return AuditSummaryResponse(
+        total_events=counts.total_events,
+        sensitive_events=counts.sensitive_events,
+        recent_count=counts.recent_count,
+        window_hours=window_hours,
+    )
 
 
 @router.get("/events/export")

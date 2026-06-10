@@ -1,12 +1,13 @@
 """Tenant-scoped audit log read models and SQL repository."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.db.security_models import AuditLogORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
@@ -60,6 +61,15 @@ class AuditLogPage:
     limit: int
     has_more: bool
     next_cursor: dict[str, str] | None
+
+
+@dataclass(frozen=True)
+class AuditSummaryCounts:
+    """Immutable tenant-scoped audit aggregate returned by ``count_summary``."""
+
+    total_events: int
+    sensitive_events: int
+    recent_count: int
 
 
 class AuditLogError(ValueError):
@@ -147,6 +157,50 @@ class SqlAlchemyAuditLogRepository:
             limit=limit,
             has_more=len(rows) > limit,
             next_cursor=_next_cursor(items) if len(rows) > limit else None,
+        )
+
+    def count_summary(self, *, window_hours: int) -> AuditSummaryCounts:
+        # ====================================================================
+        # Purpose: Compute tenant-scoped audit aggregate counts (lifetime
+        #   total, lifetime sensitive, and a recent count within the supplied
+        #   window) for the GET /audit/summary tile endpoint.
+        # Database/ORM: AuditLogORM / audit_logs (read-only COUNT aggregates;
+        #   reuses ix_audit_logs_tenant_id + ix_audit_logs_event_created).
+        # Standards: Typed AuditSummaryCounts result; same tenant scoping and
+        #   AUDIT_LOG_VIEWED exclusion as list_events; raises
+        #   AuditLogValidationError on invalid window bounds.
+        # Blast Radius: Audit read-only aggregate; no write, no schema change,
+        #   no migration. Counts disclose no per-row payload.
+        # Connections:
+        #   - File: backend/ums_smart_revenue/api/audit.py -> count_summary is
+        #     called by the GET /audit/summary handler.
+        # ====================================================================
+        if window_hours < 1:
+            raise AuditLogValidationError("window_hours must be at least 1")
+
+        tenant_real = and_(
+            AuditLogORM.tenant_id == self._tenant_id,
+            AuditLogORM.event_type != AuditEventType.AUDIT_LOG_VIEWED.value,
+        )
+        cutoff = datetime.now(UTC) - timedelta(hours=window_hours)
+
+        total_events = self._session.scalar(
+            select(func.count()).select_from(AuditLogORM).where(tenant_real)
+        )
+        sensitive_events = self._session.scalar(
+            select(func.count())
+            .select_from(AuditLogORM)
+            .where(tenant_real, AuditLogORM.sensitive.is_(True))
+        )
+        recent_count = self._session.scalar(
+            select(func.count())
+            .select_from(AuditLogORM)
+            .where(tenant_real, AuditLogORM.created_at >= cutoff)
+        )
+        return AuditSummaryCounts(
+            total_events=total_events or 0,
+            sensitive_events=sensitive_events or 0,
+            recent_count=recent_count or 0,
         )
 
     @staticmethod
