@@ -115,6 +115,20 @@ def _create_tenant_context_helpers(bind) -> None:
             """
         )
     )
+    # FIX: Grant DELETE on the context table to app_platform so the
+    # session hook can fall back to a direct DELETE during a rolling
+    # migration gap (i.e. when 20260609_0002 has not yet installed the
+    # privileged `clear_app_current_tenant_id` helper). The helper
+    # itself runs SECURITY DEFINER and bypasses these grants, but the
+    # fallback path runs as the caller role, so app_platform needs
+    # DELETE explicitly. Without this, no-context sessions on a fresh
+    # 20260608_0001 install would permission-deny on the missing-helper
+    # fallback flagged by Codex P2 review on PR #88.
+    bind.execute(
+        sa.text(
+            f'GRANT DELETE ON {TENANT_CONTEXT_TABLE} TO "{APP_PLATFORM_ROLE}"'
+        )
+    )
     bind.execute(
         sa.text(
             f"""
@@ -163,6 +177,11 @@ def _create_tenant_context_helpers(bind) -> None:
     # downgrade past 20260609_0002 would drop a helper this earlier revision
     # still claims to have created (the Alembic ownership double-claim bug
     # flagged by Codex P2 review on PR #88).
+    #
+    # The direct DELETE fallback is allowed because the GRANT DELETE on
+    # `app_tenant_context` to `app_platform` is installed in
+    # `_create_tenant_context_helpers` (above), so the fallback path
+    # permission-succeeds during a rolling migration gap.
     bind.execute(
         sa.text(
             f'REVOKE ALL ON FUNCTION {TENANT_CONTEXT_SETTER}(uuid) FROM PUBLIC'

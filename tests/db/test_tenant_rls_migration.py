@@ -7,6 +7,7 @@ from ums_smart_revenue.db.rls import (
     APP_PLATFORM_ROLE,
     APP_TENANT_ROLE,
     TENANT_CONTEXT_CLEARER,
+    TENANT_CONTEXT_TABLE,
     TENANT_SCOPED_TABLES,
     tenant_rls_policy_name,
 )
@@ -151,6 +152,25 @@ def test_tenant_context_clearer_is_owned_only_by_20260609_0002():
             assert _function_exists(conn, TENANT_CONTEXT_CLEARER) is False, (
                 "20260608_0001 must not install clear_app_current_tenant_id; "
                 "its sole owner is 20260609_0002."
+            )
+            # app_platform must hold DELETE on the context table so the
+            # session hook can fall back to a direct DELETE during a
+            # rolling-migration gap (helper is not installed yet). The
+            # helper itself is SECURITY DEFINER and bypasses this grant,
+            # but the fallback runs as the caller role.
+            delete_grants = set(
+                conn.execute(
+                    sa.text(
+                        "SELECT grantee FROM information_schema.role_table_grants "
+                        "WHERE table_name = :t AND privilege_type = 'DELETE'"
+                    ),
+                    {"t": TENANT_CONTEXT_TABLE},
+                ).scalars()
+            )
+            assert APP_PLATFORM_ROLE in delete_grants, (
+                "app_platform must hold DELETE on app_tenant_context at "
+                "20260608_0001 so the missing-helper fallback in the "
+                "session hook can clear stale rows."
             )
     finally:
         engine.dispose()
