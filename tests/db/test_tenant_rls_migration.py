@@ -85,17 +85,16 @@ def _db_conn(url: str) -> Iterator[sa.Connection]:
 
 
 def _drop_public_schema(url: str) -> None:
-    """Drop and recreate the public schema for a truly fresh test DB."""
-    engine = sa.create_engine(url)
-    try:
-        with engine.begin() as conn:
-            # Fail fast (don't hang) if a stray connection holds a public-schema
-            # lock: without lock_timeout, DROP SCHEMA waits indefinitely.
-            conn.execute(sa.text("SET LOCAL lock_timeout = '30s'"))
-            conn.execute(sa.text("DROP SCHEMA public CASCADE"))
-            conn.execute(sa.text("CREATE SCHEMA public"))
-    finally:
-        engine.dispose()
+    """Drop and recreate the public schema for a truly fresh test DB.
+
+    Delegates to the shared :func:`tests.db._pg_schema_helpers.reset_public_schema`
+    helper so all 9 schema-reset call sites share the same ``lock_timeout``
+    bound and engine-disposal guarantees. Kept as a thin local wrapper to
+    preserve the existing private API used by the assertion steps below.
+    """
+    from tests.db._pg_schema_helpers import reset_public_schema
+
+    reset_public_schema(url)
 
 
 def _assert_app_platform_cross_backend_delete_rejected(url: str) -> None:
