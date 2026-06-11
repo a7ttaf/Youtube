@@ -598,7 +598,11 @@ def test_to_api_normalizes_legacy_counts_missing_rows_deleted_stale(
     the operator-facing read API never emits mixed-shape payloads.
     """
     base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
-    legacy_counts = {key: _TERMINAL_COUNTS[key] for key in _TERMINAL_COUNTS if key != "rows_deleted_stale"}
+    legacy_counts = {
+        key: _TERMINAL_COUNTS[key]
+        for key in _TERMINAL_COUNTS
+        if key != "rows_deleted_stale"
+    }
     assert "rows_deleted_stale" not in legacy_counts
 
     legacy_row = ConnectorRunORM(
