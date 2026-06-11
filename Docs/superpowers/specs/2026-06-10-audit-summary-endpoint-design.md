@@ -29,9 +29,10 @@ No schema change, no migration, no new permission, no auth change.
   identical to `GET /events`, fail-closed (403 `"Missing permission: audit.view"`). Do **NOT**
   require `VIEW_SENSITIVE_AUDIT_PAYLOADS`: the response is counts only — no `details`, no payload,
   no per-row content — so it is redaction-safe for a plain audit viewer.
-- **No self-audit.** A read aggregate must not emit an `AUDIT_LOG_VIEWED` row: it would be
-  inconsistent with other read-aggregate endpoints and would pollute the very counts it returns
-  (which is exactly why `GET /events` had to exclude `AUDIT_LOG_VIEWED` from its own listing).
+- **Snapshot, then excluded self-audit.** The aggregate snapshot excludes every
+  `AUDIT_LOG_VIEWED` row, then the successful read records one `AUDIT_LOG_VIEWED`
+  row after the snapshot. The just-written row must not affect the response the
+  caller receives, matching the `/events` list view's self-audit exclusion.
 - **Exclude `AUDIT_LOG_VIEWED`** from every count, for parity with the `/events` list view's notion
   of "real" events (it already excludes that self-event).
 - **Tenant scoping:** reuse `current_audit_log_repository` (already tenant-bound via
@@ -76,8 +77,9 @@ later additive field if a breakdown UI is built).
 - Backend (mirror `tests/api/test_audit_api.py` patterns + roles): 200 for `audit_viewer`;
   403 fail-closed for `assistant_analyst`; `sensitive_events` counts the sensitive row;
   `recent_count` respects `window_hours` (seed a row outside the window, assert excluded);
-  `AUDIT_LOG_VIEWED` excluded from counts; 422 on out-of-range `window_hours`; tenant isolation
-  if a cross-tenant fixture exists; no audit row written on success (no self-audit).
+  `AUDIT_LOG_VIEWED` excluded from counts; successful reads append exactly one excluded
+  `AUDIT_LOG_VIEWED` row after the snapshot; 422 on out-of-range `window_hours`;
+  tenant isolation if a cross-tenant fixture exists.
 - Frontend: hook + tiles render from a stubbed response; restricted viewer → no fetch.
 
 ## Part 2 — Tracker-doc hygiene (exact punch list)
@@ -100,8 +102,8 @@ Per-PR doc discipline: also add the PR-B entry to `Docs/01` and/or `Docs/15`.
 
 ## Blast-radius review
 
-- **Tables/models:** `audit_logs` (`AuditLogORM`) — READ-ONLY aggregate (COUNTs). No write, no
-  schema change, no migration.
+- **Tables/models:** `audit_logs` (`AuditLogORM`) — aggregate COUNT snapshot plus one
+  `AUDIT_LOG_VIEWED` read-audit row on success. No schema change, no migration.
 - **PostgreSQL remains source of truth.** Yes.
 - **Authorization more permissive?** No — same `VIEW_AUDIT_LOG@global` gate as `/events`,
   fail-closed; counts disclose no payload (redaction-safe), so no sensitive-payload gate needed and

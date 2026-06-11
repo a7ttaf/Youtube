@@ -1,12 +1,21 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
+import { StrictMode, type ReactElement, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AuditSummaryResponse } from "@/lib/api/types";
 import { useAuditSummary } from "@/lib/api/useAuditSummary";
 import { TenantProvider } from "@/contexts/TenantContext";
 
-function wrapper({ children }: { children: React.ReactNode }) { // skipcq: JS-0067
+function wrapper({ children }: { children: ReactNode }) { // skipcq: JS-0067
   return <TenantProvider initialSlug="ums">{children}</TenantProvider>;
+}
+
+function strictWrapper({ children }: { children: ReactNode }): ReactElement {
+  return (
+    <StrictMode>
+      <TenantProvider initialSlug="ums">{children}</TenantProvider>
+    </StrictMode>
+  );
 }
 
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -33,6 +42,28 @@ function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function abortError(): Error {
+  const err = new Error("aborted");
+  err.name = "AbortError";
+  return err;
+}
+
+type DeferredFetch = {
+  promise: Promise<Response>;
+  resolve: (value: Response) => void;
+  reject: (reason?: unknown) => void;
+};
+
+function deferredResponse(): DeferredFetch {
+  let resolve!: (value: Response) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<Response>((promiseResolve, promiseReject) => {
+    resolve = promiseResolve;
+    reject = promiseReject;
+  });
+  return { promise, resolve, reject };
 }
 
 function fetchMock() { // skipcq: JS-0067
@@ -70,15 +101,37 @@ describe("useAuditSummary", () => {
     expect(typeof result.current.reload).toBe("function");
   });
 
-  it("reload() re-runs the fetch", async () => {
-    fetchMock().mockResolvedValue(jsonResponse(SUMMARY));
+  it("reload() aborts the stale in-flight request before starting a fresh fetch", async () => {
+    const first = deferredResponse();
+    const second = deferredResponse();
+    const signals: AbortSignal[] = [];
+    fetchMock().mockImplementation((_input, init) => {
+      const signal = (init as RequestInit | undefined)?.signal;
+      if (!(signal instanceof AbortSignal)) {
+        throw new Error("expected request AbortSignal");
+      }
+      signals.push(signal);
+      const pending = signals.length === 1 ? first : second;
+      signal.addEventListener("abort", () => pending.reject(abortError()));
+      return pending.promise;
+    });
     const { result } = renderHook(() => useAuditSummary(), { wrapper });
 
-    await waitFor(() => expect(result.current.loading).toBe(false));
     expect(fetchMock()).toHaveBeenCalledTimes(1);
+    expect(signals[0]?.aborted).toBe(false);
 
     act(() => result.current.reload());
     await waitFor(() => expect(fetchMock()).toHaveBeenCalledTimes(2));
+    expect(signals[0]?.aborted).toBe(true);
+    expect(signals[1]?.aborted).toBe(false);
+
+    await act(async () => {
+      second.resolve(jsonResponse(SUMMARY));
+      await second.promise;
+    });
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.data).toEqual(SUMMARY);
+    expect(result.current.error).toBeNull();
   });
 
   it("captures a typed ApiError (403) and clears data", async () => {
@@ -94,6 +147,34 @@ describe("useAuditSummary", () => {
 });
 
 describe("useAuditSummary bounded request", () => {
+  it("keeps the StrictMode replayed request alive and reuses it without surfacing AbortError", async () => {
+    const pending = deferredResponse();
+    let capturedSignal: AbortSignal | null = null;
+    fetchMock().mockImplementation((_input, init) => {
+      capturedSignal = (init as RequestInit | undefined)?.signal ?? null;
+      capturedSignal?.addEventListener("abort", () => {
+        pending.reject(abortError());
+      });
+      return pending.promise;
+    });
+
+    const { result } = renderHook(() => useAuditSummary(), {
+      wrapper: strictWrapper,
+    });
+
+    await waitFor(() => expect(fetchMock()).toHaveBeenCalledTimes(1));
+    expect((capturedSignal as AbortSignal | null)?.aborted).toBe(false);
+
+    await act(async () => {
+      pending.resolve(jsonResponse(SUMMARY));
+      await pending.promise;
+    });
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    expect(result.current.data).toEqual(SUMMARY);
+    expect(result.current.error).toBeNull();
+  });
+
   it("forwards an AbortSignal to fetch so a stalled request can be cancelled", async () => {
     fetchMock().mockResolvedValue(jsonResponse(SUMMARY));
     renderHook(() => useAuditSummary(), { wrapper });
@@ -104,27 +185,38 @@ describe("useAuditSummary bounded request", () => {
     expect(init?.signal).toBeInstanceOf(AbortSignal);
   });
 
-  it("aborts the in-flight request when the hook unmounts", async () => {
-    let capturedSignal: AbortSignal | null = null;
-    fetchMock().mockImplementation((_input, init) => {
-      capturedSignal = (init as RequestInit | undefined)?.signal ?? null;
-      return new Promise<Response>((_resolve, reject) => {
-        // Never resolve; the test verifies the unmount aborts, not a server reply.
+  it("leaves an unmounted in-flight request to the stale-result guard and timeout", async () => {
+    vi.useFakeTimers();
+    try {
+      const pending = deferredResponse();
+      let capturedSignal: AbortSignal | null = null;
+      fetchMock().mockImplementation((_input, init) => {
+        capturedSignal = (init as RequestInit | undefined)?.signal ?? null;
         capturedSignal?.addEventListener("abort", () => {
-          const err = new Error("aborted");
-          err.name = "AbortError";
-          reject(err);
+          pending.reject(abortError());
         });
+        return pending.promise;
       });
-    });
-    const { unmount } = renderHook(() => useAuditSummary(), { wrapper });
+      const { unmount } = renderHook(() => useAuditSummary(), { wrapper });
 
-    await waitFor(() => expect(fetchMock()).toHaveBeenCalledTimes(1));
-    expect(capturedSignal).not.toBeNull();
-    expect((capturedSignal as AbortSignal | null)?.aborted).toBe(false);
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(fetchMock()).toHaveBeenCalledTimes(1);
+      expect(capturedSignal).not.toBeNull();
+      expect((capturedSignal as AbortSignal | null)?.aborted).toBe(false);
 
-    unmount();
-    expect((capturedSignal as AbortSignal | null)?.aborted).toBe(true);
+      unmount();
+      expect((capturedSignal as AbortSignal | null)?.aborted).toBe(false);
+
+      await act(async () => {
+        vi.advanceTimersByTime(31_000);
+        await Promise.resolve();
+      });
+      expect((capturedSignal as AbortSignal | null)?.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("aborts a hanging request after the timeout so the Audit screen cannot stay loading forever", async () => {
@@ -135,9 +227,7 @@ describe("useAuditSummary bounded request", () => {
         capturedSignal = (init as RequestInit | undefined)?.signal ?? null;
         return new Promise<Response>((_resolve, reject) => {
           capturedSignal?.addEventListener("abort", () => {
-            const err = new Error("aborted");
-            err.name = "AbortError";
-            reject(err);
+            reject(abortError());
           });
         });
       });

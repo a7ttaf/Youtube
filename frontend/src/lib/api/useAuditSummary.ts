@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useRef } from "react";
 
 import { useApiClient } from "@/lib/api/client";
 import type { AuditSummaryResponse } from "@/lib/api/types";
@@ -17,9 +17,9 @@ const REQUEST_TIMEOUT_MS = 30_000;
 //   tenant-scoped aggregate counts only (no per-row payload), so it is gated by
 //   the SAME VIEW_AUDIT_LOG permission as GET /audit/events; window_hours
 //   defaults to 24 on the backend, so the tile read sends no query params.
-//   The in-flight request is bounded by REQUEST_TIMEOUT_MS via AbortController
-//   and is aborted on component unmount so a stalled or rapidly unmounted
-//   Audit screen cannot leak orphan requests into the browser's network stack.
+//   The in-flight request is bounded by REQUEST_TIMEOUT_MS via AbortController,
+//   and reload() aborts superseded requests. Unmounted consumers rely on
+//   useAsync's stale-result guard while the timeout bounds stalled fetches.
 // Database/ORM: None (frontend) — reads the backend audit aggregate endpoint.
 // Standards: The request closure is memoized on `client` (stable ref) so
 //   useAsync does NOT refetch on every render. The hook is self-auditing on
@@ -40,8 +40,11 @@ const REQUEST_TIMEOUT_MS = 30_000;
 // ==========================================================================
 export function useAuditSummary(): AsyncState<AuditSummaryResponse> { // skipcq: JS-0067
   const client = useApiClient();
-  // Holds the in-flight request's AbortController so a reload can supersede
-  // the prior request and an unmount can cancel it (no orphan fetch).
+  // FIX: Do not abort from an unmount cleanup here. React StrictMode replays
+  // effect cleanup/setup on the same hook instance, and aborting during that
+  // simulated cleanup poisons useAsync's reused in-flight promise with
+  // AbortError. useAsync drops stale unmounted results, and the timeout below
+  // still bounds stalled requests.
   const abortRef = useRef<AbortController | null>(null);
 
   const run = useCallback(async (): Promise<AuditSummaryResponse> => {
@@ -64,17 +67,11 @@ export function useAuditSummary(): AsyncState<AuditSummaryResponse> { // skipcq:
       // Always clear the timer: a fast successful response would otherwise
       // leave a setTimeout dangling that aborts a later (post-unmount) call.
       clearTimeout(timer);
+      if (abortRef.current === controller) {
+        abortRef.current = null;
+      }
     }
   }, [client]);
-
-  // Cancel any in-flight request when the component unmounts so a quick
-  // navigation away from the Audit screen cannot leak an orphan fetch.
-  useEffect(() => {
-    return () => {
-      abortRef.current?.abort();
-      abortRef.current = null;
-    };
-  }, []);
 
   return useAsync(run);
 }

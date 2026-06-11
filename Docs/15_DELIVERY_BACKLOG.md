@@ -518,9 +518,11 @@ single P-tier above.
   extracted `views/AuditView.tsx`. (Registry was later wired to `GET /channels`
   in PR #73/#78.)
 - ✅ Audit summary endpoint — `GET /audit/summary` (tenant-scoped,
-  VIEW_AUDIT_LOG fail-closed, no self-audit): returns total/sensitive/recent
-  event counts excluding `AUDIT_LOG_VIEWED`, with a `window_hours` param
-  (default 24) for the recent count. The Audit summary tiles are wired off it
+  VIEW_AUDIT_LOG fail-closed, snapshot-then-excluded-self-audit): returns
+  total/sensitive/recent event counts excluding `AUDIT_LOG_VIEWED`, then records
+  one excluded `AUDIT_LOG_VIEWED` read row after the snapshot, with a
+  `window_hours` param (default 24) for the recent count. The Audit summary
+  tiles are wired off it
   (live Total events / High sensitivity / Events-24h; Retention stays a static
   policy constant), replacing the `AUDIT_SUMMARY` mock and the "live aggregate
   endpoint coming" disclaimer — branch `feat/audit-summary-endpoint`.

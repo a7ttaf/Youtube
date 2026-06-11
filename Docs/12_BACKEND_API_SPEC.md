@@ -457,12 +457,20 @@ the generated deck through the same artifact store and marks the export job
 ```http
 GET /audit/events?limit=50
 GET /audit/events?limit=50&cursor_created_at=2026-05-10T12:00:00Z&cursor_id=00000000-0000-0000-0000-000000000001
+GET /audit/summary?window_hours=24
 GET /audit/events/export?event_type=REVENUE_VIEWED&entity_type=channel&entity_id=chan-1
 ```
 
 Audit event reads require `audit.view`. Sensitive audit `details` are masked unless
 the caller also has `audit.view_sensitive_payloads`. Audit reads are themselves
 recorded as `AUDIT_LOG_VIEWED`.
+
+`GET /audit/summary` returns tenant-scoped `total_events`, `sensitive_events`,
+and `recent_count` aggregates. The snapshot excludes `AUDIT_LOG_VIEWED` rows
+from every count, then the successful read records one `AUDIT_LOG_VIEWED` row
+with `entity_type=audit_log_summary`; that just-written row is excluded from the
+response that triggered it. `window_hours` defaults to `24` and is bounded to
+`1..8760`.
 
 `GET /audit/events/export` returns the current filtered slice as CSV (`text/csv`)
 with a `Content-Disposition: attachment; filename="audit-events.csv"` header. It
