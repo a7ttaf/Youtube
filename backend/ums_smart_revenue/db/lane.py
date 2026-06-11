@@ -33,6 +33,13 @@ from ums_smart_revenue.db.session import (
 #   monthly_channel_revenue_facts).
 # Standards (MEASURED semantics -- probe-verified against the live PG container,
 #   not the SET-LOCAL textbook):
+#   - The helper does NOT eagerly open a connection/transaction. Dialect is
+#     resolved via session.get_bind() (no DBAPI work), the active-lane flag is
+#     set first, and the elevation lands on the CURRENT transaction only when
+#     one is already in flight at entry. When no transaction is in flight at
+#     entry, the elevation is deferred to the next after_begin (the flag
+#     suppresses the demote). This is the fix for the per-report blob-upload
+#     idle-in-transaction window in the connector run path.
 #   - SET LOCAL ROLE is transaction-scoped, but the elevation here spans EVERY
 #     transaction begun on the session while the _PLATFORM_LANE_ACTIVE_KEY flag
 #     is set, NOT just the entry transaction. The after_begin hook
@@ -78,17 +85,37 @@ from ums_smart_revenue.db.session import (
 @contextmanager
 def platform_lane(session: Session) -> Iterator[None]:
     """Run the wrapped block under ``app_platform`` (no-op off Postgres)."""
-    connection = session.connection()
-    if connection.dialect.name != "postgresql":
+    # FIX: Determine the dialect WITHOUT opening a connection/transaction.
+    # The previous implementation called session.connection() unconditionally
+    # on entry, which triggered after_begin and started a Postgres transaction
+    # immediately. In the connector run path, that transaction could remain
+    # open across _prepare_raw_report_file() -> blob upload_and_verify() (non-DB
+    # network work) and trip idle_in_transaction_session_timeout under slow
+    # storage. The fix: set the active-lane flag eagerly so the next
+    # after_begin (a) sets app_platform and (b) skips the app_tenant demote.
+    # When a transaction is already in flight at entry, elevate the CURRENT
+    # transaction with one session.connection() call; when no transaction is
+    # in flight, defer the elevation to the next after_begin so we never
+    # autobegin an idle-in-transaction connection just to set a role the next
+    # after_begin re-pins anyway.
+    bind = session.get_bind()
+    if bind is None or bind.dialect.name != "postgresql":
         # Off Postgres there are no roles to switch; stay transparent.
         yield
         return
     # Mark the lane active BEFORE elevating so the after_begin hook keeps any
     # nested SAVEPOINT on app_platform instead of re-pinning the tenant lane.
     session.info[_PLATFORM_LANE_ACTIVE_KEY] = True
-    # The after_begin hook fired on session.connection() above and pinned the
-    # configured lane; elevate to app_platform for the platform-only writes.
-    connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"')
+    if session.in_transaction():
+        # An in-flight transaction already exists; elevate it directly so the
+        # current statement batch runs on app_platform (mirrors the original
+        # entry-time behavior for the in-txn case).
+        connection = session.connection()
+        connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"')
+    # If no transaction is in flight, defer the elevation to the next
+    # after_begin: it will SET LOCAL ROLE "app_platform" and skip the
+    # app_tenant demote because the flag above is set. This is the fix for
+    # the per-report blob-upload idle-in-transaction window.
     completed = False
     try:
         yield

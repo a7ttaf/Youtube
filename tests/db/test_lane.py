@@ -84,12 +84,22 @@ class _StubConnection:
         return None
 
 
+class _StubBind:
+    """Mimic the SQLAlchemy engine/connection wrapper exposing ``.dialect``."""
+
+    def __init__(self, dialect_name: str) -> None:
+        self.dialect = type("Dialect", (), {"name": dialect_name})()
+
+
 class _StubSession:
     """Minimal session exposing ``info`` and ``connection()`` for the helper.
 
     ``in_transaction`` defaults to True (the healthy entry-transaction case);
     ``txn_status`` drives the simulated psycopg transaction-status name the
     Finding 4 guard reads (``INTRANS`` = healthy, ``INERROR`` = aborted).
+    The body can flip ``in_transaction`` to False via ``simulate_commit`` to
+    model a body commit (the realistic case for the "no restore on clean
+    exit" assertion).
     """
 
     def __init__(
@@ -104,6 +114,15 @@ class _StubSession:
         self._connection = _StubConnection(dialect_name, txn_status=txn_status)
         self.connection_calls = 0
         self._in_transaction = in_transaction
+        self._bind = _StubBind(dialect_name)
+        self.get_bind_calls = 0
+
+    def get_bind(self) -> _StubBind:
+        # The helper uses get_bind() to resolve the dialect WITHOUT opening
+        # a connection/transaction; track calls so tests can assert the
+        # helper never autobegins when no transaction is in flight.
+        self.get_bind_calls += 1
+        return self._bind
 
     def connection(self) -> _StubConnection:
         self.connection_calls += 1
@@ -111,6 +130,10 @@ class _StubSession:
 
     def in_transaction(self) -> bool:
         return self._in_transaction
+
+    def simulate_commit(self) -> None:
+        """Drop the in-flight transaction to model a body commit."""
+        self._in_transaction = False
 
 
 def test_platform_lane_is_noop_off_postgres() -> None:
@@ -133,25 +156,86 @@ def test_platform_lane_elevates_then_restores_tenant_lane() -> None:
         f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"',
         f'SET LOCAL ROLE "{APP_TENANT_ROLE}"',
     ]
-    # The transaction must be ensured-begun before the elevation lands.
-    assert session.connection_calls >= 1
+    # The in-flight transaction is elevated with a single session.connection()
+    # call; the second session.connection() call comes from the clean-exit
+    # restore (Finding 4 guard: the txn is still in flight and healthy). The
+    # new helper does not autobegin a fresh transaction when the txn is
+    # already open.
+    assert session.connection_calls == 2
 
 
-def test_platform_lane_post_commit_clean_exit_issues_no_restore() -> None:
-    """A body that committed (no active txn on exit) must NOT autobegin/restore.
+def test_platform_lane_no_active_txn_at_entry_defers_elevation() -> None:
+    """No in-flight transaction at entry => no autobegin, no eager elevation.
 
-    Finding 4(a): session.connection() would autobegin an idle-in-transaction
-    connection just to set a role the next after_begin re-pins anyway. Only the
-    enter-time elevation should be on the call log.
+    The previous implementation called session.connection() unconditionally on
+    entry, which triggered after_begin and started a Postgres transaction
+    immediately. In the per-report connector path that transaction could
+    remain open across _prepare_raw_report_file() -> blob upload_and_verify()
+    (non-DB network work) and trip idle_in_transaction_session_timeout under
+    slow storage. The new behavior: set the active-lane flag eagerly, defer
+    the elevation to the next after_begin (the flag carries the intent
+    through), and never autobegin an idle-in-transaction connection just to
+    set a role the next after_begin re-pins anyway. The body runs without any
+    role statements, and the flag is cleared on block exit.
     """
     session = _StubSession(
         role=APP_TENANT_ROLE, dialect_name="postgresql", in_transaction=False
     )
     with platform_lane(session):
         pass
+    # No role statements issued and no autobegin via session.connection().
+    assert session._connection.calls == []
+    assert session.connection_calls == 0
+    # get_bind() was used to resolve the dialect without opening a connection.
+    assert session.get_bind_calls == 1
+    # The flag is cleared on block exit (clean exit, no exception).
+    assert _PLATFORM_LANE_ACTIVE_KEY not in session.info
+
+
+def test_platform_lane_defers_elevation_even_when_body_never_writes() -> None:
+    """A body that never starts a transaction issues no role statements at all.
+
+    This is the exact per-report blob-upload case: the helper is entered
+    before any DB write, the body performs non-DB network work
+    (upload_and_verify), and the first DB write happens AFTER the helper
+    exits. The fix must NOT autobegin a transaction just to set a role the
+    next after_begin re-pins anyway -- the next after_begin will see the
+    flag and run the elevation naturally.
+    """
+    session = _StubSession(
+        role=APP_TENANT_ROLE, dialect_name="postgresql", in_transaction=False
+    )
+    with platform_lane(session):
+        # Body performs only non-DB work; no session.connection() call.
+        assert session.connection_calls == 0
+    assert session._connection.calls == []
+    assert session.connection_calls == 0
+    assert session.get_bind_calls == 1
+
+
+def test_platform_lane_post_commit_clean_exit_issues_no_restore() -> None:
+    """A body that committed (in-flight txn dropped) must NOT autobegin/restore.
+
+    Finding 4(a): session.connection() would autobegin an idle-in-transaction
+    connection just to set a role the next after_begin re-pins anyway. The
+    realistic model is: enter with an in-flight transaction, the body commits
+    (dropping the in-flight transaction), the helper exits cleanly. The
+    _restore_tenant_lane guard sees in_transaction() is False and skips the
+    restore, avoiding the autobegin. Only the enter-time elevation should be
+    on the call log.
+    """
+    session = _StubSession(
+        role=APP_TENANT_ROLE, dialect_name="postgresql", in_transaction=True
+    )
+    with platform_lane(session):
+        # Body commits; the in-flight transaction is now gone.
+        session.simulate_commit()
     assert session._connection.calls == [
         f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"'
     ]
+    # Only the entry-time elevation called session.connection(); the
+    # post-commit clean-exit path did not autobegin a fresh transaction.
+    assert session.connection_calls == 1
 
 
 def test_platform_lane_swallowed_error_clean_exit_skips_restore() -> None:
