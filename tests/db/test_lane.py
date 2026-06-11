@@ -1,19 +1,29 @@
 """Unit tests for the ``platform_lane`` single-session elevation helper.
 
-These pin the contract the connector run path depends on:
+These pin the contract the connector run path depends on (MEASURED semantics --
+the spec'd Finding 4 behavior correction; the prior unconditional-restore tests
+were rewritten here on purpose):
 
 * SQLite (and any non-Postgres dialect) -> complete no-op: no SET LOCAL ROLE
   statements are emitted, so the helper is transparent to the test tier.
-* Postgres tenant-lane session (``session.info`` marks ``app_tenant``) ->
-  ``SET LOCAL ROLE "app_platform"`` on enter, ``SET LOCAL ROLE "app_tenant"``
-  on exit. The enter path first touches ``session.connection()`` so the
-  ``after_begin`` hook has already pinned the configured lane before the
-  elevation lands.
+* Postgres tenant-lane session (``session.info`` marks ``app_tenant``) with the
+  entry transaction still active and healthy on exit -> ``SET LOCAL ROLE
+  "app_platform"`` on enter, ``SET LOCAL ROLE "app_tenant"`` on exit. The enter
+  path first touches ``session.connection()`` so the ``after_begin`` hook has
+  already pinned the configured lane before the elevation lands.
+* Postgres tenant-lane session whose body committed/rolled back (so the session
+  is no longer in a transaction on exit) -> NO restore: issuing it would
+  autobegin an idle-in-transaction connection just to set a role the next
+  after_begin re-pins anyway.
+* Postgres tenant-lane session whose body swallowed a DB error (transaction in
+  error state) but exited cleanly -> NO restore and NO raise: a SET LOCAL ROLE
+  on an aborted transaction would surface InFailedSqlTransaction out of __exit__.
 * Postgres platform-lane session (``session.info`` marks ``app_platform``) ->
   elevation on enter but NO restore on exit (the session is already privileged;
   restoring ``app_tenant`` would wrongly demote it).
-* The exit restore runs even when the body raises, so a failure inside the
-  block cannot strand a tenant-lane session in the elevated role.
+* On a body exception the restore is skipped (success-gated); only the flag pop
+  runs. The caller's rollback ends the transaction and the next after_begin
+  re-pins the tenant lane.
 
 The unit tier uses lightweight connection/session stubs (mirroring
 ``tests/db/test_session_tenant_hook.py::test_no_context_clears_stale_context``)
@@ -33,12 +43,41 @@ from ums_smart_revenue.db.session import (
 )
 
 
+class _StubTxnStatus:
+    """Mimic ``psycopg.pq.TransactionStatus`` enough for the .name compare."""
+
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _StubDriverInfo:
+    """Expose ``transaction_status`` like psycopg's connection.info."""
+
+    def __init__(self, status_name: str) -> None:
+        self.transaction_status = _StubTxnStatus(status_name)
+
+
+class _StubDriverConnection:
+    """Mimic the psycopg driver_connection carrying ``info``."""
+
+    def __init__(self, status_name: str) -> None:
+        self.info = _StubDriverInfo(status_name)
+
+
+class _StubDbapiConnection:
+    """Mimic the SQLAlchemy connection.connection (DBAPI wrapper)."""
+
+    def __init__(self, status_name: str) -> None:
+        self.driver_connection = _StubDriverConnection(status_name)
+
+
 class _StubConnection:
     """Record ``exec_driver_sql`` calls and report a fixed dialect name."""
 
-    def __init__(self, dialect_name: str) -> None:
+    def __init__(self, dialect_name: str, *, txn_status: str = "INTRANS") -> None:
         self.dialect = type("Dialect", (), {"name": dialect_name})()
         self.calls: list[str] = []
+        self.connection = _StubDbapiConnection(txn_status)
 
     def exec_driver_sql(self, sql: str, parameters=None):
         self.calls.append(sql)
@@ -46,16 +85,32 @@ class _StubConnection:
 
 
 class _StubSession:
-    """Minimal session exposing ``info`` and ``connection()`` for the helper."""
+    """Minimal session exposing ``info`` and ``connection()`` for the helper.
 
-    def __init__(self, *, role: str, dialect_name: str) -> None:
+    ``in_transaction`` defaults to True (the healthy entry-transaction case);
+    ``txn_status`` drives the simulated psycopg transaction-status name the
+    Finding 4 guard reads (``INTRANS`` = healthy, ``INERROR`` = aborted).
+    """
+
+    def __init__(
+        self,
+        *,
+        role: str,
+        dialect_name: str,
+        in_transaction: bool = True,
+        txn_status: str = "INTRANS",
+    ) -> None:
         self.info = {_SESSION_ROLE_KEY: role}
-        self._connection = _StubConnection(dialect_name)
+        self._connection = _StubConnection(dialect_name, txn_status=txn_status)
         self.connection_calls = 0
+        self._in_transaction = in_transaction
 
     def connection(self) -> _StubConnection:
         self.connection_calls += 1
         return self._connection
+
+    def in_transaction(self) -> bool:
+        return self._in_transaction
 
 
 def test_platform_lane_is_noop_off_postgres() -> None:
@@ -67,7 +122,7 @@ def test_platform_lane_is_noop_off_postgres() -> None:
 
 
 def test_platform_lane_elevates_then_restores_tenant_lane() -> None:
-    """A tenant-lane Postgres session elevates on enter and restores on exit."""
+    """A tenant-lane session restores when the entry txn is active + healthy."""
     session = _StubSession(role=APP_TENANT_ROLE, dialect_name="postgresql")
     with platform_lane(session):
         # Inside the block only the elevation has been issued.
@@ -80,6 +135,44 @@ def test_platform_lane_elevates_then_restores_tenant_lane() -> None:
     ]
     # The transaction must be ensured-begun before the elevation lands.
     assert session.connection_calls >= 1
+
+
+def test_platform_lane_post_commit_clean_exit_issues_no_restore() -> None:
+    """A body that committed (no active txn on exit) must NOT autobegin/restore.
+
+    Finding 4(a): session.connection() would autobegin an idle-in-transaction
+    connection just to set a role the next after_begin re-pins anyway. Only the
+    enter-time elevation should be on the call log.
+    """
+    session = _StubSession(
+        role=APP_TENANT_ROLE, dialect_name="postgresql", in_transaction=False
+    )
+    with platform_lane(session):
+        pass
+    assert session._connection.calls == [
+        f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"'
+    ]
+
+
+def test_platform_lane_swallowed_error_clean_exit_skips_restore() -> None:
+    """A swallowed DB error (aborted txn) clean exit must not raise/restore.
+
+    Finding 4(b): issuing SET LOCAL ROLE on an INERROR transaction would raise
+    InFailedSqlTransaction out of __exit__. The guard reads the psycopg
+    transaction status name and skips the restore.
+    """
+    session = _StubSession(
+        role=APP_TENANT_ROLE,
+        dialect_name="postgresql",
+        in_transaction=True,
+        txn_status="INERROR",
+    )
+    # Body swallows its own DB error and exits cleanly -> no raise from __exit__.
+    with platform_lane(session):
+        pass
+    assert session._connection.calls == [
+        f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"'
+    ]
 
 
 def test_platform_lane_does_not_demote_platform_lane_session() -> None:
