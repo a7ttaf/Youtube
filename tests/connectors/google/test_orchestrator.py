@@ -3238,6 +3238,7 @@ def test_run_one_with_youtube_analytics_empty_success_replaces_existing_rows(
     assert second_outcome.counts["reports_attempted"] == 1
     assert second_outcome.counts["reports_succeeded"] == 1
     assert second_outcome.counts["rows_upserted_total"] == 0
+    assert second_outcome.counts["rows_deleted_stale"] == len(initial_rows)
 
     final_rows = session.scalars(
         select(GoogleRevenueSourceRowORM).where(
@@ -4878,6 +4879,7 @@ def test_run_one_with_adsense_management_empty_success_replaces_existing_rows(
     assert second_outcome.counts["reports_attempted"] == 1
     assert second_outcome.counts["reports_succeeded"] == 1
     assert second_outcome.counts["rows_upserted_total"] == 0
+    assert second_outcome.counts["rows_deleted_stale"] == 2
 
     final_rows = session.scalars(
         select(GoogleRevenueSourceRowORM).where(

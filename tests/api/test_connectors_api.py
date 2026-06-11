@@ -468,6 +468,7 @@ RUN_COUNTS = {
     "rows_upserted_created": 5,
     "rows_upserted_updated": 3,
     "rows_upserted_unchanged": 1,
+    "rows_deleted_stale": 0,
 }
 
 

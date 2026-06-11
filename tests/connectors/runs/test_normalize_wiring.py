@@ -3,9 +3,8 @@
 These tests isolate the orchestrator's finance-projection seam
 (``_normalize_ingested_source_rows``) from the live ingest machinery by
 patching ``_run_one_with_credentials`` to return a controlled
-``ConnectorRunOutcome`` and patching ``GoogleSourceNormalizer`` /
-``get_month_close_status`` at orchestrator module scope. They pin the gate
-matrix the spec locks:
+``ConnectorRunOutcome`` and patching the normalization adapter's repository /
+normalizer dependencies. They pin the gate matrix the spec locks:
 
 * dry-run -> normalize NOT invoked (no committed source rows);
 * FAILED run -> NOT invoked (deferred stale-row cleanup for Analytics did
@@ -29,6 +28,7 @@ The end-to-end proof that real source rows actually become facts lives in
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
@@ -36,7 +36,7 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from ums_smart_revenue.connectors.runs import orchestrator
+from ums_smart_revenue.connectors.runs import normalization, orchestrator
 from ums_smart_revenue.connectors.runs.orchestrator import (
     ConnectorRunOutcome,
     run_one,
@@ -95,6 +95,8 @@ def _outcome(
     *,
     run: ConnectorRunEntry | None,
     reports_succeeded: int = 1,
+    rows_upserted_total: int = 1,
+    rows_deleted_stale: int = 0,
     analytics_cleanup_blocked: bool = False,
 ) -> ConnectorRunOutcome:
     """Wrap a run stub in an immutable ``ConnectorRunOutcome``.
@@ -109,10 +111,11 @@ def _outcome(
         "reports_attempted": max(reports_succeeded, 1),
         "reports_succeeded": reports_succeeded,
         "reports_failed": 0,
-        "rows_upserted_total": 0,
-        "rows_upserted_created": 0,
+        "rows_upserted_total": rows_upserted_total,
+        "rows_upserted_created": rows_upserted_total,
         "rows_upserted_updated": 0,
         "rows_upserted_unchanged": 0,
+        "rows_deleted_stale": rows_deleted_stale,
     }
     return ConnectorRunOutcome(
         run=run,
@@ -147,8 +150,8 @@ def _invoke_run_one(
 
     The audit_sink and audit_actor are built LAZILY inside
     ``_normalize_ingested_source_rows`` (after the dry-run gate passes);
-    the helper patches ``SqlAlchemyAuditSink`` at module scope so the
-    lazy construction observes the patch.
+    the helper patches ``SqlAlchemyAuditSink`` in the normalization adapter
+    module so the lazy construction observes the patch.
     """
     session = MagicMock(name="session")
     normalizer_cls = MagicMock(name="GoogleSourceNormalizer")
@@ -175,15 +178,18 @@ def _invoke_run_one(
     ), patch.object(
         orchestrator, "validate_report_month", return_value=None
     ), patch.object(
-        orchestrator, "get_month_close_status", get_month_close_status_mock
+        normalization, "get_month_close_status", get_month_close_status_mock
     ), patch.object(
-        orchestrator, "GoogleSourceNormalizer", normalizer_cls
+        normalization, "GoogleSourceNormalizer", normalizer_cls
     ), patch.object(
-        orchestrator, "record_projection_failure", record_failure_mock
+        normalization, "record_projection_failure", record_failure_mock
     ), patch.object(
-        orchestrator, "SqlAlchemyAuditSink", return_value=audit_sink_mock
+        normalization, "SqlAlchemyAuditSink", return_value=audit_sink_mock
     ), patch.object(
         orchestrator, "build_connector_service_principal",
+        return_value=audit_actor_mock,
+    ), patch.object(
+        normalization, "build_connector_service_principal",
         return_value=audit_actor_mock,
     ):
         returned = run_one(
@@ -237,6 +243,91 @@ def test_failed_run_does_not_invoke_normalize(reports_succeeded: int) -> None:
 def test_run_with_no_run_entry_does_not_invoke_normalize() -> None:
     """Defensive: a live outcome with run=None must not normalize."""
     _, normalizer_cls, _, _, _ = _invoke_run_one(outcome=_outcome(run=None))
+    normalizer_cls.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["SUCCEEDED", "PARTIAL"])
+def test_terminal_run_with_zero_upserted_rows_skips_normalize(
+    status: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A terminal run that produced no source rows must not re-normalize a month.
+
+    The skip must also emit a structured log line so operators can audit
+    hot-path runs that were intentionally bypassed; this is the
+    observability contract the new ``rows_upserted_total == 0 AND
+    rows_deleted_stale == 0`` gate promises in its contract block.
+    """
+    caplog.set_level(logging.INFO, logger=orchestrator.logger.name)
+    _, normalizer_cls, session, record_failure, _ = _invoke_run_one(
+        outcome=_outcome(
+            run=_run_entry(status=status),
+            rows_upserted_total=0,
+        )
+    )
+    normalizer_cls.assert_not_called()
+    session.commit.assert_not_called()
+    session.rollback.assert_not_called()
+    record_failure.assert_not_called()
+    assert "ingestion normalize skipped (no source row mutations)" in caplog.text
+
+
+@pytest.mark.parametrize("status", ["SUCCEEDED", "PARTIAL"])
+def test_terminal_run_with_zero_upserts_but_stale_deletes_normalizes(
+    status: str,
+) -> None:
+    """A stale-row deletion changes source truth and must re-project facts."""
+    normalizer = MagicMock(name="normalizer")
+    _, normalizer_cls, session, _, _ = _invoke_run_one(
+        outcome=_outcome(
+            run=_run_entry(status=status),
+            rows_upserted_total=0,
+            rows_deleted_stale=1,
+        ),
+        normalizer=normalizer,
+    )
+
+    normalizer_cls.assert_called_once_with(session, tenant_id=TENANT_ID)
+    normalizer.normalize_month.assert_called_once_with(
+        month=REPORT_MONTH,
+        actor_user_id=str(TRIGGERED_BY),
+    )
+    session.commit.assert_called_once()
+
+
+def test_terminal_success_delegates_projection_to_adapter() -> None:
+    """The orchestrator delegates DB/transaction-heavy projection work to an adapter."""
+    outcome = _outcome(run=_run_entry(status="SUCCEEDED"))
+    session = MagicMock(name="session")
+    adapter = MagicMock(name="normalization_adapter")
+    adapter_cls = MagicMock(return_value=adapter)
+    with patch.object(
+        orchestrator, "_run_one_with_credentials", return_value=outcome
+    ), patch.object(
+        orchestrator, "_credentials_for_run", return_value=MagicMock()
+    ), patch.object(
+        orchestrator, "validate_report_month", return_value=None
+    ), patch.object(
+        orchestrator,
+        "SqlAlchemyIngestedSourceRowNormalizationAdapter",
+        adapter_cls,
+        create=True,
+    ), patch.object(
+        orchestrator, "GoogleSourceNormalizer", create=True
+    ) as normalizer_cls, patch.object(
+        orchestrator, "get_month_close_status", return_value="OPEN", create=True
+    ):
+        run_one(
+            session,
+            tenant_id=TENANT_ID,
+            connector_key=CONNECTOR_KEY,
+            account_id=ACCOUNT_ID,
+            report_month=REPORT_MONTH,
+            dry_run=False,
+            triggered_by_user_id=TRIGGERED_BY,
+        )
+    adapter_cls.assert_called_once_with(session, tenant_id=TENANT_ID)
+    adapter.normalize_after_run.assert_called_once()
     normalizer_cls.assert_not_called()
 
 
@@ -477,9 +568,9 @@ def test_projection_failure_records_on_run_when_normalize_raises() -> None:
     audit_actor_mock = MagicMock(name="audit_actor")
     audit_actor_mock.user_id = SERVICE_ACTOR_ID
     with patch.object(
-        orchestrator, "SqlAlchemyAuditSink", return_value=audit_sink_mock
+        normalization, "SqlAlchemyAuditSink", return_value=audit_sink_mock
     ), patch.object(
-        orchestrator, "build_connector_service_principal",
+        normalization, "build_connector_service_principal",
         return_value=audit_actor_mock,
     ), patch(
         "ums_smart_revenue.auth.audit_service.record_audit_event"
@@ -526,13 +617,13 @@ def test_failed_facts_txn_is_rolled_back_before_run_rewrite() -> None:
     normalizer_cls = MagicMock(name="GoogleSourceNormalizer")
     normalizer_cls.return_value = normalizer
     with patch.object(
-        orchestrator, "get_month_close_status", return_value="OPEN"
+        normalization, "get_month_close_status", return_value="OPEN"
     ), patch.object(
-        orchestrator, "GoogleSourceNormalizer", normalizer_cls
+        normalization, "GoogleSourceNormalizer", normalizer_cls
     ), patch.object(
-        orchestrator, "record_projection_failure", record_failure
+        normalization, "record_projection_failure", record_failure
     ), patch.object(
-        orchestrator, "SqlAlchemyAuditSink", return_value=MagicMock()
+        normalization, "SqlAlchemyAuditSink", return_value=MagicMock()
     ):
         with pytest.raises(ValueError, match="unknown channel"):
             orchestrator._normalize_ingested_source_rows(
@@ -619,7 +710,9 @@ def test_lock_prefilter_failure_records_on_run() -> None:
     )
 
 
-def test_partial_with_failed_report_scopes_skips_normalize() -> None:
+def test_partial_with_failed_report_scopes_skips_normalize(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Thread 12: a PARTIAL run with any failed report scopes skips normalize.
 
     Generalization of Thread 11 -- the failed report's intended source
@@ -630,8 +723,13 @@ def test_partial_with_failed_report_scopes_skips_normalize() -> None:
     stale rows eligible for canonical selection. Skip normalize to keep
     the previous month's facts intact; the next SUCCEEDED run for the
     same month will rewrite them.
+
+    The skip must also emit a structured log line so operators can
+    audit partial-with-failures bypass decisions without re-reading
+    the orchestrator source.
     """
     from dataclasses import replace
+    caplog.set_level(logging.INFO, logger=orchestrator.logger.name)
     run = _run_entry(status="PARTIAL")
     outcome = replace(
         _outcome(run=run),
@@ -644,9 +742,9 @@ def test_partial_with_failed_report_scopes_skips_normalize() -> None:
     normalizer_cls.assert_not_called()
     session.commit.assert_not_called()
     record_failure.assert_not_called()
-    # Autobegun read txn must be released.
-    assert session.rollback.call_count >= 1
+    session.rollback.assert_not_called()
     assert returned.run is not None and returned.run.status == "PARTIAL"
+    assert "ingestion normalize skipped (partial run with failed scopes)" in caplog.text
 
 
 def test_partial_with_clean_failures_normalizes() -> None:

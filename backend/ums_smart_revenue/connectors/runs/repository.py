@@ -26,6 +26,7 @@ CONNECTOR_RUN_COUNT_KEYS = (
     "rows_upserted_created",
     "rows_upserted_updated",
     "rows_upserted_unchanged",
+    "rows_deleted_stale",
 )
 TERMINAL_STATUSES = frozenset({"SUCCEEDED", "PARTIAL", "FAILED"})
 MONTH_PATTERN = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")
@@ -504,6 +505,37 @@ def _zero_counts() -> dict[str, int]:
     return dict.fromkeys(CONNECTOR_RUN_COUNT_KEYS, 0)
 
 
+def _normalize_counts_for_read(counts_json: object) -> dict[str, int]:
+    """Normalize a stored ``counts_json`` payload into the fixed B2.3 read shape.
+
+    Historical ``connector_runs`` rows written before a key was added to
+    ``CONNECTOR_RUN_COUNT_KEYS`` (for example ``rows_deleted_stale``) still
+    carry the old JSON shape on disk. The B2.3 spec promises that every
+    read-side payload contains the full key set with defaults of 0, so this
+    helper fills in any missing keys with 0 instead of letting the API emit
+    mixed-shape payloads. Non-dict payloads and unexpected keys are tolerated
+    defensively (extra keys are dropped, non-int values for expected keys
+    are coerced to 0) so a corrupted row cannot raise out of the read path
+    and mask the operator-facing run history. Negative integers are also
+    clamped to 0 since row counts are non-negative by definition; a negative
+    value is data corruption and must never surface to the operator-facing
+    read API.
+    """
+    raw = counts_json if isinstance(counts_json, dict) else {}
+    normalized: dict[str, int] = {}
+    for key in CONNECTOR_RUN_COUNT_KEYS:
+        value = raw.get(key)
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+        ):
+            normalized[key] = value
+        else:
+            normalized[key] = 0
+    return normalized
+
+
 def _to_entry(row: ConnectorRunORM) -> ConnectorRunEntry:
     """Convert a ConnectorRunORM row into a ConnectorRunEntry."""
     return ConnectorRunEntry(
@@ -518,7 +550,7 @@ def _to_entry(row: ConnectorRunORM) -> ConnectorRunEntry:
         started_at=row.started_at,
         finished_at=row.finished_at,
         status=row.status,
-        counts=dict(row.counts_json),
+        counts=_normalize_counts_for_read(row.counts_json),
         error_summary=row.error_summary,
     )
 
