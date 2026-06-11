@@ -17,7 +17,10 @@ from contextlib import contextmanager
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.db.rls import APP_PLATFORM_ROLE, APP_TENANT_ROLE
-from ums_smart_revenue.db.session import _SESSION_ROLE_KEY
+from ums_smart_revenue.db.session import (
+    _PLATFORM_LANE_ACTIVE_KEY,
+    _SESSION_ROLE_KEY,
+)
 
 
 # ============================================================================
@@ -31,13 +34,16 @@ from ums_smart_revenue.db.session import _SESSION_ROLE_KEY
 # Standards: SET LOCAL ROLE is transaction-scoped, so the elevation must be
 #   re-applied per transaction AFTER the transaction has begun -- we touch
 #   session.connection() first so the after_begin hook pins the configured lane
-#   before we elevate. A commit/rollback INSIDE the block ends the elevation
-#   with that transaction (callers must not commit mid-block and keep writing
-#   under the assumption the elevation persists). The exit restore targets only
+#   before we elevate. A _PLATFORM_LANE_ACTIVE_KEY flag is set on session.info
+#   for the duration so the after_begin hook (which also fires for nested
+#   SAVEPOINTs) does not re-pin the tenant lane and undo the elevation
+#   mid-transaction. A commit/rollback INSIDE the block ends the elevation with
+#   that transaction (callers must not commit mid-block and keep writing under
+#   the assumption the elevation persists). The exit restore targets only
 #   tenant-lane sessions (session.info marker); a platform-lane session is left
 #   elevated because demoting it would wrongly restrict an already-privileged
-#   lane. The restore runs in a finally so a body failure cannot strand a
-#   tenant-lane session in app_platform.
+#   lane. Both the flag clear and the restore run in a finally so a body
+#   failure cannot strand a tenant-lane session in app_platform.
 # Blast Radius: Authorization (which DB role executes already-trusted writes).
 #   RLS still applies to app_platform (NOBYPASSRLS + trusted-context policies),
 #   so tenant scoping is preserved; this only widens the write-grant surface
@@ -59,12 +65,16 @@ def platform_lane(session: Session) -> Iterator[None]:
         # Off Postgres there are no roles to switch; stay transparent.
         yield
         return
-    # The after_begin hook fired on the line above and pinned the session's
+    # Mark the lane active BEFORE elevating so the after_begin hook keeps any
+    # nested SAVEPOINT on app_platform instead of re-pinning the tenant lane.
+    session.info[_PLATFORM_LANE_ACTIVE_KEY] = True
+    # The after_begin hook fired on session.connection() above and pinned the
     # configured lane; elevate to app_platform for the platform-only writes.
     connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"')
     try:
         yield
     finally:
+        session.info.pop(_PLATFORM_LANE_ACTIVE_KEY, None)
         # Restore the tenant lane only for tenant-lane sessions. A platform-lane
         # session is already privileged for its whole lifetime; demoting it to
         # app_tenant here would wrongly restrict it.

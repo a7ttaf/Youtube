@@ -93,6 +93,9 @@ from ums_smart_revenue.connectors.google.errors import (  # noqa: E402
 # load, before ``_parse_args`` is first called -- so this file lets ruff's
 # I001 import sorter do its alphabetical thing.
 from ums_smart_revenue.connectors.runs.orchestrator import run_one  # noqa: E402
+from ums_smart_revenue.connectors.runs.tenant_context import (  # noqa: E402
+    connector_tenant_context,
+)
 from ums_smart_revenue.db.session import build_session_factory  # noqa: E402
 
 # Strict ``YYYY-MM`` with two-digit month in 01-12. argparse's ``type=`` can
@@ -184,7 +187,14 @@ def main(argv: list[str] | None = None) -> int:
         print("UMS_DATABASE_URL is required to run the Google connector", file=sys.stderr)
         return 2
     session_factory = build_session_factory(settings.database_url)
-    with session_factory() as session:
+    # FIX: set TENANT_CTX for the run. The connector CLI runs outside any
+    # FastAPI request, so without this the per-transaction RLS session hook
+    # (db/session.py) finds no tenant, clears the trusted context row, and pins
+    # the restricted app_tenant lane -> every tenant-table policy denies all
+    # rows and the run dies fail-closed at the credential read (a misleading
+    # CredentialNotFoundError) before any ingest. The previous code built the
+    # tenant-lane session but never set the context -- the fail-closed-empty gap.
+    with session_factory() as session, connector_tenant_context(args.tenant):
         try:
             outcome = run_one(
                 session,
