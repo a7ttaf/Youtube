@@ -28,6 +28,7 @@ The end-to-end proof that real source rows actually become facts lives in
 """
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
@@ -248,8 +249,16 @@ def test_run_with_no_run_entry_does_not_invoke_normalize() -> None:
 @pytest.mark.parametrize("status", ["SUCCEEDED", "PARTIAL"])
 def test_terminal_run_with_zero_upserted_rows_skips_normalize(
     status: str,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A terminal run that produced no source rows must not re-normalize a month."""
+    """A terminal run that produced no source rows must not re-normalize a month.
+
+    The skip must also emit a structured log line so operators can audit
+    hot-path runs that were intentionally bypassed; this is the
+    observability contract the new ``rows_upserted_total == 0 AND
+    rows_deleted_stale == 0`` gate promises in its contract block.
+    """
+    caplog.set_level(logging.INFO, logger=orchestrator.logger.name)
     _, normalizer_cls, session, record_failure, _ = _invoke_run_one(
         outcome=_outcome(
             run=_run_entry(status=status),
@@ -260,6 +269,7 @@ def test_terminal_run_with_zero_upserted_rows_skips_normalize(
     session.commit.assert_not_called()
     session.rollback.assert_not_called()
     record_failure.assert_not_called()
+    assert "ingestion normalize skipped (no source row mutations)" in caplog.text
 
 
 @pytest.mark.parametrize("status", ["SUCCEEDED", "PARTIAL"])
@@ -700,7 +710,9 @@ def test_lock_prefilter_failure_records_on_run() -> None:
     )
 
 
-def test_partial_with_failed_report_scopes_skips_normalize() -> None:
+def test_partial_with_failed_report_scopes_skips_normalize(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     """Thread 12: a PARTIAL run with any failed report scopes skips normalize.
 
     Generalization of Thread 11 -- the failed report's intended source
@@ -711,8 +723,13 @@ def test_partial_with_failed_report_scopes_skips_normalize() -> None:
     stale rows eligible for canonical selection. Skip normalize to keep
     the previous month's facts intact; the next SUCCEEDED run for the
     same month will rewrite them.
+
+    The skip must also emit a structured log line so operators can
+    audit partial-with-failures bypass decisions without re-reading
+    the orchestrator source.
     """
     from dataclasses import replace
+    caplog.set_level(logging.INFO, logger=orchestrator.logger.name)
     run = _run_entry(status="PARTIAL")
     outcome = replace(
         _outcome(run=run),
@@ -727,6 +744,7 @@ def test_partial_with_failed_report_scopes_skips_normalize() -> None:
     record_failure.assert_not_called()
     session.rollback.assert_not_called()
     assert returned.run is not None and returned.run.status == "PARTIAL"
+    assert "ingestion normalize skipped (partial run with failed scopes)" in caplog.text
 
 
 def test_partial_with_clean_failures_normalizes() -> None:

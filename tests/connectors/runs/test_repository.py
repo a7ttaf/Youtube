@@ -673,6 +673,45 @@ def test_to_entry_normalizes_legacy_counts_with_extra_keys_dropped(
     assert counts["rows_upserted_total"] == 4
 
 
+def test_to_entry_coerces_negative_counts_to_zero(
+    session: Session,
+) -> None:
+    """Read-time normalization coerces negative integers to 0.
+
+    The B2.3 spec promises every read-side payload contains the full
+    key set with ``defaults to 0``; a negative integer (which can only
+    be the result of data corruption, since row counts are non-negative
+    by definition) violates that promise. ``_normalize_counts_for_read``
+    must clamp negative integers to 0 so a corrupted historical row
+    cannot surface a negative count to the operator-facing API.
+    """
+    base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
+    corrupted_counts = dict(_TERMINAL_COUNTS)
+    corrupted_counts["rows_upserted_total"] = -3
+    corrupted_counts["rows_deleted_stale"] = -1
+    corrupted_row = ConnectorRunORM(
+        id=uuid4(),
+        tenant_id=TENANT_ID,
+        connector_key="youtube-reporting",
+        account_id="acct-test-1",
+        report_month="2026-04",
+        triggered_by_user_id=USER_ID,
+        started_at=base,
+        finished_at=base,
+        status="SUCCEEDED",
+        counts_json=corrupted_counts,
+        error_summary=None,
+    )
+    session.add(corrupted_row)
+    session.flush()
+
+    page = list_runs(session, tenant_id=TENANT_ID, limit=10)
+    counts = page.items[0].counts
+
+    assert counts["rows_upserted_total"] == 0
+    assert counts["rows_deleted_stale"] == 0
+
+
 def _raw_file(
     session: Session,
     *,

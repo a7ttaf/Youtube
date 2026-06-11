@@ -516,13 +516,23 @@ def _normalize_counts_for_read(counts_json: object) -> dict[str, int]:
     mixed-shape payloads. Non-dict payloads and unexpected keys are tolerated
     defensively (extra keys are dropped, non-int values for expected keys
     are coerced to 0) so a corrupted row cannot raise out of the read path
-    and mask the operator-facing run history.
+    and mask the operator-facing run history. Negative integers are also
+    clamped to 0 since row counts are non-negative by definition; a negative
+    value is data corruption and must never surface to the operator-facing
+    read API.
     """
     raw = counts_json if isinstance(counts_json, dict) else {}
     normalized: dict[str, int] = {}
     for key in CONNECTOR_RUN_COUNT_KEYS:
         value = raw.get(key)
-        normalized[key] = value if isinstance(value, int) and not isinstance(value, bool) else 0
+        if (
+            isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+        ):
+            normalized[key] = value
+        else:
+            normalized[key] = 0
     return normalized
 
 
