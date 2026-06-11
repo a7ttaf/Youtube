@@ -5,6 +5,7 @@ from io import StringIO
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
@@ -30,8 +31,23 @@ router = APIRouter(prefix="/audit", tags=["audit"])
 # response carries X-Truncated: true so callers never silently lose audit rows.
 AUDIT_EXPORT_MAX_ROWS = 10_000
 
+# Upper bound on the GET /audit/summary ``window_hours`` query parameter.
+# 8760 = 365 * 24, the maximum window a caller can ask for (one full year).
+# The repository's count_summary accepts a (created_at >= now - window_hours)
+# filter, so 8760 keeps the most-recent-count query bounded and predictable.
+MAX_SUMMARY_WINDOW_HOURS = 8760
+
 # Characters that trigger CSV/Excel formula injection when they lead a cell.
 _CSV_INJECTION_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
+
+
+class AuditSummaryResponse(BaseModel):
+    """Aggregate audit counts surfaced by the GET /audit/summary tiles."""
+
+    total_events: int
+    sensitive_events: int
+    recent_count: int
+    window_hours: int
 
 
 def current_audit_log_repository(
@@ -107,6 +123,75 @@ def list_audit_events(
         },
         "audit_event": audit_record_to_api(record),
     }
+
+
+@router.get("/summary")
+def get_audit_summary(
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[
+        SqlAlchemyAuditLogRepository, Depends(current_audit_log_repository)
+    ],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
+    window_hours: Annotated[int, Query(ge=1, le=MAX_SUMMARY_WINDOW_HOURS)] = 24,
+) -> AuditSummaryResponse:
+    """Return tenant-scoped aggregate audit counts for the summary tiles."""
+    # ========================================================================
+    # Purpose: Serve the Audit screen's summary tiles (total / sensitive /
+    #   recent counts) from a single tenant-scoped aggregate query. Counts
+    #   only — no per-row payload — so it is redaction-safe for a plain
+    #   audit viewer.
+    # Database/ORM: SqlAlchemyAuditLogRepository.count_summary over
+    #   AuditLogORM (read-only COUNT aggregates; no write to the rows being
+    #   counted; one excluded AUDIT_LOG_VIEWED row written AFTER the snapshot
+    #   for parity with /events list semantics).
+    # Standards: Same fail-closed VIEW_AUDIT_LOG@global gate as /events;
+    #   thin route (gate -> repo -> record -> shape); typed
+    #   AuditLogValidationError -> HTTPException(422) at the boundary. The
+    #   self-audit row uses the AUDIT_LOG_VIEWED event_type which the count
+    #   query excludes, so the just-appended row cannot pollute its own
+    #   response.
+    # Blast Radius: Audit read + one self-audit write; same fail-closed gate
+    #   as /events; no schema change, no migration, no graph/finance impact.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/auth/audit_log.py -> count_summary.
+    #   - File: backend/ums_smart_revenue/api/audit.py -> list_audit_events
+    #     gate parity + record_audit_event call shape parity.
+    # ========================================================================
+    audit_scope = AccessScope.global_scope()
+    # Fail-closed permission check; counts disclose no payload, so the
+    # sensitive-payload gate is intentionally NOT required here.
+    _require_permission(user, Permission.VIEW_AUDIT_LOG, audit_scope)
+    try:
+        counts = repository.count_summary(window_hours=window_hours)
+    except AuditLogValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+    # Record the audit read AFTER the snapshot is taken. The recorded row uses
+    # the excluded AUDIT_LOG_VIEWED event_type, so the count_summary WHERE
+    # filter (event_type != AUDIT_LOG_VIEWED) keeps the just-written row out
+    # of the values being returned — the read stays auditable, the counts
+    # stay self-consistent.
+    record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.AUDIT_LOG_VIEWED,
+        entity_type="audit_log_summary",
+        entity_id="summary",
+        scope=audit_scope,
+        details={
+            "window_hours": window_hours,
+            "total_events": counts.total_events,
+            "sensitive_events": counts.sensitive_events,
+            "recent_count": counts.recent_count,
+        },
+    )
+    return AuditSummaryResponse(
+        total_events=counts.total_events,
+        sensitive_events=counts.sensitive_events,
+        recent_count=counts.recent_count,
+        window_hours=window_hours,
+    )
 
 
 @router.get("/events/export")

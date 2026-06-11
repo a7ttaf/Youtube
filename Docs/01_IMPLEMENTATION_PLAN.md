@@ -53,8 +53,9 @@ of this is required for any phase below to work end-to-end.
 - ✅ PR #10: Frontend preview shell — follow-through shipped: API client +
   `X-UMS-Tenant` header wiring (PR #41); real dashboard pages wired to live
   APIs (PR #69: Command Center + smart alerts, Close, Trace/Explain, Exports,
-  Connectors; the Audit page is wired to `GET /audit/events` (
-  PR #71 (31a7641), so Registry is the only remaining mock-labelled page).
+  Connectors; the Audit page is wired to `GET /audit/events` (PR #71,
+  31a7641) and Registry to `GET /channels` (PR #73/#78), so all dashboard
+  pages are wired to live APIs).
 
 ### S1 — Governance, infra, scope freeze (2026-05-16)
 
@@ -630,8 +631,8 @@ operator-asserted (tenant_id, month, bank_reference)→account(s) receipt model
 
 - ⏳ Internal decision dashboard / Smart alerts — shipped as live UI
   (PR #69). Management-ready summaries remain export-driven (Phase 6
-  artifacts); the Registry page is still mock-labelled (the Audit page is now
-  wired to `GET /audit/events`).
+  artifacts); the Registry page is wired to `GET /channels` (PR #73/#78) and
+  the Audit page to `GET /audit/events`).
 
 ### Acceptance gate
 
@@ -648,7 +649,7 @@ Six screens are wired to live APIs on the June-14 MVP branch (PR #69):
 Command Center + smart alerts, Close, Trace/Explain, Exports, Connectors —
 plus a demo-month seed (`scripts/seed_demo_month.py`), an end-to-end smoke
 (`scripts/smoke_mvp.py`), and the demo runbook (`frontend/README.md`).
-Registry remains mock-only and is labelled as such in-app; the Audit page is
+Registry is wired to `GET /channels` (PR #73/#78); the Audit page is
 now wired to `GET /audit/events` (see below).
 
 - ✅ Production session hydration — merged to main as PR #70 (4d7f154):
@@ -661,8 +662,8 @@ now wired to `GET /audit/events` (see below).
   the permanent access-denied screen and needs no preview role; the dev preview
   role is now presentation-only. Failed hydration / a `disabled` principal fails
   closed to `AccessDenied`; connector controls require `canRunConnectorJobs`;
-  the smoke asserts the contract. Registry stays mock-only; live ingestion needs
-  real connector credentials.
+  the smoke asserts the contract. Live ingestion needs real connector
+  credentials.
 - ✅ Production Audit view wiring — merged to main as PR #71 (31a7641): the
   dashboard Audit page reads the real
   `GET /audit/events` feed (tenant-scoped audit log from PR #22) instead of the
@@ -673,8 +674,9 @@ now wired to `GET /audit/events` (see below).
   sensitive-payload redaction (the UI reflects `details_redacted`, never reveals
   withheld payloads or offers a reveal control); fail-closed gate (a non-audit
   viewer sees the restricted placeholder and fires no fetch); 403 → audit-
-  appropriate no-permission copy. Frontend-only; backend unchanged. Registry is
-  now the only mock-labelled page. Track C follow-up (branch
+  appropriate no-permission copy. Frontend-only; backend unchanged. (Registry
+  was later wired to `GET /channels` in PR #73/#78, so no page remains
+  mock-labelled.) Track C follow-up (branch
   `feat/audit-track-c`) completed the surface: Load More via
   `pagination.next_cursor` (append + id-dedupe + filter-change reset), a live
   event-type filter on the existing `event_type` param (real `AuditEventType`
