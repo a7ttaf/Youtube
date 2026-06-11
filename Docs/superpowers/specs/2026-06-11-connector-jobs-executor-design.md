@@ -56,10 +56,31 @@ spec." This is that spec.
   fresh contextvars context → `TENANT_CTX=None` → context cleared → tenant-table reads come
   back EMPTY (fail-closed). Any worker thread must explicitly set `TENANT_CTX` (or run under
   `contextvars.copy_context()`).
-- **OBSERVED GAP (pre-existing, fix in this scope)**: `scripts/run_google_connector.py` never
-  sets `TENANT_CTX` before `run_one`. Harmless on SQLite (hook no-ops off Postgres), but on
-  RLS-enforced Postgres the CLI pull reads/writes fail-closed-empty. The executor PR fixes
-  the CLI the same way it fixes the worker (single shared helper).
+- **VERIFIED BLOCKER (2026-06-11 deep audit, adversarially confirmed P1+P2)**: the ingestion
+  pipeline currently composes end-to-end **only on SQLite**. Two stacked problems on
+  RLS-enforced Postgres:
+  1. **P1** — `scripts/run_google_connector.py:186` (the only production trigger) builds a
+     tenant-lane session but never sets `TENANT_CTX`, so `app_current_tenant_id()` is NULL,
+     every tenant-table policy denies all rows, and `run_one` dies at `_load_credential` with
+     a misleading `CredentialNotFoundError` (exit 2) before any ingest. Fail-closed — no leak,
+     no wrong write — but the merged #90+#93 deliverable cannot execute against the Postgres
+     source of truth, and the all-SQLite test suite cannot see it (the session hook no-ops off
+     Postgres).
+  2. **P2** — even with context set, the run path writes three **platform-only-write** tables
+     on the tenant lane: `audit_logs` (run-lifecycle emits at `orchestrator.py:753-761`,
+     normalization audit at `normalization.py:66-105`), `monthly_channel_revenue_facts`
+     (`record_fact`), and `finance_month_close` (`get_or_create_month_close_row` INSERT at
+     `google_source_normalizer.py:217-222`). Track-E migration `20260608_0001` grants
+     `app_tenant` no DML on those tables (`TENANT_PLATFORM_ONLY_WRITE_TABLES`, pinned by
+     `tests/tenancy/test_rls_grant_surface.py:117-135`). Compounding contract break: when the
+     fact INSERT denies, `_record_projection_failure_on_run`'s own audit INSERT also denies
+     and rolls back the FAILED rewrite — the durable `connector_runs` row stays **SUCCEEDED
+     with zero facts projected**. API routes solved this lane split with platform-bound
+     dependencies (`api/dependencies_finance.py:38-48`) and the explicit
+     `SET LOCAL ROLE app_platform` elevation precedent in `committed_allocation.py:247`; the
+     connectors package has zero elevation.
+
+  These are **prerequisites** for this spec — see the next section.
 - **Service actor**: a live run requires `UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID` (fail-closed
   ValueError before `start_run`) and blob config (`UMS_BLOB_BACKEND`).
 - **triggered_by FK**: composite FK `(tenant_id, triggered_by_user_id) → users(tenant_id, id)`
@@ -69,6 +90,37 @@ spec." This is that spec.
   principal's UUID is not a tenant users row (attribution preserved in the audit `reason` and
   actor stash; `SqlAlchemyAuditSink` already stashes unknown actors in
   `details["actor_user_id"]`).
+
+## Prerequisite PR (ships FIRST, own branch): ingestion RLS lane fix
+
+The P1/P2 blockers above predate this spec (P1 landed with Track E #85; P2 became load-bearing
+when #90 wired facts into the run path) and they break the **CLI** today, independent of any
+executor. Recommended as a separate, small PR so the fix is not held hostage by executor
+review:
+
+1. **Tenant context**: a shared helper (e.g. `connectors/runs/tenant_context.py`) that sets
+   `TENANT_CTX` for the target tenant around `run_one` and resets in `finally`; used by the
+   CLI now, by the executor worker later. (`FIX:` comment per standard.)
+2. **Lane discipline for the platform-only writes**: scoped `SET LOCAL ROLE app_platform`
+   elevation around the three platform-only write surfaces in the run path (run-lifecycle
+   audit emits, normalization fact+audit+month-close writes), following the
+   `committed_allocation.py:247` precedent — NOT a blanket platform session for the whole run
+   (source-row/connector-run writes stay on the tenant lane so RLS keeps doing its job).
+   Alternative considered: granting `app_tenant` DML on the three tables — **rejected**, it
+   widens the tenant lane's blast surface and contradicts Track E's pinned grant model.
+3. **A PG-tier test that exercises `run_one` against RLS** (the entire current coverage of
+   this path is SQLite; that is exactly why two green full-suite runs never caught this).
+4. Rides along (both verified P3, same files): fix the stale
+   `ConnectorRunOutcome.analytics_cleanup_blocked` docstrings (`orchestrator.py:200-207`,
+   `:846-852` claim the normalize gate consumes the flag; the gate read was removed in
+   `a3a584a` — either re-consume the flag in the gate as defense-in-depth or correct both
+   docstrings and pin the intended semantics with a test), and the Docs/12 + Docs/13
+   ingestion drift (Docs/13:241 still calls `google_revenue_source_rows` "planned";
+   Docs/12:364-367 still calls fact normalization "future"; `recorded_not_executed` and the
+   run-driven REPORT_IMPORTED / PROJECTION_FAILED semantics are undocumented).
+
+This spec's executor worker then simply reuses items 1-2 (same helper, same elevation
+pattern) instead of inventing its own session discipline.
 
 ## Approaches considered
 
@@ -115,8 +167,10 @@ Worker body (each submitted job):
 
 1. Build a fresh session from the executor's own `session_factory`
    (`build_session_factory(database_url)` — per-URL engine cache means no second pool).
-2. Set `TENANT_CTX` to the submitting tenant inside the worker thread (fresh contextvars
-   context otherwise fail-closes RLS); reset in `finally`.
+2. Establish tenant + lane context via the **prerequisite PR's shared helper** (sets
+   `TENANT_CTX` for the submitting tenant inside the worker thread — a fresh contextvars
+   context otherwise fail-closes RLS — and carries the platform-lane elevation for the
+   run path's platform-only writes); reset in `finally`.
 3. `run_one(session, tenant_id=..., connector_key=..., account_id=..., report_month=...,
    dry_run=..., triggered_by_user_id=<resolved or None>)`.
 4. Catch and log (never propagate out of the thread): `GoogleConnectorError` (Bucket A — see
@@ -186,12 +240,11 @@ Connectors screen: a "Run pull" action on a credential row (month picker + reaso
 without `connectors.run_jobs` capability (session-hydration capabilities already exist).
 Errors surface the 409/422 detail verbatim. No new client state machinery.
 
-### CLI fix (rides along)
+### CLI fix
 
-`scripts/run_google_connector.py` sets `TENANT_CTX` for the target tenant around `run_one`
-(shared helper with the executor worker, e.g. `connectors/runs/tenant_context.py` or directly
-`tenancy/context`), fixing the RLS fail-closed-empty gap on Postgres. `FIX:` comment per
-standard.
+Moved to the **prerequisite PR** (see section above) — the CLI is broken on RLS-enforced
+Postgres today, executor or not, so the fix must not wait on this spec's review cycle. The
+executor worker reuses the same helper.
 
 ### Settings (all `config/settings.py`, env-prefixed `UMS_`)
 
@@ -288,6 +341,8 @@ clean-room Postgres container (`127.0.0.1`, fresh `ums-gate-pg`) · frontend `np
 
 ## Open questions for the operator
 
+0. **Green-light the prerequisite RLS lane-fix PR first?** (Recommended — it fixes a verified
+   P1 on the merged deliverable and is independent of this spec's review.)
 1. **Ship Part 2 (credential telemetry + migration) in the same PR or split?** Default in
    this spec: same PR, separable commits.
 2. **Executor default-enabled in dev but disabled in prod-like env?** Default here: OFF
