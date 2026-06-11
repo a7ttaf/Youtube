@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import and_, func, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.auth.audit import AuditEventType
@@ -168,7 +168,9 @@ class SqlAlchemyAuditLogRepository:
         #   reuses ix_audit_logs_tenant_id + ix_audit_logs_event_created).
         # Standards: Typed AuditSummaryCounts result; same tenant scoping and
         #   AUDIT_LOG_VIEWED exclusion as list_events; raises
-        #   AuditLogValidationError on invalid window bounds.
+        #   AuditLogValidationError on invalid window bounds; all three counts
+        #   are derived from a SINGLE SELECT so they share one MVCC snapshot
+        #   on PostgreSQL's default READ COMMITTED isolation.
         # Blast Radius: Audit read-only aggregate; no write, no schema change,
         #   no migration. Counts disclose no per-row payload.
         # Connections:
@@ -178,29 +180,37 @@ class SqlAlchemyAuditLogRepository:
         if window_hours < 1:
             raise AuditLogValidationError("window_hours must be at least 1")
 
-        tenant_real = and_(
-            AuditLogORM.tenant_id == self._tenant_id,
-            AuditLogORM.event_type != AuditEventType.AUDIT_LOG_VIEWED.value,
-        )
+        # Single snapshot for all three aggregates: under READ COMMITTED, a
+        # concurrent appender can commit between two independent SELECTs and
+        # leave one count including the new row while another does not. Folding
+        # total / sensitive / recent into one SELECT guarantees the three
+        # numbers are always mutually consistent (no "recent row that total
+        # did not see" or "sensitive row the total missed").
         cutoff = datetime.now(UTC) - timedelta(hours=window_hours)
-
-        total_events = self._session.scalar(
-            select(func.count()).select_from(AuditLogORM).where(tenant_real)
-        )
-        sensitive_events = self._session.scalar(
-            select(func.count())
+        total_events, sensitive_events, recent_count = self._session.execute(
+            select(
+                func.count().label("total_events"),
+                func.coalesce(
+                    func.sum(
+                        case((AuditLogORM.sensitive.is_(True), 1), else_=0)
+                    ),
+                    0,
+                ).label("sensitive_events"),
+                func.coalesce(
+                    func.sum(case((AuditLogORM.created_at >= cutoff, 1), else_=0)),
+                    0,
+                ).label("recent_count"),
+            )
             .select_from(AuditLogORM)
-            .where(tenant_real, AuditLogORM.sensitive.is_(True))
-        )
-        recent_count = self._session.scalar(
-            select(func.count())
-            .select_from(AuditLogORM)
-            .where(tenant_real, AuditLogORM.created_at >= cutoff)
-        )
+            .where(
+                AuditLogORM.tenant_id == self._tenant_id,
+                AuditLogORM.event_type != AuditEventType.AUDIT_LOG_VIEWED.value,
+            )
+        ).one()
         return AuditSummaryCounts(
-            total_events=total_events or 0,
-            sensitive_events=sensitive_events or 0,
-            recent_count=recent_count or 0,
+            total_events=int(total_events or 0),
+            sensitive_events=int(sensitive_events or 0),
+            recent_count=int(recent_count or 0),
         )
 
     @staticmethod

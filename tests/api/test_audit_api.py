@@ -1,4 +1,5 @@
 import csv
+import json
 from datetime import UTC, datetime, timedelta
 from io import StringIO
 from uuid import UUID, uuid4
@@ -487,6 +488,28 @@ def _audit_table_count(database_url: str) -> int:
         return len(session.scalars(select(AuditLogORM)).all())
 
 
+def _audit_rows_by_type(
+    database_url: str, event_type: str
+) -> list[dict[str, object]]:
+    """Return every audit row of the given event_type as plain dicts."""
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        rows = session.scalars(
+            select(AuditLogORM).where(AuditLogORM.event_type == event_type)
+        ).all()
+        return [
+            {
+                "event_type": row.event_type,
+                "entity_type": row.entity_type,
+                "entity_id": row.entity_id,
+                "details": json.loads(row.details)
+                if isinstance(row.details, str)
+                else dict(row.details or {}),
+            }
+            for row in rows
+        ]
+
+
 def test_audit_summary_returns_counts_for_viewer(tmp_path):
     """Return aggregate counts with the four contract fields for a viewer."""
     database_url = build_database_url(tmp_path)
@@ -609,8 +632,15 @@ def test_audit_summary_rejects_out_of_range_window_hours(tmp_path):
     assert too_large.status_code == 422
 
 
-def test_audit_summary_writes_no_audit_row(tmp_path):
-    """Verify the summary endpoint emits no self-audit row on success."""
+def test_audit_summary_writes_excluded_audit_log_viewed_row(tmp_path):
+    """Record a self-audit row that the count query excludes from itself.
+
+    The summary endpoint must remain auditable (audit reads are themselves
+    recorded), but the just-appended AUDIT_LOG_VIEWED row is excluded from
+    the count_summary WHERE filter so the snapshot is not polluted by the
+    read it just performed. This is the same self-audit / exclusion pattern
+    used by the /audit/events list endpoint.
+    """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     before = _audit_table_count(database_url)
@@ -619,10 +649,30 @@ def test_audit_summary_writes_no_audit_row(tmp_path):
         response = client.get(
             "/audit/summary", headers=auth_headers("audit_viewer")
         )
+        body = response.json()
+        # Capture the new row's identity before the request session closes.
+        new_rows = _audit_rows_by_type(database_url, "AUDIT_LOG_VIEWED")
 
     assert response.status_code == 200
-    # No self-audit: the audit table count is unchanged by the summary call.
-    assert _audit_table_count(database_url) == before
+    # Exactly one AUDIT_LOG_VIEWED row was appended for this read.
+    assert _audit_table_count(database_url) == before + 1
+    assert len(new_rows) == 1
+    new_row = new_rows[0]
+    assert new_row["event_type"] == "AUDIT_LOG_VIEWED"
+    assert new_row["entity_type"] == "audit_log_summary"
+    assert new_row["entity_id"] == "summary"
+    # The recorded counts reflect the snapshot taken BEFORE the row was
+    # written, so the just-appended AUDIT_LOG_VIEWED row is not double-counted
+    # in any aggregate it is itself a witness of.
+    assert body["total_events"] == 2
+    assert body["sensitive_events"] == 1
+    assert body["recent_count"] == 2
+    assert new_row["details"] == {
+        "window_hours": 24,
+        "total_events": 2,
+        "sensitive_events": 1,
+        "recent_count": 2,
+    }
 
 
 def test_audit_summary_is_tenant_scoped(tmp_path):

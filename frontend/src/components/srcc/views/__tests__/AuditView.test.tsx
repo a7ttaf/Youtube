@@ -551,9 +551,17 @@ describe("AuditView summary tiles wired to GET /audit/summary", () => {
     renderAuditView();
 
     // Live formatted counts from the stubbed aggregate (toLocaleString grouping).
-    await waitFor(() => expect(screen.getByText("184")).toBeInTheDocument());
-    expect(screen.getByText("230")).toBeInTheDocument();
-    expect(screen.getByText("1,840")).toBeInTheDocument();
+    // The audit tile uses the runtime locale's number grouping, so derive the
+    // expected display string the same way to keep this stable under any
+    // locale default (en-US -> "1,840", de-DE -> "1.840", etc.).
+    const recentFormatted = SUMMARY.recent_count.toLocaleString();
+    const sensitiveFormatted = SUMMARY.sensitive_events.toLocaleString();
+    const totalFormatted = SUMMARY.total_events.toLocaleString();
+    await waitFor(() =>
+      expect(screen.getByText(recentFormatted)).toBeInTheDocument(),
+    );
+    expect(screen.getByText(sensitiveFormatted)).toBeInTheDocument();
+    expect(screen.getByText(totalFormatted)).toBeInTheDocument();
     // Tile labels are the live-wired ones, not the old mock labels.
     expect(screen.getByText("Events (24h)")).toBeInTheDocument();
     expect(screen.getByText("Total events")).toBeInTheDocument();
@@ -573,8 +581,14 @@ describe("AuditView summary tiles wired to GET /audit/summary", () => {
     // Fail-closed: the restricted branch mounts no hook, so no /audit/summary fetch.
     expect(summaryCalls()).toHaveLength(0);
     // Numeric tiles show the honest placeholder, never an invented or stale count.
-    expect(screen.queryByText("184")).not.toBeInTheDocument();
-    expect(screen.queryByText("1,840")).not.toBeInTheDocument();
+    // Use the same runtime-locale formatting the tiles use so this stays
+    // stable under any default Intl locale (matches the positive assertions).
+    expect(
+      screen.queryByText(SUMMARY.recent_count.toLocaleString()),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(SUMMARY.total_events.toLocaleString()),
+    ).not.toBeInTheDocument();
     // The static retention tile still renders; the tiles label is present.
     expect(screen.getByText("7 years")).toBeInTheDocument();
     expect(screen.getByText("Total events")).toBeInTheDocument();

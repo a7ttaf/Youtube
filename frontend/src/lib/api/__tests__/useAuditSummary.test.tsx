@@ -92,3 +92,79 @@ describe("useAuditSummary", () => {
     expect(result.current.error).toMatchObject({ name: "ApiError", status: 403 });
   });
 });
+
+describe("useAuditSummary bounded request", () => {
+  it("forwards an AbortSignal to fetch so a stalled request can be cancelled", async () => {
+    fetchMock().mockResolvedValue(jsonResponse(SUMMARY));
+    renderHook(() => useAuditSummary(), { wrapper });
+
+    await waitFor(() => expect(fetchMock()).toHaveBeenCalledTimes(1));
+    const init = requireFetchArgs()[1] as RequestInit | undefined;
+    expect(init).toBeDefined();
+    expect(init?.signal).toBeInstanceOf(AbortSignal);
+  });
+
+  it("aborts the in-flight request when the hook unmounts", async () => {
+    let capturedSignal: AbortSignal | null = null;
+    fetchMock().mockImplementation((_input, init) => {
+      capturedSignal = (init as RequestInit | undefined)?.signal ?? null;
+      return new Promise<Response>((_resolve, reject) => {
+        // Never resolve; the test verifies the unmount aborts, not a server reply.
+        capturedSignal?.addEventListener("abort", () => {
+          const err = new Error("aborted");
+          err.name = "AbortError";
+          reject(err);
+        });
+      });
+    });
+    const { unmount } = renderHook(() => useAuditSummary(), { wrapper });
+
+    await waitFor(() => expect(fetchMock()).toHaveBeenCalledTimes(1));
+    expect(capturedSignal).not.toBeNull();
+    expect((capturedSignal as AbortSignal | null)?.aborted).toBe(false);
+
+    unmount();
+    expect((capturedSignal as AbortSignal | null)?.aborted).toBe(true);
+  });
+
+  it("aborts a hanging request after the timeout so the Audit screen cannot stay loading forever", async () => {
+    vi.useFakeTimers();
+    try {
+      let capturedSignal: AbortSignal | null = null;
+      fetchMock().mockImplementation((_input, init) => {
+        capturedSignal = (init as RequestInit | undefined)?.signal ?? null;
+        return new Promise<Response>((_resolve, reject) => {
+          capturedSignal?.addEventListener("abort", () => {
+            const err = new Error("aborted");
+            err.name = "AbortError";
+            reject(err);
+          });
+        });
+      });
+
+      const { result } = renderHook(() => useAuditSummary(), { wrapper });
+      // Let the effect's first fetch start.
+      await act(async () => {
+        await Promise.resolve();
+      });
+      expect(fetchMock()).toHaveBeenCalledTimes(1);
+      expect(capturedSignal).not.toBeNull();
+      expect((capturedSignal as AbortSignal | null)?.aborted).toBe(false);
+
+      // Advance fake timers past REQUEST_TIMEOUT_MS (30s) and let the abort
+      // rejection propagate through the microtask queue.
+      await act(async () => {
+        vi.advanceTimersByTime(31_000);
+        await Promise.resolve();
+      });
+
+      expect((capturedSignal as AbortSignal | null)?.aborted).toBe(true);
+      // The aborted request surfaces as an error (loading false), not a
+      // permanent loading spinner pinned at true.
+      expect(result.current.loading).toBe(false);
+      expect(result.current.error).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

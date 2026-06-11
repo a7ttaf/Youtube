@@ -131,6 +131,7 @@ def get_audit_summary(
     repository: Annotated[
         SqlAlchemyAuditLogRepository, Depends(current_audit_log_repository)
     ],
+    audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
     window_hours: Annotated[int, Query(ge=1, le=MAX_SUMMARY_WINDOW_HOURS)] = 24,
 ) -> AuditSummaryResponse:
     """Return tenant-scoped aggregate audit counts for the summary tiles."""
@@ -140,17 +141,21 @@ def get_audit_summary(
     #   only — no per-row payload — so it is redaction-safe for a plain
     #   audit viewer.
     # Database/ORM: SqlAlchemyAuditLogRepository.count_summary over
-    #   AuditLogORM (read-only COUNT aggregates; no write).
+    #   AuditLogORM (read-only COUNT aggregates; no write to the rows being
+    #   counted; one excluded AUDIT_LOG_VIEWED row written AFTER the snapshot
+    #   for parity with /events list semantics).
     # Standards: Same fail-closed VIEW_AUDIT_LOG@global gate as /events;
-    #   thin route (gate -> repo -> shape); typed AuditLogValidationError ->
-    #   HTTPException(422) at the boundary. No self-audit (no AUDIT_LOG_VIEWED
-    #   row) so the aggregate cannot pollute its own counts.
-    # Blast Radius: Audit read-only aggregate; no write, no schema change, no
-    #   migration; same fail-closed gate as /events. No graph/finance impact.
+    #   thin route (gate -> repo -> record -> shape); typed
+    #   AuditLogValidationError -> HTTPException(422) at the boundary. The
+    #   self-audit row uses the AUDIT_LOG_VIEWED event_type which the count
+    #   query excludes, so the just-appended row cannot pollute its own
+    #   response.
+    # Blast Radius: Audit read + one self-audit write; same fail-closed gate
+    #   as /events; no schema change, no migration, no graph/finance impact.
     # Connections:
     #   - File: backend/ums_smart_revenue/auth/audit_log.py -> count_summary.
     #   - File: backend/ums_smart_revenue/api/audit.py -> list_audit_events
-    #     gate parity.
+    #     gate parity + record_audit_event call shape parity.
     # ========================================================================
     audit_scope = AccessScope.global_scope()
     # Fail-closed permission check; counts disclose no payload, so the
@@ -162,6 +167,25 @@ def get_audit_summary(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
         ) from exc
+    # Record the audit read AFTER the snapshot is taken. The recorded row uses
+    # the excluded AUDIT_LOG_VIEWED event_type, so the count_summary WHERE
+    # filter (event_type != AUDIT_LOG_VIEWED) keeps the just-written row out
+    # of the values being returned — the read stays auditable, the counts
+    # stay self-consistent.
+    record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.AUDIT_LOG_VIEWED,
+        entity_type="audit_log_summary",
+        entity_id="summary",
+        scope=audit_scope,
+        details={
+            "window_hours": window_hours,
+            "total_events": counts.total_events,
+            "sensitive_events": counts.sensitive_events,
+            "recent_count": counts.recent_count,
+        },
+    )
     return AuditSummaryResponse(
         total_events=counts.total_events,
         sensitive_events=counts.sensitive_events,
