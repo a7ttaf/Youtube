@@ -586,6 +586,93 @@ def test_to_api_shape_excludes_tenant_id(session: Session) -> None:
     assert api["triggered_by_user_id"] == str(USER_ID)
 
 
+def test_to_api_normalizes_legacy_counts_missing_rows_deleted_stale(
+    session: Session,
+) -> None:
+    """Historical rows written before ``rows_deleted_stale`` was added read back normalized.
+
+    The PR added ``rows_deleted_stale`` to the fixed ``counts_json`` B2.3
+    contract. Pre-existing ``connector_runs`` rows in the database still
+    carry the old 7-key shape on disk. ``list_runs`` and ``to_api`` must
+    return the full fixed key set with the missing key defaulted to 0 so
+    the operator-facing read API never emits mixed-shape payloads.
+    """
+    base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
+    legacy_counts = {key: _TERMINAL_COUNTS[key] for key in _TERMINAL_COUNTS if key != "rows_deleted_stale"}
+    assert "rows_deleted_stale" not in legacy_counts
+
+    legacy_row = ConnectorRunORM(
+        id=uuid4(),
+        tenant_id=TENANT_ID,
+        connector_key="youtube-reporting",
+        account_id="acct-test-1",
+        report_month="2026-04",
+        triggered_by_user_id=USER_ID,
+        started_at=base,
+        finished_at=base,
+        status="SUCCEEDED",
+        counts_json=legacy_counts,
+        error_summary=None,
+    )
+    session.add(legacy_row)
+    session.flush()
+
+    page = list_runs(session, tenant_id=TENANT_ID, limit=10)
+    api = page.items[0].to_api()
+
+    assert set(api["counts"].keys()) == set(CONNECTOR_RUN_COUNT_KEYS)
+    assert api["counts"]["rows_deleted_stale"] == 0
+    for key, value in legacy_counts.items():
+        assert api["counts"][key] == value
+
+
+def test_to_entry_normalizes_legacy_counts_with_extra_keys_dropped(
+    session: Session,
+) -> None:
+    """Defensive read-time normalization drops unknown keys and coerces non-int values to 0.
+
+    A pre-existing or corrupted row whose ``counts_json`` carries extra
+    legacy keys, a missing key, or a non-integer value for an expected
+    key must not break the operator-facing read path; the read API still
+    returns the full fixed B2.3 key set.
+    """
+    base = datetime(2026, 4, 1, 12, 0, 0, tzinfo=UTC)
+    messy_counts = {
+        "reports_attempted": 1,
+        "reports_succeeded": 1,
+        "reports_failed": 0,
+        "rows_upserted_total": 4,
+        "rows_upserted_created": 4,
+        "rows_upserted_updated": 0,
+        "rows_upserted_unchanged": 0,
+        "rows_deleted_stale": "missing",  # Non-integer: must coerce to 0.
+        "legacy_unsupported_key": 99,  # Extra key: must be dropped on read.
+    }
+    messy_row = ConnectorRunORM(
+        id=uuid4(),
+        tenant_id=TENANT_ID,
+        connector_key="youtube-reporting",
+        account_id="acct-test-1",
+        report_month="2026-04",
+        triggered_by_user_id=USER_ID,
+        started_at=base,
+        finished_at=base,
+        status="SUCCEEDED",
+        counts_json=messy_counts,
+        error_summary=None,
+    )
+    session.add(messy_row)
+    session.flush()
+
+    page = list_runs(session, tenant_id=TENANT_ID, limit=10)
+    counts = page.items[0].counts
+
+    assert set(counts.keys()) == set(CONNECTOR_RUN_COUNT_KEYS)
+    assert "legacy_unsupported_key" not in counts
+    assert counts["rows_deleted_stale"] == 0
+    assert counts["rows_upserted_total"] == 4
+
+
 def _raw_file(
     session: Session,
     *,
