@@ -499,23 +499,24 @@ def _normalize_ingested_source_rows(
     run = outcome.run
     if run is None or run.status not in ("SUCCEEDED", "PARTIAL"):
         return
-    # PARTIAL YouTube Analytics runs whose deferred cleanup was blocked
-    # are also unsafe to normalize -- the blocked cleanup left stale
-    # source rows eligible for canonical selection, and a partial channel
-    # report failure means some channels in the month are missing fresh
-    # data. Skip normalize to keep the previous month's facts intact; the
-    # next SUCCEEDED run for the same month will rewrite them.
-    if (
-        run.status == "PARTIAL"
-        and outcome.analytics_cleanup_blocked
-    ):
+    # PARTIAL runs with one or more failed report scopes are also unsafe
+    # to normalize. The failed report's intended source rows were never
+    # committed, so the month-wide normalize would project only the
+    # committed (potentially stale) source rows from the successful
+    # sibling reports; a partial YouTube Analytics run additionally has
+    # blocked the deferred stale-row cleanup, leaving stale rows
+    # eligible for canonical selection. Skip normalize to keep the
+    # previous month's facts intact; the next SUCCEEDED run for the same
+    # month will rewrite them.
+    if run.status == "PARTIAL" and outcome.per_report_failures:
         session.rollback()
         logger.info(
-            "ingestion normalize skipped (analytics cleanup blocked) "
-            "tenant_id=%s month=%s run_id=%s",
+            "ingestion normalize skipped (partial run with failed scopes) "
+            "tenant_id=%s month=%s run_id=%s failed_scopes=%d",
             tenant_id,
             report_month,
             run.id,
+            len(outcome.per_report_failures),
         )
         return
 
@@ -648,8 +649,19 @@ def _record_projection_failure_on_run(
     Uses ``record_projection_failure`` to update the run row, then commits
     in its own transaction. The run lifecycle audit row (FINISHED) is left
     intact; the rewrite is an additional column update on the run row
-    itself, not a duplicate FINISHED edge.
+    itself, not a duplicate FINISHED edge. A PROJECTION_FAILED audit
+    edge is emitted in the SAME transaction so the audit trail reflects
+    the rewrite: previously the durable run row said FAILED while the
+    audit trail still recorded the terminal lifecycle as
+    SUCCEEDED/PARTIAL with no error_summary_present.
     """
+    from ums_smart_revenue.auth.audit import AuditEventType
+    from ums_smart_revenue.auth.audit_service import record_audit_event
+    from ums_smart_revenue.auth.scopes import AccessScope
+    from ums_smart_revenue.connectors.google.audit import (
+        build_connector_service_principal,
+    )
+
     error_summary = f"normalize failed: {type(exc).__name__}: {exc!s}"
     try:
         run_id = UUID(run.id)
@@ -664,6 +676,30 @@ def _record_projection_failure_on_run(
         tenant_id=tenant_id,
         connector_run_id=run_id,
         error_summary=error_summary,
+    )
+    # Emit a PROJECTION_FAILED edge in the same transaction as the
+    # run-row rewrite so the audit trail is consistent with the durable
+    # run state. The actor is the connector service principal (the same
+    # identity that emitted the original FINISHED edge) so audit
+    # consumers can correlate the two edges by run_id.
+    audit_actor = build_connector_service_principal(tenant_id=tenant_id)
+    audit_sink: AuditSink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+    record_audit_event(
+        sink=audit_sink,
+        actor=audit_actor,
+        event_type=AuditEventType.CONNECTOR_JOB_RUN,
+        entity_type="connector_run",
+        entity_id=run.id,
+        scope=AccessScope.connector(run.connector_key),
+        reason="post-run normalize failed; run rewritten to FAILED",
+        details={
+            "lifecycle": "PROJECTION_FAILED",
+            "run_id": run.id,
+            "connector_key": run.connector_key,
+            "account_id": run.account_id,
+            "report_month": run.report_month,
+            "error_summary_present": True,
+        },
     )
     session.commit()
 
@@ -705,31 +741,38 @@ def _emit_normalized_fact_audit(
     ``backend/ums_smart_revenue/api/revenue.py::create_monthly_channel_revenue_fact``):
     same event type, same entity_type, same entity_id format, and the
     same ``details`` keys operators already filter on. The ``lifecycle``
-    discriminator distinguishes CREATED vs UPDATED; the ``scope`` is the
-    connector scope, matching the connector run lifecycle audit (see
-    ``connectors/google/audit.py::emit_run_started``).
+    discriminator distinguishes CREATED vs UPDATED.
+
+    Scope is the finance-month (the month the fact is for) so the audit
+    row is attributed to the fact's data window, not to the run that
+    happened to trigger the projection. ``details`` carries the fact's
+    source_kind, source_report_id, youtube_channel_id, and month so
+    audit consumers can correlate the fact with the source rows that
+    produced it, plus the run's connector_key / account_id as
+    "triggered by" context for traceability.
     """
     from ums_smart_revenue.auth.audit import AuditEventType
     from ums_smart_revenue.auth.audit_service import record_audit_event
     from ums_smart_revenue.auth.scopes import AccessScope
 
+    fact_month = getattr(fact, "month", None) or run.report_month
     record_audit_event(
         sink=audit_sink,
         actor=audit_actor,
         event_type=AuditEventType.REPORT_IMPORTED,
         entity_type="monthly_channel_revenue_fact",
         entity_id=getattr(fact, "audit_entity_id", None),
-        scope=AccessScope.connector(run.connector_key),
+        scope=AccessScope.finance_month(fact_month),
         reason=f"connector normalize: {lifecycle}",
         details={
             "lifecycle": lifecycle,
-            "connector_key": run.connector_key,
-            "account_id": run.account_id,
-            "report_month": run.report_month,
             "source_kind": getattr(fact, "source_kind", None),
             "source_report_id": getattr(fact, "source_report_id", None),
             "youtube_channel_id": getattr(fact, "youtube_channel_id", None),
-            "month": getattr(fact, "month", None),
+            "month": fact_month,
+            "triggered_by_run_id": run.id,
+            "triggered_by_connector_key": run.connector_key,
+            "triggered_by_account_id": run.account_id,
         },
     )
 

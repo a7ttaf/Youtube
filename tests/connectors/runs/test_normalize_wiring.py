@@ -391,8 +391,13 @@ def test_audit_events_emitted_for_created_and_updated_facts() -> None:
     discriminator distinguishes CREATED vs UPDATED. The audit_sink is
     invoked via ``record_audit_event`` (the public audit helper), so the
     sink's ``append`` method is what the wiring test should observe.
+
+    Thread 13: scope is the fact's month (finance-month), not the run's
+    connector; details carry the fact's source_kind / source_report_id /
+    channel_id / month plus triggered_by_* context.
     """
     from ums_smart_revenue.auth.audit import AuditEventType
+    from ums_smart_revenue.auth.scopes import ScopeType
 
     created_fact = MagicMock(name="created_fact")
     created_fact.audit_entity_id = "channel-1:2026-04:YOUTUBE_CMS"
@@ -437,6 +442,17 @@ def test_audit_events_emitted_for_created_and_updated_facts() -> None:
         assert record.event_type == AuditEventType.REPORT_IMPORTED.value
         assert record.entity_type == "monthly_channel_revenue_fact"
         assert record.details.get("lifecycle") in {"CREATED", "UPDATED"}
+        # Thread 13: scope is finance-month (the fact's month), not the
+        # run's connector; details carry the fact's source attributes
+        # plus triggered_by_* context for traceability.
+        assert record.scope_type == ScopeType.FINANCE_MONTH.value
+        assert record.scope_id == "2026-04"
+        assert "source_kind" in record.details
+        assert "source_report_id" in record.details
+        assert "youtube_channel_id" in record.details
+        assert "triggered_by_run_id" in record.details
+        assert "triggered_by_connector_key" in record.details
+        assert "triggered_by_account_id" in record.details
         lifecycles.append(record.details["lifecycle"])
     assert sorted(lifecycles) == ["CREATED", "UPDATED"]
 
@@ -448,11 +464,26 @@ def test_projection_failure_records_on_run_when_normalize_raises() -> None:
     ``record_projection_failure``; the caller still sees the original
     exception. Run history now shows FAILED with a projection-failure
     summary instead of SUCCEEDED with no facts produced.
+
+    Thread 14: a ``CONNECTOR_JOB_RUN`` audit row with
+    ``lifecycle="PROJECTION_FAILED"`` is also emitted in the same
+    transaction so the audit trail is consistent with the durable run
+    state.
     """
     normalizer = MagicMock(name="normalizer_instance")
     normalizer.normalize_month.side_effect = ValueError("unknown channel")
     record_failure = MagicMock(name="record_projection_failure")
-    with pytest.raises(ValueError, match="unknown channel"):
+    audit_sink_mock = MagicMock(name="audit_sink")
+    audit_actor_mock = MagicMock(name="audit_actor")
+    audit_actor_mock.user_id = SERVICE_ACTOR_ID
+    with patch.object(
+        orchestrator, "SqlAlchemyAuditSink", return_value=audit_sink_mock
+    ), patch.object(
+        orchestrator, "build_connector_service_principal",
+        return_value=audit_actor_mock,
+    ), patch(
+        "ums_smart_revenue.auth.audit_service.record_audit_event"
+    ) as record_audit_event_mock, pytest.raises(ValueError, match="unknown channel"):
         _invoke_run_one(
             outcome=_outcome(run=_run_entry(status="SUCCEEDED")),
             normalizer=normalizer,
@@ -465,6 +496,14 @@ def test_projection_failure_records_on_run_when_normalize_raises() -> None:
     assert "error_summary" in kwargs
     assert "unknown channel" in kwargs["error_summary"]
     assert kwargs["error_summary"].startswith("normalize failed: ValueError:")
+    # Thread 14: a PROJECTION_FAILED audit edge is recorded.
+    record_audit_event_mock.assert_called_once()
+    audit_kwargs = record_audit_event_mock.call_args.kwargs
+    assert audit_kwargs["entity_type"] == "connector_run"
+    assert audit_kwargs["details"]["lifecycle"] == "PROJECTION_FAILED"
+    assert audit_kwargs["details"]["error_summary_present"] is True
+    assert audit_kwargs["details"]["connector_key"] == CONNECTOR_KEY
+    assert audit_kwargs["details"]["account_id"] == ACCOUNT_ID
 
 
 def test_failed_facts_txn_is_rolled_back_before_run_rewrite() -> None:
@@ -580,17 +619,24 @@ def test_lock_prefilter_failure_records_on_run() -> None:
     )
 
 
-def test_partial_analytics_with_blocked_cleanup_skips_normalize() -> None:
-    """Thread 11: a PARTIAL YouTube Analytics run with blocked cleanup
-    does not normalize (stale source rows would let the normalizer
-    pick canonical rows from stale data and rewrite facts with old
-    revenue). The prefilter still runs (we are not in a locked month
-    here) and is rolled back to close the autobegun read txn.
+def test_partial_with_failed_report_scopes_skips_normalize() -> None:
+    """Thread 12: a PARTIAL run with any failed report scopes skips normalize.
+
+    Generalization of Thread 11 -- the failed report's intended source
+    rows were never committed, so the month-wide normalize would project
+    only the committed (potentially stale) source rows from the
+    successful sibling reports; a partial YouTube Analytics run
+    additionally has blocked the deferred stale-row cleanup, leaving
+    stale rows eligible for canonical selection. Skip normalize to keep
+    the previous month's facts intact; the next SUCCEEDED run for the
+    same month will rewrite them.
     """
     from dataclasses import replace
     run = _run_entry(status="PARTIAL")
     outcome = replace(
-        _outcome(run=run), analytics_cleanup_blocked=True
+        _outcome(run=run),
+        analytics_cleanup_blocked=True,
+        per_report_failures=[("youtube_analytics_a1", "HttpError")],
     )
     returned, normalizer_cls, session, record_failure, _ = _invoke_run_one(
         outcome=outcome,
@@ -603,34 +649,20 @@ def test_partial_analytics_with_blocked_cleanup_skips_normalize() -> None:
     assert returned.run is not None and returned.run.status == "PARTIAL"
 
 
-def test_partial_analytics_with_clean_cleanup_normalizes() -> None:
-    """Thread 11 positive case: a PARTIAL Analytics run whose cleanup
-    completed (no sibling failures) IS normalized; the cleanup-blocked
-    flag is False.
+def test_partial_with_clean_failures_normalizes() -> None:
+    """A PARTIAL run whose per-report failures list is empty normalizes.
+
+    Defensive: if a PARTIAL run somehow has no per-report failures (an
+    edge case where counts disagree with the per_report_failures list,
+    e.g. a future extension that bumps reports_failed without recording
+    a per-report failure), the gate does not skip normalize.
     """
     from dataclasses import replace
     run = _run_entry(status="PARTIAL")
     outcome = replace(
-        _outcome(run=run), analytics_cleanup_blocked=False
-    )
-    normalizer = MagicMock(name="normalizer_instance")
-    _, normalizer_cls, session, _, _ = _invoke_run_one(
-        outcome=outcome, normalizer=normalizer,
-    )
-    normalizer_cls.assert_called_once()
-    normalizer.normalize_month.assert_called_once()
-    session.commit.assert_called_once()
-
-
-def test_partial_non_analytics_always_normalizes() -> None:
-    """Thread 11 negative case: a PARTIAL YouTube Reporting / AdSense
-    run (no deferred cleanup) normalizes regardless of per-report
-    failures because there is no blocked-cleanup state to gate on.
-    """
-    from dataclasses import replace
-    run = _run_entry(status="PARTIAL")
-    outcome = replace(
-        _outcome(run=run), analytics_cleanup_blocked=False
+        _outcome(run=run),
+        analytics_cleanup_blocked=False,
+        per_report_failures=[],
     )
     normalizer = MagicMock(name="normalizer_instance")
     _, normalizer_cls, session, _, _ = _invoke_run_one(
