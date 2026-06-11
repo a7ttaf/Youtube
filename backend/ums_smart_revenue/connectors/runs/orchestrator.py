@@ -139,6 +139,7 @@ from ums_smart_revenue.connectors.runs.repository import (
     ConnectorRunValidationError,
     finish_run,
     link_raw_file,
+    record_projection_failure,
     start_run,
     validate_report_month,
 )
@@ -400,6 +401,17 @@ def run_one(
             account_id=account_id,
         ),
     )
+    # Post-run normalize stage uses a fresh audit context bound to the
+    # same session so audit rows for normalized facts commit alongside
+    # the facts themselves. The actor is the connector service principal
+    # (matching the run lifecycle audit rows) -- the run lifecycle audit
+    # edges were emitted by _run_live and are already committed.
+    normalize_audit_sink: AuditSink = SqlAlchemyAuditSink(
+        session, tenant_id=tenant_id
+    )
+    normalize_audit_actor: UserPrincipal = build_connector_service_principal(
+        tenant_id=tenant_id
+    )
     _normalize_ingested_source_rows(
         session=session,
         tenant_id=tenant_id,
@@ -407,6 +419,8 @@ def run_one(
         dry_run=dry_run,
         triggered_by_user_id=triggered_by_user_id,
         outcome=outcome,
+        audit_sink=normalize_audit_sink,
+        audit_actor=normalize_audit_actor,
     )
     return outcome
 
@@ -419,9 +433,12 @@ def run_one(
 #          facts. Runs once per successful run over ALL source rows for
 #          (tenant, report_month); re-normalizing an already-normalized month is
 #          idempotent (unchanged facts), so repeated runs for a month are safe.
-#          The gate is keyed off ``outcome.counts["reports_succeeded"]`` (not
-#          the terminal run status) so a FAILED run that committed successful
-#          reports still projects its source rows into facts.
+#          The gate is keyed off the terminal run status (SUCCEEDED/PARTIAL)
+#          -- not the per-report count -- because the per-report loop's
+#          deferred stale-row cleanup for YouTube Analytics only flushes after
+#          the entire loop completes; a FAILED run leaves source rows un-pruned
+#          and normalizing those would let the normalizer pick canonical rows
+#          from stale data.
 # Database/ORM: MonthlyChannelRevenueFactORM (WRITE via the normalizer's
 #               record_fact upsert). Reads google_revenue_source_rows,
 #               youtube_channels, finance_month_close. No schema change.
@@ -429,19 +446,22 @@ def run_one(
 #            normalize_month does NOT commit, so a successful normalize is
 #            committed here. Fail-closed locked-month policy (below) and
 #            fail-LOUD on real data errors -- silently producing no facts is the
-#            bug this stage fixes, so a non-lock error rolls back and re-raises.
-#            No bare except; no secrets/PII logged (the normalizer redacts).
-#            The locked-month prefilter SELECT autobegins a SQLAlchemy txn;
-#            it is released with rollback (pure read, nothing to commit) so
-#            the caller's session is not left in an active read transaction.
+#            bug this stage fixes, so a non-lock error is recorded on the run
+#            (see ``record_projection_failure``) and re-raised. No bare except;
+#            no secrets/PII logged (the normalizer redacts). The locked-month
+#            prefilter SELECT autobegins a SQLAlchemy txn; it is released with
+#            rollback (pure read, nothing to commit) so the caller's session
+#            is not left in an active read transaction.
 # Blast Radius: FINANCE -- writes MonthlyChannelRevenueFactORM (the dashboard,
 #               allocation, reconciliation, net-revenue, and exports all read
 #               it). Locked-month facts are NEVER overwritten: a pure-SELECT
 #               prefilter skips LOCKED months, and the normalizer's own upfront
 #               + per-write fail-closed guard catches any lock acquired
 #               mid-flight. ALLOCATION / MANUAL_UPLOAD facts use disjoint
-#               source_kind values and are untouched. No graph projection
-#               impact detected.
+#               source_kind values and are untouched. On non-lock normalize
+#               failure, the run is rewritten to FAILED via
+#               ``record_projection_failure`` so the run history reflects the
+#               missing projection. No graph projection impact detected.
 # Connections:
 #   - File: backend/ums_smart_revenue/finance/google_source_normalizer.py ->
 #     GoogleSourceNormalizer.normalize_month (the only source-rows -> facts path).
@@ -449,6 +469,8 @@ def run_one(
 #     get_month_close_status (pure-SELECT locked-month prefilter).
 #   - File: backend/ums_smart_revenue/finance/revenue_facts.py ->
 #     RevenueFactLockedMonthError (mid-flight lock -> skip).
+#   - File: backend/ums_smart_revenue/connectors/runs/repository.py ->
+#     record_projection_failure (post-run error recording on a terminal run).
 #   - File: Docs/superpowers/specs/2026-06-10-ingestion-source-rows-to-facts-design.md
 #     -> integration point, locked-month policy, blast-radius review.
 # ============================================================================
@@ -460,22 +482,24 @@ def _normalize_ingested_source_rows(
     dry_run: bool,
     triggered_by_user_id: UUID | None,
     outcome: ConnectorRunOutcome,
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
 ) -> None:
     """Project this run's ingested source rows into revenue facts (fail-closed on locks)."""
-    # Skip on dry-run (no committed source rows) and on any outcome that did
-    # not commit at least one successful report. The gate is keyed off
-    # ``counts["reports_succeeded"]`` rather than the terminal run status
-    # because ``_process_live_reports`` commits each successful report before
-    # continuing: a later generator-level exception is caught by ``_run_live``
-    # and finished as FAILED, but the source rows for the successful reports
-    # are already committed. Keying off the terminal status alone would
-    # leave the finance facts stale/missing for the successful reports.
+    # Skip on dry-run (no committed source rows) and on any run that did not
+    # reach a terminal SUCCEEDED/PARTIAL status. The gate is intentionally
+    # keyed off the terminal run status (not the per-report count) because
+    # the per-report loop's deferred stale-row cleanup for YouTube Analytics
+    # only flushes after the entire loop completes: a FAILED run leaves
+    # source rows un-pruned, and normalizing those would let the normalizer
+    # pick canonical rows from stale data and rewrite facts with old revenue.
+    # This matches the design spec §"Failure handling" -- "run status FAILED
+    # -> no normalize (no new committed source rows worth projecting; prior
+    # month state intact)".
     if dry_run:
         return
     run = outcome.run
-    if run is None:
-        return
-    if outcome.counts.get("reports_succeeded", 0) <= 0:
+    if run is None or run.status not in ("SUCCEEDED", "PARTIAL"):
         return
 
     # Locked-month prefilter (pure SELECT -- no row creation, no lock
@@ -494,18 +518,39 @@ def _normalize_ingested_source_rows(
         )
         return
 
-    # Actor: prefer the user who triggered the run; otherwise reuse the same
-    # connector service principal the run's audit rows were attributed to.
-    if triggered_by_user_id is not None:
-        actor_user_id = str(triggered_by_user_id)
-    else:
-        actor_user_id = build_connector_service_principal(tenant_id=tenant_id).user_id
+    # Actor: reuse the audit_actor the run lifecycle audit rows were
+    # attributed to so the post-run normalize events are continuous with
+    # the run. The service principal resolves via env (Bucket A fail-closed
+    # in run_one via _run_one_with_credentials -> _run_live), so a missing
+    # principal would already have raised before this stage.
+    actor_user_id = audit_actor.user_id
 
     try:
-        GoogleSourceNormalizer(session, tenant_id=tenant_id).normalize_month(
+        normalizer = GoogleSourceNormalizer(session, tenant_id=tenant_id)
+        result = normalizer.normalize_month(
             month=report_month,
             actor_user_id=actor_user_id,
         )
+        # Emit one REPORT_IMPORTED audit edge per fact written so audit
+        # consumers can see connector-driven fact changes (the existing
+        # /facts import path already does this for the API caller; the
+        # post-run normalize is the matching production caller).
+        for fact in result.created:
+            _emit_normalized_fact_audit(
+                audit_sink=audit_sink,
+                audit_actor=audit_actor,
+                run=run,
+                fact=fact,
+                lifecycle="CREATED",
+            )
+        for fact in result.updated:
+            _emit_normalized_fact_audit(
+                audit_sink=audit_sink,
+                audit_actor=audit_actor,
+                run=run,
+                fact=fact,
+                lifecycle="UPDATED",
+            )
         # normalize_month does NOT commit (caller owns the txn); persist the
         # facts the post-commit session staged.
         session.commit()
@@ -521,13 +566,33 @@ def _normalize_ingested_source_rows(
             tenant_id,
             report_month,
         )
-    except Exception:
+    except Exception as exc:
         # Any other normalize error (e.g. an unsupported source_system or an
-        # amount/value validation error) is a real data problem. Roll back the
-        # partial projection and re-raise -- silently producing no facts is
-        # exactly the bug this stage fixes, so a genuine failure must be
-        # visible. No bare except; no secrets/PII logged (the normalizer
-        # already redacts).
+        # amount/value validation error) is a real data problem. Record the
+        # projection failure on the run (rewriting it to FAILED with an
+        # error_summary) so the run history does not silently show success
+        # while the finance facts are missing, then re-raise so the caller
+        # still sees a fail-loud exception. The rewrite uses a fresh
+        # transaction because the prior commit/rollback in this branch left
+        # the session state ambiguous; if the rewrite itself fails, fall
+        # back to rollback + re-raise the ORIGINAL exception (not the
+        # rewrite error) so the original failure is never hidden.
+        try:
+            _record_projection_failure_on_run(
+                session=session,
+                tenant_id=tenant_id,
+                run=run,
+                exc=exc,
+            )
+        except Exception:
+            logger.exception(
+                "ingestion normalize could not record projection failure on run "
+                "tenant_id=%s month=%s run_id=%s",
+                tenant_id,
+                report_month,
+                run.id,
+            )
+            session.rollback()
         session.rollback()
         logger.exception(
             "ingestion normalize failed tenant_id=%s month=%s",
@@ -535,6 +600,81 @@ def _normalize_ingested_source_rows(
             report_month,
         )
         raise
+
+
+def _record_projection_failure_on_run(
+    *,
+    session: Session,
+    tenant_id: UUID,
+    run: ConnectorRunEntry,
+    exc: BaseException,
+) -> None:
+    """Rewrite a terminal run to FAILED with a projection-failure error summary.
+
+    Uses ``record_projection_failure`` to update the run row, then commits
+    in its own transaction. The run lifecycle audit row (FINISHED) is left
+    intact; the rewrite is an additional column update on the run row
+    itself, not a duplicate FINISHED edge.
+    """
+    error_summary = f"normalize failed: {type(exc).__name__}: {exc!s}"
+    try:
+        run_id = UUID(run.id)
+    except (ValueError, TypeError, AttributeError):
+        logger.warning(
+            "cannot record projection failure: run id is not a UUID (run_id=%r)",
+            run.id,
+        )
+        return
+    record_projection_failure(
+        session,
+        tenant_id=tenant_id,
+        connector_run_id=run_id,
+        error_summary=error_summary,
+    )
+    session.commit()
+
+
+def _emit_normalized_fact_audit(
+    *,
+    audit_sink: AuditSink,
+    audit_actor: UserPrincipal,
+    run: ConnectorRunEntry,
+    fact: object,
+    lifecycle: str,
+) -> None:
+    """Emit a REPORT_IMPORTED audit row for one fact written by the post-run normalize.
+
+    Mirrors the shape of the API-driven ``POST /facts`` import audit (see
+    ``backend/ums_smart_revenue/api/revenue.py::create_monthly_channel_revenue_fact``):
+    same event type, same entity_type, same entity_id format, and the
+    same ``details`` keys operators already filter on. The ``lifecycle``
+    discriminator distinguishes CREATED vs UPDATED; the ``scope`` is the
+    connector scope, matching the connector run lifecycle audit (see
+    ``connectors/google/audit.py::emit_run_started``).
+    """
+    from ums_smart_revenue.auth.audit import AuditEventType
+    from ums_smart_revenue.auth.audit_service import record_audit_event
+    from ums_smart_revenue.auth.scopes import AccessScope
+
+    record_audit_event(
+        sink=audit_sink,
+        actor=audit_actor,
+        event_type=AuditEventType.REPORT_IMPORTED,
+        entity_type="monthly_channel_revenue_fact",
+        entity_id=getattr(fact, "audit_entity_id", None),
+        scope=AccessScope.connector(run.connector_key),
+        reason=f"connector normalize: {lifecycle}",
+        details={
+            "lifecycle": lifecycle,
+            "connector_key": run.connector_key,
+            "account_id": run.account_id,
+            "report_month": run.report_month,
+            "source_kind": getattr(fact, "source_kind", None),
+            "source_report_id": getattr(fact, "source_report_id", None),
+            "youtube_channel_id": getattr(fact, "youtube_channel_id", None),
+            "month": getattr(fact, "month", None),
+        },
+    )
 
 
 # ============================================================================
