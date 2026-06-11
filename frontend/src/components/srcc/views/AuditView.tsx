@@ -184,15 +184,16 @@ const AuditSummaryTiles = ({ canViewAudit }: { canViewAudit: boolean }) => {
 
 /**
  * The audit log screen: live summary tiles plus the gated live timeline.
- * `canViewAudit` gates both the summary fetch and whether the timeline mounts;
- * `canViewFinance` is retained for parity with the shell prop contract but the
- * audit tiles are not finance-gated (they carry no money values).
+ * `canViewAudit` gates both the summary fetch and whether the timeline mounts.
+ * `canViewFinance` is accepted (optional) for parity with the shell prop
+ * contract but the audit tiles are not finance-gated (they carry no money
+ * values); AppShell may pass it for consistency with sibling views.
  */
 const AuditView = ({
   canViewAudit,
 }: {
   canViewAudit: boolean;
-  canViewFinance: boolean;
+  canViewFinance?: boolean;
 }) => {
   const [eventType, setEventType] = useState("");
 

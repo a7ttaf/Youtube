@@ -31,6 +31,12 @@ router = APIRouter(prefix="/audit", tags=["audit"])
 # response carries X-Truncated: true so callers never silently lose audit rows.
 AUDIT_EXPORT_MAX_ROWS = 10_000
 
+# Upper bound on the GET /audit/summary ``window_hours`` query parameter.
+# 8760 = 365 * 24, the maximum window a caller can ask for (one full year).
+# The repository's count_summary accepts a (created_at >= now - window_hours)
+# filter, so 8760 keeps the most-recent-count query bounded and predictable.
+MAX_SUMMARY_WINDOW_HOURS = 8760
+
 # Characters that trigger CSV/Excel formula injection when they lead a cell.
 _CSV_INJECTION_PREFIXES = ("=", "+", "-", "@", "\t", "\r", "\n")
 
@@ -125,7 +131,7 @@ def get_audit_summary(
     repository: Annotated[
         SqlAlchemyAuditLogRepository, Depends(current_audit_log_repository)
     ],
-    window_hours: Annotated[int, Query(ge=1, le=8760)] = 24,
+    window_hours: Annotated[int, Query(ge=1, le=MAX_SUMMARY_WINDOW_HOURS)] = 24,
 ) -> AuditSummaryResponse:
     """Return tenant-scoped aggregate audit counts for the summary tiles."""
     # ========================================================================
