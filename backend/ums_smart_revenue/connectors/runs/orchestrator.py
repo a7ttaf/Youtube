@@ -896,8 +896,13 @@ def _process_live_reports(
         # (tenant-writable) TOGETHER with its DOWNLOADED / PARSED / FAILED audit
         # edges (audit_logs is TENANT_PLATFORM_ONLY_WRITE). Elevate the whole
         # per-report iteration so the audit INSERTs do not permission-deny on
-        # the tenant lane; the elevation ends with this iteration's internal
-        # commit, and the next iteration re-pins via the after_begin hook.
+        # the tenant lane. MEASURED semantics: the elevation spans the entire
+        # iteration -- it persists across the iteration's internal commit AND
+        # the failure recorder's mid-block rollback+commit (which then writes
+        # the platform-only FAILED audit edge), because the after_begin hook
+        # keeps re-elevating while the platform-lane flag is set. The elevation
+        # ends only at block exit; the next iteration re-pins app_tenant via the
+        # next after_begin (the flag was popped on exit).
         with platform_lane(session):
             raw_file_count = _handle_live_produced_report(
                 session=session,
@@ -1149,6 +1154,19 @@ def _record_live_report_failure(
             )
         session.commit()
     except Exception:
+        # FIX: the swallow here previously logged nothing, against the repo's
+        # error-handling rules -- a lane regression (e.g. the FAILED audit edge
+        # permission-denying on the wrong DB role) would silently drop the
+        # per-report FAILED state and the run would still terminate PARTIAL with
+        # no diagnostic trail. Log before swallowing (run/report identifiers
+        # only -- no secret values, no raw SQL values). Control flow is
+        # unchanged on purpose: the run MUST still terminate PARTIAL.
+        logger.exception(
+            "Failed to persist per-report failure state for "
+            "run_id=%s report_type=%s; rolling back the failure write.",
+            run_entry.id,
+            report_type,
+        )
         session.rollback()
 
 
