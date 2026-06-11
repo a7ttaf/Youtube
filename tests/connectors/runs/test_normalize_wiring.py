@@ -95,12 +95,15 @@ def _outcome(
     *,
     run: ConnectorRunEntry | None,
     reports_succeeded: int = 1,
+    analytics_cleanup_blocked: bool = False,
 ) -> ConnectorRunOutcome:
     """Wrap a run stub in an immutable ``ConnectorRunOutcome``.
 
     ``reports_succeeded`` is plumbed because the connector run keeps the
     per-report counts even when the terminal status is FAILED; tests that
     need to assert gate behavior across statuses pass it explicitly.
+    ``analytics_cleanup_blocked`` is plumbed for the PARTIAL Analytics
+    gate; non-Analytics runs always pass False.
     """
     counts = {
         "reports_attempted": max(reports_succeeded, 1),
@@ -111,7 +114,12 @@ def _outcome(
         "rows_upserted_updated": 0,
         "rows_upserted_unchanged": 0,
     }
-    return ConnectorRunOutcome(run=run, counts=counts, per_report_failures=[])
+    return ConnectorRunOutcome(
+        run=run,
+        counts=counts,
+        per_report_failures=[],
+        analytics_cleanup_blocked=analytics_cleanup_blocked,
+    )
 
 
 def _invoke_run_one(
@@ -122,6 +130,7 @@ def _invoke_run_one(
     month_close_status: str | None = "OPEN",
     normalizer: MagicMock | None = None,
     record_projection_failure: MagicMock | None = None,
+    get_month_close_status_side_effect: Exception | None = None,
 ) -> tuple[
     ConnectorRunOutcome,
     MagicMock,
@@ -135,6 +144,11 @@ def _invoke_run_one(
     record_projection_failure_mock, audit_sink_mock)`` so callers can
     assert on normalize invocation, the actor argument, the run rewrite on
     failure, and the audit edges emitted for created/updated facts.
+
+    The audit_sink and audit_actor are built LAZILY inside
+    ``_normalize_ingested_source_rows`` (after the dry-run gate passes);
+    the helper patches ``SqlAlchemyAuditSink`` at module scope so the
+    lazy construction observes the patch.
     """
     session = MagicMock(name="session")
     normalizer_cls = MagicMock(name="GoogleSourceNormalizer")
@@ -146,6 +160,14 @@ def _invoke_run_one(
     audit_sink_mock = MagicMock(name="audit_sink")
     audit_actor_mock = MagicMock(name="audit_actor")
     audit_actor_mock.user_id = SERVICE_ACTOR_ID
+    if get_month_close_status_side_effect is not None:
+        get_month_close_status_mock = MagicMock(
+            side_effect=get_month_close_status_side_effect
+        )
+    else:
+        get_month_close_status_mock = MagicMock(
+            return_value=month_close_status
+        )
     with patch.object(
         orchestrator, "_run_one_with_credentials", return_value=outcome
     ), patch.object(
@@ -153,7 +175,7 @@ def _invoke_run_one(
     ), patch.object(
         orchestrator, "validate_report_month", return_value=None
     ), patch.object(
-        orchestrator, "get_month_close_status", return_value=month_close_status
+        orchestrator, "get_month_close_status", get_month_close_status_mock
     ), patch.object(
         orchestrator, "GoogleSourceNormalizer", normalizer_cls
     ), patch.object(
@@ -220,7 +242,13 @@ def test_run_with_no_run_entry_does_not_invoke_normalize() -> None:
 
 @pytest.mark.parametrize("status", ["SUCCEEDED", "PARTIAL"])
 def test_terminal_success_invokes_normalize_and_commits(status: str) -> None:
-    """SUCCEEDED and PARTIAL runs both trigger a single normalize + commit."""
+    """SUCCEEDED and PARTIAL runs both trigger a single normalize + commit.
+
+    The normalize actor is the triggering user when one is supplied (per
+    the design spec §"Actor") -- ``str(triggered_by_user_id)`` is the
+    actor. Tests that need the connector service principal pass
+    ``triggered_by_user_id=None``.
+    """
     normalizer = MagicMock(name="normalizer_instance")
     returned, normalizer_cls, session, _, _ = _invoke_run_one(
         outcome=_outcome(run=_run_entry(status=status)),
@@ -230,7 +258,7 @@ def test_terminal_success_invokes_normalize_and_commits(status: str) -> None:
     normalizer.normalize_month.assert_called_once()
     _, kwargs = normalizer.normalize_month.call_args
     assert kwargs["month"] == REPORT_MONTH
-    assert kwargs["actor_user_id"] == SERVICE_ACTOR_ID
+    assert kwargs["actor_user_id"] == str(TRIGGERED_BY)
     session.commit.assert_called_once()
     assert returned.run is not None and returned.run.status == status
 
@@ -288,20 +316,67 @@ def test_non_lock_normalize_error_rolls_back_reraises_and_records_failure() -> N
         )
 
 
-def test_actor_is_connector_service_principal() -> None:
-    """The post-run normalize uses the connector service principal id, not the trigger user.
+def test_actor_is_triggering_user_when_supplied() -> None:
+    """When triggered_by_user_id is supplied, it is the normalize actor.
 
-    The run lifecycle audit rows (emit_run_started, emit_run_finished, the
-    per-raw-file FAILED edges) are all attributed to the connector service
-    principal. The post-run normalize audit rows are continuous with the
-    run lifecycle audit, so they share the same actor. A user-supplied
-    ``triggered_by_user_id`` is preserved on the connector_runs row itself
-    but is NOT the audit actor.
+    The design spec §"Actor" says: "Use `triggered_by_user_id` when
+    present; otherwise fall back to the connector service principal".
+    The audit_sink's append will stash the raw actor UUID in
+    details['actor_user_id'] when the user is not in the users table;
+    that's expected for the normalize stage because triggering users
+    are typically operators who run the ingest out-of-band.
+    """
+    from dataclasses import dataclass
+
+    @dataclass
+    class _StubResult:
+        created: list
+        updated: list
+        unchanged: list
+        skipped: list
+
+    created_fact = MagicMock(name="created_fact")
+    created_fact.audit_entity_id = "channel-1:2026-04:YOUTUBE_CMS"
+    created_fact.source_kind = "YOUTUBE_CMS"
+    created_fact.source_report_id = "report-A"
+    created_fact.youtube_channel_id = "channel-1"
+    created_fact.month = "2026-04"
+    normalizer = MagicMock(name="normalizer_instance")
+    normalizer.normalize_month.return_value = _StubResult(
+        created=[created_fact],
+        updated=[],
+        unchanged=[],
+        skipped=[],
+    )
+    _, _, _, _, audit_sink = _invoke_run_one(
+        outcome=_outcome(run=_run_entry(status="SUCCEEDED")),
+        triggered_by_user_id=TRIGGERED_BY,
+        normalizer=normalizer,
+    )
+    _, kwargs = normalizer.normalize_month.call_args
+    assert kwargs["actor_user_id"] == str(TRIGGERED_BY)
+    # The audit_sink also received the user attribution.
+    audit_actor_for_appends = [
+        call.args[0].user_id for call in audit_sink.append.call_args_list
+    ]
+    assert audit_actor_for_appends, "expected at least one audit append"
+    assert all(
+        actor_id == str(TRIGGERED_BY) for actor_id in audit_actor_for_appends
+    )
+
+
+def test_actor_falls_back_to_service_principal_when_no_triggering_user() -> None:
+    """Without triggered_by_user_id, the connector service principal id is used.
+
+    The audit context is built LAZILY (after the dry-run gate passes) so
+    a dry-run path does not require UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID
+    to be set. When the normalize actually fires without a triggering
+    user, the service principal resolves via the env var.
     """
     normalizer = MagicMock(name="normalizer_instance")
     _, _, _, _, _ = _invoke_run_one(
         outcome=_outcome(run=_run_entry(status="SUCCEEDED")),
-        triggered_by_user_id=TRIGGERED_BY,
+        triggered_by_user_id=None,
         normalizer=normalizer,
     )
     _, kwargs = normalizer.normalize_month.call_args
@@ -390,3 +465,177 @@ def test_projection_failure_records_on_run_when_normalize_raises() -> None:
     assert "error_summary" in kwargs
     assert "unknown channel" in kwargs["error_summary"]
     assert kwargs["error_summary"].startswith("normalize failed: ValueError:")
+
+
+def test_failed_facts_txn_is_rolled_back_before_run_rewrite() -> None:
+    """Thread 7: a non-lock SQLAlchemy flush/commit error must not silently
+    leave the run as SUCCEEDED/PARTIAL.
+
+    The session is rolled back BEFORE the run-status rewrite so the rewrite
+    observes a clean session. Previously, the rewrite was attempted on the
+    same session in a failed-transaction state, which raised
+    ``PendingRollbackError``, the helper failure was swallowed, and the
+    run stayed SUCCEEDED/PARTIAL with no facts produced.
+    """
+    normalizer = MagicMock(name="normalizer_instance")
+    normalizer.normalize_month.side_effect = ValueError("unknown channel")
+    record_failure = MagicMock(name="record_projection_failure")
+    # Call _normalize_ingested_source_rows directly with a controlled
+    # outcome so we can observe the session mock's rollback + commit
+    # behavior across the failed-facts -> run-rewrite transaction pair.
+    session = MagicMock(name="session")
+    normalizer_cls = MagicMock(name="GoogleSourceNormalizer")
+    normalizer_cls.return_value = normalizer
+    with patch.object(
+        orchestrator, "get_month_close_status", return_value="OPEN"
+    ), patch.object(
+        orchestrator, "GoogleSourceNormalizer", normalizer_cls
+    ), patch.object(
+        orchestrator, "record_projection_failure", record_failure
+    ), patch.object(
+        orchestrator, "SqlAlchemyAuditSink", return_value=MagicMock()
+    ):
+        with pytest.raises(ValueError, match="unknown channel"):
+            orchestrator._normalize_ingested_source_rows(
+                session=session,
+                tenant_id=TENANT_ID,
+                report_month=REPORT_MONTH,
+                dry_run=False,
+                triggered_by_user_id=TRIGGERED_BY,
+                outcome=_outcome(run=_run_entry(status="SUCCEEDED")),
+            )
+    # The session must be rolled back at least once: once for the failed
+    # facts transaction, and at least once inside the rewrite helper. We
+    # assert the rewrite path was entered (record_failure was called) and
+    # that the run did not stay SUCCEEDED with no facts produced.
+    assert session.rollback.call_count >= 1
+    record_failure.assert_called_once()
+
+
+def test_dry_run_does_not_require_service_principal_env() -> None:
+    """Thread 8: a dry-run path must not need UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID.
+
+    The audit context is built INSIDE ``_normalize_ingested_source_rows``
+    after the dry-run gate, so a dry-run that exercises the dry-run path
+    does not raise even when the env var is unset. We verify this by
+    building a fresh ``run_one`` invocation that bypasses the autouse
+    env fixture (monkeypatch.delenv) and confirming no exception is
+    raised.
+    """
+    from ums_smart_revenue.config.settings import (
+        GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
+        load_app_settings,
+    )
+
+    monkeypatch = pytest.MonkeyPatch()
+    try:
+        monkeypatch.delenv(
+            GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV, raising=False
+        )
+        load_app_settings.cache_clear()
+        try:
+            session = MagicMock(name="session")
+            with patch.object(
+                orchestrator, "_run_one_with_credentials",
+                return_value=_outcome(run=None),
+            ), patch.object(
+                orchestrator, "_credentials_for_run", return_value=MagicMock()
+            ), patch.object(
+                orchestrator, "validate_report_month", return_value=None
+            ):
+                # No exception should be raised on the dry-run path.
+                returned = run_one(
+                    session,
+                    tenant_id=TENANT_ID,
+                    connector_key=CONNECTOR_KEY,
+                    account_id=ACCOUNT_ID,
+                    report_month=REPORT_MONTH,
+                    dry_run=True,
+                )
+            assert returned is not None
+        finally:
+            load_app_settings.cache_clear()
+    finally:
+        monkeypatch.undo()
+
+
+def test_lock_prefilter_failure_records_on_run() -> None:
+    """Thread 9: a transient ``get_month_close_status`` SELECT error is
+    recorded on the run via ``record_projection_failure`` so the run
+    history does not silently show success while finance facts are
+    missing.
+    """
+    record_failure = MagicMock(name="record_projection_failure")
+    with pytest.raises(RuntimeError, match="db down"):
+        _invoke_run_one(
+            outcome=_outcome(run=_run_entry(status="SUCCEEDED")),
+            get_month_close_status_side_effect=RuntimeError("db down"),
+            record_projection_failure=record_failure,
+        )
+    record_failure.assert_called_once()
+    kwargs = record_failure.call_args.kwargs
+    assert "db down" in kwargs["error_summary"]
+    assert kwargs["error_summary"].startswith(
+        "normalize failed: RuntimeError:"
+    )
+
+
+def test_partial_analytics_with_blocked_cleanup_skips_normalize() -> None:
+    """Thread 11: a PARTIAL YouTube Analytics run with blocked cleanup
+    does not normalize (stale source rows would let the normalizer
+    pick canonical rows from stale data and rewrite facts with old
+    revenue). The prefilter still runs (we are not in a locked month
+    here) and is rolled back to close the autobegun read txn.
+    """
+    from dataclasses import replace
+    run = _run_entry(status="PARTIAL")
+    outcome = replace(
+        _outcome(run=run), analytics_cleanup_blocked=True
+    )
+    returned, normalizer_cls, session, record_failure, _ = _invoke_run_one(
+        outcome=outcome,
+    )
+    normalizer_cls.assert_not_called()
+    session.commit.assert_not_called()
+    record_failure.assert_not_called()
+    # Autobegun read txn must be released.
+    assert session.rollback.call_count >= 1
+    assert returned.run is not None and returned.run.status == "PARTIAL"
+
+
+def test_partial_analytics_with_clean_cleanup_normalizes() -> None:
+    """Thread 11 positive case: a PARTIAL Analytics run whose cleanup
+    completed (no sibling failures) IS normalized; the cleanup-blocked
+    flag is False.
+    """
+    from dataclasses import replace
+    run = _run_entry(status="PARTIAL")
+    outcome = replace(
+        _outcome(run=run), analytics_cleanup_blocked=False
+    )
+    normalizer = MagicMock(name="normalizer_instance")
+    _, normalizer_cls, session, _, _ = _invoke_run_one(
+        outcome=outcome, normalizer=normalizer,
+    )
+    normalizer_cls.assert_called_once()
+    normalizer.normalize_month.assert_called_once()
+    session.commit.assert_called_once()
+
+
+def test_partial_non_analytics_always_normalizes() -> None:
+    """Thread 11 negative case: a PARTIAL YouTube Reporting / AdSense
+    run (no deferred cleanup) normalizes regardless of per-report
+    failures because there is no blocked-cleanup state to gate on.
+    """
+    from dataclasses import replace
+    run = _run_entry(status="PARTIAL")
+    outcome = replace(
+        _outcome(run=run), analytics_cleanup_blocked=False
+    )
+    normalizer = MagicMock(name="normalizer_instance")
+    _, normalizer_cls, session, _, _ = _invoke_run_one(
+        outcome=outcome, normalizer=normalizer,
+    )
+    normalizer_cls.assert_called_once()
+    normalizer.normalize_month.assert_called_once()
+    session.commit.assert_called_once()

@@ -197,11 +197,20 @@ class ConnectorRunOutcome:
     shape that ``finish_run`` validates. ``per_report_failures`` lists
     ``(report_type_id, error_class_name)`` for each report that failed inside
     the per-report ``except`` handler; the happy path returns an empty list.
+
+    ``analytics_cleanup_blocked`` is True only for YouTube Analytics runs
+    whose deferred stale-row cleanup was blocked by a per-report sibling
+    failure (``_DeferredAnalyticsStaleCleanupState.blocked``). Non-Analytics
+    runs always carry False because they have no deferred cleanup. The
+    post-run normalize stage uses this to skip PARTIAL Analytics runs whose
+    cleanup did not complete -- normalizing them would let the normalizer
+    pick canonical rows from stale data and rewrite facts with old revenue.
     """
 
     run: ConnectorRunEntry | None
     counts: dict[str, int]
     per_report_failures: list[tuple[str, str]]
+    analytics_cleanup_blocked: bool = False
 
 
 @dataclass(frozen=True)
@@ -401,17 +410,10 @@ def run_one(
             account_id=account_id,
         ),
     )
-    # Post-run normalize stage uses a fresh audit context bound to the
-    # same session so audit rows for normalized facts commit alongside
-    # the facts themselves. The actor is the connector service principal
-    # (matching the run lifecycle audit rows) -- the run lifecycle audit
-    # edges were emitted by _run_live and are already committed.
-    normalize_audit_sink: AuditSink = SqlAlchemyAuditSink(
-        session, tenant_id=tenant_id
-    )
-    normalize_audit_actor: UserPrincipal = build_connector_service_principal(
-        tenant_id=tenant_id
-    )
+    # The post-run normalize audit context (sink + actor) is built INSIDE
+    # _normalize_ingested_source_rows so a dry-run path does not require
+    # UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID to be set -- the dry-run
+    # returns immediately and the audit context is unused.
     _normalize_ingested_source_rows(
         session=session,
         tenant_id=tenant_id,
@@ -419,8 +421,6 @@ def run_one(
         dry_run=dry_run,
         triggered_by_user_id=triggered_by_user_id,
         outcome=outcome,
-        audit_sink=normalize_audit_sink,
-        audit_actor=normalize_audit_actor,
     )
     return outcome
 
@@ -482,8 +482,6 @@ def _normalize_ingested_source_rows(
     dry_run: bool,
     triggered_by_user_id: UUID | None,
     outcome: ConnectorRunOutcome,
-    audit_sink: AuditSink,
-    audit_actor: UserPrincipal,
 ) -> None:
     """Project this run's ingested source rows into revenue facts (fail-closed on locks)."""
     # Skip on dry-run (no committed source rows) and on any run that did not
@@ -501,6 +499,43 @@ def _normalize_ingested_source_rows(
     run = outcome.run
     if run is None or run.status not in ("SUCCEEDED", "PARTIAL"):
         return
+    # PARTIAL YouTube Analytics runs whose deferred cleanup was blocked
+    # are also unsafe to normalize -- the blocked cleanup left stale
+    # source rows eligible for canonical selection, and a partial channel
+    # report failure means some channels in the month are missing fresh
+    # data. Skip normalize to keep the previous month's facts intact; the
+    # next SUCCEEDED run for the same month will rewrite them.
+    if (
+        run.status == "PARTIAL"
+        and outcome.analytics_cleanup_blocked
+    ):
+        session.rollback()
+        logger.info(
+            "ingestion normalize skipped (analytics cleanup blocked) "
+            "tenant_id=%s month=%s run_id=%s",
+            tenant_id,
+            report_month,
+            run.id,
+        )
+        return
+
+    # Audit context is built AFTER the dry-run / status / cleanup gates
+    # pass so a dry-run path does not require UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID
+    # to be set. The sink is bound to the same session so audit rows for
+    # normalized facts commit alongside the facts themselves. The actor
+    # prefers the user who triggered the run, falling back to the
+    # connector service principal for scheduled / system runs; this
+    # matches the design spec §"Actor" -- "Use `triggered_by_user_id` when
+    # present; otherwise fall back to the connector service principal".
+    audit_sink: AuditSink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+    if triggered_by_user_id is not None:
+        actor_user_id = str(triggered_by_user_id)
+        audit_actor: UserPrincipal = _principal_for_triggered_user(
+            triggered_by_user_id=actor_user_id, tenant_id=tenant_id
+        )
+    else:
+        audit_actor = build_connector_service_principal(tenant_id=tenant_id)
+        actor_user_id = audit_actor.user_id
 
     # Locked-month prefilter (pure SELECT -- no row creation, no lock
     # contention). A connector legitimately ingesting late data for a locked
@@ -508,24 +543,23 @@ def _normalize_ingested_source_rows(
     # leave the run status unchanged. The SELECT autobegins a SQLAlchemy
     # transaction; release it with rollback (pure read, nothing to commit) so
     # the caller's session is not left in an active read txn -- a subsequent
-    # ``with session.begin()`` on the same session would otherwise fail.
-    if get_month_close_status(session, report_month, tenant_id=tenant_id) == "LOCKED":
-        session.rollback()
-        logger.info(
-            "ingestion normalize skipped (month locked) tenant_id=%s month=%s",
-            tenant_id,
-            report_month,
-        )
-        return
-
-    # Actor: reuse the audit_actor the run lifecycle audit rows were
-    # attributed to so the post-run normalize events are continuous with
-    # the run. The service principal resolves via env (Bucket A fail-closed
-    # in run_one via _run_one_with_credentials -> _run_live), so a missing
-    # principal would already have raised before this stage.
-    actor_user_id = audit_actor.user_id
-
+    # ``with session.begin()`` on the same session would otherwise fail. The
+    # prefilter is INSIDE the same non-lock failure handler so a transient
+    # database error reading `finance_month_close` is recorded on the run via
+    # ``record_projection_failure`` (fail-loud, no silent success).
     try:
+        if get_month_close_status(
+            session, report_month, tenant_id=tenant_id
+        ) == "LOCKED":
+            session.rollback()
+            logger.info(
+                "ingestion normalize skipped (month locked) "
+                "tenant_id=%s month=%s",
+                tenant_id,
+                report_month,
+            )
+            return
+
         normalizer = GoogleSourceNormalizer(session, tenant_id=tenant_id)
         result = normalizer.normalize_month(
             month=report_month,
@@ -568,15 +602,16 @@ def _normalize_ingested_source_rows(
         )
     except Exception as exc:
         # Any other normalize error (e.g. an unsupported source_system or an
-        # amount/value validation error) is a real data problem. Record the
-        # projection failure on the run (rewriting it to FAILED with an
-        # error_summary) so the run history does not silently show success
-        # while the finance facts are missing, then re-raise so the caller
-        # still sees a fail-loud exception. The rewrite uses a fresh
-        # transaction because the prior commit/rollback in this branch left
-        # the session state ambiguous; if the rewrite itself fails, fall
-        # back to rollback + re-raise the ORIGINAL exception (not the
-        # rewrite error) so the original failure is never hidden.
+        # amount/value validation error, or a transient finance_month_close
+        # SELECT error) is a real data problem. Record the projection failure
+        # on the run (rewriting it to FAILED with an error_summary) so the
+        # run history does not silently show success while the finance facts
+        # are missing, then re-raise so the caller still sees a fail-loud
+        # exception. Roll back the failed facts/prefilter transaction FIRST
+        # so the session is in a clean state for the run-status rewrite --
+        # otherwise the rewrite raises PendingRollbackError and the run
+        # silently stays SUCCEEDED/PARTIAL with no facts produced.
+        session.rollback()
         try:
             _record_projection_failure_on_run(
                 session=session,
@@ -593,7 +628,6 @@ def _normalize_ingested_source_rows(
                 run.id,
             )
             session.rollback()
-        session.rollback()
         logger.exception(
             "ingestion normalize failed tenant_id=%s month=%s",
             tenant_id,
@@ -632,6 +666,29 @@ def _record_projection_failure_on_run(
         error_summary=error_summary,
     )
     session.commit()
+
+
+def _principal_for_triggered_user(
+    *, triggered_by_user_id: str, tenant_id: UUID
+) -> UserPrincipal:
+    """Build a minimal UserPrincipal for the user that triggered the run.
+
+    The post-run normalize audit rows are attributed to the triggering
+    user (when present) so operators who inspect a normalized fact can
+    see who triggered the ingest that produced it. The principal is a
+    best-effort shell -- the SqlAlchemyAuditSink looks up the real
+    ``users`` row, and if absent, stashes the raw actor UUID in
+    ``details["actor_user_id"]`` and sets ``user_id=None`` on the row.
+    This matches how the API-driven ``POST /facts`` import handles its
+    actor.
+    """
+    return UserPrincipal(
+        user_id=triggered_by_user_id,
+        email=f"trigger:{triggered_by_user_id}",
+        is_service_account=False,
+        disabled=False,
+        tenant_id=str(tenant_id),
+    )
 
 
 def _emit_normalized_fact_audit(
@@ -880,7 +937,7 @@ def _run_live(
     finished = False
     try:
         try:
-            _process_live_reports(
+            analytics_cleanup_blocked = _process_live_reports(
                 session=session,
                 tenant_id=tenant_id,
                 connector_key=connector_key,
@@ -910,6 +967,7 @@ def _run_live(
                 run=finished_run,
                 counts=counts,
                 per_report_failures=per_report_failures,
+                analytics_cleanup_blocked=False,
             )
 
         finished_run = _finish_aggregate_live_run(
@@ -926,6 +984,7 @@ def _run_live(
             run=finished_run,
             counts=counts,
             per_report_failures=per_report_failures,
+            analytics_cleanup_blocked=analytics_cleanup_blocked,
         )
     finally:
         if not finished:
@@ -954,8 +1013,15 @@ def _process_live_reports(
     per_report_failure_details: list[tuple[str, str, str | None]],
     audit_sink: AuditSink,
     audit_actor: UserPrincipal,
-) -> None:
-    """Drive the live run end-to-end: produce, parse, upsert, and aggregate counts."""
+) -> bool:
+    """Drive the live run end-to-end and return whether Analytics cleanup was blocked.
+
+    Returns True if the run used the deferred Analytics stale-row cleanup
+    AND that cleanup was blocked by a per-report sibling failure
+    (``_DeferredAnalyticsStaleCleanupState.blocked``). Non-Analytics runs
+    always return False. The post-run normalize stage uses this flag to
+    skip PARTIAL Analytics runs whose cleanup did not complete.
+    """
     runner = dispatch_connector(key=connector_key)
     backend, scheme, bucket = _build_blob_backend()
     repo = SqlAlchemyGoogleRevenueSourceRowRepository(session)
@@ -1002,6 +1068,10 @@ def _process_live_reports(
             tenant_id=tenant_id,
             deferred_cleanup=deferred_analytics_cleanup,
         )
+    return bool(
+        deferred_analytics_cleanup is not None
+        and deferred_analytics_cleanup.blocked
+    )
 
 
 def _unpack_produced_report(
