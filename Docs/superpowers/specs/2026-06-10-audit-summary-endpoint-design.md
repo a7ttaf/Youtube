@@ -21,6 +21,20 @@ though both shipped in PR #69.
 
 No schema change, no migration, no new permission, no auth change.
 
+## Alternatives considered
+
+- **Separate COUNT queries vs single aggregate SELECT:** separate queries would be simpler to read,
+  but under concurrent audit writes they can observe different PostgreSQL snapshots and produce
+  inconsistent tile totals. A single aggregate SELECT keeps `total_events`, `sensitive_events`, and
+  `recent_count` mutually consistent.
+- **No self-audit vs snapshot-then-excluded self-audit:** recording no `AUDIT_LOG_VIEWED` row would
+  avoid count pollution, but it breaks the audit-read trail already required for `/audit/events`.
+  Snapshot-then-excluded preserves auditability while ensuring the new read event cannot affect the
+  response it triggered.
+- **Keep the "Denied attempts" tile:** the mock tile was not derivable from `audit_logs` because
+  permission denials fail at the route boundary and write no row. Keeping it would require a new
+  denial-logging mechanism, so the tile stays out of scope for this endpoint.
+
 ## Part 1 — `GET /audit/summary`
 
 ### Contract (locked decisions)
