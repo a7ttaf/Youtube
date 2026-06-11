@@ -419,6 +419,9 @@ def run_one(
 #          facts. Runs once per successful run over ALL source rows for
 #          (tenant, report_month); re-normalizing an already-normalized month is
 #          idempotent (unchanged facts), so repeated runs for a month are safe.
+#          The gate is keyed off ``outcome.counts["reports_succeeded"]`` (not
+#          the terminal run status) so a FAILED run that committed successful
+#          reports still projects its source rows into facts.
 # Database/ORM: MonthlyChannelRevenueFactORM (WRITE via the normalizer's
 #               record_fact upsert). Reads google_revenue_source_rows,
 #               youtube_channels, finance_month_close. No schema change.
@@ -428,6 +431,9 @@ def run_one(
 #            fail-LOUD on real data errors -- silently producing no facts is the
 #            bug this stage fixes, so a non-lock error rolls back and re-raises.
 #            No bare except; no secrets/PII logged (the normalizer redacts).
+#            The locked-month prefilter SELECT autobegins a SQLAlchemy txn;
+#            it is released with rollback (pure read, nothing to commit) so
+#            the caller's session is not left in an active read transaction.
 # Blast Radius: FINANCE -- writes MonthlyChannelRevenueFactORM (the dashboard,
 #               allocation, reconciliation, net-revenue, and exports all read
 #               it). Locked-month facts are NEVER overwritten: a pure-SELECT
@@ -456,20 +462,31 @@ def _normalize_ingested_source_rows(
     outcome: ConnectorRunOutcome,
 ) -> None:
     """Project this run's ingested source rows into revenue facts (fail-closed on locks)."""
-    # Skip on dry-run (no committed source rows) and on any run that did not
-    # reach a terminal SUCCEEDED/PARTIAL status (FAILED runs committed no new
-    # source rows worth projecting; prior month state stays intact).
+    # Skip on dry-run (no committed source rows) and on any outcome that did
+    # not commit at least one successful report. The gate is keyed off
+    # ``counts["reports_succeeded"]`` rather than the terminal run status
+    # because ``_process_live_reports`` commits each successful report before
+    # continuing: a later generator-level exception is caught by ``_run_live``
+    # and finished as FAILED, but the source rows for the successful reports
+    # are already committed. Keying off the terminal status alone would
+    # leave the finance facts stale/missing for the successful reports.
     if dry_run:
         return
     run = outcome.run
-    if run is None or run.status not in ("SUCCEEDED", "PARTIAL"):
+    if run is None:
+        return
+    if outcome.counts.get("reports_succeeded", 0) <= 0:
         return
 
     # Locked-month prefilter (pure SELECT -- no row creation, no lock
     # contention). A connector legitimately ingesting late data for a locked
     # month must not fail the run or mutate locked facts: skip the projection,
-    # leave the run status unchanged.
+    # leave the run status unchanged. The SELECT autobegins a SQLAlchemy
+    # transaction; release it with rollback (pure read, nothing to commit) so
+    # the caller's session is not left in an active read txn -- a subsequent
+    # ``with session.begin()`` on the same session would otherwise fail.
     if get_month_close_status(session, report_month, tenant_id=tenant_id) == "LOCKED":
+        session.rollback()
         logger.info(
             "ingestion normalize skipped (month locked) tenant_id=%s month=%s",
             tenant_id,

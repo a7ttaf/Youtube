@@ -62,9 +62,27 @@ def _run_entry(*, status: str) -> ConnectorRunEntry:
     )
 
 
-def _outcome(*, run: ConnectorRunEntry | None) -> ConnectorRunOutcome:
-    """Wrap a run stub in an immutable ``ConnectorRunOutcome``."""
-    return ConnectorRunOutcome(run=run, counts={}, per_report_failures=[])
+def _outcome(
+    *,
+    run: ConnectorRunEntry | None,
+    reports_succeeded: int = 1,
+) -> ConnectorRunOutcome:
+    """Wrap a run stub in an immutable ``ConnectorRunOutcome``.
+
+    ``reports_succeeded`` defaults to 1 so the existing success-path tests do
+    not have to repeat the count plumbing; the FAILED-no-committed-success
+    test passes 0 to prove the new gate skips such runs.
+    """
+    counts = {
+        "reports_attempted": max(reports_succeeded, 1),
+        "reports_succeeded": reports_succeeded,
+        "reports_failed": 0,
+        "rows_upserted_total": 0,
+        "rows_upserted_created": 0,
+        "rows_upserted_updated": 0,
+        "rows_upserted_unchanged": 0,
+    }
+    return ConnectorRunOutcome(run=run, counts=counts, per_report_failures=[])
 
 
 def _invoke_run_one(
@@ -117,13 +135,40 @@ def test_dry_run_does_not_invoke_normalize() -> None:
     assert returned is not None
 
 
-def test_failed_run_does_not_invoke_normalize() -> None:
-    """A FAILED run committed no new source rows worth projecting."""
+def test_failed_run_with_no_committed_successes_does_not_invoke_normalize() -> None:
+    """A FAILED run that committed no successful reports has no rows to project.
+
+    The gate is keyed off ``counts["reports_succeeded"]`` (not the terminal
+    status) because ``_process_live_reports`` commits each successful report
+    before continuing. A FAILED run with zero committed successes has nothing
+    to project, so normalize must not fire -- a real-data failure during
+    processing must not silently produce a partial facts projection.
+    """
     _, normalizer_cls, session = _invoke_run_one(
-        outcome=_outcome(run=_run_entry(status="FAILED"))
+        outcome=_outcome(run=_run_entry(status="FAILED"), reports_succeeded=0)
     )
     normalizer_cls.assert_not_called()
     session.commit.assert_not_called()
+
+
+def test_failed_run_with_committed_successes_invokes_normalize() -> None:
+    """A FAILED run whose processing already committed successes must still project.
+
+    The post-run normalize gate is keyed off ``counts["reports_succeeded"]``
+    rather than the terminal status: a later generator-level exception after
+    some reports succeeded leaves committed ``google_revenue_source_rows``
+    that must be collapsed into revenue facts, otherwise the dashboard /
+    allocation / exports stay stale for the (tenant, report_month) window.
+    """
+    normalizer = MagicMock(name="normalizer_instance")
+    returned, normalizer_cls, session = _invoke_run_one(
+        outcome=_outcome(run=_run_entry(status="FAILED"), reports_succeeded=1),
+        normalizer=normalizer,
+    )
+    normalizer_cls.assert_called_once_with(session, tenant_id=TENANT_ID)
+    normalizer.normalize_month.assert_called_once()
+    session.commit.assert_called_once()
+    assert returned.run is not None and returned.run.status == "FAILED"
 
 
 def test_run_with_no_run_entry_does_not_invoke_normalize() -> None:
@@ -150,14 +195,20 @@ def test_terminal_success_invokes_normalize_and_commits(status: str) -> None:
 
 
 def test_locked_month_prefilter_skips_normalize() -> None:
-    """A LOCKED month is skipped at the prefilter: no normalize, run unchanged."""
+    """A LOCKED month is skipped at the prefilter: no normalize, run unchanged.
+
+    The prefilter SELECT autobegins a SQLAlchemy transaction; the locked
+    branch releases it with rollback (pure read, nothing to commit) so the
+    caller's session is not left in an active read transaction -- a later
+    ``with session.begin()`` on the same session would otherwise fail.
+    """
     returned, normalizer_cls, session = _invoke_run_one(
         outcome=_outcome(run=_run_entry(status="SUCCEEDED")),
         month_close_status="LOCKED",
     )
     normalizer_cls.assert_not_called()
     session.commit.assert_not_called()
-    session.rollback.assert_not_called()
+    session.rollback.assert_called_once()
     assert returned.run is not None and returned.run.status == "SUCCEEDED"
 
 
