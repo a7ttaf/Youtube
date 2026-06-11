@@ -505,6 +505,24 @@ def _normalize_ingested_source_rows(
             len(outcome.per_report_failures),
         )
         return
+    # FIX: restore the analytics_cleanup_blocked gate read removed in a3a584a.
+    # The ConnectorRunOutcome docstring promises this gate consumes the flag,
+    # but the read was dropped, leaving a phantom guard: today's safety is
+    # incidental (blocked=True co-occurs with a per_report_failures entry, so
+    # the check above already returned). This makes the guard real and strictly
+    # more conservative -- a PARTIAL Analytics run whose deferred stale-row
+    # cleanup did not complete skips normalize even if per_report_failures is
+    # empty, because the un-pruned stale rows could be picked as canonical and
+    # rewrite facts with old revenue.
+    if run.status == "PARTIAL" and outcome.analytics_cleanup_blocked:
+        logger.info(
+            "ingestion normalize skipped (analytics cleanup blocked) "
+            "tenant_id=%s month=%s run_id=%s",
+            tenant_id,
+            report_month,
+            run.id,
+        )
+        return
     rows_upserted_total = int(outcome.counts.get("rows_upserted_total") or 0)
     rows_deleted_stale = int(outcome.counts.get("rows_deleted_stale") or 0)
     if rows_upserted_total <= 0 and rows_deleted_stale <= 0:
@@ -1194,7 +1212,10 @@ def _sweep_unfinished_live_run(
     audit_sink: AuditSink,
     audit_actor: UserPrincipal,
 ) -> None:
-    """Best-effort sweep for the no-credentials early-out — finish any still-open ``run_entry``."""
+    """Best-effort sweep for the no-credentials early-out.
+
+    Finishes any still-open ``run_entry`` left behind by the abort path.
+    """
     session.rollback()
     try:
         finished_run = finish_run(
