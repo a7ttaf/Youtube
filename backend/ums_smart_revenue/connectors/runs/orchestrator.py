@@ -1533,6 +1533,12 @@ def _flush_deferred_stale_cleanup_plans(
     ``source_row_key``. This prevents a channel that fell out of the target
     set (deactivated, ``revenue_required=False``, etc.) from losing its
     historical revenue when sibling channels are successfully replaced.
+
+    Returns:
+        The total number of stale source rows deleted across all deferred
+        scopes. The orchestrator copies this value into
+        ``counts["rows_deleted_stale"]`` so the post-run normalizer can
+        decide whether the month needs re-projection.
     """
     if deferred_cleanup.blocked:
         return 0
