@@ -149,7 +149,12 @@ def build_platform_session_factory(
 #   fail-closed (missing tenant context => no row => RLS policy rejects access);
 #   always switch tenant-lane sessions into the restricted app_tenant role so
 #   that an unset TENANT_CTX (or an owner/superuser login that bypasses RLS on
-#   the raw login role) cannot read tenant tables.
+#   the raw login role) cannot read tenant tables. EXCEPTION: while
+#   db/lane.py:platform_lane holds an active block (session.info carries
+#   _PLATFORM_LANE_ACTIVE_KEY), the tenant-lane demote at the end of this hook
+#   is SKIPPED, so the session keeps running app_platform for every transaction
+#   begun in-block (the elevation already set app_platform above). The flag is
+#   set/popped ONLY by db/lane.py.
 # Blast Radius: Authorization/finance reads+writes at the DB boundary. SQLite
 #   is unaffected; Postgres tenant-lane sessions stay on app_tenant with or
 #   without a trusted context row, so RLS is the only authorization gate.

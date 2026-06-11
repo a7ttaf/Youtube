@@ -162,8 +162,13 @@ When the post-run projection fails on a non-lock error, the run is rewritten to
 is recorded. Locked finance months are never overwritten. On RLS-enforced
 Postgres these platform-only writes (`audit_logs`,
 `monthly_channel_revenue_facts`, `finance_month_close`) execute on the
-privileged `app_platform` lane via `db.lane.platform_lane`, while tenant-writable
-ingest writes (raw files, source rows) stay on `app_tenant`.
+privileged `app_platform` lane via `db.lane.platform_lane`. Only three steps
+stay on the tenant `app_tenant` lane: the credential read, the LOCKED-month
+prefilter `SELECT`, and the post-loop deferred Analytics stale-row flush. Each
+per-report ingest transaction (raw files, source rows, `mark_parsed`, and the
+in-savepoint stale deletes) is itself elevated, because its `DOWNLOADED` /
+`PARSED` / `FAILED` audit edges (`audit_logs`, platform-only) commit atomically
+with the ingest evidence in the same transaction.
 
 `GET /revenue/channels/{channel_id}/months/{month}/facts` is an implemented
 guarded revenue read for channel/month source facts. It requires

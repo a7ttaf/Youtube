@@ -57,11 +57,18 @@ A context manager generalizing the sanctioned single-session elevation precedent
 def platform_lane(session: Session) -> Iterator[None]:
     # No-op off Postgres. On Postgres: ensure the transaction has begun
     # (session.connection() — the after_begin hook fires first and pins the
-    # session's configured lane), then SET LOCAL ROLE "app_platform"; on exit,
-    # restore "app_tenant" ONLY for tenant-lane sessions (session.info marker),
-    # platform-lane sessions stay elevated. SET LOCAL is transaction-scoped, so
-    # a commit/rollback inside the block ends the elevation with the
-    # transaction — callers must not commit mid-block and keep writing.
+    # session's configured lane), set a session.info flag, then SET LOCAL ROLE
+    # "app_platform". MEASURED semantics (probe-verified, NOT the SET-LOCAL
+    # textbook): while the flag is set the after_begin hook re-elevates to
+    # app_platform on EVERY transaction begun on the session and skips the
+    # app_tenant demote, so the elevation persists across a mid-block commit, a
+    # mid-block rollback, and nested SAVEPOINTs — it ends only at block exit
+    # (flag popped in finally). On exit, restore "app_tenant" ONLY for
+    # tenant-lane sessions (session.info marker) AND only when the entry
+    # transaction is still active+healthy (skip when not in a transaction and
+    # when the txn is in error state); platform-lane sessions stay elevated. On
+    # a body exception the restore is skipped (success-gated); the caller's
+    # rollback ends the transaction and the next after_begin re-pins the lane.
 ```
 
 Atomicity is the point: the run path's facts+audit+commit stay one transaction on one
@@ -96,8 +103,13 @@ executor spec).
     `PROJECTION_FAILED` emit is not; the whole short transaction elevates).
   The LOCKED prefilter SELECT stays on the tenant lane (read, policy-scoped) — elevation
   starts only where platform-only writes begin.
-- Per-report ingest transactions (raw files, source rows, mark_parsed, stale deletes) stay
-  **tenant-lane** — all tenant-writable; RLS keeps doing its job there.
+- Per-report ingest transactions (raw files, source rows, mark_parsed, in-savepoint stale
+  deletes) are **elevated** (see deviation D2 below). Although the ingest rows themselves are
+  tenant-writable, each iteration's `DOWNLOADED` / `PARSED` / `FAILED` audit edges
+  (`audit_logs`, platform-only) commit atomically with the ingest evidence in the same
+  transaction, so the whole iteration runs on `app_platform`. RLS still scopes every write
+  (`app_platform` is NOBYPASSRLS). Only the credential read, the LOCKED-month prefilter
+  SELECT, and the post-loop deferred Analytics stale-row flush stay on the tenant lane.
 - `scripts/run_google_connector.py` — wrap the `run_one` call in
   `connector_tenant_context(args.tenant)`. `FIX:` comment citing the fail-closed-empty gap.
 
@@ -163,3 +175,33 @@ inline status entry for this PR.
 - No executor (next PR, after the 2026-06-11 spec review).
 - No grant/policy/migration changes; no credential telemetry; no celery.
 - No refactor of `committed_allocation.py` onto the new helper (follow-up note only).
+
+## Implementation deviations (reviewed and accepted)
+
+These corrections were probe-verified against the live PG container during the fix pass and
+supersede the original locked text above where they conflict.
+
+- **D1 — `after_begin` flag is load-bearing for full-block elevation.** The original sketch
+  implied `SET LOCAL ROLE` elevation ends with the first commit/rollback inside the block.
+  Measured: the `after_begin` hook fires for every transaction begun on the session
+  (including nested SAVEPOINTs), and its first action is an unconditional `SET LOCAL ROLE
+  "app_platform"`; while `_PLATFORM_LANE_ACTIVE_KEY` is set it then SKIPS the `app_tenant`
+  demote. So elevation persists across a mid-block commit, a mid-block rollback, and nested
+  savepoints — it ends only at block exit when the flag is popped. The per-report failure
+  recorder (`orchestrator.py:_record_live_report_failure`) relies on this: it rolls back /
+  commits mid-block and then writes the platform-only `FAILED` audit edge.
+- **D2 — per-report iterations are elevated, not tenant-lane.** The spec's original premise
+  ("Per-report ingest transactions stay tenant-lane") was wrong: each iteration's
+  `DOWNLOADED` / `PARSED` / `FAILED` audit edges (`audit_logs`, platform-only) commit
+  atomically with the ingest evidence in the same transaction, so the whole iteration must
+  run on `app_platform`. RLS (NOBYPASSRLS + trusted-context WITH CHECK) still scopes every
+  write; cross-tenant and no-context platform writes are rejected (pinned by
+  `test_cross_tenant_platform_write_denied_under_elevation`).
+- **D3 — clean-exit restore is success-and-healthy-txn-gated.** The restore runs only on a
+  clean exit AND only when the entry transaction is still active and healthy: skipped when
+  the session is not in a transaction (post-commit/post-rollback bodies — avoids autobegining
+  an idle-in-transaction connection just to set a role the next `after_begin` re-pins) and
+  skipped when the in-flight transaction is in error state (avoids raising
+  `InFailedSqlTransaction` out of `__exit__` and masking the real error). On a body exception
+  the restore is skipped entirely; the caller's rollback ends the transaction and the next
+  `after_begin` re-pins the tenant lane.

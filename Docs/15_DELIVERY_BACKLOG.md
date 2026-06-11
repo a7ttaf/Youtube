@@ -145,8 +145,12 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
       on SQLite). New db.lane.platform_lane elevates every run-path
       platform-only-write transaction (audit_logs lifecycle/REPORT_IMPORTED/
       PROJECTION_FAILED emits, monthly_channel_revenue_facts upserts,
-      finance_month_close creation) to app_platform; tenant-writable ingest
-      (raw files, source rows) stays on app_tenant. New
+      finance_month_close creation) to app_platform. Only the credential read,
+      the LOCKED-month prefilter SELECT, and the post-loop deferred Analytics
+      stale-row flush stay on app_tenant; each per-report ingest transaction
+      (raw files, source rows, mark_parsed, in-savepoint stale deletes) is
+      elevated because its DOWNLOADED/PARSED/FAILED audit edges commit
+      atomically with the ingest evidence. New
       connectors/runs/tenant_context.connector_tenant_context sets TENANT_CTX in
       scripts/run_google_connector.py so the run no longer dies fail-closed at
       the credential read. after_begin now respects a platform-lane flag so a
