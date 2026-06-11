@@ -287,18 +287,19 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
     verify/reject and close are dual-gated admin actions. File:
     `backend/ums_smart_revenue/finance/channel_account_links.py`
     (`_require_range_open`); sequence with Spec 2b / month-close hardening.
-  - ⏳ Deferred follow-up (PR #57 N10): the API allocation-permission check
-    `_require_allocation_permission_for_range` iterates `_iter_months(start, end)`
-    for per-finance-month scope checks, so the same far-future `effective_month_end`
-    drives ~95k in-memory authorization iterations (no DB rows/locks, but a CPU
-    cost) for a globally-authorized caller. Shares the root cause of the finance
-    materialization fix above. Recommended fix: short-circuit when the caller
-    holds the global allocation grant (which already authorizes every covered
-    month), and/or cap the accepted effective range at the propose/validation
-    boundary. Authorization-layer change → carries authz-test obligations; kept
-    out of this review-cleanup PR. File:
+  - ✅ PR #57 N10 — DONE (branch `feat/auth-allocation-range-shortcircuit`):
+    `_require_allocation_permission_for_range` now short-circuits the bounded
+    path when the caller holds CHANGE_ALLOCATION_RULE at global scope (a GLOBAL
+    grant is a strict superset of the per-finance-month checks via
+    `OrgAccessIndex.contains`), eliminating the ~95k in-memory authz iterations
+    for a far-future `effective_month_end`. Uses the non-raising `has_permission`
+    so a non-global caller still falls through to the per-month loop (gated
+    month-by-month); identical authorization decision, never more permissive.
+    Authz test matrix added (global short-circuit asserts `_iter_months` never
+    runs; month-scoped still iterates + 403s; missing/disabled fail closed). The
+    optional propose-time range cap stays a separate optional hardening. File:
     `backend/ums_smart_revenue/api/channel_account_links.py`
-    (`_require_allocation_permission_for_range`, `_iter_months`).
+    (`_require_allocation_permission_for_range`).
   - ⏳ Deferred follow-up (PR #57 N2): supersede/close-range workflow to
     end-date an open-ended VERIFIED link without `reject` wiping its historical
     months. Needs a dedicated atomic cap-then-verify operation; out of this
