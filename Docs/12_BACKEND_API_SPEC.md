@@ -149,6 +149,22 @@ sum must not exceed `gross_revenue_usd`. Null component values mean the source
 did not provide that breakdown; the backend does not infer missing format
 revenue from gross revenue.
 
+Monthly channel revenue facts are also produced by the connector run path
+without going through `POST /revenue/facts`: after a live run upserts source
+rows, `connectors/runs/orchestrator.run_one` invokes the post-run normalizer
+(`finance/google_source_normalizer`), which upserts facts and emits one
+`REPORT_IMPORTED` audit row per created/updated fact. These run-driven rows
+carry `triggered_by_run_id`, `triggered_by_connector_key`, and
+`triggered_by_account_id` in the audit `details` (distinguishing them from the
+`POST /revenue/facts` import path) and are scoped to the fact's finance-month.
+When the post-run projection fails on a non-lock error, the run is rewritten to
+`FAILED` and a `CONNECTOR_JOB_RUN` audit row with `lifecycle="PROJECTION_FAILED"`
+is recorded. Locked finance months are never overwritten. On RLS-enforced
+Postgres these platform-only writes (`audit_logs`,
+`monthly_channel_revenue_facts`, `finance_month_close`) execute on the
+privileged `app_platform` lane via `db.lane.platform_lane`, while tenant-writable
+ingest writes (raw files, source rows) stay on `app_tenant`.
+
 `GET /revenue/channels/{channel_id}/months/{month}/facts` is an implemented
 guarded revenue read for channel/month source facts. It requires
 `finance.view_revenue` for the channel scope, audits `REVENUE_VIEWED`, and
@@ -337,6 +353,13 @@ GET /connectors/runs?limit=50&cursor_started_at=2026-05-10T12:00:00Z&cursor_id=<
 
 Connector credential responses expose metadata only, never raw credential material or secret references.
 
+`POST /connectors/jobs` records a connector job request but does NOT execute the
+pull: it is a recorded no-op (`recorded_not_executed`) pending the connector-job
+executor (a future spec). The only production trigger that actually runs the
+end-to-end ingest today is the CLI `scripts/run_google_connector.py`, which sets
+the tenant context (`connector_tenant_context`) so the run executes correctly on
+RLS-enforced Postgres and dispatches to `connectors/runs/orchestrator.run_one`.
+
 `GET /connectors/runs` lists connector run history (read-only operational
 metadata) and requires `connectors.view_health`. It is tenant-scoped, accepts
 optional `connector_key`/`account_id` filters, and uses newest-first
@@ -361,10 +384,15 @@ GET /reports/raw-files/{raw_file_id}
 
 Raw report metadata records the immutable file reference before parsing. `POST /reports/raw-files` requires `source`, `report_type`, `report_month`, `storage_uri`, `checksum`, `parse_status`, and `reason`; responses include `id`, `source`, `report_type`, `report_month`, `storage_uri`, `checksum`, `parse_status`, `downloaded_by`, `downloaded_at`, and `audit_event`. `GET /reports/raw-files` is offset-paginated with `limit` capped at `100`, optional `source`, `report_type`, and `report_month` filters, and returns `items` plus `pagination.limit`, `pagination.offset`, `pagination.returned`, and `pagination.has_more`.
 
-Future Google source-ingestion endpoints should expose source rows linked to
-these raw files. Those rows preserve Google-reported amounts, currencies,
-account/report identity, period boundaries, and raw payload references before
-any normalized finance facts are written.
+Google source-ingestion is live. The connector run path upserts
+`google_revenue_source_rows` linked to these raw files, preserving
+Google-reported amounts, currencies, account/report identity, period boundaries,
+and raw payload references; `GET /revenue/source-rows` (and
+`GET /revenue/source-rows/{id}`, listed under the revenue group above) reads
+them. The post-run normalizer then projects eligible source rows into
+`monthly_channel_revenue_facts` and emits run-driven `REPORT_IMPORTED` audit rows
+(see the `POST /revenue/facts` section above for the run-driven import and
+`PROJECTION_FAILED` semantics).
 
 ### Exports
 

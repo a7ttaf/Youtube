@@ -135,9 +135,26 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
       source_system still allowed (the guard keys on the full tuple);
       error-message cap formatting; guard runs before the FK/currency
       existence pre-checks.
-- ⏳ Monthly revenue normalization — remaining: B2 live ingestion wiring
-  (revenue facts foundation in PR #2; normalization bridge from
-  google_revenue_source_rows shipped in PR #44).
+- ⏳ Monthly revenue normalization — revenue facts foundation in PR #2;
+  normalization bridge from google_revenue_source_rows shipped in PR #44;
+  run_one now wires the post-run normalizer (PR #90) behind the adapter
+  (PR #93). Remaining: the connector-job executor so POST /connectors/jobs
+  actually runs (still recorded_not_executed); the CLI is the only live trigger.
+    - ✅ PR #93 (ingestion RLS lane fix) — made the merged ingest→normalize
+      pipeline executable on RLS-enforced Postgres (it previously composed only
+      on SQLite). New db.lane.platform_lane elevates every run-path
+      platform-only-write transaction (audit_logs lifecycle/REPORT_IMPORTED/
+      PROJECTION_FAILED emits, monthly_channel_revenue_facts upserts,
+      finance_month_close creation) to app_platform; tenant-writable ingest
+      (raw files, source rows) stays on app_tenant. New
+      connectors/runs/tenant_context.connector_tenant_context sets TENANT_CTX in
+      scripts/run_google_connector.py so the run no longer dies fail-closed at
+      the credential read. after_begin now respects a platform-lane flag so a
+      nested SAVEPOINT cannot re-pin the tenant lane and undo the elevation.
+      Restored the analytics_cleanup_blocked normalize gate (read removed in
+      a3a584a; the docstrings already promised it). New PG-tier proof
+      tests/connectors/runs/test_run_one_rls_postgres.py (5 obligations); no
+      grant/policy/migration change.
 - ✅ AdSense payment sync — shipped: live `accounts.payments.list` pull
   (GoogleAdSensePaymentClient + pure fail-closed mapping/parse +
   AdSensePaymentSyncService with read-only locked-month skip + audit + operator

@@ -238,10 +238,14 @@ finance_month_close (
 -- currency_exchange_rates is legacy scaffolding for provider observations. It
 -- is not the official finance source and is not expanded by the revised B1
 -- plan.
--- google_revenue_source_rows is the planned source-ingestion foundation for
--- Google/YouTube/AdSense monetary reports. It stores source-reported amounts,
--- currencies, period/report identity, idempotent row keys, and raw payload
--- references before values are selected for finance fact tables.
+-- google_revenue_source_rows is the live source-ingestion foundation for
+-- Google/YouTube/AdSense monetary reports. The connector run path
+-- (connectors/runs/orchestrator.run_one) upserts rows here, then the post-run
+-- normalizer (finance/google_source_normalizer) projects them into
+-- monthly_channel_revenue_facts. It stores source-reported amounts, currencies,
+-- period/report identity, idempotent row keys, and raw payload references before
+-- values are selected for finance fact tables. The source-row read API is
+-- GET /revenue/source-rows.
 -- Monthly channel revenue facts store optional official Shorts, longform, and
 -- subscription revenue component columns when source reports provide those
 -- values. Component columns are nullable, non-negative, and their known sum
