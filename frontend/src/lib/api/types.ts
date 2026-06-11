@@ -775,6 +775,18 @@ export type AuditEventListResponse = {
   audit_event: Record<string, unknown>;
 };
 
+// GET /audit/summary — tenant-scoped aggregate counts for the audit summary
+// tiles. Counts only (no per-row payload), so it is redaction-safe behind the
+// same VIEW_AUDIT_LOG gate as /audit/events and does NOT self-audit.
+// All four fields are integers. Source: AuditSummaryResponse (api/audit.py:38-44)
+// backed by AuditSummaryCounts (auth/audit_log.py:67-72).
+export type AuditSummaryResponse = {
+  total_events: number;
+  sensitive_events: number;
+  recent_count: number;
+  window_hours: number;
+};
+
 // ============================================================================
 // Purpose: TypeScript mirror of the backend GET /channels JSON contract consumed
 //   by the Registry view. Fields are matched 1:1 against

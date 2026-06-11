@@ -372,6 +372,12 @@ def _connector_audit_events(session: Session) -> list[AuditLogORM]:
     ``REPORT_IMPORTED`` (raw-file-level: DOWNLOADED, PARSED, FAILED).
     Sorting by ``created_at`` then by ``id`` preserves the lifecycle
     ordering across the three sequential runs.
+
+    The post-run normalize stage also emits ``REPORT_IMPORTED`` rows for
+    written facts; those carry ``entity_type="monthly_channel_revenue_fact"``
+    and are filtered out here so this helper stays scoped to the
+    connector-lifecycle rows. Assertion 4b checks the normalize-audit
+    rows separately.
     """
     return list(
         session.scalars(
@@ -382,6 +388,7 @@ def _connector_audit_events(session: Session) -> list[AuditLogORM]:
                     ["CONNECTOR_JOB_RUN", "REPORT_IMPORTED"]
                 )
             )
+            .where(AuditLogORM.entity_type != "monthly_channel_revenue_fact")
             .order_by(AuditLogORM.created_at, AuditLogORM.id)
         )
     )
@@ -620,11 +627,11 @@ def test_three_connectors_end_to_end_on_mocks(
     )
 
     # ============================================================================
-    # Assertion 2 + 3: C1 normalize_month produces YT facts and skips AdSense.
+    # Assertion 2 + 3: the orchestrator now normalizes source rows into facts as
+    # the final stage of a successful run (no manual normalize_month call). The
+    # YT Reporting + YT Analytics rows must already be MonthlyChannelRevenueFactORM
+    # entries after run_one returns; AdSense is skipped (MISSING_CHANNEL_ID).
     # ============================================================================
-    result = GoogleSourceNormalizer(session, tenant_id=TENANT_ID).normalize_month(
-        month=REPORT_MONTH, actor_user_id=ACTOR_USER_ID,
-    )
     facts = list(
         session.scalars(
             select(MonthlyChannelRevenueFactORM).where(
@@ -649,6 +656,22 @@ def test_three_connectors_end_to_end_on_mocks(
         f"(1 channel x {{YOUTUBE_CMS, YOUTUBE_ANALYTICS}}); got {len(facts)}"
     )
     assert {fact.youtube_channel_id for fact in facts} == {channel_id}
+
+    # Direct normalizer-semantics coverage: the AdSense rows must classify as
+    # MISSING_CHANNEL_ID (the wiring's NormalizationResult is internal to the
+    # orchestrator, so re-run normalize_month explicitly to inspect skips). This
+    # re-run is idempotent against the facts the wiring already wrote — the two
+    # YT facts come back UNCHANGED — so it does not perturb the count above.
+    result = GoogleSourceNormalizer(session, tenant_id=TENANT_ID).normalize_month(
+        month=REPORT_MONTH, actor_user_id=ACTOR_USER_ID,
+    )
+    assert not result.created, (
+        "re-running normalize after the wiring must not create new facts; "
+        f"result.created={result.created!r}"
+    )
+    assert {fact.youtube_channel_id for fact in result.unchanged} == {channel_id}, (
+        "the wiring-written YT facts must re-classify as UNCHANGED on re-run"
+    )
     # The C1 normalizer flags the AdSense rows as MISSING_CHANNEL_ID because
     # the AdSense parser leaves ``youtube_channel_id=None``.
     missing_channel_skips = [
@@ -686,6 +709,39 @@ def test_three_connectors_end_to_end_on_mocks(
             f"run_id={run_id} lifecycle mismatch: expected STARTED -> "
             f"DOWNLOADED -> PARSED -> FINISHED, got {lifecycles!r}"
         )
+
+    # ============================================================================
+    # Assertion 4b: post-run normalize emits one REPORT_IMPORTED CREATED audit
+    # edge per fact written. YT Reporting + YT Analytics each write one
+    # channel-eligible USD fact; AdSense rows are skipped as
+    # MISSING_CHANNEL_ID (no fact, no audit edge). entity_type
+    # ``monthly_channel_revenue_fact`` distinguishes these from the
+    # connector-lifecycle REPORT_IMPORTED events above (entity_type
+    # ``raw_report_file``).
+    # ============================================================================
+    fact_audit_events = list(
+        session.scalars(
+            select(AuditLogORM)
+            .where(AuditLogORM.tenant_id == TENANT_ID)
+            .where(AuditLogORM.event_type == "REPORT_IMPORTED")
+            .where(AuditLogORM.entity_type == "monthly_channel_revenue_fact")
+            .order_by(AuditLogORM.created_at, AuditLogORM.id)
+        )
+    )
+    assert len(fact_audit_events) == 2, (
+        f"expected 2 fact-audit events (YT Reporting + YT Analytics); "
+        f"got {len(fact_audit_events)}: "
+        f"{[(e.entity_id, e.details.get('lifecycle')) for e in fact_audit_events]}"
+    )
+    fact_audit_lifecycles = [e.details["lifecycle"] for e in fact_audit_events]
+    assert fact_audit_lifecycles == ["CREATED", "CREATED"], (
+        f"expected both normalize CREATED edges; got {fact_audit_lifecycles!r}"
+    )
+    fact_audit_actors = {e.details.get("actor_user_id") for e in fact_audit_events}
+    assert fact_audit_actors == {SERVICE_ACTOR_ID}, (
+        f"expected the connector service principal on every fact-audit row; "
+        f"got {fact_audit_actors!r}"
+    )
 
     # Every audit row must carry the same connector service principal. The
     # SqlAlchemyAuditSink stores the raw actor UUID in

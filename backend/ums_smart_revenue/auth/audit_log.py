@@ -1,12 +1,13 @@
 """Tenant-scoped audit log read models and SQL repository."""
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID
 
-from sqlalchemy import and_, or_, select
+from sqlalchemy import and_, case, func, or_, select
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.db.security_models import AuditLogORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
@@ -60,6 +61,15 @@ class AuditLogPage:
     limit: int
     has_more: bool
     next_cursor: dict[str, str] | None
+
+
+@dataclass(frozen=True)
+class AuditSummaryCounts:
+    """Immutable tenant-scoped audit aggregate returned by ``count_summary``."""
+
+    total_events: int
+    sensitive_events: int
+    recent_count: int
 
 
 class AuditLogError(ValueError):
@@ -147,6 +157,60 @@ class SqlAlchemyAuditLogRepository:
             limit=limit,
             has_more=len(rows) > limit,
             next_cursor=_next_cursor(items) if len(rows) > limit else None,
+        )
+
+    def count_summary(self, *, window_hours: int) -> AuditSummaryCounts:
+        # ====================================================================
+        # Purpose: Compute tenant-scoped audit aggregate counts (lifetime
+        #   total, lifetime sensitive, and a recent count within the supplied
+        #   window) for the GET /audit/summary tile endpoint.
+        # Database/ORM: AuditLogORM / audit_logs (read-only COUNT aggregates;
+        #   reuses ix_audit_logs_tenant_id + ix_audit_logs_event_created).
+        # Standards: Typed AuditSummaryCounts result; same tenant scoping and
+        #   AUDIT_LOG_VIEWED exclusion as list_events; raises
+        #   AuditLogValidationError on invalid window bounds; all three counts
+        #   are derived from a SINGLE SELECT so they share one MVCC snapshot
+        #   on PostgreSQL's default READ COMMITTED isolation.
+        # Blast Radius: Audit read-only aggregate; no write, no schema change,
+        #   no migration. Counts disclose no per-row payload.
+        # Connections:
+        #   - File: backend/ums_smart_revenue/api/audit.py -> count_summary is
+        #     called by the GET /audit/summary handler.
+        # ====================================================================
+        if window_hours < 1:
+            raise AuditLogValidationError("window_hours must be at least 1")
+
+        # Single snapshot for all three aggregates: under READ COMMITTED, a
+        # concurrent appender can commit between two independent SELECTs and
+        # leave one count including the new row while another does not. Folding
+        # total / sensitive / recent into one SELECT guarantees the three
+        # numbers are always mutually consistent (no "recent row that total
+        # did not see" or "sensitive row the total missed").
+        cutoff = datetime.now(UTC) - timedelta(hours=window_hours)
+        total_events, sensitive_events, recent_count = self._session.execute(
+            select(
+                func.count().label("total_events"),
+                func.coalesce(
+                    func.sum(
+                        case((AuditLogORM.sensitive.is_(True), 1), else_=0)
+                    ),
+                    0,
+                ).label("sensitive_events"),
+                func.coalesce(
+                    func.sum(case((AuditLogORM.created_at >= cutoff, 1), else_=0)),
+                    0,
+                ).label("recent_count"),
+            )
+            .select_from(AuditLogORM)
+            .where(
+                AuditLogORM.tenant_id == self._tenant_id,
+                AuditLogORM.event_type != AuditEventType.AUDIT_LOG_VIEWED.value,
+            )
+        ).one()
+        return AuditSummaryCounts(
+            total_events=int(total_events or 0),
+            sensitive_events=int(sensitive_events or 0),
+            recent_count=int(recent_count or 0),
         )
 
     @staticmethod

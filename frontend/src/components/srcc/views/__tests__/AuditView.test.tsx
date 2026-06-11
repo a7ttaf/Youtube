@@ -4,7 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import AuditView from "@/components/srcc/views/AuditView";
-import type { AuditEventListResponse } from "@/lib/api/types";
+import type { AuditEventListResponse, AuditSummaryResponse } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
 
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -97,6 +97,15 @@ const EMPTY_EVENTS: AuditEventListResponse = {
   audit_event: {},
 };
 
+// Real-shaped aggregate response (AuditSummaryResponse, api/audit.py:38-44).
+// Values chosen so the formatted (toLocaleString) digit groups are unambiguous.
+const SUMMARY: AuditSummaryResponse = {
+  total_events: 1840,
+  sensitive_events: 230,
+  recent_count: 184,
+  window_hours: 24,
+};
+
 function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   return new Response(JSON.stringify(body), {
     status,
@@ -130,6 +139,9 @@ function routeEvents( // skipcq: JS-0067
     const url = urlOf(input);
     const custom = responder(url);
     if (custom) return Promise.resolve(custom);
+    if (url.startsWith("/audit/summary")) {
+      return Promise.resolve(jsonResponse(SUMMARY));
+    }
     if (url.startsWith("/audit/events")) {
       if (url.includes("cursor_created_at=")) {
         return Promise.resolve(jsonResponse(PAGED_EVENTS_SECOND));
@@ -165,6 +177,12 @@ function renderAuditView(canViewAudit = true, canViewFinance = true) { // skipcq
 function auditCalls() { // skipcq: JS-0067
   return fetchMock().mock.calls.filter(([input]) =>
     urlOf(input).startsWith("/audit/events"),
+  );
+}
+
+function summaryCalls() { // skipcq: JS-0067
+  return fetchMock().mock.calls.filter(([input]) =>
+    urlOf(input).startsWith("/audit/summary"),
   );
 }
 
@@ -524,5 +542,77 @@ describe("AuditView wired to GET /audit/events", () => {
     );
     expect(urlOf(exportCall?.[0])).toContain("event_type=CHANNEL_UPDATED");
     expect(urlOf(exportCall?.[0])).not.toContain("cursor");
+  });
+});
+
+describe("AuditView summary tiles wired to GET /audit/summary", () => {
+  it("fetches GET /audit/summary and renders the three live counts (no 'live aggregate endpoint coming')", async () => {
+    fetchMock().mockImplementation(routeEvents(() => null));
+    renderAuditView();
+
+    // Live formatted counts from the stubbed aggregate (toLocaleString grouping).
+    // The audit tile uses the runtime locale's number grouping, so derive the
+    // expected display string the same way to keep this stable under any
+    // locale default (en-US -> "1,840", de-DE -> "1.840", etc.).
+    const recentFormatted = SUMMARY.recent_count.toLocaleString();
+    const sensitiveFormatted = SUMMARY.sensitive_events.toLocaleString();
+    const totalFormatted = SUMMARY.total_events.toLocaleString();
+    await waitFor(() =>
+      expect(screen.getByText(recentFormatted)).toBeInTheDocument(),
+    );
+    expect(screen.getByText(sensitiveFormatted)).toBeInTheDocument();
+    expect(screen.getByText(totalFormatted)).toBeInTheDocument();
+    // Tile labels are the live-wired ones, not the old mock labels.
+    expect(screen.getByText("Events (24h)")).toBeInTheDocument();
+    expect(screen.getByText("Total events")).toBeInTheDocument();
+    // The retention tile stays a static frontend constant (not from the endpoint).
+    expect(screen.getByText("7 years")).toBeInTheDocument();
+    // Exactly one summary fetch fired.
+    expect(summaryCalls()).toHaveLength(1);
+    // The now-false disclaimer is gone.
+    expect(screen.queryByText(/live aggregate endpoint coming/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/reference figures/i)).not.toBeInTheDocument();
+  });
+
+  it("fires NO summary fetch and fails the tiles closed when canViewAudit is false", () => {
+    fetchMock().mockImplementation(routeEvents(() => null));
+    renderAuditView(false);
+
+    // Fail-closed: the restricted branch mounts no hook, so no /audit/summary fetch.
+    expect(summaryCalls()).toHaveLength(0);
+    // Numeric tiles show the honest placeholder, never an invented or stale count.
+    // Use the same runtime-locale formatting the tiles use so this stays
+    // stable under any default Intl locale (matches the positive assertions).
+    expect(
+      screen.queryByText(SUMMARY.recent_count.toLocaleString()),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText(SUMMARY.total_events.toLocaleString()),
+    ).not.toBeInTheDocument();
+    // The static retention tile still renders; the tiles label is present.
+    expect(screen.getByText("7 years")).toBeInTheDocument();
+    expect(screen.getByText("Total events")).toBeInTheDocument();
+  });
+
+  it("keeps the numeric tiles honest (placeholder) when the summary read 403s", async () => {
+    fetchMock().mockImplementation(
+      routeEvents((url) =>
+        url.startsWith("/audit/summary")
+          ? jsonResponse({ detail: "Missing permission: audit.view" }, 403)
+          : null,
+      ),
+    );
+    renderAuditView();
+
+    // The events feed still loads (its own fetch is fine); the summary 403 must
+    // not surface an invented count.
+    await waitFor(() =>
+      expect(screen.getByText("REVENUE_EXPORTED")).toBeInTheDocument(),
+    );
+    expect(summaryCalls()).toHaveLength(1);
+    expect(screen.queryByText("184")).not.toBeInTheDocument();
+    expect(screen.queryByText("1,840")).not.toBeInTheDocument();
+    // Retention tile is unaffected by the aggregate failure.
+    expect(screen.getByText("7 years")).toBeInTheDocument();
   });
 });

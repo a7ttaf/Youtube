@@ -215,6 +215,53 @@ def finish_run(
 
 
 # ============================================================================
+# Purpose: Re-open a terminal connector run to record a post-finish failure
+#          from the post-run normalize stage. The run is rewritten to FAILED
+#          with a "projection failed" error summary so run history reflects
+#          the missing MonthlyChannelRevenueFactORM projection; the
+#          connector_runs lifecycle audit row is left intact (FINISHED was
+#          emitted at finish_run time; the projection failure is recorded
+#          on the run row itself, not as a duplicate FINISHED edge).
+# Database/ORM: ConnectorRunORM (UPDATE status/error_summary only).
+# Standards: Tenant-scoped, run must be terminal, error_summary truncated to
+#            the schema's 500-char check. Preserves finished_at, counts_json,
+#            and the original FINISHED audit edge.
+# Blast Radius: Connector run history (read surface only). Finance tables
+#               untouched; this does NOT roll back any already-written
+#               source rows. The downstream normalize stage will re-raise the
+#               original error so the caller still sees a fail-loud exception.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/orchestrator.py ->
+#     _normalize_ingested_source_rows calls this on non-lock normalize
+#     failure so run history is not silently misleading.
+# ============================================================================
+def record_projection_failure(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    connector_run_id: UUID,
+    error_summary: str,
+) -> ConnectorRunEntry:
+    """Rewrite a terminal run to FAILED with a projection-failure error summary."""
+    if not error_summary or not error_summary.strip():
+        raise ConnectorRunValidationError("error_summary must not be blank")
+    row = _get_run(
+        session,
+        tenant_id=tenant_id,
+        connector_run_id=connector_run_id,
+        for_update=True,
+    )
+    if row.status == "RUNNING":
+        raise ConnectorRunValidationError(
+            "connector run is still RUNNING; use finish_run instead"
+        )
+    row.status = "FAILED"
+    row.error_summary = error_summary.strip()[:ERROR_SUMMARY_MAX_CHARS]
+    session.flush()
+    return _to_entry(row)
+
+
+# ============================================================================
 # Purpose: Return a tenant-scoped, newest-first page of connector runs for the
 #          read-only run-history API, with optional connector/account filters
 #          and a both-or-neither (started_at, id) keyset cursor.

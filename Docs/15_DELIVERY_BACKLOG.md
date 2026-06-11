@@ -152,8 +152,9 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
   Payment-match remains USD-only; the paid/unpaid status view groups
   AdSense-reported amounts by currency. Outstanding = PENDING + UNPAID;
   CANCELLED shown for evidence; no FX, per Docs/18.
-- ⏳ Finance month-close screen — remaining: close-gate backend (PR #8);
-  UI not built.
+- ✅ Finance month-close screen — shipped (PR #69): CloseView wired to
+  GET/POST /finance-close (status, readiness checklist, lock/unlock with
+  audited reason); close-gate backend (PR #8).
 - ✅ Net revenue calculation — shipped: GET /revenue/months/{month}/net-revenue
   (build_month_net_revenue_summary; per-channel gross/net/deduction roll-up,
   scope-filtered, USD-only). Tax/deduction ingestion + allocation-rule
@@ -169,9 +170,9 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
   (build_channel_month_revenue_explanation; per-metric source/formula/
   confidence/warnings, persisted to number_explanations). Explain-number
   drawer UI remains unbuilt (Phase 5).
-- ⏳ Smart issue panel — remaining: smart-alerts BACKEND ships (GET
-  /revenue/months/{month}/smart-alerts, build_monthly_smart_alert_summary);
-  panel UI not built.
+- ✅ Smart issue panel — shipped (PR #69): smart-alerts problem panel wired
+  into the Command Center from GET /revenue/months/{month}/smart-alerts
+  (build_monthly_smart_alert_summary).
 - ✅ Excel export — shipped: GET /exports/{export_id}/finance-workbook.xlsx
   (+ preview) via build_finance_workbook_xlsx; tenant-scoped export jobs,
   persisted + audited. Final column template/branding may iterate.
@@ -495,7 +496,7 @@ single P-tier above.
 - ✅ Frontend tenant-header foundation: `TenantContext`, `useApiClient`, `GET /tenants/me`, Vite dev gateway proxy, Vitest framework + validation-gate integration — PR #41.
 - ✅ June-14 MVP dashboard wiring: six screens wired to live APIs
   (Command Center + smart-alerts problem panel, Close, Trace/Explain,
-  Exports, Connectors; Registry/Audit stay mock-labelled), demo-month seed
+  Exports, Connectors; Registry/Audit still mock at that point), demo-month seed
   (`scripts/seed_demo_month.py`), end-to-end smoke (`scripts/smoke_mvp.py`),
   demo runbook (`frontend/README.md`) — PR #69.
 - ✅ Production session role hydration — merged to main (PR #70, 4d7f154):
@@ -509,13 +510,23 @@ single P-tier above.
   (401/403/network) or a `disabled` principal fails closed to `AccessDenied`;
   connector controls require `canRunConnectorJobs`; the Vite dev proxy now
   forwards `/session`. Smoke (`scripts/smoke_mvp.py`) asserts the contract.
-  Registry stays mock-only; live ingestion needs real connector credentials.
+  Live ingestion needs real connector credentials.
 - ✅ Production Audit view wiring — merged to main (PR #71, 31a7641): the
   dashboard Audit page now reads the real `GET /audit/events` feed (was mock
   `AUDIT_EVENTS`). Distinct cursor-pagination types
   (`AuditLogEntry`/`AuditEventCursor`/`AuditEventPagination`), a memoized
   `useAuditEvents` hook (one self-auditing fetch per mount, no loop), and an
-  extracted `views/AuditView.tsx`. Registry is now the only mock-labelled page.
+  extracted `views/AuditView.tsx`. (Registry was later wired to `GET /channels`
+  in PR #73/#78.)
+- ✅ Audit summary endpoint — `GET /audit/summary` (tenant-scoped,
+  VIEW_AUDIT_LOG fail-closed, snapshot-then-excluded-self-audit): returns
+  total/sensitive/recent event counts excluding `AUDIT_LOG_VIEWED`, then records
+  one excluded `AUDIT_LOG_VIEWED` read row after the snapshot, with a
+  `window_hours` param (default 24) for the recent count. The Audit summary
+  tiles are wired off it
+  (live Total events / High sensitivity / Events-24h; Retention stays a static
+  policy constant), replacing the `AUDIT_SUMMARY` mock and the "live aggregate
+  endpoint coming" disclaimer — branch `feat/audit-summary-endpoint`.
 - ✅ Connector credential test-connection probe — `POST /connectors/credentials/{connector_key}/{account_id}/test`
   (branch `docs/plan-hygiene-post-71`): wraps `resolve_connector_credentials()` (load
   credential row → resolve secret URI → OAuth token refresh, no live data pull).
