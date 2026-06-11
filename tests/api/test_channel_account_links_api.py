@@ -402,3 +402,110 @@ def test_allocation_permission_gated_for_whole_range():
     # Global allocation grant authorizes both a bounded and an open-ended range.
     _require_allocation_permission_for_range(global_scoped, "2026-01", "2026-12")
     _require_allocation_permission_for_range(global_scoped, "2026-01", None)
+
+
+def test_global_grant_short_circuits_bounded_range_without_iteration(monkeypatch):
+    """A global CHANGE_ALLOCATION_RULE grant authorizes a far-future bounded range
+    via one check -- the per-month loop must NOT run (no ~95k iterations)."""
+    def _boom(start, end):
+        raise AssertionError(
+            "_iter_months must not run for a global-grant holder (short-circuit)"
+        )
+
+    monkeypatch.setattr(
+        "ums_smart_revenue.api.channel_account_links._iter_months", _boom
+    )
+    global_scoped = UserPrincipal(
+        user_id=str(USER_ID),
+        email="map-admin@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()
+            ),
+        ),
+    )
+    # Under the old per-month loop this far-future bound would iterate ~95k
+    # months; the short-circuit returns without ever touching _iter_months.
+    _require_allocation_permission_for_range(global_scoped, "2026-01", "9999-12")
+
+
+def test_month_scoped_caller_still_iterates_bounded_range(monkeypatch):
+    """A non-global caller must NOT be short-circuited: the per-month loop runs
+    and a month outside the grant still 403s."""
+    calls: list[tuple[str, str]] = []
+    real_iter = _iter_months
+
+    def _counting(start, end):
+        calls.append((start, end))
+        return real_iter(start, end)
+
+    monkeypatch.setattr(
+        "ums_smart_revenue.api.channel_account_links._iter_months", _counting
+    )
+    month_scoped = UserPrincipal(
+        user_id=str(USER_ID),
+        email="map-admin@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.CHANGE_ALLOCATION_RULE,
+                AccessScope.finance_month("2026-01"),
+            ),
+        ),
+    )
+    with pytest.raises(HTTPException) as exc:
+        _require_allocation_permission_for_range(month_scoped, "2026-01", "2026-06")
+    assert exc.value.status_code == 403
+    # The loop ran (short-circuit did NOT fire for a non-global caller).
+    assert calls == [("2026-01", "2026-06")]
+
+
+def test_missing_and_disabled_global_grant_fail_closed():
+    """No grant -> 403; a disabled principal with a global grant falls through the
+    short-circuit (has_permission returns False for disabled) and is denied."""
+    no_grant = UserPrincipal(
+        user_id=str(USER_ID),
+        email="map-admin@example.com",
+        direct_permissions=(),
+    )
+    with pytest.raises(HTTPException) as missing:
+        _require_allocation_permission_for_range(no_grant, "2026-01", "2026-03")
+    assert missing.value.status_code == 403
+
+    disabled_global = UserPrincipal(
+        user_id=str(USER_ID),
+        email="map-admin@example.com",
+        disabled=True,
+        direct_permissions=(
+            PermissionGrant(
+                Permission.CHANGE_ALLOCATION_RULE, AccessScope.global_scope()
+            ),
+        ),
+    )
+    with pytest.raises(HTTPException) as disabled:
+        _require_allocation_permission_for_range(disabled_global, "2026-01", "2026-03")
+    assert disabled.value.status_code == 403
+
+
+def test_contiguous_month_grants_cover_bounded_range():
+    """A non-global caller granted a contiguous set of months passes a bounded
+    range fully inside the grant, and 403s once it extends past."""
+    two_month = UserPrincipal(
+        user_id=str(USER_ID),
+        email="map-admin@example.com",
+        direct_permissions=(
+            PermissionGrant(
+                Permission.CHANGE_ALLOCATION_RULE,
+                AccessScope.finance_month("2026-01"),
+            ),
+            PermissionGrant(
+                Permission.CHANGE_ALLOCATION_RULE,
+                AccessScope.finance_month("2026-02"),
+            ),
+        ),
+    )
+    # Both covered months: no raise.
+    _require_allocation_permission_for_range(two_month, "2026-01", "2026-02")
+    # Extends to an uncovered month: 403.
+    with pytest.raises(HTTPException) as exc:
+        _require_allocation_permission_for_range(two_month, "2026-01", "2026-03")
+    assert exc.value.status_code == 403
