@@ -389,7 +389,8 @@ the raw files they produced.
   "rows_upserted_total": int,
   "rows_upserted_created": int,
   "rows_upserted_updated": int,
-  "rows_upserted_unchanged": int
+  "rows_upserted_unchanged": int,
+  "rows_deleted_stale": int
 }
 ```
 

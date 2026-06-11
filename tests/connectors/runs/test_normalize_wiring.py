@@ -95,6 +95,7 @@ def _outcome(
     run: ConnectorRunEntry | None,
     reports_succeeded: int = 1,
     rows_upserted_total: int = 1,
+    rows_deleted_stale: int = 0,
     analytics_cleanup_blocked: bool = False,
 ) -> ConnectorRunOutcome:
     """Wrap a run stub in an immutable ``ConnectorRunOutcome``.
@@ -113,6 +114,7 @@ def _outcome(
         "rows_upserted_created": rows_upserted_total,
         "rows_upserted_updated": 0,
         "rows_upserted_unchanged": 0,
+        "rows_deleted_stale": rows_deleted_stale,
     }
     return ConnectorRunOutcome(
         run=run,
@@ -258,6 +260,29 @@ def test_terminal_run_with_zero_upserted_rows_skips_normalize(
     session.commit.assert_not_called()
     session.rollback.assert_not_called()
     record_failure.assert_not_called()
+
+
+@pytest.mark.parametrize("status", ["SUCCEEDED", "PARTIAL"])
+def test_terminal_run_with_zero_upserts_but_stale_deletes_normalizes(
+    status: str,
+) -> None:
+    """A stale-row deletion changes source truth and must re-project facts."""
+    normalizer = MagicMock(name="normalizer")
+    _, normalizer_cls, session, _, _ = _invoke_run_one(
+        outcome=_outcome(
+            run=_run_entry(status=status),
+            rows_upserted_total=0,
+            rows_deleted_stale=1,
+        ),
+        normalizer=normalizer,
+    )
+
+    normalizer_cls.assert_called_once_with(session, tenant_id=TENANT_ID)
+    normalizer.normalize_month.assert_called_once_with(
+        month=REPORT_MONTH,
+        actor_user_id=str(TRIGGERED_BY),
+    )
+    session.commit.assert_called_once()
 
 
 def test_terminal_success_delegates_projection_to_adapter() -> None:

@@ -26,6 +26,7 @@ CONNECTOR_RUN_COUNT_KEYS = (
     "rows_upserted_created",
     "rows_upserted_updated",
     "rows_upserted_unchanged",
+    "rows_deleted_stale",
 )
 TERMINAL_STATUSES = frozenset({"SUCCEEDED", "PARTIAL", "FAILED"})
 MONTH_PATTERN = re.compile(r"^[0-9]{4}-(0[1-9]|1[0-2])$")

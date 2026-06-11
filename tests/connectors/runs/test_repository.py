@@ -144,6 +144,7 @@ def test_finish_run_sets_terminal_status_counts_and_finished_at(
         "rows_upserted_created": 4,
         "rows_upserted_updated": 1,
         "rows_upserted_unchanged": 1,
+        "rows_deleted_stale": 0,
     }
 
     finished = finish_run(
@@ -401,6 +402,7 @@ _TERMINAL_COUNTS = {
     "rows_upserted_created": 6,
     "rows_upserted_updated": 3,
     "rows_upserted_unchanged": 1,
+    "rows_deleted_stale": 0,
 }
 
 

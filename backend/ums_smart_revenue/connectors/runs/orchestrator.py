@@ -429,9 +429,9 @@ def run_one(
 #          commits source rows, decide whether post-run finance projection
 #          should run and delegate DB/transaction work to the normalization
 #          adapter. The gate is keyed off the terminal run status
-#          (SUCCEEDED/PARTIAL) and a no-op rows_upserted_total guard because
-#          re-normalizing a month with no newly ingested source rows puts a
-#          full-month projection on the connector hot path for no benefit.
+#          (SUCCEEDED/PARTIAL) and a no-op source-row mutation guard because
+#          re-normalizing a month with no upserted or deleted source rows puts
+#          a full-month projection on the connector hot path for no benefit.
 #          The gate is not keyed off the per-report success count because the
 #          per-report loop's
 #          deferred stale-row cleanup for YouTube Analytics only flushes after
@@ -506,9 +506,10 @@ def _normalize_ingested_source_rows(
         )
         return
     rows_upserted_total = int(outcome.counts.get("rows_upserted_total") or 0)
-    if rows_upserted_total <= 0:
+    rows_deleted_stale = int(outcome.counts.get("rows_deleted_stale") or 0)
+    if rows_upserted_total <= 0 and rows_deleted_stale <= 0:
         logger.info(
-            "ingestion normalize skipped (no upserted source rows) "
+            "ingestion normalize skipped (no source row mutations) "
             "tenant_id=%s month=%s run_id=%s",
             tenant_id,
             report_month,
@@ -891,7 +892,7 @@ def _process_live_reports(
         )
         ordering_index += max(raw_file_count, 1)
     if deferred_analytics_cleanup is not None:
-        _flush_deferred_stale_cleanup_plans(
+        counts["rows_deleted_stale"] += _flush_deferred_stale_cleanup_plans(
             repo=repo,
             tenant_id=tenant_id,
             deferred_cleanup=deferred_analytics_cleanup,
@@ -1036,6 +1037,7 @@ def _handle_live_produced_report(
         counts["rows_upserted_created"] += processed.rows_created
         counts["rows_upserted_updated"] += processed.rows_updated
         counts["rows_upserted_unchanged"] += processed.rows_unchanged
+        counts["rows_deleted_stale"] += processed.rows_deleted_stale
         return processed.raw_file_count
     except Exception as exc:
         if deferred_analytics_cleanup is not None:
@@ -1225,8 +1227,9 @@ class _ProcessedReportResult:
     # Purpose: Carry per-report row-write outcomes from ``_process_one_report``
     #          back to ``_handle_live_produced_report`` so the caller can update
     #          every key in ``connector_runs.counts_json`` without unpacking a
-    #          long anonymous tuple. The four ``rows_*`` ints feed
-    #          ``rows_upserted_total / _created / _updated / _unchanged``.
+    #          long anonymous tuple. The four upsert ints feed
+    #          ``rows_upserted_total / _created / _updated / _unchanged`` and
+    #          ``rows_deleted_stale`` records successful replacement cleanup.
     # Database/ORM: None directly; sourced from the repository's
     #               ``SourceRowUpsertResult`` for this report.
     # Standards: Sum invariant — rows_total == rows_created + rows_updated +
@@ -1237,6 +1240,7 @@ class _ProcessedReportResult:
     rows_created: int
     rows_updated: int
     rows_unchanged: int
+    rows_deleted_stale: int
     raw_file_count: int
     deferred_cleanup_plans: tuple[_DeferredStaleCleanupPlan, ...]
 
@@ -1279,6 +1283,7 @@ def _process_one_report(
     """
     source_system = _source_system_for_connector(connector_key)
     deferred_cleanup_plans: tuple[_DeferredStaleCleanupPlan, ...] = ()
+    rows_deleted_stale = 0
     raw_files = _prepare_and_link_raw_reports(
         session=session,
         tenant_id=tenant_id,
@@ -1344,7 +1349,7 @@ def _process_one_report(
                 fallback_source_account_id=fallback_source_account_id,
             )
         else:
-            _delete_stale_source_rows(
+            rows_deleted_stale = _delete_stale_source_rows(
                 repo=repo,
                 tenant_id=tenant_id,
                 source_system=source_system,
@@ -1385,6 +1390,7 @@ def _process_one_report(
         rows_created=upsert_result.created,
         rows_updated=upsert_result.updated,
         rows_unchanged=upsert_result.unchanged,
+        rows_deleted_stale=rows_deleted_stale,
         raw_file_count=len(raw_files),
         deferred_cleanup_plans=deferred_cleanup_plans,
     )
@@ -1519,7 +1525,7 @@ def _flush_deferred_stale_cleanup_plans(
     repo: SqlAlchemyGoogleRevenueSourceRowRepository,
     tenant_id: UUID,
     deferred_cleanup: _DeferredAnalyticsStaleCleanupState,
-) -> None:
+) -> int:
     """Execute the merged keep-key plans once the analytics run completes cleanly.
 
     Rows whose ``youtube_channel_id`` is NOT in ``attempted_channel_ids`` are
@@ -1529,8 +1535,9 @@ def _flush_deferred_stale_cleanup_plans(
     historical revenue when sibling channels are successfully replaced.
     """
     if deferred_cleanup.blocked:
-        return
+        return 0
     attempted = deferred_cleanup.attempted_channel_ids
+    rows_deleted_stale = 0
     # FIX: cache repo.list() per (source_system, report_month). Multiple scopes
     # in a single run can share the same (source_system, report_month) but
     # different source_account_id, so hoisting the fetch keeps the flush at one
@@ -1555,7 +1562,7 @@ def _flush_deferred_stale_cleanup_plans(
                 and row.youtube_channel_id not in attempted
             ):
                 preserved_keys.add(row.source_row_key)
-        repo.delete_stale_for_scope(
+        rows_deleted_stale += repo.delete_stale_for_scope(
             tenant_id,
             source_system=source_system,
             source_account_id=source_account_id,
@@ -1563,6 +1570,7 @@ def _flush_deferred_stale_cleanup_plans(
             report_month=report_month,
             keep_source_row_keys=preserved_keys,
         )
+    return rows_deleted_stale
 
 
 # ============================================================================
@@ -1697,14 +1705,15 @@ def _delete_stale_source_rows(
     report_month: str,
     parsed_rows: Iterable[ParsedSourceRow],
     fallback_source_account_id: str,
-) -> None:
+) -> int:
     """Delete source rows in each scope whose keys are absent from the new parse."""
+    rows_deleted_stale = 0
     for (row_report_type, source_account_id), keys in _stale_source_row_keys_by_scope(
         report_types=report_types,
         parsed_rows=parsed_rows,
         fallback_source_account_id=fallback_source_account_id,
     ).items():
-        repo.delete_stale_for_scope(
+        rows_deleted_stale += repo.delete_stale_for_scope(
             tenant_id,
             source_system=source_system,
             source_account_id=source_account_id,
@@ -1712,6 +1721,7 @@ def _delete_stale_source_rows(
             report_month=report_month,
             keep_source_row_keys=keys,
         )
+    return rows_deleted_stale
 
 
 # ============================================================================
