@@ -71,14 +71,22 @@ def platform_lane(session: Session) -> Iterator[None]:
     # The after_begin hook fired on session.connection() above and pinned the
     # configured lane; elevate to app_platform for the platform-only writes.
     connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"')
+    completed = False
     try:
         yield
+        completed = True
     finally:
+        # The flag pop is an in-memory dict op and always runs.
         session.info.pop(_PLATFORM_LANE_ACTIVE_KEY, None)
-        # Restore the tenant lane only for tenant-lane sessions. A platform-lane
-        # session is already privileged for its whole lifetime; demoting it to
-        # app_tenant here would wrongly restrict it.
-        if session.info.get(_SESSION_ROLE_KEY) == APP_TENANT_ROLE:
+        # Restore the tenant lane only on a clean exit, and only for tenant-lane
+        # sessions (a platform-lane session is privileged for its whole life;
+        # demoting it would wrongly restrict it). On the exception path the
+        # block's transaction may be aborted, so issuing SET LOCAL ROLE would
+        # raise "current transaction is aborted" and mask the real error -- the
+        # caller's rollback ends the transaction and the next after_begin
+        # re-pins the configured lane. This mirrors the committed_allocation
+        # precedent, which restores only after a successful child write.
+        if completed and session.info.get(_SESSION_ROLE_KEY) == APP_TENANT_ROLE:
             session.connection().exec_driver_sql(
                 f'SET LOCAL ROLE "{APP_TENANT_ROLE}"'
             )

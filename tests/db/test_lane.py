@@ -27,7 +27,10 @@ import pytest
 
 from ums_smart_revenue.db.lane import platform_lane
 from ums_smart_revenue.db.rls import APP_PLATFORM_ROLE, APP_TENANT_ROLE
-from ums_smart_revenue.db.session import _SESSION_ROLE_KEY
+from ums_smart_revenue.db.session import (
+    _PLATFORM_LANE_ACTIVE_KEY,
+    _SESSION_ROLE_KEY,
+)
 
 
 class _StubConnection:
@@ -89,15 +92,23 @@ def test_platform_lane_does_not_demote_platform_lane_session() -> None:
     ]
 
 
-def test_platform_lane_restores_tenant_role_on_exception() -> None:
-    """An exception inside the block still restores the tenant lane on exit."""
+def test_platform_lane_skips_role_restore_on_exception() -> None:
+    """On exception the role restore is skipped (the txn may be aborted).
+
+    Issuing SET LOCAL ROLE on an aborted transaction raises "current
+    transaction is aborted" and would mask the real error. The caller's
+    rollback ends the transaction and the next after_begin re-pins the
+    configured lane, so the restore is intentionally not attempted here
+    (mirrors finance/committed_allocation.py, which restores only after a
+    successful child write). The active-lane flag is still cleared.
+    """
     session = _StubSession(role=APP_TENANT_ROLE, dialect_name="postgresql")
     with pytest.raises(ValueError, match="boom"):
         with platform_lane(session):
             raise ValueError("boom")
+    # Only the elevation was issued; no restore statement on the failure path.
     assert session._connection.calls == [
-        f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"',
-        f'SET LOCAL ROLE "{APP_TENANT_ROLE}"',
+        f'SET LOCAL ROLE "{APP_PLATFORM_ROLE}"'
     ]
 
 
@@ -108,3 +119,23 @@ def test_platform_lane_noop_off_postgres_on_exception() -> None:
         with platform_lane(session):
             raise ValueError("boom")
     assert session._connection.calls == []
+
+
+def test_platform_lane_sets_active_flag_inside_and_clears_after() -> None:
+    """The active-lane flag is set inside the block and cleared on every exit.
+
+    The after_begin hook reads this flag so a nested SAVEPOINT does not re-pin
+    the tenant lane mid-block; the flag must never leak past the block (clean
+    exit or exception).
+    """
+    session = _StubSession(role=APP_TENANT_ROLE, dialect_name="postgresql")
+    assert _PLATFORM_LANE_ACTIVE_KEY not in session.info
+    with platform_lane(session):
+        assert session.info.get(_PLATFORM_LANE_ACTIVE_KEY) is True
+    assert _PLATFORM_LANE_ACTIVE_KEY not in session.info
+
+    with pytest.raises(ValueError, match="boom"):
+        with platform_lane(session):
+            assert session.info.get(_PLATFORM_LANE_ACTIVE_KEY) is True
+            raise ValueError("boom")
+    assert _PLATFORM_LANE_ACTIVE_KEY not in session.info
