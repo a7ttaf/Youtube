@@ -14,12 +14,13 @@ from uuid import uuid4
 import pytest
 from alembic import command
 from alembic.config import Config
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session
 
 # Reuse the postgres URL helper that lives in tests/db/.
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "db"))
+from _pg_schema_helpers import reset_public_schema  # noqa: E402
 from _postgres_helpers import require_postgres_url  # noqa: E402
 
 from ums_smart_revenue.connectors.google_source_rows.dataclasses import (
@@ -66,12 +67,36 @@ def fresh_engine(postgres_url: str):
         raise RuntimeError(
             f"Refusing destructive schema reset for non-test database: {db_name!r}"
         )
+    # ============================================================================
+    # Purpose: Provide a fresh SQLAlchemy engine with a clean `public` schema
+    # for one finance PG normalizer integration test. The schema-reset body
+    # is delegated to the shared helper so a contended reset (e.g. an orphan
+    # `idle in transaction` connection from a prior killed/hung run on a
+    # shared/reused cluster) fails fast with a diagnosable `LockNotAvailable`
+    # error instead of hanging indefinitely.
+    # Database/ORM: PostgreSQL `public` schema via raw SQLAlchemy `text()`,
+    # executed inside the shared `reset_public_schema` helper.
+    # Standards: `SET LOCAL lock_timeout = '30s'` is transaction-scoped
+    # (reverts on `engine.begin()` commit), so it does not alter the
+    # existing per-test `statement_timeout` configuration elsewhere.
+    # The helper uses `try/finally` so the short-lived engine is disposed
+    # even on the setup-failure path.
+    # Blast Radius: None detected — test-harness fixture only; no product
+    # code, no migration, no `alembic/env.py` change.
+    # Connections:
+    #   - File: tests/finance/test_google_source_normalizer_postgres.py ->
+    #     the fail-closed DB-name check above is the only test-DB safety
+    #     gate; this block only changes the fail-fast lock bound.
+    #   - File: tests/db/_pg_schema_helpers.py -> `reset_public_schema` is
+    #     the shared schema-reset helper used by all 9 fixtures.
+    #   - File: AGENTS.md -> "Professional Commenting Standard" (this block).
+    # ============================================================================
+    reset_public_schema(postgres_url)
     engine = create_engine(postgres_url)
-    with engine.begin() as conn:
-        conn.execute(text("DROP SCHEMA public CASCADE"))
-        conn.execute(text("CREATE SCHEMA public"))
-    yield engine
-    engine.dispose()
+    try:
+        yield engine
+    finally:
+        engine.dispose()
 
 
 def _seed_pg(session, tenant_id, channel_id) -> None:

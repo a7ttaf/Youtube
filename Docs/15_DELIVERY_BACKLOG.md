@@ -13,6 +13,13 @@ match `01_IMPLEMENTATION_PLAN.md`:
 Honesty rule: scaffolding-only items (ORM + repo + tests but no real
 ingestion / UI / user-facing path) are marked `⏳`, not `✅`.
 
+**Test-harness note (2026-06-11, branch `fix/pg-migration-test-lock-timeout`):** the PG
+migration round-trip tests' `fresh_engine` schema reset now sets `SET LOCAL lock_timeout`
+so a contended `DROP SCHEMA public CASCADE` fails fast with a diagnosable error instead of
+hanging indefinitely. Run these against a **fresh** Postgres cluster — reusing a
+shared/contended cluster (orphaned roles/locks from a prior run) causes spurious
+failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-timeout.md`).
+
 ## P0 — Must build first
 
 - ⏳ Dynamic org hierarchy — remaining: ORG models (PR #25); hierarchy
