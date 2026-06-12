@@ -512,15 +512,20 @@ export type ConnectorCredentialListResponse = {
 
 // POST /connectors/jobs request body. Source: ConnectorJobRequest (connectors.py:46-49).
 // reason is REQUIRED (min_length=1) — recorded on the CONNECTOR_JOB_RUN audit event.
+// report_month is REQUIRED on the executing path (the month the pull targets);
+// dry_run (default false) runs a validate-only pass that writes no facts.
 export type ConnectorJobRequestBody = {
   connector_key: string;
   account_id: string;
+  report_month: string;
+  dry_run?: boolean;
   reason: string;
 };
 
 // POST /connectors/jobs response (202). Source: request_connector_job() (connectors.py:139-144).
-// execution_status is "recorded_not_executed": the request is audited but the
-// connector run is NOT yet executed (no execution backend wired today).
+// execution_status is "submitted" on the executing path (the request is audited
+// AND handed to the executor); it may still be "recorded_not_executed" when no
+// execution backend is wired (record-only fallback). The `string` type covers both.
 export type ConnectorJobResponse = {
   connector_key: string;
   account_id: string;

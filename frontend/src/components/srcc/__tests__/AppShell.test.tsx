@@ -548,4 +548,42 @@ describe("AppShell production session hydration", () => {
     // Finance visibility is on, but connector job controls stay disabled.
     expect(reasonField).toBeDisabled();
   });
+
+  it("CONNECTOR CONTROLS: Run pull disabled when canRunConnectorJobs=false", async () => {
+    // The per-row Run pull button only renders when at least one credential row
+    // exists. routeFetchWithSession returns an EMPTY credentials list, so route
+    // /connectors/credentials to a populated body here and delegate the rest to
+    // the shared session router (without modifying the harness helper).
+    const credentialsBody = {
+      items: [
+        {
+          id: "11111111-1111-1111-1111-111111111111",
+          connector_key: "youtube_reporting",
+          account_id: "acct-1",
+          status: "ACTIVE",
+          has_secret_ref: true,
+        },
+      ],
+      pagination: { limit: 50, offset: 0, returned: 1, has_more: false },
+    };
+    const routed = routeFetchWithSession(() =>
+      jsonResponse(
+        sessionBody({ canViewRevenue: true, canRunConnectorJobs: false }),
+      ),
+    );
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      (input: unknown) => {
+        if (urlOf(input).includes("/connectors/credentials")) {
+          return Promise.resolve(jsonResponse(credentialsBody));
+        }
+        return routed(input);
+      },
+    );
+    renderShell();
+    fireEvent.click(await screen.findByText("Connectors"));
+    const runPull = (await screen.findByRole("button", {
+      name: /run pull/i,
+    })) as HTMLButtonElement;
+    expect(runPull).toBeDisabled();
+  });
 });
