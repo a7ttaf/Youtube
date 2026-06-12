@@ -760,6 +760,41 @@ def test_request_connector_job_dry_run_skips_service_principal_preflight(
     assert audit_log.details["action"] == "job_submitted"
 
 
+def test_request_connector_job_accepts_hyphen_alias_for_underscore_credential(
+    tmp_path,
+) -> None:
+    """Credential lookup is alias-aware: hyphen public key finds underscore row.
+
+    FIX: the preflight used an exact ``connector_key`` lookup, so a caller
+    submitting ``youtube-reporting`` (public hyphen alias) could not find a
+    credential stored under the source-system ``youtube_reporting`` key.
+    The route now uses the same ``_credential_key_candidates`` fallback that
+    ``run_one`` uses.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    # Seed the credential under the underscore source key.
+    _seed_active_credential(database_url)
+    fake = _FakeExecutor(active=False)
+    client = TestClient(_enable_executor_app(database_url, fake))
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
+        json={
+            "connector_key": "youtube-reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Alias lookup",
+        },
+    )
+    assert response.status_code == 202
+    assert len(fake.submit_calls) == 1
+    assert len(fake.activate_calls) == 1
+
+
 def test_request_connector_job_after_rollback_cancels_reservation(
     tmp_path, monkeypatch
 ) -> None:

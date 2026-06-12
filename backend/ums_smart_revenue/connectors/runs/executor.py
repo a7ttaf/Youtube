@@ -144,8 +144,17 @@ class ConnectorJobExecutor:
         )
 
     def close(self) -> None:
-        """Shut the pool down deterministically (called from the app lifespan)."""
-        self._finalizer()
+        """Shut the pool down deterministically (called from the app lifespan).
+
+        Any accepted jobs that are still queued (Future entries in the
+        registry) are audited as ``job_failed_before_start`` before the
+        executor cancels them, so a deploy/restart does not make 202'd jobs
+        disappear from the operator-visible lifecycle state. The weakref
+        finalizer remains as a GC backstop for paths that bypass ``close()``.
+        """
+        self._audit_pending_on_shutdown()
+        self._executor.shutdown(wait=False, cancel_futures=True)
+        self._finalizer.detach()
 
     def has_active_job(
         self,
@@ -234,6 +243,11 @@ class ConnectorJobExecutor:
                 triggered_by_user_id=reservation.triggered_by_user_id,
                 actor_identity=reservation.actor_identity,
             )
+            # Stash the actor identity and job key on the Future so a
+            # shutdown that cancels a still-queued job can emit a properly
+            # attributed job_failed_before_start audit row.
+            future._actor_identity = reservation.actor_identity  # type: ignore[attr-defined]
+            future._job_key = key  # type: ignore[attr-defined]
             self._registry[key] = future
         return future
 
@@ -304,8 +318,41 @@ class ConnectorJobExecutor:
                 triggered_by_user_id=triggered_by_user_id,
                 actor_identity=actor_identity,
             )
+            # Stash the actor identity and job key on the Future so a
+            # shutdown that cancels a still-queued job can emit a properly
+            # attributed job_failed_before_start audit row.
+            future._actor_identity = actor_identity  # type: ignore[attr-defined]
+            future._job_key = key  # type: ignore[attr-defined]
             self._registry[key] = future
         return future
+
+    def _audit_pending_on_shutdown(self) -> None:
+        """Audit every accepted job that has not started before we cancel it.
+
+        Called deterministically from :meth:`close`. Each queued ``Future``
+        carries the submitting actor identity; any ``_SlotReservation`` that
+        has not yet been activated has no Future yet and is therefore not an
+        accepted, committed job -- it is dropped silently (the route will
+        fail to activate and log the cancellation).
+        """
+        with self._lock:
+            pending = list(self._registry.values())
+        for entry in pending:
+            if not isinstance(entry, Future) or entry.done():
+                continue
+            actor_identity = getattr(entry, "_actor_identity", None)
+            job_key = getattr(entry, "_job_key", None)
+            if actor_identity is None or job_key is None:
+                continue
+            tenant_id, connector_key, account_id, report_month = job_key
+            self._audit_failed_before_start(
+                tenant_id=tenant_id,
+                connector_key=connector_key,
+                account_id=account_id,
+                report_month=report_month,
+                error_class="ExecutorShutdown",
+                actor_identity=actor_identity,
+            )
 
     def _run_job(
         self,
