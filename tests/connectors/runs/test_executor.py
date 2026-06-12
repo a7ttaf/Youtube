@@ -594,9 +594,10 @@ def test_close_audits_queued_jobs_cancelled_by_shutdown(tmp_path) -> None:
     With max_workers=1, a second submitted job sits in the ThreadPoolExecutor
     work queue. If the app shuts down before that worker starts,
     cancel_futures=True drops the future and ``_run_job`` never runs, so
-    nothing would write a failure audit. close() now walks pending Future
-    entries and emits a ``job_failed_before_start`` row with
-    ``error_class="ExecutorShutdown"`` for each one.
+    nothing would write a failure audit. close() now cancels futures first,
+    then audits any future that is ``cancelled()`` as a
+    ``job_failed_before_start`` row with ``error_class="ExecutorShutdown"``.
+    Running futures are not audited as pre-start failures.
     """
     import threading
     import time
@@ -647,6 +648,8 @@ def test_close_audits_queued_jobs_cancelled_by_shutdown(tmp_path) -> None:
         # exception was raised mid-test, ensure we still clean up.
         executor.close()
 
+    # The queued second job is the only shutdown-audited entry; the running
+    # first job must not be misclassified as a pre-start failure.
     with factory() as session:
         audits = session.scalars(select(AuditLogORM)).all()
     shutdown_audits = [
@@ -654,8 +657,14 @@ def test_close_audits_queued_jobs_cancelled_by_shutdown(tmp_path) -> None:
         for a in audits
         if a.details.get("action") == "job_failed_before_start"
         and a.details.get("error_class") == "ExecutorShutdown"
-        and a.details.get("report_month") == "2026-04"
     ]
     assert len(shutdown_audits) == 1
     assert shutdown_audits[0].event_type == "CONNECTOR_JOB_RUN"
     assert shutdown_audits[0].entity_id == "youtube_reporting:acct-1"
+    assert shutdown_audits[0].details["report_month"] == "2026-04"
+    # No false pre-start audit for the job that was already running.
+    assert not any(
+        a.details.get("report_month") == "2026-03" for a in shutdown_audits
+    )
+    # The registry is cleared after shutdown.
+    assert executor._registry == {}

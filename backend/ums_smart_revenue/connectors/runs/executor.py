@@ -146,14 +146,15 @@ class ConnectorJobExecutor:
     def close(self) -> None:
         """Shut the pool down deterministically (called from the app lifespan).
 
-        Any accepted jobs that are still queued (Future entries in the
-        registry) are audited as ``job_failed_before_start`` before the
-        executor cancels them, so a deploy/restart does not make 202'd jobs
-        disappear from the operator-visible lifecycle state. The weakref
-        finalizer remains as a GC backstop for paths that bypass ``close()``.
+        First cancels all queued futures via ``shutdown(cancel_futures=True)``,
+        then audits any futures that were definitively cancelled as
+        ``job_failed_before_start`` with ``error_class="ExecutorShutdown"``.
+        Running futures are allowed to finish and deregister themselves; they
+        are never audited as pre-start failures. The weakref finalizer remains
+        as a GC backstop for paths that bypass ``close()``.
         """
-        self._audit_pending_on_shutdown()
         self._executor.shutdown(wait=False, cancel_futures=True)
+        self._audit_pending_on_shutdown()
         self._finalizer.detach()
 
     def has_active_job(
@@ -339,31 +340,36 @@ class ConnectorJobExecutor:
         self._registry[key] = future
 
     def _audit_pending_on_shutdown(self) -> None:
-        """Audit every accepted job that has not started before we cancel it.
+        """Audit every accepted job that was cancelled before it started.
 
-        Called deterministically from :meth:`close`. Each queued ``Future``
-        carries the submitting actor identity; any ``_SlotReservation`` that
-        has not yet been activated has no Future yet and is therefore not an
-        accepted, committed job -- it is dropped silently (the route will
-        fail to activate and log the cancellation).
+        Called deterministically from :meth:`close` *after*
+        ``ThreadPoolExecutor.shutdown(cancel_futures=True)`` has run. A
+        future that is ``cancelled()`` was queued but never started; it will
+        never run and therefore never writes its own lifecycle audit. A
+        running or completed future is left alone -- it (or its worker) owns
+        the audit trail. Any ``_SlotReservation`` that was never activated is
+        not an accepted, committed job and is dropped silently.
+
+        The registry is cleared because no new work can be accepted after
+        shutdown; running futures will deregister harmlessly when they finish.
         """
         with self._lock:
-            pending = list(self._registry.values())
-        for entry in pending:
-            # A running future will continue to completion (or fail) and
-            # write its own lifecycle audit; auditing it here would emit a
-            # false pre-start failure. Only queued/cancelled futures that
-            # never started need the shutdown audit.
-            if (
-                not isinstance(entry, Future)
-                or entry.done()
-                or entry.running()
-            ):
+            entries = list(self._registry.items())
+            self._registry.clear()
+
+        cancelled: list[tuple[_JobKey, ConnectorJobActor]] = []
+        for _key, entry in entries:
+            if not isinstance(entry, Future):
+                continue
+            if not entry.cancelled():
                 continue
             actor_identity = getattr(entry, "_actor_identity", None)
             job_key = getattr(entry, "_job_key", None)
             if actor_identity is None or job_key is None:
                 continue
+            cancelled.append((job_key, actor_identity))
+
+        for job_key, actor_identity in cancelled:
             tenant_id, connector_key, account_id, report_month = job_key
             self._audit_failed_before_start(
                 tenant_id=tenant_id,
