@@ -39,7 +39,11 @@ from ums_smart_revenue.connectors.google.errors import (
 )
 from ums_smart_revenue.connectors.google.registry import known_keys
 from ums_smart_revenue.connectors.runs.executor import ConnectorJobActor
-from ums_smart_revenue.connectors.runs.orchestrator import resolve_connector_credentials
+from ums_smart_revenue.connectors.runs.orchestrator import (
+    _credential_key_candidates,
+    _source_system_for_connector,
+    resolve_connector_credentials,
+)
 from ums_smart_revenue.connectors.runs.repository import (
     MAX_CONNECTOR_RUN_PAGE_SIZE,
     ConnectorRunValidationError,
@@ -321,6 +325,24 @@ def request_connector_job(
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     """Validate cheaply, reserve an executor slot, write the audit, and return 202 submitted."""
+    if payload.connector_key not in known_keys():
+        return _reject_connector_job(
+            audit_sink=audit_sink,
+            user=user,
+            payload=payload,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            rejection="unknown_connector",
+            detail="Unknown connector key",
+        )
+
+    # Canonicalize early so authorization, credential lookup, the executor
+    # registry key, and the downstream orchestrator all agree on the
+    # source-system underscore key. Public hyphen aliases are accepted but
+    # normalized here to prevent scope/permission mismatches and duplicate
+    # registry entries across aliases.
+    connector_key = _source_system_for_connector(payload.connector_key)
+    payload = payload.model_copy(update={"connector_key": connector_key})
+
     connector_scope = AccessScope.connector(payload.connector_key)
     _require_connector_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
 
@@ -361,16 +383,6 @@ def request_connector_job(
             ),
         )
 
-    if payload.connector_key not in known_keys():
-        return _reject_connector_job(
-            audit_sink=audit_sink,
-            user=user,
-            payload=payload,
-            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
-            rejection="unknown_connector",
-            detail="Unknown connector key",
-        )
-
     try:
         validate_report_month(payload.report_month)
     except ConnectorRunValidationError:
@@ -384,12 +396,21 @@ def request_connector_job(
         )
 
     repository = SqlAlchemyConnectorCredentialRepository(session, tenant_id=tenant_id)
-    credential = repository.get_credential(
-        session,
-        tenant_id=tenant_id,
-        connector_key=payload.connector_key,
-        account_id=payload.account_id,
-    )
+    # FIX: credential rows may be stored under the source-system underscore
+    # alias (e.g. ``youtube_reporting``) while callers submit the public
+    # hyphen key (``youtube-reporting``). Use the same alias-aware lookup
+    # that ``run_one`` / ``_load_credential`` uses so the executing endpoint
+    # does not narrow supported keys.
+    credential = None
+    for candidate_key in _credential_key_candidates(payload.connector_key):
+        credential = repository.get_credential(
+            session,
+            tenant_id=tenant_id,
+            connector_key=candidate_key,
+            account_id=payload.account_id,
+        )
+        if credential is not None:
+            break
     if credential is None:
         return _reject_connector_job(
             audit_sink=audit_sink,

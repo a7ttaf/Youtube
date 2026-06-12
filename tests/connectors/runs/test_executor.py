@@ -585,3 +585,77 @@ def test_run_job_service_principal_failure_writes_bucket_a_audit(
     assert row.details["action"] == "job_failed_before_start"
     # Canned class name only -- the env var is in the reason, not the message.
     assert row.details["error_class"] == "ConnectorServicePrincipalUnavailableError"
+
+
+
+def test_close_audits_queued_jobs_cancelled_by_shutdown(tmp_path) -> None:
+    """A deterministic close() audits accepted jobs that never started.
+
+    With max_workers=1, a second submitted job sits in the ThreadPoolExecutor
+    work queue. If the app shuts down before that worker starts,
+    cancel_futures=True drops the future and ``_run_job`` never runs, so
+    nothing would write a failure audit. close() now walks pending Future
+    entries and emits a ``job_failed_before_start`` row with
+    ``error_class="ExecutorShutdown"`` for each one.
+    """
+    import threading
+    import time
+
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+    started = threading.Event()
+
+    def _slow_run_one(session, **kwargs):
+        started.set()
+        time.sleep(0.5)
+        return _outcome()
+
+    try:
+        with patch(
+            "ums_smart_revenue.connectors.runs.executor.run_one", _slow_run_one
+        ):
+            first = executor.submit(
+                tenant_id=TENANT,
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                report_month="2026-03",
+                dry_run=False,
+                triggered_by_user_id=None,
+                actor_identity=ACTOR,
+            )
+            second = executor.submit(
+                tenant_id=TENANT,
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                report_month="2026-04",
+                dry_run=False,
+                triggered_by_user_id=None,
+                actor_identity=ACTOR,
+            )
+            # Wait until the first worker has actually started; only then is
+            # the second future queued behind it.
+            started.wait(timeout=5)
+            # The second future is still pending in the queue.
+            executor.close()
+            # The first future may still complete; we do not wait for it.
+            _ = first
+            _ = second
+    finally:
+        # If close() already ran, calling it again is a no-op. If an
+        # exception was raised mid-test, ensure we still clean up.
+        executor.close()
+
+    with factory() as session:
+        audits = session.scalars(select(AuditLogORM)).all()
+    shutdown_audits = [
+        a
+        for a in audits
+        if a.details.get("action") == "job_failed_before_start"
+        and a.details.get("error_class") == "ExecutorShutdown"
+        and a.details.get("report_month") == "2026-04"
+    ]
+    assert len(shutdown_audits) == 1
+    assert shutdown_audits[0].event_type == "CONNECTOR_JOB_RUN"
+    assert shutdown_audits[0].entity_id == "youtube_reporting:acct-1"
