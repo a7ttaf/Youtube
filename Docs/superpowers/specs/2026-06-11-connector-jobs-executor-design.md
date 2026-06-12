@@ -1,9 +1,12 @@
 # Connector Jobs Executing Path — Design Spec
 
 Date: 2026-06-11
-Status: DRAFT — awaiting operator review (no implementation on this branch)
-Branch: `spec/connector-jobs-executor` (off main `82fd67f`, PR #93)
-Author lane: architect/reviewer (Claude), evidence-verified against main `82fd67f`
+Status: APPROVED 2026-06-12 (Mahmoud — full-spec scope, OPUS tier). Prerequisite RLS
+lane-fix MERGED as PR #94 (squash `0bd3879` = current main); see resolved-decisions section.
+Build branch: `feat/connector-jobs-executor` (off main `0bd3879` = #94). Spec authored on
+`spec/connector-jobs-executor` (off `82fd67f`, #93).
+Author lane: architect/reviewer (Claude), evidence-verified against main `82fd67f` then
+re-mapped against `0bd3879` (5-agent anchor sweep, 2026-06-12).
 
 ## Problem
 
@@ -350,6 +353,123 @@ clean-room Postgres container (`127.0.0.1`, fresh `ums-gate-pg`) · frontend `np
 3. **Auto-flip credential `status` to `failed_auth` on refresh failure** (quarantine) — out
    of scope here; wants its own decision because it can disable ingestion paths on a single
    transient failure.
+
+## Implementation decisions (resolved 2026-06-12 — supersedes the open questions above)
+
+Scope: **full spec** (Part 1 executor + thin frontend + Part 2 credential telemetry
+migration), Mahmoud-authorized, OPUS tier. Prerequisite open-question #0 is **closed**: the
+RLS lane-fix merged as PR #94 (squash `0bd3879` = current main); this branch builds on it
+(`db/lane.py` `platform_lane`, `connectors/runs/tenant_context.py` `connector_tenant_context`
+are present on main).
+
+**Execution model (Approach A, confirmed).** `POST /connectors/jobs` does cheap in-request
+validation, submits to a module-owned `ConnectorJobExecutor`, and returns **202 `submitted`
+immediately**. It does **NOT** run `run_one` inline. The worker thread runs the proven CLI
+pattern on its **own** session: `build_session_factory()()` ->
+`connector_tenant_context(tenant_id, session=session)` -> `run_one(...)`. Consequences:
+- The worker session is tenant-lane; `run_one` manages its own `platform_lane` elevation
+  internally. The executor/worker **never** wraps `run_one` in `platform_lane` (not nest-safe).
+- `TENANT_CTX` is a per-thread contextvar; the worker re-establishes it via
+  `connector_tenant_context` (tenant_id captured in the request via `_resolve_tenant_uuid(user)`
+  and passed into the job — the worker thread does not inherit the request contextvar).
+- The 202 response carries `{connector_key, account_id, report_month, dry_run,
+  execution_status: "submitted", audit_event}` — **no run_id** (the run has not started; it
+  surfaces in `GET /connectors/runs` once the worker commits the RUNNING row).
+
+**Request model.** `ConnectorJobRequest` gains `report_month: str = Field(min_length=1)`
+(required) and `dry_run: bool = False`.
+
+**Route control flow (order is load-bearing — authz always first, fail-closed):**
+1. `RUN_CONNECTOR_JOBS @ connector(key)` -> **403** (HTTPException; no audit row).
+2. executor disabled -> **503** JSONResponse + `job_rejected`/`executor_disabled` audit.
+3. unknown `connector_key` (not in `known_keys()`) -> **422** + `job_rejected`/`unknown_connector`.
+4. bad `report_month` (`validate_report_month` raises) -> **422** + `job_rejected`/`invalid_month`.
+5. credential missing/inactive (cheap `get_credential` SELECT, **no OAuth refresh**) -> **422**
+   + `job_rejected`/`credential_not_found`|`credential_inactive`.
+6. duplicate guard (below) -> **409** + `job_rejected`/`duplicate_in_flight`.
+7. accept -> submit to executor + **202** + `job_submitted` audit
+   `{action, report_month, dry_run[, superseded_run_id]}`.
+
+All non-2xx-but-audited responses use **`JSONResponse` (not `HTTPException`)** with body
+`{detail: "<canned>"}` so the request session commits the audit row (mirrors the test-route
+404 pattern at `connectors.py:370-380`). Audit `details` carry only machine tokens — **never**
+`str(exc)`.
+
+**Duplicate guard.** Primary: the executor's in-process registry keyed
+`(tenant, key, account, month)` under a `threading.Lock`. Secondary: a new repository reader
+`find_active_runs_for_scope(...)` returns RUNNING `connector_runs` for the scope; if the
+youngest is younger than `connector_job_stale_running_hours` (default 6) -> 409; if older ->
+**orphan supersede**: rewrite it FAILED via
+`finish_run(status="FAILED", error_summary="orphaned RUNNING run superseded by new job")`
+(tenant-lane; `connector_runs` is tenant-writable, **no** `platform_lane`), record
+`superseded_run_id` in the `job_submitted` audit details, and proceed. TOCTOU is code-level
+only (the `(tenant,connector_key,report_month)` index is non-unique); accepted at
+`max_workers=1`, partial-unique-index deferred (documented).
+
+**Audit ownership (resolves the duplicate-row problem).** The route writes exactly **one**
+row (`job_submitted` / `job_rejected`). `run_one` independently emits `STARTED`/`FINISHED`
+`CONNECTOR_JOB_RUN` edges on the **worker's** session, later. The rewritten pinning test stubs
+the executor, so it asserts the single route-owned row. The worker's Bucket-A failure writes
+one `job_failed_before_start` row (`details={action, error_class: type(exc).__name__}`, canned
+class name only) on its own short session; projection-reraise is swallowed-after-audit (the
+run is already FAILED+audited); the registry entry is removed in `finally` on every path.
+
+**`triggered_by_user_id` degrade.** The route resolves `UUID(user.user_id)` and passes it only
+when a `users` row exists for `(tenant, id)` (cheap existence check); otherwise **None** (the
+composite FK would otherwise abort `start_run`). Attribution is preserved via the audit
+`reason` + the sink's unknown-actor stash (`details["actor_user_id"]`).
+
+**Settings (frozen `AppSettings` dataclass + hand-loader; new `_load_bool`/`_load_int`,
+fail-fast on malformed, ints reject <= 0):** `connector_job_executor_enabled: bool=False`
+(fail-closed OFF), `connector_job_max_workers: int=1`, `connector_job_stale_running_hours:
+int=6`.
+
+**App wiring.** In `create_app`, inside `if resolved_database_url:`, when enabled, construct
+the executor capturing `build_session_factory(resolved_database_url)`, attach to
+`app.state.connector_job_executor`; mirror the resolver's
+`weakref.finalize(..., shutdown, wait=False, cancel_futures=True)` GC backstop **and** an
+explicit `close()` called from a FastAPI `lifespan` shutdown (introduced here). Gating on the
+flag keeps the module-level `app = create_app()` import (and the whole test suite) from
+spawning threads.
+
+**Part 2 — credential refresh telemetry.**
+- Migration `20260612_0001_connector_credential_refresh_telemetry.py`,
+  `down_revision="20260609_0002"` (current single linear head), `batch_alter_table` adds 4
+  nullable columns (`last_refresh_attempt_at` tz, `token_expiry_at` tz, `last_refresh_status`
+  Text, `last_refresh_error_class` Text) + CHECK `ck_connector_last_refresh_status` =
+  `"last_refresh_status IS NULL OR last_refresh_status IN ('succeeded','failed')"`; downgrade
+  drops constraint then columns. ORM mirrors it. `api_connector_credentials` is
+  tenant-scoped/tenant-writable — **no** grant-pin impact (confirmed against
+  `tests/tenancy/test_rls_grant_surface.py`).
+- **Single write point: `resolve_connector_credentials`** (the test route already calls it, so
+  it is covered automatically — no separate test-route stamp needed). Stamp only around the
+  actual `refresh_credentials` call (so `CredentialNotFoundError`/`InactiveCredentialError`,
+  which never attempt a refresh, do **not** stamp):
+  - **SUCCESS:** mutate the in-session credential row (`last_refresh_attempt_at=now`,
+    `last_refresh_status='succeeded'`, `last_refresh_error_class=None`,
+    `token_expiry_at=credentials.expiry`); rides the **caller's** commit (live run -> persisted
+    at the `start_run` commit; dry-run/CLI never commits -> not persisted, the intended dry-run
+    semantics).
+  - **FAILURE (`OAuthRefreshError`):** stamp (`status='failed'`,
+    `error_class=type(exc.inner or exc).__name__`, `token_expiry_at` untouched), then
+    **`session.commit()`** to persist across the Bucket-A abort, then re-raise. This same-session
+    commit is safe because `resolve` runs **before** any `run_one` write (nothing run-related is
+    pending) and it leaves `OAuthRefreshError` propagating intact (CLI exit 2 / test-route 200 /
+    worker Bucket-A audit all preserved). A contract comment documents the "resolve-runs-first"
+    invariant.
+- `last_refresh_error_class` stores the exception **class name only**, never message text
+  (matches the `emit_run_finished` no-text precedent at `connectors/google/audit.py:156-160`).
+- Serialization: `ConnectorCredentialEntry` + `to_api()` (datetimes `.isoformat()`,
+  None-guarded) + `_to_entry` mapper.
+
+**Frontend.** Reuse the existing `canRunConnectorJobs` capability (no new capability). Extend
+`ConnectorJobRequestBody` with `report_month`/`dry_run`; "Run pull" mirrors `onRequestSync`
+(month `<select>` over `MONTH_OPTIONS`, shared audited reason, optional dry-run checkbox),
+disabled exactly like `requestDisabled` plus a required month; `RequestJobSuccess` handles
+`execution_status==='submitted'`; surface the run-history `reload` (reset to page 1) on a
+non-null `submitted` result when `canViewConnectorHealth`. 409/422/503 detail renders verbatim
+via the existing `describeError`. CLI needs no change (#94 already wired
+`connector_tenant_context`).
 
 ## Non-goals
 
