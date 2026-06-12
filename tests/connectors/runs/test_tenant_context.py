@@ -29,6 +29,7 @@ from ums_smart_revenue.connectors.runs.tenant_context import (
 )
 from ums_smart_revenue.db.tenant_models import TenantORM
 from ums_smart_revenue.tenancy.context import TENANT_CTX, get_current_tenant
+from ums_smart_revenue.tenancy.models import TenantStatus
 
 _TENANT_ID = UUID("00000000-0000-0000-0000-0000009c0001")
 
@@ -85,7 +86,9 @@ def _build_prior_tenant(tenant_id: UUID):
 # ---------------------------------------------------------------------------
 
 
-def _build_sqlite_session(*, rows: list[tuple[UUID, str, str]]) -> Session:
+def _build_sqlite_session(
+    *, rows: list[tuple[UUID, str, TenantStatus]]
+) -> Session:
     """Return a session bound to a fresh in-memory SQLite with a seeded tenants table."""
     engine = sa.create_engine("sqlite+pysqlite:///:memory:")
     TenantORM.metadata.create_all(engine)
@@ -99,6 +102,9 @@ def _build_sqlite_session(*, rows: list[tuple[UUID, str, str]]) -> Session:
                 slug=slug,
                 display_name="seed",
                 primary_currency="USD",
+                # TenantStatus is a StrEnum, so the value is the canonical
+                # status string ("ACTIVE" / "SUSPENDED" / "ARCHIVED") that
+                # the tenants.status CHECK constraint accepts.
                 status=status,
                 onboarding_at=now,
                 created_at=now,
@@ -113,7 +119,7 @@ def test_session_path_loads_active_tenant() -> None:
     """An ACTIVE tenant row is loaded and placed in TENANT_CTX."""
     tenant_id = uuid4()
     session = _build_sqlite_session(
-        rows=[(tenant_id, f"t-{tenant_id}", "ACTIVE")]
+        rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.ACTIVE)]
     )
     try:
         assert get_current_tenant() is None
@@ -121,7 +127,7 @@ def test_session_path_loads_active_tenant() -> None:
             tenant = get_current_tenant()
             assert tenant is not None
             assert tenant.id == tenant_id
-            assert tenant.status.value == "ACTIVE"
+            assert tenant.status == TenantStatus.ACTIVE
         assert get_current_tenant() is None
     finally:
         session.close()
@@ -131,14 +137,14 @@ def test_session_path_rejects_suspended_tenant() -> None:
     """A SUSPENDED tenant raises TenantLifecycleError and does NOT set the contextvar."""
     tenant_id = uuid4()
     session = _build_sqlite_session(
-        rows=[(tenant_id, f"t-{tenant_id}", "SUSPENDED")]
+        rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.SUSPENDED)]
     )
     try:
         with pytest.raises(TenantLifecycleError) as exc_info:
             with connector_tenant_context(tenant_id, session=session):
                 pytest.fail("block body must not run for a SUSPENDED tenant")
         assert exc_info.value.tenant_id == tenant_id
-        assert exc_info.value.status == "SUSPENDED"
+        assert exc_info.value.status == TenantStatus.SUSPENDED.value
         # The contextvar is NOT set when the lookup rejects.
         assert get_current_tenant() is None
     finally:
@@ -149,14 +155,14 @@ def test_session_path_rejects_archived_tenant() -> None:
     """An ARCHIVED tenant raises TenantLifecycleError and does NOT set the contextvar."""
     tenant_id = uuid4()
     session = _build_sqlite_session(
-        rows=[(tenant_id, f"t-{tenant_id}", "ARCHIVED")]
+        rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.ARCHIVED)]
     )
     try:
         with pytest.raises(TenantLifecycleError) as exc_info:
             with connector_tenant_context(tenant_id, session=session):
                 pytest.fail("block body must not run for an ARCHIVED tenant")
         assert exc_info.value.tenant_id == tenant_id
-        assert exc_info.value.status == "ARCHIVED"
+        assert exc_info.value.status == TenantStatus.ARCHIVED.value
         assert get_current_tenant() is None
     finally:
         session.close()
@@ -181,7 +187,7 @@ def test_session_path_resets_context_on_lookup_failure() -> None:
     """A failed lifecycle check resets the contextvar to its prior value (None here)."""
     tenant_id = uuid4()
     session = _build_sqlite_session(
-        rows=[(tenant_id, f"t-{tenant_id}", "SUSPENDED")]
+        rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.SUSPENDED)]
     )
     try:
         prior = get_current_tenant()

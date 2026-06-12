@@ -199,18 +199,29 @@ def main(argv: list[str] | None = None) -> int:
     # TenantResolverMiddleware applies on web requests). A UUID pointing at a
     # suspended / archived / missing tenant raises TenantLifecycleError which
     # is caught below and translated to exit 2.
-    with session_factory() as session, connector_tenant_context(
-        args.tenant, session=session
-    ):
+    #
+    # Kody review (PR #94 thread PRRT_kwDOSZIgN86I-yFZ): the
+    # connector_tenant_context context manager's __enter__ runs BEFORE this
+    # try block when both are listed in a single ``with`` statement, so a
+    # TenantLifecycleError raised during the tenant lookup would propagate
+    # uncaught through main() and surface as a raw Python traceback with
+    # exit 1 (violating the documented exit-2 contract for Bucket A typed
+    # errors). Nest the context manager INSIDE the try block so the existing
+    # ``except GoogleConnectorError`` translates the lookup failure into the
+    # documented exit 2.
+    with session_factory() as session:
         try:
-            outcome = run_one(
-                session,
-                tenant_id=args.tenant,
-                connector_key=args.connector,
-                account_id=args.account,
-                report_month=args.month,
-                dry_run=args.dry_run,
-            )
+            with connector_tenant_context(
+                args.tenant, session=session
+            ):
+                outcome = run_one(
+                    session,
+                    tenant_id=args.tenant,
+                    connector_key=args.connector,
+                    account_id=args.account,
+                    report_month=args.month,
+                    dry_run=args.dry_run,
+                )
         except GoogleConnectorError as exc:
             # Bucket A: pre-start_run typed error. No connector_runs row was
             # created. Exit 2 distinguishes this from a finished-but-FAILED
