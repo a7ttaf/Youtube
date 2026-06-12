@@ -338,7 +338,15 @@ class ConnectorJobExecutor:
         with self._lock:
             pending = list(self._registry.values())
         for entry in pending:
-            if not isinstance(entry, Future) or entry.done():
+            # A running future will continue to completion (or fail) and
+            # write its own lifecycle audit; auditing it here would emit a
+            # false pre-start failure. Only queued/cancelled futures that
+            # never started need the shutdown audit.
+            if (
+                not isinstance(entry, Future)
+                or entry.done()
+                or entry.running()
+            ):
                 continue
             actor_identity = getattr(entry, "_actor_identity", None)
             job_key = getattr(entry, "_job_key", None)
