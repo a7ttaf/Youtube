@@ -588,6 +588,48 @@ def test_run_job_service_principal_failure_writes_bucket_a_audit(
 
 
 
+def test_run_job_inactive_tenant_failure_writes_audit(tmp_path) -> None:
+    """A pre-start TenantLifecycleError for an inactive tenant is still audited.
+
+    ``_audit_failed_before_start`` must not re-enter ``connector_tenant_context``,
+    because an inactive/suspended tenant would raise the same lifecycle error
+    again and prevent the ``job_failed_before_start`` row from being written.
+    """
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+
+    with factory() as session:
+        tenant = session.get(TenantORM, TENANT)
+        tenant.status = TenantStatus.SUSPENDED
+        session.commit()
+
+    try:
+        with patch(
+            "ums_smart_revenue.connectors.runs.executor.run_one",
+            side_effect=AssertionError("run_one should not be called for inactive tenant"),
+        ):
+            executor._run_job(
+                tenant_id=TENANT,
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                report_month="2026-03",
+                dry_run=False,
+                triggered_by_user_id=None,
+                actor_identity=ACTOR,
+            )
+    finally:
+        executor.close()
+
+    with factory() as session:
+        row = session.scalars(select(AuditLogORM)).one()
+    assert row.event_type == "CONNECTOR_JOB_RUN"
+    assert row.details["action"] == "job_failed_before_start"
+    assert row.details["error_class"] == "TenantLifecycleError"
+    assert row.details["report_month"] == "2026-03"
+
+
 def test_close_audits_queued_jobs_cancelled_by_shutdown(tmp_path) -> None:
     """A deterministic close() audits accepted jobs that never started.
 

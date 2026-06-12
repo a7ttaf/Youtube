@@ -525,10 +525,13 @@ export type ConnectorJobRequestBody = {
 // POST /connectors/jobs response (202). Source: request_connector_job() (connectors.py).
 // execution_status is "submitted" on the executing path (the request is audited AND
 // handed to the executor). A disabled executor returns 503 (not a 202), surfaced as an
-// error. The `string` type stays forward-compatible with future statuses.
+// error. dry_run echoes the request flag so the success banner can branch its copy.
+// The `string` type stays forward-compatible with future statuses.
 export type ConnectorJobResponse = {
   connector_key: string;
   account_id: string;
+  report_month: string;
+  dry_run: boolean;
   execution_status: string;
   audit_event: Record<string, unknown>;
 };

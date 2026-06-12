@@ -460,31 +460,38 @@ class ConnectorJobExecutor:
         error_class: str,
         actor_identity: ConnectorJobActor,
     ) -> None:
-        """Write ONE CONNECTOR_JOB_RUN job_failed_before_start row, fresh session."""
+        """Write ONE CONNECTOR_JOB_RUN job_failed_before_start row, fresh session.
+
+        Intentionally does NOT re-enter ``connector_tenant_context()``: a
+        pre-start failure can be caused by an inactive/suspended/deleted tenant,
+        and that context manager would raise the same lifecycle error before the
+        audit row could be written. The audit itself is platform-only-write, so
+        we run it under ``platform_lane`` with the tenant_id passed explicitly to
+        ``SqlAlchemyAuditSink``.
+        """
         actor = self._build_audit_actor(tenant_id=tenant_id, actor_identity=actor_identity)
         try:
             with self._session_factory() as session:
-                with connector_tenant_context(tenant_id, session=session):
-                    # audit_logs is platform-only-write: elevate to app_platform
-                    # for this standalone audit (run_one does its own elevation;
-                    # this audit runs OUTSIDE run_one). No-op off Postgres.
-                    with platform_lane(session):
-                        sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
-                        record_audit_event(
-                            sink=sink,
-                            actor=actor,
-                            event_type=AuditEventType.CONNECTOR_JOB_RUN,
-                            entity_type="api_connector",
-                            entity_id=f"{connector_key}:{account_id}",
-                            scope=AccessScope.connector(connector_key),
-                            reason="connector job failed before start",
-                            details={
-                                "action": "job_failed_before_start",
-                                "report_month": report_month,
-                                "error_class": error_class,
-                            },
-                        )
-                        session.commit()
+                # audit_logs is platform-only-write: elevate to app_platform for
+                # this standalone audit (run_one does its own elevation; this
+                # audit runs OUTSIDE run_one). No-op off Postgres.
+                with platform_lane(session):
+                    sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+                    record_audit_event(
+                        sink=sink,
+                        actor=actor,
+                        event_type=AuditEventType.CONNECTOR_JOB_RUN,
+                        entity_type="api_connector",
+                        entity_id=f"{connector_key}:{account_id}",
+                        scope=AccessScope.connector(connector_key),
+                        reason="connector job failed before start",
+                        details={
+                            "action": "job_failed_before_start",
+                            "report_month": report_month,
+                            "error_class": error_class,
+                        },
+                    )
+                    session.commit()
         except Exception:  # noqa: BLE001 — best-effort audit, never escape
             logger.exception(
                 "Failed to persist job_failed_before_start audit (tenant=%s)",
