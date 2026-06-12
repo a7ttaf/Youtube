@@ -650,6 +650,60 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     await waitFor(() => expect(runCalls().length).toBeGreaterThan(before));
   });
 
+  it("does NOT refetch the run-history feed for a dry-run (no row is ever created)", async () => {
+    // FIX: a dry-run returns 202 'submitted' but the backend intentionally
+    // creates no connector_runs row, so polling the run-history feed would
+    // wait forever for a row that will never appear. The view gates the
+    // refetch on !dryRun and skips the poll entirely for dry-runs.
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    try {
+      fetchMock().mockImplementation(
+        routeBoth((url, init) => {
+          if (url === "/connectors/jobs" && methodOf(init) === "POST") {
+            return jsonResponse(
+              {
+                connector_key: "youtube_reporting",
+                account_id: "acct-1",
+                report_month: "2026-03",
+                dry_run: true,
+                execution_status: "submitted",
+                audit_event: {},
+              },
+              202,
+            );
+          }
+          return null;
+        }),
+      );
+      renderConnectorsView();
+      // Toggle the dry-run switch in the UI before submitting.
+      await waitFor(() =>
+        expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
+      );
+      const beforeCalls = setTimeoutSpy.mock.calls.length;
+      fireEvent.change(
+        screen.getByLabelText("Sync reason (required, audited)"),
+        { target: { value: "Dry-run only" } },
+      );
+      // Click the dry-run checkbox.
+      const dryRunCheckbox = screen.getByLabelText(/dry run/i) as HTMLInputElement;
+      fireEvent.click(dryRunCheckbox);
+      fireEvent.click(screen.getByRole("button", { name: /run pull/i }));
+      // Give the request a moment to resolve.
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      // No new delayed refetch timers were scheduled.
+      const newCalls = setTimeoutSpy.mock.calls
+        .slice(beforeCalls)
+        .map(([, delay]) => delay)
+        .filter(
+          (d): d is number => typeof d === "number" && d >= 1000,
+        );
+      expect(newCalls).toEqual([]);
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
   it("schedules delayed refetch timers after a 202 submitted so the worker row catches up", async () => {
     // FIX: the worker does not create the connector_runs row until after
     // credential resolution + OAuth refresh inside _run_live, so a single

@@ -491,6 +491,52 @@ def test_run_job_dry_run_writes_completed_audit_and_clears_registry(
     ]
 
 
+def test_run_job_dry_run_no_failures_writes_empty_per_report_failures(
+    tmp_path,
+) -> None:
+    """A dry-run with no per-report failures still audits the completed row, with an empty per_report_failures list."""
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+    key = (TENANT, "youtube_reporting", "acct-1", "2026-03")
+
+    clean_outcome = ConnectorRunOutcome(
+        run=None,
+        counts={
+            "reports_attempted": 2,
+            "reports_succeeded": 2,
+            "reports_failed": 0,
+            "rows_upserted_total": 8,
+        },
+        per_report_failures=[],
+    )
+
+    try:
+        with patch(
+            "ums_smart_revenue.connectors.runs.executor.run_one",
+            lambda session, **kw: clean_outcome,
+        ):
+            executor._register(key)
+            executor._run_job(
+                tenant_id=TENANT,
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                report_month="2026-03",
+                dry_run=True,
+                triggered_by_user_id=None,
+                actor_identity=ACTOR,
+            )
+    finally:
+        executor.close()
+
+    with factory() as session:
+        row = session.scalars(select(AuditLogORM)).one()
+    assert row.event_type == "CONNECTOR_JOB_RUN"
+    assert row.details["action"] == "job_dry_run_completed"
+    assert row.details["per_report_failures"] == []
+
+
 def test_run_job_service_principal_failure_writes_bucket_a_audit(
     tmp_path,
 ) -> None:

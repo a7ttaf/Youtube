@@ -431,6 +431,14 @@ def request_connector_job(
             detail="A connector job for this scope is already in flight",
         )
 
+    # FIX: register the after_rollback hook IMMEDIATELY after submit_if_absent
+    # so a DB error in find_active_runs_for_scope() / finish_run() / the route
+    # audit write never leaves the reservation wedged. The companion
+    # after_commit hook is attached after the audit row is written (see
+    # _enqueue_after_commit below); splitting the two attachments means a
+    # pre-audit exception still cleans up the slot.
+    _attach_after_rollback_hook(session=session, executor=executor, reservation=reservation)
+
     superseded_run_id = _supersede_or_block_running_runs(
         session,
         tenant_id=tenant_id,
@@ -439,8 +447,10 @@ def request_connector_job(
     )
     if isinstance(superseded_run_id, _DuplicateRunBlock):
         # The in-process guard let us through but the DB has a fresh RUNNING
-        # row. Drop the reservation so the executor does not block the scope
-        # on a request that will not activate.
+        # row. The after_rollback hook would not fire here (we are still
+        # in-request and the session is healthy); cancel explicitly so the
+        # executor does not block the scope on a request that will not
+        # activate.
         executor.cancel_reservation(reservation)
         return _reject_connector_job(
             audit_sink=audit_sink,
@@ -842,36 +852,85 @@ _AFTER_COMMIT_FLAG_KEY = "ums_connector_job_after_commit_attached"
 _AFTER_ROLLBACK_FLAG_KEY = "ums_connector_job_after_rollback_attached"
 
 
+def _attach_after_rollback_hook(
+    *,
+    session: Session,
+    executor: ConnectorJobExecutor,
+    reservation: _SlotReservation,
+) -> None:
+    """Attach the after_rollback hook immediately after submit_if_absent.
+
+    The hook is the safety net for any exception between
+    ``submit_if_absent`` and ``_enqueue_after_commit`` (the DB-level
+    supersede check, the route-owned audit write, etc.). Without it a
+    raised exception would leave the reservation wedged in the executor
+    registry and block future requests for the same scope. Idempotent
+    via a one-shot flag on ``session.info``.
+    """
+    if not session.info.get(_AFTER_ROLLBACK_FLAG_KEY):
+        event.listen(session, "after_rollback", _make_after_rollback_handler(executor, reservation))
+        session.info[_AFTER_ROLLBACK_FLAG_KEY] = True
+
+
 def _enqueue_after_commit(
     *,
     session: Session,
     executor: ConnectorJobExecutor,
     reservation: _SlotReservation,
 ) -> None:
-    """Attach a one-shot after_commit / after_rollback hook pair to the request session."""
+    """Attach a one-shot after_commit hook to the request session.
+
+    The companion after_rollback hook is attached right after
+    ``submit_if_absent`` (see :func:`_attach_after_rollback_hook`) so a
+    pre-audit exception still cleans up the slot. This function only
+    handles the activate-on-commit side. Idempotent via a one-shot flag
+    on ``session.info``.
+    """
     if not session.info.get(_AFTER_COMMIT_FLAG_KEY):
         event.listen(session, "after_commit", _make_after_commit_handler(executor, reservation))
         session.info[_AFTER_COMMIT_FLAG_KEY] = True
-    if not session.info.get(_AFTER_ROLLBACK_FLAG_KEY):
-        event.listen(session, "after_rollback", _make_after_rollback_handler(executor, reservation))
-        session.info[_AFTER_ROLLBACK_FLAG_KEY] = True
 
 
 def _make_after_commit_handler(
     executor: ConnectorJobExecutor, reservation: _SlotReservation
 ):
-    """Return a one-shot hook that activates the reservation after the session commits."""
+    """Return a hook that activates the reservation after the session commits.
+
+    If activation fails (e.g. the ThreadPoolExecutor rejects new work
+    while the app is shutting down), the hook MUST persist a
+    ``job_failed_before_start`` audit row on a fresh session so the
+    committed 202 has a matching failure row in the operator's audit
+    log; otherwise the accepted job disappears from the audited run
+    lifecycle. The reservation is also dropped so a future request for
+    the same scope is not blocked by a stale slot.
+    """
     def _after_commit(_session: Session) -> None:
         try:
             executor.activate(reservation)
-        except Exception:  # noqa: BLE001 — best-effort enqueue, never raise
-            # If activation fails (e.g. executor already shut down), drop the
-            # reservation so a future request for the same scope is not
-            # blocked by a stale slot.
+        except Exception as exc:  # noqa: BLE001 — best-effort, never raise
             executor.cancel_reservation(reservation)
             logger.exception(
                 "Failed to activate connector job reservation after commit"
             )
+            # Persist a job_failed_before_start audit row so the accepted
+            # 202 has a matching failure row. The original request session
+            # is already committed/closed, so this opens a fresh session
+            # via the executor's own Bucket-A helper. The audit is
+            # best-effort: any error here is logged and never raised
+            # into the request lifecycle.
+            try:
+                executor._audit_failed_before_start(
+                    tenant_id=reservation.tenant_id,
+                    connector_key=reservation.connector_key,
+                    account_id=reservation.account_id,
+                    report_month=reservation.report_month,
+                    error_class=type(exc).__name__,
+                    actor_identity=reservation.actor_identity,
+                )
+            except Exception:  # noqa: BLE001 — best-effort audit
+                logger.exception(
+                    "Failed to persist activation-failure audit for reservation"
+                )
     return _after_commit
 
 

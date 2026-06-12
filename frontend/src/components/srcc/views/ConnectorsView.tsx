@@ -200,14 +200,17 @@ export default function ConnectorsView({ // skipcq: JS-0067
       })
       .then((result) => {
         // Refetch the run-history feed only when the executor accepted the job
-        // AND the viewer can see the feed; a record-only fallback or a viewer
-        // without connector-health does not need (or get) a refresh. The poll
+        // AND the viewer can see the feed; a record-only fallback, a dry-run
+        // (the backend intentionally creates no connector_runs row for
+        // dry-runs so the feed cannot change), or a viewer without
+        // connector-health does not need (or get) a refresh. The poll
         // variant spreads the refetch over 0/1/3/5s so the worker has time to
         // commit start_run (after the OAuth refresh) before the feed is
         // re-queried -- a single immediate refetch would miss the row.
         if (
           result !== null &&
           result.execution_status === "submitted" &&
+          !dryRun &&
           canViewConnectorHealth
         ) {
           runsReloadPoll();
