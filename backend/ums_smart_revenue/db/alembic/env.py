@@ -6,6 +6,7 @@ from sqlalchemy import engine_from_config, pool
 
 from ums_smart_revenue.db.explanation_models import ExplanationBase
 from ums_smart_revenue.db.finance_models import FinanceBase
+from ums_smart_revenue.db.migration_url import resolve_database_url
 from ums_smart_revenue.db.org_models import OrgBase
 from ums_smart_revenue.db.report_models import ReportBase
 from ums_smart_revenue.db.security_models import SecurityBase
@@ -45,13 +46,21 @@ target_metadata = [
 ]
 
 
+# ============================================================================
+# Purpose: Resolve the database URL Alembic migrates against, delegating the
+#          precedence rule to the pure, unit-tested resolver seam.
+# Database/ORM: None — returns a connection URL string.
+# Standards: Thin delegate; the precedence contract (and its tests) live in
+#            db/migration_url.py so this import-time module stays trivial.
+# Blast Radius: Migration entry point for prod + tests. No schema/data change.
+# Connections:
+#   - File: backend/ums_smart_revenue/db/migration_url.py -> resolve_database_url
+#     owns the config_file_name-gated precedence (FIX: an ambient
+#     UMS_DATABASE_URL no longer silently overrides a programmatically-injected
+#     sqlalchemy.url, which was retargeting migration tests to the wrong DB).
+# ============================================================================
 def get_database_url() -> str:
-    url = os.environ.get("UMS_DATABASE_URL") or config.get_main_option("sqlalchemy.url")
-    if not url:
-        raise RuntimeError(
-            "Database URL not configured. Set UMS_DATABASE_URL or sqlalchemy.url in alembic.ini."
-        )
-    return url
+    return resolve_database_url(config, os.environ)
 
 
 def run_migrations_offline() -> None:
