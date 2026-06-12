@@ -9,6 +9,12 @@ DATABASE_URL_ENV = "UMS_DATABASE_URL"
 TRUSTED_GATEWAY_TOKEN_ENV = "UMS_TRUSTED_GATEWAY_TOKEN"
 AUTHZ_SOURCE_ENV = "UMS_AUTHZ_SOURCE"
 GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV = "UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"
+CONNECTOR_JOB_EXECUTOR_ENABLED_ENV = "UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"
+CONNECTOR_JOB_MAX_WORKERS_ENV = "UMS_CONNECTOR_JOB_MAX_WORKERS"
+CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV = "UMS_CONNECTOR_JOB_STALE_RUNNING_HOURS"
+
+_TRUTHY_TOKENS = frozenset({"1", "true", "yes", "on"})
+_FALSY_TOKENS = frozenset({"0", "false", "no", "off", ""})
 
 AUTHZ_SOURCE_HEADERS = "headers"
 AUTHZ_SOURCE_DATABASE = "database"
@@ -33,6 +39,13 @@ class AppSettings:
     # ``connectors/google/audit.py::build_connector_service_principal``,
     # which raises ``ValueError`` when the value is needed but absent.
     google_connector_service_actor_id: str | None = None
+    # In-process connector-job executor toggle + tuning. Fail-closed OFF:
+    # when False, POST /connectors/jobs returns 503 (explicit refusal, never a
+    # silent fallback to the old recorder). max_workers / stale_running_hours
+    # are positive ints validated at load time so a typo fails closed at boot.
+    connector_job_executor_enabled: bool = False
+    connector_job_max_workers: int = 1
+    connector_job_stale_running_hours: int = 6
 
 
 @lru_cache(maxsize=1)
@@ -56,6 +69,15 @@ def load_app_settings() -> AppSettings:
         trusted_gateway_token=trusted_gateway_token or None,
         authz_source=authz_source,
         google_connector_service_actor_id=_load_google_connector_service_actor_id(),
+        connector_job_executor_enabled=_load_bool(
+            CONNECTOR_JOB_EXECUTOR_ENABLED_ENV, default=False
+        ),
+        connector_job_max_workers=_load_int(
+            CONNECTOR_JOB_MAX_WORKERS_ENV, default=1
+        ),
+        connector_job_stale_running_hours=_load_int(
+            CONNECTOR_JOB_STALE_RUNNING_HOURS_ENV, default=6
+        ),
     )
 
 
@@ -113,3 +135,62 @@ def _load_google_connector_service_actor_id() -> str | None:
             f"{GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV} must be a valid UUID"
         ) from exc
     return str(parsed)
+
+
+# ============================================================================
+# Purpose: Parse a UMS_* boolean env var at settings-load time with a two-tier
+#          contract: missing/blank -> default; recognised truthy/falsy token ->
+#          the matching bool; unrecognised token -> ValueError carrying the env
+#          name so a misconfigured deployment fails fast at boot.
+# Database/ORM: None.
+# Standards: Mirrors _load_google_connector_service_actor_id's "missing ->
+#            default vs malformed -> fail-closed" idiom; case/whitespace
+#            insensitive.
+# Blast Radius: Connector-job executor enablement (route 503 vs submit). No
+#               finance, audit, or graph projection impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/app.py -> create_app gates the executor
+#     construction on connector_job_executor_enabled.
+# ============================================================================
+def _load_bool(env_name: str, *, default: bool) -> bool:
+    """Parse a UMS_* boolean env var, failing fast on an unrecognised token."""
+    raw = environ.get(env_name)
+    if raw is None:
+        return default
+    candidate = raw.strip().lower()
+    if candidate in _TRUTHY_TOKENS:
+        return True
+    if candidate in _FALSY_TOKENS:
+        return False
+    allowed = ", ".join(sorted(_TRUTHY_TOKENS | (_FALSY_TOKENS - {""})))
+    raise ValueError(f"{env_name} must be one of: {allowed}")
+
+
+# ============================================================================
+# Purpose: Parse a UMS_* positive-int env var at settings-load time with a
+#          two-tier contract: missing/blank -> default; present-but-malformed
+#          or non-positive -> ValueError carrying the env name (a 0 or negative
+#          worker count would build a broken ThreadPoolExecutor / stale window).
+# Database/ORM: None.
+# Standards: Mirrors the UUID loader's fail-closed-at-boot idiom; rejects <= 0.
+# Blast Radius: Executor pool size + orphan-supersede age threshold. No finance,
+#               audit, or graph projection impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> consumes
+#     max_workers; the route consumes stale_running_hours.
+# ============================================================================
+def _load_int(env_name: str, *, default: int) -> int:
+    """Parse a UMS_* positive-int env var, failing fast on bad/non-positive."""
+    raw = environ.get(env_name)
+    if raw is None:
+        return default
+    candidate = raw.strip()
+    if not candidate:
+        return default
+    try:
+        parsed = int(candidate)
+    except ValueError as exc:
+        raise ValueError(f"{env_name} must be a positive integer") from exc
+    if parsed <= 0:
+        raise ValueError(f"{env_name} must be a positive integer")
+    return parsed
