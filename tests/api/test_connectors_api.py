@@ -639,12 +639,24 @@ def test_request_connector_job_orphan_supersede_then_accept(tmp_path):
                 ConnectorRunORM.account_id == "content-owner-1",
             )
         ).one()
-        audit_log = session.scalars(select(AuditLogORM)).one()
+        audit_logs = session.scalars(select(AuditLogORM)).all()
     engine.dispose()
     assert run.status == "FAILED"
     assert "superseded" in (run.error_summary or "")
-    assert audit_log.details["action"] == "job_submitted"
-    assert audit_log.details["superseded_run_id"] == str(run.id)
+    assert len(audit_logs) == 2
+    submitted_audit = next(
+        (log for log in audit_logs if log.details.get("action") == "job_submitted"), None
+    )
+    superseded_audit = next(
+        (log for log in audit_logs if log.details.get("action") == "run_superseded"), None
+    )
+    assert submitted_audit is not None
+    assert superseded_audit is not None
+    assert submitted_audit.details["superseded_run_id"] == str(run.id)
+    assert superseded_audit.details["run_id"] == str(run.id)
+    assert superseded_audit.details["action"] == "run_superseded"
+    assert superseded_audit.details["lifecycle"] == "FINISHED"
+    assert superseded_audit.details["status"] == "FAILED"
     assert len(fake.submit_calls) == 1
     assert len(fake.activate_calls) == 1
     assert fake.cancel_calls == []
@@ -694,6 +706,58 @@ def test_request_connector_job_503_service_principal_unavailable(tmp_path):
     assert fake.submit_calls == []
     assert fake.activate_calls == []
     assert fake.cancel_calls == []
+
+
+def test_request_connector_job_dry_run_skips_service_principal_preflight(
+    tmp_path,
+) -> None:
+    """Dry-runs do not require the live-run service principal.
+
+    FIX: the dry-run path does not create a connector_runs row and does
+    not emit the live-run STARTED/FINISHED service-principal audit
+    edges, so the service actor is never needed for a dry-run. Without
+    this exemption, a validate-only dry-run is unavailable in
+    environments that lack the live-run env var.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url)
+    # Drop the service-actor env var the fixture sets so the pre-flight
+    # gate WOULD fail closed for a live run.
+    os.environ.pop("UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID", None)
+    load_app_settings.cache_clear()
+    os.environ["UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"] = "true"
+    load_app_settings.cache_clear()
+    app = create_app(database_url=database_url)
+    fake = _FakeExecutor(active=False)
+    app.state.connector_job_executor = fake
+    client = TestClient(app)
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "dry_run": True,
+            "reason": "Validate-only pull",
+        },
+    )
+    # Dry-run: pre-flight skipped; the executor slot is reserved and
+    # activated normally. The route returns 202 'submitted'.
+    assert response.status_code == 202
+    assert len(fake.submit_calls) == 1
+    assert len(fake.activate_calls) == 1
+    # The audit row is the route-owned job_submitted, NOT a
+    # service_principal_unavailable rejection.
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+    engine.dispose()
+    assert audit_log.details["action"] == "job_submitted"
 
 
 def test_request_connector_job_after_rollback_cancels_reservation(

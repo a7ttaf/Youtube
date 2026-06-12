@@ -343,7 +343,12 @@ def request_connector_job(
     # landed in the catch-all log-only branch and left operators with no run
     # row and no failure audit. Reject here so the audit trail is complete
     # AND the executor slot is never wasted.
-    if settings.google_connector_service_actor_id is None:
+    # Dry-runs are exempt: the dry-run path does NOT create a connector_runs
+    # row and does NOT emit the live-run STARTED/FINISHED service-principal
+    # audit edges, so the service principal is never needed for a dry-run.
+    # The executor's job_dry_run_completed audit row is attributed to the
+    # submitting actor snapshot instead.
+    if not payload.dry_run and settings.google_connector_service_actor_id is None:
         return _reject_connector_job(
             audit_sink=audit_sink,
             user=user,
@@ -444,6 +449,8 @@ def request_connector_job(
         tenant_id=tenant_id,
         payload=payload,
         stale_hours=settings.connector_job_stale_running_hours,
+        audit_sink=audit_sink,
+        user=user,
     )
     if isinstance(superseded_run_id, _DuplicateRunBlock):
         # The in-process guard let us through but the DB has a fresh RUNNING
@@ -738,8 +745,23 @@ def _supersede_or_block_running_runs(
     tenant_id: UUID,
     payload: ConnectorJobRequest,
     stale_hours: int,
+    audit_sink: AuditSink,
+    user: UserPrincipal,
 ) -> str | _DuplicateRunBlock | None:
-    """Block on a fresh RUNNING run; supersede a stale one and return its id."""
+    """Block on a fresh RUNNING run; supersede a stale one and return its id.
+
+    FIX: when a stale RUNNING row is rewritten to FAILED, emit a matching
+    ``CONNECTOR_JOB_RUN`` terminal audit edge with
+    ``action=run_superseded`` so the stale run's lifecycle is complete
+    (STARTED -> run_superseded) in the operator's audit log. Previously
+    the database status changed but only the new job's ``job_submitted``
+    row was written, so operators inspecting the stale run's lifecycle
+    would see STARTED with no matching terminal edge even though the
+    connector_runs row was FAILED. Attributed to the submitting user
+    (the one who triggered the supersede) via the route-owned audit
+    sink -- not the connector service principal, which may not be
+    available in every environment.
+    """
     running = find_active_runs_for_scope(
         session,
         tenant_id=tenant_id,
@@ -763,6 +785,28 @@ def _supersede_or_block_running_runs(
                 status="FAILED",
                 counts=dict(entry.counts),
                 error_summary="orphaned RUNNING run superseded by new job",
+            )
+            # Terminal audit edge: run was STARTED at some point (the row
+            # was RUNNING before finish_run), and is now FAILED because a
+            # new job superseded it. Attribute to the operator who
+            # triggered the supersede.
+            _audit_connector_change(
+                audit_sink=audit_sink,
+                user=user,
+                event_type=AuditEventType.CONNECTOR_JOB_RUN,
+                connector_key=payload.connector_key,
+                account_id=payload.account_id,
+                reason=(
+                    f"orphaned RUNNING run {entry.id} superseded by new job"
+                ),
+                details={
+                    "action": "run_superseded",
+                    "run_id": entry.id,
+                    "report_month": payload.report_month,
+                    "lifecycle": "FINISHED",
+                    "status": "FAILED",
+                    "error_summary_present": True,
+                },
             )
             superseded = entry.id
     return superseded
