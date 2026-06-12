@@ -799,6 +799,13 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
   monitoring not built.
 - ✅ Month locking — shipped: explicit POST /finance-close/{month}/lock +
   /unlock workflow (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED).
+- ✅ Migration target-DB safety — alembic env.py no longer lets an ambient
+  `UMS_DATABASE_URL` silently override a programmatically-injected
+  `sqlalchemy.url`, closing the wrong-DB footgun where migration round-trip
+  tests could drop/upgrade whatever DB the env var named. Precedence extracted
+  to a pure `config.config_file_name`-gated resolver
+  (`db/migration_url.py::resolve_database_url`); production's ini-based
+  env-var-wins contract is preserved. 6 unit tests + 1 PG e2e; no schema change.
 
 ### Acceptance gate
 
