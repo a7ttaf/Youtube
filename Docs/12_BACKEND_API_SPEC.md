@@ -358,12 +358,42 @@ GET /connectors/runs?limit=50&cursor_started_at=2026-05-10T12:00:00Z&cursor_id=<
 
 Connector credential responses expose metadata only, never raw credential material or secret references.
 
-`POST /connectors/jobs` records a connector job request but does NOT execute the
-pull: it is a recorded no-op (`recorded_not_executed`) pending the connector-job
-executor (a future spec). The only production trigger that actually runs the
-end-to-end ingest today is the CLI `scripts/run_google_connector.py`, which sets
-the tenant context (`connector_tenant_context`) so the run executes correctly on
-RLS-enforced Postgres and dispatches to `connectors/runs/orchestrator.run_one`.
+`POST /connectors/jobs` submits a real Google ingest pull to the module-owned,
+bounded, in-process `ConnectorJobExecutor` and returns **202** immediately with
+`execution_status: "submitted"`. The worker thread runs the proven CLI pattern on
+its own session (`build_session_factory()()` ->
+`connector_tenant_context(tenant_id, session=session)` ->
+`connectors/runs/orchestrator.run_one`), so the run executes correctly on
+RLS-enforced Postgres. The CLI `scripts/run_google_connector.py` remains a valid
+production trigger.
+
+Request body: `connector_key`, `account_id`, `report_month` (`YYYY-MM`,
+required), `dry_run` (bool, default `false`), `reason` (required, audited).
+
+Responses:
+
+- **202** `{connector_key, account_id, report_month, dry_run,
+  execution_status: "submitted", audit_event}` (no `run_id` — the run surfaces in
+  `GET /connectors/runs` once the worker commits the RUNNING row).
+- **403** missing `connectors.run_jobs` (no audit).
+- **503** `"Connector job executor is disabled"` when the fail-closed
+  `connector_job_executor_enabled` setting is off (default OFF).
+- **422** unknown connector key / malformed `report_month` / missing or inactive
+  credential.
+- **409** duplicate in-flight (an in-process registry entry or a fresh RUNNING
+  row for the exact scope). An orphan supersede flips a stale RUNNING row (older
+  than `connector_job_stale_running_hours`, default 6h) to `FAILED` and proceeds
+  to **202** with `superseded_run_id` recorded in the audit details.
+
+Audit: exactly one route-owned `CONNECTOR_JOB_RUN` row (`details.action` is
+`job_submitted` or `job_rejected`); the worker emits its own STARTED/FINISHED
+lifecycle edges and, on a pre-start (Bucket-A) failure, a
+`job_failed_before_start` row (canned error class name only, never message text).
+
+`GET /connectors/credentials` now also returns `last_refresh_attempt_at`,
+`token_expiry_at`, `last_refresh_status` (`succeeded`/`failed`/null), and
+`last_refresh_error_class` (nullable; ISO-8601 timestamps), stamped at the single
+`resolve_connector_credentials` refresh chokepoint.
 
 `GET /connectors/runs` lists connector run history (read-only operational
 metadata) and requires `connectors.view_health`. It is tenant-scoped, accepts
