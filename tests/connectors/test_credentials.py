@@ -146,7 +146,9 @@ def test_secret_ref_prefixes_const_matches_documented_allowlist():
 # -----------------------------------------------------------------------------
 
 
-def test_entry_to_api_serializes_all_five_fields():
+def test_entry_to_api_serializes_all_fields():
+    # Part 2 added four nullable credential refresh-telemetry fields to the read
+    # shape; unstamped, they serialize as None alongside the original five keys.
     entry = ConnectorCredentialEntry(
         id="11111111-1111-1111-1111-111111111111",
         connector_key="youtube_reporting",
@@ -161,6 +163,10 @@ def test_entry_to_api_serializes_all_five_fields():
         "account_id": "content-owner-1",
         "status": "active",
         "has_secret_ref": True,
+        "last_refresh_attempt_at": None,
+        "token_expiry_at": None,
+        "last_refresh_status": None,
+        "last_refresh_error_class": None,
     }
 
 
