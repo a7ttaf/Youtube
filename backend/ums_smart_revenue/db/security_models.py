@@ -434,11 +434,26 @@ class ApiConnectorCredentialORM(SecurityBase):
         default=_TENANT_ID_DEFAULT_VALUE,
         server_default=_TENANT_ID_DEFAULT,
     )
+    last_refresh_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    token_expiry_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_refresh_status: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_refresh_error_class: Mapped[str | None] = mapped_column(
+        Text, nullable=True
+    )
 
     __table_args__ = (
         CheckConstraint(
             "status IN ('active', 'disabled', 'rotating', 'failed_auth')",
             name="ck_connector_status",
+        ),
+        CheckConstraint(
+            "last_refresh_status IS NULL "
+            "OR last_refresh_status IN ('succeeded', 'failed')",
+            name="ck_connector_last_refresh_status",
         ),
         ForeignKeyConstraint(
             ["tenant_id", "created_by"],
