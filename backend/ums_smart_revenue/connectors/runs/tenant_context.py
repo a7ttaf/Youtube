@@ -102,6 +102,32 @@ def connector_tenant_context(
         # ACTIVE-only gate the resolver applies on web requests. The
         # contextvar is set AFTER the check so a rejected tenant leaves
         # TENANT_CTX at its prior value.
+        #
+        # Transaction boundary: the SELECT inside get_by_id() is the FIRST DB
+        # call on this Session (the CLI is the documented production caller
+        # and opens a fresh session with no prior work). On Postgres this
+        # autobegins a transaction and fires the after_begin hook in
+        # db/session.py, which pins app_tenant with app_current_tenant_id()
+        # = NULL because TENANT_CTX is empty at that point. The transaction
+        # stays open after the SELECT returns, and if we yield now the
+        # caller's first DB call (e.g. run_one's _load_credential) runs in
+        # the SAME transaction with NULL tenant context -- RLS denies all
+        # tenant rows and the run recreates the fail-closed-empty CLI path
+        # this whole change is meant to fix. after_begin does NOT re-fire
+        # for continued use of an open transaction, only for new ones, so
+        # setting TENANT_CTX here is not enough.
+        #
+        # Fix: record whether the session was already in a transaction
+        # before the lookup. If it was NOT, the lookup opened the first
+        # transaction and we end it (rollback is safe: the lookup is
+        # read-only and the caller's body will autobegin a fresh
+        # transaction on its first DB access, at which point
+        # after_begin re-fires WITH TENANT_CTX set and pins the correct
+        # app_tenant + app_current_tenant_id(tenant.id)). If it WAS
+        # already in a transaction (caller-owned outer transaction,
+        # documented test path), we don't touch the boundary -- the
+        # outer transaction's role/context is the caller's contract.
+        prior_in_transaction = session.in_transaction()
         try:
             tenant = SqlAlchemyTenantRepository(session).get_by_id(tenant_id)
         except TenantNotFoundError as exc:
@@ -112,6 +138,12 @@ def connector_tenant_context(
             raise TenantLifecycleError(
                 tenant_id=tenant_id, status=tenant.status.value
             )
+        if not prior_in_transaction and session.in_transaction():
+            # End the lookup transaction so the caller's first DB call
+            # autobegins a fresh transaction and re-fires after_begin with
+            # TENANT_CTX set. Rollback is safe (read-only lookup; the
+            # tenant row was never mutated).
+            session.rollback()
     else:
         # Test-only fabrication path: build the minimal ACTIVE tenant the
         # RLS session hook needs (it reads only ``tenant.id``). Production

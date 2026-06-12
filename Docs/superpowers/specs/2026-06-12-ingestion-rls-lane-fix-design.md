@@ -80,13 +80,73 @@ code, separate review surface); a follow-up note records that.
 
 ```py
 @contextmanager
-def connector_tenant_context(tenant_id: UUID) -> Iterator[None]:
-    # TENANT_CTX.set(<minimal Tenant for tenant_id>) ... finally: reset token.
+def connector_tenant_context(
+    tenant_id: UUID,
+    *,
+    session: Session | None = None,  # REQUIRED for production callers
+) -> Iterator[None]:
+    # Production path: look up tenant by id via SqlAlchemyTenantRepository(session),
+    # enforce ACTIVE-only lifecycle gate, then end the lookup transaction (if we
+    # opened it) so the caller's first DB call autobegins a fresh transaction
+    # whose after_begin hook re-fires with TENANT_CTX set. The no-session form
+    # is retained for unit tests that exercise the contextvar contract without
+    # a live DB; production callers (CLI, future executor) MUST pass a session.
+    if session is not None:
+        tenant = SqlAlchemyTenantRepository(session).get_by_id(tenant_id)  # raises TenantLifecycleError on missing/SUSPENDED/ARCHIVED
+        # ... end the lookup transaction ...
+    else:
+        # TEST-ONLY: fabricate a minimal ACTIVE Tenant for the contextvar.
+        # Production MUST pass a session.
+        tenant = Tenant(id=tenant_id, status=TenantStatus.ACTIVE, ...)
+    token = TENANT_CTX.set(tenant)
+    try:
+        yield
+    finally:
+        TENANT_CTX.reset(token)
 ```
 
+The CLI / future executor MUST pass its open session so the lifecycle gate is enforced.
 Builds the minimal `tenancy` model object the session hook needs (the hook reads only
 `tenant.id`). Used by the CLI now, by the executor worker later (per the 2026-06-11
 executor spec).
+
+### 2a. Implementation deviations (reviewed and accepted)
+
+The implementation in `backend/ums_smart_revenue/connectors/runs/tenant_context.py`
+deviates from the helper sketch above in two load-bearing ways discovered during
+PR review and verified against a live Postgres container. Documenting them here so
+the spec stays the source of truth and future executor authors don't reverse the
+fix:
+
+- **D1 — `session` is keyword-only and required for production callers.** The
+  original sketch advertised `connector_tenant_context(tenant_id)` (no `session`),
+  with the future executor expected to use that form. After PR #94 review
+  (chatgpt-codex-connector P1, thread PRRT_kwDOSZIgN86I-MiG), the helper was
+  changed to accept the caller's session as a keyword-only argument and the
+  implementation now REQUIRES it for production callers: the tenant is loaded
+  by id and the ACTIVE-only lifecycle gate is enforced. The no-session form
+  is retained as a test-only fabrication path (it builds a stub ACTIVE Tenant
+  with no DB lookup) so unit tests can exercise the contextvar contract
+  without a live DB. The CLI passes its open session; the future executor
+  MUST do the same.
+
+- **D2 — Lookup transaction is ended before yielding.** The original sketch
+  implied the helper just `set(tenant)` and yielded. After PR #94 review
+  (chatgpt-codex-connector P1, posted 2026-06-12 on commit 4a05480), it was
+  observed that the `get_by_id` SELECT autobegins a Postgres transaction
+  whose `after_begin` hook runs with `TENANT_CTX` empty, pins `app_tenant`
+  with `app_current_tenant_id()=NULL`, and leaves the transaction open. The
+  caller's first DB call (e.g. `run_one`'s `_load_credential`) then runs in
+  the SAME transaction with `NULL` tenant context, recreating the
+  fail-closed-empty CLI path this whole change is meant to fix. The fix:
+  after the lookup, if the session was NOT already in a transaction (i.e.
+  we opened the first one, which is the documented CLI path), call
+  `session.rollback()` to end it. The caller's first DB call autobegins a
+  fresh transaction whose `after_begin` re-fires WITH `TENANT_CTX` set and
+  pins the correct role + tenant context. Rollback is safe: the lookup is
+  read-only and the tenant row was never mutated. Callers that own an
+  outer transaction are responsible for their own transaction boundary
+  (the helper does not touch an existing transaction).
 
 ### 3. Wiring (the complete set of platform-only write surfaces in the run path)
 
@@ -111,7 +171,9 @@ executor spec).
   (`app_platform` is NOBYPASSRLS). Only the credential read, the LOCKED-month prefilter
   SELECT, and the post-loop deferred Analytics stale-row flush stay on the tenant lane.
 - `scripts/run_google_connector.py` — wrap the `run_one` call in
-  `connector_tenant_context(args.tenant)`. `FIX:` comment citing the fail-closed-empty gap.
+  `connector_tenant_context(args.tenant, session=session)`. `FIX:` comment
+  citing the fail-closed-empty gap. The CLI must pass its open session
+  so the lifecycle gate is enforced (per D1 in section 2a).
 
 ### 4. `analytics_cleanup_blocked` gate restore
 

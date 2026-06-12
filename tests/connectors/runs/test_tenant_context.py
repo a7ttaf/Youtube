@@ -198,3 +198,101 @@ def test_session_path_resets_context_on_lookup_failure() -> None:
         assert get_current_tenant() is prior
     finally:
         session.close()
+
+
+def test_session_path_ends_lookup_transaction_when_session_was_idle() -> None:
+    """ChatGPT codex review (PR #94 P1, posted 2026-06-12 on commit 4a05480):
+    the ``get_by_id`` SELECT autobegins a Postgres transaction whose
+    after_begin hook runs with ``TENANT_CTX`` empty, pins ``app_tenant``
+    with ``app_current_tenant_id()=NULL``, and leaves the transaction
+    open. The caller's first DB call (e.g. ``run_one``'s
+    ``_load_credential``) then runs in the SAME transaction with NULL
+    tenant context -- RLS denies all tenant rows and the run recreates
+    the fail-closed-empty CLI path this whole change is meant to fix.
+
+    The fix: after the lookup, if the session was NOT already in a
+    transaction (i.e. the CLI path where the helper opens the first
+    transaction), end the lookup transaction via ``session.rollback()``
+    so the caller's first DB call autobegins a fresh transaction whose
+    after_begin re-fires WITH ``TENANT_CTX`` set. This test pins that
+    contract by asserting the session is NOT in a transaction at the
+    start of the body (the lookup transaction was ended) and that the
+    body can still run a fresh DB call.
+
+    PG-tier verification of the after_begin behaviour itself lives in
+    ``tests/connectors/runs/test_run_one_rls_postgres.py`` (requires
+    ``UMS_TEST_DATABASE_URL``). The SQLite tier exercises the same
+    transaction-boundary contract.
+    """
+    tenant_id = uuid4()
+    session = _build_sqlite_session(
+        rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.ACTIVE)]
+    )
+    try:
+        # Pre-condition: the session is idle (no transaction). The helper
+        # will open the first transaction for the lookup and then end it.
+        assert not session.in_transaction()
+        with connector_tenant_context(tenant_id, session=session):
+            # The lookup transaction was ended before the body ran, so the
+            # session is back to idle. The caller's first DB call (which
+            # we simulate with a session.get below) will autobegin a
+            # fresh transaction on the now-set TENANT_CTX.
+            assert not session.in_transaction()
+            # Confirm the body can still run a DB call against the same
+            # session after the lookup transaction was ended. The SELECT
+            # returns the seeded row and the session opens a healthy new
+            # transaction for it.
+            row = session.get(TenantORM, tenant_id)
+            assert row is not None
+            assert row.id == tenant_id
+        # Close the body's transaction so the test fixture can release the
+        # in-memory engine cleanly. The helper did not need to do this --
+        # the body owns the transaction it opened.
+        if session.in_transaction():
+            session.rollback()
+        assert not session.in_transaction()
+    finally:
+        session.close()
+
+
+def test_session_path_does_not_touch_caller_owned_outer_transaction() -> None:
+    """When the caller already has a transaction in flight, the helper
+    must not end it: the lookup joins the caller's transaction as a
+    savepoint, and rolling back here would discard the caller's
+    uncommitted work. The caller's outer transaction is the boundary
+    the helper respects.
+
+    PG-tier verification of the role/context pinning under a caller-owned
+    transaction lives in
+    ``tests/connectors/runs/test_run_one_rls_postgres.py``. This test
+    pins the SQLite-tier invariant that an outer transaction survives
+    the helper's exit.
+    """
+    from sqlalchemy import text
+
+    tenant_id = uuid4()
+    session = _build_sqlite_session(
+        rows=[(tenant_id, f"t-{tenant_id}", TenantStatus.ACTIVE)]
+    )
+    try:
+        # Caller opens a transaction and writes a sentinel row that must
+        # survive the helper's exit.
+        session.execute(text("CREATE TABLE _outer_marker (id INTEGER)"))
+        session.execute(text("INSERT INTO _outer_marker (id) VALUES (1)"))
+        assert session.in_transaction()
+        try:
+            with connector_tenant_context(tenant_id, session=session):
+                # Inside the helper, the session is still in the
+                # caller's transaction (the lookup joined it).
+                assert session.in_transaction()
+            # Outside the helper, the caller's transaction must still be
+            # alive (we did not roll it back).
+            assert session.in_transaction()
+            marker = session.execute(
+                text("SELECT id FROM _outer_marker")
+            ).scalar()
+            assert marker == 1
+        finally:
+            session.rollback()
+    finally:
+        session.close()
