@@ -141,7 +141,6 @@ def test_bucket_a_audit_persists_under_platform_lane_on_postgres(
     actor = ConnectorJobActor(
         user_id=str(actor_id),
         email="ops@example.com",
-        role="revenue_operations_admin",
     )
     factory = build_session_factory(pg_url)
     executor = ConnectorJobExecutor(

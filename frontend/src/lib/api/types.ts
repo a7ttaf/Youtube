@@ -522,10 +522,10 @@ export type ConnectorJobRequestBody = {
   reason: string;
 };
 
-// POST /connectors/jobs response (202). Source: request_connector_job() (connectors.py:139-144).
-// execution_status is "submitted" on the executing path (the request is audited
-// AND handed to the executor); it may still be "recorded_not_executed" when no
-// execution backend is wired (record-only fallback). The `string` type covers both.
+// POST /connectors/jobs response (202). Source: request_connector_job() (connectors.py).
+// execution_status is "submitted" on the executing path (the request is audited AND
+// handed to the executor). A disabled executor returns 503 (not a 202), surfaced as an
+// error. The `string` type stays forward-compatible with future statuses.
 export type ConnectorJobResponse = {
   connector_key: string;
   account_id: string;
