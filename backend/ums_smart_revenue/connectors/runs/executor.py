@@ -388,18 +388,7 @@ class ConnectorJobExecutor:
         actor_identity: ConnectorJobActor,
     ) -> None:
         """Write ONE CONNECTOR_JOB_RUN job_failed_before_start row, fresh session."""
-        actor = UserPrincipal(
-            user_id=actor_identity.user_id,
-            email=actor_identity.email,
-            direct_permissions=(
-                PermissionGrant(
-                    permission=Permission.RUN_CONNECTOR_JOBS,
-                    scope=AccessScope.global_scope(),
-                    active=True,
-                ),
-            ),
-            tenant_id=str(tenant_id),
-        )
+        actor = self._build_audit_actor(tenant_id=tenant_id, actor_identity=actor_identity)
         try:
             with self._session_factory() as session:
                 with connector_tenant_context(tenant_id, session=session):
@@ -448,18 +437,7 @@ class ConnectorJobExecutor:
         ``[{"report_type": ..., "error_class": ...}, ...]`` array so an
         operator console can render them directly.
         """
-        actor = UserPrincipal(
-            user_id=actor_identity.user_id,
-            email=actor_identity.email,
-            direct_permissions=(
-                PermissionGrant(
-                    permission=Permission.RUN_CONNECTOR_JOBS,
-                    scope=AccessScope.global_scope(),
-                    active=True,
-                ),
-            ),
-            tenant_id=str(tenant_id),
-        )
+        actor = self._build_audit_actor(tenant_id=tenant_id, actor_identity=actor_identity)
         per_report_failures = [
             {"report_type": report_type, "error_class": error_class}
             for report_type, error_class in outcome.per_report_failures
@@ -491,3 +469,34 @@ class ConnectorJobExecutor:
                 "Failed to persist job_dry_run_completed audit (tenant=%s)",
                 tenant_id,
             )
+
+    def _build_audit_actor(
+        self,
+        *,
+        tenant_id: UUID,
+        actor_identity: ConnectorJobActor,
+    ) -> UserPrincipal:
+        """Build the tenant-pinned ``UserPrincipal`` for an executor-owned audit row.
+
+        Shared between ``_audit_failed_before_start`` [Bucket-A
+        pre-start failure] and ``_audit_dry_run_outcome`` [dry-run
+        outcome persistence]. The principal carries
+        ``RUN_CONNECTOR_JOBS@global`` so the audit log shows the
+        executor's anonymous system identity for the row, with the
+        submitting user preserved via the reason text and the
+        SqlAlchemyAuditSink's unknown-actor stash in
+        ``details["actor_user_id"]`` (matches the Bucket-A audit
+        precedent).
+        """
+        return UserPrincipal(
+            user_id=actor_identity.user_id,
+            email=actor_identity.email,
+            direct_permissions=(
+                PermissionGrant(
+                    permission=Permission.RUN_CONNECTOR_JOBS,
+                    scope=AccessScope.global_scope(),
+                    active=True,
+                ),
+            ),
+            tenant_id=str(tenant_id),
+        )
