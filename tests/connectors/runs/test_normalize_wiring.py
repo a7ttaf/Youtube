@@ -769,3 +769,39 @@ def test_partial_with_clean_failures_normalizes() -> None:
     normalizer_cls.assert_called_once()
     normalizer.normalize_month.assert_called_once()
     session.commit.assert_called_once()
+
+
+def test_partial_with_blocked_cleanup_and_empty_failures_skips_normalize(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A PARTIAL run with analytics_cleanup_blocked=True skips even with no failures.
+
+    Defense-in-depth restore of the ``analytics_cleanup_blocked`` gate the
+    ConnectorRunOutcome docstring already promises. The flag is True only for
+    a YouTube Analytics run whose deferred stale-row cleanup was blocked by a
+    sibling failure; normalizing then would let the normalizer pick canonical
+    rows from stale, un-pruned data and rewrite facts with old revenue. The
+    flag is consumed independently of ``per_report_failures`` so the gate holds
+    even if a future regression empties that list while leaving cleanup
+    blocked. The skip emits a structured log line for operator observability,
+    mirroring the neighboring skip tests.
+    """
+    from dataclasses import replace
+    caplog.set_level(logging.INFO, logger=orchestrator.logger.name)
+    run = _run_entry(status="PARTIAL")
+    outcome = replace(
+        _outcome(run=run),
+        analytics_cleanup_blocked=True,
+        per_report_failures=[],
+    )
+    returned, normalizer_cls, session, record_failure, _ = _invoke_run_one(
+        outcome=outcome,
+    )
+    normalizer_cls.assert_not_called()
+    session.commit.assert_not_called()
+    record_failure.assert_not_called()
+    session.rollback.assert_not_called()
+    assert returned.run is not None and returned.run.status == "PARTIAL"
+    assert (
+        "ingestion normalize skipped (analytics cleanup blocked)" in caplog.text
+    )

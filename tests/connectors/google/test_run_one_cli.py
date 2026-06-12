@@ -38,6 +38,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.connectors.google.errors import TenantLifecycleError
 from ums_smart_revenue.db.report_models import ReportBase
 from ums_smart_revenue.db.security_models import SecurityBase
 from ums_smart_revenue.db.source_models import CurrencyORM
@@ -255,3 +256,86 @@ def test_cli_main_returns_2_when_credential_missing(
 
     assert exit_code == 2
     assert "CredentialNotFoundError" in captured_err.getvalue()
+
+
+def test_cli_main_returns_2_when_tenant_lifecycle_rejected(
+    session: Session, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kody review (PR #94 thread PRRT_kwDOSZIgN86I-yFZ) regression: a
+    ``TenantLifecycleError`` raised by ``connector_tenant_context`` while
+    looking up the tenant (suspended / archived / missing) MUST be caught
+    by the CLI's ``except GoogleConnectorError`` handler and translated to
+    exit code 2 with a typed error class name on stderr.
+
+    Pre-fix behaviour: the ``with`` statement listed
+    ``connector_tenant_context`` alongside ``session_factory``, so its
+    ``__enter__`` ran OUTSIDE the try block and a lookup-time
+    ``TenantLifecycleError`` propagated uncaught through ``main()``,
+    surfacing as a raw Python traceback with exit 1. Post-fix: the context
+    manager is nested inside the try block, so the typed error is caught
+    and translated to the documented exit 2 (Bucket A: pre-start_run typed
+    error, no ``connector_runs`` row created).
+    """
+    module = _load_cli_module()
+
+    class _SessionCtx:
+        def __init__(self, db_session: Session) -> None:
+            self._session = db_session
+
+        def __enter__(self) -> Session:
+            return self._session
+
+        def __exit__(self, *_exc_info: object) -> None:
+            return None
+
+    def _fake_factory() -> _SessionCtx:
+        return _SessionCtx(session)
+
+    class _StubSettings:
+        database_url = "sqlite+pysqlite:///:memory:"
+
+    def _load_stub_settings() -> _StubSettings:
+        return _StubSettings()
+
+    def _build_fake_session_factory(_url: str):
+        return _fake_factory
+
+    import contextlib
+
+    @contextlib.contextmanager
+    def _raise_on_enter(*_args, **_kwargs):
+        """Stand-in for the real helper that raises on every __enter__.
+
+        Pins that the CLI catches the typed ``TenantLifecycleError`` raised
+        during the context manager's ``__enter__`` (i.e. the lookup phase)
+        regardless of whether the underlying lookup is production or
+        test-grade. Pre-fix: the ``with`` statement listed
+        ``connector_tenant_context`` alongside ``session_factory``, so its
+        ``__enter__`` ran OUTSIDE the try block and the typed error
+        propagated uncaught. Post-fix: the context manager is nested inside
+        the try block, so the existing ``except GoogleConnectorError``
+        translates the typed error to exit 2.
+        """
+        raise TenantLifecycleError(tenant_id=TENANT_ID, status="SUSPENDED")
+        yield  # pragma: no cover -- unreachable, the raise above is the test surface
+
+    monkeypatch.setattr(module, "load_app_settings", _load_stub_settings)
+    monkeypatch.setattr(module, "build_session_factory", _build_fake_session_factory)
+    monkeypatch.setattr(module, "connector_tenant_context", _raise_on_enter)
+
+    captured_err = io.StringIO()
+    monkeypatch.setattr(sys, "stderr", captured_err)
+
+    exit_code = module.main(
+        [
+            "--tenant", str(TENANT_ID),
+            "--connector", "youtube-reporting",
+            "--account", "any-account",
+            "--month", "2026-05",
+        ]
+    )
+
+    assert exit_code == 2
+    stderr = captured_err.getvalue()
+    assert "TenantLifecycleError" in stderr
+    assert "SUSPENDED" in stderr

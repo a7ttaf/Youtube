@@ -17,6 +17,7 @@ from ums_smart_revenue.connectors.runs.repository import (
     ConnectorRunEntry,
     record_projection_failure,
 )
+from ums_smart_revenue.db.lane import platform_lane
 from ums_smart_revenue.finance.google_source_normalizer import GoogleSourceNormalizer
 from ums_smart_revenue.finance.month_close import get_month_close_status
 from ums_smart_revenue.finance.revenue_facts import RevenueFactLockedMonthError
@@ -82,27 +83,35 @@ class SqlAlchemyIngestedSourceRowNormalizationAdapter:
             normalizer = GoogleSourceNormalizer(
                 self._session, tenant_id=self._tenant_id
             )
-            result = normalizer.normalize_month(
-                month=report_month,
-                actor_user_id=actor_user_id,
-            )
-            for fact in result.created:
-                _emit_normalized_fact_audit(
-                    audit_sink=audit_sink,
-                    audit_actor=audit_actor,
-                    run=run,
-                    fact=fact,
-                    lifecycle="CREATED",
+            # FIX: the normalize write set is platform-only -- record_fact upserts
+            # monthly_channel_revenue_facts, get_or_create_month_close_row can
+            # INSERT an OPEN finance_month_close row, and the REPORT_IMPORTED
+            # emits write audit_logs (all TENANT_PLATFORM_ONLY_WRITE). Elevate
+            # the write block through commit so the tenant lane (CLI / executor)
+            # does not permission-deny. The LOCKED prefilter SELECT above stays
+            # on the tenant lane (read, policy-scoped). No-op off Postgres.
+            with platform_lane(self._session):
+                result = normalizer.normalize_month(
+                    month=report_month,
+                    actor_user_id=actor_user_id,
                 )
-            for fact in result.updated:
-                _emit_normalized_fact_audit(
-                    audit_sink=audit_sink,
-                    audit_actor=audit_actor,
-                    run=run,
-                    fact=fact,
-                    lifecycle="UPDATED",
-                )
-            self._session.commit()
+                for fact in result.created:
+                    _emit_normalized_fact_audit(
+                        audit_sink=audit_sink,
+                        audit_actor=audit_actor,
+                        run=run,
+                        fact=fact,
+                        lifecycle="CREATED",
+                    )
+                for fact in result.updated:
+                    _emit_normalized_fact_audit(
+                        audit_sink=audit_sink,
+                        audit_actor=audit_actor,
+                        run=run,
+                        fact=fact,
+                        lifecycle="UPDATED",
+                    )
+                self._session.commit()
         except RevenueFactLockedMonthError:
             self._session.rollback()
             logger.info(
@@ -158,32 +167,39 @@ def _record_projection_failure_on_run(
             run.id,
         )
         return
-    record_projection_failure(
-        session,
-        tenant_id=tenant_id,
-        connector_run_id=run_id,
-        error_summary=error_summary,
-    )
     audit_actor = build_connector_service_principal(tenant_id=tenant_id)
     audit_sink: AuditSink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
-    record_audit_event(
-        sink=audit_sink,
-        actor=audit_actor,
-        event_type=AuditEventType.CONNECTOR_JOB_RUN,
-        entity_type="connector_run",
-        entity_id=run.id,
-        scope=AccessScope.connector(run.connector_key),
-        reason="post-run normalize failed; run rewritten to FAILED",
-        details={
-            "lifecycle": "PROJECTION_FAILED",
-            "run_id": run.id,
-            "connector_key": run.connector_key,
-            "account_id": run.account_id,
-            "report_month": run.report_month,
-            "error_summary_present": True,
-        },
-    )
-    session.commit()
+    # FIX: the connector_runs rewrite is tenant-writable, but the
+    # PROJECTION_FAILED audit emit writes audit_logs (platform-only). Elevate
+    # the whole short transaction so the audit INSERT does not permission-deny
+    # on the tenant lane -- otherwise the FAILED rewrite rolls back with it and
+    # the durable run stays SUCCEEDED with zero facts (the P2 compounding
+    # break). No-op off Postgres.
+    with platform_lane(session):
+        record_projection_failure(
+            session,
+            tenant_id=tenant_id,
+            connector_run_id=run_id,
+            error_summary=error_summary,
+        )
+        record_audit_event(
+            sink=audit_sink,
+            actor=audit_actor,
+            event_type=AuditEventType.CONNECTOR_JOB_RUN,
+            entity_type="connector_run",
+            entity_id=run.id,
+            scope=AccessScope.connector(run.connector_key),
+            reason="post-run normalize failed; run rewritten to FAILED",
+            details={
+                "lifecycle": "PROJECTION_FAILED",
+                "run_id": run.id,
+                "connector_key": run.connector_key,
+                "account_id": run.account_id,
+                "report_month": run.report_month,
+                "error_summary_present": True,
+            },
+        )
+        session.commit()
 
 
 def _emit_normalized_fact_audit(

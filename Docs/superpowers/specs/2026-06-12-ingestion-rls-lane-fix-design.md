@@ -1,0 +1,306 @@
+# Ingestion RLS lane fix — make the merged pipeline executable on Postgres
+
+Date: 2026-06-12
+Status: Locked design (prerequisite carved out of the 2026-06-11 connector-jobs executor
+spec after the deep audit); implementation on this branch.
+Branch: `fix/ingestion-rls-lane` (off main `82fd67f`, PR #93)
+
+## Problem (both findings adversarially verified on main `82fd67f`)
+
+The merged ingestion pipeline (#90 normalize wiring + #93 adapter) composes end-to-end
+**only on SQLite** — and the all-SQLite test coverage of this path is exactly why two green
+full-suite runs never caught it:
+
+1. **P1 — CLI dead under RLS.** `scripts/run_google_connector.py` (the only production
+   trigger; `POST /connectors/jobs` is still `recorded_not_executed`) builds a tenant-lane
+   session but never sets `TENANT_CTX`. On Postgres the `after_begin` hook
+   (`db/session.py:153-196`) finds no tenant, clears the trusted context row, and pins
+   `app_tenant`; `app_current_tenant_id()` returns NULL, every tenant-table policy denies all
+   rows, and `run_one` dies at `_load_credential` with a misleading
+   `CredentialNotFoundError` (exit 2) before any ingest. Fail-closed, but the deliverable
+   cannot run against the source of truth.
+2. **P2 — platform-only writes on the tenant lane.** Even with context set, the run path
+   writes three tables that Track-E migration `20260608_0001` grants **no** `app_tenant`
+   DML on (`TENANT_PLATFORM_ONLY_WRITE_TABLES`, pinned by
+   `tests/tenancy/test_rls_grant_surface.py:117-135`):
+   - `audit_logs` — run-lifecycle emits (`orchestrator.py` start/finish transactions) and
+     the normalization `REPORT_IMPORTED` / `PROJECTION_FAILED` emits;
+   - `monthly_channel_revenue_facts` — `record_fact` upserts via
+     `GoogleSourceNormalizer.normalize_month`;
+   - `finance_month_close` — `get_or_create_month_close_row(for_update=True)` can INSERT an
+     OPEN row (`google_source_normalizer.py:217-222`).
+   Compounding contract break: when the fact INSERT denies,
+   `_record_projection_failure_on_run`'s own audit INSERT also denies, the FAILED rewrite
+   rolls back, and the durable `connector_runs` row stays **SUCCEEDED with zero facts**.
+
+Verified P3 ride-alongs (same files, fixed here):
+
+3. `ConnectorRunOutcome.analytics_cleanup_blocked` is write-only: the docstrings
+   (`orchestrator.py:200-207`, `:846-852`) claim the normalize gate consumes it, but the
+   gate read was removed in `a3a584a`. Today's safety is incidental (blocked=True always
+   co-occurs with a `per_report_failures` entry) — a phantom guard on the finance projection
+   path.
+4. Docs drift: `Docs/13_SQL_DATA_MODEL.md:241` still calls `google_revenue_source_rows`
+   "planned"; `Docs/12_BACKEND_API_SPEC.md:364-367` still calls fact normalization "future";
+   the `/connectors/jobs` no-op contract and the run-driven `REPORT_IMPORTED` /
+   `PROJECTION_FAILED` audit semantics are undocumented.
+
+## Design (locked)
+
+### 1. Lane helper — `backend/ums_smart_revenue/db/lane.py`
+
+A context manager generalizing the sanctioned single-session elevation precedent
+(`finance/committed_allocation.py:245-288`):
+
+```py
+@contextmanager
+def platform_lane(session: Session) -> Iterator[None]:
+    # No-op off Postgres. On Postgres: ensure the transaction has begun
+    # (session.connection() — the after_begin hook fires first and pins the
+    # session's configured lane), set a session.info flag, then SET LOCAL ROLE
+    # "app_platform". MEASURED semantics (probe-verified, NOT the SET-LOCAL
+    # textbook): while the flag is set the after_begin hook re-elevates to
+    # app_platform on EVERY transaction begun on the session and skips the
+    # app_tenant demote, so the elevation persists across a mid-block commit, a
+    # mid-block rollback, and nested SAVEPOINTs — it ends only at block exit
+    # (flag popped in finally). On exit, restore "app_tenant" ONLY for
+    # tenant-lane sessions (session.info marker) AND only when the entry
+    # transaction is still active+healthy (skip when not in a transaction and
+    # when the txn is in error state); platform-lane sessions stay elevated. On
+    # a body exception the restore is skipped (success-gated); the caller's
+    # rollback ends the transaction and the next after_begin re-pins the lane.
+```
+
+Atomicity is the point: the run path's facts+audit+commit stay one transaction on one
+session (the #90/#93 contract), unlike the API's two-session platform-binding pattern.
+`committed_allocation.py` is **not** refactored onto the helper in this PR (merged finance
+code, separate review surface); a follow-up note records that.
+
+### 2. Tenant context helper — `backend/ums_smart_revenue/connectors/runs/tenant_context.py`
+
+```py
+@contextmanager
+def connector_tenant_context(
+    tenant_id: UUID,
+    *,
+    session: Session | None = None,  # REQUIRED for production callers
+) -> Iterator[None]:
+    # Production path: look up tenant by id via SqlAlchemyTenantRepository(session),
+    # enforce ACTIVE-only lifecycle gate, then end the lookup transaction (if we
+    # opened it) so the caller's first DB call autobegins a fresh transaction
+    # whose after_begin hook re-fires with TENANT_CTX set. The no-session form
+    # is retained for unit tests that exercise the contextvar contract without
+    # a live DB; production callers (CLI, future executor) MUST pass a session.
+    if session is not None:
+        tenant = SqlAlchemyTenantRepository(session).get_by_id(tenant_id)  # raises TenantLifecycleError on missing/SUSPENDED/ARCHIVED
+        # ... end the lookup transaction ...
+    else:
+        # TEST-ONLY: fabricate a minimal ACTIVE Tenant for the contextvar.
+        # Production MUST pass a session.
+        tenant = Tenant(id=tenant_id, status=TenantStatus.ACTIVE, ...)
+    token = TENANT_CTX.set(tenant)
+    try:
+        yield
+    finally:
+        TENANT_CTX.reset(token)
+```
+
+The CLI / future executor MUST pass its open session so the lifecycle gate is enforced.
+Builds the minimal `tenancy` model object the session hook needs (the hook reads only
+`tenant.id`). Used by the CLI now, by the executor worker later (per the 2026-06-11
+executor spec).
+
+### 2a. Implementation deviations (reviewed and accepted)
+
+The implementation in `backend/ums_smart_revenue/connectors/runs/tenant_context.py`
+deviates from the helper sketch above in two load-bearing ways discovered during
+PR review and verified against a live Postgres container. Documenting them here so
+the spec stays the source of truth and future executor authors don't reverse the
+fix:
+
+- **D1 — `session` is keyword-only and required for production callers.** The
+  original sketch advertised `connector_tenant_context(tenant_id)` (no `session`),
+  with the future executor expected to use that form. After PR #94 review
+  (chatgpt-codex-connector P1, thread PRRT_kwDOSZIgN86I-MiG), the helper was
+  changed to accept the caller's session as a keyword-only argument and the
+  implementation now REQUIRES it for production callers: the tenant is loaded
+  by id and the ACTIVE-only lifecycle gate is enforced. The no-session form
+  is retained as a test-only fabrication path (it builds a stub ACTIVE Tenant
+  with no DB lookup) so unit tests can exercise the contextvar contract
+  without a live DB. The CLI passes its open session; the future executor
+  MUST do the same.
+
+- **D2 — Lookup transaction is ended before yielding.** The original sketch
+  implied the helper just `set(tenant)` and yielded. After PR #94 review
+  (chatgpt-codex-connector P1, posted 2026-06-12 on commit 4a05480), it was
+  observed that the `get_by_id` SELECT autobegins a Postgres transaction
+  whose `after_begin` hook runs with `TENANT_CTX` empty, pins `app_tenant`
+  with `app_current_tenant_id()=NULL`, and leaves the transaction open. The
+  caller's first DB call (e.g. `run_one`'s `_load_credential`) then runs in
+  the SAME transaction with `NULL` tenant context, recreating the
+  fail-closed-empty CLI path this whole change is meant to fix. The fix:
+  after the lookup, if the session was NOT already in a transaction (i.e.
+  we opened the first one, which is the documented CLI path), call
+  `session.rollback()` to end it. The caller's first DB call autobegins a
+  fresh transaction whose `after_begin` re-fires WITH `TENANT_CTX` set and
+  pins the correct role + tenant context. Rollback is safe: the lookup is
+  read-only and the tenant row was never mutated. Callers that own an
+  outer transaction are responsible for their own transaction boundary
+  (the helper does not touch an existing transaction).
+
+### 3. Wiring (the complete set of platform-only write surfaces in the run path)
+
+- `orchestrator.py` — wrap with `platform_lane(session)`:
+  - the `start_run` + `emit_run_started` + commit transaction;
+  - the `finish_run` + `emit_run_finished` + commit transactions
+    (`_finish_failed_live_run`, `_finish_aggregate_live_run`);
+  - the `_sweep_unfinished_live_run` rescue transaction (also emits);
+  - dry-run emits if any exist (audit-only; verify during implementation).
+- `connectors/runs/normalization.py` — wrap:
+  - the normalize block (facts + month-close get-or-create + `REPORT_IMPORTED` emits +
+    commit) in `normalize_after_run`;
+  - `_record_projection_failure_on_run` (run rewrite is tenant-writable but the
+    `PROJECTION_FAILED` emit is not; the whole short transaction elevates).
+  The LOCKED prefilter SELECT stays on the tenant lane (read, policy-scoped) — elevation
+  starts only where platform-only writes begin.
+- Per-report ingest transactions (raw files, source rows, mark_parsed, in-savepoint stale
+  deletes) are **elevated** (see deviation D2 below). Although the ingest rows themselves are
+  tenant-writable, each iteration's `DOWNLOADED` / `PARSED` / `FAILED` audit edges
+  (`audit_logs`, platform-only) commit atomically with the ingest evidence in the same
+  transaction, so the whole iteration runs on `app_platform`. RLS still scopes every write
+  (`app_platform` is NOBYPASSRLS). Only the credential read, the LOCKED-month prefilter
+  SELECT, and the post-loop deferred Analytics stale-row flush stay on the tenant lane.
+- `scripts/run_google_connector.py` — wrap the `run_one` call in
+  `connector_tenant_context(args.tenant, session=session)`. `FIX:` comment
+  citing the fail-closed-empty gap. The CLI must pass its open session
+  so the lifecycle gate is enforced (per D1 in section 2a).
+
+### 4. `analytics_cleanup_blocked` gate restore
+
+Re-consume the flag explicitly in `_normalize_ingested_source_rows` (defense-in-depth, as
+both docstrings already promise): a PARTIAL run with `analytics_cleanup_blocked=True` skips
+normalize even if `per_report_failures` is empty. Strictly more conservative; pin with a new
+wiring test (blocked=True + empty failures → not invoked). Docstrings then match behavior.
+
+### 5. Docs
+
+`Docs/13:241` planned→live wording; `Docs/12` ingestion section rewritten to current
+behavior (source-rows API exists; post-run normalization writes facts; run-driven
+`REPORT_IMPORTED` with `triggered_by_run_id` + `PROJECTION_FAILED` run-rewrite semantics;
+`/connectors/jobs` documented as a recorded no-op pending the executor spec). `Docs/15`
+inline status entry for this PR.
+
+## Alternatives considered
+
+- **Two-session platform-binding pattern (API precedent).** The API handler opens a
+  SECOND session bound to the platform role for platform-only writes; the request
+  session stays on the tenant lane. Pros: clear lane separation, each session has
+  one role, no in-transaction `SET LOCAL ROLE` juggling. Cons: the run path's
+  contract requires atomic facts+audit+commit in one transaction on one session
+  (the #90/#93 wiring — see `connectors/runs/orchestrator.py`
+  `_handle_live_produced_report` and `connectors/runs/normalization.py`
+  `normalize_after_run`); splitting into two sessions breaks this contract and
+  would require either a two-phase commit across sessions or a re-architecture
+  of the normalize/ingest loop that defeats the whole point of the per-report
+  "audit edge commits with the evidence" design. The single-session elevation
+  via `platform_lane` keeps the run path's atomicity intact while still letting
+  the platform-only writes land on `app_platform`.
+
+- **SET LOCAL ROLE per statement (no `session.info` flag).** Execute
+  `SET LOCAL ROLE app_platform` immediately before each platform-only write and
+  `SET LOCAL ROLE app_tenant` immediately after. Pros: no session-level state, no
+  custom flag, all role changes are visible in the SQL log. Cons: `SET LOCAL` is
+  transaction-scoped, so a per-report iteration that does `session.commit()`
+  mid-block would reset the role on the next transaction; the after_begin hook
+  re-pins `app_tenant` after every commit/rollback, so the platform-only audit
+  INSERTs would permission-deny on the tenant lane. The `session.info` flag
+  survives commit/rollback (it's session-level) and lets the after_begin hook
+  know "we're inside a `platform_lane` block, keep the elevation". The
+  load-bearing flag is set/popped ONLY by `db/lane.py`, and the SQLite tier is
+  unaffected (the hook returns early on the SQLite dialect).
+
+- **Wrap the runner in `session.begin_nested()` (SAVEPOINT) instead of using
+  `session.info`.** A savepoint would let the platform_lane block own its own
+  sub-transaction. Pros: explicit transaction scope. Cons: SAVEPOINTs in
+  SQLAlchemy fire `after_begin` on entry, which would re-pin `app_tenant` and
+  silently undo the elevation mid-block; the session-level flag is what lets
+  the after_begin hook re-elevate on every sub-transaction. Same load-bearing
+  reason as the previous alternative.
+
+## Test obligations (TDD; the PG tests are the heart of this PR)
+
+- **PG-tier (new file, e.g. `tests/connectors/runs/test_run_one_rls_postgres.py`)**, using
+  the existing `require_postgres_url` + migrated-to-head harness patterns:
+  1. RED first: on a tenant-lane session with `TENANT_CTX` set, the pre-fix lifecycle-emit
+     transaction and the pre-fix normalization write set raise permission-denied — written
+     and observed failing BEFORE the wiring fix lands (run-to-fail logged in the task).
+  2. GREEN: post-fix, a simulated live run (network layer stubbed; DB writes real) drives
+     `run_one` end-to-end on Postgres: connector run row SUCCEEDED, source rows present,
+     facts projected, `REPORT_IMPORTED` + lifecycle audit rows present — all scoped to the
+     context tenant.
+  3. Cross-tenant isolation: with tenant A context, rows for tenant B remain invisible
+     (read) and unwritable.
+  4. CLI context helper: without it, `_load_credential` sees nothing (fail-closed pin);
+     with it, the credential row resolves.
+  5. Projection-failure path on PG: a forced normalize error rewrites the run FAILED and
+     persists the `PROJECTION_FAILED` audit row (the P2 compounding break, now working).
+- **SQLite unit tests**: `platform_lane` no-ops off Postgres; restores `app_tenant` for
+  tenant-lane sessions on a stubbed PG connection; `connector_tenant_context` sets/resets
+  `TENANT_CTX` (exception-safe); the `analytics_cleanup_blocked` gate test above; all
+  existing wiring/gate tests stay green untouched.
+- **Grant-surface tests untouched** — this PR changes no grants, no policies, no migration.
+
+## Blast-radius review
+
+- **Tables/ORM**: none changed; no migration. New code paths write the same rows through
+  the same repositories, on the correct lane.
+- **PostgreSQL source of truth**: yes — this PR is what makes that statement true in
+  practice for ingestion.
+- **Authorization more permissive?** The elevation widens *which DB role* executes
+  already-trusted writes inside the orchestrator (service-principal-actor paths that API
+  routes already perform via platform-bound sessions). RLS tenant scoping still applies to
+  `app_platform` (NOBYPASSRLS + context-row policies). No grant, policy, route, or
+  permission change; tenant-lane request code cannot reach the helper's elevation without
+  already holding the session object. Fail-closed behaviors (missing context → empty) are
+  preserved and now tested on PG.
+- **Finance/locks**: locked-month guards unchanged (3 layers re-verified in the #93 review);
+  the gate restore in item 4 is strictly more conservative.
+- **Neo4j**: No graph projection impact detected (no graph code in backend/ — re-verified
+  2026-06-11).
+- **Rollback**: code-only revert; no data reset.
+
+## Non-goals
+
+- No executor (next PR, after the 2026-06-11 spec review).
+- No grant/policy/migration changes; no credential telemetry; no celery.
+- No refactor of `committed_allocation.py` onto the new helper (follow-up note only).
+
+## Implementation deviations (reviewed and accepted)
+
+These corrections were probe-verified against the live PG container during the fix pass and
+supersede the original locked text above where they conflict.
+
+- **D1 — `after_begin` flag is load-bearing for full-block elevation.** The original sketch
+  implied `SET LOCAL ROLE` elevation ends with the first commit/rollback inside the block.
+  Measured: the `after_begin` hook fires for every transaction begun on the session
+  (including nested SAVEPOINTs), and its first action is an unconditional `SET LOCAL ROLE
+  "app_platform"`; while `_PLATFORM_LANE_ACTIVE_KEY` is set it then SKIPS the `app_tenant`
+  demote. So elevation persists across a mid-block commit, a mid-block rollback, and nested
+  savepoints — it ends only at block exit when the flag is popped. The per-report failure
+  recorder (`orchestrator.py:_record_live_report_failure`) relies on this: it rolls back /
+  commits mid-block and then writes the platform-only `FAILED` audit edge.
+- **D2 — per-report iterations are elevated, not tenant-lane.** The spec's original premise
+  ("Per-report ingest transactions stay tenant-lane") was wrong: each iteration's
+  `DOWNLOADED` / `PARSED` / `FAILED` audit edges (`audit_logs`, platform-only) commit
+  atomically with the ingest evidence in the same transaction, so the whole iteration must
+  run on `app_platform`. RLS (NOBYPASSRLS + trusted-context WITH CHECK) still scopes every
+  write; cross-tenant and no-context platform writes are rejected (pinned by
+  `test_cross_tenant_platform_write_denied_under_elevation`).
+- **D3 — clean-exit restore is success-and-healthy-txn-gated.** The restore runs only on a
+  clean exit AND only when the entry transaction is still active and healthy: skipped when
+  the session is not in a transaction (post-commit/post-rollback bodies — avoids autobegining
+  an idle-in-transaction connection just to set a role the next `after_begin` re-pins) and
+  skipped when the in-flight transaction is in error state (avoids raising
+  `InFailedSqlTransaction` out of `__exit__` and masking the real error). On a body exception
+  the restore is skipped entirely; the caller's rollback ends the transaction and the next
+  `after_begin` re-pins the tenant lane.

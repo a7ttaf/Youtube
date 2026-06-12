@@ -145,6 +145,7 @@ from ums_smart_revenue.connectors.runs.repository import (
     start_run,
     validate_report_month,
 )
+from ums_smart_revenue.db.lane import platform_lane
 from ums_smart_revenue.db.report_models import RawReportFileORM
 from ums_smart_revenue.db.security_models import ApiConnectorCredentialORM
 
@@ -505,6 +506,24 @@ def _normalize_ingested_source_rows(
             len(outcome.per_report_failures),
         )
         return
+    # FIX: restore the analytics_cleanup_blocked gate read removed in a3a584a.
+    # The ConnectorRunOutcome docstring promises this gate consumes the flag,
+    # but the read was dropped, leaving a phantom guard: today's safety is
+    # incidental (blocked=True co-occurs with a per_report_failures entry, so
+    # the check above already returned). This makes the guard real and strictly
+    # more conservative -- a PARTIAL Analytics run whose deferred stale-row
+    # cleanup did not complete skips normalize even if per_report_failures is
+    # empty, because the un-pruned stale rows could be picked as canonical and
+    # rewrite facts with old revenue.
+    if run.status == "PARTIAL" and outcome.analytics_cleanup_blocked:
+        logger.info(
+            "ingestion normalize skipped (analytics cleanup blocked) "
+            "tenant_id=%s month=%s run_id=%s",
+            tenant_id,
+            report_month,
+            run.id,
+        )
+        return
     rows_upserted_total = int(outcome.counts.get("rows_upserted_total") or 0)
     rows_deleted_stale = int(outcome.counts.get("rows_deleted_stale") or 0)
     if rows_upserted_total <= 0 and rows_deleted_stale <= 0:
@@ -742,23 +761,28 @@ def _run_live(
     # ============================================================================
     audit_actor = build_connector_service_principal(tenant_id=tenant_id)
 
-    run_entry = start_run(
-        session,
-        tenant_id=tenant_id,
-        connector_key=connector_key,
-        account_id=account_id,
-        report_month=report_month,
-        triggered_by_user_id=triggered_by_user_id,
-    )
     audit_sink: AuditSink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
-    # Spec §8.4: CONNECTOR_JOB_RUN/STARTED is committed with start_run -- the
-    # STARTED row and the run row share one transaction, so a process crash
-    # between the two writes cannot leave a RUNNING run without its STARTED
-    # audit edge.
-    emit_run_started(
-        sink=audit_sink, actor=audit_actor, run=run_entry, dry_run=False,
-    )
-    session.commit()
+    # FIX: the STARTED edge writes audit_logs (TENANT_PLATFORM_ONLY_WRITE), so
+    # elevate the start_run + emit + commit transaction to app_platform; on the
+    # tenant lane (CLI / executor) the audit INSERT would permission-deny and
+    # the run could not even open. No-op off Postgres.
+    with platform_lane(session):
+        run_entry = start_run(
+            session,
+            tenant_id=tenant_id,
+            connector_key=connector_key,
+            account_id=account_id,
+            report_month=report_month,
+            triggered_by_user_id=triggered_by_user_id,
+        )
+        # Spec §8.4: CONNECTOR_JOB_RUN/STARTED is committed with start_run -- the
+        # STARTED row and the run row share one transaction, so a process crash
+        # between the two writes cannot leave a RUNNING run without its STARTED
+        # audit edge.
+        emit_run_started(
+            sink=audit_sink, actor=audit_actor, run=run_entry, dry_run=False,
+        )
+        session.commit()
 
     counts = _zero_counts()
     per_report_failures: list[tuple[str, str]] = []
@@ -868,28 +892,40 @@ def _process_live_reports(
         report_month=report_month,
         account_id=account_id,
     ):
-        raw_file_count = _handle_live_produced_report(
-            session=session,
-            tenant_id=tenant_id,
-            connector_key=connector_key,
-            account_id=account_id,
-            report_month=report_month,
-            triggered_by_user_id=triggered_by_user_id,
-            run_entry=run_entry,
-            backend=backend,
-            scheme=scheme,
-            bucket=bucket,
-            parser=parser,
-            repo=repo,
-            produced=produced,
-            ordering_index=ordering_index,
-            counts=counts,
-            per_report_failures=per_report_failures,
-            per_report_failure_details=per_report_failure_details,
-            deferred_analytics_cleanup=deferred_analytics_cleanup,
-            audit_sink=audit_sink,
-            audit_actor=audit_actor,
-        )
+        # FIX: each per-report transaction commits raw-file + source-row writes
+        # (tenant-writable) TOGETHER with its DOWNLOADED / PARSED / FAILED audit
+        # edges (audit_logs is TENANT_PLATFORM_ONLY_WRITE). Elevate the whole
+        # per-report iteration so the audit INSERTs do not permission-deny on
+        # the tenant lane. MEASURED semantics: the elevation spans the entire
+        # iteration -- it persists across the iteration's internal commit AND
+        # the failure recorder's mid-block rollback+commit (which then writes
+        # the platform-only FAILED audit edge), because the after_begin hook
+        # keeps re-elevating while the platform-lane flag is set. The elevation
+        # ends only at block exit; the next iteration re-pins app_tenant via the
+        # next after_begin (the flag was popped on exit).
+        with platform_lane(session):
+            raw_file_count = _handle_live_produced_report(
+                session=session,
+                tenant_id=tenant_id,
+                connector_key=connector_key,
+                account_id=account_id,
+                report_month=report_month,
+                triggered_by_user_id=triggered_by_user_id,
+                run_entry=run_entry,
+                backend=backend,
+                scheme=scheme,
+                bucket=bucket,
+                parser=parser,
+                repo=repo,
+                produced=produced,
+                ordering_index=ordering_index,
+                counts=counts,
+                per_report_failures=per_report_failures,
+                per_report_failure_details=per_report_failure_details,
+                deferred_analytics_cleanup=deferred_analytics_cleanup,
+                audit_sink=audit_sink,
+                audit_actor=audit_actor,
+            )
         ordering_index += max(raw_file_count, 1)
     if deferred_analytics_cleanup is not None:
         counts["rows_deleted_stale"] += _flush_deferred_stale_cleanup_plans(
@@ -1118,6 +1154,19 @@ def _record_live_report_failure(
             )
         session.commit()
     except Exception:
+        # FIX: the swallow here previously logged nothing, against the repo's
+        # error-handling rules -- a lane regression (e.g. the FAILED audit edge
+        # permission-denying on the wrong DB role) would silently drop the
+        # per-report FAILED state and the run would still terminate PARTIAL with
+        # no diagnostic trail. Log before swallowing (run/report identifiers
+        # only -- no secret values, no raw SQL values). Control flow is
+        # unchanged on purpose: the run MUST still terminate PARTIAL.
+        logger.exception(
+            "Failed to persist per-report failure state for "
+            "run_id=%s report_type=%s; rolling back the failure write.",
+            run_entry.id,
+            report_type,
+        )
         session.rollback()
 
 
@@ -1144,18 +1193,23 @@ def _finish_failed_live_run(
 ) -> ConnectorRunEntry:
     """Close a live run as FAILED (bucket-A short-circuit) with the supplied error class."""
     session.rollback()
-    finished_run = finish_run(
-        session,
-        tenant_id=tenant_id,
-        connector_run_id=UUID(run_entry.id),
-        status="FAILED",
-        counts=counts,
-        error_summary=f"{type(exc).__name__}: {exc!s}",
-    )
-    # Spec §8.4: CONNECTOR_JOB_RUN/FINISHED is committed with finish_run so
-    # the terminal state and its audit row share one transaction.
-    emit_run_finished(sink=audit_sink, actor=audit_actor, run=finished_run)
-    session.commit()
+    # FIX: the FINISHED edge writes audit_logs (TENANT_PLATFORM_ONLY_WRITE);
+    # elevate the finish_run + emit + commit so the terminal write does not
+    # permission-deny on the tenant lane. The rollback above is left outside
+    # the block so the elevation wraps a clean new transaction.
+    with platform_lane(session):
+        finished_run = finish_run(
+            session,
+            tenant_id=tenant_id,
+            connector_run_id=UUID(run_entry.id),
+            status="FAILED",
+            counts=counts,
+            error_summary=f"{type(exc).__name__}: {exc!s}",
+        )
+        # Spec §8.4: CONNECTOR_JOB_RUN/FINISHED is committed with finish_run so
+        # the terminal state and its audit row share one transaction.
+        emit_run_finished(sink=audit_sink, actor=audit_actor, run=finished_run)
+        session.commit()
     return finished_run
 
 
@@ -1171,17 +1225,21 @@ def _finish_aggregate_live_run(
 ) -> ConnectorRunEntry:
     """Close a live run as SUCCEEDED/PARTIAL based on the aggregated per-report counts."""
     status = _derive_terminal_status(counts)
-    finished_run = finish_run(
-        session,
-        tenant_id=tenant_id,
-        connector_run_id=UUID(run_entry.id),
-        status=status,
-        counts=counts,
-        error_summary=_summarize_failures(per_report_failure_details),
-    )
-    # Spec §8.4: CONNECTOR_JOB_RUN/FINISHED commits with finish_run.
-    emit_run_finished(sink=audit_sink, actor=audit_actor, run=finished_run)
-    session.commit()
+    # FIX: elevate the finish_run + FINISHED emit + commit; the audit_logs write
+    # is platform-only and would permission-deny on the tenant lane. No-op off
+    # Postgres.
+    with platform_lane(session):
+        finished_run = finish_run(
+            session,
+            tenant_id=tenant_id,
+            connector_run_id=UUID(run_entry.id),
+            status=status,
+            counts=counts,
+            error_summary=_summarize_failures(per_report_failure_details),
+        )
+        # Spec §8.4: CONNECTOR_JOB_RUN/FINISHED commits with finish_run.
+        emit_run_finished(sink=audit_sink, actor=audit_actor, run=finished_run)
+        session.commit()
     return finished_run
 
 
@@ -1194,22 +1252,31 @@ def _sweep_unfinished_live_run(
     audit_sink: AuditSink,
     audit_actor: UserPrincipal,
 ) -> None:
-    """Best-effort sweep for the no-credentials early-out — finish any still-open ``run_entry``."""
+    """Best-effort sweep for the no-credentials early-out.
+
+    Finishes any still-open ``run_entry`` left behind by the abort path.
+    """
     session.rollback()
     try:
-        finished_run = finish_run(
-            session,
-            tenant_id=tenant_id,
-            connector_run_id=UUID(run_entry.id),
-            status="FAILED",
-            counts=counts,
-            error_summary="orchestrator aborted unexpectedly",
-        )
-        # Best-effort: even the fail-safe sweep emits FINISHED so the audit
-        # trail records the lifecycle terminus. A sink error here is
-        # swallowed by the outer except so the sweep stays best-effort.
-        emit_run_finished(sink=audit_sink, actor=audit_actor, run=finished_run)
-        session.commit()
+        # FIX: elevate the rescue finish + FINISHED emit + commit; audit_logs is
+        # platform-only. A denial here would otherwise be swallowed by the
+        # best-effort except, silently losing the lifecycle terminus on PG.
+        with platform_lane(session):
+            finished_run = finish_run(
+                session,
+                tenant_id=tenant_id,
+                connector_run_id=UUID(run_entry.id),
+                status="FAILED",
+                counts=counts,
+                error_summary="orchestrator aborted unexpectedly",
+            )
+            # Best-effort: even the fail-safe sweep emits FINISHED so the audit
+            # trail records the lifecycle terminus. A sink error here is
+            # swallowed by the outer except so the sweep stays best-effort.
+            emit_run_finished(
+                sink=audit_sink, actor=audit_actor, run=finished_run
+            )
+            session.commit()
     except Exception:
         session.rollback()
 
@@ -3137,6 +3204,31 @@ class YouTubeAnalyticsRunner:
             channel_ids = list_target_channels(
                 session, tenant_id=tenant_id, account_id=account_id,
             )
+            # FIX: end the read-only channel-list transaction now so the
+            # orchestrator's per-report `with platform_lane(session):` block
+            # enters with NO active transaction. Without this, the
+            # channel-list transaction stays open through the for-loop, and
+            # the per-report platform_lane entry EAGERLY elevates the
+            # already-open tenant transaction (it only defers elevation
+            # when no transaction is active). The first analytics report
+            # then holds an elevated Postgres transaction across the
+            # `_prepare_raw_report_file` blob upload_and_verify (network /
+            # GCS I/O) before any raw-file/audit write, and a slow backend
+            # can trip `idle_in_transaction_session_timeout` mid-upload.
+            # Rollback is safe: the SELECT is read-only and the orchestrator
+            # owns the per-report transaction via the platform_lane
+            # `with` block (its first DB call autobegins a fresh
+            # transaction that the after_begin hook elevates to
+            # app_platform via the platform-lane flag).
+            #
+            # Only rollback when the active transaction is TOP-LEVEL: the
+            # dry-run path wraps the runner in `session.begin_nested()`
+            # (a SAVEPOINT) and ends with `savepoint.rollback()`; rolling
+            # back the outer transaction here would close the savepoint
+            # and surface as a ResourceClosedError on the
+            # `savepoint.rollback()` finally clause.
+            if session.in_transaction() and not session.in_nested_transaction():
+                session.rollback()
             for channel_id in channel_ids:
                 try:
                     # FIX: Build the query_request INSIDE the per-channel try so

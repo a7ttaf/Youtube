@@ -17,6 +17,13 @@ from ums_smart_revenue.db.rls import (
 SessionFactory = sessionmaker[Session]
 
 _SESSION_ROLE_KEY = "ums_db_role"
+# Set on session.info by db.lane.platform_lane while a privileged-write block is
+# active. The after_begin hook reads it so that a nested SAVEPOINT (which also
+# fires after_begin) does not re-pin the tenant lane and silently undo the
+# elevation mid-transaction. Only server-side code holding the Session object
+# can set it (same trust boundary as the existing single-session elevation in
+# finance/committed_allocation.py); the fail-closed default is unchanged.
+_PLATFORM_LANE_ACTIVE_KEY = "ums_platform_lane_active"
 
 _engine_cache: dict[str, Engine] = {}
 _engine_cache_lock = Lock()
@@ -142,7 +149,12 @@ def build_platform_session_factory(
 #   fail-closed (missing tenant context => no row => RLS policy rejects access);
 #   always switch tenant-lane sessions into the restricted app_tenant role so
 #   that an unset TENANT_CTX (or an owner/superuser login that bypasses RLS on
-#   the raw login role) cannot read tenant tables.
+#   the raw login role) cannot read tenant tables. EXCEPTION: while
+#   db/lane.py:platform_lane holds an active block (session.info carries
+#   _PLATFORM_LANE_ACTIVE_KEY), the tenant-lane demote at the end of this hook
+#   is SKIPPED, so the session keeps running app_platform for every transaction
+#   begun in-block (the elevation already set app_platform above). The flag is
+#   set/popped ONLY by db/lane.py.
 # Blast Radius: Authorization/finance reads+writes at the DB boundary. SQLite
 #   is unaffected; Postgres tenant-lane sessions stay on app_tenant with or
 #   without a trusted context row, so RLS is the only authorization gate.
@@ -193,7 +205,14 @@ def _apply_tenant_isolation(session, _transaction, connection):
         # absent; missing trusted context is the fail-closed RLS signal.
         # Always switch into app_tenant so an unset context row (or an owner
         # login that bypasses RLS on the raw role) cannot leak tenant data.
-        connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_TENANT_ROLE}"')
+        # EXCEPTION: while db.lane.platform_lane holds an active privileged
+        # block, stay on app_platform. after_begin also fires for nested
+        # SAVEPOINTs, so without this a savepoint inside the block would re-pin
+        # app_tenant and silently undo the elevation mid-transaction (the
+        # platform-only write then permission-denies). The elevation already
+        # set app_platform above; leaving it in place is correct here.
+        if not session.info.get(_PLATFORM_LANE_ACTIVE_KEY):
+            connection.exec_driver_sql(f'SET LOCAL ROLE "{APP_TENANT_ROLE}"')
 
 
 def session_dependency(
