@@ -1092,3 +1092,107 @@ def test_get_credential_found_none_and_wrong_tenant(tmp_path):
             account_id="acct-1",
         ) is None
     engine.dispose()
+
+
+def test_to_entry_maps_refresh_telemetry_columns(tmp_path):
+    """_to_entry reads the four telemetry columns into the entry + to_api."""
+    from ums_smart_revenue.connectors.credentials import (
+        SqlAlchemyConnectorCredentialRepository,
+    )
+
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    stamped = datetime(2026, 3, 1, 12, 0, tzinfo=UTC)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            ApiConnectorCredentialORM(
+                id=uuid4(),
+                tenant_id=UUID(UMS_TENANT_ID),
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                encrypted_secret_ref="secret-manager://ums/yt/acct-1",
+                status="active",
+                last_refresh_attempt_at=stamped,
+                token_expiry_at=stamped,
+                last_refresh_status="succeeded",
+                last_refresh_error_class=None,
+            )
+        )
+        session.commit()
+    with Session(engine) as session:
+        repo = SqlAlchemyConnectorCredentialRepository(
+            session, tenant_id=UMS_TENANT_ID
+        )
+        entry = repo.get_credential(
+            session,
+            tenant_id=UUID(UMS_TENANT_ID),
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+        )
+    engine.dispose()
+    assert entry is not None
+    assert entry.last_refresh_status == "succeeded"
+    api = entry.to_api()
+    assert api["last_refresh_status"] == "succeeded"
+    # to_api serializes whatever the DB returns; the SQLite test tier strips
+    # the tzinfo on DateTime(timezone=True) read-back (Postgres keeps +00:00),
+    # so compare the parsed instant rather than the raw offset string.
+    assert datetime.fromisoformat(api["last_refresh_attempt_at"]).replace(
+        tzinfo=UTC
+    ) == stamped
+    assert datetime.fromisoformat(api["token_expiry_at"]).replace(
+        tzinfo=UTC
+    ) == stamped
+    assert api["last_refresh_error_class"] is None
+
+
+def test_to_api_serializes_none_telemetry(tmp_path):
+    """to_api emits None for unstamped telemetry without raising."""
+    from ums_smart_revenue.connectors.credentials import ConnectorCredentialEntry
+
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=True,
+        last_refresh_attempt_at=None,
+        token_expiry_at=None,
+        last_refresh_status=None,
+        last_refresh_error_class=None,
+    )
+    api = entry.to_api()
+    assert api["last_refresh_attempt_at"] is None
+    assert api["token_expiry_at"] is None
+    assert api["last_refresh_status"] is None
+
+
+def test_list_credentials_api_includes_telemetry_fields(tmp_path):
+    """GET /credentials surfaces the four telemetry keys (None when unstamped)."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            ApiConnectorCredentialORM(
+                id=uuid4(),
+                tenant_id=UUID(UMS_TENANT_ID),
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                encrypted_secret_ref="secret-manager://ums/yt/acct-1",
+                status="active",
+            )
+        )
+        session.commit()
+    engine.dispose()
+    client = TestClient(create_app(database_url=database_url))
+    response = client.get(
+        "/connectors/credentials", headers=auth_headers("connector_admin")
+    )
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert "last_refresh_status" in item
+    assert "last_refresh_attempt_at" in item
+    assert "token_expiry_at" in item
+    assert "last_refresh_error_class" in item

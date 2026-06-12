@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+from datetime import datetime
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -31,6 +32,10 @@ class ConnectorCredentialEntry:
     account_id: str
     status: str
     has_secret_ref: bool
+    last_refresh_attempt_at: datetime | None = None
+    token_expiry_at: datetime | None = None
+    last_refresh_status: str | None = None
+    last_refresh_error_class: str | None = None
 
     def to_api(self) -> dict[str, object]:
         return {
@@ -39,6 +44,18 @@ class ConnectorCredentialEntry:
             "account_id": self.account_id,
             "status": self.status,
             "has_secret_ref": self.has_secret_ref,
+            "last_refresh_attempt_at": (
+                self.last_refresh_attempt_at.isoformat()
+                if self.last_refresh_attempt_at is not None
+                else None
+            ),
+            "token_expiry_at": (
+                self.token_expiry_at.isoformat()
+                if self.token_expiry_at is not None
+                else None
+            ),
+            "last_refresh_status": self.last_refresh_status,
+            "last_refresh_error_class": self.last_refresh_error_class,
         }
 
 
@@ -204,6 +221,10 @@ class SqlAlchemyConnectorCredentialRepository:
             account_id=row.account_id,
             status=row.status,
             has_secret_ref=bool(row.encrypted_secret_ref),
+            last_refresh_attempt_at=row.last_refresh_attempt_at,
+            token_expiry_at=row.token_expiry_at,
+            last_refresh_status=row.last_refresh_status,
+            last_refresh_error_class=row.last_refresh_error_class,
         )
 
 
