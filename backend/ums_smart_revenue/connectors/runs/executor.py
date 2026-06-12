@@ -6,6 +6,7 @@ import threading
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from uuid import UUID
 
 from ums_smart_revenue.auth.audit import AuditEventType
@@ -24,10 +25,20 @@ from ums_smart_revenue.connectors.runs.tenant_context import (
 )
 from ums_smart_revenue.db.lane import platform_lane
 from ums_smart_revenue.db.session import SessionFactory
+from ums_smart_revenue.tenancy.context import TENANT_CTX
+from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
 
 logger = logging.getLogger(__name__)
 
 _JobKey = tuple[UUID, str, str, str]
+
+# Placeholder timestamps for the minimal-tenant fabrication in
+# ``_audit_failed_before_start``: only ``Tenant.id`` is read by the after_begin
+# hook / RLS policy, so the rest of the fields are placeholders that are never
+# persisted and never validated against the ``tenants`` table. The
+# fabrication pattern mirrors the test-only branch in
+# ``connectors/runs/tenant_context.py``.
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 @dataclass(frozen=True)
@@ -464,35 +475,68 @@ class ConnectorJobExecutor:
         audit row could be written. The audit itself is platform-only-write, so
         we run it under ``platform_lane`` with the tenant_id passed explicitly to
         ``SqlAlchemyAuditSink``.
+
+        FIX (PR #95 P2): the audit_logs INSERT must satisfy the
+        ``20260608_0001`` RLS ``WITH CHECK (tenant_id = app_current_tenant_id())``
+        policy. The after_begin hook in ``db.session`` writes the trusted
+        tenant-context row from ``TENANT_CTX.get().id``; without a tenant in
+        the contextvar the hook clears the row, ``app_current_tenant_id()``
+        returns NULL on Postgres, and the INSERT permission-denies via RLS --
+        silently dropping the only record of the failure on the audited
+        lifecycle. Set ``TENANT_CTX`` to a minimal ``Tenant`` (id-only; the
+        lifecycle check is intentionally bypassed because we are writing the
+        audit, not authorizing a run) so the after_begin hook writes the
+        trusted context row for ``tenant_id`` and the INSERT satisfies the
+        policy. The token is reset on every exit path via try/finally so the
+        contextvar never leaks past the call. No-op off Postgres (RLS
+        policies are not enforced on SQLite).
         """
         actor = self._build_audit_actor(tenant_id=tenant_id, actor_identity=actor_identity)
+        # Minimal-tenant fabrication for the contextvar: only ``.id`` is read
+        # by the after_begin hook / RLS policy, so the rest of the fields are
+        # placeholders that are never persisted and never validated against
+        # the ``tenants`` table.
+        minimal_tenant = Tenant(
+            id=tenant_id,
+            slug=f"connector-job-failed-audit:{tenant_id}",
+            display_name="connector job failed-audit",
+            primary_currency="USD",
+            status=TenantStatus.ACTIVE,
+            onboarding_at=_EPOCH,
+            created_at=_EPOCH,
+            updated_at=_EPOCH,
+        )
+        token = TENANT_CTX.set(minimal_tenant)
         try:
-            with self._session_factory() as session:
-                # audit_logs is platform-only-write: elevate to app_platform for
-                # this standalone audit (run_one does its own elevation; this
-                # audit runs OUTSIDE run_one). No-op off Postgres.
-                with platform_lane(session):
-                    sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
-                    record_audit_event(
-                        sink=sink,
-                        actor=actor,
-                        event_type=AuditEventType.CONNECTOR_JOB_RUN,
-                        entity_type="api_connector",
-                        entity_id=f"{connector_key}:{account_id}",
-                        scope=AccessScope.connector(connector_key),
-                        reason="connector job failed before start",
-                        details={
-                            "action": "job_failed_before_start",
-                            "report_month": report_month,
-                            "error_class": error_class,
-                        },
-                    )
+            try:
+                with self._session_factory() as session:
+                    # audit_logs is platform-only-write: elevate to app_platform
+                    # for this standalone audit (run_one does its own elevation;
+                    # this audit runs OUTSIDE run_one). No-op off Postgres.
+                    with platform_lane(session):
+                        sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+                        record_audit_event(
+                            sink=sink,
+                            actor=actor,
+                            event_type=AuditEventType.CONNECTOR_JOB_RUN,
+                            entity_type="api_connector",
+                            entity_id=f"{connector_key}:{account_id}",
+                            scope=AccessScope.connector(connector_key),
+                            reason="connector job failed before start",
+                            details={
+                                "action": "job_failed_before_start",
+                                "report_month": report_month,
+                                "error_class": error_class,
+                            },
+                        )
                     session.commit()
-        except Exception:  # noqa: BLE001 — best-effort audit, never escape
-            logger.exception(
-                "Failed to persist job_failed_before_start audit (tenant=%s)",
-                tenant_id,
-            )
+            except Exception:  # noqa: BLE001 — best-effort audit, never escape
+                logger.exception(
+                    "Failed to persist job_failed_before_start audit (tenant=%s)",
+                    tenant_id,
+                )
+        finally:
+            TENANT_CTX.reset(token)
 
     def _audit_dry_run_outcome(
         self,
