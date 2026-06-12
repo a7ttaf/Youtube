@@ -48,12 +48,33 @@ def programmatic_config(postgres_url: str) -> Config:
     return cfg
 
 
+@pytest.fixture
+def ini_config_with_injection(postgres_url: str) -> Config:
+    """An ini-backed Config whose url is overridden in code (tenancy-test pattern).
+
+    Mirrors tests/tenancy/test_isolation.py et al.: ``Config(alembic.ini)`` (the
+    ini declares the localhost placeholder) followed by an in-code url override.
+    """
+    cfg = Config(str(REPO_ROOT / "alembic.ini"))
+    cfg.set_main_option("sqlalchemy.url", postgres_url)
+    assert cfg.config_file_name is not None
+    return cfg
+
+
+def _migrated_table_names(postgres_url: str) -> list[str]:
+    engine = create_engine(postgres_url)
+    try:
+        return inspect(engine).get_table_names()
+    finally:
+        engine.dispose()
+
+
 def test_decoy_env_var_does_not_retarget_programmatic_migration(
     monkeypatch: pytest.MonkeyPatch,
     postgres_url: str,
     programmatic_config: Config,
 ) -> None:
-    """A decoy UMS_DATABASE_URL must not hijack a programmatic migration run.
+    """A decoy UMS_DATABASE_URL must not hijack a no-ini programmatic migration.
 
     With the fix, ``command.upgrade`` resolves to the injected test URL and the
     security-foundation ``users`` table appears in the test DB. Without the fix
@@ -64,11 +85,25 @@ def test_decoy_env_var_does_not_retarget_programmatic_migration(
 
     command.upgrade(programmatic_config, "head")
 
-    engine = create_engine(postgres_url)
-    try:
-        tables = inspect(engine).get_table_names()
-    finally:
-        engine.dispose()
-
     # Proof the migrations ran against the configured test DB, not the decoy.
-    assert "users" in tables
+    assert "users" in _migrated_table_names(postgres_url)
+
+
+def test_decoy_env_var_does_not_retarget_ini_config_with_injection(
+    monkeypatch: pytest.MonkeyPatch,
+    postgres_url: str,
+    ini_config_with_injection: Config,
+) -> None:
+    """The P1 case: an ini-backed Config whose url is overridden in code.
+
+    This is the pattern the original spec missed (it assumed every migration test
+    builds ``Config()`` with no ini). The in-code override differs from the ini
+    placeholder, so it must still win over the decoy ``UMS_DATABASE_URL`` and the
+    upgrade must hit the configured test DB.
+    """
+    monkeypatch.setenv("UMS_DATABASE_URL", DECOY_URL)
+    reset_public_schema(postgres_url)
+
+    command.upgrade(ini_config_with_injection, "head")
+
+    assert "users" in _migrated_table_names(postgres_url)

@@ -15,6 +15,12 @@ The four quadrants come straight from the spec
   | programmatic (no ini)| unset            | the injected sqlalchemy.url                  |
   | ini-based (prod)     | unset            | the ini placeholder                          |
 
+Plus the case the original spec missed: a ``Config(ini)`` that *overrides* the
+ini's url in code (the four ``tests/tenancy`` + ``test_session_tenant_hook``
+migration tests do exactly this). The resolver detects the override by comparing
+against the ini's on-disk value, so the injected url still wins over an ambient
+``UMS_DATABASE_URL`` — closing the footgun for that pattern too.
+
 Ini-based cases write a throwaway ``alembic.ini`` under ``tmp_path`` so the test
 never reads (or couples to) the repository's real ini file.
 """
@@ -59,6 +65,20 @@ def _ini_based_config(tmp_path: Path, url: str | None) -> Config:
     return cfg
 
 
+def _ini_based_config_with_injection(
+    tmp_path: Path, *, file_url: str, injected_url: str
+) -> Config:
+    """A Config backed by an ini whose url is overridden in code.
+
+    Mirrors tests/tenancy/test_isolation.py et al.: ``Config(ini)`` (the ini
+    declares ``file_url``) followed by ``set_main_option("sqlalchemy.url", ...)``.
+    The injected value masks the file value in alembic's in-memory parser.
+    """
+    cfg = _ini_based_config(tmp_path, file_url)
+    cfg.set_main_option("sqlalchemy.url", injected_url)
+    return cfg
+
+
 def test_programmatic_config_ignores_ambient_decoy_env_var() -> None:
     # Quadrant 1 — the regression test for the footgun.
     cfg = _programmatic_config(PROGRAMMATIC_URL)
@@ -99,3 +119,22 @@ def test_programmatic_config_without_injected_url_falls_back_to_env_var() -> Non
     cfg = _programmatic_config(None)
     env = {"UMS_DATABASE_URL": PROD_DB_URL}
     assert resolve_database_url(cfg, env) == PROD_DB_URL
+
+
+def test_ini_based_config_with_injected_url_beats_decoy_env_var(tmp_path: Path) -> None:
+    # The spec-missed case: Config(ini) whose url is overridden in code (the
+    # tests/tenancy pattern). The injected url differs from the ini's on-disk
+    # placeholder, so it wins over an ambient decoy UMS_DATABASE_URL — the
+    # footgun is closed for this pattern, not just for no-ini Config().
+    cfg = _ini_based_config_with_injection(
+        tmp_path, file_url=INI_PLACEHOLDER, injected_url=PROGRAMMATIC_URL
+    )
+    env = {"UMS_DATABASE_URL": DECOY_URL}
+    assert resolve_database_url(cfg, env) == PROGRAMMATIC_URL
+
+
+def test_ini_based_config_with_injected_url_no_env_returns_injected(tmp_path: Path) -> None:
+    cfg = _ini_based_config_with_injection(
+        tmp_path, file_url=INI_PLACEHOLDER, injected_url=PROGRAMMATIC_URL
+    )
+    assert resolve_database_url(cfg, {}) == PROGRAMMATIC_URL
