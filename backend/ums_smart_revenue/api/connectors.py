@@ -1,12 +1,13 @@
 """FastAPI route handlers for connector credential management and test-connection probing."""
 # pylint: disable=too-many-arguments, too-many-positional-arguments
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
@@ -20,6 +21,7 @@ from ums_smart_revenue.auth.policy import (
     has_permission,
 )
 from ums_smart_revenue.auth.scopes import AccessScope
+from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.connectors.credentials import (
     MAX_CREDENTIAL_PAGE_SIZE,
     ConnectorCredentialConflictError,
@@ -34,12 +36,18 @@ from ums_smart_revenue.connectors.google.errors import (
     InactiveCredentialError,
     OAuthRefreshError,
 )
+from ums_smart_revenue.connectors.google.registry import known_keys
+from ums_smart_revenue.connectors.runs.executor import ConnectorJobActor
 from ums_smart_revenue.connectors.runs.orchestrator import resolve_connector_credentials
 from ums_smart_revenue.connectors.runs.repository import (
     MAX_CONNECTOR_RUN_PAGE_SIZE,
     ConnectorRunValidationError,
+    find_active_runs_for_scope,
+    finish_run,
     list_runs,
+    validate_report_month,
 )
+from ums_smart_revenue.db.security_models import UserORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
@@ -74,6 +82,8 @@ class ConnectorJobRequest(NonBlankRequestModel):
 
     connector_key: str = Field(min_length=1)
     account_id: str = Field(min_length=1)
+    report_month: str = Field(min_length=1)
+    dry_run: bool = False
     reason: str = Field(min_length=1)
 
 
@@ -258,15 +268,142 @@ def create_connector_credential(
     return _with_audit_event(credential, record)
 
 
+# ============================================================================
+# Purpose: Submit a real Google ingest pull to the module-owned
+#   ConnectorJobExecutor and return 202 "submitted" immediately. Cheap
+#   in-request validation only (no OAuth refresh, no run_one inline). Control
+#   flow order is load-bearing and fail-closed: authz 403 -> 503 disabled ->
+#   422 unknown-key -> 422 bad-month -> 422 missing/inactive cred -> 409 dup /
+#   orphan-supersede -> 202 submit. Exactly ONE route-owned audit row
+#   (job_submitted / job_rejected); run_one emits its own STARTED/FINISHED
+#   edges later on the worker session.
+# Database/ORM: ApiConnectorCredentialORM + ConnectorRunORM (reads via
+#   get_credential / find_active_runs_for_scope; finish_run rewrites a
+#   superseded orphan), AuditLogORM (one row), UserORM (existence probe).
+# Standards: RUN_CONNECTOR_JOBS@connector gate first (HTTPException 403, no
+#   audit). All non-2xx-but-audited responses use JSONResponse (not
+#   HTTPException) so the request session commits the audit row (mirrors the
+#   test-route 404 pattern). Audit details carry only machine tokens, never
+#   str(exc). triggered_by_user_id degrades to None unless a users row exists.
+# Blast Radius: Authorization (unchanged gate), audit (additive details
+#   actions), connector run lifecycle (orphan supersede via finish_run on the
+#   tenant lane). No finance math change; no graph projection impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> submit().
+#   - File: backend/ums_smart_revenue/app.py -> app.state.connector_job_executor.
+#   - File: Docs/12_BACKEND_API_SPEC.md -> POST /connectors/jobs contract.
+# ============================================================================
 @router.post("/jobs", status_code=status.HTTP_202_ACCEPTED)
 def request_connector_job(
     payload: ConnectorJobRequest,
+    request: Request,
     user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
-    """Enqueue a connector run request and emit a CONNECTOR_JOB_RUN audit event."""
+    """Validate cheaply, submit the pull to the executor, and return 202 submitted."""
     connector_scope = AccessScope.connector(payload.connector_key)
     _require_connector_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
+
+    tenant_id = _resolve_tenant_uuid(user)
+    executor = getattr(request.app.state, "connector_job_executor", None)
+    if executor is None:
+        return _reject_connector_job(
+            audit_sink=audit_sink,
+            user=user,
+            payload=payload,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            rejection="executor_disabled",
+            detail="Connector job executor is disabled",
+        )
+
+    if payload.connector_key not in known_keys():
+        return _reject_connector_job(
+            audit_sink=audit_sink,
+            user=user,
+            payload=payload,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            rejection="unknown_connector",
+            detail="Unknown connector key",
+        )
+
+    try:
+        validate_report_month(payload.report_month)
+    except ConnectorRunValidationError:
+        return _reject_connector_job(
+            audit_sink=audit_sink,
+            user=user,
+            payload=payload,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            rejection="invalid_month",
+            detail="report_month must use YYYY-MM",
+        )
+
+    repository = SqlAlchemyConnectorCredentialRepository(session, tenant_id=tenant_id)
+    credential = repository.get_credential(
+        session,
+        tenant_id=tenant_id,
+        connector_key=payload.connector_key,
+        account_id=payload.account_id,
+    )
+    if credential is None:
+        return _reject_connector_job(
+            audit_sink=audit_sink,
+            user=user,
+            payload=payload,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            rejection="credential_not_found",
+            detail="Connector credential not found",
+        )
+    if credential.status != "active":
+        return _reject_connector_job(
+            audit_sink=audit_sink,
+            user=user,
+            payload=payload,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            rejection="credential_inactive",
+            detail="Connector credential is not active",
+        )
+
+    if executor.has_active_job(
+        tenant_id=tenant_id,
+        connector_key=payload.connector_key,
+        account_id=payload.account_id,
+        report_month=payload.report_month,
+    ):
+        return _reject_connector_job(
+            audit_sink=audit_sink,
+            user=user,
+            payload=payload,
+            status_code=status.HTTP_409_CONFLICT,
+            rejection="duplicate_in_flight",
+            detail="A connector job for this scope is already in flight",
+        )
+
+    superseded_run_id = _supersede_or_block_running_runs(
+        session,
+        tenant_id=tenant_id,
+        payload=payload,
+        stale_hours=load_app_settings().connector_job_stale_running_hours,
+    )
+    if isinstance(superseded_run_id, _DuplicateRunBlock):
+        return _reject_connector_job(
+            audit_sink=audit_sink,
+            user=user,
+            payload=payload,
+            status_code=status.HTTP_409_CONFLICT,
+            rejection="duplicate_in_flight",
+            detail="A connector job for this scope is already in flight",
+        )
+
+    triggered_by = _resolve_triggered_by_user_id(session, user, tenant_id)
+    details: dict[str, object] = {
+        "action": "job_submitted",
+        "report_month": payload.report_month,
+        "dry_run": payload.dry_run,
+    }
+    if superseded_run_id is not None:
+        details["superseded_run_id"] = superseded_run_id
     record = _audit_connector_change(
         audit_sink=audit_sink,
         user=user,
@@ -274,12 +411,25 @@ def request_connector_job(
         connector_key=payload.connector_key,
         account_id=payload.account_id,
         reason=payload.reason,
-        details={"action": "job_request_recorded"},
+        details=details,
+    )
+    executor.submit(
+        tenant_id=tenant_id,
+        connector_key=payload.connector_key,
+        account_id=payload.account_id,
+        report_month=payload.report_month,
+        dry_run=payload.dry_run,
+        triggered_by_user_id=triggered_by,
+        actor_identity=ConnectorJobActor(
+            user_id=user.user_id, email=user.email, role=str(user.role_assignments)
+        ),
     )
     return {
         "connector_key": payload.connector_key,
         "account_id": payload.account_id,
-        "execution_status": "recorded_not_executed",
+        "report_month": payload.report_month,
+        "dry_run": payload.dry_run,
+        "execution_status": "submitted",
         "audit_event": audit_record_to_api(record),
     }
 
@@ -481,3 +631,125 @@ def _with_audit_event(entry: ConnectorCredentialEntry, record) -> dict[str, obje
     response = entry.to_api()
     response["audit_event"] = audit_record_to_api(record)
     return response
+
+
+class _DuplicateRunBlock:
+    """Sentinel: a fresh RUNNING row exists for the scope -> reject as duplicate."""
+
+
+def _as_aware_utc(value: datetime) -> datetime:
+    """Treat a tz-naive started_at (SQLite read-back) as UTC for safe comparison.
+
+    Postgres returns tz-aware ``DateTime(timezone=True)`` values; the SQLite test
+    tier strips the tzinfo on read-back. Normalizing a naive value to UTC keeps
+    the stale-threshold comparison valid on both backends without changing the
+    stored value.
+    """
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+# ============================================================================
+# Purpose: Secondary cross-process duplicate guard. Inspect RUNNING
+#   connector_runs for the exact scope; the youngest younger than stale_hours
+#   blocks (returns _DuplicateRunBlock); an older row is an orphan from a dead
+#   process -> rewrite it FAILED via finish_run (tenant-lane; connector_runs is
+#   tenant-writable) and return its id so the route records superseded_run_id.
+# Database/ORM: ConnectorRunORM (read via find_active_runs_for_scope; FAILED
+#   rewrite via finish_run, which requires RUNNING + flush-only).
+# Standards: TOCTOU is code-level only (the index is non-unique); accepted at
+#   max_workers=1; partial-unique-index deferred (documented in the spec).
+# Blast Radius: Connector run lifecycle only. No finance, audit (the route
+#   owns its row), or graph projection impact.
+# Connections:
+#   - Function: find_active_runs_for_scope -> the RUNNING reader.
+#   - Function: finish_run -> the RUNNING->FAILED transition.
+# ============================================================================
+def _supersede_or_block_running_runs(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    payload: ConnectorJobRequest,
+    stale_hours: int,
+) -> str | _DuplicateRunBlock | None:
+    """Block on a fresh RUNNING run; supersede a stale one and return its id."""
+    running = find_active_runs_for_scope(
+        session,
+        tenant_id=tenant_id,
+        connector_key=payload.connector_key,
+        account_id=payload.account_id,
+        report_month=payload.report_month,
+    )
+    if not running:
+        return None
+    threshold = datetime.now(UTC) - timedelta(hours=stale_hours)
+    youngest = running[0]
+    if _as_aware_utc(youngest.started_at) >= threshold:
+        return _DuplicateRunBlock()
+    superseded: str | None = None
+    for entry in running:
+        if _as_aware_utc(entry.started_at) < threshold:
+            finish_run(
+                session,
+                tenant_id=tenant_id,
+                connector_run_id=UUID(entry.id),
+                status="FAILED",
+                counts=dict(entry.counts),
+                error_summary="orphaned RUNNING run superseded by new job",
+            )
+            superseded = entry.id
+    return superseded
+
+
+def _resolve_triggered_by_user_id(
+    session: Session, user: UserPrincipal, tenant_id: UUID
+) -> UUID | None:
+    """Return the principal UUID only if it is a real users row for the tenant."""
+    try:
+        candidate = UUID(user.user_id)
+    except (ValueError, TypeError):
+        return None
+    exists = session.scalar(
+        select(UserORM.id).where(
+            UserORM.id == candidate, UserORM.tenant_id == tenant_id
+        )
+    )
+    return candidate if exists is not None else None
+
+
+# ============================================================================
+# Purpose: Write the single route-owned CONNECTOR_JOB_RUN job_rejected audit
+#   row, then return a JSONResponse with the given status so the request
+#   session COMMITS the audit row (HTTPException would roll it back). Audit
+#   details carry only machine tokens.
+# Database/ORM: AuditLogORM (one row via the request-scoped sink).
+# Standards: JSONResponse-commits-the-audit pattern (mirrors the test-route
+#   404 at connectors.py:370-380). No str(exc) interpolation.
+# Blast Radius: Audit (additive job_rejected action). No finance, auth, or
+#   graph projection impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> request_connector_job.
+# ============================================================================
+def _reject_connector_job(
+    *,
+    audit_sink: AuditSink,
+    user: UserPrincipal,
+    payload: ConnectorJobRequest,
+    status_code: int,
+    rejection: str,
+    detail: str,
+) -> JSONResponse:
+    """Audit a rejected job submission and return a committing JSONResponse."""
+    _audit_connector_change(
+        audit_sink=audit_sink,
+        user=user,
+        event_type=AuditEventType.CONNECTOR_JOB_RUN,
+        connector_key=payload.connector_key,
+        account_id=payload.account_id,
+        reason=payload.reason,
+        details={
+            "action": "job_rejected",
+            "rejection": rejection,
+            "report_month": payload.report_month,
+        },
+    )
+    return JSONResponse(status_code=status_code, content={"detail": detail})

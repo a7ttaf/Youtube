@@ -19,6 +19,7 @@ from ums_smart_revenue.connectors.google.errors import (
     OAuthRefreshError,
     SecretFetchError,
 )
+from ums_smart_revenue.connectors.runs.executor import ConnectorJobActor
 from ums_smart_revenue.db.connector_models import ConnectorRunORM
 from ums_smart_revenue.db.org_models import OrgBase
 from ums_smart_revenue.db.report_models import ReportBase
@@ -71,6 +72,54 @@ def seed_database(database_url: str) -> None:
             session.commit()
     finally:
         engine.dispose()
+
+
+class _FakeExecutor:
+    """Records submit() calls and answers has_active_job() from a flag set."""
+
+    def __init__(self, *, active=False):
+        self.active = active
+        self.submit_calls: list[dict] = []
+
+    def has_active_job(self, **kwargs) -> bool:
+        return self.active
+
+    def submit(self, **kwargs):
+        self.submit_calls.append(kwargs)
+        return None
+
+
+def _enable_executor_app(database_url: str, executor):
+    """Build an app with the executor enabled + a fake executor on app.state."""
+    import os
+
+    os.environ["UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"] = "true"
+    from ums_smart_revenue.config.settings import load_app_settings
+
+    load_app_settings.cache_clear()
+    app = create_app(database_url=database_url)
+    app.state.connector_job_executor = executor
+    return app
+
+
+def _seed_active_credential(database_url: str, *, status="active"):
+    engine = create_engine(database_url)
+    # The jobs route reads connector_runs for the dup/orphan guard; ensure the
+    # ReportBase tables exist so the reader runs against a real (empty) table.
+    ReportBase.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            ApiConnectorCredentialORM(
+                id=uuid4(),
+                tenant_id=UUID(UMS_TENANT_ID),
+                connector_key="youtube_reporting",
+                account_id="content-owner-1",
+                encrypted_secret_ref="secret-manager://ums/yt/content-owner-1",
+                status=status,
+            )
+        )
+        session.commit()
+    engine.dispose()
 
 
 def test_connector_admin_can_create_credential_reference_without_exposing_secret_ref(
@@ -250,9 +299,84 @@ def test_assistant_cannot_create_connector_credential(tmp_path):
 
 
 def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
-    """revenue_operations_admin can enqueue a connector job and write CONNECTOR_JOB_RUN audit."""
+    """revenue_operations_admin submits a job: 202 submitted + one job_submitted audit."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
+    _seed_active_credential(database_url)
+    fake = _FakeExecutor(active=False)
+    client = TestClient(_enable_executor_app(database_url, fake))
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Manual retry after report availability delay",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+    engine.dispose()
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["connector_key"] == "youtube_reporting"
+    assert body["execution_status"] == "submitted"
+    assert body["report_month"] == "2026-03"
+    assert body["dry_run"] is False
+    assert audit_log.event_type == "CONNECTOR_JOB_RUN"
+    assert audit_log.scope_type == "connector"
+    assert audit_log.scope_id == "youtube_reporting"
+    assert audit_log.details["action"] == "job_submitted"
+    assert len(fake.submit_calls) == 1
+    call = fake.submit_calls[0]
+    assert call["connector_key"] == "youtube_reporting"
+    assert call["account_id"] == "content-owner-1"
+    assert call["report_month"] == "2026-03"
+    assert call["dry_run"] is False
+    assert isinstance(call["actor_identity"], ConnectorJobActor)
+
+
+def test_request_connector_job_missing_permission_403(tmp_path):
+    """assistant_analyst is denied with the run_jobs permission detail (no audit)."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url)
+    fake = _FakeExecutor()
+    client = TestClient(_enable_executor_app(database_url, fake))
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers("assistant_analyst"),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Should be denied",
+        },
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: connectors.run_jobs"
+    assert fake.submit_calls == []
+
+
+def test_request_connector_job_503_when_executor_disabled(tmp_path):
+    """Executor disabled -> 503 + a job_rejected/executor_disabled audit."""
+    import os
+
+    os.environ.pop("UMS_CONNECTOR_JOB_EXECUTOR_ENABLED", None)
+    from ums_smart_revenue.config.settings import load_app_settings
+
+    load_app_settings.cache_clear()
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url)
     client = TestClient(create_app(database_url=database_url))
 
     response = client.post(
@@ -263,20 +387,211 @@ def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
         json={
             "connector_key": "youtube_reporting",
             "account_id": "content-owner-1",
-            "reason": "Manual retry after report availability delay",
+            "report_month": "2026-03",
+            "reason": "Try while disabled",
         },
     )
-
     engine = create_engine(database_url)
     with Session(engine) as session:
         audit_log = session.scalars(select(AuditLogORM)).one()
+    engine.dispose()
+    assert response.status_code == 503
+    assert audit_log.details["action"] == "job_rejected"
+    assert audit_log.details["rejection"] == "executor_disabled"
 
+
+def test_request_connector_job_422_unknown_connector(tmp_path):
+    """Unknown connector key -> 422 + job_rejected/unknown_connector."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    fake = _FakeExecutor()
+    client = TestClient(_enable_executor_app(database_url, fake))
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers("revenue_operations_admin", "connector", "made_up"),
+        json={
+            "connector_key": "made_up",
+            "account_id": "acct-1",
+            "report_month": "2026-03",
+            "reason": "Unknown key",
+        },
+    )
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+    engine.dispose()
+    assert response.status_code == 422
+    assert audit_log.details["rejection"] == "unknown_connector"
+    assert fake.submit_calls == []
+
+
+def test_request_connector_job_422_bad_month(tmp_path):
+    """Malformed report_month -> 422 + job_rejected/invalid_month."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url)
+    fake = _FakeExecutor()
+    client = TestClient(_enable_executor_app(database_url, fake))
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-13",
+            "reason": "Bad month",
+        },
+    )
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+    engine.dispose()
+    assert response.status_code == 422
+    assert audit_log.details["rejection"] == "invalid_month"
+    assert fake.submit_calls == []
+
+
+def test_request_connector_job_422_missing_credential(tmp_path):
+    """Missing credential -> 422 + job_rejected/credential_not_found."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    fake = _FakeExecutor()
+    client = TestClient(_enable_executor_app(database_url, fake))
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "No credential exists",
+        },
+    )
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+    engine.dispose()
+    assert response.status_code == 422
+    assert audit_log.details["rejection"] == "credential_not_found"
+    assert fake.submit_calls == []
+
+
+def test_request_connector_job_422_inactive_credential(tmp_path):
+    """Inactive credential -> 422 + job_rejected/credential_inactive."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url, status="disabled")
+    fake = _FakeExecutor()
+    client = TestClient(_enable_executor_app(database_url, fake))
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Inactive credential",
+        },
+    )
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+    engine.dispose()
+    assert response.status_code == 422
+    assert audit_log.details["rejection"] == "credential_inactive"
+    assert fake.submit_calls == []
+
+
+def test_request_connector_job_409_duplicate_in_flight(tmp_path):
+    """has_active_job True -> 409 + job_rejected/duplicate_in_flight."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url)
+    fake = _FakeExecutor(active=True)
+    client = TestClient(_enable_executor_app(database_url, fake))
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Duplicate",
+        },
+    )
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+    engine.dispose()
+    assert response.status_code == 409
+    assert audit_log.details["rejection"] == "duplicate_in_flight"
+    assert fake.submit_calls == []
+
+
+def test_request_connector_job_orphan_supersede_then_accept(tmp_path):
+    """A stale RUNNING row older than the threshold is flipped FAILED + 202."""
+    from datetime import timedelta
+
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url)
+    # Seed a RUNNING row older than the default 6h threshold.
+    seed_connector_run(
+        database_url,
+        connector_key="youtube_reporting",
+        account_id="content-owner-1",
+        status="RUNNING",
+        error_summary=None,
+        started_at=datetime.now(UTC) - timedelta(hours=12),
+        finished_at=None,
+        report_month="2026-03",
+    )
+    fake = _FakeExecutor(active=False)
+    client = TestClient(_enable_executor_app(database_url, fake))
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Supersede stale run",
+        },
+    )
     assert response.status_code == 202
-    assert response.json()["connector_key"] == "youtube_reporting"
-    assert response.json()["execution_status"] == "recorded_not_executed"
-    assert audit_log.event_type == "CONNECTOR_JOB_RUN"
-    assert audit_log.scope_type == "connector"
-    assert audit_log.scope_id == "youtube_reporting"
+    body = response.json()
+    assert body["execution_status"] == "submitted"
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        run = session.scalars(
+            select(ConnectorRunORM).where(
+                ConnectorRunORM.connector_key == "youtube_reporting",
+                ConnectorRunORM.account_id == "content-owner-1",
+            )
+        ).one()
+        audit_log = session.scalars(select(AuditLogORM)).one()
+    engine.dispose()
+    assert run.status == "FAILED"
+    assert "superseded" in (run.error_summary or "")
+    assert audit_log.details["action"] == "job_submitted"
+    assert audit_log.details["superseded_run_id"] == str(run.id)
+    assert len(fake.submit_calls) == 1
 
 
 def test_connector_admin_can_test_connection_ok(tmp_path):
