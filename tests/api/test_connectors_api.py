@@ -728,3 +728,52 @@ def test_list_runs_limit_over_cap_returns_422(tmp_path):
     )
 
     assert response.status_code == 422
+
+
+def test_get_credential_found_none_and_wrong_tenant(tmp_path):
+    """get_credential returns the entry for the scope, None when absent/cross-tenant."""
+    from ums_smart_revenue.connectors.credentials import (
+        SqlAlchemyConnectorCredentialRepository,
+    )
+
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    other_tenant = UUID("00000000-0000-0000-0000-0000000000ff")
+    with Session(engine) as session:
+        session.add(
+            ApiConnectorCredentialORM(
+                id=uuid4(),
+                tenant_id=UUID(UMS_TENANT_ID),
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                encrypted_secret_ref="secret-manager://ums/yt/acct-1",
+                status="active",
+            )
+        )
+        session.commit()
+    with Session(engine) as session:
+        repo = SqlAlchemyConnectorCredentialRepository(
+            session, tenant_id=UMS_TENANT_ID
+        )
+        found = repo.get_credential(
+            session,
+            tenant_id=UUID(UMS_TENANT_ID),
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+        )
+        assert found is not None
+        assert found.status == "active"
+        assert repo.get_credential(
+            session,
+            tenant_id=UUID(UMS_TENANT_ID),
+            connector_key="youtube_reporting",
+            account_id="missing",
+        ) is None
+        assert repo.get_credential(
+            session,
+            tenant_id=other_tenant,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+        ) is None
+    engine.dispose()

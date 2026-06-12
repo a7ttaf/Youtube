@@ -736,3 +736,82 @@ def _raw_file(
     session.add(row)
     session.flush()
     return row
+
+
+def test_find_active_runs_for_scope_returns_only_running_matching_scope(
+    session: Session,
+) -> None:
+    """Only RUNNING rows for the exact scope are returned, newest started first."""
+    from datetime import timedelta
+
+    from ums_smart_revenue.connectors.runs.repository import (
+        find_active_runs_for_scope,
+    )
+    from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
+    tenant = UUID(UMS_TENANT_ID)
+    # Two RUNNING rows for the target scope at different started_at.
+    older = ConnectorRunORM(
+        id=uuid4(),
+        tenant_id=tenant,
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        report_month="2026-03",
+        triggered_by_user_id=None,
+        started_at=datetime.now(UTC) - timedelta(hours=10),
+        status="RUNNING",
+        counts_json={},
+        error_summary=None,
+    )
+    newer = ConnectorRunORM(
+        id=uuid4(),
+        tenant_id=tenant,
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        report_month="2026-03",
+        triggered_by_user_id=None,
+        started_at=datetime.now(UTC) - timedelta(hours=1),
+        status="RUNNING",
+        counts_json={},
+        error_summary=None,
+    )
+    # A terminal row (same scope) and a RUNNING row for another scope.
+    terminal = ConnectorRunORM(
+        id=uuid4(),
+        tenant_id=tenant,
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        report_month="2026-03",
+        triggered_by_user_id=None,
+        started_at=datetime.now(UTC) - timedelta(hours=2),
+        finished_at=datetime.now(UTC) - timedelta(hours=2),
+        status="SUCCEEDED",
+        counts_json={},
+        error_summary=None,
+    )
+    other = ConnectorRunORM(
+        id=uuid4(),
+        tenant_id=tenant,
+        connector_key="adsense",
+        account_id="acct-1",
+        report_month="2026-03",
+        triggered_by_user_id=None,
+        started_at=datetime.now(UTC),
+        status="RUNNING",
+        counts_json={},
+        error_summary=None,
+    )
+    session.add_all([older, newer, terminal, other])
+    session.flush()
+
+    rows = find_active_runs_for_scope(
+        session,
+        tenant_id=tenant,
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        report_month="2026-03",
+    )
+    assert [r.status for r in rows] == ["RUNNING", "RUNNING"]
+    # newest started_at first.
+    assert rows[0].started_at >= rows[1].started_at
+    assert {r.connector_key for r in rows} == {"youtube_reporting"}
