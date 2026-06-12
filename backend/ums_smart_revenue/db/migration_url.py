@@ -20,7 +20,8 @@ from alembic.config import Config
 #          re-read to detect deliberate in-code injection.
 # Database/ORM: None — reads a config file, touches no models.
 # Standards: ``interpolation=None`` so ``%(...)s`` logging formatters elsewhere
-#            in the ini do not raise; missing/unreadable file returns None.
+#            in the ini do not raise; missing/unreadable file raises
+#            RuntimeError so precedence cannot silently flip.
 # Blast Radius: Migration URL resolution only. No graph projection impact.
 # Connections:
 #   - File: backend/ums_smart_revenue/db/migration_url.py -> resolve_database_url
@@ -31,8 +32,18 @@ def _ini_declared_url(config: Config) -> str | None:
     if not path:
         return None
     parser = configparser.ConfigParser(interpolation=None)
-    if not parser.read(path, encoding="utf-8"):
-        return None
+    try:
+        files_read = parser.read(path, encoding="utf-8")
+    except configparser.Error as exc:
+        raise RuntimeError(
+            f"alembic ini file {path!r} could not be parsed: {exc}; "
+            "cannot classify sqlalchemy.url injection status"
+        ) from exc
+    if not files_read:
+        raise RuntimeError(
+            f"alembic ini file {path!r} could not be read; "
+            "cannot classify sqlalchemy.url injection status"
+        )
     section = config.config_ini_section
     if not parser.has_option(section, "sqlalchemy.url"):
         return None
@@ -69,11 +80,20 @@ def resolve_database_url(config: Config, environ: Mapping[str, str]) -> str:
     then overrode the url. When the configured url equals the ini declaration
     (production: the alembic.ini placeholder, no in-code override),
     ``UMS_DATABASE_URL`` wins, preserving the existing production contract.
+
+    :param config: Alembic Config object (may or may not be ini-backed).
+    :param environ: Environment mapping (normally ``os.environ``).
+    :returns: The resolved database URL string.
+    :raises RuntimeError: If neither ``UMS_DATABASE_URL`` nor ``sqlalchemy.url``
+        is configured, or if the ini file is unreadable.
     """
     configured = config.get_main_option("sqlalchemy.url")
     declared_on_disk = _ini_declared_url(config)
     # Deliberate in-code injection (configured value not the ini's own) wins over
-    # an ambient UMS_DATABASE_URL — this is the footgun fix.
+    # an ambient UMS_DATABASE_URL — this is the footgun fix.  The equality check
+    # is safe because a caller that explicitly set_main_option to the SAME value
+    # as the ini placeholder has no distinct intent — UMS_DATABASE_URL should
+    # still win (matching the production contract).
     if configured and configured != declared_on_disk:
         return configured
     # No in-code override (production ini placeholder, or an ini-only run):

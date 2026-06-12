@@ -138,3 +138,33 @@ def test_ini_based_config_with_injected_url_no_env_returns_injected(tmp_path: Pa
         tmp_path, file_url=INI_PLACEHOLDER, injected_url=PROGRAMMATIC_URL
     )
     assert resolve_database_url(cfg, {}) == PROGRAMMATIC_URL
+
+
+def test_ini_based_config_explicit_placeholder_equals_disk_still_honors_env_var(tmp_path: Path) -> None:
+    # A caller that sets sqlalchemy.url to the SAME value as the ini placeholder
+    # has no distinct injection intent; UMS_DATABASE_URL must still win (prod
+    # contract).  This closes the edge-case where a test hardcodes the local
+    # placeholder and an ambient UMS_DATABASE_URL would otherwise be ignored.
+    cfg = _ini_based_config(tmp_path, INI_PLACEHOLDER)
+    cfg.set_main_option("sqlalchemy.url", INI_PLACEHOLDER)
+    env = {"UMS_DATABASE_URL": PROD_DB_URL}
+    assert resolve_database_url(cfg, env) == PROD_DB_URL
+
+
+def test_unreadable_ini_raises_runtime_error(tmp_path: Path) -> None:
+    # If the ini path exists but cannot be parsed, _ini_declared_url must fail
+    # fast instead of returning None (which would silently flip precedence).
+    ini = tmp_path / "alembic.ini"
+    ini.write_text("[alembic]\nsqlalchemy.url = some-url\n", encoding="utf-8")
+    cfg = Config(str(ini))
+    # Pre-initialize Alembic's lazy file_config cache so get_main_option()
+    # inside resolve_database_url uses the cached in-memory parse and does not
+    # re-read the file (which would raise configparser.MissingSectionHeaderError
+    # from the garbage content we write next).
+    cfg.get_main_option("sqlalchemy.url")
+    # Replace the file with garbage so our _ini_declared_url configparser.read
+    # raises configparser.Error (no section headers), which is caught and
+    # re-raised as RuntimeError.
+    ini.write_text("NOT VALID INI CONTENT [[[\n", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="could not be parsed"):
+        resolve_database_url(cfg, {"UMS_DATABASE_URL": PROD_DB_URL})
