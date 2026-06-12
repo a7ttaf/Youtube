@@ -2981,8 +2981,21 @@ _CREDENTIAL_KEY_ALIASES: dict[str, tuple[str, ...]] = {
     "youtube_reporting": ("youtube-reporting",),
     "youtube-analytics": ("youtube_analytics",),
     "youtube_analytics": ("youtube-analytics",),
-    "adsense-management": ("adsense_management",),
-    "adsense_management": ("adsense-management",),
+    # FIX (PR #95 P2): the legacy ``adsense`` connector scope (still used
+    # by ``/adsense/sync-payments`` and the run-history health read in
+    # ``auth/policy.py``) is an umbrella for the AdSense Management
+    # replacement keys. Including it in the candidate set lets an
+    # existing connector-ops grant scoped to the legacy ``adsense``
+    # connector authorise a job submitted under the new
+    # ``adsense-management`` / ``adsense_management`` keys, and vice
+    # versa, instead of being rejected by the exact-match
+    # ``has_permission`` check. Mirrors
+    # ``auth/policy.py::_CONNECTOR_KEY_ALIASES`` and
+    # ``auth/policy.py::_connector_key_candidates`` which already
+    # include the legacy alias for the read paths.
+    "adsense-management": ("adsense_management", "adsense"),
+    "adsense_management": ("adsense-management", "adsense"),
+    "adsense": ("adsense-management", "adsense_management"),
 }
 
 
