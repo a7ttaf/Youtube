@@ -27,9 +27,7 @@ from ums_smart_revenue.tenancy.context import get_current_tenant
 from ums_smart_revenue.tenancy.models import TenantStatus
 
 TENANT = UUID(UMS_TENANT_ID)
-ACTOR = ConnectorJobActor(
-    user_id=str(uuid4()), email="ops@example.com", role="revenue_operations_admin"
-)
+ACTOR = ConnectorJobActor(user_id=str(uuid4()), email="ops@example.com")
 
 
 def _factory(tmp_path) -> sessionmaker:

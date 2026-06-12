@@ -1,14 +1,17 @@
 """Integration tests for connector credential and test-connection API endpoints."""
+import os
 from datetime import UTC, datetime
 from unittest.mock import MagicMock, patch
 from uuid import UUID, uuid4
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.connectors.credentials import (
     _is_duplicate_credential_integrity_error,
     is_external_secret_ref,
@@ -32,6 +35,20 @@ from ums_smart_revenue.db.security_models import (
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 USER_ID = UUID("00000000-0000-0000-0000-000000004001")
+
+
+@pytest.fixture(autouse=True)
+def _restore_executor_env():
+    """Restore UMS_CONNECTOR_JOB_EXECUTOR_ENABLED after each test (no cross-test leak)."""
+    prior = os.environ.get("UMS_CONNECTOR_JOB_EXECUTOR_ENABLED")
+    try:
+        yield
+    finally:
+        if prior is None:
+            os.environ.pop("UMS_CONNECTOR_JOB_EXECUTOR_ENABLED", None)
+        else:
+            os.environ["UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"] = prior
+        load_app_settings.cache_clear()
 
 
 def auth_headers(
@@ -91,11 +108,7 @@ class _FakeExecutor:
 
 def _enable_executor_app(database_url: str, executor):
     """Build an app with the executor enabled + a fake executor on app.state."""
-    import os
-
     os.environ["UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"] = "true"
-    from ums_smart_revenue.config.settings import load_app_settings
-
     load_app_settings.cache_clear()
     app = create_app(database_url=database_url)
     app.state.connector_job_executor = executor

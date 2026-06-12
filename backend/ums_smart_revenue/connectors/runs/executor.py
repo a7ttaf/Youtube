@@ -40,7 +40,6 @@ class ConnectorJobActor:
 
     user_id: str
     email: str
-    role: str
 
 
 # ============================================================================

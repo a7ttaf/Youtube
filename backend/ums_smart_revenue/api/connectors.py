@@ -421,7 +421,7 @@ def request_connector_job(
         dry_run=payload.dry_run,
         triggered_by_user_id=triggered_by,
         actor_identity=ConnectorJobActor(
-            user_id=user.user_id, email=user.email, role=str(user.role_assignments)
+            user_id=user.user_id, email=user.email
         ),
     )
     return {

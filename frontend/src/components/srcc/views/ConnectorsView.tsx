@@ -39,9 +39,9 @@ import { describeError } from "./CommandView";
 //   /adsense/sync-payments). Each connector credential row exposes a Run pull
 //   button that submits an audited connector job for the screen's selected
 //   report_month (with an optional dry-run validate-only pass); the backend
-//   returns execution_status "submitted" on the executing path (or the
-//   "recorded_not_executed" record-only fallback when no executor is wired),
-//   surfaced honestly. On a "submitted" result the run-history feed refetches.
+//   returns execution_status "submitted" on the executing path (a disabled
+//   executor returns 503, surfaced as an error). On a "submitted" result the
+//   run-history feed refetches.
 //   The view also consumes GET /connectors/runs for the newest-first run-history
 //   feed, with keyset pagination and fail-closed 403 handling. Loading / error
 //   / empty / 403 states mirror the other wired views.
@@ -756,26 +756,19 @@ function RequestJobError({ error }: { error: ApiError | Error }) { // skipcq: JS
 }
 
 function RequestJobSuccess({ result }: { result: ConnectorJobResponse }) { // skipcq: JS-0067
-  // Surface the executing path honestly: "submitted" means the job was handed to
-  // the executor (run history will update); "recorded_not_executed" is the
-  // record-only fallback when no executor is wired, so an operator never assumes
-  // data was pulled.
-  const submitted = result.execution_status === "submitted";
-  const recordedOnly = result.execution_status === "recorded_not_executed";
-  const tone = submitted ? "green" : recordedOnly ? "amber" : "green";
-  const message = submitted
-    ? "Submitted to executor — run history will update"
-    : recordedOnly
-      ? "Queued (recorded, not yet executed)"
-      : result.execution_status;
+  // The executing path returns execution_status "submitted": the job was handed to
+  // the executor and the run-history feed updates once it starts. A disabled
+  // executor returns 503 (surfaced via RequestJobError), so the success banner only
+  // ever renders the submitted state.
+  const message = "Submitted to executor — run history will update";
   return (
     <div className="permission-band" role="status" style={{ margin: 13 }}>
-      <Dot tone={tone} />
+      <Dot tone="green" />
       <span>
         <strong>Sync requested</strong>
         <span>{`${result.connector_key} · ${result.account_id} — ${message}`}</span>
       </span>
-      <Badge tone={tone}>{result.execution_status}</Badge>
+      <Badge tone="green">{result.execution_status}</Badge>
     </div>
   );
 }

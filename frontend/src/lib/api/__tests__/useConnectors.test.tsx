@@ -41,7 +41,7 @@ const CREDENTIALS: ConnectorCredentialListResponse = {
 const JOB_RESULT: ConnectorJobResponse = {
   connector_key: "youtube_reporting",
   account_id: "acct-1",
-  execution_status: "recorded_not_executed",
+  execution_status: "submitted",
   audit_event: {},
 };
 
@@ -138,8 +138,8 @@ describe("useConnectorJobActions", () => {
     const [url, init] = requireFetchArgs();
     expect(url).toBe("/connectors/jobs");
     expect(methodOf(init)).toBe("POST");
-    expect(resolved?.execution_status).toBe("recorded_not_executed");
-    expect(result.current.data?.execution_status).toBe("recorded_not_executed");
+    expect(resolved?.execution_status).toBe("submitted");
+    expect(result.current.data?.execution_status).toBe("submitted");
     expect(result.current.error).toBeNull();
   });
 
@@ -267,6 +267,6 @@ describe("useConnectorJobActions", () => {
     });
 
     expect(fetchMock()).toHaveBeenCalledTimes(2);
-    expect(result.current.data?.execution_status).toBe("recorded_not_executed");
+    expect(result.current.data?.execution_status).toBe("submitted");
   });
 });

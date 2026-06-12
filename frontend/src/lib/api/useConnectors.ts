@@ -56,9 +56,9 @@ export type UseConnectorJobActionsState = {
   data: ConnectorJobResponse | null;
   loading: boolean;
   error: ApiError | Error | null;
-  // Trigger the POST on user action; resolves with the recorded job-request
-  // result (execution_status === "recorded_not_executed"), or with `null` when a
-  // same-tick duplicate submit is dropped by the in-flight guard (no POST fired),
+  // Trigger the POST on user action; resolves with the job-request result
+  // (execution_status === "submitted" on the executing path), or with `null` when
+  // a same-tick duplicate submit is dropped by the in-flight guard (no POST fired),
   // or rejects with the typed error already captured in `error`.
   requestJob: (
     body: ConnectorJobRequestBody,
@@ -73,10 +73,10 @@ export type UseConnectorJobActionsState = {
 //   useApiClient and tracks {data, loading, error} while exposing a stable
 //   requestJob(body). A superseded request is discarded so a slow earlier submit
 //   cannot overwrite a newer one (rapid re-submits).
-// Database/ORM: None (frontend) — calls the backend connector-job endpoint,
-//   which records a CONNECTOR_JOB_RUN audit event server-side. NOTE: the job is
-//   recorded, NOT executed (execution_status === "recorded_not_executed"); there
-//   is no execution backend or run-history read route wired today.
+// Database/ORM: None (frontend) — calls the backend connector-job endpoint, which
+//   submits the pull to the in-process executor and records a CONNECTOR_JOB_RUN
+//   audit event server-side (execution_status === "submitted"); progress shows in
+//   the GET /connectors/runs run-history feed.
 // Standards: the body is JSON-encoded by useApiClient; reason is required by the
 //   backend (min_length=1). Errors propagate as the typed ApiError (403 =
 //   missing RUN_CONNECTOR_JOBS @connector, 422 = blank field) for the caller to
