@@ -56,6 +56,7 @@ import types as _types  # SimpleNamespace used for dry-run tenant_id proxy
 from calendar import monthrange
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from datetime import date as date_cls
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -654,8 +655,60 @@ def resolve_connector_credentials(
     # fail scheme lookup.
     payload = resolve_secret(credential.encrypted_secret_ref.strip())
     credentials = build_credentials_from_payload(payload)
-    refresh_credentials(credentials)
+    # ========================================================================
+    # Purpose: Part 2 -- stamp credential refresh telemetry at the single
+    #   chokepoint where the OAuth refresh outcome is known and the credential
+    #   ORM row is in-session. SUCCESS rides the caller's commit (live run ->
+    #   persisted at start_run commit; dry-run/CLI never commits -> not
+    #   persisted, the intended dry-run semantics). FAILURE commits the stamp on
+    #   THIS session (the only safe point: resolve runs BEFORE any run_one write,
+    #   so nothing run-related is pending) then re-raises, leaving Bucket-A
+    #   propagation intact (CLI exit 2 / test-route 200 / worker Bucket-A audit).
+    # Database/ORM: ApiConnectorCredentialORM (UPDATE 4 telemetry columns;
+    #   tenant-writable -> NO platform_lane needed).
+    # Standards: error_class stores type(exc.inner or exc).__name__ only, never
+    #   str(exc) (no message text). Invariant: resolve-runs-before-any-run-write
+    #   -> the same-session failure commit is safe.
+    # Blast Radius: Connector credential read surface. No finance, audit, or
+    #   graph projection impact; OAuthRefreshError still propagates.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/google/oauth.py ->
+    #     refresh_credentials populates credentials.expiry on success.
+    # ========================================================================
+    try:
+        refresh_credentials(credentials)
+    except OAuthRefreshError as exc:
+        inner = getattr(exc, "inner", None)
+        _stamp_credential_refresh(
+            credential,
+            status="failed",
+            error_class=type(inner or exc).__name__,
+            token_expiry=None,
+        )
+        session.commit()
+        raise
+    _stamp_credential_refresh(
+        credential,
+        status="succeeded",
+        error_class=None,
+        token_expiry=getattr(credentials, "expiry", None),
+    )
     return credentials
+
+
+def _stamp_credential_refresh(
+    credential,
+    *,
+    status: str,
+    error_class: str | None,
+    token_expiry,
+) -> None:
+    """Mutate the in-session credential row's four telemetry columns."""
+    credential.last_refresh_attempt_at = datetime.now(UTC)
+    credential.last_refresh_status = status
+    credential.last_refresh_error_class = error_class
+    if token_expiry is not None:
+        credential.token_expiry_at = token_expiry
 
 
 # Backwards-compatible internal alias (existing call sites unchanged).
