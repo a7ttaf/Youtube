@@ -383,12 +383,7 @@ Responses:
 - **409** duplicate in-flight (an in-process registry entry or a fresh RUNNING
   row for the exact scope). An orphan supersede flips a stale RUNNING row (older
   than `connector_job_stale_running_hours`, default 6h) to `FAILED` and proceeds
-  to **202** with `superseded_run_id` recorded in the audit details. The
-  duplicate / orphan-supersede read is alias-aware: a RUNNING row opened under a
-  public hyphen key (e.g. `youtube-reporting`) is matched when the request
-  arrives with the source-system underscore key (`youtube_reporting`), and vice
-  versa, mirroring the credential + authorise-alias expansion the rest of the
-  preflight uses.
+  to **202** with `superseded_run_id` recorded in the audit details.
 
 Audit: exactly one route-owned `CONNECTOR_JOB_RUN` row (`details.action` is
 `job_submitted` or `job_rejected`); the worker emits its own STARTED/FINISHED

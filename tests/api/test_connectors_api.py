@@ -960,65 +960,6 @@ def test_request_connector_job_activate_runs_only_after_commit(tmp_path):
     assert fake.cancel_calls == []
 
 
-def test_request_connector_job_job_submitted_audit_uses_route_session(
-    tmp_path,
-) -> None:
-    """The ``job_submitted`` audit row is persisted via the route's session,
-    not the dependency-injected platform audit sink, so the audit commit and
-    the after_commit activation hook fire on the same transaction.
-
-    Pins the fix for: the previous design routed the ``job_submitted`` row
-    through ``current_audit_sink`` (backed by ``current_platform_db_session``),
-    which commits independently of the request's tenant session. On Postgres
-    a stale-run supersede or other tenant-session commit failure after the
-    platform audit committed would leave a durable ``job_submitted``
-    acceptance record while the activation hook never fired. The audit must
-    be observable in the route's own transaction so the operator never sees
-    a successful 202 with a single-sided audit (committed acceptance, no
-    worker).
-    """
-    database_url = build_database_url(tmp_path)
-    seed_database(database_url)
-    _seed_active_credential(database_url)
-    fake = _FakeExecutor(active=False)
-    client = TestClient(_enable_executor_app(database_url, fake))
-
-    response = client.post(
-        "/connectors/jobs",
-        headers=auth_headers(
-            "revenue_operations_admin", "connector", "youtube_reporting"
-        ),
-        json={
-            "connector_key": "youtube_reporting",
-            "account_id": "content-owner-1",
-            "report_month": "2026-03",
-            "reason": "Audit-on-route-session contract",
-        },
-    )
-    assert response.status_code == 202
-
-    # The audit row must be readable via a fresh session over the SAME
-    # database_url the route committed to. If the audit had been written
-    # through a different (platform) session that failed to commit, the
-    # row would not be visible here.
-    engine = create_engine(database_url)
-    with Session(engine) as session:
-        audit_rows = session.scalars(
-            select(AuditLogORM).where(
-                AuditLogORM.event_type == "CONNECTOR_JOB_RUN",
-            )
-        ).all()
-    submitted = [
-        a
-        for a in audit_rows
-        if a.details.get("action") == "job_submitted"
-    ]
-    assert len(submitted) == 1
-    assert submitted[0].scope_id == "youtube_reporting"
-    assert submitted[0].entity_id == "youtube_reporting:content-owner-1"
-    assert submitted[0].details["report_month"] == "2026-03"
-
-
 def test_connector_admin_can_test_connection_ok(tmp_path):
     """connector_admin: ok probe returns 200 status='ok' and writes CONNECTOR_TESTED audit."""
     database_url = build_database_url(tmp_path)

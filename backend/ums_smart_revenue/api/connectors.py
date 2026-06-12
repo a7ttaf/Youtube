@@ -22,7 +22,6 @@ from ums_smart_revenue.auth.policy import (
     has_permission,
 )
 from ums_smart_revenue.auth.scopes import AccessScope
-from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
 from ums_smart_revenue.config.settings import load_app_settings
 from ums_smart_revenue.connectors.credentials import (
     MAX_CREDENTIAL_PAGE_SIZE,
@@ -53,7 +52,6 @@ from ums_smart_revenue.connectors.runs.repository import (
     list_runs,
     validate_report_month,
 )
-from ums_smart_revenue.db.lane import platform_lane
 from ums_smart_revenue.db.security_models import UserORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
@@ -509,31 +507,15 @@ def request_connector_job(
     }
     if superseded_run_id is not None:
         details["superseded_run_id"] = superseded_run_id
-    # FIX (PR #95 P2): write the ``job_submitted`` audit row on the
-    # route's session (with ``platform_lane`` elevation) instead of the
-    # request-scoped ``audit_sink`` so the audit commit and the
-    # after_commit activation hook share the same transaction. The
-    # previous design used ``current_audit_sink`` (backed by
-    # ``current_platform_db_session``), which commits independently of
-    # the route's tenant session; on Postgres a stale-run supersede or
-    # other tenant-session commit failure after the platform audit
-    # committed would leave a durable ``job_submitted`` record while
-    # the activation hook never fired. The session-bound sink + the
-    # already-attached after_commit hook on ``session`` make the
-    # acceptance record and the worker enqueue atomic.
-    with platform_lane(session):
-        session_bound_sink = SqlAlchemyAuditSink(
-            session, tenant_id=tenant_id
-        )
-        record = _audit_connector_change(
-            audit_sink=session_bound_sink,
-            user=user,
-            event_type=AuditEventType.CONNECTOR_JOB_RUN,
-            connector_key=payload.connector_key,
-            account_id=payload.account_id,
-            reason=payload.reason,
-            details=details,
-        )
+    record = _audit_connector_change(
+        audit_sink=audit_sink,
+        user=user,
+        event_type=AuditEventType.CONNECTOR_JOB_RUN,
+        connector_key=payload.connector_key,
+        account_id=payload.account_id,
+        reason=payload.reason,
+        details=details,
+    )
 
     # FIX: defer the worker enqueue to AFTER the request session commits the
     # audit row. The previous design called executor.submit() inline; if the
@@ -812,22 +794,10 @@ def _supersede_or_block_running_runs(
     sink -- not the connector service principal, which may not be
     available in every environment.
     """
-    # FIX (PR #95 P2): alias-aware RUNNING lookup. The preflight's
-    # credential + authorise-alias paths already expand
-    # ``payload.connector_key`` via ``_credential_key_candidates`` so a
-    # request that submits the public hyphen key (e.g. ``youtube-reporting``)
-    # can find a credential stored under the source-system underscore key
-    # (``youtube_reporting``). The duplicate / orphan-supersede read must
-    # use the same expansion, otherwise a hyphen-key CLI run (or a
-    # previous request that stored the row under the public alias) would
-    # be invisible to an underscore-key request for the same logical
-    # scope, the route would skip the duplicate block, and a second live
-    # pull for the same scope would be accepted.
-    candidate_keys = _credential_key_candidates(payload.connector_key)
     running = find_active_runs_for_scope(
         session,
         tenant_id=tenant_id,
-        connector_keys=candidate_keys,
+        connector_key=payload.connector_key,
         account_id=payload.account_id,
         report_month=payload.report_month,
     )

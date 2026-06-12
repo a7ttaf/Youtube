@@ -9,35 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - Root governance: `README.md`, `SECURITY.md`, `CONTRIBUTING.md`, `CODEOWNERS`, `CODE_OF_CONDUCT.md`, `.gitignore`.
-- `connectors.runs.repository.find_active_runs_for_scope` now accepts a
-  ``connector_keys`` alias-candidate tuple so the
-  `POST /connectors/jobs` duplicate / orphan-supersede preflight matches a
-  RUNNING row opened under a public hyphen key (e.g.
-  `youtube-reporting`) when the request arrives with the source-system
-  underscore key (`youtube_reporting`), and vice versa. Symmetric with the
-  credential + authorise-alias expansion the rest of the preflight uses.
 
 ### Changed
 - `SqlAlchemyGoogleRevenueSourceRowRepository.upsert_many(...)` now returns
   `SourceRowUpsertResult` instead of a bare list of rows. Callers that need the
   persisted rows should read `.entries`; connector-run accounting should use
   `.created`, `.updated`, and `.unchanged` for source-row classification.
-- `ConnectorJobExecutor._audit_failed_before_start` now sets `TENANT_CTX`
-  to a minimal `Tenant` (id-only; lifecycle check intentionally
-  bypassed) so the after_begin hook writes the trusted tenant-context
-  row required by the `20260608_0001` RLS `WITH CHECK` policy on
-  `audit_logs`. The token is reset on every exit path via try/finally.
-  The pre-start failure audit is now durable on Postgres for all
-  tenant lifecycle states (ACTIVE / SUSPENDED / ARCHIVED), closing the
-  silent audit-loss window for inactive-tenant failures.
-- `POST /connectors/jobs` now writes the `job_submitted` audit row on
-  the route's tenant session (with `platform_lane` elevation) instead
-  of the dependency-injected platform audit sink, so the audit commit
-  and the after_commit activation hook share the same transaction.
-  The acceptance record and the worker enqueue are now atomic: a
-  stale-run supersede or other tenant-session commit failure after the
-  audit would have been written can no longer leave a durable
-  `job_submitted` record with no worker activation.
 
 ### Removed
 - *(planned)* Neo4j component dropped entirely — `backend/ums_smart_revenue/graph/`, `tests/graph/`, `neo4j==6.2.0` dependency, related auth permissions, retired specs archived to `Docs/_archived/`.

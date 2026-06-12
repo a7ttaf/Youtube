@@ -355,9 +355,9 @@ def list_runs(
 
 # ============================================================================
 # Purpose: Return the tenant-scoped RUNNING connector runs for one exact scope
-#   (tenant, connector_keys, account_id, report_month), newest started_at
-#   first. Powers the POST /connectors/jobs secondary duplicate guard +
-#   orphan-supersede decision (a stale RUNNING row from a dead process).
+#   (tenant, connector_key, account_id, report_month), newest started_at first.
+#   Powers the POST /connectors/jobs secondary duplicate guard + orphan-
+#   supersede decision (a stale RUNNING row from a dead process).
 # Database/ORM: ConnectorRunORM (read only).
 # Standards: tenant filter + status='RUNNING' + the full scope tuple always
 #   applied; ordered started_at desc so the youngest RUNNING row is first.
@@ -372,30 +372,16 @@ def find_active_runs_for_scope(
     session: Session,
     *,
     tenant_id: UUID,
-    connector_keys: tuple[str, ...],
+    connector_key: str,
     account_id: str,
     report_month: str,
 ) -> list[ConnectorRunEntry]:
-    """List RUNNING runs for the scope, newest started_at first.
-
-    ``connector_keys`` is a tuple of one-or-more alias candidates (e.g.
-    ``("youtube-reporting", "youtube_reporting")``) so a RUNNING row opened
-    under a public hyphen key is correctly matched when the request
-    arrives with the source-system underscore key, and vice versa. The
-    caller is responsible for expanding the submitted key via
-    ``_credential_key_candidates`` (same helper the credential lookup +
-    authorise-aliases paths use) so this read stays symmetric with the
-    rest of the connector-job preflight.
-    """
-    if not connector_keys:
-        raise ConnectorRunValidationError(
-            "connector_keys must contain at least one candidate"
-        )
+    """List RUNNING runs for one exact scope, newest started_at first."""
     stmt = (
         select(ConnectorRunORM)
         .where(
             ConnectorRunORM.tenant_id == tenant_id,
-            ConnectorRunORM.connector_key.in_(connector_keys),
+            ConnectorRunORM.connector_key == connector_key,
             ConnectorRunORM.account_id == account_id,
             ConnectorRunORM.report_month == report_month,
             ConnectorRunORM.status == "RUNNING",
