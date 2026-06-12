@@ -35,11 +35,14 @@ import { describeError } from "./CommandView";
 //   AppShell. It reads the configured connector credentials (the "data sources
 //   configured" list) from GET /connectors/credentials and the synced AdSense
 //   payments from GET /adsense/payments (month-filtered), and wires two write
-//   actions: "Request sync" (POST /connectors/jobs) and "Sync payments" (POST
-//   /adsense/sync-payments). Each connector credential row exposes a Request
-//   sync button that records — but does NOT execute — a job-run intent
-//   (execution_status "recorded_not_executed"), surfaced honestly. The view
-//   now also consumes GET /connectors/runs for the newest-first run-history
+//   actions: "Run pull" (POST /connectors/jobs) and "Sync payments" (POST
+//   /adsense/sync-payments). Each connector credential row exposes a Run pull
+//   button that submits an audited connector job for the screen's selected
+//   report_month (with an optional dry-run validate-only pass); the backend
+//   returns execution_status "submitted" on the executing path (or the
+//   "recorded_not_executed" record-only fallback when no executor is wired),
+//   surfaced honestly. On a "submitted" result the run-history feed refetches.
+//   The view also consumes GET /connectors/runs for the newest-first run-history
 //   feed, with keyset pagination and fail-closed 403 handling. Loading / error
 //   / empty / 403 states mirror the other wired views.
 // Database/ORM: None (frontend) — consumes GET /connectors/credentials, POST
@@ -143,6 +146,11 @@ export default function ConnectorsView({ // skipcq: JS-0067
 }) {
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   const [reason, setReason] = useState<string>("");
+  const [dryRun, setDryRun] = useState<boolean>(false);
+  // Nonce bumped after a successful executing-path submit so the run-history feed
+  // refetches (the new run should appear newest-first without a manual refresh).
+  const [reloadToken, setReloadToken] = useState<number>(0);
+  const runsReload = () => setReloadToken((n) => n + 1);
 
   const credentials = useConnectorCredentials();
   const jobActions = useConnectorJobActions();
@@ -155,20 +163,36 @@ export default function ConnectorsView({ // skipcq: JS-0067
   const paymentRows = payments.data?.items ?? [];
 
   // ==========================================================================
-  // Purpose: Request a connector job run for one credential row using the reason
-  //   typed into the inline, always-visible "Sync reason" field (the button is
-  //   already disabled while the reason is empty or a request is in flight). The
-  //   backend records + audits the intent but does NOT execute it; on success the
-  //   recorded result is shown in a banner. Errors are captured by the hook.
+  // Purpose: Run a connector pull for one credential row using the reason typed
+  //   into the inline, always-visible "Sync reason" field (the button is already
+  //   disabled while the reason is empty, a request is in flight, or no month is
+  //   selected). The request carries the screen's selected report_month + the
+  //   dry-run toggle. The backend submits the job to the executor and audits it;
+  //   on a "submitted" result the run-history feed is refetched so the new run
+  //   surfaces. Errors are captured by the hook and shown in the banner.
   // ==========================================================================
   const onRequestSync = (credential: ConnectorCredential) => {
     const trimmed = reason.trim();
-    if (!canRunConnectors || jobActions.loading || !trimmed) return;
+    if (!canRunConnectors || jobActions.loading || !trimmed || !month) return;
     jobActions
       .requestJob({
         connector_key: credential.connector_key,
         account_id: credential.account_id,
+        report_month: month,
+        dry_run: dryRun,
         reason: trimmed,
+      })
+      .then((result) => {
+        // Refetch the run-history feed only when the executor accepted the job
+        // AND the viewer can see the feed; a record-only fallback or a viewer
+        // without connector-health does not need (or get) a refresh.
+        if (
+          result !== null &&
+          result.execution_status === "submitted" &&
+          canViewConnectorHealth
+        ) {
+          runsReload();
+        }
       })
       .catch(() => {
         // The hook already captured the typed error in jobActions.error and
@@ -188,6 +212,8 @@ export default function ConnectorsView({ // skipcq: JS-0067
           canManageConnectors={canManageConnectors}
           reason={reason}
           onReason={setReason}
+          dryRun={dryRun}
+          onDryRun={setDryRun}
           jobError={jobActions.error}
           jobResult={jobActions.data}
           requestingJob={jobActions.loading}
@@ -208,6 +234,7 @@ export default function ConnectorsView({ // skipcq: JS-0067
           canViewConnectorHealth={canViewConnectorHealth}
           syncActions={syncActions}
           onSynced={() => payments.reload()}
+          reloadToken={reloadToken}
         />
       </div>
     </section>
@@ -229,6 +256,8 @@ function DataSourcesPanel({ // skipcq: JS-0067
   canManageConnectors,
   reason,
   onReason,
+  dryRun,
+  onDryRun,
   jobError,
   jobResult,
   requestingJob,
@@ -250,6 +279,8 @@ function DataSourcesPanel({ // skipcq: JS-0067
   canManageConnectors: boolean;
   reason: string;
   onReason: (value: string) => void;
+  dryRun: boolean;
+  onDryRun: (value: boolean) => void;
   jobError: ApiError | Error | null;
   jobResult: ConnectorJobResponse | null;
   requestingJob: boolean;
@@ -291,6 +322,8 @@ function DataSourcesPanel({ // skipcq: JS-0067
         canRunConnectors={canRunConnectors}
         reason={reason}
         onReason={onReason}
+        dryRun={dryRun}
+        onDryRun={onDryRun}
       />
 
       <ConnectorCredentialsTable
@@ -319,18 +352,24 @@ function DataSourcesPanel({ // skipcq: JS-0067
 }
 
 /**
- * The inline, always-visible "Sync reason" field that every per-row Request sync
- * uses; the reason is recorded on the audit event. When the viewer cannot run
- * connectors the field is disabled and shows the connector-operations hint.
+ * The inline, always-visible "Sync reason" field that every per-row Run pull
+ * uses; the reason is recorded on the audit event. It also carries the dry-run
+ * toggle (validate-only, no facts written) that the pull request honors. When the
+ * viewer cannot run connectors both controls are disabled and the field shows the
+ * connector-operations hint.
  */
 function SyncReasonField({ // skipcq: JS-0067
   canRunConnectors,
   reason,
   onReason,
+  dryRun,
+  onDryRun,
 }: {
   canRunConnectors: boolean;
   reason: string;
   onReason: (value: string) => void;
+  dryRun: boolean;
+  onDryRun: (value: boolean) => void;
 }) {
   return (
     <div className="field-row" style={{ margin: 13 }}>
@@ -342,6 +381,16 @@ function SyncReasonField({ // skipcq: JS-0067
         placeholder="Why this sync is being requested"
         onChange={(e) => onReason(e.target.value)}
       />
+      <label htmlFor="connectorDryRun" className="item-sub">
+        <input
+          id="connectorDryRun"
+          type="checkbox"
+          checked={dryRun}
+          disabled={!canRunConnectors}
+          onChange={(e) => onDryRun(e.target.checked)}
+        />
+        {" Dry run (validate only, no facts written)"}
+      </label>
       {canRunConnectors ? null : (
         <span className="item-sub" role="note">
           {CONNECTOR_ROLE_HINT}
@@ -361,12 +410,14 @@ function ConnectorSidebar({ // skipcq: JS-0067
   canViewConnectorHealth,
   syncActions,
   onSynced,
+  reloadToken,
 }: {
   month: string;
   canRunConnectors: boolean;
   canViewConnectorHealth: boolean;
   syncActions: ReturnType<typeof useAdsenseSyncActions>;
   onSynced: () => void;
+  reloadToken: number;
 }) {
   return (
     <aside className="view-stack">
@@ -380,7 +431,10 @@ function ConnectorSidebar({ // skipcq: JS-0067
         />
       </section>
 
-      <RunHistory canViewConnectorHealth={canViewConnectorHealth} />
+      <RunHistory
+        canViewConnectorHealth={canViewConnectorHealth}
+        reloadToken={reloadToken}
+      />
     </aside>
   );
 }
@@ -429,8 +483,10 @@ const runStatusTone = (status: ConnectorRun["status"]): Severity => {
  */
 function RunHistory({ // skipcq: JS-0067
   canViewConnectorHealth,
+  reloadToken,
 }: {
   canViewConnectorHealth: boolean;
+  reloadToken: number;
 }) {
   return (
     <section className="panel" aria-labelledby="runHistoryTitle">
@@ -444,7 +500,7 @@ function RunHistory({ // skipcq: JS-0067
         </Badge>
       </div>
       {canViewConnectorHealth ? (
-        <RunHistoryFeed />
+        <RunHistoryFeed reloadToken={reloadToken} />
       ) : (
         <div className="permission-band" role="note">
           <Dot tone="red" />
@@ -511,16 +567,28 @@ function syncRunPage( // skipcq: JS-0067
 }
 
 /** Resolve the run-history feed state (rows, cursor, loadMore). Unconditional hook. */
-function useRunHistoryFeedState(): RunHistoryFeedState { // skipcq: JS-0067
+function useRunHistoryFeedState(reloadToken: number): RunHistoryFeedState { // skipcq: JS-0067
   const [rows, setRows] = useState<ConnectorRun[]>([]);
   const [pagination, setPagination] = useState<ConnectorRunPagination | null>(null);
   const [cursorStartedAt, setCursorStartedAt] = useState<string>();
   const [cursorId, setCursorId] = useState<string>();
 
-  const { data, loading, error } = useConnectorRuns({
+  const { data, loading, error, reload } = useConnectorRuns({
     cursor_started_at: cursorStartedAt,
     cursor_id: cursorId,
   });
+
+  // FIX: when a Run pull submits a new job (reloadToken bumps), reset the cursor
+  // window back to page 1 and refetch so the newest run surfaces at the top
+  // without a manual refresh. Skip the initial mount (reloadToken === 0).
+  useEffect(() => {
+    if (reloadToken === 0) return;
+    setRows([]);
+    setPagination(null);
+    setCursorStartedAt(undefined);
+    setCursorId(undefined);
+    reload();
+  }, [reloadToken, reload]);
 
   useEffect(() => {
     if (!data) return;
@@ -543,10 +611,11 @@ function useRunHistoryFeedState(): RunHistoryFeedState { // skipcq: JS-0067
 /**
  * The live connector run-history feed: maps loading / error (403 -> no-permission
  * copy) / empty / loaded states and consumes pagination.next_cursor for a
- * "Load More" append flow (dedupe by run id).
+ * "Load More" append flow (dedupe by run id). reloadToken refetches page 1 after
+ * a successful Run pull submit.
  */
-function RunHistoryFeed() { // skipcq: JS-0067
-  const { error, runs, hasMore, loading, loadMore } = useRunHistoryFeedState();
+function RunHistoryFeed({ reloadToken }: { reloadToken: number }) { // skipcq: JS-0067
+  const { error, runs, hasMore, loading, loadMore } = useRunHistoryFeedState(reloadToken);
 
   if (error) return <RunHistoryError error={error} />;
   if (loading && runs.length === 0) return <RunHistoryLoadingState />;
@@ -687,25 +756,26 @@ function RequestJobError({ error }: { error: ApiError | Error }) { // skipcq: JS
 }
 
 function RequestJobSuccess({ result }: { result: ConnectorJobResponse }) { // skipcq: JS-0067
-  // The backend records but does NOT execute the job; surface that honestly so
-  // an operator never assumes data was pulled.
+  // Surface the executing path honestly: "submitted" means the job was handed to
+  // the executor (run history will update); "recorded_not_executed" is the
+  // record-only fallback when no executor is wired, so an operator never assumes
+  // data was pulled.
+  const submitted = result.execution_status === "submitted";
   const recordedOnly = result.execution_status === "recorded_not_executed";
+  const tone = submitted ? "green" : recordedOnly ? "amber" : "green";
+  const message = submitted
+    ? "Submitted to executor — run history will update"
+    : recordedOnly
+      ? "Queued (recorded, not yet executed)"
+      : result.execution_status;
   return (
     <div className="permission-band" role="status" style={{ margin: 13 }}>
-      <Dot tone={recordedOnly ? "amber" : "green"} />
+      <Dot tone={tone} />
       <span>
         <strong>Sync requested</strong>
-        <span>
-          {`${result.connector_key} · ${result.account_id} — ${
-            recordedOnly
-              ? "Queued (recorded, not yet executed)"
-              : result.execution_status
-          }`}
-        </span>
+        <span>{`${result.connector_key} · ${result.account_id} — ${message}`}</span>
       </span>
-      <Badge tone={recordedOnly ? "amber" : "green"}>
-        {result.execution_status}
-      </Badge>
+      <Badge tone={tone}>{result.execution_status}</Badge>
     </div>
   );
 }
@@ -857,7 +927,7 @@ function ConnectorCredentialRow({ // skipcq: JS-0067
           disabled={requestDisabled}
           onClick={() => onRequestSync(credential)}
         >
-          {requestingJob ? "Working…" : "Request sync"}
+          {requestingJob ? "Working…" : "Run pull"}
         </button>
         {canRunConnectors ? null : (
           <span className="item-sub" role="note">

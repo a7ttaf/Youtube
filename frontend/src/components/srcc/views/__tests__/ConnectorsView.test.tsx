@@ -512,7 +512,10 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     await waitFor(() => expect(screen.getByText("ok")).toBeInTheDocument());
   });
 
-  it("requests a connector job (POST /connectors/jobs) with the inline reason and shows the recorded-not-executed result", async () => {
+  // CONTRACT FLIP (Task 9): the per-row job control is now "Run pull" on the
+  // executing path; a 202 with execution_status "submitted" surfaces the
+  // Submitted banner. The POST carries the trimmed reason typed inline.
+  it("requests a connector job (POST /connectors/jobs) with the inline reason and shows the submitted result", async () => {
     fetchMock().mockImplementation(
       routeBoth((url, init) => {
         if (url === "/connectors/jobs" && methodOf(init) === "POST") {
@@ -520,7 +523,9 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
             {
               connector_key: "youtube_reporting",
               account_id: "acct-1",
-              execution_status: "recorded_not_executed",
+              report_month: "2026-03",
+              dry_run: false,
+              execution_status: "submitted",
               audit_event: {},
             },
             202,
@@ -535,7 +540,7 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
       expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
     );
 
-    const requestButton = screen.getByRole("button", { name: /request sync/i });
+    const requestButton = screen.getByRole("button", { name: /run pull/i });
     // The button is disabled until a sync reason is typed (no window.prompt).
     expect(requestButton).toBeDisabled();
 
@@ -549,10 +554,10 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     await waitFor(() =>
       expect(screen.getByText("Sync requested")).toBeInTheDocument(),
     );
-    // Honest copy: the job is recorded, not executed.
-    expect(
-      screen.getByText(/Queued \(recorded, not yet executed\)/i),
-    ).toBeInTheDocument();
+    // Honest copy: the job was submitted to the executor. (Match the banner
+    // message specifically; the status badge also renders "submitted", so a
+    // bare /Submitted/i would match two elements.)
+    expect(screen.getByText(/Submitted to executor/i)).toBeInTheDocument();
     const jobCall = fetchMock().mock.calls.find(
       ([input, init]) =>
         urlOf(input) === "/connectors/jobs" && methodOf(init) === "POST",
@@ -563,6 +568,130 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
       String((jobCall?.[1] as RequestInit | undefined)?.body ?? "{}"),
     );
     expect(jobBody.reason).toBe("Manual March resync");
+  });
+
+  it("Run pull POSTs report_month + dry_run and shows the submitted banner", async () => {
+    fetchMock().mockImplementation(
+      routeBoth((url, init) => {
+        if (url === "/connectors/jobs" && methodOf(init) === "POST") {
+          return jsonResponse(
+            {
+              connector_key: "youtube_reporting",
+              account_id: "acct-1",
+              report_month: "2026-03",
+              dry_run: false,
+              execution_status: "submitted",
+              audit_event: {},
+            },
+            202,
+          );
+        }
+        return null;
+      }),
+    );
+    renderConnectorsView();
+
+    await waitFor(() =>
+      expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
+    );
+    fireEvent.change(
+      screen.getByLabelText("Sync reason (required, audited)"),
+      { target: { value: "Manual March pull" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: /run pull/i }));
+
+    // Match the banner message specifically; the status badge also renders
+    // "submitted", so a bare /Submitted/i would match two elements.
+    await waitFor(() =>
+      expect(screen.getByText(/Submitted to executor/i)).toBeInTheDocument(),
+    );
+    const jobCall = fetchMock().mock.calls.find(
+      ([input, init]) =>
+        urlOf(input) === "/connectors/jobs" && methodOf(init) === "POST",
+    );
+    const body = JSON.parse(
+      String((jobCall?.[1] as RequestInit | undefined)?.body ?? "{}"),
+    );
+    expect(body.report_month).toBe("2026-03");
+    expect(body.dry_run).toBe(false);
+    expect(body.reason).toBe("Manual March pull");
+  });
+
+  it("refetches the runs list after a 202 submitted", async () => {
+    fetchMock().mockImplementation(
+      routeBoth((url, init) => {
+        if (url === "/connectors/jobs" && methodOf(init) === "POST") {
+          return jsonResponse(
+            {
+              connector_key: "youtube_reporting",
+              account_id: "acct-1",
+              report_month: "2026-03",
+              dry_run: false,
+              execution_status: "submitted",
+              audit_event: {},
+            },
+            202,
+          );
+        }
+        return null;
+      }),
+    );
+    renderConnectorsView();
+
+    await waitFor(() =>
+      expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
+    );
+    const before = runCalls().length;
+    fireEvent.change(
+      screen.getByLabelText("Sync reason (required, audited)"),
+      { target: { value: "Pull then refresh" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: /run pull/i }));
+    await waitFor(() => expect(runCalls().length).toBeGreaterThan(before));
+  });
+
+  it("surfaces a 409 detail verbatim on Run pull", async () => {
+    fetchMock().mockImplementation(
+      routeBoth((url, init) => {
+        if (url === "/connectors/jobs" && methodOf(init) === "POST") {
+          return jsonResponse(
+            { detail: "A connector job for this scope is already in flight" },
+            409,
+          );
+        }
+        return null;
+      }),
+    );
+    renderConnectorsView();
+
+    await waitFor(() =>
+      expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
+    );
+    fireEvent.change(
+      screen.getByLabelText("Sync reason (required, audited)"),
+      { target: { value: "Duplicate" } },
+    );
+    fireEvent.click(screen.getByRole("button", { name: /run pull/i }));
+    await waitFor(() =>
+      expect(
+        screen.getByText(/already in flight/i),
+      ).toBeInTheDocument(),
+    );
+  });
+
+  it("disables Run pull + shows the role hint when the viewer cannot run connectors", async () => {
+    fetchMock().mockImplementation(routeBoth(() => null));
+    renderConnectorsView(false);
+
+    await waitFor(() =>
+      expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("button", { name: /run pull/i }),
+    ).toBeDisabled();
+    expect(
+      screen.getAllByText("Requires a connector-operations role.").length,
+    ).toBeGreaterThan(0);
   });
 
   it("syncs AdSense payments (POST /adsense/sync-payments) and refetches the list", async () => {
@@ -644,7 +773,7 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     expect(screen.getByRole("alert")).toBeInTheDocument();
   });
 
-  it("disables the Request sync + Sync payments actions and shows the role hint when the viewer cannot run connectors", async () => {
+  it("disables the Run pull + Sync payments actions and shows the role hint when the viewer cannot run connectors", async () => {
     fetchMock().mockImplementation(routeBoth(() => null));
     renderConnectorsView(false);
 
@@ -652,7 +781,7 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
       expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
     );
     expect(
-      screen.getByRole("button", { name: /request sync/i }),
+      screen.getByRole("button", { name: /run pull/i }),
     ).toBeDisabled();
     expect(
       screen.getByRole("button", { name: /^sync payments$/i }),

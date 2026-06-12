@@ -130,6 +130,7 @@ describe("useConnectorJobActions", () => {
       resolved = await result.current.requestJob({
         connector_key: "youtube_reporting",
         account_id: "acct-1",
+        report_month: "2026-03",
         reason: "Manual resync",
       });
     });
@@ -153,6 +154,7 @@ describe("useConnectorJobActions", () => {
         result.current.requestJob({
           connector_key: "youtube_reporting",
           account_id: "acct-1",
+          report_month: "2026-03",
           reason: "Manual resync",
         }),
       ).rejects.toMatchObject({ name: "ApiError", status: 403 });
@@ -172,6 +174,7 @@ describe("useConnectorJobActions", () => {
     const JOB_BODY = {
       connector_key: "youtube_reporting",
       account_id: "acct-1",
+      report_month: "2026-03",
       reason: "Manual resync",
     };
     let firstResolved: ConnectorJobResponse | null | undefined;
@@ -193,6 +196,56 @@ describe("useConnectorJobActions", () => {
     expect(result.current.loading).toBe(false);
   });
 
+  it("includes report_month + dry_run in the POST body and resolves submitted", async () => {
+    fetchMock().mockResolvedValue(
+      jsonResponse(
+        {
+          connector_key: "youtube_reporting",
+          account_id: "acct-1",
+          report_month: "2026-03",
+          dry_run: true,
+          execution_status: "submitted",
+          audit_event: {},
+        },
+        202,
+      ),
+    );
+    const { result } = renderHook(() => useConnectorJobActions(), { wrapper });
+    let resolved: ConnectorJobResponse | null | undefined;
+    await act(async () => {
+      resolved = await result.current.requestJob({
+        connector_key: "youtube_reporting",
+        account_id: "acct-1",
+        report_month: "2026-03",
+        dry_run: true,
+        reason: "Manual pull",
+      });
+    });
+    const [, init] = requireFetchArgs();
+    const body = JSON.parse(String((init as RequestInit).body ?? "{}"));
+    expect(body.report_month).toBe("2026-03");
+    expect(body.dry_run).toBe(true);
+    expect(resolved?.execution_status).toBe("submitted");
+  });
+
+  it("rejects with a typed 503 when the executor is disabled", async () => {
+    fetchMock().mockResolvedValue(
+      jsonResponse({ detail: "Connector job executor is disabled" }, 503),
+    );
+    const { result } = renderHook(() => useConnectorJobActions(), { wrapper });
+    await act(async () => {
+      await expect(
+        result.current.requestJob({
+          connector_key: "youtube_reporting",
+          account_id: "acct-1",
+          report_month: "2026-03",
+          reason: "While disabled",
+        }),
+      ).rejects.toMatchObject({ name: "ApiError", status: 503 });
+    });
+    expect(result.current.error).toMatchObject({ status: 503 });
+  });
+
   it("allows a fresh job request after the in-flight one settles", async () => {
     // A fresh Response per call: a Response body can only be read once.
     fetchMock().mockImplementation(() => jsonResponse(JOB_RESULT, 202));
@@ -201,6 +254,7 @@ describe("useConnectorJobActions", () => {
     const JOB_BODY = {
       connector_key: "youtube_reporting",
       account_id: "acct-1",
+      report_month: "2026-03",
       reason: "Manual resync",
     };
     // First request settles and clears the in-flight latch.
