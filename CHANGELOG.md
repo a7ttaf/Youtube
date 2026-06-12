@@ -38,6 +38,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stale-run supersede or other tenant-session commit failure after the
   audit would have been written can no longer leave a durable
   `job_submitted` record with no worker activation.
+- `POST /connectors/jobs` now writes the `run_superseded` terminal
+  audit edge (stale-RUNNING supersede) on the same route tenant
+  session as the `finish_run` connector_runs row update (with
+  `platform_lane` elevation) instead of the dependency-injected
+  platform audit sink, so the audit commit and the `finish_run`
+  share the same transaction. The FINISHED/FAILED edge and the row
+  status are now atomic: a tenant-session commit failure can no
+  longer leave a durable terminal edge for a row that stayed
+  RUNNING, or a FAILED row with no terminal edge.
+- `connectors.runs.orchestrator._credential_key_candidates` now
+  includes the legacy `adsense` connector scope (still used by
+  `/adsense/sync-payments` and the run-history health read in
+  `auth/policy.py`) in the candidate set for
+  `adsense-management` / `adsense_management`, mirroring
+  `auth/policy.py::_CONNECTOR_KEY_ALIASES` so a connector-ops grant
+  scoped to the legacy `adsense` connector authorises a job
+  submitted under the new AdSense Management keys (and vice
+  versa).
+- `ConnectorJobExecutor._audit_dry_run_outcome` now sets
+  `TENANT_CTX` directly (id-only, lifecycle check intentionally
+  bypassed) instead of re-entering `connector_tenant_context()`,
+  so a dry-run whose tenant lifecycle flipped SUSPENDED or
+  ARCHIVED between the successful `run_one(..., dry_run=True)`
+  return and the outcome-write step still records the
+  `job_dry_run_completed` row. Mirrors the pre-start failure
+  audit's explicit-tenant platform-lane path.
 
 ### Removed
 - *(planned)* Neo4j component dropped entirely — `backend/ums_smart_revenue/graph/`, `tests/graph/`, `neo4j==6.2.0` dependency, related auth permissions, retired specs archived to `Docs/_archived/`.

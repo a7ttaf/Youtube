@@ -537,6 +537,80 @@ def test_run_job_dry_run_no_failures_writes_empty_per_report_failures(
     assert row.details["per_report_failures"] == []
 
 
+def test_run_job_dry_run_audit_persists_after_tenant_suspended(
+    tmp_path,
+) -> None:
+    """The dry-run outcome audit is written even when the tenant is
+    SUSPENDED by the time the outcome-write step runs.
+
+    Pins the fix for: ``_audit_dry_run_outcome`` previously re-entered
+    ``connector_tenant_context()`` to satisfy the audit_logs RLS WITH
+    CHECK, but that helper raises ``TenantLifecycleError`` for
+    non-ACTIVE tenants. A dry-run whose tenant lifecycle flipped
+    SUSPENDED between the successful ``run_one(..., dry_run=True)``
+    return and the outcome-write step left the ``job_submitted`` row
+    with no companion ``job_dry_run_completed`` row. The fix sets
+    ``TENANT_CTX`` directly with a minimal Tenant (no lifecycle check),
+    so the outcome audit is durable on Postgres for all tenant states.
+
+    The race itself (lifecycle flips during a run) is hard to reproduce
+    deterministically without a parallel tenant update thread, so this
+    test exercises the audit writer directly with the tenant already
+    SUSPENDED and proves it does not raise and writes the expected row.
+    """
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+
+    # Tenant is SUSPENDED by the time the outcome audit would run.
+    with factory() as session:
+        tenant = session.get(TenantORM, TENANT)
+        tenant.status = TenantStatus.SUSPENDED
+        session.commit()
+
+    dry_outcome = ConnectorRunOutcome(
+        run=None,
+        counts={
+            "reports_attempted": 1,
+            "reports_succeeded": 1,
+            "reports_failed": 0,
+            "rows_upserted_total": 3,
+        },
+        per_report_failures=[],
+    )
+
+    try:
+        # Direct call to the outcome writer: simulates the post-run
+        # step with a tenant that is no longer ACTIVE.
+        executor._audit_dry_run_outcome(
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+            report_month="2026-03",
+            outcome=dry_outcome,
+            actor_identity=ACTOR,
+        )
+    finally:
+        executor.close()
+
+    with factory() as session:
+        rows = session.scalars(select(AuditLogORM)).all()
+    completed = [
+        a for a in rows if a.details.get("action") == "job_dry_run_completed"
+    ]
+    assert len(completed) == 1
+    assert completed[0].event_type == "CONNECTOR_JOB_RUN"
+    assert completed[0].tenant_id == TENANT
+    assert completed[0].details["dry_run"] is True
+    assert completed[0].details["report_month"] == "2026-03"
+    # TENANT_CTX is reset on every exit path; the next request sees the
+    # caller's prior contextvar, not the outcome-audit's fabrication.
+    from ums_smart_revenue.tenancy.context import get_current_tenant
+
+    assert get_current_tenant() is None
+
+
 def test_run_job_service_principal_failure_writes_bucket_a_audit(
     tmp_path,
 ) -> None:

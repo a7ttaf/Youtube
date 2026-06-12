@@ -148,7 +148,12 @@ def _enable_executor_app(database_url: str, executor):
     return app
 
 
-def _seed_active_credential(database_url: str, *, status="active"):
+def _seed_active_credential(
+    database_url: str,
+    *,
+    status="active",
+    connector_key: str = "youtube_reporting",
+):
     engine = create_engine(database_url)
     # The jobs route reads connector_runs for the dup/orphan guard; ensure the
     # ReportBase tables exist so the reader runs against a real (empty) table.
@@ -158,7 +163,7 @@ def _seed_active_credential(database_url: str, *, status="active"):
             ApiConnectorCredentialORM(
                 id=uuid4(),
                 tenant_id=UUID(UMS_TENANT_ID),
-                connector_key="youtube_reporting",
+                connector_key=connector_key,
                 account_id="content-owner-1",
                 encrypted_secret_ref="secret-manager://ums/yt/content-owner-1",
                 status=status,
@@ -1017,6 +1022,47 @@ def test_request_connector_job_job_submitted_audit_uses_route_session(
     assert submitted[0].scope_id == "youtube_reporting"
     assert submitted[0].entity_id == "youtube_reporting:content-owner-1"
     assert submitted[0].details["report_month"] == "2026-03"
+
+
+def test_request_connector_job_accepts_legacy_adsense_scope_grant(
+    tmp_path,
+) -> None:
+    """A connector-ops grant scoped to the legacy ``adsense`` connector
+    authorises a job submitted under the new ``adsense-management`` key.
+
+    Pins the fix for: the route's alias expansion
+    (``_credential_key_candidates``) only included the hyphen/underscore
+    pair, so a grant scoped to the legacy ``adsense`` connector (still
+    used by ``/adsense/sync-payments`` and the run-history health read in
+    ``auth/policy.py``) was rejected when the operator submitted the
+    replacement ``adsense-management`` job key. The candidate set now
+    mirrors the auth/policy.py ``_CONNECTOR_KEY_ALIASES`` umbrella so
+    existing scoped grants can run the replacement connector.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    # Seed the credential under the new source-system underscore key.
+    _seed_active_credential(database_url, connector_key="adsense_management")
+    fake = _FakeExecutor(active=False)
+    client = TestClient(_enable_executor_app(database_url, fake))
+
+    response = client.post(
+        "/connectors/jobs",
+        # Note: x_scope_id is the LEGACY "adsense" scope -- the grant
+        # is held against the umbrella scope, not the new key.
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "adsense"
+        ),
+        json={
+            "connector_key": "adsense-management",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Legacy-adsense grant covers new connector key",
+        },
+    )
+    assert response.status_code == 202
+    assert len(fake.submit_calls) == 1
+    assert len(fake.activate_calls) == 1
 
 
 def test_connector_admin_can_test_connection_ok(tmp_path):
