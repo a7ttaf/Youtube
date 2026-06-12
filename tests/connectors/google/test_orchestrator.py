@@ -2779,17 +2779,20 @@ def test_dry_run_parser_failure_increments_reports_failed_and_keeps_per_report_f
             dry_run=True,
         )
 
-    # ----- outcome contract: counts capture the failure; per-report list empty -----
+    # ----- outcome contract: counts capture the failure AND per-report failures are populated -----
     assert isinstance(outcome, ConnectorRunOutcome)
     assert outcome.run is None
     assert outcome.counts["reports_attempted"] == 2
     assert outcome.counts["reports_succeeded"] == 1
     assert outcome.counts["reports_failed"] == 1
-    # Spec §5.4: dry-run returns counts only; per_report_failures stays
-    # empty even when individual reports fail. If a future change widens
-    # the dry-run outcome to surface per-report failures, this assertion
-    # is the canary that forces the spec update to land alongside the code.
-    assert outcome.per_report_failures == []
+    # FIX: the dry-run outcome now carries per-report failures (report_type,
+    # error_class) so the executor's job_dry_run_completed audit row (the
+    # only durable record of a dry-run, since connector_runs is empty) can
+    # show operators which reports would fail. Each failing report appears
+    # once with the canned exception class name.
+    assert outcome.per_report_failures == [
+        ("content_owner_basic_a3", "ParserError"),
+    ]
 
     # ----- no DB writes: SAVEPOINT still cleans up around the iteration -----
     assert session.query(ConnectorRunORM).count() == 0

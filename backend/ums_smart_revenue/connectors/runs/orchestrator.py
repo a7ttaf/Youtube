@@ -783,6 +783,7 @@ def _run_dry_run(
 ) -> ConnectorRunOutcome:
     """Execute the connector's produce/parse path inside a rolled-back savepoint."""
     counts = _zero_counts()
+    per_report_failures: list[tuple[str, str]] = []
     runner = dispatch_connector(key=connector_key)
     parser = _parser_for_connector(connector_key)
     savepoint = session.begin_nested()
@@ -802,6 +803,13 @@ def _run_dry_run(
             account_id=account_id,
         ):
             counts["reports_attempted"] += 1
+            # FIX: extract the report_type from the produced report so a
+            # per-report failure carries it in the returned outcome. Previously
+            # the dry-run outcome always had an empty per_report_failures
+            # list, so the executor's job_dry_run_completed audit row
+            # (the only durable record of what the dry-run found) listed no
+            # failures even when individual reports threw.
+            report_type, _payload, _raws, _failure = _unpack_produced_report(produced)
             try:
                 if isinstance(produced, ProducedReportFailure):
                     raise produced.error
@@ -812,11 +820,18 @@ def _run_dry_run(
                 parsed_rows = list(parser.parse(parser_payload, tenant_id=tenant_id))
                 counts["rows_upserted_total"] += len(parsed_rows)
                 counts["reports_succeeded"] += 1
-            except Exception:
+            except Exception as exc:
                 counts["reports_failed"] += 1
+                per_report_failures.append(
+                    (report_type, type(exc).__name__)
+                )
     finally:
         savepoint.rollback()
-    return ConnectorRunOutcome(run=None, counts=counts, per_report_failures=[])
+    return ConnectorRunOutcome(
+        run=None,
+        counts=counts,
+        per_report_failures=per_report_failures,
+    )
 
 
 # ============================================================================
