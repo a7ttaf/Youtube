@@ -56,6 +56,16 @@ of this is required for any phase below to work end-to-end.
   Connectors; the Audit page is wired to `GET /audit/events` (PR #71,
   31a7641) and Registry to `GET /channels` (PR #73/#78), so all dashboard
   pages are wired to live APIs).
+- ✅ Connector-jobs executor: `POST /connectors/jobs` now EXECUTES (submits a
+  real ingest pull to a bounded in-process `ConnectorJobExecutor`, returns 202
+  `submitted`; the old `recorded_not_executed` no-op is retired). Fail-closed
+  `connector_job_executor_enabled` setting (default OFF -> 503), in-process +
+  DB duplicate guard with stale-orphan supersede, one route-owned audit row, a
+  worker Bucket-A `job_failed_before_start` audit, and a frontend "Run pull"
+  control. Part 2 adds four `api_connector_credentials` refresh-telemetry
+  columns + CHECK (migration `20260612_0001`) stamped at the single
+  `resolve_connector_credentials` chokepoint. See
+  `Docs/15_DELIVERY_BACKLOG.md` for the full scope + deferrals.
 
 ### S1 — Governance, infra, scope freeze (2026-05-16)
 

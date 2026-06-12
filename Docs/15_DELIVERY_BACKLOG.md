@@ -138,8 +138,28 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
 - ⏳ Monthly revenue normalization — revenue facts foundation in PR #2;
   normalization bridge from google_revenue_source_rows shipped in PR #44;
   run_one now wires the post-run normalizer (PR #90) behind the adapter
-  (PR #93). Remaining: the connector-job executor so POST /connectors/jobs
-  actually runs (still recorded_not_executed); the CLI is the only live trigger.
+  (PR #93).
+    - ✅ Connector-job executor — POST /connectors/jobs now EXECUTES: it submits
+      a real ingest pull to a bounded in-process `ConnectorJobExecutor` and
+      returns 202 `submitted` (the old `recorded_not_executed` no-op is retired;
+      the CLI `scripts/run_google_connector.py` remains a valid trigger). The
+      worker runs the CLI pattern on its own session under
+      `connector_tenant_context` -> `run_one`. Fail-closed setting
+      `connector_job_executor_enabled` (default OFF -> 503); duplicate guard
+      (in-process registry + DB RUNNING reader with stale-orphan supersede);
+      route-owned `job_submitted`/`job_rejected` audit + worker
+      `job_failed_before_start` Bucket-A audit. Frontend "Run pull" control
+      (report_month + dry-run, submitted banner, run-history refetch).
+    - ✅ Part 2 credential refresh telemetry — four additive nullable columns on
+      `api_connector_credentials` (`last_refresh_attempt_at`, `token_expiry_at`,
+      `last_refresh_status`, `last_refresh_error_class`) + CHECK
+      `ck_connector_last_refresh_status` (migration `20260612_0001`), stamped at
+      the single `resolve_connector_credentials` chokepoint; surfaced on
+      GET /connectors/credentials.
+    - Deferred: no celery/redis broker (in-process only); no partial-unique
+      index on RUNNING runs (TOCTOU is code-level, accepted at max_workers=1);
+      no live-OAuth credentials; no auto-flip of credential `status` to
+      `failed_auth` on refresh failure.
     - ✅ PR #93 (ingestion RLS lane fix) — made the merged ingest→normalize
       pipeline executable on RLS-enforced Postgres (it previously composed only
       on SQLite). New db.lane.platform_lane elevates every run-path

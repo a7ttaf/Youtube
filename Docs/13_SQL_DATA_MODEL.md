@@ -433,3 +433,39 @@ group/sector/company membership do not change the data returned by the same
 `export_id`, ensuring finance numbers stay deterministic per export. The
 column is `NULL` for `scope_type='global'` jobs (all channels) and for
 pre-snapshot legacy rows that fall back to live resolution.
+
+## Connector credentials
+
+```sql
+api_connector_credentials (
+  id uuid primary key,
+  tenant_id uuid,
+  connector_key text,
+  account_id text,
+  encrypted_secret_ref text,
+  status text,                       -- active|disabled|rotating|failed_auth
+  created_by uuid null,
+  updated_by uuid null,
+  created_at timestamptz,
+  updated_at timestamptz,
+  -- Part 2 credential refresh telemetry (additive, nullable; no backfill):
+  last_refresh_attempt_at timestamptz null,
+  token_expiry_at timestamptz null,
+  last_refresh_status text null,     -- succeeded|failed|null
+  last_refresh_error_class text null
+);
+```
+
+Implementation note:
+`api_connector_credentials` stores a reference to the external encrypted secret
+(no raw credential material). The table is tenant-scoped and tenant-writable
+(NOT in `TENANT_PLATFORM_ONLY_WRITE_TABLES`), so the telemetry `UPDATE` runs on
+the tenant lane with no grant-pin change.
+
+The four refresh-telemetry columns (migration `20260612_0001`) are stamped at the
+single `resolve_connector_credentials` chokepoint where the OAuth refresh outcome
+is known: success rides the caller's commit; a failure commits the `failed` stamp
+on the same session and re-raises. `last_refresh_error_class` stores the exception
+class name only, never message text. A CHECK constraint
+`ck_connector_last_refresh_status` enforces
+`last_refresh_status IS NULL OR last_refresh_status IN ('succeeded','failed')`.
