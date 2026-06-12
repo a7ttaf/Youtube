@@ -325,6 +325,23 @@ def request_connector_job(
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
     """Validate cheaply, reserve an executor slot, write the audit, and return 202 submitted."""
+    # Authorize first against the submitted key OR any hyphen/underscore
+    # alias, so a grant scoped to ``youtube-reporting`` works when the
+    # credential and orchestrator canonicalize to ``youtube_reporting``.
+    # This gate runs BEFORE any auditable rejection so unauthorized callers
+    # cannot create connector-job audit events. For unknown keys fall back
+    # to the submitted key; the unknown-key check below will reject them.
+    try:
+        candidate_keys = _credential_key_candidates(payload.connector_key)
+    except ValueError:
+        candidate_keys = (payload.connector_key,)
+    alias_scopes = [AccessScope.connector(key) for key in candidate_keys]
+    if not any(
+        has_permission(user, Permission.RUN_CONNECTOR_JOBS, scope)
+        for scope in alias_scopes
+    ):
+        _raise_missing_connector_permission(Permission.RUN_CONNECTOR_JOBS)
+
     if payload.connector_key not in known_keys():
         return _reject_connector_job(
             audit_sink=audit_sink,
@@ -335,16 +352,10 @@ def request_connector_job(
             detail="Unknown connector key",
         )
 
-    # Canonicalize early so authorization, credential lookup, the executor
-    # registry key, and the downstream orchestrator all agree on the
-    # source-system underscore key. Public hyphen aliases are accepted but
-    # normalized here to prevent scope/permission mismatches and duplicate
-    # registry entries across aliases.
+    # Canonicalize so credential lookup, the executor registry key, and the
+    # downstream orchestrator all agree on the source-system underscore key.
     connector_key = _source_system_for_connector(payload.connector_key)
     payload = payload.model_copy(update={"connector_key": connector_key})
-
-    connector_scope = AccessScope.connector(payload.connector_key)
-    _require_connector_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
 
     settings = load_app_settings()
     tenant_id = _resolve_tenant_uuid(user)
