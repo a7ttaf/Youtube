@@ -180,16 +180,21 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
       tests/connectors/runs/test_run_one_rls_postgres.py (5 obligations); no
       grant/policy/migration change.
 - ✅ Alembic env.py URL-precedence hardening — `get_database_url()` no longer lets
-  an ambient `UMS_DATABASE_URL` silently override a programmatically-injected
+  an ambient `UMS_DATABASE_URL` silently override an in-code-injected
   `sqlalchemy.url`. That footgun meant any box with `UMS_DATABASE_URL` exported
   (a dev/staging DB) would run migration round-trip tests' schema drops + upgrades
   against that ambient DB — data-destructive and nondeterministic. The precedence
-  logic is extracted to a pure, unit-tested seam
-  `db/migration_url.py::resolve_database_url`, gated on `config.config_file_name`:
-  programmatic Config (no ini ⇒ tests/embedded callers) lets the injected url win;
-  ini-based Config (production) preserves env-var-wins over the alembic.ini
-  placeholder. 6 unit tests (4 spec quadrants + empty-guard + edge) + 1 PG e2e
-  regression (decoy env var cannot retarget a programmatic `command.upgrade`). No
+  logic is extracted to a unit-tested seam
+  `db/migration_url.py::resolve_database_url`: it re-reads the ini's on-disk
+  `sqlalchemy.url` and treats any *differing* configured value as a deliberate
+  in-code injection that wins over the env var; when the configured url equals the
+  ini placeholder (production, no override) `UMS_DATABASE_URL` still wins,
+  preserving the prod contract. This is robust for BOTH caller patterns —
+  `Config()` (no ini) and `Config(alembic.ini)` + `set_main_option` (the
+  tests/tenancy + test_session_tenant_hook migration tests, which a review found
+  the first config_file_name-only gate had missed). 8 unit tests (4 spec
+  quadrants + empty-guard + edge + 2 ini-injection) + 2 PG e2e regressions (decoy
+  env var cannot retarget either a no-ini or an ini-backed `command.upgrade`). No
   schema/data change; no graph projection impact.
 - ✅ AdSense payment sync — shipped: live `accounts.payments.list` pull
   (GoogleAdSensePaymentClient + pure fail-closed mapping/parse +

@@ -23,17 +23,26 @@ Spec: `Docs/superpowers/specs/2026-06-11-alembic-env-url-precedence-design.md`.
 
 ```python
 configured = config.get_main_option("sqlalchemy.url")
-if config.config_file_name is None and configured:
-    return configured            # programmatic (tests/embedded): injected url wins
-url = environ.get("UMS_DATABASE_URL") or configured  # ini (prod): env var wins
+declared_on_disk = _ini_declared_url(config)   # re-read the ini file's own url
+if configured and configured != declared_on_disk:
+    return configured            # deliberate in-code injection wins over the env var
+url = environ.get("UMS_DATABASE_URL") or configured  # prod: env var wins over placeholder
 if not url:
     raise RuntimeError(...)       # empty-guard preserved
 return url
 ```
 
-`config_file_name is None` ⟺ no ini path was passed to `Config()` ⟺ programmatic caller
-(every migration round-trip fixture builds `Config()` and `set_main_option(...)`). Production
-runs Alembic from `alembic.ini`, so `config_file_name` is set and env-var-wins is preserved.
+A configured `sqlalchemy.url` that differs from the ini file's on-disk declaration was injected
+in code (tests/embedded callers) and must win over an ambient `UMS_DATABASE_URL`. When it equals
+the ini's declared value (production placeholder, no override), the env var wins, preserving the
+prod contract.
+
+> **Why not just `config.config_file_name is None`?** A review found four migration tests
+> (`tests/tenancy/test_isolation.py`, `test_rls_restricted_login.py`, `test_rls_grant_surface.py`,
+> `tests/db/test_session_tenant_hook.py`) build `Config("alembic.ini")` and inject the url, so
+> `config_file_name` is set for them — a bare `config_file_name` gate would leave the footgun open.
+> The on-disk comparison closes it for both caller patterns without touching those sensitive tests.
+> See the spec's "Post-review correction".
 
 ---
 

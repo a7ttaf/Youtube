@@ -107,3 +107,23 @@ PG suite on a fresh clean-room cluster.
 The test-harness lock_timeout hang fix (separate branch `fix/pg-migration-test-lock-timeout`,
 commit `b9deb3e`). The two are independent: lock_timeout is test infrastructure; this is the
 migration entry point's URL contract.
+
+## Post-review correction (2026-06-12, implemented on `fix/alembic-env-url-precedence`)
+
+A pre-implementation review found this spec's premise — "every migration round-trip test builds
+`Config()` (no ini)" / "true for the entire current codebase" — is **factually wrong**. Four
+migration-running tests build `Config("alembic.ini")` and then inject the url in code:
+`tests/tenancy/test_isolation.py`, `tests/tenancy/test_rls_restricted_login.py`,
+`tests/tenancy/test_rls_grant_surface.py`, `tests/db/test_session_tenant_hook.py`. For those,
+`config.config_file_name` is **set**, so Approach A's `config_file_name is None` gate would take the
+production branch and leave the footgun open (an ambient `UMS_DATABASE_URL` would still retarget
+them).
+
+**Implemented refinement (supersedes Approach A's discriminator):** the resolver re-reads the ini's
+*on-disk* `sqlalchemy.url` (`configparser`, `interpolation=None`) and treats any configured value
+that **differs** from it as a deliberate in-code injection that wins over `UMS_DATABASE_URL`. When
+the configured url equals the ini's declared value (production placeholder, no in-code override) the
+env var wins, preserving the prod contract byte-for-byte. This is robust for **both** caller patterns
+(`Config()` with no ini *and* `Config(ini)` + `set_main_option`) and required no changes to the four
+sensitive RLS tests. Validation expanded to 8 unit quadrants + 2 PG e2e round-trips (no-ini and
+ini-backed, each proving a decoy `UMS_DATABASE_URL` cannot retarget `command.upgrade`).
