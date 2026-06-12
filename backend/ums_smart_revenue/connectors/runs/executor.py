@@ -359,15 +359,11 @@ class ConnectorJobExecutor:
 
         cancelled: list[tuple[_JobKey, ConnectorJobActor]] = []
         for _key, entry in entries:
-            if not isinstance(entry, Future):
-                continue
-            if not entry.cancelled():
-                continue
-            actor_identity = getattr(entry, "_actor_identity", None)
-            job_key = getattr(entry, "_job_key", None)
-            if actor_identity is None or job_key is None:
-                continue
-            cancelled.append((job_key, actor_identity))
+            if isinstance(entry, Future) and entry.cancelled():
+                actor_identity = getattr(entry, "_actor_identity", None)
+                job_key = getattr(entry, "_job_key", None)
+                if actor_identity is not None and job_key is not None:
+                    cancelled.append((job_key, actor_identity))
 
         for job_key, actor_identity in cancelled:
             tenant_id, connector_key, account_id, report_month = job_key
