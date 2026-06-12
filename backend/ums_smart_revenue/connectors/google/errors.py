@@ -7,6 +7,8 @@ row plus an audit event with error_class=<class name>.
 """
 from __future__ import annotations
 
+from uuid import UUID
+
 
 class GoogleConnectorError(Exception):
     """Root of all B2 typed errors."""
@@ -172,6 +174,34 @@ class CredentialNotFoundError(GoogleConnectorError):
         super().__init__(f"no credential for {connector_key}/{account_id}")
         self.connector_key = connector_key
         self.account_id = account_id
+
+
+class TenantLifecycleError(GoogleConnectorError):
+    """Raised when a connector run targets a tenant in a non-ACTIVE lifecycle.
+
+    Connector runs (CLI / future executor) run outside the FastAPI request
+    path that ``TenantResolverMiddleware`` guards, so the lifecycle check
+    the resolver enforces (ACTIVE only; SUSPENDED -> 423, ARCHIVED -> 410)
+    must be reapplied at the connector entry point. Otherwise a UUID that
+    points at a suspended/archived tenant would still authorize the run
+    on the tenant lane and read/mutate the suspended tenant's rows.
+    """
+
+    def __init__(self, *, tenant_id: UUID, status: str | None) -> None:
+        """Carry the looked-up ``tenant_id`` and the offending ``status``.
+
+        ``status`` is ``None`` when the tenant row was not found at all
+        (the ``tenants`` table returned no row for the supplied id).
+        """
+        if status is None:
+            super().__init__(f"tenant {tenant_id} not found")
+        else:
+            super().__init__(
+                f"tenant {tenant_id} is {status}; "
+                f"connector runs require ACTIVE"
+            )
+        self.tenant_id = tenant_id
+        self.status = status
 
 
 class InactiveCredentialError(GoogleConnectorError):

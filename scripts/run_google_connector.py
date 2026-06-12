@@ -194,7 +194,14 @@ def main(argv: list[str] | None = None) -> int:
     # rows and the run dies fail-closed at the credential read (a misleading
     # CredentialNotFoundError) before any ingest. The previous code built the
     # tenant-lane session but never set the context -- the fail-closed-empty gap.
-    with session_factory() as session, connector_tenant_context(args.tenant):
+    # The CLI also passes its open session so the helper loads the tenant by id
+    # and enforces the ACTIVE-only lifecycle gate (replaying the gate
+    # TenantResolverMiddleware applies on web requests). A UUID pointing at a
+    # suspended / archived / missing tenant raises TenantLifecycleError which
+    # is caught below and translated to exit 2.
+    with session_factory() as session, connector_tenant_context(
+        args.tenant, session=session
+    ):
         try:
             outcome = run_one(
                 session,

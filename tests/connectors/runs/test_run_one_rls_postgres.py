@@ -292,7 +292,7 @@ def test_run_with_tenant_context_resolves_credential_and_succeeds(
     _seed_owner(pg_url, tenant_id=fresh_tenant)
     factory = build_session_factory(pg_url)
     with factory() as session:
-        with connector_tenant_context(fresh_tenant):
+        with connector_tenant_context(fresh_tenant, session=session):
             outcome = _run_yt_reporting(session, fresh_tenant)
     assert outcome.run is not None
     assert outcome.run.status == "SUCCEEDED"
@@ -320,7 +320,7 @@ def test_run_one_persists_lifecycle_facts_and_audit_on_postgres(
     _seed_owner(pg_url, tenant_id=fresh_tenant)
     factory = build_session_factory(pg_url)
     with factory() as session:
-        with connector_tenant_context(fresh_tenant):
+        with connector_tenant_context(fresh_tenant, session=session):
             outcome = _run_yt_reporting(session, fresh_tenant)
     assert outcome.run is not None
     assert outcome.run.status == "SUCCEEDED"
@@ -403,7 +403,7 @@ def test_cross_tenant_isolation_under_run_context(
     _seed_owner(pg_url, tenant_id=tenant_b)
     factory = build_session_factory(pg_url)
     with factory() as session:
-        with connector_tenant_context(tenant_a):
+        with connector_tenant_context(tenant_a, session=session):
             outcome = _run_yt_reporting(session, tenant_a)
             # While in tenant A's context, tenant B's credential is invisible.
             from ums_smart_revenue.db.security_models import (
@@ -467,7 +467,7 @@ def test_cross_tenant_platform_write_denied_under_elevation(
 
     # (a) cross-tenant write under tenant-A context is rejected by WITH CHECK.
     with factory() as session:
-        with connector_tenant_context(tenant_a):
+        with connector_tenant_context(tenant_a, session=session):
             with platform_lane(session):
                 with pytest.raises(Exception) as cross_tenant_exc:
                     session.execute(
@@ -541,7 +541,7 @@ def test_projection_failure_rewrites_run_failed_and_persists_audit(
         pass
 
     with factory() as session:
-        with connector_tenant_context(fresh_tenant):
+        with connector_tenant_context(fresh_tenant, session=session):
             with patch.object(
                 normalization,
                 "GoogleSourceNormalizer",
@@ -693,7 +693,7 @@ def test_per_report_failure_persists_failed_raw_file_and_audit_on_postgres(
     _seed_owner(pg_url, tenant_id=fresh_tenant, with_channel=True)
     factory = build_session_factory(pg_url)
     with factory() as session:
-        with connector_tenant_context(fresh_tenant):
+        with connector_tenant_context(fresh_tenant, session=session):
             outcome = _run_yt_reporting_two_reports_second_parse_fails(
                 session, fresh_tenant
             )
