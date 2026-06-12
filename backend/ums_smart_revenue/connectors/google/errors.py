@@ -14,6 +14,33 @@ class GoogleConnectorError(Exception):
     """Root of all B2 typed errors."""
 
 
+class ConnectorServicePrincipalUnavailableError(GoogleConnectorError):
+    """Raised when the connector service actor is required but not provisioned.
+
+    The ``build_connector_service_principal`` call inside the live run path
+    fails closed with ``ValueError`` if ``UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID``
+    is unset; the orchestrator converts that to this typed exception so the
+    executor's ``except GoogleConnectorError`` branch treats it as a Bucket-A
+    pre-start failure and writes a ``job_failed_before_start`` audit row
+    (otherwise the ValueError would be swallowed by the catch-all log-only
+    branch and operators would see a 202 with no run row, no failure audit,
+    and no reason the job never started).
+
+    Subclassing ``GoogleConnectorError`` keeps the error in the family the
+    orchestrator already knows how to translate; subclassing is preferred
+    over a stand-alone Exception so future Bucket-A additions (catching by
+    the parent class) continue to handle this path.
+    """
+
+    def __init__(self, *, env_var: str) -> None:
+        """Carry the offending ``env_var`` for downstream diagnostics."""
+        super().__init__(
+            f"connector service principal is unavailable; set {env_var} "
+            "to a UUID before running connector jobs"
+        )
+        self.env_var = env_var
+
+
 class UnsupportedSecretSchemeError(GoogleConnectorError):
     """Raised when a credential resolver is asked to handle an unknown scheme."""
 
