@@ -135,8 +135,15 @@ def create_app(
             resolved_database_url
         )
         if settings.connector_job_executor_enabled:
+            # FIX: reuse the request-scoped session_factory the app already
+            # created. build_session_factory caches the engine per URL, but
+            # calling it twice still produced a second sessionmaker object
+            # over the same engine -- a wasted allocation that the request
+            # path and the worker pool both had to share. ThreadPoolExecutor
+            # workers call session_factory() per job, so they pick up the
+            # same pooled connection lifecycle the request handlers do.
             _app.state.connector_job_executor = ConnectorJobExecutor(
-                session_factory=build_session_factory(resolved_database_url),
+                session_factory=session_factory,
                 max_workers=settings.connector_job_max_workers,
                 stale_running_hours=settings.connector_job_stale_running_hours,
             )

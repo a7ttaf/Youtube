@@ -1,13 +1,14 @@
 """FastAPI route handlers for connector credential management and test-connection probing."""
 # pylint: disable=too-many-arguments, too-many-positional-arguments
+import logging
 from datetime import UTC, datetime, timedelta
-from typing import Annotated
+from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.channels import audit_record_to_api, current_audit_sink
@@ -49,6 +50,14 @@ from ums_smart_revenue.connectors.runs.repository import (
 )
 from ums_smart_revenue.db.security_models import UserORM
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+
+if TYPE_CHECKING:
+    from ums_smart_revenue.connectors.runs.executor import (
+        ConnectorJobExecutor,
+        _SlotReservation,
+    )
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/connectors", tags=["connectors"])
 
@@ -273,10 +282,19 @@ def create_connector_credential(
 #   ConnectorJobExecutor and return 202 "submitted" immediately. Cheap
 #   in-request validation only (no OAuth refresh, no run_one inline). Control
 #   flow order is load-bearing and fail-closed: authz 403 -> 503 disabled ->
-#   422 unknown-key -> 422 bad-month -> 422 missing/inactive cred -> 409 dup /
-#   orphan-supersede -> 202 submit. Exactly ONE route-owned audit row
-#   (job_submitted / job_rejected); run_one emits its own STARTED/FINISHED
-#   edges later on the worker session.
+#   503 service_principal_unavailable -> 422 unknown-key -> 422 bad-month ->
+#   422 missing/inactive cred -> 409 dup / orphan-supersede -> 202 submit.
+#   Exactly ONE route-owned audit row (job_submitted / job_rejected);
+#   run_one emits its own STARTED/FINISHED edges later on the worker session.
+#
+#   Submission is the reserve-then-activate pattern (see
+#   ``ConnectorJobExecutor.submit_if_absent`` + ``activate``): the route
+#   holds a registry slot for the scope BEFORE the audit row commits and
+#   enqueues the worker only AFTER the audit row commits (via a
+#   ``session.after_commit`` hook). If the audit commit fails the worker
+#   is never enqueued, so the route's 202 is the authoritative
+#   acceptance record.
+#
 # Database/ORM: ApiConnectorCredentialORM + ConnectorRunORM (reads via
 #   get_credential / find_active_runs_for_scope; finish_run rewrites a
 #   superseded orphan), AuditLogORM (one row), UserORM (existence probe).
@@ -289,7 +307,8 @@ def create_connector_credential(
 #   actions), connector run lifecycle (orphan supersede via finish_run on the
 #   tenant lane). No finance math change; no graph projection impact.
 # Connections:
-#   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> submit().
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py ->
+#     submit_if_absent + activate + cancel_reservation.
 #   - File: backend/ums_smart_revenue/app.py -> app.state.connector_job_executor.
 #   - File: Docs/12_BACKEND_API_SPEC.md -> POST /connectors/jobs contract.
 # ============================================================================
@@ -301,10 +320,11 @@ def request_connector_job(
     session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_audit_sink)],
 ) -> dict[str, object]:
-    """Validate cheaply, submit the pull to the executor, and return 202 submitted."""
+    """Validate cheaply, reserve an executor slot, write the audit, and return 202 submitted."""
     connector_scope = AccessScope.connector(payload.connector_key)
     _require_connector_permission(user, Permission.RUN_CONNECTOR_JOBS, connector_scope)
 
+    settings = load_app_settings()
     tenant_id = _resolve_tenant_uuid(user)
     executor = getattr(request.app.state, "connector_job_executor", None)
     if executor is None:
@@ -315,6 +335,25 @@ def request_connector_job(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             rejection="executor_disabled",
             detail="Connector job executor is disabled",
+        )
+
+    # FIX: fail-closed pre-flight for the connector service principal. Without
+    # this, a submit would still return 202 (the executor reserves a slot
+    # eagerly) and the worker would raise ValueError before start_run, which
+    # landed in the catch-all log-only branch and left operators with no run
+    # row and no failure audit. Reject here so the audit trail is complete
+    # AND the executor slot is never wasted.
+    if settings.google_connector_service_actor_id is None:
+        return _reject_connector_job(
+            audit_sink=audit_sink,
+            user=user,
+            payload=payload,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            rejection="service_principal_unavailable",
+            detail=(
+                "Connector service principal is not configured;"
+                " set UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"
+            ),
         )
 
     if payload.connector_key not in known_keys():
@@ -365,12 +404,24 @@ def request_connector_job(
             detail="Connector credential is not active",
         )
 
-    if executor.has_active_job(
+    # FIX: atomic dedup. The previous has_active_job() -> submit() pair was a
+    # check-then-act race: two concurrent requests for the same scope could
+    # both pass the check before either reached submit(). submit_if_absent
+    # holds the executor's registry lock across the membership check and the
+    # insert, so the second concurrent caller sees the in-flight slot and
+    # returns None -> 409.
+    triggered_by = _resolve_triggered_by_user_id(session, user, tenant_id)
+    actor_identity = ConnectorJobActor(user_id=user.user_id, email=user.email)
+    reservation = executor.submit_if_absent(
         tenant_id=tenant_id,
         connector_key=payload.connector_key,
         account_id=payload.account_id,
         report_month=payload.report_month,
-    ):
+        dry_run=payload.dry_run,
+        triggered_by_user_id=triggered_by,
+        actor_identity=actor_identity,
+    )
+    if reservation is None:
         return _reject_connector_job(
             audit_sink=audit_sink,
             user=user,
@@ -384,9 +435,13 @@ def request_connector_job(
         session,
         tenant_id=tenant_id,
         payload=payload,
-        stale_hours=load_app_settings().connector_job_stale_running_hours,
+        stale_hours=settings.connector_job_stale_running_hours,
     )
     if isinstance(superseded_run_id, _DuplicateRunBlock):
+        # The in-process guard let us through but the DB has a fresh RUNNING
+        # row. Drop the reservation so the executor does not block the scope
+        # on a request that will not activate.
+        executor.cancel_reservation(reservation)
         return _reject_connector_job(
             audit_sink=audit_sink,
             user=user,
@@ -396,7 +451,6 @@ def request_connector_job(
             detail="A connector job for this scope is already in flight",
         )
 
-    triggered_by = _resolve_triggered_by_user_id(session, user, tenant_id)
     details: dict[str, object] = {
         "action": "job_submitted",
         "report_month": payload.report_month,
@@ -413,17 +467,21 @@ def request_connector_job(
         reason=payload.reason,
         details=details,
     )
-    executor.submit(
-        tenant_id=tenant_id,
-        connector_key=payload.connector_key,
-        account_id=payload.account_id,
-        report_month=payload.report_month,
-        dry_run=payload.dry_run,
-        triggered_by_user_id=triggered_by,
-        actor_identity=ConnectorJobActor(
-            user_id=user.user_id, email=user.email
-        ),
+
+    # FIX: defer the worker enqueue to AFTER the request session commits the
+    # audit row. The previous design called executor.submit() inline; if the
+    # session.commit() at end-of-request failed during dependency cleanup,
+    # the worker had already mutated connector_runs / raw_report_files while
+    # the accepted-job audit rolled back -- leaving a successful 202 in the
+    # client with no durable record. The after_commit hook closes that
+    # window: a failed commit never invokes the worker, and the reservation
+    # is dropped on rollback so the executor slot is reclaimed.
+    _enqueue_after_commit(
+        session=session,
+        executor=executor,
+        reservation=reservation,
     )
+
     return {
         "connector_key": payload.connector_key,
         "account_id": payload.account_id,
@@ -753,3 +811,74 @@ def _reject_connector_job(
         },
     )
     return JSONResponse(status_code=status_code, content={"detail": detail})
+
+
+# ============================================================================
+# Purpose: Defer the executor's worker enqueue to AFTER the request session
+#   commits the route-owned job_submitted audit row. This closes the window
+#   where a failed commit (during dependency cleanup) would leave a worker
+#   mutating connector run/source tables while the accepted-job audit rolled
+#   back and the client may see a failed request. The companion
+#   after_rollback hook drops the reservation so a failed commit never
+#   wedges the executor's registry on a slot that was never activated.
+#
+#   Hooks are attached with a one-shot guard (a flag on ``session.info``)
+#   so a request that has multiple commit/rollback cycles (e.g. inner
+#   savepoints committing) does not double-enqueue the worker.
+#
+# Database/ORM: None directly; the session hook is the SQLAlchemy
+#               ``after_commit`` / ``after_rollback`` event API.
+# Standards: No bare except; hook errors are logged but never raised into
+#            the request lifecycle (the audit row is already committed).
+# Blast Radius: Connector run lifecycle. No finance, audit, or graph
+#               projection impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> activate
+#     + cancel_reservation.
+#   - File: backend/ums_smart_revenue/api/connectors.py ->
+#     request_connector_job attaches the hooks.
+# ============================================================================
+_AFTER_COMMIT_FLAG_KEY = "ums_connector_job_after_commit_attached"
+_AFTER_ROLLBACK_FLAG_KEY = "ums_connector_job_after_rollback_attached"
+
+
+def _enqueue_after_commit(
+    *,
+    session: Session,
+    executor: ConnectorJobExecutor,
+    reservation: _SlotReservation,
+) -> None:
+    """Attach a one-shot after_commit / after_rollback hook pair to the request session."""
+    if not session.info.get(_AFTER_COMMIT_FLAG_KEY):
+        event.listen(session, "after_commit", _make_after_commit_handler(executor, reservation))
+        session.info[_AFTER_COMMIT_FLAG_KEY] = True
+    if not session.info.get(_AFTER_ROLLBACK_FLAG_KEY):
+        event.listen(session, "after_rollback", _make_after_rollback_handler(executor, reservation))
+        session.info[_AFTER_ROLLBACK_FLAG_KEY] = True
+
+
+def _make_after_commit_handler(
+    executor: ConnectorJobExecutor, reservation: _SlotReservation
+):
+    """Return a one-shot hook that activates the reservation after the session commits."""
+    def _after_commit(_session: Session) -> None:
+        try:
+            executor.activate(reservation)
+        except Exception:  # noqa: BLE001 — best-effort enqueue, never raise
+            # If activation fails (e.g. executor already shut down), drop the
+            # reservation so a future request for the same scope is not
+            # blocked by a stale slot.
+            executor.cancel_reservation(reservation)
+            logger.exception(
+                "Failed to activate connector job reservation after commit"
+            )
+    return _after_commit
+
+
+def _make_after_rollback_handler(
+    executor: ConnectorJobExecutor, reservation: _SlotReservation
+):
+    """Return a hook that drops the reservation when the session rolls back."""
+    def _after_rollback(_session: Session) -> None:
+        executor.cancel_reservation(reservation)
+    return _after_rollback

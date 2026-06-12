@@ -4493,15 +4493,23 @@ def test_run_one_fail_closed_when_service_actor_id_missing(
     _stub_secret_resolver,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Live run raises ValueError in Bucket A when the service-actor env is unset.
+    """Live run raises typed Bucket-A exception when the service-actor env is unset.
 
     The orchestrator constructs the connector service principal before
     ``start_run``, so a missing UUID fails CLOSED with no half-created
-    RUNNING row and no audit emissions.
+    RUNNING row and no audit emissions. The orchestrator translates the
+    raw ``ValueError`` from ``build_connector_service_principal`` into
+    the typed ``ConnectorServicePrincipalUnavailableError`` (a
+    ``GoogleConnectorError`` subclass) so the executor's
+    ``except GoogleConnectorError`` branch can audit it as a Bucket-A
+    ``job_failed_before_start`` row.
     """
     from ums_smart_revenue.config.settings import (
         GOOGLE_CONNECTOR_SERVICE_ACTOR_ID_ENV,
         load_app_settings,
+    )
+    from ums_smart_revenue.connectors.google.errors import (
+        ConnectorServicePrincipalUnavailableError,
     )
 
     _make_credential_row(
@@ -4525,7 +4533,7 @@ def test_run_one_fail_closed_when_service_actor_id_missing(
             return_value=None,
         ),
         patch("ums_smart_revenue.connectors.runs.orchestrator.GoogleHttpClient"),
-        pytest.raises(ValueError) as excinfo,
+        pytest.raises(ConnectorServicePrincipalUnavailableError) as excinfo,
     ):
         run_one(
             session,

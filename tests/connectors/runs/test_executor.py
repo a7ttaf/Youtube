@@ -253,3 +253,289 @@ def test_submit_then_future_result_clears_active_flag(tmp_path) -> None:
         ) is False
     finally:
         executor.close()
+
+
+# ---------------------------------------------------------------------------
+# submit_if_absent + activate + cancel_reservation: the atomic dedup flow
+# --------------------------------------------------------------------------
+
+
+def test_submit_if_absent_returns_none_for_duplicate(tmp_path) -> None:
+    """A second submit_if_absent for the same scope returns None (atomic guard)."""
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+    try:
+        first = executor.submit_if_absent(
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+            report_month="2026-03",
+            dry_run=False,
+            triggered_by_user_id=None,
+            actor_identity=ACTOR,
+        )
+        assert first is not None
+        second = executor.submit_if_absent(
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+            report_month="2026-03",
+            dry_run=False,
+            triggered_by_user_id=None,
+            actor_identity=ACTOR,
+        )
+        assert second is None
+        # has_active_job still reports True for the in-flight reservation.
+        assert executor.has_active_job(
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+            report_month="2026-03",
+        ) is True
+    finally:
+        executor.close()
+
+
+def test_activate_enqueues_worker_and_replaces_reservation(tmp_path) -> None:
+    """activate() turns a reservation into a real Future and runs the worker."""
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+    try:
+        with patch(
+            "ums_smart_revenue.connectors.runs.executor.run_one",
+            lambda session, **kw: _outcome(),
+        ):
+            reservation = executor.submit_if_absent(
+                tenant_id=TENANT,
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                report_month="2026-03",
+                dry_run=False,
+                triggered_by_user_id=None,
+                actor_identity=ACTOR,
+            )
+            assert reservation is not None
+            future = executor.activate(reservation)
+            future.result(timeout=10)
+        assert executor.has_active_job(
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+            report_month="2026-03",
+        ) is False
+    finally:
+        executor.close()
+
+
+def test_activate_is_idempotent_for_same_reservation(tmp_path) -> None:
+    """Calling activate() twice on the same reservation returns the same Future."""
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+    try:
+        with patch(
+            "ums_smart_revenue.connectors.runs.executor.run_one",
+            lambda session, **kw: _outcome(),
+        ):
+            reservation = executor.submit_if_absent(
+                tenant_id=TENANT,
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                report_month="2026-03",
+                dry_run=False,
+                triggered_by_user_id=None,
+                actor_identity=ACTOR,
+            )
+            assert reservation is not None
+            first = executor.activate(reservation)
+            second = executor.activate(reservation)
+            assert first is second
+            first.result(timeout=10)
+    finally:
+        executor.close()
+
+
+def test_cancel_reservation_drops_in_flight_slot(tmp_path) -> None:
+    """cancel_reservation removes a pending reservation; subsequent submit_if_absent succeeds."""
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+    try:
+        reservation = executor.submit_if_absent(
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+            report_month="2026-03",
+            dry_run=False,
+            triggered_by_user_id=None,
+            actor_identity=ACTOR,
+        )
+        assert reservation is not None
+        assert executor.cancel_reservation(reservation) is True
+        assert executor.has_active_job(
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+            report_month="2026-03",
+        ) is False
+        # A new submit_if_absent succeeds and returns a fresh reservation.
+        second = executor.submit_if_absent(
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+            report_month="2026-03",
+            dry_run=False,
+            triggered_by_user_id=None,
+            actor_identity=ACTOR,
+        )
+        assert second is not None
+        executor.cancel_reservation(second)
+    finally:
+        executor.close()
+
+
+def test_cancel_reservation_returns_false_when_already_activated(tmp_path) -> None:
+    """cancel_reservation is a no-op (returns False) if the slot is already a Future."""
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+    try:
+        with patch(
+            "ums_smart_revenue.connectors.runs.executor.run_one",
+            lambda session, **kw: _outcome(),
+        ):
+            reservation = executor.submit_if_absent(
+                tenant_id=TENANT,
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                report_month="2026-03",
+                dry_run=False,
+                triggered_by_user_id=None,
+                actor_identity=ACTOR,
+            )
+            assert reservation is not None
+            future = executor.activate(reservation)
+            # The future is now in the registry; cancel_reservation must NOT
+            # remove it (would kill the in-flight worker).
+            assert executor.cancel_reservation(reservation) is False
+            future.result(timeout=10)
+    finally:
+        executor.close()
+
+
+# ---------------------------------------------------------------------------
+# Dry-run outcome audit + service-principal pre-start failure audit
+# --------------------------------------------------------------------------
+
+
+def test_run_job_dry_run_writes_completed_audit_and_clears_registry(
+    tmp_path,
+) -> None:
+    """A dry-run worker audits one job_dry_run_completed row with counts + failures."""
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+    key = (TENANT, "youtube_reporting", "acct-1", "2026-03")
+
+    dry_outcome = ConnectorRunOutcome(
+        run=None,
+        counts={
+            "reports_attempted": 2,
+            "reports_succeeded": 1,
+            "reports_failed": 1,
+            "rows_upserted_total": 5,
+        },
+        per_report_failures=[("report-type-2", "ParserError")],
+    )
+
+    try:
+        with patch(
+            "ums_smart_revenue.connectors.runs.executor.run_one",
+            lambda session, **kw: dry_outcome,
+        ):
+            executor._register(key)
+            executor._run_job(
+                tenant_id=TENANT,
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                report_month="2026-03",
+                dry_run=True,
+                triggered_by_user_id=None,
+                actor_identity=ACTOR,
+            )
+        assert executor.has_active_job(
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+            report_month="2026-03",
+        ) is False
+    finally:
+        executor.close()
+
+    with factory() as session:
+        row = session.scalars(select(AuditLogORM)).one()
+    assert row.event_type == "CONNECTOR_JOB_RUN"
+    assert row.details["action"] == "job_dry_run_completed"
+    assert row.details["dry_run"] is True
+    assert row.details["counts"] == dry_outcome.counts
+    assert row.details["per_report_failures"] == [
+        {"report_type": "report-type-2", "error_class": "ParserError"}
+    ]
+
+
+def test_run_job_service_principal_failure_writes_bucket_a_audit(
+    tmp_path,
+) -> None:
+    """A pre-start ConnectorServicePrincipalUnavailableError is audited (no ValueError swallow)."""
+    factory = _factory(tmp_path)
+    executor = ConnectorJobExecutor(
+        session_factory=factory, max_workers=1, stale_running_hours=6
+    )
+    key = (TENANT, "youtube_reporting", "acct-1", "2026-03")
+
+    from ums_smart_revenue.connectors.google.errors import (
+        ConnectorServicePrincipalUnavailableError,
+    )
+
+    def _boom(session, **kwargs):
+        raise ConnectorServicePrincipalUnavailableError(
+            env_var="UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"
+        )
+
+    try:
+        with patch(
+            "ums_smart_revenue.connectors.runs.executor.run_one", _boom
+        ):
+            executor._register(key)
+            executor._run_job(
+                tenant_id=TENANT,
+                connector_key="youtube_reporting",
+                account_id="acct-1",
+                report_month="2026-03",
+                dry_run=False,
+                triggered_by_user_id=None,
+                actor_identity=ACTOR,
+            )
+        assert executor.has_active_job(
+            tenant_id=TENANT,
+            connector_key="youtube_reporting",
+            account_id="acct-1",
+            report_month="2026-03",
+        ) is False
+    finally:
+        executor.close()
+
+    with factory() as session:
+        row = session.scalars(select(AuditLogORM)).one()
+    assert row.event_type == "CONNECTOR_JOB_RUN"
+    assert row.details["action"] == "job_failed_before_start"
+    # Canned class name only -- the env var is in the reason, not the message.
+    assert row.details["error_class"] == "ConnectorServicePrincipalUnavailableError"

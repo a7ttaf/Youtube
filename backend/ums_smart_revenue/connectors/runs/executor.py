@@ -15,7 +15,10 @@ from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.scopes import AccessScope
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
 from ums_smart_revenue.connectors.google.errors import GoogleConnectorError
-from ums_smart_revenue.connectors.runs.orchestrator import run_one
+from ums_smart_revenue.connectors.runs.orchestrator import (
+    ConnectorRunOutcome,
+    run_one,
+)
 from ums_smart_revenue.connectors.runs.tenant_context import (
     connector_tenant_context,
 )
@@ -42,6 +45,27 @@ class ConnectorJobActor:
     email: str
 
 
+@dataclass(frozen=True)
+class _SlotReservation:
+    """Pre-claim for a registry slot whose worker has not yet been enqueued.
+
+    The route reserves a slot via ``submit_if_absent`` BEFORE writing the
+    route-owned audit row; the worker is enqueued only after the audit row
+    commits (via an ``after_commit`` hook that calls ``activate``). On a
+    rollback the route invokes ``cancel_reservation`` to drop the claim,
+    so the registry can never deadlock on a half-committed submission.
+    """
+
+    key: _JobKey
+    tenant_id: UUID
+    connector_key: str
+    account_id: str
+    report_month: str
+    dry_run: bool
+    triggered_by_user_id: UUID | None
+    actor_identity: ConnectorJobActor
+
+
 # ============================================================================
 # Purpose: Own a bounded ThreadPoolExecutor + an in-process registry of live
 #   jobs keyed (tenant, connector_key, account_id, report_month), and run each
@@ -49,6 +73,22 @@ class ConnectorJobActor:
 #   (re-establishing TENANT_CTX in the worker thread, which does not inherit the
 #   request contextvar). Mirrors the TenantResolverMiddleware executor pattern
 #   (weakref.finalize GC backstop + explicit close()).
+#
+#   The public submission API is ``submit_if_absent`` -> ``activate``
+#   (or ``cancel_reservation``) so the route can hold a registry slot
+#   BEFORE the audit row commits and only enqueue the worker AFTER the
+#   commit succeeds. This makes a failed audit commit a no-op for the
+#   worker (no orphan run, no run-history row, no live credential refresh)
+#   and prevents the previous check-then-act duplicate race (where two
+#   concurrent requests could both pass ``has_active_job`` before either
+#   reached ``submit``).
+#
+#   A dry-run job is still a live worker; the worker calls ``run_one``
+#   with ``dry_run=True``, captures the ``ConnectorRunOutcome`` (run is
+#   None for dry runs), and audits it as ``job_dry_run_completed`` so
+#   operators have counts + per-report-failure detail to inspect instead
+#   of just the green ``submitted`` signal.
+#
 # Database/ORM: opens its own Session via session_factory; run_one writes
 #   connector_runs + audit_logs; the Bucket-A catch writes one CONNECTOR_JOB_RUN
 #   audit row via SqlAlchemyAuditSink on a fresh own session, wrapped in
@@ -60,16 +100,25 @@ class ConnectorJobActor:
 #   thread: Bucket-A errors are audited (canned class name only), everything else
 #   is logged. Registry key removed in finally on every path.
 # Blast Radius: Authorization (tenant-pinned worker), audit (additive
-#   job_failed_before_start), connector run lifecycle. No finance math change.
+#   job_failed_before_start / job_dry_run_completed), connector run lifecycle.
+#   No finance math change.
 # Connections:
 #   - File: backend/ums_smart_revenue/tenancy/resolver.py -> executor +
 #     weakref.finalize + close() precedent.
 #   - File: backend/ums_smart_revenue/connectors/runs/tenant_context.py ->
 #     connector_tenant_context replays the ACTIVE-only tenant gate.
 #   - File: scripts/run_google_connector.py -> the CLI pattern this reuses.
+#   - File: backend/ums_smart_revenue/api/connectors.py -> the route uses
+#     submit_if_absent + after_commit.activate / after_rollback.cancel_reservation.
 # ============================================================================
 class ConnectorJobExecutor:
-    """Bounded in-process runner for connector pull jobs with a dup registry."""
+    """Bounded in-process runner for connector pull jobs with a dup registry.
+
+    Registry values are either a :class:`Future` (the worker has been
+    enqueued) or a :class:`_SlotReservation` (the route has claimed the
+    slot but the audit row has not yet committed). Both count as
+    ``active`` for dedup purposes (``has_active_job`` checks membership).
+    """
 
     def __init__(
         self,
@@ -82,7 +131,7 @@ class ConnectorJobExecutor:
         self._session_factory = session_factory
         self._stale_running_hours = stale_running_hours
         self._lock = threading.Lock()
-        self._registry: dict[_JobKey, Future] = {}
+        self._registry: dict[_JobKey, Future | _SlotReservation] = {}
         self._executor = ThreadPoolExecutor(
             max_workers=max_workers,
             thread_name_prefix="ums-connector-job",
@@ -106,13 +155,109 @@ class ConnectorJobExecutor:
         account_id: str,
         report_month: str,
     ) -> bool:
-        """Return whether a live Future exists for the exact scope (under lock)."""
+        """Return whether a live Future or pending reservation exists for the scope."""
         key = (tenant_id, connector_key, account_id, report_month)
         with self._lock:
             return key in self._registry
 
+    # ------------------------------------------------------------------
+    # Atomic check + reserve: replaces the previous has_active_job + submit
+    # pair so two concurrent requests cannot both pass the dup check.
+    # ------------------------------------------------------------------
+    def submit_if_absent(
+        self,
+        *,
+        tenant_id: UUID,
+        connector_key: str,
+        account_id: str,
+        report_month: str,
+        dry_run: bool,
+        triggered_by_user_id: UUID | None,
+        actor_identity: ConnectorJobActor,
+    ) -> _SlotReservation | None:
+        """Reserve a slot for the scope; return None if a slot is already held.
+
+        The reservation is NOT yet a Future -- the worker is enqueued only
+        after the caller invokes :meth:`activate` (typically from an
+        SQLAlchemy ``after_commit`` hook). A failed commit drops the
+        reservation via :meth:`cancel_reservation`, so the registry can
+        never deadlock on a half-committed submission.
+
+        Returns ``None`` when the scope is already held (either a pending
+        reservation or an active Future). Holding the lock across the
+        check + insert is the atomic guard against concurrent dup
+        submissions: a worker that has just finished cannot deregister
+        its key until this call releases the lock, so the second
+        concurrent request will see the in-flight slot.
+        """
+        key = (tenant_id, connector_key, account_id, report_month)
+        reservation = _SlotReservation(
+            key=key,
+            tenant_id=tenant_id,
+            connector_key=connector_key,
+            account_id=account_id,
+            report_month=report_month,
+            dry_run=dry_run,
+            triggered_by_user_id=triggered_by_user_id,
+            actor_identity=actor_identity,
+        )
+        with self._lock:
+            if key in self._registry:
+                return None
+            self._registry[key] = reservation
+        return reservation
+
+    def activate(self, reservation: _SlotReservation) -> Future:
+        """Replace a reservation with a real ``Future`` and enqueue the worker.
+
+        Idempotent: returns the existing ``Future`` if the reservation was
+        already activated. Raises ``RuntimeError`` if the registry no
+        longer holds the reservation (e.g. it was cancelled or replaced
+        by a re-submission with the same key).
+        """
+        key = reservation.key
+        with self._lock:
+            current = self._registry.get(key)
+            if isinstance(current, Future):
+                return current
+            if current is not reservation:
+                raise RuntimeError(
+                    f"reservation for {key} was deregistered or replaced"
+                )
+            future = self._executor.submit(
+                self._run_job,
+                tenant_id=reservation.tenant_id,
+                connector_key=reservation.connector_key,
+                account_id=reservation.account_id,
+                report_month=reservation.report_month,
+                dry_run=reservation.dry_run,
+                triggered_by_user_id=reservation.triggered_by_user_id,
+                actor_identity=reservation.actor_identity,
+            )
+            self._registry[key] = future
+        return future
+
+    def cancel_reservation(self, reservation: _SlotReservation) -> bool:
+        """Drop a pending reservation; no-op if it was already activated.
+
+        Returns ``True`` if the reservation was the live registry value
+        and was dropped; ``False`` if the registry already held a
+        ``Future`` (caller raced an ``activate`` and lost) or the key was
+        no longer in the registry.
+        """
+        with self._lock:
+            current = self._registry.get(reservation.key)
+            if current is reservation:
+                self._registry.pop(reservation.key, None)
+                return True
+        return False
+
     def _register(self, key: _JobKey) -> None:
-        """Reserve a registry slot before submission (caller holds no lock)."""
+        """Reserve a registry slot before submission (caller holds no lock).
+
+        Retained for the unit tests that build a slot by hand; new callers
+        should use :meth:`submit_if_absent` so the check + insert is atomic.
+        """
         with self._lock:
             self._registry[key] = Future()
 
@@ -132,7 +277,13 @@ class ConnectorJobExecutor:
         triggered_by_user_id: UUID | None,
         actor_identity: ConnectorJobActor,
     ) -> Future:
-        """Register the scope and submit the pull to the worker pool."""
+        """Register the scope and submit the pull to the worker pool.
+
+        Retained for direct-call sites that do not need the
+        reserve-then-activate flow (notably the existing executor unit
+        tests). The route uses :meth:`submit_if_absent` instead so the
+        check + insert is atomic across concurrent requests.
+        """
         key = (tenant_id, connector_key, account_id, report_month)
         # Register the REAL future atomically under the lock: enqueue while
         # holding the lock so a fast worker's finally->_deregister blocks until
@@ -169,10 +320,11 @@ class ConnectorJobExecutor:
     ) -> None:
         """Worker body: own session -> tenant context -> run_one; fail-closed."""
         key = (tenant_id, connector_key, account_id, report_month)
+        outcome: ConnectorRunOutcome | None = None
         try:
             with self._session_factory() as session:
                 with connector_tenant_context(tenant_id, session=session):
-                    run_one(
+                    outcome = run_one(
                         session,
                         tenant_id=tenant_id,
                         connector_key=connector_key,
@@ -181,7 +333,28 @@ class ConnectorJobExecutor:
                         dry_run=dry_run,
                         triggered_by_user_id=triggered_by_user_id,
                     )
+            if dry_run and outcome is not None:
+                # FIX: dry-run writes no connector_runs row (run_one skips
+                # start_run entirely), so the only durable record of what
+                # the dry-run found is the executor-side outcome. Audit one
+                # CONNECTOR_JOB_RUN row with the counts and per-report
+                # failures so operators inspecting the audit log can see
+                # which reports would fail without re-running the dry-run.
+                self._audit_dry_run_outcome(
+                    tenant_id=tenant_id,
+                    connector_key=connector_key,
+                    account_id=account_id,
+                    report_month=report_month,
+                    outcome=outcome,
+                    actor_identity=actor_identity,
+                )
         except GoogleConnectorError as exc:
+            # FIX: ConnectorServicePrincipalUnavailableError is a
+            # GoogleConnectorError subclass; it lands here and is audited
+            # as a Bucket-A job_failed_before_start row. Previously this
+            # path raised ValueError and was swallowed by the catch-all
+            # branch below, leaving a 202 with no run row, no failure
+            # audit, and no operator-visible reason the job never started.
             logger.exception(
                 "Connector job failed before start (tenant=%s connector=%s)",
                 tenant_id,
@@ -253,5 +426,68 @@ class ConnectorJobExecutor:
         except Exception:  # noqa: BLE001 — best-effort audit, never escape
             logger.exception(
                 "Failed to persist job_failed_before_start audit (tenant=%s)",
+                tenant_id,
+            )
+
+    def _audit_dry_run_outcome(
+        self,
+        *,
+        tenant_id: UUID,
+        connector_key: str,
+        account_id: str,
+        report_month: str,
+        outcome: ConnectorRunOutcome,
+        actor_identity: ConnectorJobActor,
+    ) -> None:
+        """Write ONE CONNECTOR_JOB_RUN job_dry_run_completed row, fresh session.
+
+        Dry-run jobs do not create a ``connector_runs`` row, so this audit
+        row is the only durable record of what the dry-run found. The
+        counts mirror the B2.3 ``CONNECTOR_RUN_COUNT_KEYS`` shape that
+        ``finish_run`` validates; per-report failures are listed as a
+        ``[{"report_type": ..., "error_class": ...}, ...]`` array so an
+        operator console can render them directly.
+        """
+        actor = UserPrincipal(
+            user_id=actor_identity.user_id,
+            email=actor_identity.email,
+            direct_permissions=(
+                PermissionGrant(
+                    permission=Permission.RUN_CONNECTOR_JOBS,
+                    scope=AccessScope.global_scope(),
+                    active=True,
+                ),
+            ),
+            tenant_id=str(tenant_id),
+        )
+        per_report_failures = [
+            {"report_type": report_type, "error_class": error_class}
+            for report_type, error_class in outcome.per_report_failures
+        ]
+        try:
+            with self._session_factory() as session:
+                with connector_tenant_context(tenant_id, session=session):
+                    with platform_lane(session):
+                        sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
+                        record_audit_event(
+                            sink=sink,
+                            actor=actor,
+                            event_type=AuditEventType.CONNECTOR_JOB_RUN,
+                            entity_type="api_connector",
+                            entity_id=f"{connector_key}:{account_id}",
+                            scope=AccessScope.connector(connector_key),
+                            reason="connector dry-run completed",
+                            details={
+                                "action": "job_dry_run_completed",
+                                "report_month": report_month,
+                                "dry_run": True,
+                                "counts": dict(outcome.counts),
+                                "per_report_failures": per_report_failures,
+                            },
+                        )
+                        session.commit()
+        except Exception:  # noqa: BLE001 — best-effort audit, never escape
+            logger.exception(
+                "Failed to persist job_dry_run_completed audit (tenant=%s)",
                 tenant_id,
             )

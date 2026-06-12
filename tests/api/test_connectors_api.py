@@ -35,19 +35,25 @@ from ums_smart_revenue.db.security_models import (
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 
 USER_ID = UUID("00000000-0000-0000-0000-000000004001")
+SERVICE_ACTOR_ID = UUID("00000000-0000-0000-0000-0000000000aa")
 
 
 @pytest.fixture(autouse=True)
 def _restore_executor_env():
-    """Restore UMS_CONNECTOR_JOB_EXECUTOR_ENABLED after each test (no cross-test leak)."""
-    prior = os.environ.get("UMS_CONNECTOR_JOB_EXECUTOR_ENABLED")
+    """Restore UMS_CONNECTOR_JOB_EXECUTOR_ENABLED + service actor after each test."""
+    prior_enabled = os.environ.get("UMS_CONNECTOR_JOB_EXECUTOR_ENABLED")
+    prior_actor = os.environ.get("UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID")
     try:
         yield
     finally:
-        if prior is None:
+        if prior_enabled is None:
             os.environ.pop("UMS_CONNECTOR_JOB_EXECUTOR_ENABLED", None)
         else:
-            os.environ["UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"] = prior
+            os.environ["UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"] = prior_enabled
+        if prior_actor is None:
+            os.environ.pop("UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID", None)
+        else:
+            os.environ["UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"] = prior_actor
         load_app_settings.cache_clear()
 
 
@@ -92,24 +98,51 @@ def seed_database(database_url: str) -> None:
 
 
 class _FakeExecutor:
-    """Records submit() calls and answers has_active_job() from a flag set."""
+    """Records submit_if_absent / activate / cancel_reservation calls and answers has_active_job() from a flag set."""
 
     def __init__(self, *, active=False):
         self.active = active
         self.submit_calls: list[dict] = []
+        self.activate_calls: list[dict] = []
+        self.cancel_calls: list[dict] = []
 
     def has_active_job(self, **kwargs) -> bool:
         return self.active
 
-    def submit(self, **kwargs):
+    def submit_if_absent(self, **kwargs):
+        # Record the call and mimic the atomic check: if ``active`` is set
+        # the route receives None and falls into the duplicate path.
         self.submit_calls.append(kwargs)
+        if self.active:
+            return None
+        return _FakeReservation(kwargs)
+
+    def activate(self, reservation):
+        self.activate_calls.append({"reservation": reservation})
         return None
+
+    def cancel_reservation(self, reservation):
+        self.cancel_calls.append({"reservation": reservation})
+        return True
+
+
+class _FakeReservation:
+    """Marker object for the in-flight slot the executor will activate on commit."""
+
+    def __init__(self, kwargs: dict) -> None:
+        self.kwargs = kwargs
+
+
+def _set_service_actor_env() -> None:
+    """Provision UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID so the pre-flight gate passes."""
+    os.environ["UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID"] = str(SERVICE_ACTOR_ID)
+    load_app_settings.cache_clear()
 
 
 def _enable_executor_app(database_url: str, executor):
     """Build an app with the executor enabled + a fake executor on app.state."""
     os.environ["UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"] = "true"
-    load_app_settings.cache_clear()
+    _set_service_actor_env()
     app = create_app(database_url=database_url)
     app.state.connector_job_executor = executor
     return app
@@ -354,6 +387,10 @@ def test_revenue_operations_admin_can_request_connector_job_and_audit(tmp_path):
     assert call["report_month"] == "2026-03"
     assert call["dry_run"] is False
     assert isinstance(call["actor_identity"], ConnectorJobActor)
+    # Reserve-then-activate: the route held a slot during request handling
+    # and the after_commit hook activated it (recorded by the fake).
+    assert len(fake.activate_calls) == 1
+    assert fake.cancel_calls == []
 
 
 def test_request_connector_job_missing_permission_403(tmp_path):
@@ -526,7 +563,7 @@ def test_request_connector_job_422_inactive_credential(tmp_path):
 
 
 def test_request_connector_job_409_duplicate_in_flight(tmp_path):
-    """has_active_job True -> 409 + job_rejected/duplicate_in_flight."""
+    """submit_if_absent returns None for an in-flight slot -> 409 + job_rejected/duplicate_in_flight."""
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
     _seed_active_credential(database_url)
@@ -551,7 +588,11 @@ def test_request_connector_job_409_duplicate_in_flight(tmp_path):
     engine.dispose()
     assert response.status_code == 409
     assert audit_log.details["rejection"] == "duplicate_in_flight"
-    assert fake.submit_calls == []
+    # Atomic dedup: submit_if_absent is invoked but returns None for an
+    # already-held slot. activate is NOT called.
+    assert len(fake.submit_calls) == 1
+    assert fake.activate_calls == []
+    assert fake.cancel_calls == []
 
 
 def test_request_connector_job_orphan_supersede_then_accept(tmp_path):
@@ -605,6 +646,87 @@ def test_request_connector_job_orphan_supersede_then_accept(tmp_path):
     assert audit_log.details["action"] == "job_submitted"
     assert audit_log.details["superseded_run_id"] == str(run.id)
     assert len(fake.submit_calls) == 1
+    assert len(fake.activate_calls) == 1
+    assert fake.cancel_calls == []
+
+
+def test_request_connector_job_503_service_principal_unavailable(tmp_path):
+    """Missing UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID -> 503 + job_rejected/service_principal_unavailable.
+
+    The pre-flight check rejects the request without reserving an executor
+    slot, so the worker is never enqueued even though the executor is enabled.
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url)
+    # Drop the service-actor env var the fixture sets so the pre-flight
+    # gate fails closed.
+    os.environ.pop("UMS_GOOGLE_CONNECTOR_SERVICE_ACTOR_ID", None)
+    load_app_settings.cache_clear()
+    os.environ["UMS_CONNECTOR_JOB_EXECUTOR_ENABLED"] = "true"
+    load_app_settings.cache_clear()
+    app = create_app(database_url=database_url)
+    fake = _FakeExecutor()
+    app.state.connector_job_executor = fake
+    client = TestClient(app)
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Service actor missing",
+        },
+    )
+
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        audit_log = session.scalars(select(AuditLogORM)).one()
+    engine.dispose()
+    assert response.status_code == 503
+    assert audit_log.details["action"] == "job_rejected"
+    assert audit_log.details["rejection"] == "service_principal_unavailable"
+    # Pre-flight rejection: no reservation, no activate, no cancel.
+    assert fake.submit_calls == []
+    assert fake.activate_calls == []
+    assert fake.cancel_calls == []
+
+
+def test_request_connector_job_activate_runs_only_after_commit(tmp_path):
+    """The after_commit hook activates the reservation; rollback drops the slot.
+
+    Happy path: the after_commit hook is fired by FastAPI's session_dependency
+    wrapper, so ``activate`` is recorded exactly once and no cancel happens.
+    The matching rollback path is covered at the executor level by
+    ``test_cancel_reservation_drops_in_flight_slot`` (the route's hook wiring
+    shares the same one-shot guard).
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    _seed_active_credential(database_url)
+    fake = _FakeExecutor(active=False)
+    client = TestClient(_enable_executor_app(database_url, fake))
+
+    response = client.post(
+        "/connectors/jobs",
+        headers=auth_headers(
+            "revenue_operations_admin", "connector", "youtube_reporting"
+        ),
+        json={
+            "connector_key": "youtube_reporting",
+            "account_id": "content-owner-1",
+            "report_month": "2026-03",
+            "reason": "Happy path activates after commit",
+        },
+    )
+    assert response.status_code == 202
+    assert len(fake.submit_calls) == 1
+    assert len(fake.activate_calls) == 1
+    assert fake.cancel_calls == []
 
 
 def test_connector_admin_can_test_connection_ok(tmp_path):
