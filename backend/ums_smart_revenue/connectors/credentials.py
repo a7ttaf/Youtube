@@ -163,6 +163,39 @@ class SqlAlchemyConnectorCredentialRepository:
             raise
         return self._to_entry(row)
 
+    # ========================================================================
+    # Purpose: Tenant-scoped point read of one connector credential row for the
+    #   pre-submission validation in POST /connectors/jobs (cheap; NO OAuth
+    #   refresh). Returns the serialized entry (status visible) or None.
+    # Database/ORM: ApiConnectorCredentialORM (read only).
+    # Standards: tenant_id always filtered; reuses _to_entry so the read shape
+    #   stays single-sourced.
+    # Blast Radius: Connector credential read surface only. No finance, audit,
+    #   auth-mutation, or graph projection impact.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/connectors.py ->
+    #     request_connector_job validates credential existence/status.
+    # ========================================================================
+    def get_credential(
+        self,
+        session: Session,
+        *,
+        tenant_id: UUID,
+        connector_key: str,
+        account_id: str,
+    ) -> ConnectorCredentialEntry | None:
+        """Return the tenant-scoped credential entry for the scope, or None."""
+        row = session.scalars(
+            select(ApiConnectorCredentialORM).where(
+                ApiConnectorCredentialORM.tenant_id == tenant_id,
+                ApiConnectorCredentialORM.connector_key == connector_key,
+                ApiConnectorCredentialORM.account_id == account_id,
+            )
+        ).one_or_none()
+        if row is None:
+            return None
+        return self._to_entry(row)
+
     @staticmethod
     def _to_entry(row: ApiConnectorCredentialORM) -> ConnectorCredentialEntry:
         return ConnectorCredentialEntry(

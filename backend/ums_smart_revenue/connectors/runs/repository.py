@@ -353,6 +353,44 @@ def list_runs(
     )
 
 
+# ============================================================================
+# Purpose: Return the tenant-scoped RUNNING connector runs for one exact scope
+#   (tenant, connector_key, account_id, report_month), newest started_at first.
+#   Powers the POST /connectors/jobs secondary duplicate guard + orphan-
+#   supersede decision (a stale RUNNING row from a dead process).
+# Database/ORM: ConnectorRunORM (read only).
+# Standards: tenant filter + status='RUNNING' + the full scope tuple always
+#   applied; ordered started_at desc so the youngest RUNNING row is first.
+# Blast Radius: Connector run read surface only. No finance, auth, audit, or
+#   graph projection impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py ->
+#     request_connector_job duplicate/orphan-supersede logic.
+#   - Function: finish_run -> reused to rewrite a superseded orphan to FAILED.
+# ============================================================================
+def find_active_runs_for_scope(
+    session: Session,
+    *,
+    tenant_id: UUID,
+    connector_key: str,
+    account_id: str,
+    report_month: str,
+) -> list[ConnectorRunEntry]:
+    """List RUNNING runs for one exact scope, newest started_at first."""
+    stmt = (
+        select(ConnectorRunORM)
+        .where(
+            ConnectorRunORM.tenant_id == tenant_id,
+            ConnectorRunORM.connector_key == connector_key,
+            ConnectorRunORM.account_id == account_id,
+            ConnectorRunORM.report_month == report_month,
+            ConnectorRunORM.status == "RUNNING",
+        )
+        .order_by(ConnectorRunORM.started_at.desc(), ConnectorRunORM.id.desc())
+    )
+    return [_to_entry(row) for row in session.scalars(stmt).all()]
+
+
 def _parse_cursor_uuid(value: str) -> UUID:
     """Parse the keyset cursor UUID or raise a typed validation error."""
     try:
