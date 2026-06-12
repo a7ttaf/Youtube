@@ -740,18 +740,24 @@ def resolve_connector_credentials(
 
 
 def _stamp_credential_refresh(
-    credential,
+    credential: ApiConnectorCredentialORM,
     *,
     status: str,
     error_class: str | None,
-    token_expiry,
+    token_expiry: datetime | None,
 ) -> None:
-    """Mutate the in-session credential row's four telemetry columns."""
+    """Mutate the in-session credential row's four telemetry columns.
+
+    FIX: on a failed refresh, the prior ``token_expiry_at`` (recorded from
+    the last successful refresh) is cleared so the credential-health read
+    surface does not display a stale success expiry next to
+    ``last_refresh_status='failed'``. Always assign; the in-session
+    mutation rides the caller's commit.
+    """
     credential.last_refresh_attempt_at = datetime.now(UTC)
     credential.last_refresh_status = status
     credential.last_refresh_error_class = error_class
-    if token_expiry is not None:
-        credential.token_expiry_at = token_expiry
+    credential.token_expiry_at = token_expiry
 
 
 # Backwards-compatible internal alias (existing call sites unchanged).

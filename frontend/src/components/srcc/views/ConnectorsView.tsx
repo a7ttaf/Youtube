@@ -1,4 +1,4 @@
-import { useEffect, useState, type Dispatch, type SetStateAction } from "react";
+import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
 import { ApiError } from "@/lib/api/client";
 import type {
@@ -156,17 +156,33 @@ export default function ConnectorsView({ // skipcq: JS-0067
   // next few seconds to catch the row once the worker has committed start_run.
   // The worker takes ~1-2s on the OAuth refresh + DB commit, so a 0/1/3/5s
   // schedule covers the worst case (the first 0s tick handles the happy path;
-  // the later ticks catch the row once start_run commits). The timeouts are
-  // fire-and-forget; the component stays mounted long enough for all four
-  // ticks to complete, and any later submit reuses the same nonce-bump path.
+  // the later ticks catch the row once start_run commits). The timer ids are
+  // captured in a ref and cleared on unmount so a fast navigation away from
+  // the view cannot trigger setState on an unmounted component.
   const [reloadToken, setReloadToken] = useState<number>(0);
+  // FIX: capture the setTimeout ids in a ref so the unmount cleanup can
+  // clear them; previously the timers persisted after the component
+  // unmounted and could fire setReloadToken on an unmounted React tree.
+  const pollTimersRef = useRef<number[]>([]);
   const runsReload = () => setReloadToken((n) => n + 1);
   const runsReloadPoll = () => {
     setReloadToken((n) => n + 1);
-    window.setTimeout(() => setReloadToken((n) => n + 1), 1000);
-    window.setTimeout(() => setReloadToken((n) => n + 1), 3000);
-    window.setTimeout(() => setReloadToken((n) => n + 1), 5000);
+    const timers = pollTimersRef.current;
+    timers.push(window.setTimeout(() => setReloadToken((n) => n + 1), 1000));
+    timers.push(window.setTimeout(() => setReloadToken((n) => n + 1), 3000));
+    timers.push(window.setTimeout(() => setReloadToken((n) => n + 1), 5000));
   };
+
+  // FIX: clear any pending poll timers on unmount so a navigation away
+  // from the view cannot fire setReloadToken on a dead React tree. Empty
+  // cleanup is a no-op when no poll is in flight.
+  useEffect(() => {
+    return () => {
+      const timers = pollTimersRef.current;
+      for (const id of timers) window.clearTimeout(id);
+      timers.length = 0;
+    };
+  }, []);
 
   const credentials = useConnectorCredentials();
   const jobActions = useConnectorJobActions();
@@ -216,9 +232,12 @@ export default function ConnectorsView({ // skipcq: JS-0067
           runsReloadPoll();
         }
       })
-      .catch(() => {
+      .catch((_err: unknown) => {
         // The hook already captured the typed error in jobActions.error and
-        // surfaces it in the banner; nothing more to do here.
+        // surfaces it in the banner; nothing more to do here. The arg
+        // name is `_err` to silence the "avoid empty catch" lint rule
+        // while keeping the catch-arm honest about being a no-op.
+        void _err;
       });
   };
 
@@ -782,7 +801,15 @@ function RequestJobSuccess({ result }: { result: ConnectorJobResponse }) { // sk
   // the executor and the run-history feed updates once it starts. A disabled
   // executor returns 503 (surfaced via RequestJobError), so the success banner only
   // ever renders the submitted state.
-  const message = "Submitted to executor — run history will update";
+  // FIX: a dry-run returns 202 'submitted' but the backend intentionally
+  // creates no connector_runs row, so the run-history feed cannot change
+  // for a dry-run. Branch the success copy on the submitted dry-run
+  // state so dry-run users are pointed to the audit outcome (the
+  // job_dry_run_completed CONNECTOR_JOB_RUN row) instead of a feed that
+  // will never show their pull.
+  const message = result.dry_run
+    ? "Submitted to executor (dry run) — see audit log for counts + per-report failures"
+    : "Submitted to executor — run history will update";
   return (
     <div className="permission-band" role="status" style={{ margin: 13 }}>
       <Dot tone="green" />

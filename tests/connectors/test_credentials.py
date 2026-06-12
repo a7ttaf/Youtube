@@ -501,9 +501,7 @@ def test_list_credentials_never_exposes_encrypted_secret_ref_in_serialized_outpu
 
 
 def test_direct_orm_insert_with_duplicate_composite_key_raises_integrity_error():
-    from sqlalchemy.exc import IntegrityError
-
-    with build_session() as session:
+    with build_session() as session, pytest.raises(IntegrityError):
         session.add(
             ApiConnectorCredentialORM(
                 id=uuid4(),
@@ -526,8 +524,7 @@ def test_direct_orm_insert_with_duplicate_composite_key_raises_integrity_error()
                 status="active",
             )
         )
-        with pytest.raises(IntegrityError):
-            session.flush()
+        session.flush()
 
 
 # -----------------------------------------------------------------------------
@@ -542,11 +539,13 @@ def test_repository_default_tenant_id_matches_constant():
 
 
 def test_repository_rejects_malformed_tenant_id():
-    with build_session() as session:
-        with pytest.raises(
+    with (
+        build_session() as session,
+        pytest.raises(
             ConnectorCredentialValidationError, match="tenant_id must be a valid UUID"
-        ):
-            SqlAlchemyConnectorCredentialRepository(session, tenant_id="not-a-uuid")
+        ),
+    ):
+        SqlAlchemyConnectorCredentialRepository(session, tenant_id="not-a-uuid")
 
 
 @pytest.mark.parametrize(
