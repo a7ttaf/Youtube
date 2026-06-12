@@ -149,8 +149,24 @@ export default function ConnectorsView({ // skipcq: JS-0067
   const [dryRun, setDryRun] = useState<boolean>(false);
   // Nonce bumped after a successful executing-path submit so the run-history feed
   // refetches (the new run should appear newest-first without a manual refresh).
+  // FIX: the worker does not create the connector_runs row until after credential
+  // resolution + OAuth refresh inside _run_live, so a single immediate refetch
+  // can easily run before the RUNNING row exists and the feed stays stale until
+  // the operator manually refreshes. We bump the nonce a few times over the
+  // next few seconds to catch the row once the worker has committed start_run.
+  // The worker takes ~1-2s on the OAuth refresh + DB commit, so a 0/1/3/5s
+  // schedule covers the worst case (the first 0s tick handles the happy path;
+  // the later ticks catch the row once start_run commits). The timeouts are
+  // fire-and-forget; the component stays mounted long enough for all four
+  // ticks to complete, and any later submit reuses the same nonce-bump path.
   const [reloadToken, setReloadToken] = useState<number>(0);
   const runsReload = () => setReloadToken((n) => n + 1);
+  const runsReloadPoll = () => {
+    setReloadToken((n) => n + 1);
+    window.setTimeout(() => setReloadToken((n) => n + 1), 1000);
+    window.setTimeout(() => setReloadToken((n) => n + 1), 3000);
+    window.setTimeout(() => setReloadToken((n) => n + 1), 5000);
+  };
 
   const credentials = useConnectorCredentials();
   const jobActions = useConnectorJobActions();
@@ -185,13 +201,16 @@ export default function ConnectorsView({ // skipcq: JS-0067
       .then((result) => {
         // Refetch the run-history feed only when the executor accepted the job
         // AND the viewer can see the feed; a record-only fallback or a viewer
-        // without connector-health does not need (or get) a refresh.
+        // without connector-health does not need (or get) a refresh. The poll
+        // variant spreads the refetch over 0/1/3/5s so the worker has time to
+        // commit start_run (after the OAuth refresh) before the feed is
+        // re-queried -- a single immediate refetch would miss the row.
         if (
           result !== null &&
           result.execution_status === "submitted" &&
           canViewConnectorHealth
         ) {
-          runsReload();
+          runsReloadPoll();
         }
       })
       .catch(() => {

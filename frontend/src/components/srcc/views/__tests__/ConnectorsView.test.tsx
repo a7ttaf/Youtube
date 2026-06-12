@@ -650,6 +650,63 @@ describe("ConnectorsView wired to the connector + AdSense endpoints", () => {
     await waitFor(() => expect(runCalls().length).toBeGreaterThan(before));
   });
 
+  it("schedules delayed refetch timers after a 202 submitted so the worker row catches up", async () => {
+    // FIX: the worker does not create the connector_runs row until after
+    // credential resolution + OAuth refresh inside _run_live, so a single
+    // immediate refetch can miss the RUNNING row. The view schedules three
+    // delayed setReloadToken calls (1s/3s/5s) so the run-history feed
+    // re-queries once the worker has committed start_run. We spy on
+    // window.setTimeout here (the polling uses setTimeout) and assert the
+    // expected 1s/3s/5s delays are scheduled.
+    const setTimeoutSpy = vi.spyOn(window, "setTimeout");
+    try {
+      fetchMock().mockImplementation(
+        routeBoth((url, init) => {
+          if (url === "/connectors/jobs" && methodOf(init) === "POST") {
+            return jsonResponse(
+              {
+                connector_key: "youtube_reporting",
+                account_id: "acct-1",
+                report_month: "2026-03",
+                dry_run: false,
+                execution_status: "submitted",
+                audit_event: {},
+              },
+              202,
+            );
+          }
+          return null;
+        }),
+      );
+      renderConnectorsView();
+
+      await waitFor(() =>
+        expect(screen.getByText("youtube_reporting")).toBeInTheDocument(),
+      );
+      const beforeCalls = setTimeoutSpy.mock.calls.length;
+      fireEvent.change(
+        screen.getByLabelText("Sync reason (required, audited)"),
+        { target: { value: "Poll for new row" } },
+      );
+      fireEvent.click(screen.getByRole("button", { name: /run pull/i }));
+      await waitFor(() =>
+        expect(setTimeoutSpy.mock.calls.length).toBeGreaterThan(beforeCalls),
+      );
+      const pollDelays = setTimeoutSpy.mock.calls
+        .slice(beforeCalls)
+        .map(([, delay]) => delay)
+        .filter(
+          (d): d is number => typeof d === "number",
+        );
+      // Exactly the three delayed refetch ticks; the 0s tick is the
+      // immediate setReloadToken inside runsReloadPoll itself, not a
+      // setTimeout.
+      expect(pollDelays).toEqual(expect.arrayContaining([1000, 3000, 5000]));
+    } finally {
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
   it("surfaces a 409 detail verbatim on Run pull", async () => {
     fetchMock().mockImplementation(
       routeBoth((url, init) => {
