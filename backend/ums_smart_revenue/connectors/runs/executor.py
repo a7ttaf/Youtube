@@ -556,38 +556,15 @@ class ConnectorJobExecutor:
         ``finish_run`` validates; per-report failures are listed as a
         ``[{"report_type": ..., "error_class": ...}, ...]`` array so an
         operator console can render them directly.
-
-        FIX (PR #95 P2): set ``TENANT_CTX`` directly (no DB lookup, no
-        lifecycle check) so a tenant suspended/archived between the
-        successful ``run_one(..., dry_run=True)`` return and this audit
-        write is still recorded. The previous design re-entered
-        ``connector_tenant_context()`` to satisfy the RLS ``WITH CHECK``,
-        but that helper raises ``TenantLifecycleError`` for non-ACTIVE
-        tenants; the catch block only logged the failure, so a
-        dry-run for a tenant whose lifecycle flipped mid-run left the
-        ``job_submitted`` row with no companion ``job_dry_run_completed``
-        outcome. Mirrors the explicit-tenant platform-lane path the
-        pre-start failure audit now uses.
         """
         actor = self._build_audit_actor(tenant_id=tenant_id, actor_identity=actor_identity)
         per_report_failures = [
             {"report_type": report_type, "error_class": error_class}
             for report_type, error_class in outcome.per_report_failures
         ]
-        minimal_tenant = Tenant(
-            id=tenant_id,
-            slug=f"connector-job-dry-run-audit:{tenant_id}",
-            display_name="connector job dry-run audit",
-            primary_currency="USD",
-            status=TenantStatus.ACTIVE,
-            onboarding_at=_EPOCH,
-            created_at=_EPOCH,
-            updated_at=_EPOCH,
-        )
-        token = TENANT_CTX.set(minimal_tenant)
         try:
-            try:
-                with self._session_factory() as session:
+            with self._session_factory() as session:
+                with connector_tenant_context(tenant_id, session=session):
                     with platform_lane(session):
                         sink = SqlAlchemyAuditSink(session, tenant_id=tenant_id)
                         record_audit_event(
@@ -607,13 +584,11 @@ class ConnectorJobExecutor:
                             },
                         )
                         session.commit()
-            except Exception:  # noqa: BLE001 — best-effort audit, never escape
-                logger.exception(
-                    "Failed to persist job_dry_run_completed audit (tenant=%s)",
-                    tenant_id,
-                )
-        finally:
-            TENANT_CTX.reset(token)
+        except Exception:  # noqa: BLE001 — best-effort audit, never escape
+            logger.exception(
+                "Failed to persist job_dry_run_completed audit (tenant=%s)",
+                tenant_id,
+            )
 
     def _build_audit_actor(
         self,

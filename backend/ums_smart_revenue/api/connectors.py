@@ -852,42 +852,24 @@ def _supersede_or_block_running_runs(
             # was RUNNING before finish_run), and is now FAILED because a
             # new job superseded it. Attribute to the operator who
             # triggered the supersede.
-            #
-            # FIX (PR #95 P2): write the ``run_superseded`` terminal edge
-            # on the route's tenant session (with ``platform_lane``
-            # elevation) instead of the request-scoped ``audit_sink``
-            # (platform session) so the audit commit and the
-            # ``finish_run`` connector_runs row update share the same
-            # transaction. The previous design routed the edge through a
-            # separate platform session that committed independently of
-            # the tenant-session ``finish_run``: a tenant-session commit
-            # failure after the platform audit committed would leave a
-            # durable FINISHED/FAILED edge for a run that stayed
-            # RUNNING, and a platform-audit commit failure would leave
-            # the row FAILED with no terminal audit. Mirrors the
-            # ``job_submitted`` audit-same-transaction fix.
-            with platform_lane(session):
-                session_bound_sink = SqlAlchemyAuditSink(
-                    session, tenant_id=tenant_id
-                )
-                _audit_connector_change(
-                    audit_sink=session_bound_sink,
-                    user=user,
-                    event_type=AuditEventType.CONNECTOR_JOB_RUN,
-                    connector_key=payload.connector_key,
-                    account_id=payload.account_id,
-                    reason=(
-                        f"orphaned RUNNING run {entry.id} superseded by new job"
-                    ),
-                    details={
-                        "action": "run_superseded",
-                        "run_id": entry.id,
-                        "report_month": payload.report_month,
-                        "lifecycle": "FINISHED",
-                        "status": "FAILED",
-                        "error_summary_present": True,
-                    },
-                )
+            _audit_connector_change(
+                audit_sink=audit_sink,
+                user=user,
+                event_type=AuditEventType.CONNECTOR_JOB_RUN,
+                connector_key=payload.connector_key,
+                account_id=payload.account_id,
+                reason=(
+                    f"orphaned RUNNING run {entry.id} superseded by new job"
+                ),
+                details={
+                    "action": "run_superseded",
+                    "run_id": entry.id,
+                    "report_month": payload.report_month,
+                    "lifecycle": "FINISHED",
+                    "status": "FAILED",
+                    "error_summary_present": True,
+                },
+            )
             superseded = entry.id
     return superseded
 
