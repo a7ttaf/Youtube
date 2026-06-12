@@ -168,3 +168,15 @@ def test_unreadable_ini_raises_runtime_error(tmp_path: Path) -> None:
     ini.write_text("NOT VALID INI CONTENT [[[\n", encoding="utf-8")
     with pytest.raises(RuntimeError, match="could not be parsed"):
         resolve_database_url(cfg, {"UMS_DATABASE_URL": PROD_DB_URL})
+
+
+def test_invalid_utf8_ini_raises_runtime_error(tmp_path: Path) -> None:
+    # If the ini file contains invalid UTF-8 bytes, configparser.read raises
+    # UnicodeDecodeError.  _ini_declared_url must catch it and raise RuntimeError
+    # instead of letting the encoding error propagate.
+    ini = tmp_path / "alembic.ini"
+    ini.write_bytes(b"[alembic]\nsqlalchemy.url = \xff\xfe not-utf8\n")
+    cfg = Config(str(ini))
+    cfg.get_main_option("sqlalchemy.url")
+    with pytest.raises(RuntimeError, match="could not be parsed"):
+        resolve_database_url(cfg, {"UMS_DATABASE_URL": PROD_DB_URL})

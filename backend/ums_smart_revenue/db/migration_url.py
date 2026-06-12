@@ -34,7 +34,7 @@ def _ini_declared_url(config: Config) -> str | None:
     parser = configparser.ConfigParser(interpolation=None)
     try:
         files_read = parser.read(path, encoding="utf-8")
-    except configparser.Error as exc:
+    except (configparser.Error, UnicodeDecodeError) as exc:
         raise RuntimeError(
             f"alembic ini file {path!r} could not be parsed: {exc}; "
             "cannot classify sqlalchemy.url injection status"
