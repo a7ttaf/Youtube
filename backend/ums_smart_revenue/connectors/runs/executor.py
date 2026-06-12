@@ -243,12 +243,11 @@ class ConnectorJobExecutor:
                 triggered_by_user_id=reservation.triggered_by_user_id,
                 actor_identity=reservation.actor_identity,
             )
-            # Stash the actor identity and job key on the Future so a
-            # shutdown that cancels a still-queued job can emit a properly
-            # attributed job_failed_before_start audit row.
-            future._actor_identity = reservation.actor_identity  # type: ignore[attr-defined]
-            future._job_key = key  # type: ignore[attr-defined]
-            self._registry[key] = future
+            self._stash_and_register(
+                future=future,
+                key=key,
+                actor_identity=reservation.actor_identity,
+            )
         return future
 
     def cancel_reservation(self, reservation: _SlotReservation) -> bool:
@@ -318,13 +317,26 @@ class ConnectorJobExecutor:
                 triggered_by_user_id=triggered_by_user_id,
                 actor_identity=actor_identity,
             )
-            # Stash the actor identity and job key on the Future so a
-            # shutdown that cancels a still-queued job can emit a properly
-            # attributed job_failed_before_start audit row.
-            future._actor_identity = actor_identity  # type: ignore[attr-defined]
-            future._job_key = key  # type: ignore[attr-defined]
-            self._registry[key] = future
+            self._stash_and_register(
+                future=future,
+                key=key,
+                actor_identity=actor_identity,
+            )
         return future
+
+    def _stash_and_register(
+        self,
+        future: Future,
+        key: _JobKey,
+        actor_identity: ConnectorJobActor,
+    ) -> None:
+        """Stash shutdown-audit metadata on *future* and insert into the registry.
+
+        Must be called while holding ``self._lock``.
+        """
+        future._actor_identity = actor_identity  # type: ignore[attr-defined]
+        future._job_key = key  # type: ignore[attr-defined]
+        self._registry[key] = future
 
     def _audit_pending_on_shutdown(self) -> None:
         """Audit every accepted job that has not started before we cancel it.
