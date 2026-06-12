@@ -3204,6 +3204,31 @@ class YouTubeAnalyticsRunner:
             channel_ids = list_target_channels(
                 session, tenant_id=tenant_id, account_id=account_id,
             )
+            # FIX: end the read-only channel-list transaction now so the
+            # orchestrator's per-report `with platform_lane(session):` block
+            # enters with NO active transaction. Without this, the
+            # channel-list transaction stays open through the for-loop, and
+            # the per-report platform_lane entry EAGERLY elevates the
+            # already-open tenant transaction (it only defers elevation
+            # when no transaction is active). The first analytics report
+            # then holds an elevated Postgres transaction across the
+            # `_prepare_raw_report_file` blob upload_and_verify (network /
+            # GCS I/O) before any raw-file/audit write, and a slow backend
+            # can trip `idle_in_transaction_session_timeout` mid-upload.
+            # Rollback is safe: the SELECT is read-only and the orchestrator
+            # owns the per-report transaction via the platform_lane
+            # `with` block (its first DB call autobegins a fresh
+            # transaction that the after_begin hook elevates to
+            # app_platform via the platform-lane flag).
+            #
+            # Only rollback when the active transaction is TOP-LEVEL: the
+            # dry-run path wraps the runner in `session.begin_nested()`
+            # (a SAVEPOINT) and ends with `savepoint.rollback()`; rolling
+            # back the outer transaction here would close the savepoint
+            # and surface as a ResourceClosedError on the
+            # `savepoint.rollback()` finally clause.
+            if session.in_transaction() and not session.in_nested_transaction():
+                session.rollback()
             for channel_id in channel_ids:
                 try:
                     # FIX: Build the query_request INSIDE the per-channel try so

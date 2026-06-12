@@ -190,6 +190,43 @@ behavior (source-rows API exists; post-run normalization writes facts; run-drive
 `/connectors/jobs` documented as a recorded no-op pending the executor spec). `Docs/15`
 inline status entry for this PR.
 
+## Alternatives considered
+
+- **Two-session platform-binding pattern (API precedent).** The API handler opens a
+  SECOND session bound to the platform role for platform-only writes; the request
+  session stays on the tenant lane. Pros: clear lane separation, each session has
+  one role, no in-transaction `SET LOCAL ROLE` juggling. Cons: the run path's
+  contract requires atomic facts+audit+commit in one transaction on one session
+  (the #90/#93 wiring — see `connectors/runs/orchestrator.py`
+  `_handle_live_produced_report` and `connectors/runs/normalization.py`
+  `normalize_after_run`); splitting into two sessions breaks this contract and
+  would require either a two-phase commit across sessions or a re-architecture
+  of the normalize/ingest loop that defeats the whole point of the per-report
+  "audit edge commits with the evidence" design. The single-session elevation
+  via `platform_lane` keeps the run path's atomicity intact while still letting
+  the platform-only writes land on `app_platform`.
+
+- **SET LOCAL ROLE per statement (no `session.info` flag).** Execute
+  `SET LOCAL ROLE app_platform` immediately before each platform-only write and
+  `SET LOCAL ROLE app_tenant` immediately after. Pros: no session-level state, no
+  custom flag, all role changes are visible in the SQL log. Cons: `SET LOCAL` is
+  transaction-scoped, so a per-report iteration that does `session.commit()`
+  mid-block would reset the role on the next transaction; the after_begin hook
+  re-pins `app_tenant` after every commit/rollback, so the platform-only audit
+  INSERTs would permission-deny on the tenant lane. The `session.info` flag
+  survives commit/rollback (it's session-level) and lets the after_begin hook
+  know "we're inside a `platform_lane` block, keep the elevation". The
+  load-bearing flag is set/popped ONLY by `db/lane.py`, and the SQLite tier is
+  unaffected (the hook returns early on the SQLite dialect).
+
+- **Wrap the runner in `session.begin_nested()` (SAVEPOINT) instead of using
+  `session.info`.** A savepoint would let the platform_lane block own its own
+  sub-transaction. Pros: explicit transaction scope. Cons: SAVEPOINTs in
+  SQLAlchemy fire `after_begin` on entry, which would re-pin `app_tenant` and
+  silently undo the elevation mid-block; the session-level flag is what lets
+  the after_begin hook re-elevate on every sub-transaction. Same load-bearing
+  reason as the previous alternative.
+
 ## Test obligations (TDD; the PG tests are the heart of this PR)
 
 - **PG-tier (new file, e.g. `tests/connectors/runs/test_run_one_rls_postgres.py`)**, using

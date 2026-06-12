@@ -127,23 +127,34 @@ def connector_tenant_context(
         # already in a transaction (caller-owned outer transaction,
         # documented test path), we don't touch the boundary -- the
         # outer transaction's role/context is the caller's contract.
+        #
+        # The rollback must run on EVERY exit path -- success,
+        # TenantNotFoundError, AND non-active-status -- so a failed
+        # lookup does not leave the session in a state where the next
+        # connector_tenant_context call sees prior_in_transaction=True
+        # and skips the rollback (a worker that catches the typed error
+        # and retries against a different tenant would otherwise end up
+        # reading tenant rows with app_current_tenant_id()=NULL).
         prior_in_transaction = session.in_transaction()
         try:
-            tenant = SqlAlchemyTenantRepository(session).get_by_id(tenant_id)
-        except TenantNotFoundError as exc:
-            raise TenantLifecycleError(
-                tenant_id=tenant_id, status=None
-            ) from exc
-        if tenant.status != TenantStatus.ACTIVE:
-            raise TenantLifecycleError(
-                tenant_id=tenant_id, status=tenant.status.value
-            )
-        if not prior_in_transaction and session.in_transaction():
-            # End the lookup transaction so the caller's first DB call
-            # autobegins a fresh transaction and re-fires after_begin with
-            # TENANT_CTX set. Rollback is safe (read-only lookup; the
-            # tenant row was never mutated).
-            session.rollback()
+            try:
+                tenant = SqlAlchemyTenantRepository(session).get_by_id(tenant_id)
+            except TenantNotFoundError as exc:
+                raise TenantLifecycleError(
+                    tenant_id=tenant_id, status=None
+                ) from exc
+            if tenant.status != TenantStatus.ACTIVE:
+                raise TenantLifecycleError(
+                    tenant_id=tenant_id, status=tenant.status.value
+                )
+        finally:
+            # End the lookup transaction on every exit path so the
+            # caller's first DB call autobegins a fresh transaction and
+            # re-fires after_begin with TENANT_CTX set. Rollback is
+            # safe: the lookup is read-only, no data was mutated, and
+            # the caller's body owns its own transaction boundary.
+            if not prior_in_transaction and session.in_transaction():
+                session.rollback()
     else:
         # Test-only fabrication path: build the minimal ACTIVE tenant the
         # RLS session hook needs (it reads only ``tenant.id``). Production

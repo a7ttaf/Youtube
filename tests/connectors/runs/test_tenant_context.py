@@ -147,6 +147,14 @@ def test_session_path_rejects_suspended_tenant() -> None:
         assert exc_info.value.status == TenantStatus.SUSPENDED.value
         # The contextvar is NOT set when the lookup rejects.
         assert get_current_tenant() is None
+        # ChatGPT codex review (PR #94 P2, posted 2026-06-12 on commit
+        # f07fb6d): the lookup transaction is rolled back on the
+        # rejected-lookup path too, not only on the success path. A
+        # worker that catches TenantLifecycleError and retries against
+        # a different tenant must see a clean idle session, not an
+        # open transaction pinning app_tenant with
+        # app_current_tenant_id()=NULL.
+        assert not session.in_transaction()
     finally:
         session.close()
 
@@ -179,6 +187,11 @@ def test_session_path_rejects_missing_tenant() -> None:
         assert exc_info.value.tenant_id == tenant_id
         assert exc_info.value.status is None
         assert get_current_tenant() is None
+        # Same rejected-lookup rollback contract as
+        # test_session_path_rejects_suspended_tenant: a failed lookup
+        # must leave the session idle, not pinned to an open tenant-lane
+        # transaction with app_current_tenant_id()=NULL.
+        assert not session.in_transaction()
     finally:
         session.close()
 
