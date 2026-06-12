@@ -1,6 +1,7 @@
 """FastAPI application factory and router wiring."""
 
 from collections.abc import Iterable
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import UUID
 
@@ -64,6 +65,7 @@ from ums_smart_revenue.config.settings import (
     load_app_settings,
 )
 from ums_smart_revenue.config.version_baseline import STACK_VERSION_BASELINE
+from ums_smart_revenue.connectors.runs.executor import ConnectorJobExecutor
 from ums_smart_revenue.db.session import (
     build_platform_session_factory,
     build_session_factory,
@@ -96,10 +98,34 @@ def create_app(
         raise ValueError(
             "database authz_source requires database_url or UMS_DATABASE_URL"
         )
+    # ========================================================================
+    # Purpose: Close the module-owned ConnectorJobExecutor on app shutdown so
+    #   worker threads tear down deterministically (the weakref.finalize GC
+    #   backstop is a safety net, not the primary teardown). No startup work.
+    # Database/ORM: None directly; the executor owns its own session factory.
+    # Standards: getattr-guarded so a disabled app (no executor) shuts down
+    #   cleanly. Fail-closed default OFF means the import-time app spawns no
+    #   threads.
+    # Blast Radius: Process lifecycle / threads only. No finance, auth, audit,
+    #   or graph projection impact.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/runs/executor.py -> close().
+    # ========================================================================
+    @asynccontextmanager
+    async def _lifespan(app: FastAPI):
+        """Yield through serving, then close the connector-job executor if present."""
+        try:
+            yield
+        finally:
+            executor = getattr(app.state, "connector_job_executor", None)
+            if executor is not None:
+                executor.close()
+
     _app = FastAPI(
         title="UMS Smart Revenue Control Center API",
         version="0.1.0",
         description="Numbers-first internal revenue control API for UMS.",
+        lifespan=_lifespan,
     )
 
     if resolved_database_url:
@@ -108,6 +134,12 @@ def create_app(
         platform_session_factory = build_platform_session_factory(
             resolved_database_url
         )
+        if settings.connector_job_executor_enabled:
+            _app.state.connector_job_executor = ConnectorJobExecutor(
+                session_factory=build_session_factory(resolved_database_url),
+                max_workers=settings.connector_job_max_workers,
+                stale_running_hours=settings.connector_job_stale_running_hours,
+            )
         overrides = _app.dependency_overrides
         if resolved_authz_source == AUTHZ_SOURCE_DATABASE:
             overrides[current_db_session] = authenticated_session_dependency(
