@@ -160,11 +160,6 @@ def seed_org(session: Session) -> None:
 
 
 def test_sql_channel_registry_reads_and_writes_channel_rows():
-    # FIX: Use build_finance_session (org + finance) instead of build_session
-    # (org only). The mapping re-parenting path now reaches the locked-month
-    # guard, which JOINS the finance tables. The org-only caller path stays
-    # valid through the no-op short-circuit; the change-path test needs the
-    # finance schema for the JOIN to resolve.
     session = build_finance_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)

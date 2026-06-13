@@ -1115,7 +1115,7 @@ def get_month_smart_alerts(
         (
             missing_fact_channel_count,
             missing_fact_channel_sample,
-        ) = _missing_revenue_fact_channel_count_and_sample(
+        ) = missing_revenue_fact_channel_count_and_sample(
             session, month=month
         )
         payment_match = build_monthly_payment_match_summary(
@@ -1666,10 +1666,7 @@ def _channel_name_map(session: Session) -> dict[str, str]:
             YouTubeChannelORM.active.is_(True),
         )
     )
-    return {
-        channel_id: channel_name
-        for channel_id, channel_name in session.execute(statement).all()
-    }
+    return dict(session.execute(statement).all())
 
 
 @router.post(
@@ -2289,7 +2286,7 @@ def _previous_month(month: str) -> str:
 #   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> consumes
 #     (count, sample) for the coverage alert details.
 # ============================================================================
-def _missing_revenue_fact_channel_count_and_sample(
+def missing_revenue_fact_channel_count_and_sample(
     session: Session, *, month: str
 ) -> tuple[int, list[str]]:
     """Return (count, sample) of active revenue-required channels with no fact for the month.

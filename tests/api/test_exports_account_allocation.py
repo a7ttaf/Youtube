@@ -392,3 +392,45 @@ def test_global_finance_export_still_records_bank_reconciliation_viewed():
     )
     kinds = {record.event_type for record in records}
     assert {"REVENUE_VIEWED", "PAYMENT_VIEWED", "BANK_RECONCILIATION_VIEWED"} <= kinds
+
+
+def test_export_bundle_includes_coverage_alert_for_factless_channels(tmp_path):
+    """Export finance bundle surfaces CHANNELS_MISSING_REVENUE_FACTS (review #98 T9).
+
+    A 2nd active revenue_required channel with no fact for the month must show
+    up in the smart-alerts summary that the export bundle carries, so the
+    exported workbook discloses the same coverage gap the API surfaces.
+    """
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed_missing_net_with_components(session)
+        # Add a 2nd active, revenue_required channel with no fact for the month.
+        session.add(
+            YouTubeChannelORM(
+                id=uuid4(),
+                tenant_id=TENANT,
+                youtube_channel_id="chB",
+                channel_name="B",
+                active=True,
+                revenue_required=True,
+            )
+        )
+        session.commit()
+        summaries = _build_finance_source_summaries_for_export(
+            export_job=_export_job(scope_type="global", scope_channel_ids=None),
+            session=session,
+            org_index=OrgAccessIndex(),
+            group_registry=ChannelGroupRegistry(),
+        )
+    coverage_codes = [
+        alert.code
+        for alert in summaries.smart_alerts.alerts
+    ]
+    assert "CHANNELS_MISSING_REVENUE_FACTS" in coverage_codes
+    coverage = next(
+        alert
+        for alert in summaries.smart_alerts.alerts
+        if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
+    )
+    assert coverage.details["channel_count"] == 1
+    assert coverage.details["sample_channel_ids"] == ["chB"]
