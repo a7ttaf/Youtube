@@ -128,10 +128,11 @@ function routeFetch( // skipcq: JS-0067
     { match: "/rankings", respond: () => jsonResponse(RANKINGS_EMPTY) },
   ];
   const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+  const defaultRoute = { respond: netRevenue };
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = String(input);
-    const route = routes.find((entry) => url.includes(entry.match));
-    return Promise.resolve(route ? route.respond() : netRevenue());
+    const route = routes.find((entry) => url.includes(entry.match)) ?? defaultRoute;
+    return Promise.resolve(route.respond());
   });
   return fetchMock;
 }

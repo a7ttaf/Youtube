@@ -94,6 +94,10 @@ def build_authorized_revenue_scopes(
             if scope.id is None:
                 continue
             if scope.type == ScopeType.SECTOR:
+                # FIX (review #102): skip stale grants for deactivated sectors
+                # so the selector never offers a dead option that 403s on read.
+                if scope.id not in sector_names:
+                    continue
                 sector_ids.add(scope.id)
                 # A sector grant contains its companies (mirror
                 # OrgAccessIndex.contains via the reverse company_sector walk).
@@ -103,6 +107,10 @@ def build_authorized_revenue_scopes(
                     if sector_id == scope.id
                 )
             elif scope.type == ScopeType.COMPANY:
+                # FIX (review #102): skip stale grants for deactivated companies
+                # so the selector never offers a dead option that 403s on read.
+                if scope.id not in company_names:
+                    continue
                 # A company grant confers ONLY that company, never its sector.
                 company_ids.add(scope.id)
 

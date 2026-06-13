@@ -147,11 +147,16 @@ def test_global_grant_with_other_scoped_grants_still_lists_full_universe():
 
 
 def test_raw_id_fallback_when_name_missing():
-    """A unit absent from the name maps falls back to its raw id as the label."""
+    """An active unit absent from the name maps falls back to its raw id as the label.
+
+    Only units present in the active name maps are included — a grant for a
+    deactivated sector/company is filtered out so the selector never offers a
+    dead option that 403s on read.
+    """
     options = build_authorized_revenue_scopes(
         granted=(AccessScope.sector(SECTOR_TV),),
         org_index=ORG_INDEX,
-        sector_names={},  # sector name deactivated/missing
+        sector_names={SECTOR_TV: SECTOR_TV},  # active but name == raw id
         company_names={COMPANY_TV_A: "TV A"},  # company-tv-b name missing
     )
 
@@ -159,6 +164,27 @@ def test_raw_id_fallback_when_name_missing():
     assert by_id[SECTOR_TV] == SECTOR_TV  # raw-id fallback for the sector
     assert by_id[COMPANY_TV_B] == COMPANY_TV_B  # raw-id fallback for the company
     assert by_id[COMPANY_TV_A] == "TV A"
+
+
+def test_stale_grants_for_deactivated_units_are_filtered():
+    """Grants for deactivated sectors/companies are excluded from the options.
+
+    When a VIEW_REVENUE grant points at a sector or company that has since been
+    deactivated (absent from the active name maps), the selector must NOT offer
+    it — the read path would return an empty scope for that option.
+    """
+    options = build_authorized_revenue_scopes(
+        granted=(AccessScope.sector(SECTOR_TV),),
+        org_index=ORG_INDEX,
+        sector_names={},  # sector deactivated
+        company_names={COMPANY_TV_A: "TV A"},  # company-tv-b name missing
+    )
+
+    scope_ids = {o.scope_id for o in options}
+    assert SECTOR_TV not in scope_ids  # deactivated sector filtered out
+    assert COMPANY_TV_B not in scope_ids  # deactivated company filtered out
+    assert COMPANY_TV_A not in scope_ids  # parent sector deactivated, children excluded too
+    assert options == []  # no active grants remain
 
 
 def test_no_grants_returns_empty_list():
