@@ -35,6 +35,7 @@ const FULL_SESSION: SessionMe = {
     canViewConnectorHealth: true,
     canRunConnectorJobs: true,
     canViewAudit: true,
+    canViewAnalytics: true,
   },
 };
 
@@ -324,6 +325,7 @@ function sessionBody( // skipcq: JS-0067
       canViewConnectorHealth: false,
       canRunConnectorJobs: false,
       canViewAudit: false,
+      canViewAnalytics: false,
       ...capabilities,
     },
     ...overrides,

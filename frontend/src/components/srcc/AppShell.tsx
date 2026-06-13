@@ -48,6 +48,7 @@ type AccessPermissions = {
   canRunConnectors: boolean;
   canViewAudit: boolean;
   canViewConnectorHealth: boolean;
+  canViewAnalytics: boolean;
 };
 
 // FIX: Session capabilities are now hydrated from GET /session/me (see
@@ -127,6 +128,12 @@ function capabilitiesToPermissions( // skipcq: JS-0067
     // mirroring the GET /connectors/runs route gate. Narrower principals see the
     // restricted placeholder and fire no fetch; the route 403 stays authoritative.
     canViewConnectorHealth: capabilities.canViewConnectorHealth,
+    // The outside-CMS / channel-issues monitor gates on the backend's analytics
+    // read exactly: /session/me exposes canViewAnalytics (scope-aware — true for
+    // ANY active VIEW_ANALYTICS grant), mirroring the GET /channels/outside-cms +
+    // /channels/issues route gates. A narrower principal sees the restricted
+    // placeholder and fires no fetch; the route 403 stays authoritative.
+    canViewAnalytics: capabilities.canViewAnalytics,
   };
 }
 
@@ -677,7 +684,12 @@ function ViewRouter({ // skipcq: JS-0067, JS-R1005
 }) {
   return (
     <>
-      {view === "command" && <CommandView canViewFinance={canViewFinance} />}
+      {view === "command" && (
+        <CommandView
+          canViewFinance={canViewFinance}
+          canViewAnalytics={permissions.canViewAnalytics}
+        />
+      )}
       {view === "registry" && (
         <RegistryView
           canManageRegistry={permissions.canManageRegistry}
