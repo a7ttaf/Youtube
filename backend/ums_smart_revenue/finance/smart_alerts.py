@@ -1,4 +1,4 @@
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -14,6 +14,7 @@ from ums_smart_revenue.finance.revenue_facts import RevenueFactEntry
 DEFAULT_HIGH_GAP_THRESHOLD_USD = Decimal("100.00")
 DEFAULT_REVENUE_TREND_ANOMALY_THRESHOLD_PERCENT = Decimal("0.50")
 _SEVERITY_RANK = {"LOW": 1, "MEDIUM": 2, "HIGH": 3}
+MISSING_FACT_CHANNEL_SAMPLE_LIMIT = 20
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ def build_monthly_smart_alert_summary(
     bank_reconciliation: MonthBankReconciliationSummary,
     close_status: str | None,
     manual_overrides: Iterable[RevenueManualOverrideEntry],
+    missing_revenue_fact_channel_ids: Sequence[str] = (),
     current_revenue_facts: Iterable[RevenueFactEntry] = (),
     previous_revenue_facts: Iterable[RevenueFactEntry] = (),
     high_gap_threshold_usd: Decimal = DEFAULT_HIGH_GAP_THRESHOLD_USD,
@@ -93,6 +95,41 @@ def build_monthly_smart_alert_summary(
                 source="payment_match",
                 confidence="E_MISSING",
                 details={"payment_match_status": payment_match.status},
+            )
+        )
+
+    # ========================================================================
+    # Purpose: Emit a per-channel coverage gap alert when active,
+    #   revenue-required channels have no revenue fact for the month. Distinct
+    #   from the month-level MISSING_REVENUE_SOURCE (zero-YouTube-revenue);
+    #   mirrors the close-readiness MISSING_REVENUE_FACTS blocker.
+    # Database/ORM: None (pure; ids are pre-read by the route).
+    # Standards: Capped, sorted sample (no full registry dump); count + sample
+    #   only, matching the close-readiness disclosure pattern.
+    # Blast Radius: Finance read surface. No auth, no money, no Neo4j.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/api/revenue.py -> pre-reads the ids.
+    #   - File: backend/ums_smart_revenue/finance/month_close_readiness.py ->
+    #     shares the active+revenue_required-without-fact query shape.
+    # ========================================================================
+    missing_fact_channel_ids = sorted(missing_revenue_fact_channel_ids)
+    if missing_fact_channel_ids:
+        alerts.append(
+            MonthlySmartAlert(
+                code="CHANNELS_MISSING_REVENUE_FACTS",
+                severity="HIGH",
+                message=(
+                    f"{len(missing_fact_channel_ids)} active revenue-required "
+                    f"channel(s) have no revenue facts for {month}."
+                ),
+                source="revenue_facts",
+                confidence="E_MISSING",
+                details={
+                    "channel_count": len(missing_fact_channel_ids),
+                    "sample_channel_ids": missing_fact_channel_ids[
+                        :MISSING_FACT_CHANNEL_SAMPLE_LIMIT
+                    ],
+                },
             )
         )
 

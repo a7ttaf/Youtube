@@ -137,6 +137,58 @@ def test_smart_alerts_detect_payment_bank_month_and_override_risks():
     assert summary.alerts[-1].details["approved_override_count"] == 1
 
 
+def test_smart_alerts_flag_missing_channel_revenue_facts():
+    summary = build_alerts(
+        payment_match=payment_summary(
+            status="NO_YOUTUBE_REVENUE",
+            youtube_revenue_total_usd=Decimal("0.0000"),
+            payment_gap_usd=None,
+        ),
+        missing_revenue_fact_channel_ids=["channel-tv-b", "channel-tv-a"],
+    )
+
+    codes = [alert.code for alert in summary.alerts]
+    # The coverage alert is inserted after MISSING_REVENUE_SOURCE and before
+    # PAYMENT_NOT_MATCHED, matching the per-channel ordering in the spec.
+    assert codes.index("CHANNELS_MISSING_REVENUE_FACTS") == (
+        codes.index("MISSING_REVENUE_SOURCE") + 1
+    )
+    assert codes.index("CHANNELS_MISSING_REVENUE_FACTS") < codes.index(
+        "PAYMENT_NOT_MATCHED"
+    )
+    coverage_alert = next(
+        alert
+        for alert in summary.alerts
+        if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
+    )
+    assert coverage_alert.severity == "HIGH"
+    assert coverage_alert.confidence == "E_MISSING"
+    assert coverage_alert.details == {
+        "channel_count": 2,
+        "sample_channel_ids": ["channel-tv-a", "channel-tv-b"],
+    }
+
+
+def test_smart_alerts_cap_missing_channel_sample_at_twenty():
+    missing = [f"channel-{index:03d}" for index in range(25)]
+    summary = build_alerts(missing_revenue_fact_channel_ids=missing)
+
+    coverage_alert = next(
+        alert
+        for alert in summary.alerts
+        if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
+    )
+    assert coverage_alert.details["channel_count"] == 25
+    assert coverage_alert.details["sample_channel_ids"] == sorted(missing)[:20]
+
+
+def test_smart_alerts_omit_missing_channel_alert_when_empty():
+    summary = build_alerts(missing_revenue_fact_channel_ids=[])
+
+    codes = [alert.code for alert in summary.alerts]
+    assert "CHANNELS_MISSING_REVENUE_FACTS" not in codes
+
+
 def test_smart_alerts_return_clear_when_payment_bank_and_close_are_clean():
     summary = build_alerts(
         payment_match=payment_summary(

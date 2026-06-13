@@ -2,9 +2,11 @@ import re
 from datetime import date
 from decimal import Decimal
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.dependencies import (
@@ -38,6 +40,8 @@ from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.db.finance_models import MonthlyChannelRevenueFactORM
+from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.finance.account_allocation_read import (
     allocation_provenance_to_api,
     resolve_month_account_allocation,
@@ -118,6 +122,8 @@ from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_sum
 from ums_smart_revenue.finance.smart_alerts import (
     build_monthly_smart_alert_summary,
 )
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 router = APIRouter(prefix="/revenue", tags=["revenue"])
 MONTH_VALUE_PATTERN = re.compile(r"^\d{4}-\d{2}$")
@@ -1077,6 +1083,7 @@ def get_month_smart_alerts(
         SqlAlchemyFinanceMonthCloseRepository,
         Depends(current_finance_month_close_repository),
     ],
+    session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
     """Aggregate cross-domain health signals for a month into a prioritized smart-alert summary."""
@@ -1095,6 +1102,9 @@ def get_month_smart_alerts(
         bank_entries = bank_repository.list_month_entries(month=month)
         manual_overrides = override_repository.list_month_overrides(month=month)
         close = close_repository.get(month)
+        missing_fact_channel_ids = _missing_revenue_fact_channel_ids(
+            session, month=month
+        )
         payment_match = build_monthly_payment_match_summary(
             month=month,
             facts=facts,
@@ -1123,6 +1133,7 @@ def get_month_smart_alerts(
         bank_reconciliation=bank_reconciliation,
         close_status=close.status if close else "OPEN",
         manual_overrides=manual_overrides,
+        missing_revenue_fact_channel_ids=missing_fact_channel_ids,
         current_revenue_facts=facts,
         previous_revenue_facts=previous_facts,
     )
@@ -2032,6 +2043,55 @@ def _previous_month(month: str) -> str:
             )
         return f"{year - 1:04d}-12"
     return f"{year:04d}-{month_number - 1:02d}"
+
+
+# ============================================================================
+# Purpose: Read the active, revenue-required channels that have no revenue fact
+#   for the month, so the smart-alert builder can emit per-channel coverage gaps.
+# Database/ORM: Read-only LEFT JOIN of YouTubeChannelORM x
+#   MonthlyChannelRevenueFactORM (no FOR UPDATE), tenant-scoped, source of truth
+#   in PostgreSQL.
+# Standards: Mirrors month_close_readiness._missing_required_revenue_fact_count
+#   exactly (active.is_(True) AND revenue_required.is_(True) AND fact.id IS NULL);
+#   returns ids (not a count). No write, no lock, no Neo4j.
+# Blast Radius: Finance read surface only; no auth/audit/finance mutation.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/month_close_readiness.py ->
+#     shared query shape (count there; ids here).
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> consumes ids.
+# ============================================================================
+def _missing_revenue_fact_channel_ids(session: Session, *, month: str) -> list[str]:
+    """Return active revenue-required channel ids with no fact for the month."""
+    tenant_id = _resolve_smart_alert_tenant_id()
+    statement = (
+        select(YouTubeChannelORM.youtube_channel_id)
+        .select_from(YouTubeChannelORM)
+        .outerjoin(
+            MonthlyChannelRevenueFactORM,
+            (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)
+            & (
+                MonthlyChannelRevenueFactORM.youtube_channel_id
+                == YouTubeChannelORM.youtube_channel_id
+            )
+            & (MonthlyChannelRevenueFactORM.tenant_id == tenant_id)
+            & (MonthlyChannelRevenueFactORM.month == month),
+        )
+        .where(
+            YouTubeChannelORM.tenant_id == tenant_id,
+            YouTubeChannelORM.active.is_(True),
+            YouTubeChannelORM.revenue_required.is_(True),
+            MonthlyChannelRevenueFactORM.id.is_(None),
+        )
+    )
+    return list(session.scalars(statement).all())
+
+
+def _resolve_smart_alert_tenant_id() -> UUID:
+    """Resolve the request tenant id, mirroring the finance repositories."""
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return UUID(UMS_TENANT_ID)
 
 
 def _revenue_read_scope_to_channel_ids(
