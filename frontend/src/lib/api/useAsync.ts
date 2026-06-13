@@ -129,7 +129,7 @@ export function useAsync<T>( // skipcq: JS-0067
         setLoading(false);
       });
     // Supersede: a newer run (dep change or reload) must win.
-    return cleanup;
+    return cleanup; // skipcq: JS-0045
   }, [run, nonce, enabled]);
 
   return { data, loading, error, reload };
