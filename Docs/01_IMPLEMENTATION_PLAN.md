@@ -688,6 +688,17 @@ operator-asserted (tenant_id, month, bank_reference)→account(s) receipt model
   dimension by gross|net|deduction with None-sink + stable id tie-break, top-N)
   + a CommandView rankings panel (own hook, money gated on `canViewFinance`,
   metric toggle, surfaces `allocation_source`).
+- ✅ Group/sector rollup scope selector — shipped (branch
+  `feat/group-sector-rollup`): new fail-closed `GET /revenue/scopes`
+  (`finance.view_revenue`, read-only, no audit; pure
+  `finance/revenue_scopes.py` `build_authorized_revenue_scopes`) returns ONLY
+  the viewer's authorized rollup scopes (global / their sectors / their
+  companies), so the selector can never over-list the org structure or offer a
+  dead option that 403s on the rollup read. CommandView now populates its
+  `<select aria-label="Scope">` from that endpoint (keyed on a stable
+  `{scopeType, scopeId}` pair, global-only fallback on load/403) and threads the
+  chosen scope into the already-wired net-revenue + rankings reads. Channel
+  GROUP scope is a named follow-up (see acceptance gate below).
 - ✅ Outside-CMS issue monitor — shipped (this PR): CommandView monitor panel
   wired to `GET /channels/outside-cms` + `GET /channels/issues`
   (VIEW_ANALYTICS-gated, no-fetch-when-restricted; 403 -> denied copy, never
@@ -706,13 +717,19 @@ operator-asserted (tenant_id, month, bank_reference)→account(s) receipt model
 ### Acceptance gate
 
 - ⏳ A user can select month + group and receive source-backed gross,
-  deduction, net, currency, and explanation — partially met by PR #69
-  (month + channel selection with source-backed gross/deduction/net and
-  explanations); company/sector rollup is now produced by the rankings endpoint
-  (`GET /revenue/months/{month}/rankings`, this PR), but a group-scoped
-  net-revenue selector in the dashboard is still not built. Optional display
-  conversion is later work and must be labeled non-official unless it is the
-  currency reported by Google/AdSense.
+  deduction, net, currency, and explanation — **MET for global / sector /
+  company rollup** (branch `feat/group-sector-rollup`): the Command Center
+  selector now lists the viewer's authorized scopes from the fail-closed
+  `GET /revenue/scopes` endpoint and threads the chosen month + scope into the
+  source-backed net-revenue + rankings reads (gross/deduction/net per scope);
+  channel + month selection with explanations already shipped in PR #69.
+  Remaining (named follow-up): **channel-GROUP revenue scope** (TV_BRAND /
+  CUSTOM_GROUP etc.) is not a finance `scope_type` today — it needs a
+  `ScopeType.GROUP`, a group_id → member channel_ids resolver, and per-channel
+  authorization as the AND of `AccessScope.channel(cid)` checks; the exports
+  path (`api/exports.py` `_access_scopes_for_export_scope`) is the precedent.
+  Optional display conversion is later work and must be labeled non-official
+  unless it is the currency reported by Google/AdSense.
 
 ### Status (2026-06-05)
 

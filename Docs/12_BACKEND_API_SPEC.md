@@ -129,6 +129,7 @@ GET /revenue/months/{month}/bank-reconciliation
 POST /revenue/months/{month}/bank-reconciliation
 GET /revenue/months/{month}/smart-alerts
 GET /revenue/months/{month}/net-revenue?scope_type=company&scope_id=123&currency=USD
+GET /revenue/scopes
 POST /revenue/facts
 GET /revenue/channels/{channel_id}/months/{month}/facts
 POST /revenue/channels/{channel_id}/months/{month}/explain?metric=adjusted_gross_revenue_usd
@@ -241,6 +242,24 @@ approved manual revenue overrides. Missing source net values are returned as
 `NET_REVENUE_SOURCE_MISSING` channel issues and counted at month level. The
 endpoint does not persist calculated rows, allocate bank/payment gaps, invent
 tax values, or depend on a graph database.
+
+`GET /revenue/scopes` is an implemented read-only metadata helper that powers
+the Command Center rollup scope selector. It requires `finance.view_revenue`
+and is fail-closed: a disabled principal, or one with no active
+`finance.view_revenue` grant in any scope, returns `403`
+(`Missing permission: finance.view_revenue`) — never a silent empty list. It
+takes no path or query parameters and performs **no audit write** (it is a
+metadata helper like `GET /org-units`, not a revenue-number disclosure). The
+response is `{"scopes": [{"scope_type", "scope_id", "label"}, ...]}` and
+contains **only** the rollup scopes the caller is authorized to aggregate, so
+the selector can never offer an out-of-scope org unit (org-structure leak) or a
+dead option that would `403` on the rollup read. A global `finance.view_revenue`
+grant yields the `global` option (`scope_id: null`) plus every active sector and
+company; a sector grant yields that sector plus its member companies; a company
+grant yields that company only (it does not confer the sector). The `global`
+option is present only when a global grant exists. Names resolve through the
+org-unit reader with a raw-id fallback, and the list is deterministically
+ordered (global first, then sectors by name, then companies by name).
 
 `POST /revenue/recalculate` is an implemented dry-run recalculation request
 foundation for allocation-method review. The request includes `month`,

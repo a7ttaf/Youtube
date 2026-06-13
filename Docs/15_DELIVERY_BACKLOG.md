@@ -787,6 +787,37 @@ single P-tier above.
     scope-aware `can_view_analytics` (any active VIEW_ANALYTICS grant at any
     scope; fail-closed disabled -> false) threaded through the FE AppShell to
     gate the monitor panel.
+- ✅ Command Center group/sector rollup scope selector (2026-06-13, branch
+  `feat/group-sector-rollup`) — closes the Phase 1 / 5 acceptance gate "user
+  selects month + group/sector and receives source-backed gross/deduction/net"
+  for **global / sector / company** rollup:
+  - **`GET /revenue/scopes`** — new fail-closed read-only endpoint
+    (`finance.view_revenue`; disabled or no active grant in any scope -> 403
+    `Missing permission: finance.view_revenue`, never a silent empty list) that
+    performs **no audit write** (metadata helper like `GET /org-units`, not a
+    revenue-number disclosure). Pure `finance/revenue_scopes.py`
+    `build_authorized_revenue_scopes` returns ONLY the viewer's authorized
+    rollup scopes: a global grant -> global + every active sector + company; a
+    sector grant -> the sector + its member companies (reverse `company_sector`
+    walk mirroring `OrgAccessIndex.contains`); a company grant -> that company
+    only (never its sector). Dedup by (scope_type, scope_id); names via the
+    org-unit reader with raw-id fallback; deterministic order (global, then
+    sectors by name, then companies by name); `global` present only with a
+    global grant. Response `{scopes:[{scope_type, scope_id, label}]}`. This is
+    the anti-scope-leak surface — the selector can never over-list the org
+    structure or offer a dead option that 403s on the rollup read.
+  - **Dynamic CommandView selector** — `useRevenueScopes` hook + the
+    `<select aria-label="Scope">` now populate from `GET /revenue/scopes`
+    (replacing the hardcoded single global entry), with scope state keyed on a
+    stable `{scopeType, scopeId}` pair and a global-only fallback while loading
+    or on 403/error (panels still fail-closed on the actual reads). The chosen
+    month + scope thread unchanged into the already-wired net-revenue + rankings
+    reads.
+  - **Remaining (named follow-up): channel-GROUP revenue scope** (TV_BRAND /
+    CUSTOM_GROUP etc.) is not a finance `scope_type` today — it needs a
+    `ScopeType.GROUP`, a group_id -> member channel_ids resolver, and
+    per-channel authorization as the AND of `AccessScope.channel(cid)` checks;
+    `api/exports.py` `_access_scopes_for_export_scope` is the precedent.
 
 ## Hard problems to solve early
 
