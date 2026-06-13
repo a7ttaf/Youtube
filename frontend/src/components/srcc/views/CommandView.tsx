@@ -354,6 +354,10 @@ const SmartAlertsBody = ({
   data: SmartAlertsSummary | null;
   loading: boolean;
   error: ApiError | Error | null;
+const SmartAlertsBody = ({ data, loading, error }: { data: any; loading: boolean; error?: any }) => {
+  // original SmartAlertsBody implementation
+};
+
 }) => {
   if (error) {
     const { title, detail } = describeError(error);
