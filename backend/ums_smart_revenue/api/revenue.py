@@ -101,6 +101,10 @@ from ums_smart_revenue.finance.payment_matching import (
     build_monthly_payment_match_summary,
     normalize_payment_match_currency,
 )
+from ums_smart_revenue.finance.rankings import (
+    RankingsValidationError,
+    build_month_rankings,
+)
 from ums_smart_revenue.finance.recalculation import (
     RevenueRecalculationValidationError,
     build_recalculation_preview,
@@ -122,6 +126,7 @@ from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_sum
 from ums_smart_revenue.finance.smart_alerts import (
     build_monthly_smart_alert_summary,
 )
+from ums_smart_revenue.org.org_units_read import SqlAlchemyOrgUnitReader
 from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
 from ums_smart_revenue.tenancy.context import get_current_tenant
 
@@ -1446,6 +1451,176 @@ def get_month_net_revenue(
         audit_record_to_api(payment_record),
     ]
     return summary_api
+
+
+# ============================================================================
+# Purpose: Return finance-gated, scope-safe company/sector/channel rankings for
+#   a month, rolled up from the per-channel net-revenue summary.
+# Database/ORM: Reads revenue facts, manual overrides, deduction components,
+#   channel-account links (committed snapshot for LOCKED months), and org-unit
+#   names; no writes.
+# Standards: Thin route — enforce VIEW_REVENUE@target + VIEW_CONFIDENCE@target +
+#   VIEW_FINALIZED_PAYMENTS@finance_month BEFORE any read; restrict the channel
+#   set to the authorized scope BEFORE ranking; logic lives in build_month_rankings
+#   and build_month_net_revenue_summary; dual REVENUE_VIEWED/PAYMENT_VIEWED audit;
+#   typed errors -> HTTP 422 at the boundary only.
+# Blast Radius: Finance read path only. No persistence, no auth weakening, no
+#   graph impact. A scoped read with no in-scope channels returns empty rankings
+#   (NOT 403); cross-scope channels/companies/sectors never leak into the result.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/rankings.py -> build_month_rankings.
+#   - File: backend/ums_smart_revenue/finance/net_revenue.py ->
+#       build_month_net_revenue_summary / filter_account_allocations_to_scope.
+#   - File: backend/ums_smart_revenue/finance/account_allocation_read.py ->
+#       resolve_month_account_allocation (committed snapshot for LOCKED months).
+# ============================================================================
+@router.get("/months/{month}/rankings")
+def get_month_rankings(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    revenue_repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
+    override_repository: Annotated[
+        SqlAlchemyManualOverrideRepository,
+        Depends(current_manual_override_repository),
+    ],
+    deduction_component_repository: Annotated[
+        SqlAlchemyDeductionComponentRepository,
+        Depends(current_deduction_component_repository),
+    ],
+    link_repository: Annotated[
+        SqlAlchemyChannelAccountLinkRepository,
+        Depends(current_channel_account_link_repository),
+    ],
+    committed_repository: Annotated[
+        SqlAlchemyCommittedAllocationRepository,
+        Depends(current_committed_allocation_repository),
+    ],
+    session: Annotated[Session, Depends(current_db_session)],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    scope_type: Annotated[str, Query(min_length=1)] = "global",
+    scope_id: str | None = None,
+    metric: Annotated[str, Query(min_length=1)] = "gross",
+    limit: Annotated[int, Query(ge=1, le=100)] = 10,
+) -> dict[str, object]:
+    """Return scoped month rankings for an authorized finance viewer."""
+    target_scope, channel_ids = _revenue_read_scope_to_channel_ids(
+        scope_type=scope_type,
+        scope_id=scope_id,
+        org_index=org_index,
+    )
+    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    _require_permission(
+        user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month)
+    )
+    normalized_scope_type = target_scope.type.value
+    normalized_scope_id = target_scope.id or "global"
+    try:
+        facts = revenue_repository.list_month_facts(
+            month=month,
+            youtube_channel_ids=channel_ids,
+        )
+        overrides = override_repository.list_month_overrides(
+            month=month,
+            youtube_channel_ids=channel_ids,
+        )
+        deduction_components = deduction_component_repository.list_month_components(
+            month=month,
+            youtube_channel_ids=channel_ids,
+            component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
+        )
+        account_result, _allocation_provenance = resolve_month_account_allocation(
+            month=month,
+            session=session,
+            deduction_repository=deduction_component_repository,
+            revenue_repository=revenue_repository,
+            link_repository=link_repository,
+            committed_repository=committed_repository,
+        )
+        # Scope-leak guard: account allocation resolves month-wide, so drop lines
+        # for channels outside the authorized channel_ids before they reach the
+        # summary builder. channel_ids is None for global reads (no restriction).
+        scoped_account_lines = filter_account_allocations_to_scope(
+            account_result.lines, channel_ids
+        )
+        summary = build_month_net_revenue_summary(
+            month=month,
+            facts=facts,
+            manual_overrides=overrides,
+            deduction_components=deduction_components,
+            account_allocations=scoped_account_lines,
+            unallocated_account_issues=None,
+        )
+        company_names, sector_names = _org_unit_name_maps(session)
+        rankings = build_month_rankings(
+            summary=summary,
+            channel_company=org_index.channel_company,
+            channel_sector=org_index.channel_sector,
+            company_names=company_names,
+            sector_names=sector_names,
+            metric=metric,
+            limit=limit,
+        )
+    except (
+        DeductionComponentValidationError,
+        ManualOverrideValidationError,
+        NetRevenueValidationError,
+        RankingsValidationError,
+        RevenueFactValidationError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    response = rankings.to_api()
+    entity_id = f"{month}:{normalized_scope_type}:{normalized_scope_id}"
+    revenue_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="monthly_rankings",
+        entity_id=entity_id,
+        scope=target_scope,
+        details={
+            "metric": rankings.metric,
+            "channel_count": len(rankings.channels),
+            "company_count": len(rankings.companies),
+            "sector_count": len(rankings.sectors),
+        },
+    )
+    payment_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.PAYMENT_VIEWED,
+        entity_type="monthly_rankings",
+        entity_id=entity_id,
+        scope=AccessScope.finance_month(month),
+        details={"metric": rankings.metric},
+    )
+    response["audit_events"] = [
+        audit_record_to_api(revenue_record),
+        audit_record_to_api(payment_record),
+    ]
+    return response
+
+
+def _org_unit_name_maps(
+    session: Session,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return (company_id->name, sector_id->name) maps for the current tenant."""
+    company_names: dict[str, str] = {}
+    sector_names: dict[str, str] = {}
+    for unit in SqlAlchemyOrgUnitReader(session).list_active_units():
+        if unit.type == "COMPANY":
+            company_names[unit.id] = unit.name
+        elif unit.type == "SECTOR":
+            sector_names[unit.id] = unit.name
+    return company_names, sector_names
 
 
 @router.post(
