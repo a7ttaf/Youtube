@@ -48,7 +48,7 @@ const QUERY_PARAM_BUILDERS: ReadonlyArray<{ // skipcq: JS-0067
   { key: "limit", pick: (q) => (q.limit !== undefined ? String(q.limit) : undefined) },
 ];
 
-function buildRankingsPath(query: RankingsQuery): string {
+const buildRankingsPath = (query: RankingsQuery): string => { // skipcq: JS-0067
   const params = new URLSearchParams();
   for (const { key, pick } of QUERY_PARAM_BUILDERS) {
     const value = pick(query);
@@ -58,7 +58,7 @@ function buildRankingsPath(query: RankingsQuery): string {
   return `/revenue/months/${encodeURIComponent(query.month)}/rankings${
     qs ? `?${qs}` : ""
   }`;
-}
+};
 
 export function useRankings( // skipcq: JS-0067
   query: RankingsQuery,
