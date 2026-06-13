@@ -69,6 +69,11 @@ export type SessionCapabilities = {
   canViewConnectorHealth: boolean;
   canRunConnectorJobs: boolean;
   canViewAudit: boolean;
+  // True when the principal holds ANY active VIEW_ANALYTICS grant (direct or via
+  // role) at ANY scope — scope-aware, not global-only — so a legitimately
+  // company-scoped analytics user still sees the analytics surface. Fail-closed
+  // (disabled -> false). Source: SessionCapabilities.can_view_analytics.
+  canViewAnalytics: boolean;
 };
 
 // GET /session/me — the authenticated principal's identity, optional tenant,
@@ -861,4 +866,135 @@ export type ChannelMappingResponse = Record<string, unknown> & {
 export type AccountLinkProposalResponse = {
   link: Record<string, unknown>;
   audit_event: Record<string, unknown>;
+};
+
+// ============================================================================
+// Purpose: TypeScript mirror of the backend GET /channels/outside-cms JSON
+//   contract consumed by the Command Center monitor panel. The endpoint is
+//   VIEW_ANALYTICS-gated and scope-filtered (visible channels only); it returns
+//   {items, summary} with NO money and NO audit. Fields are matched 1:1 against
+//   the backend serializer (not guessed); nullable fields serialize as null.
+//   `missing_official_revenue` distinguishes an outside-CMS channel that still
+//   has an official source (e.g. OFFICIAL_MANUAL_IMPORT) from one that is
+//   genuinely missing its revenue source.
+// Standards: Read-only typed boundary at the API surface; no logic here.
+// Connections:
+//   - File: backend/ums_smart_revenue/api/channels.py
+//       _outside_cms_channel_to_api() (lines 230-249) -> OutsideCmsItem
+//       list_outside_cms_channels()   (lines 135-163) -> OutsideCmsResponse
+// ============================================================================
+
+// One outside-CMS channel row. Source: _outside_cms_channel_to_api()
+// (api/channels.py:230-249).
+export type OutsideCmsItem = {
+  youtube_channel_id: string;
+  channel_name: string;
+  primary_company_id: string | null;
+  cms_status: string;
+  content_owner_id: string | null;
+  revenue_required: boolean;
+  revenue_source_status: string;
+  missing_official_revenue: boolean;
+  recommended_action: string;
+};
+
+// GET /channels/outside-cms. Source: list_outside_cms_channels()
+// (api/channels.py:152-163).
+export type OutsideCmsResponse = {
+  items: OutsideCmsItem[];
+  summary: {
+    outside_cms_channel_count: number;
+    revenue_required_count: number;
+    missing_official_revenue_count: number;
+  };
+};
+
+// ============================================================================
+// Purpose: TypeScript mirror of the backend GET /channels/issues JSON contract
+//   consumed by the Command Center monitor panel. The endpoint is
+//   VIEW_ANALYTICS-gated and scope-filtered; it returns {items, summary} with NO
+//   money and NO audit. Fields are matched 1:1 against the backend serializers
+//   (not guessed); nullable fields serialize as null. `issue_type`/`severity`/
+//   `recommended_action` are stable strings the panel renders directly.
+// Standards: Read-only typed boundary at the API surface; no logic here.
+// Connections:
+//   - File: backend/ums_smart_revenue/org/channel_issues.py
+//       ChannelRegistryIssue.to_api()        (lines 26-35) -> ChannelIssue
+//       summarize_channel_registry_issues()  (lines 62-76) -> ChannelIssuesSummary
+//   - File: backend/ums_smart_revenue/api/channels.py
+//       list_channel_issues()                (lines 166-188) -> ChannelIssuesResponse
+// ============================================================================
+
+// One channel registry issue row. Source: ChannelRegistryIssue.to_api()
+// (org/channel_issues.py:26-35). issue_type is one of MISSING_COMPANY |
+// MISSING_SECTOR | OUTSIDE_CMS_REVENUE_REQUIRED | REVENUE_REQUIRED_NO_GROUP;
+// severity is one of "high" | "medium" (kept as `string` for forward-compat).
+export type ChannelIssue = {
+  youtube_channel_id: string;
+  channel_name: string;
+  primary_company_id: string | null;
+  issue_type: string;
+  severity: string;
+  message: string;
+  recommended_action: string;
+};
+
+// GET /channels/issues. Source: list_channel_issues() (api/channels.py:185-188)
+// with summary from summarize_channel_registry_issues() (channel_issues.py:62-76).
+export type ChannelIssuesResponse = {
+  items: ChannelIssue[];
+  summary: {
+    total_issue_count: number;
+    channel_count: number;
+    // Per-issue-type counts keyed by ChannelIssueType value (counts are ints).
+    issue_type_counts: Record<string, number>;
+  };
+};
+
+// ============================================================================
+// Purpose: TypeScript mirror of the backend GET /revenue/months/{month}/rankings
+//   JSON contract consumed by the Command Center rankings panel. All money values
+//   are serialized as STRINGS by the backend (decimal_to_api) and may be null
+//   when a value is unknown (None is preserved, never coalesced to 0) — the UI
+//   formats them for display via financeDisplay and never performs float math.
+//   The panel is finance-gated (it shows money) and surfaces allocation_source so
+//   a `live_fallback` is not read as authoritative. Fields are matched 1:1
+//   against the backend service serializer (build_month_rankings / RankedEntry),
+//   not guessed.
+// Standards: Read-only typed boundary at the API surface; no logic here.
+// Connections:
+//   - File: backend/ums_smart_revenue/finance/rankings.py
+//       RankedEntry.to_api()       -> RankedEntry
+//       MonthRankingsSummary.to_api() -> MonthRankingsResponse
+//   - File: backend/ums_smart_revenue/api/revenue.py
+//       get_month_rankings()       -> GET /revenue/months/{month}/rankings;
+//         adds allocation_source/committed_run (committed snapshot for LOCKED).
+// ============================================================================
+
+// The ranking metric the endpoint ranks by. The query param defaults to "gross".
+export type RankingMetric = "gross" | "net" | "deduction";
+
+// One ranked entity (channel, company, or sector). rank is 1-based; entity_name
+// falls back to the raw id when no org-unit name resolves. Money values are
+// decimal-as-STRINGS and may be null (None preserved). Source: RankedEntry.to_api().
+export type RankedEntry = {
+  rank: number;
+  entity_id: string;
+  entity_name: string;
+  gross_revenue_usd: MoneyString | null;
+  net_revenue_usd: MoneyString | null;
+  deduction_amount_usd: MoneyString | null;
+};
+
+// GET /revenue/months/{month}/rankings. Source: MonthRankingsSummary.to_api()
+// plus the route-level allocation_source/committed_run additions.
+export type MonthRankingsResponse = {
+  month: string;
+  metric: string;
+  channels: RankedEntry[];
+  companies: RankedEntry[];
+  sectors: RankedEntry[];
+  // Route-level additions (committed snapshot provenance for LOCKED months).
+  allocation_source?: AllocationSource;
+  committed_run?: CommittedRun | null;
 };
