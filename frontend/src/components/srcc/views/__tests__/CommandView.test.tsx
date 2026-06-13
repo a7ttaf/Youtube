@@ -96,12 +96,11 @@ const SCOPES_GLOBAL_AND_COMPANY: RevenueScopeOption[] = [
   { scope_type: "company", scope_id: "company-a", label: "Company Alpha" },
 ];
 
-function jsonResponse(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
+const jsonResponse = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
 
 // Route each fetch by URL and return a FRESH Response per call (a Response body
 // can only be read once, so the net-revenue + smart-alerts requests cannot share
@@ -111,11 +110,11 @@ function jsonResponse(body: unknown, status = 200) {
 // Dispatch is a URL-substring -> responder table (data-driven) rather than a
 // chain of if/else branches to keep the routing function's cyclomatic complexity
 // below DeepSource's medium-risk threshold.
-function routeFetch(
+const routeFetch = (
   netRevenue: () => Response,
   smartAlerts?: () => Response,
   scopes?: () => Response,
-) {
+) => {
   const routes: ReadonlyArray<{ match: string; respond: () => Response }> = [
     {
       match: "/revenue/scopes",
@@ -135,15 +134,15 @@ function routeFetch(
     return Promise.resolve(route.respond());
   });
   return fetchMock;
-}
+};
 
-function renderCommandView(canViewFinance: boolean) {
+const renderCommandView = (canViewFinance: boolean) => {
   return render(
     <TenantProvider initialSlug="ums">
       <CommandView canViewFinance={canViewFinance} />
     </TenantProvider>,
   );
-}
+};
 
 describe("CommandView wired to net-revenue", () => {
   it("renders real-shaped totals formatted as USD when finance is visible", async () => {

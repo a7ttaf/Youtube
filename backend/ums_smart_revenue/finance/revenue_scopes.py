@@ -51,6 +51,104 @@ class RevenueScopeOption:
 #   - File: backend/ums_smart_revenue/api/revenue.py -> GET /revenue/scopes
 #       caller (supplies granted scopes + org_index + name maps).
 # ============================================================================
+
+
+def _expand_global_grants(
+    sector_names: Mapping[str, str],
+    company_names: Mapping[str, str],
+    org_index: OrgAccessIndex,
+) -> tuple[set[str], set[str]]:
+    """A global grant authorizes the entire active universe."""
+    sector_ids = set(sector_names.keys())
+    company_ids = {
+        cid
+        for cid in company_names
+        if cid in org_index.company_sector
+    }
+    return sector_ids, company_ids
+
+
+def _collect_sector_scope(
+    scope_id: str,
+    org_index: OrgAccessIndex,
+) -> tuple[set[str], set[str]]:
+    """Expand one sector grant into its sector id + member company ids."""
+    company_ids = {
+        cid for cid, sid in org_index.company_sector.items() if sid == scope_id
+    }
+    return {scope_id}, company_ids
+
+
+def _expand_scoped_grants(
+    granted: tuple[AccessScope, ...],
+    org_index: OrgAccessIndex,
+    sector_names: Mapping[str, str],
+    company_names: Mapping[str, str],
+) -> tuple[set[str], set[str]]:
+    """Expand non-global grants into sector/company id sets."""
+    sector_ids: set[str] = set()
+    company_ids: set[str] = set()
+    for scope in granted:
+        if scope.id is None:
+            continue
+        # FIX (review #102): skip stale grants for deactivated sectors/companies
+        # so the selector never offers a dead option that 403s on read.
+        if scope.type == ScopeType.SECTOR:
+            if scope.id not in sector_names:
+                continue
+            sector_ids.add(scope.id)
+            company_ids.update(
+                company_id
+                for company_id, sector_id in org_index.company_sector.items()
+                if sector_id == scope.id
+            )
+        elif scope.type == ScopeType.COMPANY:
+            if scope.id not in company_names:
+                continue
+            company_ids.add(scope.id)
+    return sector_ids, company_ids
+
+
+def _scope_sort_key(option: RevenueScopeOption) -> tuple[str, str]:
+    return (option.label, option.scope_id or "")
+
+
+def _build_options(
+    has_global: bool,
+    sector_ids: set[str],
+    company_ids: set[str],
+    sector_names: Mapping[str, str],
+    company_names: Mapping[str, str],
+) -> list[RevenueScopeOption]:
+    """Assemble the ordered, labeled option list from the resolved id sets."""
+    sectors = [
+        RevenueScopeOption(
+            scope_type="sector",
+            scope_id=sid,
+            label=sector_names.get(sid, sid),
+        )
+        for sid in sector_ids
+    ]
+    companies = [
+        RevenueScopeOption(
+            scope_type="company",
+            scope_id=cid,
+            label=company_names.get(cid, cid),
+        )
+        for cid in company_ids
+    ]
+    sectors.sort(key=_scope_sort_key)
+    companies.sort(key=_scope_sort_key)
+    options: list[RevenueScopeOption] = []
+    if has_global:
+        options.append(
+            RevenueScopeOption(scope_type="global", scope_id=None, label="Global")
+        )
+    options.extend(sectors)
+    options.extend(companies)
+    return options
+
+
 def build_authorized_revenue_scopes(
     *,
     granted: tuple[AccessScope, ...],
@@ -71,73 +169,14 @@ def build_authorized_revenue_scopes(
         name. The global option is present ONLY when a global grant exists.
     """
     has_global = any(scope.type == ScopeType.GLOBAL for scope in granted)
-
-    sector_ids: set[str] = set()
-    company_ids: set[str] = set()
-
     if has_global:
-        # A global grant authorizes the entire active universe. The sector set
-        # comes from the org-unit reader's active sector names.  For companies,
-        # we intersect with org_index.company_sector so the selector only offers
-        # companies whose parent sector is also active — matching the access
-        # index used by _revenue_read_scope_to_channel_ids on the read path.
-        # Without this intersection, a company whose parent sector is inactive
-        # would appear in the selector but 403 on selection (empty channel set).
-        sector_ids.update(sector_names.keys())
-        company_ids.update(
-            company_id
-            for company_id in company_names
-            if company_id in org_index.company_sector
+        sector_ids, company_ids = _expand_global_grants(
+            sector_names, company_names, org_index
         )
     else:
-        for scope in granted:
-            if scope.id is None:
-                continue
-            if scope.type == ScopeType.SECTOR:
-                # FIX (review #102): skip stale grants for deactivated sectors
-                # so the selector never offers a dead option that 403s on read.
-                if scope.id not in sector_names:
-                    continue
-                sector_ids.add(scope.id)
-                # A sector grant contains its companies (mirror
-                # OrgAccessIndex.contains via the reverse company_sector walk).
-                company_ids.update(
-                    company_id
-                    for company_id, sector_id in org_index.company_sector.items()
-                    if sector_id == scope.id
-                )
-            elif scope.type == ScopeType.COMPANY:
-                # FIX (review #102): skip stale grants for deactivated companies
-                # so the selector never offers a dead option that 403s on read.
-                if scope.id not in company_names:
-                    continue
-                # A company grant confers ONLY that company, never its sector.
-                company_ids.add(scope.id)
-
-    sectors = [
-        RevenueScopeOption(
-            scope_type="sector",
-            scope_id=sector_id,
-            label=sector_names.get(sector_id, sector_id),
+        sector_ids, company_ids = _expand_scoped_grants(
+            granted, org_index, sector_names, company_names
         )
-        for sector_id in sector_ids
-    ]
-    companies = [
-        RevenueScopeOption(
-            scope_type="company",
-            scope_id=company_id,
-            label=company_names.get(company_id, company_id),
-        )
-        for company_id in company_ids
-    ]
-    sectors.sort(key=lambda option: (option.label, option.scope_id or ""))
-    companies.sort(key=lambda option: (option.label, option.scope_id or ""))
-
-    options: list[RevenueScopeOption] = []
-    if has_global:
-        options.append(
-            RevenueScopeOption(scope_type="global", scope_id=None, label="Global")
-        )
-    options.extend(sectors)
-    options.extend(companies)
-    return options
+    return _build_options(
+        has_global, sector_ids, company_ids, sector_names, company_names
+    )

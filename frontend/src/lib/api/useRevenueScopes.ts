@@ -26,7 +26,7 @@ import { useAsync, type AsyncState } from "@/lib/api/useAsync";
 //   - File: frontend/src/lib/api/types.ts -> RevenueScopeOption/RevenueScopesResponse.
 //   - File: backend/ums_smart_revenue/api/revenue.py -> GET /revenue/scopes.
 // ============================================================================
-export function useRevenueScopes(): AsyncState<RevenueScopeOption[]> {
+export const useRevenueScopes = (): AsyncState<RevenueScopeOption[]> => {
   const client = useApiClient();
   const run = useCallback(
     async () => {
@@ -36,4 +36,4 @@ export function useRevenueScopes(): AsyncState<RevenueScopeOption[]> {
     [client],
   );
   return useAsync(run);
-}
+};

@@ -74,9 +74,9 @@ type ScopeOption = {
 // Standards: Pure helper; no money, no authorization. Global carries no scope_id.
 // Blast Radius: None detected (UI selection identity only).
 // ============================================================================
-function scopeOptionKey(scopeType: string, scopeId: string | null): string {
+const scopeOptionKey = (scopeType: string, scopeId: string | null): string => {
   return scopeId ? `${scopeType}:${scopeId}` : scopeType;
-}
+};
 
 // The guaranteed fallback when the authorized-scope fetch is loading, errors, or
 // returns nothing: a single GLOBAL option. A scoped viewer with no global grant
@@ -104,7 +104,7 @@ const GLOBAL_SCOPE_FALLBACK: ScopeOption = {
 //   - File: frontend/src/lib/api/useRevenueScopes.ts -> the option source.
 //   - File: frontend/src/lib/api/types.ts -> RevenueScopeOption.
 // ============================================================================
-function resolveScopeOptions(scopes: RevenueScopeOption[] | null): ScopeOption[] {
+const resolveScopeOptions = (scopes: RevenueScopeOption[] | null): ScopeOption[] => {
   if (!scopes || scopes.length === 0) {
     return [GLOBAL_SCOPE_FALLBACK];
   }
@@ -113,7 +113,7 @@ function resolveScopeOptions(scopes: RevenueScopeOption[] | null): ScopeOption[]
     scopeType: scope.scope_type,
     scopeId: scope.scope_id,
   }));
-}
+};
 
 const ALLOCATION_SOURCE_COPY: Record<
   NetRevenueResponse["allocation_source"],
@@ -136,13 +136,13 @@ const STATUS_KEYWORD_TONE: Record<string, Severity> = {
 };
 
 /** Map a month/channel status string to a design-system badge tone. */
-function statusTone(status: string): Severity {
+const statusTone = (status: string): Severity => {
   const normalized = status.toUpperCase();
   for (const [keyword, tone] of Object.entries(STATUS_KEYWORD_TONE)) {
     if (normalized.includes(keyword)) return tone;
   }
   return "blue";
-}
+};
 
 /**
  * Human-readable confidence badge. Renders the resolved label + tone from the
@@ -151,18 +151,18 @@ function statusTone(status: string): Severity {
  * assistive tech. Channel rows carry no separate API human label, so the helper
  * falls back to its prefix map for these.
  */
-function ConfidenceBadge({ code }: { code: string }) {
+const ConfidenceBadge = ({ code }: { code: string }) => {
   const { label, tone } = confidenceDisplay(code);
   return (
     <span title={code} aria-label={`Confidence: ${code}`}>
       <Badge tone={tone}>{label}</Badge>
     </span>
   );
-}
+};
 
 // Map an alert severity to a design-system badge tone (HIGH -> red, MEDIUM ->
 // amber, LOW -> blue). Unknown severities fall back to blue.
-function severityTone(severity: SmartAlertSeverity | string): Severity {
+const severityTone = (severity: SmartAlertSeverity | string): Severity => {
   switch (severity) {
     case "HIGH":
       return "red";
@@ -173,24 +173,24 @@ function severityTone(severity: SmartAlertSeverity | string): Severity {
     default:
       return "blue";
   }
-}
+};
 
 /** Human-facing label for a channel row (its YouTube channel id for now). */
-function channelDisplayName(channel: ChannelNetRevenue): string {
+const channelDisplayName = (channel: ChannelNetRevenue): string => {
   return channel.youtube_channel_id;
-}
+};
 
 /** Two-letter avatar initials derived from a channel's id. */
-function channelAvatar(channel: ChannelNetRevenue): string {
+const channelAvatar = (channel: ChannelNetRevenue): string => {
   const id = channel.youtube_channel_id.replace(/[^a-zA-Z0-9]/g, "");
   return (id.slice(-2) || "--").toUpperCase();
-}
+};
 
 /**
  * Command Center screen: month/scope filters, the real net-revenue status strip
  * and channel table, the smart-alerts panel, and the per-channel explanation.
  */
-export default function CommandView({
+const CommandView = ({
   canViewFinance,
   canViewAnalytics = false,
 }: {
@@ -199,7 +199,7 @@ export default function CommandView({
   // missing flag fails closed (false) — the analytics monitor never mounts and
   // fires no request without an explicit, backend-derived grant.
   canViewAnalytics?: boolean;
-}) {
+}) => {
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
   // Stable {scopeType, scopeId} identity instead of a positional index: the
   // option list arrives asynchronously, so an index would point at the wrong
@@ -221,7 +221,10 @@ export default function CommandView({
   // noisy 403) for a scoped viewer before their real options arrive. Once the
   // scopes fetch resolves (success -> real options, or error -> global fallback),
   // the gated reads fire with the correct scope.
-  const scopesReady = scopesData !== null || scopesError !== null;
+  const scopesReady = useMemo(
+    () => scopesData !== null || scopesError !== null,
+    [scopesData, scopesError],
+  );
   const scopeOptions = useMemo(
     () => resolveScopeOptions(scopesData),
     [scopesData],
@@ -230,12 +233,15 @@ export default function CommandView({
   // option (always present — resolveScopeOptions guarantees >=1) when the key is
   // not in the current list (e.g. before the fetch resolves). The fallback is
   // global while loading, never an out-of-scope unit.
-  const scope =
-    scopeOptions.find(
-      (option) => scopeOptionKey(option.scopeType, option.scopeId) === selectedScopeKey,
-    ) ??
-    scopeOptions[0] ??
-    GLOBAL_SCOPE_FALLBACK;
+  const scope = useMemo(
+    () =>
+      scopeOptions.find(
+        (option) => scopeOptionKey(option.scopeType, option.scopeId) === selectedScopeKey,
+      ) ??
+      scopeOptions[0] ??
+      GLOBAL_SCOPE_FALLBACK,
+    [scopeOptions, selectedScopeKey],
+  );
   const { data, loading, error, reload } = useNetRevenue({
     month,
     scopeType: scope.scopeType,
@@ -243,12 +249,19 @@ export default function CommandView({
     enabled: scopesReady,
   });
 
-  const currency = data?.currency ?? "USD";
+  const currency = useMemo(() => data?.currency ?? "USD", [data]);
   const channels = useMemo(() => data?.channels ?? [], [data]);
-  const selectedChannel =
-    channels.find((c) => c.youtube_channel_id === selectedChannelId) ??
-    channels[0] ??
-    null;
+  const selectedChannel = useMemo(
+    () =>
+      channels.find((c) => c.youtube_channel_id === selectedChannelId) ??
+      channels[0] ??
+      null,
+    [channels, selectedChannelId],
+  );
+  const activeChannelId = useMemo(
+    () => selectedChannel?.youtube_channel_id ?? null,
+    [selectedChannel],
+  );
 
   return (
     <>
@@ -342,20 +355,22 @@ export default function CommandView({
         currency={currency}
         channelCount={channels.length}
         selectedChannel={selectedChannel}
-        selectedChannelId={selectedChannel?.youtube_channel_id ?? null}
+        selectedChannelId={activeChannelId}
         month={month}
         onSelect={setSelectedChannelId}
       />
     </>
   );
-}
+};
+
+export default CommandView;
 
 /**
  * Two-column Command Center workspace: the real channel table plus mock issue,
  * close, explanation, and export-readiness panels. Splits into named panels so
  * each JSX subtree stays shallow.
  */
-function CommandWorkspace({
+const CommandWorkspace = ({
   data,
   loading,
   error,
@@ -377,7 +392,7 @@ function CommandWorkspace({
   selectedChannelId: string | null;
   month: string;
   onSelect: (id: string) => void;
-}) {
+}) => {
   return (
     <section className="workspace" aria-label="Command workspace">
       <div className="work-left">
@@ -412,10 +427,10 @@ function CommandWorkspace({
       </aside>
     </section>
   );
-}
+};
 
 /** Channel Revenue Table panel: header badge plus the real net-revenue table. */
-function ChannelRevenuePanel({
+const ChannelRevenuePanel = ({
   data,
   loading,
   error,
@@ -433,7 +448,7 @@ function ChannelRevenuePanel({
   channelCount: number;
   selectedChannelId: string | null;
   onSelect: (id: string) => void;
-}) {
+}) => {
   return (
     <section className="panel channel-table" aria-labelledby="channelTableTitle">
       <div className="panel-header">
@@ -454,10 +469,10 @@ function ChannelRevenuePanel({
       />
     </section>
   );
-}
+};
 
 /** Mock Issue Queue panel (not yet wired to the API). */
-function IssueQueuePanel() {
+const IssueQueuePanel = () => {
   return (
     <section className="panel" aria-labelledby="issuesTitle">
       <div className="panel-header">
@@ -480,10 +495,10 @@ function IssueQueuePanel() {
       </div>
     </section>
   );
-}
+};
 
 /** Mock Month Close Controls panel (not yet wired to the API). */
-function MonthCloseControlsPanel() {
+const MonthCloseControlsPanel = () => {
   return (
     <section className="panel" aria-labelledby="closeTitle">
       <div className="panel-header">
@@ -507,10 +522,10 @@ function MonthCloseControlsPanel() {
       </div>
     </section>
   );
-}
+};
 
 /** Trailing control for a close step: a status badge or an action button. */
-function CloseStepAction({ step }: { step: (typeof CLOSE_STEPS)[number] }) {
+const CloseStepAction = ({ step }: { step: (typeof CLOSE_STEPS)[number] }) => {
   if (step.badge) {
     return <Badge tone={step.badge.tone}>{step.badge.text}</Badge>;
   }
@@ -519,10 +534,10 @@ function CloseStepAction({ step }: { step: (typeof CLOSE_STEPS)[number] }) {
       {step.action}
     </button>
   );
-}
+};
 
 /** Net-revenue explanation card for the selected channel (or an empty state). */
-function ExplainCard({
+const ExplainCard = ({
   selectedChannel,
   canViewFinance,
   currency,
@@ -534,7 +549,7 @@ function ExplainCard({
   currency: string;
   loading: boolean;
   month: string;
-}) {
+}) => {
   return (
     <section className="panel explain-card">
       <div className="explain-head">
@@ -570,10 +585,10 @@ function ExplainCard({
       </div>
     </section>
   );
-}
+};
 
 /** Mock Export Readiness panel (not yet wired to the API). */
-function ExportReadinessPanel() {
+const ExportReadinessPanel = () => {
   return (
     <section className="panel">
       <div className="panel-header">
@@ -596,34 +611,33 @@ function ExportReadinessPanel() {
       </div>
     </section>
   );
-}
+};
 
 // ============================================================================
 // Purpose: Map an ApiError/Error to friendly UI copy. 403 -> no-permission
 //   message (matches the finance fail-closed model); other ApiError -> the
 //   typed status + message; non-ApiError -> generic network failure.
 // ============================================================================
-function describeError(error: ApiError | Error): { title: string; detail: string } {
+const extractApiErrorDetail = (error: ApiError): string => {
+  const body = error.body as { detail?: unknown } | null;
+  if (body && typeof body.detail === "string") return body.detail;
+  return error.message;
+};
+
+const describeError = (error: ApiError | Error): { title: string; detail: string } => {
   if (error instanceof ApiError) {
-    if (error.status === 403) {
+    if (error.status === 403)
       return {
         title: "No permission",
         detail: "Your role cannot view net revenue for this month or scope.",
       };
-    }
-    const detail =
-      typeof error.body === "object" &&
-      error.body !== null &&
-      typeof (error.body as { detail?: unknown }).detail === "string"
-        ? (error.body as { detail: string }).detail
-        : error.message;
-    return { title: `Request failed (${error.status})`, detail };
+    return { title: `Request failed (${error.status})`, detail: extractApiErrorDetail(error) };
   }
   return {
     title: "Network error",
     detail: error.message || "Could not reach the revenue service.",
   };
-}
+};
 
 // ============================================================================
 // Purpose: Smart Alerts / Problem Panel for the Command Center. Fetches the
@@ -645,7 +659,7 @@ function describeError(error: ApiError | Error): { title: string; detail: string
 //   - File: frontend/src/lib/api/types.ts -> SmartAlertsSummary contract.
 //   - File: backend/ums_smart_revenue/api/revenue.py:844 get_month_smart_alerts.
 // ============================================================================
-function SmartAlertsPanel({ month }: { month: string }) {
+const SmartAlertsPanel = ({ month }: { month: string }) => {
   const { data, loading, error, reload } = useSmartAlerts({ month });
 
   return (
@@ -669,11 +683,25 @@ function SmartAlertsPanel({ month }: { month: string }) {
       <SmartAlertsBody data={data} loading={loading} error={error} />
     </section>
   );
-}
+};
 
 // Header badge: surfaces the overall status + highest severity at a glance, and
 // degrades to Loading / Error / No permission without breaking the panel header.
-function SmartAlertsHeaderBadge({
+const alertErrorBadge = (error: ApiError | Error): { tone: Severity; children: string } => {
+  const isForbidden = error instanceof ApiError && error.status === 403;
+  return { tone: isForbidden ? "blue" : "red", children: isForbidden ? "No permission" : "Error" };
+};
+
+const alertDataBadge = (data: SmartAlertsSummary): { tone: Severity; children: string } => {
+  if (data.status === "CLEAR") return { tone: "green", children: "Clear" };
+  const severity = data.highest_severity;
+  return {
+    tone: severity ? severityTone(severity) : "amber",
+    children: severity ?? "Attention",
+  };
+};
+
+const SmartAlertsHeaderBadge = ({
   data,
   loading,
   error,
@@ -681,29 +709,26 @@ function SmartAlertsHeaderBadge({
   data: SmartAlertsSummary | null;
   loading: boolean;
   error: ApiError | Error | null;
-}) {
-  if (error) {
-    const isForbidden = error instanceof ApiError && error.status === 403;
-    return <Badge tone={isForbidden ? "blue" : "red"}>{isForbidden ? "No permission" : "Error"}</Badge>;
-  }
-  if (loading && !data) {
-    return <Badge tone="blue">Loading</Badge>;
-  }
-  if (!data) {
-    return <Badge tone="amber">Empty</Badge>;
-  }
-  if (data.status === "CLEAR") {
-    return <Badge tone="green">Clear</Badge>;
-  }
-  return (
-    <Badge tone={data.highest_severity ? severityTone(data.highest_severity) : "amber"}>
-      {data.highest_severity ?? "Attention"}
-    </Badge>
-  );
-}
+}) => {
+  if (error) return <Badge {...alertErrorBadge(error)} />;
+  if (loading && !data) return <Badge tone="blue">Loading</Badge>;
+  if (!data) return <Badge tone="amber">Empty</Badge>;
+  return <Badge {...alertDataBadge(data)} />;
+};
+
+// Read alerts defensively: a missing/non-array field is treated as "no alerts"
+// rather than throwing inside the panel. Extracted to keep SmartAlertsBody's
+// cyclomatic complexity below the DeepSource medium-risk threshold.
+const safeAlerts = (data: SmartAlertsSummary | null): SmartAlert[] =>
+  data && Array.isArray(data.alerts) ? data.alerts : [];
+
+const emptyAlertSubText = (data: SmartAlertsSummary | null): string =>
+  data
+    ? `Status ${data.status} — nothing needs attention for ${data.month}.`
+    : "No smart-alert data returned.";
 
 /** Body of the smart-alerts panel: error, loading, empty, and alert-row states. */
-function SmartAlertsBody({
+const SmartAlertsBody = ({
   data,
   loading,
   error,
@@ -711,7 +736,7 @@ function SmartAlertsBody({
   data: SmartAlertsSummary | null;
   loading: boolean;
   error: ApiError | Error | null;
-}) {
+}) => {
   if (error) {
     const { title, detail } = describeError(error);
     return (
@@ -726,8 +751,8 @@ function SmartAlertsBody({
     );
   }
 
-  if (loading && !data) {
-    return (
+  if (!data)
+    return loading ? (
       <div className="issue-list" role="list" aria-busy="true">
         <ItemRow
           tone="blue"
@@ -736,28 +761,29 @@ function SmartAlertsBody({
           trailing={<Badge tone="blue">Loading</Badge>}
         />
       </div>
+    ) : (
+      <div className="issue-list" role="list">
+        <ItemRow
+          tone="green"
+          title="No active alerts"
+          sub="No smart-alert data returned."
+          trailing={<Badge tone="green">Clear</Badge>}
+        />
+      </div>
     );
-  }
 
-  // Read alerts defensively: a missing/non-array field (e.g. an unexpected body
-  // shape) is treated as "no alerts" rather than throwing inside the panel.
-  const alerts = Array.isArray(data?.alerts) ? data.alerts : [];
-  if (!data || alerts.length === 0) {
+  const alerts = safeAlerts(data);
+  if (alerts.length === 0)
     return (
       <div className="issue-list" role="list">
         <ItemRow
           tone="green"
           title="No active alerts"
-          sub={
-            data
-              ? `Status ${data.status} — nothing needs attention for ${data.month}.`
-              : "No smart-alert data returned."
-          }
+          sub={emptyAlertSubText(data)}
           trailing={<Badge tone="green">Clear</Badge>}
         />
       </div>
     );
-  }
 
   return (
     <div className="issue-list" role="list">
@@ -772,10 +798,87 @@ function SmartAlertsBody({
       ))}
     </div>
   );
-}
+};
+
+// Build the metric-cell descriptors for the net-revenue status strip. Extracted
+// from NetRevenueStatusStrip so the component's cyclomatic complexity stays
+// below the DeepSource medium-risk threshold — the ternaries and nullish
+// coalescing live here instead.
+type RevenueMetric = {
+  id: string;
+  tone: string;
+  label: string;
+  value: string;
+  badge: { text: string; tone: Severity };
+  note: [string, string];
+  finance: boolean;
+  locked?: boolean;
+};
+
+const buildRevenueMetrics = (
+  data: NetRevenueResponse,
+  canViewFinance: boolean,
+  currency: string,
+): RevenueMetric[] => {
+  const allocation = ALLOCATION_SOURCE_COPY[data.allocation_source] ?? {
+    label: data.allocation_source,
+    tone: "blue" as Severity,
+  };
+  return [
+    {
+      id: "gross",
+      tone: "is-revenue",
+      label: "Adjusted gross",
+      value: financeDisplay(data.total_adjusted_gross_revenue_usd, canViewFinance, { currency }),
+      badge: { text: currency, tone: "green" },
+      note: [`${data.channel_count} channels`, `${data.calculated_channel_count} calculated`],
+      finance: true,
+    },
+    {
+      id: "net",
+      tone: "is-net",
+      label: "Net revenue",
+      value: financeDisplay(data.total_net_revenue_usd, canViewFinance, { currency }),
+      badge: { text: data.status, tone: statusTone(data.status) },
+      note: ["After deductions", `${data.missing_net_source_count} missing source`],
+      finance: true,
+    },
+    {
+      id: "deductions",
+      tone: "is-review",
+      label: "Deductions",
+      value: financeDisplay(data.total_deduction_amount_usd, canViewFinance, { currency }),
+      badge: { text: "Total", tone: "amber" },
+      note: [
+        canViewFinance
+          ? `Direct ${financeDisplay(data.total_channel_direct_deduction_amount_usd, canViewFinance, { currency })}`
+          : RESTRICTED_FINANCE_VALUE,
+        canViewFinance
+          ? `Allocated ${financeDisplay(data.total_account_allocated_deduction_amount_usd, canViewFinance, { currency })}`
+          : "",
+      ],
+      finance: true,
+    },
+    {
+      id: "allocation",
+      tone: "is-close",
+      label: "Allocation source",
+      value: allocation.label,
+      badge: { text: data.status, tone: statusTone(data.status) },
+      note: [
+        data.committed_run?.commit_version != null
+          ? `Snapshot v${data.committed_run.commit_version}`
+          : "Computed at read time",
+        `Status ${data.status}`,
+      ],
+      finance: false,
+      locked: data.allocation_source === "committed_snapshot",
+    },
+  ];
+};
 
 /** Top metric strip summarising the month's gross, net, deductions, and allocation source. */
-function NetRevenueStatusStrip({
+const NetRevenueStatusStrip = ({
   data,
   loading,
   error,
@@ -787,7 +890,7 @@ function NetRevenueStatusStrip({
   error: ApiError | Error | null;
   canViewFinance: boolean;
   currency: string;
-}) {
+}) => {
   if (error) {
     const { title, detail } = describeError(error);
     return (
@@ -843,71 +946,7 @@ function NetRevenueStatusStrip({
     );
   }
 
-  const allocation = ALLOCATION_SOURCE_COPY[data.allocation_source] ?? {
-    label: data.allocation_source,
-    tone: "blue" as Severity,
-  };
-
-  const metrics: Array<{
-    id: string;
-    tone: string;
-    label: string;
-    value: string;
-    badge: { text: string; tone: Severity };
-    note: [string, string];
-    finance: boolean;
-    locked?: boolean;
-  }> = [
-    {
-      id: "gross",
-      tone: "is-revenue",
-      label: "Adjusted gross",
-      value: financeDisplay(data.total_adjusted_gross_revenue_usd, canViewFinance, { currency }),
-      badge: { text: currency, tone: "green" },
-      note: [`${data.channel_count} channels`, `${data.calculated_channel_count} calculated`],
-      finance: true,
-    },
-    {
-      id: "net",
-      tone: "is-net",
-      label: "Net revenue",
-      value: financeDisplay(data.total_net_revenue_usd, canViewFinance, { currency }),
-      badge: { text: data.status, tone: statusTone(data.status) },
-      note: ["After deductions", `${data.missing_net_source_count} missing source`],
-      finance: true,
-    },
-    {
-      id: "deductions",
-      tone: "is-review",
-      label: "Deductions",
-      value: financeDisplay(data.total_deduction_amount_usd, canViewFinance, { currency }),
-      badge: { text: "Total", tone: "amber" },
-      note: [
-        canViewFinance
-          ? `Direct ${financeDisplay(data.total_channel_direct_deduction_amount_usd, canViewFinance, { currency })}`
-          : RESTRICTED_FINANCE_VALUE,
-        canViewFinance
-          ? `Allocated ${financeDisplay(data.total_account_allocated_deduction_amount_usd, canViewFinance, { currency })}`
-          : "",
-      ],
-      finance: true,
-    },
-    {
-      id: "allocation",
-      tone: "is-close",
-      label: "Allocation source",
-      value: allocation.label,
-      badge: { text: data.status, tone: statusTone(data.status) },
-      note: [
-        data.committed_run?.commit_version != null
-          ? `Snapshot v${data.committed_run.commit_version}`
-          : "Computed at read time",
-        `Status ${data.status}`,
-      ],
-      finance: false,
-      locked: data.allocation_source === "committed_snapshot",
-    },
-  ];
+  const metrics = buildRevenueMetrics(data, canViewFinance, currency);
 
   return (
     <section className="status-strip" aria-label="Revenue summary">
@@ -933,10 +972,10 @@ function NetRevenueStatusStrip({
       ))}
     </section>
   );
-}
+};
 
 /** Selectable per-channel revenue table with error, loading, and empty states. */
-function NetRevenueChannelTable({
+const NetRevenueChannelTable = ({
   data,
   loading,
   error,
@@ -952,7 +991,7 @@ function NetRevenueChannelTable({
   currency: string;
   selectedChannelId: string | null;
   onSelect: (id: string) => void;
-}) {
+}) => {
   if (error) {
     const { title, detail } = describeError(error);
     return (
@@ -965,18 +1004,22 @@ function NetRevenueChannelTable({
     );
   }
 
-  if (loading && !data) {
-    return (
+  if (!data)
+    return loading ? (
       <div className="table-wrap" aria-busy="true">
         <div style={{ padding: 16 }} className="item-sub">
           Loading channels…
         </div>
       </div>
+    ) : (
+      <div className="table-wrap">
+        <div style={{ padding: 16 }} className="item-sub">
+          No channels for this month and scope.
+        </div>
+      </div>
     );
-  }
 
-  const channels = data?.channels ?? [];
-  if (channels.length === 0) {
+  if (data.channels.length === 0)
     return (
       <div className="table-wrap">
         <div style={{ padding: 16 }} className="item-sub">
@@ -984,14 +1027,13 @@ function NetRevenueChannelTable({
         </div>
       </div>
     );
-  }
 
   return (
     <div className="table-wrap">
       <table role="grid" aria-label="Channel revenue">
         <ChannelTableHead />
         <tbody>
-          {channels.map((c) => (
+          {data.channels.map((c) => (
             <ChannelRow
               key={c.youtube_channel_id}
               channel={c}
@@ -1005,10 +1047,10 @@ function NetRevenueChannelTable({
       </table>
     </div>
   );
-}
+};
 
 /** Static header row for the channel revenue table. */
-function ChannelTableHead() {
+const ChannelTableHead = () => {
   return (
     <thead>
       <tr>
@@ -1022,10 +1064,10 @@ function ChannelTableHead() {
       </tr>
     </thead>
   );
-}
+};
 
 /** Single selectable channel row: name, status, permission-gated money, and issues. */
-function ChannelRow({
+const ChannelRow = ({
   channel,
   canViewFinance,
   currency,
@@ -1037,7 +1079,7 @@ function ChannelRow({
   currency: string;
   selected: boolean;
   onSelect: (id: string) => void;
-}) {
+}) => {
   return (
     <tr
       role="row"
@@ -1080,10 +1122,10 @@ function ChannelRow({
       </td>
     </tr>
   );
-}
+};
 
 /** Avatar + name + source-kind cell for a channel row. */
-function ChannelNameCell({ channel }: { channel: ChannelNetRevenue }) {
+const ChannelNameCell = ({ channel }: { channel: ChannelNetRevenue }) => {
   return (
     <span className="channel-cell">
       <span className="avatar">{channelAvatar(channel)}</span>
@@ -1093,10 +1135,10 @@ function ChannelNameCell({ channel }: { channel: ChannelNetRevenue }) {
       </span>
     </span>
   );
-}
+};
 
 /** Explanation rows for the selected channel: gross, deductions, and resulting net. */
-function ChannelExplainRows({
+const ChannelExplainRows = ({
   channel,
   canViewFinance,
   currency,
@@ -1104,7 +1146,7 @@ function ChannelExplainRows({
   channel: ChannelNetRevenue;
   canViewFinance: boolean;
   currency: string;
-}) {
+}) => {
   const rows: Array<{ key: string; tone: Severity; title: string; sub: string; value: string | null }> = [
     {
       key: "gross",
@@ -1154,7 +1196,7 @@ function ChannelExplainRows({
       ))}
     </>
   );
-}
+};
 
 // ============================================================================
 // Purpose: Outside-CMS / channel-issues monitor for the Command Center. Wires
@@ -1178,11 +1220,11 @@ function ChannelExplainRows({
 //   - File: frontend/src/lib/api/types.ts -> OutsideCmsResponse/ChannelIssuesResponse.
 //   - File: backend/ums_smart_revenue/api/channels.py -> the two monitor routes.
 // ============================================================================
-function OutsideCmsMonitorPanel({
+const OutsideCmsMonitorPanel = ({
   canViewAnalytics,
 }: {
   canViewAnalytics: boolean;
-}) {
+}) => {
   return (
     <section
       className="panel"
@@ -1205,10 +1247,10 @@ function OutsideCmsMonitorPanel({
       )}
     </section>
   );
-}
+};
 
 /** Restricted placeholder: NO hook mounted, NO request fired (fail-closed). */
-function OutsideCmsRestrictedBand() {
+const OutsideCmsRestrictedBand = () => {
   return (
     <div className="permission-band" role="note">
       <ItemRow
@@ -1219,14 +1261,14 @@ function OutsideCmsRestrictedBand() {
       />
     </div>
   );
-}
+};
 
 /**
  * The live monitor body: each half owns its own hook so an outside-cms failure
  * cannot blank the issues half (and vice-versa). Only mounted when permitted, so
  * both hooks stay rules-of-hooks safe and fire exactly once at this view root.
  */
-function OutsideCmsMonitorBody() {
+const OutsideCmsMonitorBody = () => {
   const outsideCms = useOutsideCmsChannels();
   const issues = useChannelIssues();
   return (
@@ -1249,16 +1291,16 @@ function OutsideCmsMonitorBody() {
       </div>
     </>
   );
-}
+};
 
 /** Summary tiles: outside-CMS count, missing-official-revenue, open issues. */
-function OutsideCmsSummaryTiles({
+const OutsideCmsSummaryTiles = ({
   outsideCms,
   issues,
 }: {
   outsideCms: OutsideCmsResponse | null;
   issues: ChannelIssuesResponse | null;
-}) {
+}) => {
   // Read defensively: an unexpected body shape (missing summary) renders the
   // dash placeholder rather than throwing inside the panel.
   const outsideCount = outsideCms?.summary?.outside_cms_channel_count ?? null;
@@ -1285,10 +1327,10 @@ function OutsideCmsSummaryTiles({
       />
     </div>
   );
-}
+};
 
 /** Outside-CMS half: loading / error / empty / row states (fails on its own). */
-function OutsideCmsHalf({
+const OutsideCmsHalf = ({
   data,
   loading,
   error,
@@ -1296,7 +1338,7 @@ function OutsideCmsHalf({
   data: OutsideCmsResponse | null;
   loading: boolean;
   error: ApiError | Error | null;
-}) {
+}) => {
   // Read items defensively so an unexpected body shape cannot throw in the panel.
   const items = Array.isArray(data?.items) ? data.items : [];
   return (
@@ -1320,10 +1362,10 @@ function OutsideCmsHalf({
       </MonitorList>
     </section>
   );
-}
+};
 
 /** One outside-CMS row: distinguishes "covered" from "missing source". */
-function OutsideCmsRow({ item }: { item: OutsideCmsItem }) {
+const OutsideCmsRow = ({ item }: { item: OutsideCmsItem }) => {
   const tone: Severity = item.missing_official_revenue ? "amber" : "green";
   const status = item.missing_official_revenue
     ? "Missing official revenue"
@@ -1336,10 +1378,10 @@ function OutsideCmsRow({ item }: { item: OutsideCmsItem }) {
       trailing={<Badge tone={tone}>{item.revenue_source_status}</Badge>}
     />
   );
-}
+};
 
 /** Channel-issues half: loading / error / empty / row states (fails on its own). */
-function ChannelIssuesHalf({
+const ChannelIssuesHalf = ({
   data,
   loading,
   error,
@@ -1347,7 +1389,7 @@ function ChannelIssuesHalf({
   data: ChannelIssuesResponse | null;
   loading: boolean;
   error: ApiError | Error | null;
-}) {
+}) => {
   // Read items defensively so an unexpected body shape cannot throw in the panel.
   const items = Array.isArray(data?.items) ? data.items : [];
   return (
@@ -1379,18 +1421,18 @@ function ChannelIssuesHalf({
       </MonitorList>
     </section>
   );
-}
+};
 
 /** Map a channel-issue severity string to a design-system badge tone. */
-function issueSeverityTone(severity: string): Severity {
+const issueSeverityTone = (severity: string): Severity => {
   const normalized = severity.toLowerCase();
   if (normalized === "high") return "red";
   if (normalized === "medium") return "amber";
   return "blue";
-}
+};
 
 /** One channel-issue row. */
-function ChannelIssueRow({ issue }: { issue: ChannelIssue }) {
+const ChannelIssueRow = ({ issue }: { issue: ChannelIssue }) => {
   const tone = issueSeverityTone(issue.severity);
   return (
     <ItemRow
@@ -1400,14 +1442,14 @@ function ChannelIssueRow({ issue }: { issue: ChannelIssue }) {
       trailing={<Badge tone={tone}>{issue.severity}</Badge>}
     />
   );
-}
+};
 
 /**
  * Shared list shell for a monitor half: surfaces a contained error (403 -> denied
  * copy, never masked as "no issues"), a loading state, an empty state, or the
  * caller's rows. Keeps each half's JSX subtree shallow and consistent.
  */
-function MonitorList({
+const MonitorList = ({
   error,
   loading,
   empty,
@@ -1421,7 +1463,7 @@ function MonitorList({
   emptyTitle: string;
   emptySub: string;
   children: ReactNode;
-}) {
+}) => {
   if (error) {
     const { title, detail } = describeError(error);
     return (
@@ -1459,7 +1501,7 @@ function MonitorList({
       {children}
     </div>
   );
-}
+};
 
 // ============================================================================
 // Purpose: Company/sector/channel rankings panel for the Command Center. Wires
@@ -1481,7 +1523,7 @@ function MonitorList({
 //   - File: frontend/src/lib/api/types.ts -> MonthRankingsResponse/RankedEntry.
 //   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_rankings.
 // ============================================================================
-function RankingsPanel({
+const RankingsPanel = ({
   month,
   canViewFinance,
   scopeType,
@@ -1501,7 +1543,7 @@ function RankingsPanel({
   // verdict resolves so the panel does not fire a global read during the load
   // window (mirrors the net-revenue gate above).
   scopesReady: boolean;
-}) {
+}) => {
   const [metric, setMetric] = useState<RankingMetric>("gross");
   return (
     <section className="panel" aria-labelledby="rankingsTitle" style={{ marginBottom: 16 }}>
@@ -1533,10 +1575,10 @@ function RankingsPanel({
       )}
     </section>
   );
-}
+};
 
 /** Metric selector for the rankings panel (gross / net / deduction). */
-function RankingMetricToggle({
+const RankingMetricToggle = ({
   metric,
   onChange,
   disabled,
@@ -1544,7 +1586,7 @@ function RankingMetricToggle({
   metric: RankingMetric;
   onChange: (next: RankingMetric) => void;
   disabled: boolean;
-}) {
+}) => {
   return (
     <select
       className="control"
@@ -1558,10 +1600,10 @@ function RankingMetricToggle({
       <option value="deduction">Deduction</option>
     </select>
   );
-}
+};
 
 /** Restricted placeholder: NO hook mounted, NO request fired (fail-closed). */
-function RankingsRestrictedBand() {
+const RankingsRestrictedBand = () => {
   return (
     <div className="permission-band" role="note">
       <ItemRow
@@ -1572,13 +1614,13 @@ function RankingsRestrictedBand() {
       />
     </div>
   );
-}
+};
 
 /**
  * Live rankings body: owns useRankings (only mounted when canViewFinance) and
  * renders the three ranked dimensions plus the allocation-source provenance.
  */
-function RankingsBody({
+const RankingsBody = ({
   month,
   metric,
   canViewFinance,
@@ -1600,7 +1642,7 @@ function RankingsBody({
   // FIX (review #102 Qodo #3): Gate the rankings read until the authorized-scope
   // verdict resolves (see CommandView.scopesReady).
   scopesReady: boolean;
-}) {
+}) => {
   const { data, loading, error } = useRankings({
     month,
     metric,
@@ -1629,10 +1671,10 @@ function RankingsBody({
     );
   }
   return <RankingsContent data={data} metric={metric} canViewFinance={canViewFinance} />;
-}
+};
 
 /** Resolved rankings content: allocation source + the three ranked dimensions. */
-function RankingsContent({
+const RankingsContent = ({
   data,
   metric,
   canViewFinance,
@@ -1640,7 +1682,7 @@ function RankingsContent({
   data: MonthRankingsResponse | null;
   metric: RankingMetric;
   canViewFinance: boolean;
-}) {
+}) => {
   if (!data) {
     return (
       <div className="issue-list" role="list">
@@ -1685,20 +1727,20 @@ function RankingsContent({
       />
     </>
   );
-}
+};
 
 /** Select the money value for the active metric from a ranked entry. */
-function rankingMetricValue(
+const rankingMetricValue = (
   row: RankedEntry,
   metric: RankingMetric,
-): string | null {
+): string | null => {
   if (metric === "net") return row.net_revenue_usd;
   if (metric === "deduction") return row.deduction_amount_usd;
   return row.gross_revenue_usd;
-}
+};
 
 /** One ranked dimension (companies / sectors / channels): rows or empty state. */
-function RankingDimension({
+const RankingDimension = ({
   title,
   rows,
   metric,
@@ -1708,7 +1750,7 @@ function RankingDimension({
   rows: RankedEntry[];
   metric: RankingMetric;
   canViewFinance: boolean;
-}) {
+}) => {
   const safeRows = Array.isArray(rows) ? rows : [];
   return (
     <section className="panel" aria-label={`${title} ranking`}>
@@ -1746,6 +1788,6 @@ function RankingDimension({
       </div>
     </section>
   );
-}
+};
 
 export { describeError };

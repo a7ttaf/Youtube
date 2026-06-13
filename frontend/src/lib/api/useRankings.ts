@@ -64,9 +64,9 @@ const buildRankingsPath = (query: RankingsQuery): string => {
   }`;
 };
 
-export function useRankings(
+export const useRankings = (
   query: RankingsQuery,
-): AsyncState<MonthRankingsResponse> {
+): AsyncState<MonthRankingsResponse> => {
   const client = useApiClient();
   const path = buildRankingsPath(query);
   const { enabled = true } = query;
@@ -75,4 +75,4 @@ export function useRankings(
     [client, path],
   );
   return useAsync(run, enabled);
-}
+};

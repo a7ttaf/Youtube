@@ -16,9 +16,7 @@ const ORIGINAL_FETCH = globalThis.fetch;
 // while preserving the spy for assertion. Using a named function (rather than
 // `() => {}`) keeps the JS-0321 / arrow-empty lint family happy and the call
 // site readable.
-function noop() {
-  return undefined;
-}
+const noop = () => undefined;
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
@@ -169,12 +167,11 @@ const CHANNEL_ISSUES_MULTI: ChannelIssuesResponse = {
   },
 };
 
-function jsonResponse(body: unknown, status = 200) {
-  return new Response(JSON.stringify(body), {
+const jsonResponse = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
 
 type RouteOptions = {
   outsideCms?: () => Response;
@@ -214,7 +211,7 @@ const URL_RESPONDERS: Array<{
 
 // Route each fetch by URL so the monitor panel's two reads (outside-cms +
 // issues) can be driven independently from the net-revenue + smart-alerts reads.
-function routeFetch(opts: RouteOptions = {}) {
+const routeFetch = (opts: RouteOptions = {}) => {
   const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = String(input);
@@ -226,12 +223,12 @@ function routeFetch(opts: RouteOptions = {}) {
     return Promise.resolve(jsonResponse({}, 404));
   });
   return fetchMock;
-}
+};
 
-function renderCommandView(opts: {
+const renderCommandView = (opts: {
   canViewFinance?: boolean;
   canViewAnalytics?: boolean;
-} = {}) {
+} = {}) => {
   return render(
     <TenantProvider initialSlug="ums">
       <CommandView
@@ -240,7 +237,7 @@ function renderCommandView(opts: {
       />
     </TenantProvider>,
   );
-}
+};
 
 describe("OutsideCmsMonitorPanel in CommandView", () => {
   it("loads the outside-CMS + issues rows and summary when analytics is allowed", async () => {
