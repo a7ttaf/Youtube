@@ -1,4 +1,4 @@
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal
 
@@ -90,27 +90,72 @@ def build_monthly_smart_alert_summary(
         )
     if missing_revenue_fact_channel_count < 0:
         raise ValueError("missing_revenue_fact_channel_count must be non-negative")
-    alerts: list[MonthlySmartAlert] = []
     normalized_close_status = close_status or "OPEN"
     overrides = list(manual_overrides)
 
-    if payment_match.status == "NO_YOUTUBE_REVENUE":
-        alerts.append(
-            MonthlySmartAlert(
-                code="MISSING_REVENUE_SOURCE",
-                severity="HIGH",
-                message=f"No YouTube revenue source is available for {month}.",
-                source="payment_match",
-                confidence="E_MISSING",
-                details={"payment_match_status": payment_match.status},
-            )
-        )
+    # Per-alert builders. Each one is a small pure function that returns a
+    # MonthlySmartAlert or None (None is dropped). Splitting them out drops
+    # build_monthly_smart_alert_summary's cyclomatic complexity below the
+    # PY-R1000 high-risk threshold and makes each branch independently
+    # testable / rewritable without touching the others.
+    builders: list[Callable[[], MonthlySmartAlert | None]] = [
+        lambda: _missing_revenue_source_alert(month, payment_match),
+        lambda: _channels_missing_revenue_facts_alert(
+            month,
+            missing_revenue_fact_channel_count,
+            missing_revenue_fact_channel_sample,
+        ),
+        lambda: _payment_not_matched_alert(month, payment_match),
+        lambda: _bank_reconciliation_alert(month, bank_reconciliation),
+        lambda: _unexplained_gap_alert(
+            month, payment_match, bank_reconciliation, high_gap_threshold_usd
+        ),
+        lambda: _revenue_trend_anomaly_alert(
+            month,
+            current_revenue_facts,
+            previous_revenue_facts,
+            revenue_trend_anomaly_threshold_percent,
+        ),
+        lambda: _month_not_locked_alert(month, normalized_close_status),
+        lambda: _manual_overrides_alert(month, overrides),
+    ]
+    alerts = [alert for build in builders if (alert := build()) is not None]
 
+    highest_severity = _highest_severity(alerts)
+    return MonthlySmartAlertSummary(
+        month=month,
+        status="ATTENTION_REQUIRED" if alerts else "CLEAR",
+        highest_severity=highest_severity,
+        alerts=alerts,
+    )
+
+
+def _missing_revenue_source_alert(
+    month: str, payment_match: MonthlyPaymentMatchSummary
+) -> MonthlySmartAlert | None:
+    """Month-level zero-YouTube-revenue signal."""
+    if payment_match.status != "NO_YOUTUBE_REVENUE":
+        return None
+    return MonthlySmartAlert(
+        code="MISSING_REVENUE_SOURCE",
+        severity="HIGH",
+        message=f"No YouTube revenue source is available for {month}.",
+        source="payment_match",
+        confidence="E_MISSING",
+        details={"payment_match_status": payment_match.status},
+    )
+
+
+def _channels_missing_revenue_facts_alert(
+    month: str,
+    count: int,
+    sample: Sequence[str],
+) -> MonthlySmartAlert | None:
     # ========================================================================
-    # Purpose: Emit a per-channel coverage gap alert when active,
-    #   revenue-required channels have no revenue fact for the month. Distinct
-    #   from the month-level MISSING_REVENUE_SOURCE (zero-YouTube-revenue);
-    #   mirrors the close-readiness MISSING_REVENUE_FACTS blocker.
+    # Purpose: Per-channel coverage gap when active, revenue-required channels
+    #   have no revenue fact for the month. Distinct from MISSING_REVENUE_SOURCE
+    #   (month-level zero YouTube revenue); mirrors the close-readiness
+    #   MISSING_REVENUE_FACTS blocker.
     # Database/ORM: None (pure; count + sample are pre-read by the route).
     # Standards: Cap sample to MISSING_FACT_CHANNEL_SAMPLE_LIMIT; trust the
     #   route's server-side LIMIT 20 + ORDER BY youtube_channel_id. If the
@@ -123,138 +168,157 @@ def build_monthly_smart_alert_summary(
     #   - File: backend/ums_smart_revenue/finance/month_close_readiness.py ->
     #     shares the active+revenue_required-without-fact query shape.
     # ========================================================================
-    sample = sorted(missing_revenue_fact_channel_sample)[:MISSING_FACT_CHANNEL_SAMPLE_LIMIT]
-    if missing_revenue_fact_channel_count > 0 or sample:
-        alerts.append(
-            MonthlySmartAlert(
-                code="CHANNELS_MISSING_REVENUE_FACTS",
-                severity="HIGH",
-                message=(
-                    f"{missing_revenue_fact_channel_count} active revenue-required "
-                    f"channel(s) have no revenue facts for {month}."
-                ),
-                source="revenue_facts",
-                confidence="E_MISSING",
-                details={
-                    "channel_count": missing_revenue_fact_channel_count,
-                    "sample_channel_ids": sample,
-                },
-            )
-        )
+    capped_sample = sorted(sample)[:MISSING_FACT_CHANNEL_SAMPLE_LIMIT]
+    if count <= 0 and not capped_sample:
+        return None
+    return MonthlySmartAlert(
+        code="CHANNELS_MISSING_REVENUE_FACTS",
+        severity="HIGH",
+        message=(
+            f"{count} active revenue-required "
+            f"channel(s) have no revenue facts for {month}."
+        ),
+        source="revenue_facts",
+        confidence="E_MISSING",
+        details={
+            "channel_count": count,
+            "sample_channel_ids": capped_sample,
+        },
+    )
 
-    if payment_match.status != "PAYMENT_MATCHED":
-        alerts.append(
-            MonthlySmartAlert(
-                code="PAYMENT_NOT_MATCHED",
-                severity="HIGH",
-                message=f"AdSense payment is not matched for {month}.",
-                source="payment_match",
-                confidence="E_MISSING",
-                details={
-                    "payment_match_status": payment_match.status,
-                    "payment_gap_usd": _decimal_to_api(payment_match.payment_gap_usd),
-                    "issue_count": len(payment_match.issues),
-                },
-            )
-        )
 
+def _payment_not_matched_alert(
+    month: str, payment_match: MonthlyPaymentMatchSummary
+) -> MonthlySmartAlert | None:
+    """AdSense payment not matched for the month."""
+    if payment_match.status == "PAYMENT_MATCHED":
+        return None
+    return MonthlySmartAlert(
+        code="PAYMENT_NOT_MATCHED",
+        severity="HIGH",
+        message=f"AdSense payment is not matched for {month}.",
+        source="payment_match",
+        confidence="E_MISSING",
+        details={
+            "payment_match_status": payment_match.status,
+            "payment_gap_usd": _decimal_to_api(payment_match.payment_gap_usd),
+            "issue_count": len(payment_match.issues),
+        },
+    )
+
+
+def _bank_reconciliation_alert(
+    month: str, bank_reconciliation: MonthBankReconciliationSummary
+) -> MonthlySmartAlert | None:
+    """No bank receipt OR non-confirmed bank reconciliation for the month."""
     if bank_reconciliation.status == "MISSING_BANK_RECEIPT":
-        alerts.append(
-            MonthlySmartAlert(
-                code="BANK_AMOUNT_MISSING",
-                severity="HIGH",
-                message=f"No bank receipt is recorded for {month}.",
-                source="bank_reconciliation",
-                confidence="E_MISSING",
-                details={
-                    "bank_reconciliation_status": bank_reconciliation.status,
-                    "paid_payment_count": bank_reconciliation.paid_payment_count,
-                },
-            )
+        return MonthlySmartAlert(
+            code="BANK_AMOUNT_MISSING",
+            severity="HIGH",
+            message=f"No bank receipt is recorded for {month}.",
+            source="bank_reconciliation",
+            confidence="E_MISSING",
+            details={
+                "bank_reconciliation_status": bank_reconciliation.status,
+                "paid_payment_count": bank_reconciliation.paid_payment_count,
+            },
         )
-    elif bank_reconciliation.status != "BANK_CONFIRMED":
-        alerts.append(
-            MonthlySmartAlert(
-                code="BANK_RECONCILIATION_NOT_CONFIRMED",
-                severity="HIGH",
-                message=f"Bank reconciliation is not confirmed for {month}.",
-                source="bank_reconciliation",
-                confidence="E_MISSING",
-                details={
-                    "bank_reconciliation_status": bank_reconciliation.status,
-                    "bank_gap_usd": _decimal_to_api(bank_reconciliation.bank_gap_usd),
-                },
-            )
+    if bank_reconciliation.status != "BANK_CONFIRMED":
+        return MonthlySmartAlert(
+            code="BANK_RECONCILIATION_NOT_CONFIRMED",
+            severity="HIGH",
+            message=f"Bank reconciliation is not confirmed for {month}.",
+            source="bank_reconciliation",
+            confidence="E_MISSING",
+            details={
+                "bank_reconciliation_status": bank_reconciliation.status,
+                "bank_gap_usd": _decimal_to_api(bank_reconciliation.bank_gap_usd),
+            },
         )
+    return None
 
+
+def _unexplained_gap_alert(
+    month: str,
+    payment_match: MonthlyPaymentMatchSummary,
+    bank_reconciliation: MonthBankReconciliationSummary,
+    threshold_usd: Decimal,
+) -> MonthlySmartAlert | None:
+    """Payment or bank gap above threshold for the month."""
     gap_details = _high_gap_details(
         payment_gap_usd=payment_match.payment_gap_usd,
         bank_gap_usd=bank_reconciliation.bank_gap_usd,
-        threshold_usd=high_gap_threshold_usd,
+        threshold_usd=threshold_usd,
     )
-    if gap_details:
-        alerts.append(
-            MonthlySmartAlert(
-                code="UNEXPLAINED_GAP_HIGH",
-                severity="HIGH",
-                message=f"One or more finance gaps exceed threshold for {month}.",
-                source="reconciliation",
-                confidence="E_MISSING",
-                details=gap_details,
-            )
-        )
+    if not gap_details:
+        return None
+    return MonthlySmartAlert(
+        code="UNEXPLAINED_GAP_HIGH",
+        severity="HIGH",
+        message=f"One or more finance gaps exceed threshold for {month}.",
+        source="reconciliation",
+        confidence="E_MISSING",
+        details=gap_details,
+    )
 
+
+def _revenue_trend_anomaly_alert(
+    month: str,
+    current_facts: Iterable[RevenueFactEntry],
+    previous_facts: Iterable[RevenueFactEntry],
+    threshold_percent: Decimal,
+) -> MonthlySmartAlert | None:
+    """One or more channels moved month-over-month above threshold."""
     trend_details = _revenue_trend_anomaly_details(
-        current_revenue_facts=current_revenue_facts,
-        previous_revenue_facts=previous_revenue_facts,
-        threshold_percent=revenue_trend_anomaly_threshold_percent,
+        current_revenue_facts=current_facts,
+        previous_revenue_facts=previous_facts,
+        threshold_percent=threshold_percent,
     )
-    if trend_details:
-        alerts.append(
-            MonthlySmartAlert(
-                code="REVENUE_TREND_ANOMALY",
-                severity="HIGH",
-                message=(
-                    "One or more channels have month-over-month revenue "
-                    f"movement above threshold for {month}."
-                ),
-                source="revenue_facts",
-                confidence="D_ESTIMATED",
-                details=trend_details,
-            )
-        )
+    if not trend_details:
+        return None
+    return MonthlySmartAlert(
+        code="REVENUE_TREND_ANOMALY",
+        severity="HIGH",
+        message=(
+            "One or more channels have month-over-month revenue "
+            f"movement above threshold for {month}."
+        ),
+        source="revenue_facts",
+        confidence="D_ESTIMATED",
+        details=trend_details,
+    )
 
-    if normalized_close_status != "LOCKED":
-        alerts.append(
-            MonthlySmartAlert(
-                code="MONTH_NOT_LOCKED",
-                severity="MEDIUM",
-                message=f"Finance month {month} is not locked.",
-                source="finance_close",
-                confidence="D_ESTIMATED",
-                details={"close_status": normalized_close_status},
-            )
-        )
 
+def _month_not_locked_alert(
+    month: str, normalized_close_status: str
+) -> MonthlySmartAlert | None:
+    """Finance month is not yet LOCKED."""
+    if normalized_close_status == "LOCKED":
+        return None
+    return MonthlySmartAlert(
+        code="MONTH_NOT_LOCKED",
+        severity="MEDIUM",
+        message=f"Finance month {month} is not locked.",
+        source="finance_close",
+        confidence="D_ESTIMATED",
+        details={"close_status": normalized_close_status},
+    )
+
+
+def _manual_overrides_alert(
+    month: str, overrides: Sequence[RevenueManualOverrideEntry]
+) -> MonthlySmartAlert | None:
+    """At least one APPROVED manual override affects the month."""
     approved_count = sum(1 for override in overrides if override.status == "APPROVED")
-    if approved_count:
-        alerts.append(
-            MonthlySmartAlert(
-                code="MANUAL_OVERRIDE_USED",
-                severity="MEDIUM",
-                message=f"{approved_count} approved manual override(s) affect {month}.",
-                source="manual_overrides",
-                confidence="B_RECONCILED",
-                details={"approved_override_count": approved_count},
-            )
-        )
-
-    highest_severity = _highest_severity(alerts)
-    return MonthlySmartAlertSummary(
-        month=month,
-        status="ATTENTION_REQUIRED" if alerts else "CLEAR",
-        highest_severity=highest_severity,
-        alerts=alerts,
+    if approved_count <= 0:
+        return None
+    return MonthlySmartAlert(
+        code="MANUAL_OVERRIDE_USED",
+        severity="MEDIUM",
+        message=f"{approved_count} approved manual override(s) affect {month}.",
+        source="manual_overrides",
+        confidence="B_RECONCILED",
+        details={"approved_override_count": approved_count},
     )
 
 

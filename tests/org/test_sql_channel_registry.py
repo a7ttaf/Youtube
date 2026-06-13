@@ -57,8 +57,7 @@ def build_session() -> Session:
     engine = create_engine("sqlite+pysqlite:///:memory:")
 
     @event.listens_for(engine, "connect")
-    def _enable_foreign_keys(dbapi_connection, connection_record):
-        del connection_record
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     OrgBase.metadata.create_all(engine)
@@ -74,8 +73,7 @@ def build_finance_session() -> Session:
     engine = create_engine("sqlite+pysqlite:///:memory:")
 
     @event.listens_for(engine, "connect")
-    def _enable_foreign_keys(dbapi_connection, connection_record):
-        del connection_record
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     OrgBase.metadata.create_all(engine)
@@ -271,7 +269,6 @@ def test_sql_channel_registry_does_not_mask_non_duplicate_integrity_error(
         nonlocal lookups
         assert channel_id == "channel-racing-failure"
         lookups += 1
-        return None
 
     def _raise_foreign_key_failure():
         raise IntegrityError(
