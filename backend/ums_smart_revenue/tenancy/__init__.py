@@ -12,7 +12,13 @@ from ums_smart_revenue.tenancy.context import (
     get_current_tenant,
     require_current_tenant,
 )
-from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
+from ums_smart_revenue.tenancy.models import (
+    DEFAULT_PRIMARY_CURRENCY,
+    PLACEHOLDER_TENANT_EPOCH,
+    Tenant,
+    TenantStatus,
+    make_placeholder_tenant,
+)
 from ums_smart_revenue.tenancy.repository import (
     SqlAlchemyTenantRepository,
     TenantNotFoundError,
@@ -28,6 +34,8 @@ from ums_smart_revenue.tenancy.resolver import (
 
 __all__ = [
     "DEFAULT_BYPASS_PATHS",
+    "DEFAULT_PRIMARY_CURRENCY",
+    "PLACEHOLDER_TENANT_EPOCH",
     "SqlAlchemyTenantRepository",
     "TENANT_CTX",
     "TENANT_HEADER",
@@ -39,6 +47,7 @@ __all__ = [
     "TenantStatus",
     "TenantValidationError",
     "get_current_tenant",
+    "make_placeholder_tenant",
     "normalise_slug",
     "require_current_tenant",
 ]

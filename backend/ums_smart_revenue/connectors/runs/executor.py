@@ -24,6 +24,8 @@ from ums_smart_revenue.connectors.runs.tenant_context import (
 )
 from ums_smart_revenue.db.lane import platform_lane
 from ums_smart_revenue.db.session import SessionFactory
+from ums_smart_revenue.tenancy.context import TENANT_CTX
+from ums_smart_revenue.tenancy.models import make_placeholder_tenant
 
 logger = logging.getLogger(__name__)
 
@@ -468,8 +470,35 @@ class ConnectorJobExecutor:
         audit row could be written. The audit itself is platform-only-write, so
         we run it under ``platform_lane`` with the tenant_id passed explicitly to
         ``SqlAlchemyAuditSink``.
+
+        The audit_logs INSERT must also satisfy the ``20260608_0001`` RLS
+        ``WITH CHECK (tenant_id = app_current_tenant_id())`` policy. The
+        after_begin hook in ``db.session`` writes the trusted tenant-context row
+        from ``TENANT_CTX.get().id``; with no tenant in the contextvar the hook
+        clears the row, ``app_current_tenant_id()`` returns NULL on Postgres, and
+        the INSERT permission-denies via RLS -- silently dropping the only record
+        of the failure. Set ``TENANT_CTX`` to a minimal ``Tenant`` (id-only; the
+        lifecycle check is intentionally bypassed because we are writing the
+        audit, not authorizing a run) so the hook writes the context row and the
+        INSERT satisfies the policy. The token is reset via ``finally`` so the
+        contextvar never leaks. No-op off Postgres (RLS is not enforced there).
         """
+        # FIX: Restore the RLS tenant-context bridge dropped by the 2026-06-12
+        # reverts (bdf5b71/15c0818/06af2ed). Without TENANT_CTX set,
+        # app_current_tenant_id() is NULL and the audit_logs WITH CHECK denies
+        # the INSERT (app_platform is NOBYPASSRLS, so elevation alone is not
+        # enough); the Bucket-A failure audit was silently lost on Postgres.
         actor = self._build_audit_actor(tenant_id=tenant_id, actor_identity=actor_identity)
+        # Minimal-tenant fabrication for the contextvar: only ``.id`` is read by
+        # the after_begin hook / RLS policy, so the remaining fields are
+        # placeholders, never persisted or validated against ``tenants``. Built
+        # via the shared factory so the placeholder shape stays centralized.
+        minimal_tenant = make_placeholder_tenant(
+            tenant_id=tenant_id,
+            slug=f"connector-job-failed-audit:{tenant_id}",
+            display_name="connector job failed-audit",
+        )
+        token = TENANT_CTX.set(minimal_tenant)
         try:
             with self._session_factory() as session:
                 # audit_logs is platform-only-write: elevate to app_platform for
@@ -497,6 +526,8 @@ class ConnectorJobExecutor:
                 "Failed to persist job_failed_before_start audit (tenant=%s)",
                 tenant_id,
             )
+        finally:
+            TENANT_CTX.reset(token)
 
     def _audit_dry_run_outcome(
         self,

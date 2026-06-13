@@ -160,6 +160,17 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
       index on RUNNING runs (TOCTOU is code-level, accepted at max_workers=1);
       no live-OAuth credentials; no auto-flip of credential `status` to
       `failed_auth` on refresh failure.
+    - ✅ Executor Bucket-A audit RLS regression fix — three post-#95 reverts
+      (`bdf5b71`/`15c0818`/`06af2ed`) dropped the `TENANT_CTX` minimal-tenant set
+      in `_audit_failed_before_start`, leaving `app_current_tenant_id()` NULL so
+      the `audit_logs` `WITH CHECK (tenant_id = app_current_tenant_id())` RLS
+      policy denied the failure-audit INSERT on Postgres (main red gate on
+      `test_bucket_a_audit_persists_under_platform_lane_on_postgres`;
+      `app_platform` is `NOBYPASSRLS` so `platform_lane` alone is insufficient).
+      Restored the fabricated-`Tenant` (id-only) contextvar bridge, reset via
+      `finally`, so the `after_begin` hook writes the trusted context row. Only
+      the Bucket-A path was restored (dry-run path stayed on
+      `connector_tenant_context`, which already passes); SQLite tier unaffected.
     - ✅ PR #93 (ingestion RLS lane fix) — made the merged ingest→normalize
       pipeline executable on RLS-enforced Postgres (it previously composed only
       on SQLite). New db.lane.platform_lane elevates every run-path
