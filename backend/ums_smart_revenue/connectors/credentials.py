@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
 
 from sqlalchemy import select
@@ -53,6 +53,54 @@ class ConnectorCredentialEntry:
             "last_refresh_status": self.last_refresh_status,
             "last_refresh_error_class": self.last_refresh_error_class,
         }
+
+
+# ============================================================================
+# Purpose: Derive a coarse, read-only health label for a connector credential
+#   from its already-persisted refresh telemetry. Pure and side-effect free so
+#   the route can pass an explicit as_of and the rules stay unit-testable.
+# Database/ORM: None (operates on a ConnectorCredentialEntry value object).
+# Standards: Returns a fixed literal set; never raises on naive/aware datetime
+#   mismatch (token_expiry_at is normalized to UTC before comparison so the
+#   SQLite read-back tz-naive value compares safely against an aware as_of).
+# Blast Radius: Connector credential read surface only. No finance, auth-
+#   mutation, audit, or graph projection impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/connectors.py -> the health route
+#     appends this label to each credential's to_api() shape.
+# ============================================================================
+CREDENTIAL_EXPIRY_WINDOW = timedelta(hours=24)
+
+
+def derive_credential_health_state(
+    entry: ConnectorCredentialEntry, *, as_of: datetime
+) -> str:
+    """Return one of healthy/expiring/auth_failed/missing/unknown for a credential.
+
+    Rules (evaluated in order):
+      - auth_failed: last_refresh_status is a failure or last_refresh_error_class
+        is set.
+      - missing: no stored secret reference.
+      - expiring: token_expiry_at is at or before as_of + 24h.
+      - healthy: last refresh succeeded and the token is not expiring.
+      - unknown: none of the above can be determined.
+    """
+    if entry.last_refresh_status == "failed" or entry.last_refresh_error_class:
+        return "auth_failed"
+    if not entry.has_secret_ref:
+        return "missing"
+    if entry.token_expiry_at is not None:
+        expiry = _as_aware_utc(entry.token_expiry_at)
+        if expiry <= as_of + CREDENTIAL_EXPIRY_WINDOW:
+            return "expiring"
+    if entry.last_refresh_status == "succeeded":
+        return "healthy"
+    return "unknown"
+
+
+def _as_aware_utc(value: datetime) -> datetime:
+    """Normalize a tz-naive datetime (SQLite read-back) to UTC for comparison."""
+    return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
 
 
 @dataclass(frozen=True)

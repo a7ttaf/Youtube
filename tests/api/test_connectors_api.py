@@ -1562,3 +1562,286 @@ def test_list_credentials_api_includes_telemetry_fields(tmp_path):
     assert "last_refresh_attempt_at" in item
     assert "token_expiry_at" in item
     assert "last_refresh_error_class" in item
+
+
+def seed_credential(
+    database_url: str,
+    *,
+    connector_key: str,
+    account_id: str,
+    status: str = "active",
+    encrypted_secret_ref: str = "secret-manager://ums/yt/acct",
+    last_refresh_attempt_at: datetime | None = None,
+    token_expiry_at: datetime | None = None,
+    last_refresh_status: str | None = None,
+    last_refresh_error_class: str | None = None,
+) -> None:
+    """Seed one connector credential row with explicit telemetry values."""
+    engine = create_engine(database_url)
+    try:
+        with Session(engine) as session:
+            session.add(
+                ApiConnectorCredentialORM(
+                    id=uuid4(),
+                    tenant_id=UUID(UMS_TENANT_ID),
+                    connector_key=connector_key,
+                    account_id=account_id,
+                    encrypted_secret_ref=encrypted_secret_ref,
+                    status=status,
+                    last_refresh_attempt_at=last_refresh_attempt_at,
+                    token_expiry_at=token_expiry_at,
+                    last_refresh_status=last_refresh_status,
+                    last_refresh_error_class=last_refresh_error_class,
+                )
+            )
+            session.commit()
+    finally:
+        engine.dispose()
+
+
+def test_credential_health_returns_telemetry_and_state_for_viewer(tmp_path):
+    """VIEW_CONNECTOR_HEALTH viewer gets telemetry + health_state per credential."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_credential(
+        database_url,
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        last_refresh_attempt_at=datetime(2026, 3, 1, 12, 0, tzinfo=UTC),
+        token_expiry_at=datetime(2030, 1, 1, 0, 0, tzinfo=UTC),
+        last_refresh_status="succeeded",
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/credentials/health",
+        headers=auth_headers("system_integration_user"),
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["credentials"]) == 1
+    entry = body["credentials"][0]
+    assert entry["connector_key"] == "youtube_reporting"
+    assert entry["last_refresh_status"] == "succeeded"
+    assert "last_refresh_attempt_at" in entry
+    assert "token_expiry_at" in entry
+    assert "last_refresh_error_class" in entry
+    assert entry["health_state"] == "healthy"
+
+
+def test_credential_health_connector_scope_excludes_foreign_connector(tmp_path):
+    """Connector-scoped viewer sees only allowed connector ids; no foreign leak."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_credential(
+        database_url,
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        last_refresh_status="succeeded",
+    )
+    seed_credential(
+        database_url,
+        connector_key="adsense",
+        account_id="acct-2",
+        last_refresh_status="succeeded",
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/credentials/health",
+        headers=auth_headers(
+            "system_integration_user", "connector", "youtube_reporting"
+        ),
+    )
+
+    assert response.status_code == 200
+    keys = {entry["connector_key"] for entry in response.json()["credentials"]}
+    assert keys == {"youtube_reporting"}
+    assert "adsense" not in keys
+
+
+def test_credential_health_forbidden_without_view_connector_health(tmp_path):
+    """audit_viewer lacks VIEW_CONNECTOR_HEALTH (and MANAGE) -> fail-closed 403."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_credential(
+        database_url,
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/credentials/health",
+        headers=auth_headers("audit_viewer"),
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: connectors.view_health"
+
+
+def test_credential_health_serializes_null_telemetry_as_unknown(tmp_path):
+    """A credential with no refresh telemetry yields health_state 'unknown'."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    seed_credential(
+        database_url,
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        last_refresh_attempt_at=None,
+        token_expiry_at=None,
+        last_refresh_status=None,
+        last_refresh_error_class=None,
+    )
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/connectors/credentials/health",
+        headers=auth_headers("system_integration_user"),
+    )
+
+    assert response.status_code == 200
+    entry = response.json()["credentials"][0]
+    assert entry["last_refresh_status"] is None
+    assert entry["token_expiry_at"] is None
+    assert entry["health_state"] == "unknown"
+
+
+def test_derive_credential_health_state_auth_failed_on_failure_status():
+    """A failed last_refresh_status derives 'auth_failed' regardless of expiry."""
+    from ums_smart_revenue.connectors.credentials import (
+        ConnectorCredentialEntry,
+        derive_credential_health_state,
+    )
+
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="failed_auth",
+        has_secret_ref=True,
+        token_expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
+        last_refresh_status="failed",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "auth_failed"
+
+
+def test_derive_credential_health_state_auth_failed_on_error_class():
+    """A set last_refresh_error_class derives 'auth_failed' even with no status."""
+    from ums_smart_revenue.connectors.credentials import (
+        ConnectorCredentialEntry,
+        derive_credential_health_state,
+    )
+
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=True,
+        last_refresh_error_class="OAuthRefreshError",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "auth_failed"
+
+
+def test_derive_credential_health_state_missing_without_secret_ref():
+    """No stored secret reference derives 'missing'."""
+    from ums_smart_revenue.connectors.credentials import (
+        ConnectorCredentialEntry,
+        derive_credential_health_state,
+    )
+
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=False,
+        last_refresh_status="succeeded",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "missing"
+
+
+def test_derive_credential_health_state_expiring_within_window():
+    """token_expiry_at within 24h of as_of derives 'expiring'."""
+    from ums_smart_revenue.connectors.credentials import (
+        ConnectorCredentialEntry,
+        derive_credential_health_state,
+    )
+
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=True,
+        token_expiry_at=datetime(2026, 6, 14, 18, 0, tzinfo=UTC),
+        last_refresh_status="succeeded",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "expiring"
+
+
+def test_derive_credential_health_state_healthy_on_success_not_expiring():
+    """Last success and a far-future expiry derive 'healthy'."""
+    from ums_smart_revenue.connectors.credentials import (
+        ConnectorCredentialEntry,
+        derive_credential_health_state,
+    )
+
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=True,
+        token_expiry_at=datetime(2030, 1, 1, tzinfo=UTC),
+        last_refresh_status="succeeded",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "healthy"
+
+
+def test_derive_credential_health_state_healthy_on_success_no_expiry():
+    """Last success with no recorded expiry is still 'healthy' (not expiring)."""
+    from ums_smart_revenue.connectors.credentials import (
+        ConnectorCredentialEntry,
+        derive_credential_health_state,
+    )
+
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=True,
+        token_expiry_at=None,
+        last_refresh_status="succeeded",
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "healthy"
+
+
+def test_derive_credential_health_state_unknown_without_telemetry():
+    """A credential with a secret but no telemetry derives 'unknown'."""
+    from ums_smart_revenue.connectors.credentials import (
+        ConnectorCredentialEntry,
+        derive_credential_health_state,
+    )
+
+    as_of = datetime(2026, 6, 14, 12, 0, tzinfo=UTC)
+    entry = ConnectorCredentialEntry(
+        id="x",
+        connector_key="youtube_reporting",
+        account_id="acct-1",
+        status="active",
+        has_secret_ref=True,
+        token_expiry_at=None,
+        last_refresh_status=None,
+        last_refresh_error_class=None,
+    )
+    assert derive_credential_health_state(entry, as_of=as_of) == "unknown"

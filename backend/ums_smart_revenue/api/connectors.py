@@ -30,6 +30,7 @@ from ums_smart_revenue.connectors.credentials import (
     ConnectorCredentialEntry,
     ConnectorCredentialValidationError,
     SqlAlchemyConnectorCredentialRepository,
+    derive_credential_health_state,
     is_external_secret_ref,
 )
 from ums_smart_revenue.connectors.google.errors import (
@@ -232,6 +233,64 @@ def list_connector_runs(
             "next_cursor": page.next_cursor,
         },
     }
+
+
+@router.get("/credentials/health")
+def list_connector_credential_health(
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    repository: Annotated[
+        SqlAlchemyConnectorCredentialRepository, Depends(current_connector_repository)
+    ],
+    limit: Annotated[int, Query(ge=1, le=MAX_CREDENTIAL_PAGE_SIZE)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+) -> dict[str, object]:
+    """Return credential refresh telemetry plus a derived health_state per credential."""
+    # ========================================================================
+    # Purpose: Surface read-only OAuth credential health (the four already-
+    #   persisted refresh-telemetry columns plus a derived coarse health_state)
+    #   for the dashboard. Fail-closed behind VIEW_CONNECTOR_HEALTH at global or
+    #   connector scope; connector-scoped callers are narrowed to their granted
+    #   connector ids (no foreign-credential leak). Distinct from the
+    #   MANAGE_CONNECTORS-gated GET /connectors/credentials list, which is
+    #   unchanged. No audit emission (operational metadata read, mirrors the
+    #   credential-list and run-history routes).
+    # Database/ORM: ApiConnectorCredentialORM via
+    #   SqlAlchemyConnectorCredentialRepository.list_credentials (read only).
+    # Standards: Boundary permission gate via connector_health_connector_ids +
+    #   _require_connector_health; typed ConnectorCredentialValidationError ->
+    #   HTTP 422; health_state is additive (all raw to_api fields preserved);
+    #   as_of is an explicit aware-UTC instant passed to the pure deriver.
+    # Blast Radius: Connector credential read surface only. Finance/auth-
+    #   mutation/audit/Neo4j untouched.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/connectors/credentials.py ->
+    #     derive_credential_health_state + list_credentials.
+    #   - File: backend/ums_smart_revenue/auth/policy.py ->
+    #     connector_health_connector_ids.
+    # ========================================================================
+    allowed_connector_ids = connector_health_connector_ids(user)
+    _require_connector_health(allowed_connector_ids)
+
+    try:
+        page = repository.list_credentials(
+            limit=limit,
+            offset=offset,
+            connector_keys=allowed_connector_ids,
+        )
+    except ConnectorCredentialValidationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
+        ) from exc
+
+    as_of = datetime.now(UTC)
+    credentials: list[dict[str, object]] = []
+    for credential in page.items:
+        record = credential.to_api()
+        record["health_state"] = derive_credential_health_state(
+            credential, as_of=as_of
+        )
+        credentials.append(record)
+    return {"credentials": credentials}
 
 
 @router.post("/credentials", status_code=status.HTTP_201_CREATED)
