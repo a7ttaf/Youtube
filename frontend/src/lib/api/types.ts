@@ -989,6 +989,40 @@ export type RankedEntry = {
   deduction_amount_usd: MoneyString | null;
 };
 
+// ============================================================================
+// Purpose: TypeScript mirror of the backend GET /revenue/scopes JSON contract
+//   consumed by the Command Center scope selector. The endpoint returns ONLY the
+//   rollup scopes the viewer is VIEW_REVENUE-authorized for (global / their
+//   sectors / their companies), so the selector cannot offer an out-of-scope org
+//   unit (org-structure leak) or a dead option that 403s on the rollup read.
+//   `scope_id` is null for the global option and the org-unit id otherwise; the
+//   id/label pair threads straight into the net-revenue + rankings reads. Fields
+//   are matched 1:1 against RevenueScopeOption.to_api() (not guessed).
+// Standards: Read-only typed boundary at the API surface; no logic here. No
+//   client-side authorization is invented — the backend VIEW_REVENUE gate is
+//   authoritative and the option set is the fail-closed source of truth.
+// Connections:
+//   - File: backend/ums_smart_revenue/finance/revenue_scopes.py
+//       RevenueScopeOption.to_api() -> RevenueScopeOption
+//   - File: backend/ums_smart_revenue/api/revenue.py
+//       list_authorized_revenue_scopes() -> GET /revenue/scopes {scopes}
+// ============================================================================
+
+// One authorized rollup scope option. scope_type is "global" | "sector" |
+// "company"; scope_id is null only for the global option (the org-unit id
+// otherwise). label resolves to the org-unit name with a raw-id fallback.
+// Source: RevenueScopeOption.to_api() (finance/revenue_scopes.py).
+export type RevenueScopeOption = {
+  scope_type: string;
+  scope_id: string | null;
+  label: string;
+};
+
+// GET /revenue/scopes. Source: list_authorized_revenue_scopes() (api/revenue.py).
+export type RevenueScopesResponse = {
+  scopes: RevenueScopeOption[];
+};
+
 // GET /revenue/months/{month}/rankings. Source: MonthRankingsSummary.to_api()
 // plus the route-level allocation_source/committed_run additions.
 export type MonthRankingsResponse = {

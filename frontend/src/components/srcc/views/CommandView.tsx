@@ -12,6 +12,7 @@ import type {
   OutsideCmsResponse,
   RankedEntry,
   RankingMetric,
+  RevenueScopeOption,
   SmartAlert,
   SmartAlertSeverity,
   SmartAlertsSummary,
@@ -20,6 +21,7 @@ import { useChannelIssues } from "@/lib/api/useChannelIssues";
 import { useNetRevenue } from "@/lib/api/useNetRevenue";
 import { useOutsideCmsChannels } from "@/lib/api/useOutsideCmsChannels";
 import { useRankings } from "@/lib/api/useRankings";
+import { useRevenueScopes } from "@/lib/api/useRevenueScopes";
 import { useSmartAlerts } from "@/lib/api/useSmartAlerts";
 import {
   CLOSE_STEPS,
@@ -63,12 +65,55 @@ type ScopeOption = {
   scopeId: string | null;
 };
 
-// Global to start (per the task). Scoped options are listed so the selector
-// shape matches the eventual org hierarchy; they pass scope_type/scope_id
-// straight through to the backend, which resolves + authorizes them.
-const SCOPE_OPTIONS: ScopeOption[] = [
-  { label: "UMS Holding (global)", scopeType: "global", scopeId: null },
-];
+// ============================================================================
+// Purpose: Build a stable identity key for a scope selection so the selector and
+//   the scope state can survive an async option-list change (the fetched option
+//   set arrives after the first render). The key is the scope_type alone for the
+//   global option (no id) and `type:id` otherwise — this is the <option> value
+//   AND the lookup key when an onChange fires.
+// Standards: Pure helper; no money, no authorization. Global carries no scope_id.
+// Blast Radius: None detected (UI selection identity only).
+// ============================================================================
+const scopeOptionKey = (scopeType: string, scopeId: string | null): string => {
+  return scopeId ? `${scopeType}:${scopeId}` : scopeType;
+};
+
+// The guaranteed fallback when the authorized-scope fetch is loading, errors, or
+// returns nothing: a single GLOBAL option. A scoped viewer with no global grant
+// never sees this injected on top of a successful response — it is ONLY the
+// fail-open default so the screen renders while the real, fail-closed option set
+// (which the backend returns with global present ONLY when authorized) loads. The
+// panels themselves fail-closed on the actual scoped reads.
+const GLOBAL_SCOPE_FALLBACK: ScopeOption = {
+  label: "Global",
+  scopeType: "global",
+  scopeId: null,
+};
+
+// ============================================================================
+// Purpose: Resolve the scope selector's options from the authorized-scopes hook
+//   state. On a successful, non-empty fetch the options ARE the viewer's
+//   authorized scopes verbatim (the backend already includes global only when
+//   authorized, so a scoped viewer correctly gets no global option — the
+//   anti-scope-leak guarantee). While loading, on a 403/error, or on an empty
+//   list, fall back to global-only so the screen never blocks.
+// Standards: Pure mapping; no client-side authorization invented — the fetched
+//   set is the fail-closed source of truth. No money handling here.
+// Blast Radius: Authorization (the selector's option source). No mutation.
+// Connections:
+//   - File: frontend/src/lib/api/useRevenueScopes.ts -> the option source.
+//   - File: frontend/src/lib/api/types.ts -> RevenueScopeOption.
+// ============================================================================
+const resolveScopeOptions = (scopes: RevenueScopeOption[] | null): ScopeOption[] => {
+  if (!scopes || scopes.length === 0) {
+    return [GLOBAL_SCOPE_FALLBACK];
+  }
+  return scopes.map((scope) => ({
+    label: scope.label,
+    scopeType: scope.scope_type,
+    scopeId: scope.scope_id,
+  }));
+};
 
 const ALLOCATION_SOURCE_COPY: Record<
   NetRevenueResponse["allocation_source"],
@@ -91,13 +136,13 @@ const STATUS_KEYWORD_TONE: Record<string, Severity> = {
 };
 
 /** Map a month/channel status string to a design-system badge tone. */
-function statusTone(status: string): Severity { // skipcq: JS-0067, JS-R1005
+const statusTone = (status: string): Severity => {
   const normalized = status.toUpperCase();
   for (const [keyword, tone] of Object.entries(STATUS_KEYWORD_TONE)) {
     if (normalized.includes(keyword)) return tone;
   }
   return "blue";
-}
+};
 
 /**
  * Human-readable confidence badge. Renders the resolved label + tone from the
@@ -106,18 +151,18 @@ function statusTone(status: string): Severity { // skipcq: JS-0067, JS-R1005
  * assistive tech. Channel rows carry no separate API human label, so the helper
  * falls back to its prefix map for these.
  */
-function ConfidenceBadge({ code }: { code: string }) { // skipcq: JS-0067
+const ConfidenceBadge = ({ code }: { code: string }) => {
   const { label, tone } = confidenceDisplay(code);
   return (
     <span title={code} aria-label={`Confidence: ${code}`}>
       <Badge tone={tone}>{label}</Badge>
     </span>
   );
-}
+};
 
 // Map an alert severity to a design-system badge tone (HIGH -> red, MEDIUM ->
 // amber, LOW -> blue). Unknown severities fall back to blue.
-function severityTone(severity: SmartAlertSeverity | string): Severity { // skipcq: JS-0067
+const severityTone = (severity: SmartAlertSeverity | string): Severity => {
   switch (severity) {
     case "HIGH":
       return "red";
@@ -128,252 +173,21 @@ function severityTone(severity: SmartAlertSeverity | string): Severity { // skip
     default:
       return "blue";
   }
-}
+};
 
 /** Human-facing label for a channel row (its YouTube channel id for now). */
-function channelDisplayName(channel: ChannelNetRevenue): string { // skipcq: JS-0067
+const channelDisplayName = (channel: ChannelNetRevenue): string => {
   return channel.youtube_channel_id;
-}
+};
 
 /** Two-letter avatar initials derived from a channel's id. */
-function channelAvatar(channel: ChannelNetRevenue): string { // skipcq: JS-0067
+const channelAvatar = (channel: ChannelNetRevenue): string => {
   const id = channel.youtube_channel_id.replace(/[^a-zA-Z0-9]/g, "");
   return (id.slice(-2) || "--").toUpperCase();
-}
-
-/**
- * Command Center screen: month/scope filters, the real net-revenue status strip
- * and channel table, the smart-alerts panel, and the per-channel explanation.
- */
-export default function CommandView({ // skipcq: JS-0067, JS-R1005
-  canViewFinance,
-  canViewAnalytics = false,
-}: {
-  canViewFinance: boolean;
-  // Optional so the existing prop contract (canViewFinance-only) stays valid; a
-  // missing flag fails closed (false) — the analytics monitor never mounts and
-  // fires no request without an explicit, backend-derived grant.
-  canViewAnalytics?: boolean;
-}) {
-  const [month, setMonth] = useState<string>(DEFAULT_MONTH);
-  const [scopeIndex, setScopeIndex] = useState<number>(0);
-  const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
-
-  // FIX: Replaced the non-null assertion on SCOPE_OPTIONS[0] with explicit
-  // narrowing; the selected index may be out of range, and the fallback is the
-  // first option, which must exist (the constant is defined non-empty above).
-  const fallbackScope = SCOPE_OPTIONS[0];
-  if (!fallbackScope) {
-    throw new Error("SCOPE_OPTIONS must define at least one scope option");
-  }
-  const scope = SCOPE_OPTIONS[scopeIndex] ?? fallbackScope;
-  const { data, loading, error, reload } = useNetRevenue({
-    month,
-    scopeType: scope.scopeType,
-    scopeId: scope.scopeId,
-  });
-
-  const currency = data?.currency ?? "USD";
-  const channels = useMemo(() => data?.channels ?? [], [data]);
-  const selectedChannel =
-    channels.find((c) => c.youtube_channel_id === selectedChannelId) ??
-    channels[0] ??
-    null;
-
-  return (
-    <>
-      {/* month + scope selector */}
-      <section className="control-row" aria-label="Net revenue filters" style={{ marginBottom: 16 }}>
-        <select
-          className="control"
-          aria-label="Month"
-          value={month}
-          onChange={(e) => {
-            setMonth(e.target.value);
-            setSelectedChannelId(null);
-          }}
-        >
-          {MONTH_OPTIONS.map((m) => (
-            <option key={m} value={m}>
-              {m}
-            </option>
-          ))}
-        </select>
-        <select
-          className="control"
-          aria-label="Scope"
-          value={scopeIndex}
-          onChange={(e) => {
-            setScopeIndex(Number(e.target.value));
-            setSelectedChannelId(null);
-          }}
-        >
-          {SCOPE_OPTIONS.map((s, index) => (
-            <option key={s.label} value={index}>
-              {s.label}
-            </option>
-          ))}
-        </select>
-        <button
-          type="button"
-          className="icon-button"
-          aria-label="Refresh net revenue"
-          title="Refresh net revenue"
-          onClick={reload}
-        >
-          ↻
-        </button>
-      </section>
-
-      {/* status strip — REAL net-revenue summary */}
-      <NetRevenueStatusStrip
-        data={data}
-        loading={loading}
-        error={error}
-        canViewFinance={canViewFinance}
-        currency={currency}
-      />
-
-      {/* smart-alerts / problem panel — REAL data, fails independently */}
-      <SmartAlertsPanel month={month} />
-
-      {/* outside-CMS + channel-issues monitor — REAL data, fails independently,
-          no-fetch-when-restricted (mounts only when canViewAnalytics) */}
-      <OutsideCmsMonitorPanel canViewAnalytics={canViewAnalytics} />
-
-      {/* company/sector/channel rankings — REAL data, fails independently,
-          finance-gated (shows money; mounts only when canViewFinance) */}
-      <RankingsPanel
-        month={month}
-        canViewFinance={canViewFinance}
-        scopeType={scope.scopeType}
-        scopeId={scope.scopeId}
-      />
-
-      <CommandWorkspace
-        data={data}
-        loading={loading}
-        error={error}
-        canViewFinance={canViewFinance}
-        currency={currency}
-        channelCount={channels.length}
-        selectedChannel={selectedChannel}
-        selectedChannelId={selectedChannel?.youtube_channel_id ?? null}
-        month={month}
-        onSelect={setSelectedChannelId}
-      />
-    </>
-  );
-}
-
-/**
- * Two-column Command Center workspace: the real channel table plus mock issue,
- * close, explanation, and export-readiness panels. Splits into named panels so
- * each JSX subtree stays shallow.
- */
-function CommandWorkspace({ // skipcq: JS-0067
-  data,
-  loading,
-  error,
-  canViewFinance,
-  currency,
-  channelCount,
-  selectedChannel,
-  selectedChannelId,
-  month,
-  onSelect,
-}: {
-  data: NetRevenueResponse | null;
-  loading: boolean;
-  error: ApiError | Error | null;
-  canViewFinance: boolean;
-  currency: string;
-  channelCount: number;
-  selectedChannel: ChannelNetRevenue | null;
-  selectedChannelId: string | null;
-  month: string;
-  onSelect: (id: string) => void;
-}) {
-  return (
-    <section className="workspace" aria-label="Command workspace">
-      <div className="work-left">
-        <ChannelRevenuePanel
-          data={data}
-          loading={loading}
-          error={error}
-          canViewFinance={canViewFinance}
-          currency={currency}
-          channelCount={channelCount}
-          selectedChannelId={selectedChannelId}
-          onSelect={onSelect}
-        />
-
-        {/* issue + close split — still mock data (not part of net-revenue API) */}
-        <div className="layout-split">
-          <IssueQueuePanel />
-          <MonthCloseControlsPanel />
-        </div>
-      </div>
-
-      {/* explain + readiness */}
-      <aside className="side-stack" aria-label="Explanation and readiness">
-        <ExplainCard
-          selectedChannel={selectedChannel}
-          canViewFinance={canViewFinance}
-          currency={currency}
-          loading={loading}
-          month={month}
-        />
-        <ExportReadinessPanel />
-      </aside>
-    </section>
-  );
-}
-
-/** Channel Revenue Table panel: header badge plus the real net-revenue table. */
-function ChannelRevenuePanel({ // skipcq: JS-0067
-  data,
-  loading,
-  error,
-  canViewFinance,
-  currency,
-  channelCount,
-  selectedChannelId,
-  onSelect,
-}: {
-  data: NetRevenueResponse | null;
-  loading: boolean;
-  error: ApiError | Error | null;
-  canViewFinance: boolean;
-  currency: string;
-  channelCount: number;
-  selectedChannelId: string | null;
-  onSelect: (id: string) => void;
-}) {
-  return (
-    <section className="panel channel-table" aria-labelledby="channelTableTitle">
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong id="channelTableTitle">Channel Revenue Table</strong>
-          <span>Money values are source-linked and permission-gated</span>
-        </div>
-        <Badge tone="blue">{`${channelCount} channels`}</Badge>
-      </div>
-      <NetRevenueChannelTable
-        data={data}
-        loading={loading}
-        error={error}
-        canViewFinance={canViewFinance}
-        currency={currency}
-        selectedChannelId={selectedChannelId}
-        onSelect={onSelect}
-      />
-    </section>
-  );
-}
+};
 
 /** Mock Issue Queue panel (not yet wired to the API). */
-function IssueQueuePanel() { // skipcq: JS-0067
+const IssueQueuePanel = () => {
   return (
     <section className="panel" aria-labelledby="issuesTitle">
       <div className="panel-header">
@@ -396,10 +210,22 @@ function IssueQueuePanel() { // skipcq: JS-0067
       </div>
     </section>
   );
-}
+};
+
+/** Trailing control for a close step: a status badge or an action button. */
+const CloseStepAction = ({ step }: { step: (typeof CLOSE_STEPS)[number] }) => {
+  if (step.badge) {
+    return <Badge tone={step.badge.tone}>{step.badge.text}</Badge>;
+  }
+  return (
+    <button className="mini-button" type="button">
+      {step.action}
+    </button>
+  );
+};
 
 /** Mock Month Close Controls panel (not yet wired to the API). */
-function MonthCloseControlsPanel() { // skipcq: JS-0067
+const MonthCloseControlsPanel = () => {
   return (
     <section className="panel" aria-labelledby="closeTitle">
       <div className="panel-header">
@@ -423,73 +249,10 @@ function MonthCloseControlsPanel() { // skipcq: JS-0067
       </div>
     </section>
   );
-}
-
-/** Trailing control for a close step: a status badge or an action button. */
-function CloseStepAction({ step }: { step: (typeof CLOSE_STEPS)[number] }) { // skipcq: JS-0067
-  if (step.badge) {
-    return <Badge tone={step.badge.tone}>{step.badge.text}</Badge>;
-  }
-  return (
-    <button className="mini-button" type="button">
-      {step.action}
-    </button>
-  );
-}
-
-/** Net-revenue explanation card for the selected channel (or an empty state). */
-function ExplainCard({ // skipcq: JS-0067
-  selectedChannel,
-  canViewFinance,
-  currency,
-  loading,
-  month,
-}: {
-  selectedChannel: ChannelNetRevenue | null;
-  canViewFinance: boolean;
-  currency: string;
-  loading: boolean;
-  month: string;
-}) {
-  return (
-    <section className="panel explain-card">
-      <div className="explain-head">
-        <div>
-          <h2>{selectedChannel ? channelDisplayName(selectedChannel) : "No channel"}</h2>
-          <p>Net revenue explanation, {month}</p>
-        </div>
-        {selectedChannel ? (
-          <ConfidenceBadge code={selectedChannel.confidence} />
-        ) : (
-          <Badge tone="blue">—</Badge>
-        )}
-      </div>
-      <div className="formula" role="text" aria-label="Revenue formula">
-        net = adjusted_gross - channel_direct_deductions - account_allocated_deductions
-      </div>
-      <div className="explain-list" role="list">
-        {selectedChannel ? (
-          <ChannelExplainRows
-            channel={selectedChannel}
-            canViewFinance={canViewFinance}
-            currency={currency}
-          />
-        ) : (
-          <ItemRow
-            tone="blue"
-            title="No channel selected"
-            sub={loading ? "Loading net revenue…" : "No channels in this scope/month"}
-            className="explain-row"
-            trailing={<span className="muted">—</span>}
-          />
-        )}
-      </div>
-    </section>
-  );
-}
+};
 
 /** Mock Export Readiness panel (not yet wired to the API). */
-function ExportReadinessPanel() { // skipcq: JS-0067
+const ExportReadinessPanel = () => {
   return (
     <section className="panel">
       <div className="panel-header">
@@ -512,34 +275,148 @@ function ExportReadinessPanel() { // skipcq: JS-0067
       </div>
     </section>
   );
-}
+};
 
 // ============================================================================
 // Purpose: Map an ApiError/Error to friendly UI copy. 403 -> no-permission
 //   message (matches the finance fail-closed model); other ApiError -> the
 //   typed status + message; non-ApiError -> generic network failure.
 // ============================================================================
-function describeError(error: ApiError | Error): { title: string; detail: string } { // skipcq: JS-0067, JS-R1005
+const extractApiErrorDetail = (error: ApiError): string => {
+  const body = error.body as { detail?: unknown } | null;
+  if (body && typeof body.detail === "string") return body.detail;
+  return error.message;
+};
+
+const describeError = (error: ApiError | Error): { title: string; detail: string } => {
   if (error instanceof ApiError) {
-    if (error.status === 403) {
+    if (error.status === 403)
       return {
         title: "No permission",
         detail: "Your role cannot view net revenue for this month or scope.",
       };
-    }
-    const detail =
-      typeof error.body === "object" &&
-      error.body !== null &&
-      typeof (error.body as { detail?: unknown }).detail === "string"
-        ? (error.body as { detail: string }).detail
-        : error.message;
-    return { title: `Request failed (${error.status})`, detail };
+    return { title: `Request failed (${error.status})`, detail: extractApiErrorDetail(error) };
   }
   return {
     title: "Network error",
     detail: error.message || "Could not reach the revenue service.",
   };
-}
+};
+
+// Header badge: surfaces the overall status + highest severity at a glance, and
+// degrades to Loading / Error / No permission without breaking the panel header.
+const alertErrorBadge = (error: ApiError | Error): { tone: Severity; children: string } => {
+  const isForbidden = error instanceof ApiError && error.status === 403;
+  return { tone: isForbidden ? "blue" : "red", children: isForbidden ? "No permission" : "Error" };
+};
+
+const alertDataBadge = (data: SmartAlertsSummary): { tone: Severity; children: string } => {
+  if (data.status === "CLEAR") return { tone: "green", children: "Clear" };
+  const severity = data.highest_severity;
+  return {
+    tone: severity ? severityTone(severity) : "amber",
+    children: severity ?? "Attention",
+  };
+};
+
+const SmartAlertsHeaderBadge = ({
+  data,
+  loading,
+  error,
+}: {
+  data: SmartAlertsSummary | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+}) => {
+  if (error) return <Badge {...alertErrorBadge(error)} />;
+  if (loading && !data) return <Badge tone="blue">Loading</Badge>;
+  if (!data) return <Badge tone="amber">Empty</Badge>;
+  return <Badge {...alertDataBadge(data)} />;
+};
+
+// Read alerts defensively: a missing/non-array field is treated as "no alerts"
+// rather than throwing inside the panel. Extracted to keep SmartAlertsBody's
+// cyclomatic complexity below the DeepSource medium-risk threshold.
+const safeAlerts = (data: SmartAlertsSummary | null): SmartAlert[] =>
+  data && Array.isArray(data.alerts) ? data.alerts : [];
+
+const emptyAlertSubText = (data: SmartAlertsSummary | null): string =>
+  data
+    ? `Status ${data.status} — nothing needs attention for ${data.month}.`
+    : "No smart-alert data returned.";
+
+/** Body of the smart-alerts panel: error, loading, empty, and alert-row states. */
+const SmartAlertsBody = ({
+  data,
+  loading,
+  error,
+}: {
+  data: SmartAlertsSummary | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+}) => {
+  if (error) {
+    const { title, detail } = describeError(error);
+    return (
+      <div className="issue-list" role="alert">
+        <ItemRow
+          tone="blue"
+          title={title}
+          sub={detail}
+          trailing={<Badge tone="blue">—</Badge>}
+        />
+      </div>
+    );
+  }
+
+  if (!data)
+    return loading ? (
+      <div className="issue-list" role="list" aria-busy="true">
+        <ItemRow
+          tone="blue"
+          title="Loading smart alerts…"
+          sub="Aggregating payment, bank, lock, and override signals"
+          trailing={<Badge tone="blue">Loading</Badge>}
+        />
+      </div>
+    ) : (
+      <div className="issue-list" role="list">
+        <ItemRow
+          tone="green"
+          title="No active alerts"
+          sub="No smart-alert data returned."
+          trailing={<Badge tone="green">Clear</Badge>}
+        />
+      </div>
+    );
+
+  const alerts = safeAlerts(data);
+  if (alerts.length === 0)
+    return (
+      <div className="issue-list" role="list">
+        <ItemRow
+          tone="green"
+          title="No active alerts"
+          sub={emptyAlertSubText(data)}
+          trailing={<Badge tone="green">Clear</Badge>}
+        />
+      </div>
+    );
+
+  return (
+    <div className="issue-list" role="list">
+      {alerts.map((alert: SmartAlert) => (
+        <ItemRow
+          key={alert.code}
+          tone={severityTone(alert.severity)}
+          title={alert.message}
+          sub={`${alert.source} · ${alert.code}`}
+          trailing={<Badge tone={severityTone(alert.severity)}>{alert.severity}</Badge>}
+        />
+      ))}
+    </div>
+  );
+};
 
 // ============================================================================
 // Purpose: Smart Alerts / Problem Panel for the Command Center. Fetches the
@@ -561,7 +438,7 @@ function describeError(error: ApiError | Error): { title: string; detail: string
 //   - File: frontend/src/lib/api/types.ts -> SmartAlertsSummary contract.
 //   - File: backend/ums_smart_revenue/api/revenue.py:844 get_month_smart_alerts.
 // ============================================================================
-function SmartAlertsPanel({ month }: { month: string }) { // skipcq: JS-0067
+const SmartAlertsPanel = ({ month }: { month: string }) => {
   const { data, loading, error, reload } = useSmartAlerts({ month });
 
   return (
@@ -585,113 +462,87 @@ function SmartAlertsPanel({ month }: { month: string }) { // skipcq: JS-0067
       <SmartAlertsBody data={data} loading={loading} error={error} />
     </section>
   );
-}
+};
 
-// Header badge: surfaces the overall status + highest severity at a glance, and
-// degrades to Loading / Error / No permission without breaking the panel header.
-function SmartAlertsHeaderBadge({ // skipcq: JS-0067, JS-R1005
-  data,
-  loading,
-  error,
-}: {
-  data: SmartAlertsSummary | null;
-  loading: boolean;
-  error: ApiError | Error | null;
-}) {
-  if (error) {
-    const isForbidden = error instanceof ApiError && error.status === 403;
-    return <Badge tone={isForbidden ? "blue" : "red"}>{isForbidden ? "No permission" : "Error"}</Badge>;
-  }
-  if (loading && !data) {
-    return <Badge tone="blue">Loading</Badge>;
-  }
-  if (!data) {
-    return <Badge tone="amber">Empty</Badge>;
-  }
-  if (data.status === "CLEAR") {
-    return <Badge tone="green">Clear</Badge>;
-  }
-  return (
-    <Badge tone={data.highest_severity ? severityTone(data.highest_severity) : "amber"}>
-      {data.highest_severity ?? "Attention"}
-    </Badge>
-  );
-}
+// Build the metric-cell descriptors for the net-revenue status strip. Extracted
+// from NetRevenueStatusStrip so the component's cyclomatic complexity stays
+// below the DeepSource medium-risk threshold — the ternaries and nullish
+// coalescing live here instead.
+type RevenueMetric = {
+  id: string;
+  tone: string;
+  label: string;
+  value: string;
+  badge: { text: string; tone: Severity };
+  note: [string, string];
+  finance: boolean;
+  locked?: boolean;
+};
 
-/** Body of the smart-alerts panel: error, loading, empty, and alert-row states. */
-function SmartAlertsBody({ // skipcq: JS-0067, JS-R1005
-  data,
-  loading,
-  error,
-}: {
-  data: SmartAlertsSummary | null;
-  loading: boolean;
-  error: ApiError | Error | null;
-}) {
-  if (error) {
-    const { title, detail } = describeError(error);
-    return (
-      <div className="issue-list" role="alert">
-        <ItemRow
-          tone="blue"
-          title={title}
-          sub={detail}
-          trailing={<Badge tone="blue">—</Badge>}
-        />
-      </div>
-    );
-  }
-
-  if (loading && !data) {
-    return (
-      <div className="issue-list" role="list" aria-busy="true">
-        <ItemRow
-          tone="blue"
-          title="Loading smart alerts…"
-          sub="Aggregating payment, bank, lock, and override signals"
-          trailing={<Badge tone="blue">Loading</Badge>}
-        />
-      </div>
-    );
-  }
-
-  // Read alerts defensively: a missing/non-array field (e.g. an unexpected body
-  // shape) is treated as "no alerts" rather than throwing inside the panel.
-  const alerts = Array.isArray(data?.alerts) ? data.alerts : [];
-  if (!data || alerts.length === 0) {
-    return (
-      <div className="issue-list" role="list">
-        <ItemRow
-          tone="green"
-          title="No active alerts"
-          sub={
-            data
-              ? `Status ${data.status} — nothing needs attention for ${data.month}.`
-              : "No smart-alert data returned."
-          }
-          trailing={<Badge tone="green">Clear</Badge>}
-        />
-      </div>
-    );
-  }
-
-  return (
-    <div className="issue-list" role="list">
-      {alerts.map((alert: SmartAlert) => (
-        <ItemRow
-          key={alert.code}
-          tone={severityTone(alert.severity)}
-          title={alert.message}
-          sub={`${alert.source} · ${alert.code}`}
-          trailing={<Badge tone={severityTone(alert.severity)}>{alert.severity}</Badge>}
-        />
-      ))}
-    </div>
-  );
-}
+const buildRevenueMetrics = (
+  data: NetRevenueResponse,
+  canViewFinance: boolean,
+  currency: string,
+): RevenueMetric[] => {
+  const allocation = ALLOCATION_SOURCE_COPY[data.allocation_source] ?? {
+    label: data.allocation_source,
+    tone: "blue" as Severity,
+  };
+  return [
+    {
+      id: "gross",
+      tone: "is-revenue",
+      label: "Adjusted gross",
+      value: financeDisplay(data.total_adjusted_gross_revenue_usd, canViewFinance, { currency }),
+      badge: { text: currency, tone: "green" },
+      note: [`${data.channel_count} channels`, `${data.calculated_channel_count} calculated`],
+      finance: true,
+    },
+    {
+      id: "net",
+      tone: "is-net",
+      label: "Net revenue",
+      value: financeDisplay(data.total_net_revenue_usd, canViewFinance, { currency }),
+      badge: { text: data.status, tone: statusTone(data.status) },
+      note: ["After deductions", `${data.missing_net_source_count} missing source`],
+      finance: true,
+    },
+    {
+      id: "deductions",
+      tone: "is-review",
+      label: "Deductions",
+      value: financeDisplay(data.total_deduction_amount_usd, canViewFinance, { currency }),
+      badge: { text: "Total", tone: "amber" },
+      note: [
+        canViewFinance
+          ? `Direct ${financeDisplay(data.total_channel_direct_deduction_amount_usd, canViewFinance, { currency })}`
+          : RESTRICTED_FINANCE_VALUE,
+        canViewFinance
+          ? `Allocated ${financeDisplay(data.total_account_allocated_deduction_amount_usd, canViewFinance, { currency })}`
+          : "",
+      ],
+      finance: true,
+    },
+    {
+      id: "allocation",
+      tone: "is-close",
+      label: "Allocation source",
+      value: allocation.label,
+      badge: { text: data.status, tone: statusTone(data.status) },
+      note: [
+        data.committed_run?.commit_version != null
+          ? `Snapshot v${data.committed_run.commit_version}`
+          : "Computed at read time",
+        `Status ${data.status}`,
+      ],
+      finance: false,
+      locked: data.allocation_source === "committed_snapshot",
+    },
+  ];
+};
 
 /** Top metric strip summarising the month's gross, net, deductions, and allocation source. */
-function NetRevenueStatusStrip({ // skipcq: JS-0067, JS-R1005
+const NetRevenueStatusStrip = ({
   data,
   loading,
   error,
@@ -703,7 +554,7 @@ function NetRevenueStatusStrip({ // skipcq: JS-0067, JS-R1005
   error: ApiError | Error | null;
   canViewFinance: boolean;
   currency: string;
-}) {
+}) => {
   if (error) {
     const { title, detail } = describeError(error);
     return (
@@ -759,71 +610,7 @@ function NetRevenueStatusStrip({ // skipcq: JS-0067, JS-R1005
     );
   }
 
-  const allocation = ALLOCATION_SOURCE_COPY[data.allocation_source] ?? {
-    label: data.allocation_source,
-    tone: "blue" as Severity,
-  };
-
-  const metrics: Array<{
-    id: string;
-    tone: string;
-    label: string;
-    value: string;
-    badge: { text: string; tone: Severity };
-    note: [string, string];
-    finance: boolean;
-    locked?: boolean;
-  }> = [
-    {
-      id: "gross",
-      tone: "is-revenue",
-      label: "Adjusted gross",
-      value: financeDisplay(data.total_adjusted_gross_revenue_usd, canViewFinance, { currency }),
-      badge: { text: currency, tone: "green" },
-      note: [`${data.channel_count} channels`, `${data.calculated_channel_count} calculated`],
-      finance: true,
-    },
-    {
-      id: "net",
-      tone: "is-net",
-      label: "Net revenue",
-      value: financeDisplay(data.total_net_revenue_usd, canViewFinance, { currency }),
-      badge: { text: data.status, tone: statusTone(data.status) },
-      note: ["After deductions", `${data.missing_net_source_count} missing source`],
-      finance: true,
-    },
-    {
-      id: "deductions",
-      tone: "is-review",
-      label: "Deductions",
-      value: financeDisplay(data.total_deduction_amount_usd, canViewFinance, { currency }),
-      badge: { text: "Total", tone: "amber" },
-      note: [
-        canViewFinance
-          ? `Direct ${financeDisplay(data.total_channel_direct_deduction_amount_usd, canViewFinance, { currency })}`
-          : RESTRICTED_FINANCE_VALUE,
-        canViewFinance
-          ? `Allocated ${financeDisplay(data.total_account_allocated_deduction_amount_usd, canViewFinance, { currency })}`
-          : "",
-      ],
-      finance: true,
-    },
-    {
-      id: "allocation",
-      tone: "is-close",
-      label: "Allocation source",
-      value: allocation.label,
-      badge: { text: data.status, tone: statusTone(data.status) },
-      note: [
-        data.committed_run?.commit_version != null
-          ? `Snapshot v${data.committed_run.commit_version}`
-          : "Computed at read time",
-        `Status ${data.status}`,
-      ],
-      finance: false,
-      locked: data.allocation_source === "committed_snapshot",
-    },
-  ];
+  const metrics = buildRevenueMetrics(data, canViewFinance, currency);
 
   return (
     <section className="status-strip" aria-label="Revenue summary">
@@ -849,82 +636,10 @@ function NetRevenueStatusStrip({ // skipcq: JS-0067, JS-R1005
       ))}
     </section>
   );
-}
-
-/** Selectable per-channel revenue table with error, loading, and empty states. */
-function NetRevenueChannelTable({ // skipcq: JS-0067, JS-R1005
-  data,
-  loading,
-  error,
-  canViewFinance,
-  currency,
-  selectedChannelId,
-  onSelect,
-}: {
-  data: NetRevenueResponse | null;
-  loading: boolean;
-  error: ApiError | Error | null;
-  canViewFinance: boolean;
-  currency: string;
-  selectedChannelId: string | null;
-  onSelect: (id: string) => void;
-}) {
-  if (error) {
-    const { title, detail } = describeError(error);
-    return (
-      <div className="table-wrap" role="alert">
-        <div style={{ padding: 16 }}>
-          <strong>{title}</strong>
-          <p className="item-sub">{detail}</p>
-        </div>
-      </div>
-    );
-  }
-
-  if (loading && !data) {
-    return (
-      <div className="table-wrap" aria-busy="true">
-        <div style={{ padding: 16 }} className="item-sub">
-          Loading channels…
-        </div>
-      </div>
-    );
-  }
-
-  const channels = data?.channels ?? [];
-  if (channels.length === 0) {
-    return (
-      <div className="table-wrap">
-        <div style={{ padding: 16 }} className="item-sub">
-          No channels for this month and scope.
-        </div>
-      </div>
-    );
-  }
-
-  return (
-    <div className="table-wrap">
-      <table role="grid" aria-label="Channel revenue">
-        <ChannelTableHead />
-        <tbody>
-          {channels.map((c) => (
-            <ChannelRow
-              key={c.youtube_channel_id}
-              channel={c}
-              canViewFinance={canViewFinance}
-              currency={currency}
-              selected={c.youtube_channel_id === selectedChannelId}
-              onSelect={onSelect}
-            />
-          ))}
-        </tbody>
-      </table>
-    </div>
-  );
-}
+};
 
 /** Static header row for the channel revenue table. */
-function ChannelTableHead() { // skipcq: JS-0067
+const ChannelTableHead = () => {
   return (
     <thead>
       <tr>
@@ -938,10 +653,23 @@ function ChannelTableHead() { // skipcq: JS-0067
       </tr>
     </thead>
   );
-}
+};
+
+/** Avatar + name + source-kind cell for a channel row. */
+const ChannelNameCell = ({ channel }: { channel: ChannelNetRevenue }) => {
+  return (
+    <span className="channel-cell">
+      <span className="avatar">{channelAvatar(channel)}</span>
+      <span className="channel-copy">
+        <span className="channel-name">{channelDisplayName(channel)}</span>
+        <span className="channel-id">{channel.primary_source_kind ?? "no source"}</span>
+      </span>
+    </span>
+  );
+};
 
 /** Single selectable channel row: name, status, permission-gated money, and issues. */
-function ChannelRow({ // skipcq: JS-0067
+const ChannelRow = ({
   channel,
   canViewFinance,
   currency,
@@ -953,7 +681,7 @@ function ChannelRow({ // skipcq: JS-0067
   currency: string;
   selected: boolean;
   onSelect: (id: string) => void;
-}) {
+}) => {
   return (
     <tr
       role="row"
@@ -996,23 +724,127 @@ function ChannelRow({ // skipcq: JS-0067
       </td>
     </tr>
   );
-}
+};
 
-/** Avatar + name + source-kind cell for a channel row. */
-function ChannelNameCell({ channel }: { channel: ChannelNetRevenue }) { // skipcq: JS-0067
+/** Selectable per-channel revenue table with error, loading, and empty states. */
+const NetRevenueChannelTable = ({
+  data,
+  loading,
+  error,
+  canViewFinance,
+  currency,
+  selectedChannelId,
+  onSelect,
+}: {
+  data: NetRevenueResponse | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+  canViewFinance: boolean;
+  currency: string;
+  selectedChannelId: string | null;
+  onSelect: (id: string) => void;
+}) => {
+  if (error) {
+    const { title, detail } = describeError(error);
+    return (
+      <div className="table-wrap" role="alert">
+        <div style={{ padding: 16 }}>
+          <strong>{title}</strong>
+          <p className="item-sub">{detail}</p>
+        </div>
+      </div>
+    );
+  }
+
+  if (!data)
+    return loading ? (
+      <div className="table-wrap" aria-busy="true">
+        <div style={{ padding: 16 }} className="item-sub">
+          Loading channels…
+        </div>
+      </div>
+    ) : (
+      <div className="table-wrap">
+        <div style={{ padding: 16 }} className="item-sub">
+          No channels for this month and scope.
+        </div>
+      </div>
+    );
+
+  if (data.channels.length === 0)
+    return (
+      <div className="table-wrap">
+        <div style={{ padding: 16 }} className="item-sub">
+          No channels for this month and scope.
+        </div>
+      </div>
+    );
+
   return (
-    <span className="channel-cell">
-      <span className="avatar">{channelAvatar(channel)}</span>
-      <span className="channel-copy">
-        <span className="channel-name">{channelDisplayName(channel)}</span>
-        <span className="channel-id">{channel.primary_source_kind ?? "no source"}</span>
-      </span>
-    </span>
+    <div className="table-wrap">
+      <table role="grid" aria-label="Channel revenue">
+        <ChannelTableHead />
+        <tbody>
+          {data.channels.map((c) => (
+            <ChannelRow
+              key={c.youtube_channel_id}
+              channel={c}
+              canViewFinance={canViewFinance}
+              currency={currency}
+              selected={c.youtube_channel_id === selectedChannelId}
+              onSelect={onSelect}
+            />
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
-}
+};
+
+/** Channel Revenue Table panel: header badge plus the real net-revenue table. */
+const ChannelRevenuePanel = ({
+  data,
+  loading,
+  error,
+  canViewFinance,
+  currency,
+  channelCount,
+  selectedChannelId,
+  onSelect,
+}: {
+  data: NetRevenueResponse | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+  canViewFinance: boolean;
+  currency: string;
+  channelCount: number;
+  selectedChannelId: string | null;
+  onSelect: (id: string) => void;
+}) => {
+  return (
+    <section className="panel channel-table" aria-labelledby="channelTableTitle">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong id="channelTableTitle">Channel Revenue Table</strong>
+          <span>Money values are source-linked and permission-gated</span>
+        </div>
+        <Badge tone="blue">{`${channelCount} channels`}</Badge>
+      </div>
+      <NetRevenueChannelTable
+        data={data}
+        loading={loading}
+        error={error}
+        canViewFinance={canViewFinance}
+        currency={currency}
+        selectedChannelId={selectedChannelId}
+        onSelect={onSelect}
+      />
+    </section>
+  );
+};
 
 /** Explanation rows for the selected channel: gross, deductions, and resulting net. */
-function ChannelExplainRows({ // skipcq: JS-0067
+const ChannelExplainRows = ({
   channel,
   canViewFinance,
   currency,
@@ -1020,7 +852,7 @@ function ChannelExplainRows({ // skipcq: JS-0067
   channel: ChannelNetRevenue;
   canViewFinance: boolean;
   currency: string;
-}) {
+}) => {
   const rows: Array<{ key: string; tone: Severity; title: string; sub: string; value: string | null }> = [
     {
       key: "gross",
@@ -1070,61 +902,125 @@ function ChannelExplainRows({ // skipcq: JS-0067
       ))}
     </>
   );
-}
+};
 
-// ============================================================================
-// Purpose: Outside-CMS / channel-issues monitor for the Command Center. Wires
-//   the two VIEW_ANALYTICS-gated reads (GET /channels/outside-cms +
-//   GET /channels/issues) into one card that replaces the mock "Open issues" KPI
-//   and "Outside CMS" tile. NO-FETCH-WHEN-RESTRICTED: the hook-owning halves are
-//   mounted ONLY when canViewAnalytics, so a narrower principal fires ZERO
-//   requests and sees a restricted placeholder (AuditView gate pattern). A 403
-//   renders a denied state (NEVER masked as "no issues" — masking authz is
-//   forbidden); a 503/other error renders the typed request-failed copy. Each
-//   half owns its hook and fails INDEPENDENTLY (SmartAlertsPanel template).
-// Database/ORM: None (frontend) — consumes the backend analytics monitor reads.
-// Standards: No money is rendered here (both endpoints carry no finance cells),
-//   so no canViewFinance gating is needed. Read-only — no mutation. The backend
-//   403 stays authoritative and surfaces as denied copy.
-// Blast Radius: Authorization (analytics gating — UI never grants the surface
-//   without the backend capability). No finance number, no source-of-truth write.
-// Connections:
-//   - File: frontend/src/lib/api/useOutsideCmsChannels.ts -> the outside-cms hook.
-//   - File: frontend/src/lib/api/useChannelIssues.ts -> the channel-issues hook.
-//   - File: frontend/src/lib/api/types.ts -> OutsideCmsResponse/ChannelIssuesResponse.
-//   - File: backend/ums_smart_revenue/api/channels.py -> the two monitor routes.
-// ============================================================================
-function OutsideCmsMonitorPanel({ // skipcq: JS-0067
-  canViewAnalytics,
+/** Net-revenue explanation card for the selected channel (or an empty state). */
+const ExplainCard = ({
+  selectedChannel,
+  canViewFinance,
+  currency,
+  loading,
+  month,
 }: {
-  canViewAnalytics: boolean;
-}) {
+  selectedChannel: ChannelNetRevenue | null;
+  canViewFinance: boolean;
+  currency: string;
+  loading: boolean;
+  month: string;
+}) => {
   return (
-    <section
-      className="panel"
-      aria-labelledby="outsideCmsTitle"
-      style={{ marginBottom: 16 }}
-    >
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong id="outsideCmsTitle">Outside-CMS &amp; Channel Issues</strong>
-          <span>Coverage and registry-health signals (no money)</span>
+    <section className="panel explain-card">
+      <div className="explain-head">
+        <div>
+          <h2>{selectedChannel ? channelDisplayName(selectedChannel) : "No channel"}</h2>
+          <p>Net revenue explanation, {month}</p>
         </div>
-        <Badge tone={canViewAnalytics ? "blue" : "red"}>
-          {canViewAnalytics ? "Live" : "Restricted"}
-        </Badge>
+        {selectedChannel ? (
+          <ConfidenceBadge code={selectedChannel.confidence} />
+        ) : (
+          <Badge tone="blue">—</Badge>
+        )}
       </div>
-      {canViewAnalytics ? (
-        <OutsideCmsMonitorBody />
-      ) : (
-        <OutsideCmsRestrictedBand />
-      )}
+      <div className="formula" role="text" aria-label="Revenue formula">
+        net = adjusted_gross - channel_direct_deductions - account_allocated_deductions
+      </div>
+      <div className="explain-list" role="list">
+        {selectedChannel ? (
+          <ChannelExplainRows
+            channel={selectedChannel}
+            canViewFinance={canViewFinance}
+            currency={currency}
+          />
+        ) : (
+          <ItemRow
+            tone="blue"
+            title="No channel selected"
+            sub={loading ? "Loading net revenue…" : "No channels in this scope/month"}
+            className="explain-row"
+            trailing={<span className="muted">—</span>}
+          />
+        )}
+      </div>
     </section>
   );
-}
+};
+
+/**
+ * Two-column Command Center workspace: the real channel table plus mock issue,
+ * close, explanation, and export-readiness panels. Splits into named panels so
+ * each JSX subtree stays shallow.
+ */
+const CommandWorkspace = ({
+  data,
+  loading,
+  error,
+  canViewFinance,
+  currency,
+  channelCount,
+  selectedChannel,
+  selectedChannelId,
+  month,
+  onSelect,
+}: {
+  data: NetRevenueResponse | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+  canViewFinance: boolean;
+  currency: string;
+  channelCount: number;
+  selectedChannel: ChannelNetRevenue | null;
+  selectedChannelId: string | null;
+  month: string;
+  onSelect: (id: string) => void;
+}) => {
+  return (
+    <section className="workspace" aria-label="Command workspace">
+      <div className="work-left">
+        <ChannelRevenuePanel
+          data={data}
+          loading={loading}
+          error={error}
+          canViewFinance={canViewFinance}
+          currency={currency}
+          channelCount={channelCount}
+          selectedChannelId={selectedChannelId}
+          onSelect={onSelect}
+        />
+
+        {/* issue + close split — still mock data (not part of net-revenue API) */}
+        <div className="layout-split">
+          <IssueQueuePanel />
+          <MonthCloseControlsPanel />
+        </div>
+      </div>
+
+      {/* explain + readiness */}
+      <aside className="side-stack" aria-label="Explanation and readiness">
+        <ExplainCard
+          selectedChannel={selectedChannel}
+          canViewFinance={canViewFinance}
+          currency={currency}
+          loading={loading}
+          month={month}
+        />
+        <ExportReadinessPanel />
+      </aside>
+    </section>
+  );
+};
 
 /** Restricted placeholder: NO hook mounted, NO request fired (fail-closed). */
-function OutsideCmsRestrictedBand() { // skipcq: JS-0067
+const OutsideCmsRestrictedBand = () => {
   return (
     <div className="permission-band" role="note">
       <ItemRow
@@ -1135,46 +1031,16 @@ function OutsideCmsRestrictedBand() { // skipcq: JS-0067
       />
     </div>
   );
-}
-
-/**
- * The live monitor body: each half owns its own hook so an outside-cms failure
- * cannot blank the issues half (and vice-versa). Only mounted when permitted, so
- * both hooks stay rules-of-hooks safe and fire exactly once at this view root.
- */
-function OutsideCmsMonitorBody() { // skipcq: JS-0067
-  const outsideCms = useOutsideCmsChannels();
-  const issues = useChannelIssues();
-  return (
-    <>
-      <OutsideCmsSummaryTiles
-        outsideCms={outsideCms.data}
-        issues={issues.data}
-      />
-      <div className="layout-split">
-        <OutsideCmsHalf
-          data={outsideCms.data}
-          loading={outsideCms.loading}
-          error={outsideCms.error}
-        />
-        <ChannelIssuesHalf
-          data={issues.data}
-          loading={issues.loading}
-          error={issues.error}
-        />
-      </div>
-    </>
-  );
-}
+};
 
 /** Summary tiles: outside-CMS count, missing-official-revenue, open issues. */
-function OutsideCmsSummaryTiles({ // skipcq: JS-0067
+const OutsideCmsSummaryTiles = ({
   outsideCms,
   issues,
 }: {
   outsideCms: OutsideCmsResponse | null;
   issues: ChannelIssuesResponse | null;
-}) {
+}) => {
   // Read defensively: an unexpected body shape (missing summary) renders the
   // dash placeholder rather than throwing inside the panel.
   const outsideCount = outsideCms?.summary?.outside_cms_channel_count ?? null;
@@ -1201,45 +1067,10 @@ function OutsideCmsSummaryTiles({ // skipcq: JS-0067
       />
     </div>
   );
-}
-
-/** Outside-CMS half: loading / error / empty / row states (fails on its own). */
-function OutsideCmsHalf({ // skipcq: JS-0067, JS-R1005
-  data,
-  loading,
-  error,
-}: {
-  data: OutsideCmsResponse | null;
-  loading: boolean;
-  error: ApiError | Error | null;
-}) {
-  // Read items defensively so an unexpected body shape cannot throw in the panel.
-  const items = Array.isArray(data?.items) ? data.items : [];
-  return (
-    <section className="panel" aria-labelledby="outsideCmsHalfTitle">
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong id="outsideCmsHalfTitle">Outside CMS</strong>
-          <span>Coverage by channel</span>
-        </div>
-      </div>
-      <MonitorList
-        error={error}
-        loading={loading}
-        empty={items.length === 0}
-        emptyTitle="No outside-CMS channels"
-        emptySub="Every channel in scope is inside a managed CMS."
-      >
-        {items.map((item) => (
-          <OutsideCmsRow key={item.youtube_channel_id} item={item} />
-        ))}
-      </MonitorList>
-    </section>
-  );
-}
+};
 
 /** One outside-CMS row: distinguishes "covered" from "missing source". */
-function OutsideCmsRow({ item }: { item: OutsideCmsItem }) { // skipcq: JS-0067
+const OutsideCmsRow = ({ item }: { item: OutsideCmsItem }) => {
   const tone: Severity = item.missing_official_revenue ? "amber" : "green";
   const status = item.missing_official_revenue
     ? "Missing official revenue"
@@ -1252,61 +1083,18 @@ function OutsideCmsRow({ item }: { item: OutsideCmsItem }) { // skipcq: JS-0067
       trailing={<Badge tone={tone}>{item.revenue_source_status}</Badge>}
     />
   );
-}
-
-/** Channel-issues half: loading / error / empty / row states (fails on its own). */
-function ChannelIssuesHalf({ // skipcq: JS-0067, JS-R1005
-  data,
-  loading,
-  error,
-}: {
-  data: ChannelIssuesResponse | null;
-  loading: boolean;
-  error: ApiError | Error | null;
-}) {
-  // Read items defensively so an unexpected body shape cannot throw in the panel.
-  const items = Array.isArray(data?.items) ? data.items : [];
-  return (
-    <section className="panel" aria-labelledby="channelIssuesHalfTitle">
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong id="channelIssuesHalfTitle">Channel Issues</strong>
-          <span>Registry-health signals</span>
-        </div>
-      </div>
-      <MonitorList
-        error={error}
-        loading={loading}
-        empty={items.length === 0}
-        emptyTitle="No channel issues"
-        emptySub="No registry-health issues in this scope."
-      >
-        {items.map((issue) => (
-          <ChannelIssueRow
-            // FIX: key by channel id + issue_type. The same channel can have
-            // multiple issues (e.g. MISSING_SECTOR + OUTSIDE_CMS_REVENUE_REQUIRED);
-            // keying on youtube_channel_id alone gives React duplicate keys and
-            // can recycle the wrong row across issue-type / refresh changes
-            // (review #98 T3).
-            key={`${issue.youtube_channel_id}:${issue.issue_type}`}
-            issue={issue}
-          />
-        ))}
-      </MonitorList>
-    </section>
-  );
-}
+};
 
 /** Map a channel-issue severity string to a design-system badge tone. */
-function issueSeverityTone(severity: string): Severity { // skipcq: JS-0067
+const issueSeverityTone = (severity: string): Severity => {
   const normalized = severity.toLowerCase();
   if (normalized === "high") return "red";
   if (normalized === "medium") return "amber";
   return "blue";
-}
+};
 
 /** One channel-issue row. */
-function ChannelIssueRow({ issue }: { issue: ChannelIssue }) { // skipcq: JS-0067
+const ChannelIssueRow = ({ issue }: { issue: ChannelIssue }) => {
   const tone = issueSeverityTone(issue.severity);
   return (
     <ItemRow
@@ -1316,14 +1104,14 @@ function ChannelIssueRow({ issue }: { issue: ChannelIssue }) { // skipcq: JS-006
       trailing={<Badge tone={tone}>{issue.severity}</Badge>}
     />
   );
-}
+};
 
 /**
  * Shared list shell for a monitor half: surfaces a contained error (403 -> denied
  * copy, never masked as "no issues"), a loading state, an empty state, or the
  * caller's rows. Keeps each half's JSX subtree shallow and consistent.
  */
-function MonitorList({ // skipcq: JS-0067, JS-R1005
+const MonitorList = ({
   error,
   loading,
   empty,
@@ -1337,7 +1125,7 @@ function MonitorList({ // skipcq: JS-0067, JS-R1005
   emptyTitle: string;
   emptySub: string;
   children: ReactNode;
-}) {
+}) => {
   if (error) {
     const { title, detail } = describeError(error);
     return (
@@ -1375,78 +1163,169 @@ function MonitorList({ // skipcq: JS-0067, JS-R1005
       {children}
     </div>
   );
-}
+};
 
-// ============================================================================
-// Purpose: Company/sector/channel rankings panel for the Command Center. Wires
-//   the finance-gated GET /revenue/months/{month}/rankings into a card with a
-//   metric toggle (gross/net/deduction). FINANCE-GATED: the hook-owning body is
-//   mounted ONLY when canViewFinance (the panel shows money), so a non-finance
-//   viewer fires ZERO requests and sees a restricted placeholder. Money is
-//   rendered via financeDisplay; None is preserved (never coalesced to 0). The
-//   panel surfaces allocation_source so a `live_fallback` is not read as
-//   authoritative. Owns its hook and fails INDEPENDENTLY (SmartAlertsPanel
-//   template): a 403/error renders inside this card only.
-// Database/ORM: None (frontend) — consumes the backend finance rankings read.
-// Standards: Backend money values are decimal-as-strings; display-only formatting
-//   via financeDisplay, gated on canViewFinance. The backend finance 403 stays
-//   authoritative and surfaces as denied copy. Read-only — no mutation.
-// Blast Radius: Finance display (permission-gated money cells). No mutation.
-// Connections:
-//   - File: frontend/src/lib/api/useRankings.ts -> the fetch hook.
-//   - File: frontend/src/lib/api/types.ts -> MonthRankingsResponse/RankedEntry.
-//   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_rankings.
-// ============================================================================
-function RankingsPanel({ // skipcq: JS-0067
-  month,
-  canViewFinance,
-  scopeType,
-  scopeId,
+/** Outside-CMS half: loading / error / empty / row states (fails on its own). */
+const OutsideCmsHalf = ({
+  data,
+  loading,
+  error,
 }: {
-  month: string;
-  canViewFinance: boolean;
-  // FIX: Forward the active scope to RankingsBody so the panel re-queries
-  // /revenue/months/{month}/rankings with the same scope_type/scope_id the
-  // status strip and channel table use, keeping the screen internally
-  // consistent and avoiding an out-of-scope global ranking on a scoped view
-  // (review #98 T2).
-  scopeType: string;
-  scopeId: string | null;
-}) {
-  const [metric, setMetric] = useState<RankingMetric>("gross");
+  data: OutsideCmsResponse | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+}) => {
+  // Read items defensively so an unexpected body shape cannot throw in the panel.
+  const items = Array.isArray(data?.items) ? data.items : [];
   return (
-    <section className="panel" aria-labelledby="rankingsTitle" style={{ marginBottom: 16 }}>
+    <section className="panel" aria-labelledby="outsideCmsHalfTitle">
       <div className="panel-header">
         <div className="panel-title">
-          <strong id="rankingsTitle">Rankings</strong>
-          <span>Top companies, sectors, and channels for {month}</span>
+          <strong id="outsideCmsHalfTitle">Outside CMS</strong>
+          <span>Coverage by channel</span>
         </div>
-        <RankingMetricToggle
-          metric={metric}
-          onChange={setMetric}
-          disabled={!canViewFinance}
+      </div>
+      <MonitorList
+        error={error}
+        loading={loading}
+        empty={items.length === 0}
+        emptyTitle="No outside-CMS channels"
+        emptySub="Every channel in scope is inside a managed CMS."
+      >
+        {items.map((item) => (
+          <OutsideCmsRow key={item.youtube_channel_id} item={item} />
+        ))}
+      </MonitorList>
+    </section>
+  );
+};
+
+/** Channel-issues half: loading / error / empty / row states (fails on its own). */
+const ChannelIssuesHalf = ({
+  data,
+  loading,
+  error,
+}: {
+  data: ChannelIssuesResponse | null;
+  loading: boolean;
+  error: ApiError | Error | null;
+}) => {
+  // Read items defensively so an unexpected body shape cannot throw in the panel.
+  const items = Array.isArray(data?.items) ? data.items : [];
+  return (
+    <section className="panel" aria-labelledby="channelIssuesHalfTitle">
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong id="channelIssuesHalfTitle">Channel Issues</strong>
+          <span>Registry-health signals</span>
+        </div>
+      </div>
+      <MonitorList
+        error={error}
+        loading={loading}
+        empty={items.length === 0}
+        emptyTitle="No channel issues"
+        emptySub="No registry-health issues in this scope."
+      >
+        {items.map((issue) => (
+          <ChannelIssueRow
+            // FIX: key by channel id + issue_type. The same channel can have
+            // multiple issues (e.g. MISSING_SECTOR + OUTSIDE_CMS_REVENUE_REQUIRED);
+            // keying on youtube_channel_id alone gives React duplicate keys and
+            // can recycle the wrong row across issue-type / refresh changes
+            // (review #98 T3).
+            key={`${issue.youtube_channel_id}:${issue.issue_type}`}
+            issue={issue}
+          />
+        ))}
+      </MonitorList>
+    </section>
+  );
+};
+
+/**
+ * The live monitor body: each half owns its own hook so an outside-cms failure
+ * cannot blank the issues half (and vice-versa). Only mounted when permitted, so
+ * both hooks stay rules-of-hooks safe and fire exactly once at this view root.
+ */
+const OutsideCmsMonitorBody = () => {
+  const outsideCms = useOutsideCmsChannels();
+  const issues = useChannelIssues();
+  return (
+    <>
+      <OutsideCmsSummaryTiles
+        outsideCms={outsideCms.data}
+        issues={issues.data}
+      />
+      <div className="layout-split">
+        <OutsideCmsHalf
+          data={outsideCms.data}
+          loading={outsideCms.loading}
+          error={outsideCms.error}
         />
-        <Badge tone={canViewFinance ? "blue" : "red"}>
-          {canViewFinance ? "Live" : "Restricted"}
+        <ChannelIssuesHalf
+          data={issues.data}
+          loading={issues.loading}
+          error={issues.error}
+        />
+      </div>
+    </>
+  );
+};
+
+// ============================================================================
+// Purpose: Outside-CMS / channel-issues monitor for the Command Center. Wires
+//   the two VIEW_ANALYTICS-gated reads (GET /channels/outside-cms +
+//   GET /channels/issues) into one card that replaces the mock "Open issues" KPI
+//   and "Outside CMS" tile. NO-FETCH-WHEN-RESTRICTED: the hook-owning halves are
+//   mounted ONLY when canViewAnalytics, so a narrower principal fires ZERO
+//   requests and sees a restricted placeholder (AuditView gate pattern). A 403
+//   renders a denied state (NEVER masked as "no issues" — masking authz is
+//   forbidden); a 503/other error renders the typed request-failed copy. Each
+//   half owns its hook and fails INDEPENDENTLY (SmartAlertsPanel template).
+// Database/ORM: None (frontend) — consumes the backend analytics monitor reads.
+// Standards: No money is rendered here (both endpoints carry no finance cells),
+//   so no canViewFinance gating is needed. Read-only — no mutation. The backend
+//   403 stays authoritative and surfaces as denied copy.
+// Blast Radius: Authorization (analytics gating — UI never grants the surface
+//   without the backend capability). No finance number, no source-of-truth write.
+// Connections:
+//   - File: frontend/src/lib/api/useOutsideCmsChannels.ts -> the outside-cms hook.
+//   - File: frontend/src/lib/api/useChannelIssues.ts -> the channel-issues hook.
+//   - File: frontend/src/lib/api/types.ts -> OutsideCmsResponse/ChannelIssuesResponse.
+//   - File: backend/ums_smart_revenue/api/channels.py -> the two monitor routes.
+// ============================================================================
+const OutsideCmsMonitorPanel = ({
+  canViewAnalytics,
+}: {
+  canViewAnalytics: boolean;
+}) => {
+  return (
+    <section
+      className="panel"
+      aria-labelledby="outsideCmsTitle"
+      style={{ marginBottom: 16 }}
+    >
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong id="outsideCmsTitle">Outside-CMS &amp; Channel Issues</strong>
+          <span>Coverage and registry-health signals (no money)</span>
+        </div>
+        <Badge tone={canViewAnalytics ? "blue" : "red"}>
+          {canViewAnalytics ? "Live" : "Restricted"}
         </Badge>
       </div>
-      {canViewFinance ? (
-        <RankingsBody
-          month={month}
-          metric={metric}
-          canViewFinance={canViewFinance}
-          scopeType={scopeType}
-          scopeId={scopeId}
-        />
+      {canViewAnalytics ? (
+        <OutsideCmsMonitorBody />
       ) : (
-        <RankingsRestrictedBand />
+        <OutsideCmsRestrictedBand />
       )}
     </section>
   );
-}
+};
 
 /** Metric selector for the rankings panel (gross / net / deduction). */
-function RankingMetricToggle({ // skipcq: JS-0067
+const RankingMetricToggle = ({
   metric,
   onChange,
   disabled,
@@ -1454,7 +1333,7 @@ function RankingMetricToggle({ // skipcq: JS-0067
   metric: RankingMetric;
   onChange: (next: RankingMetric) => void;
   disabled: boolean;
-}) {
+}) => {
   return (
     <select
       className="control"
@@ -1468,10 +1347,10 @@ function RankingMetricToggle({ // skipcq: JS-0067
       <option value="deduction">Deduction</option>
     </select>
   );
-}
+};
 
 /** Restricted placeholder: NO hook mounted, NO request fired (fail-closed). */
-function RankingsRestrictedBand() { // skipcq: JS-0067
+const RankingsRestrictedBand = () => {
   return (
     <div className="permission-band" role="note">
       <ItemRow
@@ -1482,57 +1361,71 @@ function RankingsRestrictedBand() { // skipcq: JS-0067
       />
     </div>
   );
-}
+};
 
-/**
- * Live rankings body: owns useRankings (only mounted when canViewFinance) and
- * renders the three ranked dimensions plus the allocation-source provenance.
- */
-function RankingsBody({ // skipcq: JS-0067, JS-R1005
-  month,
+/** Select the money value for the active metric from a ranked entry. */
+const rankingMetricValue = (
+  row: RankedEntry,
+  metric: RankingMetric,
+): string | null => {
+  if (metric === "net") return row.net_revenue_usd;
+  if (metric === "deduction") return row.deduction_amount_usd;
+  return row.gross_revenue_usd;
+};
+
+/** One ranked dimension (companies / sectors / channels): rows or empty state. */
+const RankingDimension = ({
+  title,
+  rows,
   metric,
   canViewFinance,
-  scopeType,
-  scopeId,
 }: {
-  month: string;
+  title: string;
+  rows: RankedEntry[];
   metric: RankingMetric;
   canViewFinance: boolean;
-  // FIX: Thread the active Command Center scope (global | sector | company |
-  // channel) into the rankings request. The endpoint supports a scoped read;
-  // without these props the hook defaulted to global every time, leaving a
-  // sector/company/channel viewer looking at a global top-N while the rest of
-  // the screen showed scoped numbers (review #98 T2: dashboard-internal
-  // consistency + out-of-scope leak).
-  scopeType: string;
-  scopeId: string | null;
-}) {
-  const { data, loading, error } = useRankings({ month, metric, scopeType, scopeId });
-  if (error) {
-    const { title, detail } = describeError(error);
-    return (
-      <div className="issue-list" role="alert">
-        <ItemRow tone="blue" title={title} sub={detail} trailing={<Badge tone="blue">—</Badge>} />
+}) => {
+  const safeRows = Array.isArray(rows) ? rows : [];
+  return (
+    <section className="panel" aria-label={`${title} ranking`}>
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong>{title}</strong>
+          <span>Top {safeRows.length} by {metric}</span>
+        </div>
       </div>
-    );
-  }
-  if (loading && !data) {
-    return (
-      <div className="issue-list" role="list" aria-busy="true">
-        <ItemRow
-          tone="blue"
-          title="Loading rankings…"
-          sub="Ranking companies, sectors, and channels"
-          trailing={<Badge tone="blue">Loading</Badge>}
-        />
+      <div className="issue-list" role="list">
+        {safeRows.length === 0 ? (
+          <ItemRow
+            tone="blue"
+            title="No entries"
+            sub="No ranked entities in this scope."
+            trailing={<Badge tone="blue">—</Badge>}
+          />
+        ) : (
+          safeRows.map((row) => (
+            <ItemRow
+              key={row.entity_id}
+              tone="blue"
+              title={row.entity_name}
+              sub={`#${row.rank} · ${row.entity_id}`}
+              trailing={
+                <span className="money finance-data">
+                  {financeDisplay(rankingMetricValue(row, metric), canViewFinance, {
+                    currency: "USD",
+                  })}
+                </span>
+              }
+            />
+          ))
+        )}
       </div>
-    );
-  }
-  return <RankingsContent data={data} metric={metric} canViewFinance={canViewFinance} />;
-}
+    </section>
+  );
+};
 
 /** Resolved rankings content: allocation source + the three ranked dimensions. */
-function RankingsContent({ // skipcq: JS-0067
+const RankingsContent = ({
   data,
   metric,
   canViewFinance,
@@ -1540,7 +1433,7 @@ function RankingsContent({ // skipcq: JS-0067
   data: MonthRankingsResponse | null;
   metric: RankingMetric;
   canViewFinance: boolean;
-}) {
+}) => {
   if (!data) {
     return (
       <div className="issue-list" role="list">
@@ -1585,67 +1478,316 @@ function RankingsContent({ // skipcq: JS-0067
       />
     </>
   );
-}
+};
 
-/** Select the money value for the active metric from a ranked entry. */
-function rankingMetricValue( // skipcq: JS-0067
-  row: RankedEntry,
-  metric: RankingMetric,
-): string | null {
-  if (metric === "net") return row.net_revenue_usd;
-  if (metric === "deduction") return row.deduction_amount_usd;
-  return row.gross_revenue_usd;
-}
-
-/** One ranked dimension (companies / sectors / channels): rows or empty state. */
-function RankingDimension({ // skipcq: JS-0067
-  title,
-  rows,
+/**
+ * Live rankings body: owns useRankings (only mounted when canViewFinance) and
+ * renders the three ranked dimensions plus the allocation-source provenance.
+ */
+const RankingsBody = ({
+  month,
   metric,
   canViewFinance,
+  scopeType,
+  scopeId,
+  scopesReady,
 }: {
-  title: string;
-  rows: RankedEntry[];
+  month: string;
   metric: RankingMetric;
   canViewFinance: boolean;
-}) {
-  const safeRows = Array.isArray(rows) ? rows : [];
+  // FIX: Thread the active Command Center scope (global | sector | company |
+  // channel) into the rankings request. The endpoint supports a scoped read;
+  // without these props the hook defaulted to global every time, leaving a
+  // sector/company/channel viewer looking at a global top-N while the rest of
+  // the screen showed scoped numbers (review #98 T2: dashboard-internal
+  // consistency + out-of-scope leak).
+  scopeType: string;
+  scopeId: string | null;
+  // FIX (review #102 Qodo #3): Gate the rankings read until the authorized-scope
+  // verdict resolves (see CommandView.scopesReady).
+  scopesReady: boolean;
+}) => {
+  const { data, loading, error } = useRankings({
+    month,
+    metric,
+    scopeType,
+    scopeId,
+    enabled: scopesReady,
+  });
+  if (error) {
+    const { title, detail } = describeError(error);
+    return (
+      <div className="issue-list" role="alert">
+        <ItemRow tone="blue" title={title} sub={detail} trailing={<Badge tone="blue">—</Badge>} />
+      </div>
+    );
+  }
+  if (loading && !data) {
+    return (
+      <div className="issue-list" role="list" aria-busy="true">
+        <ItemRow
+          tone="blue"
+          title="Loading rankings…"
+          sub="Ranking companies, sectors, and channels"
+          trailing={<Badge tone="blue">Loading</Badge>}
+        />
+      </div>
+    );
+  }
+  return <RankingsContent data={data} metric={metric} canViewFinance={canViewFinance} />;
+};
+
+// ============================================================================
+// Purpose: Company/sector/channel rankings panel for the Command Center. Wires
+//   the finance-gated GET /revenue/months/{month}/rankings into a card with a
+//   metric toggle (gross/net/deduction). FINANCE-GATED: the hook-owning body is
+//   mounted ONLY when canViewFinance (the panel shows money), so a non-finance
+//   viewer fires ZERO requests and sees a restricted placeholder. Money is
+//   rendered via financeDisplay; None is preserved (never coalesced to 0). The
+//   panel surfaces allocation_source so a `live_fallback` is not read as
+//   authoritative. Owns its hook and fails INDEPENDENTLY (SmartAlertsPanel
+//   template): a 403/error renders inside this card only.
+// Database/ORM: None (frontend) — consumes the backend finance rankings read.
+// Standards: Backend money values are decimal-as-strings; display-only formatting
+//   via financeDisplay, gated on canViewFinance. The backend finance 403 stays
+//   authoritative and surfaces as denied copy. Read-only — no mutation.
+// Blast Radius: Finance display (permission-gated money cells). No mutation.
+// Connections:
+//   - File: frontend/src/lib/api/useRankings.ts -> the fetch hook.
+//   - File: frontend/src/lib/api/types.ts -> MonthRankingsResponse/RankedEntry.
+//   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_rankings.
+// ============================================================================
+const RankingsPanel = ({
+  month,
+  canViewFinance,
+  scopeType,
+  scopeId,
+  scopesReady,
+}: {
+  month: string;
+  canViewFinance: boolean;
+  // FIX: Forward the active scope to RankingsBody so the panel re-queries
+  // /revenue/months/{month}/rankings with the same scope_type/scope_id the
+  // status strip and channel table use, keeping the screen internally
+  // consistent and avoiding an out-of-scope global ranking on a scoped view
+  // (review #98 T2).
+  scopeType: string;
+  scopeId: string | null;
+  // FIX (review #102 Qodo #3): Gate the rankings read until the authorized-scope
+  // verdict resolves so the panel does not fire a global read during the load
+  // window (mirrors the net-revenue gate above).
+  scopesReady: boolean;
+}) => {
+  const [metric, setMetric] = useState<RankingMetric>("gross");
   return (
-    <section className="panel" aria-label={`${title} ranking`}>
+    <section className="panel" aria-labelledby="rankingsTitle" style={{ marginBottom: 16 }}>
       <div className="panel-header">
         <div className="panel-title">
-          <strong>{title}</strong>
-          <span>Top {safeRows.length} by {metric}</span>
+          <strong id="rankingsTitle">Rankings</strong>
+          <span>Top companies, sectors, and channels for {month}</span>
         </div>
+        <RankingMetricToggle
+          metric={metric}
+          onChange={setMetric}
+          disabled={!canViewFinance}
+        />
+        <Badge tone={canViewFinance ? "blue" : "red"}>
+          {canViewFinance ? "Live" : "Restricted"}
+        </Badge>
       </div>
-      <div className="issue-list" role="list">
-        {safeRows.length === 0 ? (
-          <ItemRow
-            tone="blue"
-            title="No entries"
-            sub="No ranked entities in this scope."
-            trailing={<Badge tone="blue">—</Badge>}
-          />
-        ) : (
-          safeRows.map((row) => (
-            <ItemRow
-              key={row.entity_id}
-              tone="blue"
-              title={row.entity_name}
-              sub={`#${row.rank} · ${row.entity_id}`}
-              trailing={
-                <span className="money finance-data">
-                  {financeDisplay(rankingMetricValue(row, metric), canViewFinance, {
-                    currency: "USD",
-                  })}
-                </span>
-              }
-            />
-          ))
-        )}
-      </div>
+      {canViewFinance ? (
+        <RankingsBody
+          month={month}
+          metric={metric}
+          canViewFinance={canViewFinance}
+          scopeType={scopeType}
+          scopeId={scopeId}
+          scopesReady={scopesReady}
+        />
+      ) : (
+        <RankingsRestrictedBand />
+      )}
     </section>
   );
-}
+};
+
+/**
+ * Command Center screen: month/scope filters, the real net-revenue status strip
+ * and channel table, the smart-alerts panel, and the per-channel explanation.
+ */
+const CommandView = ({
+  canViewFinance,
+  canViewAnalytics = false,
+}: {
+  canViewFinance: boolean;
+  // Optional so the existing prop contract (canViewFinance-only) stays valid; a
+  // missing flag fails closed (false) — the analytics monitor never mounts and
+  // fires no request without an explicit, backend-derived grant.
+  canViewAnalytics?: boolean;
+}) => {
+  const [month, setMonth] = useState<string>(DEFAULT_MONTH);
+  // Stable {scopeType, scopeId} identity instead of a positional index: the
+  // option list arrives asynchronously, so an index would point at the wrong
+  // (or a vanished) scope once the fetched set replaces the global-only fallback.
+  const [selectedScopeKey, setSelectedScopeKey] = useState<string>(
+    scopeOptionKey(GLOBAL_SCOPE_FALLBACK.scopeType, GLOBAL_SCOPE_FALLBACK.scopeId),
+  );
+  const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
+
+  // Fetch the viewer's VIEW_REVENUE-authorized scopes ONCE at the view root. The
+  // selector is populated ONLY from these (fail-closed against an org-structure
+  // leak); while loading or on a 403/error it degrades to global-only so the
+  // screen never blocks (the panels fail-closed on the actual scoped reads).
+  const { data: scopesData, error: scopesError } = useRevenueScopes();
+  // FIX (review #102 Qodo #3): Hold the net-revenue + rankings reads until the
+  // authorized-scope fetch has a verdict (data OR error). While it is still
+  // loading, scopesData is null and `scope` resolves to the global fallback —
+  // firing it immediately would trigger an unauthorized global read (likely a
+  // noisy 403) for a scoped viewer before their real options arrive. Once the
+  // scopes fetch resolves (success -> real options, or error -> global fallback),
+  // the gated reads fire with the correct scope.
+  const scopesReady = useMemo(
+    () => scopesData !== null || scopesError !== null,
+    [scopesData, scopesError],
+  );
+  const scopeOptions = useMemo(
+    () => resolveScopeOptions(scopesData),
+    [scopesData],
+  );
+  // Resolve the active scope from the stable key, falling back to the first
+  // option (always present — resolveScopeOptions guarantees >=1) when the key is
+  // not in the current list (e.g. before the fetch resolves). The fallback is
+  // global while loading, never an out-of-scope unit.
+  const scope = useMemo(
+    () =>
+      scopeOptions.find(
+        (option) => scopeOptionKey(option.scopeType, option.scopeId) === selectedScopeKey,
+      ) ??
+      scopeOptions[0] ??
+      GLOBAL_SCOPE_FALLBACK,
+    [scopeOptions, selectedScopeKey],
+  );
+  const { data, loading, error, reload } = useNetRevenue({
+    month,
+    scopeType: scope.scopeType,
+    scopeId: scope.scopeId,
+    enabled: scopesReady,
+  });
+
+  const currency = useMemo(() => data?.currency ?? "USD", [data]);
+  const channels = useMemo(() => data?.channels ?? [], [data]);
+  const selectedChannel = useMemo(
+    () =>
+      channels.find((c) => c.youtube_channel_id === selectedChannelId) ??
+      channels[0] ??
+      null,
+    [channels, selectedChannelId],
+  );
+  const activeChannelId = useMemo(
+    () => selectedChannel?.youtube_channel_id ?? null,
+    [selectedChannel],
+  );
+
+  return (
+    <>
+      {/* month + scope selector */}
+      <section className="control-row" aria-label="Net revenue filters" style={{ marginBottom: 16 }}>
+        <select
+          className="control"
+          aria-label="Month"
+          value={month}
+          onChange={(e) => {
+            setMonth(e.target.value);
+            setSelectedChannelId(null);
+          }}
+        >
+          {MONTH_OPTIONS.map((m) => (
+            <option key={m} value={m}>
+              {m}
+            </option>
+          ))}
+        </select>
+        <select
+          className="control"
+          aria-label="Scope"
+          // Drive the shown option from the RESOLVED active scope, not the raw
+          // selectedScopeKey: after a /revenue/scopes reload returns a different
+          // authorized set, the stored key may name an option no longer present.
+          // `scope` already falls back to the first option (global while
+          // loading), so the displayed option always matches the scope being read
+          // — no desynced selection that reads one scope but shows another.
+          value={scopeOptionKey(scope.scopeType, scope.scopeId)}
+          onChange={(e) => {
+            // Store the stable scope key; the active {scopeType, scopeId} is
+            // resolved from it against the current option list. Reset the
+            // selected channel so the explain card never shows a channel from
+            // the prior scope.
+            setSelectedScopeKey(e.target.value);
+            setSelectedChannelId(null);
+          }}
+        >
+          {scopeOptions.map((s) => (
+            <option
+              key={scopeOptionKey(s.scopeType, s.scopeId)}
+              value={scopeOptionKey(s.scopeType, s.scopeId)}
+            >
+              {s.label}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="Refresh net revenue"
+          title="Refresh net revenue"
+          onClick={reload}
+        >
+          ↻
+        </button>
+      </section>
+
+      {/* status strip — REAL net-revenue summary */}
+      <NetRevenueStatusStrip
+        data={data}
+        loading={loading}
+        error={error}
+        canViewFinance={canViewFinance}
+        currency={currency}
+      />
+
+      {/* smart-alerts / problem panel — REAL data, fails independently */}
+      <SmartAlertsPanel month={month} />
+
+      {/* outside-CMS + channel-issues monitor — REAL data, fails independently,
+          no-fetch-when-restricted (mounts only when canViewAnalytics) */}
+      <OutsideCmsMonitorPanel canViewAnalytics={canViewAnalytics} />
+
+      {/* company/sector/channel rankings — REAL data, fails independently,
+           finance-gated (shows money; mounts only when canViewFinance) */}
+      <RankingsPanel
+        month={month}
+        canViewFinance={canViewFinance}
+        scopeType={scope.scopeType}
+        scopeId={scope.scopeId}
+        scopesReady={scopesReady}
+      />
+
+      <CommandWorkspace
+        data={data}
+        loading={loading}
+        error={error}
+        canViewFinance={canViewFinance}
+        currency={currency}
+        channelCount={channels.length}
+        selectedChannel={selectedChannel}
+        selectedChannelId={activeChannelId}
+        month={month}
+        onSelect={setSelectedChannelId}
+      />
+    </>
+  );
+};
+
+export default CommandView;
 
 export { describeError };

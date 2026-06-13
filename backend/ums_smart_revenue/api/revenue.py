@@ -27,6 +27,7 @@ from ums_smart_revenue.api.dependencies_finance import (
     current_org_access_index,
     current_revenue_fact_repository,
 )
+from ums_smart_revenue.api.org_units import current_org_unit_reader
 from ums_smart_revenue.auth.audit import AuditEventType
 from ums_smart_revenue.auth.audit_service import (
     AuditRecord,
@@ -122,6 +123,7 @@ from ums_smart_revenue.finance.revenue_facts import (
     RevenueFactValidationError,
     SqlAlchemyRevenueFactRepository,
 )
+from ums_smart_revenue.finance.revenue_scopes import build_authorized_revenue_scopes
 from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_summary
 from ums_smart_revenue.finance.smart_alerts import (
     build_monthly_smart_alert_summary,
@@ -1310,6 +1312,64 @@ def get_month_deduction_components(
         },
         audit_events=audit_events,
     )
+
+
+# ============================================================================
+# Purpose: Return ONLY the rollup scopes the caller is VIEW_REVENUE-authorized
+#   to aggregate (global / their sectors / their companies), so the Command
+#   Center scope selector cannot offer an out-of-scope unit (org-structure leak)
+#   or a dead option that would 403 on the rollup read.
+# Database/ORM: OrgUnitORM names via SqlAlchemyOrgUnitReader; the org-access
+#   index (company_sector) via current_org_access_index. Read-only, no writes.
+# Standards: Thin route — fail-closed VIEW_REVENUE gate at the boundary, then a
+#   pure service build, then typed serialization. No audit event (metadata
+#   helper like GET /org-units; it discloses only ids/names the caller is
+#   authorized for, never a revenue number, so no REVENUE_VIEWED is emitted).
+# Blast Radius: Authorization — the anti-scope-leak surface for the selector.
+#   A disabled principal or one with no active VIEW_REVENUE grant in any scope
+#   gets 403, never a silent empty list. No finance totals, audit, Neo4j, or
+#   export impact.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/revenue_scopes.py ->
+#       build_authorized_revenue_scopes (the expansion/dedup/order logic).
+#   - File: backend/ums_smart_revenue/api/org_units.py -> current_org_unit_reader
+#       (shared name reader) and the GET /org-units no-audit precedent.
+# ============================================================================
+@router.get("/scopes")
+def list_authorized_revenue_scopes(
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    reader: Annotated[SqlAlchemyOrgUnitReader, Depends(current_org_unit_reader)],
+) -> dict[str, object]:
+    """Return the caller's authorized rollup scope options; 403 without VIEW_REVENUE."""
+    granted = _granted_scopes_for_permission(user, Permission.VIEW_REVENUE)
+    if user.disabled or not granted:
+        _raise_missing_permission(Permission.VIEW_REVENUE)
+
+    sector_names: dict[str, str] = {}
+    company_names: dict[str, str] = {}
+    for unit in reader.list_active_units():
+        if unit.type == "SECTOR":
+            sector_names[unit.id] = unit.name
+        elif unit.type == "COMPANY":
+            company_names[unit.id] = unit.name
+
+    options = build_authorized_revenue_scopes(
+        granted=granted,
+        org_index=org_index,
+        sector_names=sector_names,
+        company_names=company_names,
+    )
+    if not options:
+        # FIX (review #102): Fail-closed when a viewer's VIEW_REVENUE grants
+        # produce NO rollup options (e.g. only channel/connector/finance-month
+        # scope types, which the builder deliberately drops). Returning an empty
+        # list with HTTP 200 would let the frontend treat the success as a signal
+        # to fall back to a synthetic GLOBAL option and fire an unauthorized
+        # global read. 403 keeps this rollup-scope listing authoritative and
+        # matches the no-rollup-scope -> no-permission contract.
+        _raise_missing_permission(Permission.VIEW_REVENUE)
+    return {"scopes": [option.to_api() for option in options]}
 
 
 # ============================================================================

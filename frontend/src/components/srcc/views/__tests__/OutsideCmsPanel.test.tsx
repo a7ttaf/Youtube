@@ -16,9 +16,7 @@ const ORIGINAL_FETCH = globalThis.fetch;
 // while preserving the spy for assertion. Using a named function (rather than
 // `() => {}`) keeps the JS-0321 / arrow-empty lint family happy and the call
 // site readable.
-function noop() { // skipcq: JS-0067
-  return undefined;
-}
+const noop = () => undefined;
 
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
@@ -169,14 +167,13 @@ const CHANNEL_ISSUES_MULTI: ChannelIssuesResponse = {
   },
 };
 
-function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
-  return new Response(JSON.stringify(body), {
+const jsonResponse = (body: unknown, status = 200) =>
+  new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
-}
 
-type RouteOptions = { // skipcq: JS-0067
+type RouteOptions = {
   outsideCms?: () => Response;
   issues?: () => Response;
 };
@@ -190,7 +187,7 @@ const DEFAULT_NET_REVENUE: () => Response = () => jsonResponse(NET_REVENUE_BODY)
 // the response builder. Keeping the lookup in a table (rather than chained
 // `if`s in `routeFetch`) drops the function's cyclomatic complexity below the
 // JS-R1005 medium-risk threshold.
-const URL_RESPONDERS: Array<{ // skipcq: JS-0067
+const URL_RESPONDERS: Array<{
   match: (url: string) => boolean;
   build: (opts: RouteOptions) => () => Response;
 }> = [
@@ -200,13 +197,21 @@ const URL_RESPONDERS: Array<{ // skipcq: JS-0067
     build: (o) => o.issues ?? DEFAULT_ISSUES },
   { match: (url) => url.includes("/smart-alerts"),
     build: () => DEFAULT_SMART_ALERTS },
+  // Resolve the authorized-scope listing so CommandView's scopesReady gate
+  // flips promptly and the gated net-revenue read fires (review #102 Qodo #3).
+  { match: (url) => url.includes("/revenue/scopes"),
+    build: () =>
+      () =>
+        jsonResponse({
+          scopes: [{ scope_type: "global", scope_id: null, label: "Global" }],
+        }) },
   { match: (url) => url.includes("/net-revenue"),
     build: () => DEFAULT_NET_REVENUE },
 ];
 
 // Route each fetch by URL so the monitor panel's two reads (outside-cms +
 // issues) can be driven independently from the net-revenue + smart-alerts reads.
-function routeFetch(opts: RouteOptions = {}) { // skipcq: JS-0067
+const routeFetch = (opts: RouteOptions = {}) => {
   const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = String(input);
@@ -218,12 +223,12 @@ function routeFetch(opts: RouteOptions = {}) { // skipcq: JS-0067
     return Promise.resolve(jsonResponse({}, 404));
   });
   return fetchMock;
-}
+};
 
-function renderCommandView(opts: { // skipcq: JS-0067
+const renderCommandView = (opts: {
   canViewFinance?: boolean;
   canViewAnalytics?: boolean;
-} = {}) {
+} = {}) => {
   return render(
     <TenantProvider initialSlug="ums">
       <CommandView
@@ -232,7 +237,7 @@ function renderCommandView(opts: { // skipcq: JS-0067
       />
     </TenantProvider>,
   );
-}
+};
 
 describe("OutsideCmsMonitorPanel in CommandView", () => {
   it("loads the outside-CMS + issues rows and summary when analytics is allowed", async () => {
@@ -315,8 +320,8 @@ describe("OutsideCmsMonitorPanel in CommandView", () => {
 
     // Outside-cms half renders despite the issues 500.
     expect(await screen.findByText("Outside Channel One")).toBeInTheDocument();
-    // Net-revenue keeps rendering.
-    expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0);
+    // Net-revenue keeps rendering (await: the read is gated on scopesReady).
+    expect((await screen.findAllByText("UC-DRAMA-01")).length).toBeGreaterThan(0);
     // The issues half surfaces the typed request-failed copy.
     expect(screen.getByText(/Request failed \(500\)/)).toBeInTheDocument();
   });

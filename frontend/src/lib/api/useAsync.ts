@@ -26,6 +26,7 @@ import { ApiError } from "@/lib/api/client";
 //   - File: frontend/src/lib/api/client.ts -> the thrown ApiError this surfaces.
 //   - File: frontend/src/lib/api/useNetRevenue.ts -> first consumer.
 // ============================================================================
+
 export type AsyncState<T> = {
   data: T | null;
   loading: boolean;
@@ -33,18 +34,30 @@ export type AsyncState<T> = {
   reload: () => void;
 };
 
+/** Wrap an error into a typed Error (ApiError preserved, primitives stringified). */
+const toError = (caught: unknown): Error =>
+  caught instanceof Error ? caught : new Error(String(caught));
+
 /**
  * Run a stable fetch closure and track {data, loading, error, reload}, discarding
  * the result of a superseded call so a slow earlier request cannot overwrite a
  * newer one. data is reset to null at the start of each fetch (dep change or
  * reload) so stale finance values never show under a new filter. `reload()`
  * re-runs the same `run` reference.
+ *
+ * `enabled` (default true) gates the fetch: while false the effect fires NO
+ * request and loading stays at its initial true (so callers render their loading
+ * state instead of acting on a not-yet-decided scope). The Command Center uses
+ * this to hold net-revenue/rankings reads until the authorized-scope verdict is
+ * in, preventing an initial unauthorized global read for a scoped viewer.
  */
-export function useAsync<T>( // skipcq: JS-0067
+export const useAsync = <T,>(
   // The fetch must be a stable reference (memoize the caller's closure with
   // useCallback) so the effect does not re-run on every render.
   run: () => Promise<T>,
-): AsyncState<T> {
+  // When false, no fetch is issued; loading remains true until enabled flips.
+  enabled = true,
+): AsyncState<T> => {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<ApiError | Error | null>(null);
@@ -62,7 +75,33 @@ export function useAsync<T>( // skipcq: JS-0067
 
   const reload = useCallback(() => setNonce((value) => value + 1), []);
 
-  useEffect(() => { // skipcq: JS-R1005
+  // Extracted: reuse the in-flight promise when (run, nonce) hasn't changed
+  // (StrictMode double-invoke), otherwise start a fresh request. Synchronous
+  // throw from run() is caught here so loading is never pinned forever. Split
+  // out of the effect to keep the effect's cyclomatic complexity under the
+  // DeepSource medium-risk threshold.
+  const beginRequest = useCallback((): { promise: Promise<T>; failed: boolean } => {
+    const cached = inflightRef.current;
+    if (cached && cached.run === run && cached.nonce === nonce) {
+      return { promise: cached.promise, failed: false };
+    }
+    try {
+      return { promise: run(), failed: false };
+    } catch (caught: unknown) {
+      setError(toError(caught));
+      setLoading(false);
+      return { promise: Promise.resolve(null as T), failed: true };
+    }
+  }, [run, nonce]);
+
+  useEffect(() => {
+    // FIX (review #102): gate the fetch on `enabled`. While disabled the effect
+    // issues NO request and leaves loading at its initial true so callers render
+    // their loading state instead of acting on a not-yet-decided scope (e.g. the
+    // Command Center holds net-revenue/rankings reads until the authorized-scope
+    // fetch resolves, preventing an initial unauthorized global read). Returning
+    // a no-op cleanup keeps the return type consistent across all branches.
+    if (!enabled) return () => { return; };
     let active = true;
     // FIX: clear data at fetch start so a slow request under a NEW month/scope
     // filter falls back to the loading state instead of briefly showing the
@@ -70,51 +109,26 @@ export function useAsync<T>( // skipcq: JS-0067
     setData(null);
     setLoading(true);
     setError(null);
-    // Extracted so every code path returns the same cleanup type (avoids the
-    // inconsistent-return lint rule on the outer function).
-    const cleanup = () => { active = false; };
-    // FIX: StrictMode (dev) runs setup -> cleanup -> setup on the SAME instance
-    // with IDENTICAL deps; calling run() on both setups fires the request TWICE.
-    // For a self-auditing read that records a DUPLICATE audit event. Reuse the
-    // in-flight promise for the same (run, nonce); a real dep change or reload()
-    // produces a new key and correctly starts a fresh request.
-    const cached = inflightRef.current;
-    let promise: Promise<T>;
-    if (cached && cached.run === run && cached.nonce === nonce) {
-      promise = cached.promise;
-    } else {
-      try {
-        promise = run();
-      } catch (caught: unknown) {
-        // FIX: run() throwing synchronously (before returning a Promise) would
-        // otherwise leave loading=true pinned forever — .finally never fires.
-        setError(caught instanceof Error ? caught : new Error(String(caught)));
-        setLoading(false);
-        return cleanup;
-      }
-    }
+    const cleanup = () => {
+      active = false;
+    };
+    const { promise, failed } = beginRequest();
+    if (failed) return cleanup;
     inflightRef.current = { run, nonce, promise };
     promise
       .then((result) => {
-        if (!active) return;
-        setData(result);
+        if (active) setData(result);
       })
       .catch((caught: unknown) => {
         if (!active) return;
-        // Keep the typed ApiError so consumers can read .status (403 etc.);
-        // wrap anything non-Error so the state shape stays consistent.
         setData(null);
-        setError(
-          caught instanceof Error ? caught : new Error(String(caught)),
-        );
+        setError(toError(caught));
       })
       .finally(() => {
-        if (!active) return;
-        setLoading(false);
+        if (active) setLoading(false);
       });
-    // Supersede: a newer run (dep change or reload) must win.
     return cleanup;
-  }, [run, nonce]);
+  }, [run, nonce, enabled, beginRequest]);
 
   return { data, loading, error, reload };
-}
+};
