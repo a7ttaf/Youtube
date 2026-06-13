@@ -116,6 +116,47 @@ def _connector_key_candidates(connector_id: str) -> tuple[str, ...]:
     return tuple(dict.fromkeys(candidates))
 
 
+# ============================================================================
+# Purpose: Decide whether a principal may see ANY analytics surface, i.e.
+#          holds an active VIEW_ANALYTICS grant (direct or via role) at ANY
+#          scope (global, sector, company, or channel). The SPA uses this to
+#          mount the analytics panel; the backend analytics routes still
+#          re-check VIEW_ANALYTICS per requested scope, so this is a render
+#          hint, never the authorization boundary.
+# Database/ORM: None — pure policy evaluation over the already-loaded principal.
+# Standards: Fail closed for disabled users (has_permission returns False for
+#            disabled, and the loops below short-circuit on the disabled flag).
+#            Mirrors the scope-aware connector_health_connector_ids derivation
+#            rather than the global-only has_permission(global_scope) check,
+#            which would hide the panel from a legitimately company/sector/
+#            channel-scoped analytics user.
+# Blast Radius: Authorization read path only. No write, finance, audit, or
+#               graph impact. No graph projection impact detected.
+# Connections:
+#   - File: backend/ums_smart_revenue/api/session.py -> /session/me capability
+#     derivation (can_view_analytics).
+#   - File: backend/ums_smart_revenue/auth/seed.py -> ROLE_PERMISSIONS holds the
+#     VIEW_ANALYTICS membership per role.
+# ============================================================================
+def analytics_view_granted_any_scope(user: UserPrincipal) -> bool:
+    """Return True if the user holds VIEW_ANALYTICS at any scope; disabled → False."""
+    if user.disabled:
+        return False
+
+    for grant in user.direct_permissions:
+        if grant.active and grant.permission == Permission.VIEW_ANALYTICS:
+            return True
+
+    for assignment in user.role_assignments:
+        if not assignment.active:
+            continue
+        role_permissions = ROLE_PERMISSIONS.get(assignment.role, frozenset())
+        if Permission.VIEW_ANALYTICS in role_permissions:
+            return True
+
+    return False
+
+
 def can_view_channel_analytics(
     user: UserPrincipal,
     channel_id: str,

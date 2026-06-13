@@ -126,6 +126,8 @@ def test_session_me_header_mode_finance_admin_capabilities(client_headers_mode):
     assert caps["canExportRevenue"] is True
     # finance_admin also holds EXPORT_ANALYTICS_REPORT (distinct from revenue).
     assert caps["canExportAnalyticsReports"] is True
+    # finance_admin holds VIEW_ANALYTICS at global scope.
+    assert caps["canViewAnalytics"] is True
     # finance_admin holds VIEW_REVENUE but NOT MANAGE_CHANNELS (disjoint role sets).
     assert caps["canManageRegistry"] is False
     assert caps["canViewAudit"] is True
@@ -217,6 +219,44 @@ def test_session_me_header_mode_connector_scoped_connector_admin_can_view_health
     assert response.status_code == 200, response.text
     caps = response.json()["capabilities"]
     assert caps["canViewConnectorHealth"] is True
+
+
+# ---------------------------------------------------------------------------
+# Header mode — canViewAnalytics is scope-aware: a company-scoped analytics
+# role sees it true; a role without VIEW_ANALYTICS sees it false.
+# ---------------------------------------------------------------------------
+
+
+def test_session_me_header_mode_company_scoped_manager_can_view_analytics(
+    client_headers_mode,
+):
+    """A company-scoped company_manager exposes canViewAnalytics true (scope-aware)."""
+    response = client_headers_mode.get(
+        "/session/me",
+        headers=_header_principal(
+            role="company_manager",
+            scope_type="company",
+            scope_id="acme",
+        ),
+    )
+    assert response.status_code == 200, response.text
+    caps = response.json()["capabilities"]
+    # company_manager holds VIEW_ANALYTICS only at company scope; a global-only
+    # check would wrongly hide the analytics panel from this legitimate user.
+    assert caps["canViewAnalytics"] is True
+
+
+def test_session_me_header_mode_audit_viewer_cannot_view_analytics(
+    client_headers_mode,
+):
+    """audit_viewer holds no VIEW_ANALYTICS grant at any scope → canViewAnalytics false."""
+    response = client_headers_mode.get(
+        "/session/me",
+        headers=_header_principal(role="audit_viewer"),
+    )
+    assert response.status_code == 200, response.text
+    caps = response.json()["capabilities"]
+    assert caps["canViewAnalytics"] is False
 
 
 # ---------------------------------------------------------------------------
