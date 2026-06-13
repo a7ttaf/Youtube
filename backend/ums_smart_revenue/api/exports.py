@@ -1150,13 +1150,18 @@ def _build_finance_source_summaries_for_export(
     )
     # FIX: pass the same coverage data as the smart-alerts API so the
     # CHANNELS_MISSING_REVENUE_FACTS alert surfaces in the export summary
-    # when the same month would surface it on the API. Without this wire
-    # the export under-reports the same close blockers the API surfaces.
+    # when the same month would surface it on the API. The export reads
+    # the factless-channel set SCOPED to the export's frozen channel set
+    # so a company/sector/group export never leaks channel ids outside
+    # its scope (Kody #98 T13). Global exports pass channel_ids=None and
+    # get the tenant-global view, matching the smart-alerts API endpoint.
     (
         missing_fact_channel_count,
         missing_fact_channel_sample,
     ) = missing_revenue_fact_channel_count_and_sample(
-        session, month=export_job.month
+        session,
+        month=export_job.month,
+        youtube_channel_ids=channel_ids,
     )
     smart_alerts = build_monthly_smart_alert_summary(
         month=export_job.month,

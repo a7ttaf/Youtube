@@ -428,10 +428,76 @@ def test_export_bundle_includes_coverage_alert_for_factless_channels(tmp_path):
     ]
     assert "CHANNELS_MISSING_REVENUE_FACTS" in coverage_codes
     coverage = next(
-        (alert for alert in summaries.smart_alerts.alerts
-         if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"),
-        None,
+        alert
+        for alert in summaries.smart_alerts.alerts
+        if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
     )
-    assert coverage is not None
     assert coverage.details["channel_count"] == 1
     assert coverage.details["sample_channel_ids"] == ["chB"]
+
+
+def test_export_bundle_coverage_alert_respects_frozen_channel_scope(tmp_path):
+    """Scoped export's CHANNELS_MISSING_REVENUE_FACTS sample is restricted to channel_ids (review #98 T13).
+
+    A company/sector/group export must never include channel ids outside its
+    frozen channel set, even when those channels are factless. The export
+    helper now passes `youtube_channel_ids=channel_ids` so the
+    missing-revenue-fact read is restricted to the export's scope. Global
+    exports pass channel_ids=None and keep the tenant-global view.
+    """
+    engine = _engine(tmp_path)
+    with Session(engine) as session:
+        _seed_missing_net_with_components(session)
+        # Add a 2nd active, revenue_required channel with no fact for the month.
+        # This channel is OUTSIDE the export's frozen channel set.
+        session.add(
+            YouTubeChannelORM(
+                id=uuid4(),
+                tenant_id=TENANT,
+                youtube_channel_id="ch-outside",
+                channel_name="Outside",
+                active=True,
+                revenue_required=True,
+            )
+        )
+        session.commit()
+        # Scoped export: frozen channel_ids = ("chA",) only.
+        summaries = _build_finance_source_summaries_for_export(
+            export_job=_export_job(
+                scope_type="company", scope_channel_ids=("chA",)
+            ),
+            session=session,
+            org_index=OrgAccessIndex(),
+            group_registry=ChannelGroupRegistry(),
+        )
+    coverage = next(
+        (
+            alert
+            for alert in summaries.smart_alerts.alerts
+            if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
+        ),
+        None,
+    )
+    # The scoped export's channel set has no factless channel, so the
+    # coverage alert is absent (or zero-count) for the scoped view.
+    if coverage is not None:
+        assert coverage.details["channel_count"] == 0
+        assert "ch-outside" not in coverage.details["sample_channel_ids"]
+    # And the global export (no frozen channel set) still surfaces it.
+    global_summaries = _build_finance_source_summaries_for_export(
+        export_job=_export_job(scope_type="global", scope_channel_ids=None),
+        session=session,
+        org_index=OrgAccessIndex(),
+        group_registry=ChannelGroupRegistry(),
+    )
+    global_coverage = next(
+        (
+            alert
+            for alert in global_summaries.smart_alerts.alerts
+            if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
+        ),
+        None,
+    )
+    assert global_coverage is not None
+    assert global_coverage.details["channel_count"] == 1
+    assert "ch-outside" in global_coverage.details["sample_channel_ids"]

@@ -94,7 +94,10 @@ Phase 7 detection gate.
   read-only), in TWO bounded queries: a `func.count()` aggregate and a `LIMIT
   MISSING_FACT_CHANNEL_SAMPLE_LIMIT` ordered sample. Pass the (count, sample) pair into the
   builder. No new permission (stays within the existing finance gate; uses only finance
-  source-of-truth tables).
+  source-of-truth tables). The same helper also accepts an optional
+  `youtube_channel_ids: set[str] | None` parameter used by the export helper to
+  scope the read to a frozen channel set; the smart-alerts API endpoint
+  passes None to keep the tenant-global view.
 - **Missing-REPORT detection DEFERRED** — `connector_runs` carries no channel dimension and there
   is no stored "expected connectors/accounts per tenant-month" baseline; surfacing connector
   operational metadata would also widen the finance-only gate. Recorded as a named follow-up

@@ -2306,7 +2306,10 @@ def _previous_month(month: str) -> str:
 #     (count, sample) for the coverage alert details.
 # ============================================================================
 def missing_revenue_fact_channel_count_and_sample(
-    session: Session, *, month: str
+    session: Session,
+    *,
+    month: str,
+    youtube_channel_ids: set[str] | None = None,
 ) -> tuple[int, list[str]]:
     """Return (count, sample) of active revenue-required channels with no fact for the month.
 
@@ -2314,6 +2317,12 @@ def missing_revenue_fact_channel_count_and_sample(
     most `MISSING_FACT_CHANNEL_SAMPLE_LIMIT` channel ids. The two values are
     read by two independent queries so a large factless set never materializes
     a full id list on the application side.
+
+    When `youtube_channel_ids` is provided (non-None), the read is scoped to
+    those channels — used by the export helper so a company/sector/group
+    export never leaks factless channel ids outside the exported scope. When
+    omitted (None), the read is tenant-global — the smart-alerts API
+    endpoint stays global by design.
     """
     from ums_smart_revenue.finance.smart_alerts import MISSING_FACT_CHANNEL_SAMPLE_LIMIT
 
@@ -2327,12 +2336,16 @@ def missing_revenue_fact_channel_count_and_sample(
         & (MonthlyChannelRevenueFactORM.tenant_id == tenant_id)
         & (MonthlyChannelRevenueFactORM.month == month),
     )
-    where_predicates = (
+    where_predicates = [
         YouTubeChannelORM.tenant_id == tenant_id,
         YouTubeChannelORM.active.is_(True),
         YouTubeChannelORM.revenue_required.is_(True),
         MonthlyChannelRevenueFactORM.id.is_(None),
-    )
+    ]
+    if youtube_channel_ids is not None:
+        where_predicates.append(
+            YouTubeChannelORM.youtube_channel_id.in_(youtube_channel_ids)
+        )
     count_statement = (
         select(func.count())
         .select_from(YouTubeChannelORM)
