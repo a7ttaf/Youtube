@@ -18,25 +18,17 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
 from uuid import UUID
 
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.connectors.google.errors import TenantLifecycleError
 from ums_smart_revenue.tenancy.context import TENANT_CTX
-from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
+from ums_smart_revenue.tenancy.models import TenantStatus, make_placeholder_tenant
 from ums_smart_revenue.tenancy.repository import (
     SqlAlchemyTenantRepository,
     TenantNotFoundError,
 )
-
-# The RLS session hook reads ONLY ``tenant.id`` (it writes the trusted tenant
-# context row keyed on the id, never the slug/display/currency). These
-# non-identifying fields are placeholders for the test-only fabrication path
-# and are never persisted; building a full Tenant there avoids a DB round-trip
-# on the unit-test path while satisfying the frozen-dataclass contract.
-_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 # ============================================================================
@@ -160,16 +152,13 @@ def connector_tenant_context(
         # RLS session hook needs (it reads only ``tenant.id``). Production
         # callers MUST pass a session; this path is intentionally not the
         # default to prevent the CLI / executor from regressing into
-        # fabricating an ACTIVE tenant for a suspended/archived row.
-        tenant = Tenant(
-            id=tenant_id,
+        # fabricating an ACTIVE tenant for a suspended/archived row. The
+        # shape is centralized in ``tenancy.models.make_placeholder_tenant``
+        # so the audit path in ``connectors/runs/executor.py`` can share it.
+        tenant = make_placeholder_tenant(
+            tenant_id=tenant_id,
             slug=f"connector-run:{tenant_id}",
             display_name="connector run",
-            primary_currency="USD",
-            status=TenantStatus.ACTIVE,
-            onboarding_at=_EPOCH,
-            created_at=_EPOCH,
-            updated_at=_EPOCH,
         )
     token = TENANT_CTX.set(tenant)
     try:

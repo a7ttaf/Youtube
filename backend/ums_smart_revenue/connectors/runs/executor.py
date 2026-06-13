@@ -6,7 +6,6 @@ import threading
 import weakref
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from uuid import UUID
 
 from ums_smart_revenue.auth.audit import AuditEventType
@@ -26,18 +25,11 @@ from ums_smart_revenue.connectors.runs.tenant_context import (
 from ums_smart_revenue.db.lane import platform_lane
 from ums_smart_revenue.db.session import SessionFactory
 from ums_smart_revenue.tenancy.context import TENANT_CTX
-from ums_smart_revenue.tenancy.models import Tenant, TenantStatus
+from ums_smart_revenue.tenancy.models import make_placeholder_tenant
 
 logger = logging.getLogger(__name__)
 
 _JobKey = tuple[UUID, str, str, str]
-
-# Placeholder timestamps for the minimal-tenant fabrication in
-# ``_audit_failed_before_start``: only ``Tenant.id`` is read by the after_begin
-# hook / RLS policy, so the rest of the fields are placeholders that are never
-# persisted and never validated against the ``tenants`` table. The fabrication
-# pattern mirrors the test-only branch in ``connectors/runs/tenant_context.py``.
-_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 
 
 @dataclass(frozen=True)
@@ -499,16 +491,12 @@ class ConnectorJobExecutor:
         actor = self._build_audit_actor(tenant_id=tenant_id, actor_identity=actor_identity)
         # Minimal-tenant fabrication for the contextvar: only ``.id`` is read by
         # the after_begin hook / RLS policy, so the remaining fields are
-        # placeholders, never persisted or validated against ``tenants``.
-        minimal_tenant = Tenant(
-            id=tenant_id,
+        # placeholders, never persisted or validated against ``tenants``. Built
+        # via the shared factory so the placeholder shape stays centralized.
+        minimal_tenant = make_placeholder_tenant(
+            tenant_id=tenant_id,
             slug=f"connector-job-failed-audit:{tenant_id}",
             display_name="connector job failed-audit",
-            primary_currency="USD",
-            status=TenantStatus.ACTIVE,
-            onboarding_at=_EPOCH,
-            created_at=_EPOCH,
-            updated_at=_EPOCH,
         )
         token = TENANT_CTX.set(minimal_tenant)
         try:
