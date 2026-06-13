@@ -30,6 +30,7 @@ from ums_smart_revenue.org.channel_issues import (
     summarize_channel_registry_issues,
 )
 from ums_smart_revenue.org.channel_registry import (
+    ChannelMappingLockedMonthError,
     ChannelRegistry,
     ChannelRegistryConflictError,
     ChannelRegistryEntry,
@@ -394,6 +395,13 @@ def update_channel_mapping(
     except KeyError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found"
+        ) from exc
+    # Placed before the audit write below: a mapping change rejected because the
+    # channel has facts in a LOCKED finance month must NOT be recorded as an
+    # applied CHANNEL_UPDATED event.
+    except ChannelMappingLockedMonthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
         ) from exc
     except ChannelRegistryValidationError as exc:
         raise HTTPException(

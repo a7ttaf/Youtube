@@ -68,6 +68,30 @@ def test_in_memory_channel_registry_validates_primary_company_id_on_update():
         )
 
 
+def test_in_memory_channel_registry_update_mapping_has_no_lock_guard():
+    # The SQL registry rejects re-parenting a channel that has facts in a LOCKED
+    # finance month; the in-memory registry has no DB/lock concept, so its
+    # update_mapping must remain unconditional (bootstrap tests rely on this).
+    registry = ChannelRegistry(
+        [
+            ChannelRegistryEntry(
+                youtube_channel_id="channel-tv-a",
+                channel_name="TV A",
+                primary_company_id=COMPANY_TV_ID,
+                cms_status="UNKNOWN",
+                revenue_required=True,
+            )
+        ]
+    )
+
+    updated = registry.update_mapping(
+        youtube_channel_id="channel-tv-a",
+        primary_company_id=COMPANY_NEWS_ID,
+    )
+
+    assert updated.primary_company_id == COMPANY_NEWS_ID
+
+
 def test_in_memory_channel_registry_rejects_duplicate_initial_channels():
     with pytest.raises(
         ChannelRegistryConflictError, match="Duplicate channel id: channel-tv-a"
