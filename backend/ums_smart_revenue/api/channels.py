@@ -387,6 +387,14 @@ def update_channel_mapping(
             status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found"
         )
 
+    # FIX: Detect a no-op PATCH at the route boundary so the audit decision
+    # (suppress CHANNEL_UPDATED) lives with actor + reason, not the registry.
+    # The registry short-circuits the locked-month guard for the same case
+    # (no re-parenting occurs), so the returned entry still reflects the
+    # existing mapping — we must not audit a non-change (review #98 T1:
+    # idempotent retries should not produce false audit events).
+    is_no_op = current_channel.primary_company_id == payload.primary_company_id
+
     try:
         updated = registry.update_mapping(
             youtube_channel_id=youtube_channel_id,
@@ -411,6 +419,10 @@ def update_channel_mapping(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="Channel already exists"
         ) from exc
+    response = updated.to_api()
+    if is_no_op:
+        response["audit_event"] = None
+        return response
     record = record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -424,6 +436,5 @@ def update_channel_mapping(
             "new_primary_company_id": payload.primary_company_id,
         },
     )
-    response = updated.to_api()
     response["audit_event"] = audit_record_to_api(record)
     return response

@@ -225,4 +225,24 @@ describe("RankingsPanel in CommandView", () => {
     );
     expect(screen.getByText(/Request failed \(500\)/)).toBeInTheDocument();
   });
+
+  it("threads the active Command Center scope into the rankings request (no global default)", async () => {
+    // Re-route the fetch to expose the call URL for the assertion: the panel
+    // must request /rankings with the global scope_type the Command Center
+    // currently selects, not an unscoped URL (regression guard for review
+    // #98 T2: rankings defaulted to global regardless of the active scope).
+    const fetchMock = routeFetch({});
+    renderCommandView({ canViewFinance: true });
+
+    await waitFor(() =>
+      expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0),
+    );
+
+    await waitFor(() => {
+      const calledUrls = fetchMock.mock.calls.map((c) => String(c[0]));
+      const rankingCall = calledUrls.find((u) => u.includes("/rankings"));
+      expect(rankingCall).toBeDefined();
+      expect(rankingCall).toMatch(/scope_type=global/);
+    });
+  });
 });

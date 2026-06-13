@@ -160,7 +160,12 @@ def seed_org(session: Session) -> None:
 
 
 def test_sql_channel_registry_reads_and_writes_channel_rows():
-    session = build_session()
+    # FIX: Use build_finance_session (org + finance) instead of build_session
+    # (org only). The mapping re-parenting path now reaches the locked-month
+    # guard, which JOINS the finance tables. The org-only caller path stays
+    # valid through the no-op short-circuit; the change-path test needs the
+    # finance schema for the JOIN to resolve.
+    session = build_finance_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
 
@@ -515,3 +520,48 @@ def test_update_mapping_allowed_when_channel_only_has_open_month_fact():
         )
     ).one()
     assert persisted.primary_org_unit_id == COMPANY_NEWS_ID
+
+
+def test_update_mapping_no_op_returns_entry_without_locked_month_check():
+    """Idempotent / no-op PATCH must not raise on a channel with LOCKED-month facts.
+
+    The guard is meant to prevent re-parenting that would rewrite a closed
+    month's attribution; a request that doesn't change the mapping cannot
+    rewrite anything and must short-circuit BEFORE the locked-month lookup.
+    """
+    session = build_finance_session()
+    seed_org(session)
+    session.add(FinanceMonthCloseORM(month="2026-09", status="LOCKED"))
+    _seed_channel_fact(session, month="2026-09")
+    registry = SqlAlchemyChannelRegistry(session)
+
+    updated = registry.update_mapping(
+        youtube_channel_id="channel-tv-a",
+        primary_company_id=str(COMPANY_TV_ID),  # matches existing primary
+    )
+
+    assert updated.primary_company_id == str(COMPANY_TV_ID)
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-tv-a",
+        )
+    ).one()
+    assert persisted.primary_org_unit_id == COMPANY_TV_ID
+
+
+def test_update_mapping_no_op_skips_locked_month_query():
+    """No-op PATCH must not hit the finance schema; an org-only session works."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    # The locked-month guard would raise OperationalError on this session
+    # (no finance schema); the no-op short-circuit must return the entry
+    # without ever touching the finance tables.
+    updated = registry.update_mapping(
+        youtube_channel_id="channel-tv-a",
+        primary_company_id=str(COMPANY_TV_ID),  # matches existing primary
+    )
+
+    assert updated.primary_company_id == str(COMPANY_TV_ID)

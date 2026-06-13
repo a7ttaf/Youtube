@@ -67,7 +67,8 @@ def build_monthly_smart_alert_summary(
     bank_reconciliation: MonthBankReconciliationSummary,
     close_status: str | None,
     manual_overrides: Iterable[RevenueManualOverrideEntry],
-    missing_revenue_fact_channel_ids: Sequence[str] = (),
+    missing_revenue_fact_channel_count: int = 0,
+    missing_revenue_fact_channel_sample: Sequence[str] = (),
     current_revenue_facts: Iterable[RevenueFactEntry] = (),
     previous_revenue_facts: Iterable[RevenueFactEntry] = (),
     high_gap_threshold_usd: Decimal = DEFAULT_HIGH_GAP_THRESHOLD_USD,
@@ -75,13 +76,20 @@ def build_monthly_smart_alert_summary(
         DEFAULT_REVENUE_TREND_ANOMALY_THRESHOLD_PERCENT
     ),
 ) -> MonthlySmartAlertSummary:
-    """Build a monthly smart alert summary from finance signal inputs."""
+    """Build a monthly smart alert summary from finance signal inputs.
+
+    The coverage alert takes a (count, sample) pair instead of a full id
+    list so the route can bound the read at the SQL LIMIT clause. The
+    alert details keep the same wire shape (channel_count + sample_channel_ids).
+    """
     if high_gap_threshold_usd < 0:
         raise ValueError("high_gap_threshold_usd must be non-negative")
     if revenue_trend_anomaly_threshold_percent < 0:
         raise ValueError(
             "revenue_trend_anomaly_threshold_percent must be non-negative"
         )
+    if missing_revenue_fact_channel_count < 0:
+        raise ValueError("missing_revenue_fact_channel_count must be non-negative")
     alerts: list[MonthlySmartAlert] = []
     normalized_close_status = close_status or "OPEN"
     overrides = list(manual_overrides)
@@ -103,32 +111,33 @@ def build_monthly_smart_alert_summary(
     #   revenue-required channels have no revenue fact for the month. Distinct
     #   from the month-level MISSING_REVENUE_SOURCE (zero-YouTube-revenue);
     #   mirrors the close-readiness MISSING_REVENUE_FACTS blocker.
-    # Database/ORM: None (pure; ids are pre-read by the route).
-    # Standards: Capped, sorted sample (no full registry dump); count + sample
-    #   only, matching the close-readiness disclosure pattern.
+    # Database/ORM: None (pure; count + sample are pre-read by the route).
+    # Standards: Cap sample to MISSING_FACT_CHANNEL_SAMPLE_LIMIT; trust the
+    #   route's server-side LIMIT 20 + ORDER BY youtube_channel_id. If the
+    #   sample is shorter than the count the route pre-cap was tighter (only
+    #   possible on a custom-injected sample), so we re-cap here for safety.
     # Blast Radius: Finance read surface. No auth, no money, no Neo4j.
     # Connections:
-    #   - File: backend/ums_smart_revenue/api/revenue.py -> pre-reads the ids.
+    #   - File: backend/ums_smart_revenue/api/revenue.py -> pre-reads the
+    #     (count, sample) pair via two bounded queries.
     #   - File: backend/ums_smart_revenue/finance/month_close_readiness.py ->
     #     shares the active+revenue_required-without-fact query shape.
     # ========================================================================
-    missing_fact_channel_ids = sorted(missing_revenue_fact_channel_ids)
-    if missing_fact_channel_ids:
+    sample = sorted(missing_revenue_fact_channel_sample)[:MISSING_FACT_CHANNEL_SAMPLE_LIMIT]
+    if missing_revenue_fact_channel_count > 0 or sample:
         alerts.append(
             MonthlySmartAlert(
                 code="CHANNELS_MISSING_REVENUE_FACTS",
                 severity="HIGH",
                 message=(
-                    f"{len(missing_fact_channel_ids)} active revenue-required "
+                    f"{missing_revenue_fact_channel_count} active revenue-required "
                     f"channel(s) have no revenue facts for {month}."
                 ),
                 source="revenue_facts",
                 confidence="E_MISSING",
                 details={
-                    "channel_count": len(missing_fact_channel_ids),
-                    "sample_channel_ids": missing_fact_channel_ids[
-                        :MISSING_FACT_CHANNEL_SAMPLE_LIMIT
-                    ],
+                    "channel_count": missing_revenue_fact_channel_count,
+                    "sample_channel_ids": sample,
                 },
             )
         )

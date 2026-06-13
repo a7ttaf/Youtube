@@ -144,7 +144,8 @@ def test_smart_alerts_flag_missing_channel_revenue_facts():
             youtube_revenue_total_usd=Decimal("0.0000"),
             payment_gap_usd=None,
         ),
-        missing_revenue_fact_channel_ids=["channel-tv-b", "channel-tv-a"],
+        missing_revenue_fact_channel_count=2,
+        missing_revenue_fact_channel_sample=["channel-tv-b", "channel-tv-a"],
     )
 
     codes = [alert.code for alert in summary.alerts]
@@ -170,8 +171,11 @@ def test_smart_alerts_flag_missing_channel_revenue_facts():
 
 
 def test_smart_alerts_cap_missing_channel_sample_at_twenty():
-    missing = [f"channel-{index:03d}" for index in range(25)]
-    summary = build_alerts(missing_revenue_fact_channel_ids=missing)
+    sample = [f"channel-{index:03d}" for index in range(25)]
+    summary = build_alerts(
+        missing_revenue_fact_channel_count=25,
+        missing_revenue_fact_channel_sample=sample,
+    )
 
     coverage_alert = next(
         alert
@@ -179,14 +183,25 @@ def test_smart_alerts_cap_missing_channel_sample_at_twenty():
         if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
     )
     assert coverage_alert.details["channel_count"] == 25
-    assert coverage_alert.details["sample_channel_ids"] == sorted(missing)[:20]
+    assert coverage_alert.details["sample_channel_ids"] == sorted(sample)[:20]
 
 
 def test_smart_alerts_omit_missing_channel_alert_when_empty():
-    summary = build_alerts(missing_revenue_fact_channel_ids=[])
+    summary = build_alerts(
+        missing_revenue_fact_channel_count=0,
+        missing_revenue_fact_channel_sample=[],
+    )
 
     codes = [alert.code for alert in summary.alerts]
     assert "CHANNELS_MISSING_REVENUE_FACTS" not in codes
+
+
+def test_smart_alerts_reject_negative_missing_channel_count():
+    with pytest.raises(
+        ValueError,
+        match="missing_revenue_fact_channel_count must be non-negative",
+    ):
+        build_alerts(missing_revenue_fact_channel_count=-1)
 
 
 def test_smart_alerts_return_clear_when_payment_bank_and_close_are_clean():

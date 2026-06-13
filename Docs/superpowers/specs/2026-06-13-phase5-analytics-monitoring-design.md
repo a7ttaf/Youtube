@@ -45,36 +45,56 @@ an org-mapping admin can silently rewrite a LOCKED month's company/sector attrib
   between check and flush) is a narrow, documented limitation (mirrors the PR #57 N9 posture).
 - **In-memory** `ChannelRegistry.update_mapping`: unchanged (no DB/lock concept) — the guard
   is SQL-path only, so production cannot bypass it; bootstrap tests stay green.
+- **Idempotent / no-op PATCH**: a request whose `primary_company_id` matches the row's
+  current `primary_org_unit_id` MUST short-circuit BEFORE the locked-month lookup and MUST
+  return 200 unchanged. The guard is meant to prevent re-parenting that would rewrite a
+  closed month's attribution; a request that doesn't change the mapping cannot rewrite
+  anything, so safe retries and "resubmit current value" flows stay 200. Implementation:
+  parse the requested `primary_company_id` into a UUID first, compare to
+  `row.primary_org_unit_id`, return `self._to_entry(row)` early on match. This also keeps
+  the org-only caller path valid (no finance schema needed) when the request is a no-op.
+  The route suppresses the `CHANNEL_UPDATED` audit when the request is a no-op (the audit
+  decision lives at the route boundary, where actor + reason are bound).
 - **Route** `api/channels.py` `update_channel_mapping`: add
   `except ChannelMappingLockedMonthError as exc: raise HTTPException(409, detail=str(exc))`
   to the existing try/except (after the permission gate, before audit — a rejected change must
   NOT audit). 409 CONFLICT (codebase uses 409 universally for locked months; no 423 anywhere).
-  Permission gate + audit unchanged.
+  Permission gate + audit unchanged for the change-path; suppress the `CHANNEL_UPDATED` audit
+  when `current_channel.primary_company_id == payload.primary_company_id` (the no-op path
+  returns 200 with `audit_event: null`).
 - **Tests**: `tests/api/test_channels_api.py` — SQL-backed app (copy
   `test_channel_account_links_api.py::test_verify_locked_month_returns_409`): seed a channel
   with a fact in a `FinanceMonthCloseORM(status='LOCKED')` month → PATCH → 409 + 'locked' in
-  detail; an OPEN-month fact → 200. `tests/org/test_sql_channel_registry.py` service unit test;
+  detail; an OPEN-month fact → 200; a no-op PATCH against a LOCKED-month channel → 200 with
+  no audit. `tests/org/test_sql_channel_registry.py` service unit test (no-op returns
+  without finance schema; org-only fixture stays valid through the no-op short-circuit);
   `tests/org/test_channel_registry.py` asserts in-memory impl unchanged.
 
 ### C. Missing-channel coverage detection (backend) — medium
 Extend the smart-alerts engine with a per-channel coverage gap. Closes the open half of the
 Phase 7 detection gate.
 
-- **Service** `finance/smart_alerts.py` (stays PURE — no DB): add a new keyword arg
-  `missing_revenue_fact_channel_ids: Sequence[str] = ()` (pre-read in the route) and a new
-  alert block emitting code **`CHANNELS_MISSING_REVENUE_FACTS`**, severity `HIGH`, confidence
-  `E_MISSING`, when the list is non-empty. `details = {"channel_count": int,
+- **Service** `finance/smart_alerts.py` (stays PURE — no DB): add two new keyword args
+  `missing_revenue_fact_channel_count: int = 0` and
+  `missing_revenue_fact_channel_sample: Sequence[str] = ()` (pre-read in the route, server-side
+  `LIMIT MISSING_FACT_CHANNEL_SAMPLE_LIMIT` cap on the sample) and a new alert block emitting
+  code **`CHANNELS_MISSING_REVENUE_FACTS`**, severity `HIGH`, confidence `E_MISSING`, when
+  `count > 0` or the sample is non-empty. `details = {"channel_count": int,
   "sample_channel_ids": [...capped at 20, sorted...]}` (count + capped sample, mirroring the
-  close-readiness pattern; do not dump the full registry). Append after `MISSING_REVENUE_SOURCE`,
-  before `PAYMENT_NOT_MATCHED`. Distinct from the month-level `MISSING_REVENUE_SOURCE`
-  (zero-YouTube-revenue) — this is per-channel coverage, matching close-readiness
-  `MISSING_REVENUE_FACTS`.
+  close-readiness pattern; do not dump the full registry). The count + sample shape keeps
+  the read bounded: a tenant with thousands of factless channels does not materialize a
+  full id list on the application side or across the wire. Append after
+  `MISSING_REVENUE_SOURCE`, before `PAYMENT_NOT_MATCHED`. Distinct from the month-level
+  `MISSING_REVENUE_SOURCE` (zero-YouTube-revenue) — this is per-channel coverage, matching
+  close-readiness `MISSING_REVENUE_FACTS`.
 - **Route** `api/revenue.py` `get_month_smart_alerts`: read the active+revenue_required
   channels with no fact for the month using the SAME query shape as
   `month_close_readiness._missing_required_revenue_fact_count` (LEFT JOIN facts, `active.is_(True)`
   AND `revenue_required.is_(True)` AND `fact.id IS NULL`, tenant-scoped, **no** for_update lock —
-  read-only), pass the channel-id list into the builder. No new permission (stays within the
-  existing finance gate; uses only finance source-of-truth tables).
+  read-only), in TWO bounded queries: a `func.count()` aggregate and a `LIMIT
+  MISSING_FACT_CHANNEL_SAMPLE_LIMIT` ordered sample. Pass the (count, sample) pair into the
+  builder. No new permission (stays within the existing finance gate; uses only finance
+  source-of-truth tables).
 - **Missing-REPORT detection DEFERRED** — `connector_runs` carries no channel dimension and there
   is no stored "expected connectors/accounts per tenant-month" baseline; surfacing connector
   operational metadata would also widen the finance-only gate. Recorded as a named follow-up

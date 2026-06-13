@@ -128,14 +128,33 @@ class SqlAlchemyChannelRegistry:
         #   write lane); tenant-scoped; raises a typed domain error mapped to 409
         #   at the route. The concurrent-close race (a month locking between the
         #   check and flush) is a narrow documented limitation (PR #57 N9).
+        #   No-op PATCH (requested mapping equals the current value) is a
+        #   fail-fast idempotency path: the lock check is skipped, no row is
+        #   written, and the route treats the return value as a no-change marker
+        #   so the audit layer does not record a CHANNEL_UPDATED event for a
+        #   non-change. The concurrent-close race (a month locking between the
+        #   check and flush) is a narrow documented limitation (PR #57 N9).
         # Blast Radius: Finance attribution integrity, month locks, audit (a
-        #   rejected change must not be audited). No Neo4j, no exports.
+        #   rejected change must not be audited; a no-op change must not be
+        #   audited either). No Neo4j, no exports.
         # Connections:
-        #   - File: backend/ums_smart_revenue/api/channels.py -> 409 boundary.
+        #   - File: backend/ums_smart_revenue/api/channels.py -> 409 boundary +
+        #     no-op audit suppression.
         # ====================================================================
         row = self._get_row(youtube_channel_id)
         if row is None:
             raise KeyError(f"Channel not found: {youtube_channel_id}")
+
+        # FIX: Compare the parsed target to the row's current primary_org_unit_id
+        # BEFORE the locked-month guard. An idempotent PATCH (same mapping value)
+        # is a safe retry: no re-parenting would occur, so the lock check is
+        # unnecessary and would otherwise wrongly return 409 to legitimate
+        # clients that resubmit the current value.
+        parsed_primary_company_id = _parse_optional_uuid(
+            primary_company_id, "primary_company_id"
+        )
+        if parsed_primary_company_id == row.primary_org_unit_id:
+            return self._to_entry(row)
 
         locked_months = self._locked_months_for_channel(youtube_channel_id)
         if locked_months:
@@ -144,9 +163,7 @@ class SqlAlchemyChannelRegistry:
                 f"finance month(s): {', '.join(locked_months)}"
             )
 
-        row.primary_org_unit_id = _parse_optional_uuid(
-            primary_company_id, "primary_company_id"
-        )
+        row.primary_org_unit_id = parsed_primary_company_id
         try:
             self._session.flush()
         except IntegrityError as exc:

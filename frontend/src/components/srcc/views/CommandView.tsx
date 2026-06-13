@@ -243,7 +243,12 @@ export default function CommandView({ // skipcq: JS-0067, JS-R1005
 
       {/* company/sector/channel rankings — REAL data, fails independently,
           finance-gated (shows money; mounts only when canViewFinance) */}
-      <RankingsPanel month={month} canViewFinance={canViewFinance} />
+      <RankingsPanel
+        month={month}
+        canViewFinance={canViewFinance}
+        scopeType={scope.scopeType}
+        scopeId={scope.scopeId}
+      />
 
       <CommandWorkspace
         data={data}
@@ -1277,7 +1282,15 @@ function ChannelIssuesHalf({ // skipcq: JS-0067, JS-R1005
         emptySub="No registry-health issues in this scope."
       >
         {items.map((issue) => (
-          <ChannelIssueRow key={issue.youtube_channel_id} issue={issue} />
+          <ChannelIssueRow
+            // FIX: key by channel id + issue_type. The same channel can have
+            // multiple issues (e.g. MISSING_SECTOR + OUTSIDE_CMS_REVENUE_REQUIRED);
+            // keying on youtube_channel_id alone gives React duplicate keys and
+            // can recycle the wrong row across issue-type / refresh changes
+            // (review #98 T3).
+            key={`${issue.youtube_channel_id}:${issue.issue_type}`}
+            issue={issue}
+          />
         ))}
       </MonitorList>
     </section>
@@ -1387,9 +1400,18 @@ function MonitorList({ // skipcq: JS-0067, JS-R1005
 function RankingsPanel({ // skipcq: JS-0067
   month,
   canViewFinance,
+  scopeType,
+  scopeId,
 }: {
   month: string;
   canViewFinance: boolean;
+  // FIX: Forward the active scope to RankingsBody so the panel re-queries
+  // /revenue/months/{month}/rankings with the same scope_type/scope_id the
+  // status strip and channel table use, keeping the screen internally
+  // consistent and avoiding an out-of-scope global ranking on a scoped view
+  // (review #98 T2).
+  scopeType: string;
+  scopeId: string | null;
 }) {
   const [metric, setMetric] = useState<RankingMetric>("gross");
   return (
@@ -1409,7 +1431,13 @@ function RankingsPanel({ // skipcq: JS-0067
         </Badge>
       </div>
       {canViewFinance ? (
-        <RankingsBody month={month} metric={metric} canViewFinance={canViewFinance} />
+        <RankingsBody
+          month={month}
+          metric={metric}
+          canViewFinance={canViewFinance}
+          scopeType={scopeType}
+          scopeId={scopeId}
+        />
       ) : (
         <RankingsRestrictedBand />
       )}
@@ -1464,12 +1492,22 @@ function RankingsBody({ // skipcq: JS-0067, JS-R1005
   month,
   metric,
   canViewFinance,
+  scopeType,
+  scopeId,
 }: {
   month: string;
   metric: RankingMetric;
   canViewFinance: boolean;
+  // FIX: Thread the active Command Center scope (global | sector | company |
+  // channel) into the rankings request. The endpoint supports a scoped read;
+  // without these props the hook defaulted to global every time, leaving a
+  // sector/company/channel viewer looking at a global top-N while the rest of
+  // the screen showed scoped numbers (review #98 T2: dashboard-internal
+  // consistency + out-of-scope leak).
+  scopeType: string;
+  scopeId: string | null;
 }) {
-  const { data, loading, error } = useRankings({ month, metric });
+  const { data, loading, error } = useRankings({ month, metric, scopeType, scopeId });
   if (error) {
     const { title, detail } = describeError(error);
     return (

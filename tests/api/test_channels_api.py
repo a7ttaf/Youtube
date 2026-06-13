@@ -699,3 +699,29 @@ def test_mapping_change_preserves_404_if_channel_disappears_before_update():
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Channel not found"
+
+
+def test_no_op_mapping_change_returns_200_without_audit(tmp_path):
+    """Idempotent / no-op PATCH (same primary_company_id) returns 200 and is not audited.
+
+    Pairs with test_mapping_change_rejected_for_locked_month_fact_without_audit
+    to prove the audit decision lives at the route boundary and that safe
+    retries do not produce a misleading CHANNEL_UPDATED audit event.
+    """
+    client = _seed_sql_mapping_app(tmp_path, month="2026-09", month_status="LOCKED")
+    audit_sink = InMemoryAuditSink()
+    client.app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+
+    response = client.patch(
+        f"/channels/{MAPPING_CHANNEL_ID}/mapping",
+        headers=_sql_mapping_auth_headers(),
+        json={
+            "primary_company_id": BOOTSTRAP_COMPANY_TV_ID,  # matches existing
+            "reason": "resubmit current mapping value",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["primary_company_id"] == BOOTSTRAP_COMPANY_TV_ID
+    assert response.json()["audit_event"] is None
+    assert audit_sink.records == []

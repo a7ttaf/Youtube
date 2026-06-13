@@ -6,7 +6,7 @@ from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.dependencies import (
@@ -1107,7 +1107,15 @@ def get_month_smart_alerts(
         bank_entries = bank_repository.list_month_entries(month=month)
         manual_overrides = override_repository.list_month_overrides(month=month)
         close = close_repository.get(month)
-        missing_fact_channel_ids = _missing_revenue_fact_channel_ids(
+        # FIX: Bounded coverage query — total count plus an ordered, capped
+        # sample. The previous shape materialized the full id list, which
+        # turns the alert endpoint into an unbounded scan/transfer on bad
+        # ingestion months. The alert details (channel_count + sample) keep
+        # the same wire shape; only the source of the sample changed.
+        (
+            missing_fact_channel_count,
+            missing_fact_channel_sample,
+        ) = _missing_revenue_fact_channel_count_and_sample(
             session, month=month
         )
         payment_match = build_monthly_payment_match_summary(
@@ -1138,7 +1146,8 @@ def get_month_smart_alerts(
         bank_reconciliation=bank_reconciliation,
         close_status=close.status if close else "OPEN",
         manual_overrides=manual_overrides,
-        missing_revenue_fact_channel_ids=missing_fact_channel_ids,
+        missing_revenue_fact_channel_count=missing_fact_channel_count,
+        missing_revenue_fact_channel_sample=missing_fact_channel_sample,
         current_revenue_facts=facts,
         previous_revenue_facts=previous_facts,
     )
@@ -2262,43 +2271,69 @@ def _previous_month(month: str) -> str:
 
 # ============================================================================
 # Purpose: Read the active, revenue-required channels that have no revenue fact
-#   for the month, so the smart-alert builder can emit per-channel coverage gaps.
+#   for the month, so the smart-alert builder can emit per-channel coverage
+#   gaps. Bounded: returns the total COUNT plus an ordered sample capped at
+#   `MISSING_FACT_CHANNEL_SAMPLE_LIMIT` ids, so a bad ingestion month cannot
+#   turn the alert endpoint into an unbounded scan/transfer.
 # Database/ORM: Read-only LEFT JOIN of YouTubeChannelORM x
-#   MonthlyChannelRevenueFactORM (no FOR UPDATE), tenant-scoped, source of truth
-#   in PostgreSQL.
+#   MonthlyChannelRevenueFactORM (no FOR UPDATE), tenant-scoped, source of
+#   truth in PostgreSQL. The count uses `func.count()` server-side; the
+#   sample is a separate ordered `LIMIT 20` SELECT.
 # Standards: Mirrors month_close_readiness._missing_required_revenue_fact_count
-#   exactly (active.is_(True) AND revenue_required.is_(True) AND fact.id IS NULL);
-#   returns ids (not a count). No write, no lock, no Neo4j.
+#   exactly (active.is_(True) AND revenue_required.is_(True) AND fact.id IS NULL).
+#   No write, no lock, no Neo4j.
 # Blast Radius: Finance read surface only; no auth/audit/finance mutation.
 # Connections:
 #   - File: backend/ums_smart_revenue/finance/month_close_readiness.py ->
-#     shared query shape (count there; ids here).
-#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> consumes ids.
+#     shared query shape (count there; count + bounded sample here).
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> consumes
+#     (count, sample) for the coverage alert details.
 # ============================================================================
-def _missing_revenue_fact_channel_ids(session: Session, *, month: str) -> list[str]:
-    """Return active revenue-required channel ids with no fact for the month."""
+def _missing_revenue_fact_channel_count_and_sample(
+    session: Session, *, month: str
+) -> tuple[int, list[str]]:
+    """Return (count, sample) of active revenue-required channels with no fact for the month.
+
+    `count` is the total matching channels; `sample` is a sorted list of at
+    most `MISSING_FACT_CHANNEL_SAMPLE_LIMIT` channel ids. The two values are
+    read by two independent queries so a large factless set never materializes
+    a full id list on the application side.
+    """
+    from ums_smart_revenue.finance.smart_alerts import MISSING_FACT_CHANNEL_SAMPLE_LIMIT
+
     tenant_id = _resolve_smart_alert_tenant_id()
-    statement = (
+    join_predicates = (
+        (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)
+        & (
+            MonthlyChannelRevenueFactORM.youtube_channel_id
+            == YouTubeChannelORM.youtube_channel_id
+        )
+        & (MonthlyChannelRevenueFactORM.tenant_id == tenant_id)
+        & (MonthlyChannelRevenueFactORM.month == month),
+    )
+    where_predicates = (
+        YouTubeChannelORM.tenant_id == tenant_id,
+        YouTubeChannelORM.active.is_(True),
+        YouTubeChannelORM.revenue_required.is_(True),
+        MonthlyChannelRevenueFactORM.id.is_(None),
+    )
+    count_statement = (
+        select(func.count())
+        .select_from(YouTubeChannelORM)
+        .outerjoin(MonthlyChannelRevenueFactORM, *join_predicates)
+        .where(*where_predicates)
+    )
+    sample_statement = (
         select(YouTubeChannelORM.youtube_channel_id)
         .select_from(YouTubeChannelORM)
-        .outerjoin(
-            MonthlyChannelRevenueFactORM,
-            (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)
-            & (
-                MonthlyChannelRevenueFactORM.youtube_channel_id
-                == YouTubeChannelORM.youtube_channel_id
-            )
-            & (MonthlyChannelRevenueFactORM.tenant_id == tenant_id)
-            & (MonthlyChannelRevenueFactORM.month == month),
-        )
-        .where(
-            YouTubeChannelORM.tenant_id == tenant_id,
-            YouTubeChannelORM.active.is_(True),
-            YouTubeChannelORM.revenue_required.is_(True),
-            MonthlyChannelRevenueFactORM.id.is_(None),
-        )
+        .outerjoin(MonthlyChannelRevenueFactORM, *join_predicates)
+        .where(*where_predicates)
+        .order_by(YouTubeChannelORM.youtube_channel_id)
+        .limit(MISSING_FACT_CHANNEL_SAMPLE_LIMIT)
     )
-    return list(session.scalars(statement).all())
+    count_value = int(session.execute(count_statement).scalar_one())
+    sample_ids = list(session.scalars(sample_statement).all())
+    return count_value, sample_ids
 
 
 def _resolve_smart_alert_tenant_id() -> UUID:

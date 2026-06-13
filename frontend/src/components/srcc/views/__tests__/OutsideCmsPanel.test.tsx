@@ -130,6 +130,37 @@ const CHANNEL_ISSUES_BODY: ChannelIssuesResponse = {
   },
 };
 
+// Same channel id with two distinct issue types. The render key MUST include
+// the issue type so React does not log a duplicate-key warning and does not
+// reuse the wrong row across issue-type / refresh changes (review #98 T3).
+const CHANNEL_ISSUES_MULTI: ChannelIssuesResponse = {
+  items: [
+    {
+      youtube_channel_id: "UC-ISSUE-01",
+      channel_name: "Issue Channel One",
+      primary_company_id: null,
+      issue_type: "MISSING_SECTOR",
+      severity: "medium",
+      message: "Channel has no sector assignment",
+      recommended_action: "Assign a sector",
+    },
+    {
+      youtube_channel_id: "UC-ISSUE-01",
+      channel_name: "Issue Channel One",
+      primary_company_id: null,
+      issue_type: "OUTSIDE_CMS_REVENUE_REQUIRED",
+      severity: "high",
+      message: "Channel is outside CMS and revenue-required",
+      recommended_action: "Move to a managed CMS or mark revenue optional",
+    },
+  ],
+  summary: {
+    total_issue_count: 2,
+    channel_count: 1,
+    issue_type_counts: { MISSING_SECTOR: 1, OUTSIDE_CMS_REVENUE_REQUIRED: 1 },
+  },
+};
+
 function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   return new Response(JSON.stringify(body), {
     status,
@@ -266,5 +297,33 @@ describe("OutsideCmsMonitorPanel in CommandView", () => {
     expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0);
     // The issues half surfaces the typed request-failed copy.
     expect(screen.getByText(/Request failed \(500\)/)).toBeInTheDocument();
+  });
+
+  it("renders two issues for the same channel with distinct keys (no duplicate-key warning)", async () => {
+    // Capture React's duplicate-key warnings so the regression guard catches
+    // a future revert back to keying on youtube_channel_id alone.
+    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      routeFetch({ issues: () => jsonResponse(CHANNEL_ISSUES_MULTI) });
+      renderCommandView({ canViewAnalytics: true });
+
+      // Both issue rows render for the same channel id, distinguished by type.
+      expect(
+        await screen.findByText("Channel has no sector assignment"),
+      ).toBeInTheDocument();
+      expect(
+        screen.getByText("Channel is outside CMS and revenue-required"),
+      ).toBeInTheDocument();
+
+      const duplicateKeyCalls = consoleErrorSpy.mock.calls.filter((args) => {
+        const joined = args
+          .map((a) => (typeof a === "string" ? a : ""))
+          .join(" ");
+        return /Encountered two children with the same key/i.test(joined);
+      });
+      expect(duplicateKeyCalls).toEqual([]);
+    } finally {
+      consoleErrorSpy.mockRestore();
+    }
   });
 });
