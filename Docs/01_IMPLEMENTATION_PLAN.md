@@ -172,8 +172,20 @@ running on the operator's workstation.
       trusted context row, then switches a tenant-lane session to the restricted
       `app_tenant` role (fail-closed: missing context => no rows). Plus
       `build_platform_session_factory` and the `assert_tenant_match` write-path
-      helper. Composite FKs / tenant-scoped unique keys / `FORCE ROW LEVEL
-      SECURITY` remain follow-ups.
+      helper. Composite FKs / tenant-scoped unique keys remain follow-ups.
+    - ✅ FORCE RLS (2026-06-14, branch `feat/force-row-level-security`):
+      **`FORCE ROW LEVEL SECURITY` DONE.** Migration
+      `20260612_0002_force_tenant_rls` runs
+      `ALTER TABLE ... FORCE ROW LEVEL SECURITY` on all 25
+      `db.rls.TENANT_SCOPED_TABLES` (reusing the ENABLE migration's drift guard
+      so a new tenant table cannot ship un-`FORCE`d). ENABLE already bound the
+      non-owner app roles; `FORCE` additionally binds the **non-superuser table
+      owner** (which Postgres otherwise lets bypass RLS), closing the
+      owner-bypass gap and completing Track-E isolation as defense-in-depth.
+      Superuser / `BYPASSRLS` roles still bypass by Postgres design; Postgres-only
+      (no-op off Postgres), idempotent, rolls back with `NO FORCE` leaving the
+      policies in place. Proof in `tests/tenancy/test_force_rls.py`. See
+      `Docs/17_MULTI_TENANT_ARCHITECTURE.md` "FORCE ROW LEVEL SECURITY follow-up".
 - **Source-reported currency foundation.**
   `Docs/18_MULTI_CURRENCY_ENGINE.md` was revised on 2026-05-23 to make
   Google/YouTube/AdSense reported money the official finance source. The next
