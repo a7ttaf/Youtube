@@ -355,7 +355,7 @@ GET /connectors/credentials
 POST /connectors/credentials
 POST /connectors/credentials/{connector_key}/{account_id}/test
 POST /connectors/jobs
-GET /connectors/runs?connector_key=youtube-reporting&account_id=acct-1&limit=50
+GET /connectors/runs?connector_key=youtube-reporting&account_id=<id>&limit=50
 GET /connectors/runs?limit=50&cursor_started_at=2026-05-10T12:00:00Z&cursor_id=<uuid>
 ```
 
