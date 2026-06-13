@@ -96,7 +96,7 @@ const SCOPES_GLOBAL_AND_COMPANY: RevenueScopeOption[] = [
   { scope_type: "company", scope_id: "company-a", label: "Company Alpha" },
 ];
 
-function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
+function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
@@ -111,7 +111,7 @@ function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
 // Dispatch is a URL-substring -> responder table (data-driven) rather than a
 // chain of if/else branches to keep the routing function's cyclomatic complexity
 // below DeepSource's medium-risk threshold.
-function routeFetch( // skipcq: JS-0067
+function routeFetch(
   netRevenue: () => Response,
   smartAlerts?: () => Response,
   scopes?: () => Response,
@@ -137,7 +137,7 @@ function routeFetch( // skipcq: JS-0067
   return fetchMock;
 }
 
-function renderCommandView(canViewFinance: boolean) { // skipcq: JS-0067
+function renderCommandView(canViewFinance: boolean) {
   return render(
     <TenantProvider initialSlug="ums">
       <CommandView canViewFinance={canViewFinance} />

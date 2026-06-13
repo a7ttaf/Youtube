@@ -74,7 +74,7 @@ type ScopeOption = {
 // Standards: Pure helper; no money, no authorization. Global carries no scope_id.
 // Blast Radius: None detected (UI selection identity only).
 // ============================================================================
-function scopeOptionKey(scopeType: string, scopeId: string | null): string { // skipcq: JS-0067
+function scopeOptionKey(scopeType: string, scopeId: string | null): string {
   return scopeId ? `${scopeType}:${scopeId}` : scopeType;
 }
 
@@ -104,7 +104,7 @@ const GLOBAL_SCOPE_FALLBACK: ScopeOption = {
 //   - File: frontend/src/lib/api/useRevenueScopes.ts -> the option source.
 //   - File: frontend/src/lib/api/types.ts -> RevenueScopeOption.
 // ============================================================================
-function resolveScopeOptions(scopes: RevenueScopeOption[] | null): ScopeOption[] { // skipcq: JS-0067
+function resolveScopeOptions(scopes: RevenueScopeOption[] | null): ScopeOption[] {
   if (!scopes || scopes.length === 0) {
     return [GLOBAL_SCOPE_FALLBACK];
   }
@@ -136,7 +136,7 @@ const STATUS_KEYWORD_TONE: Record<string, Severity> = {
 };
 
 /** Map a month/channel status string to a design-system badge tone. */
-function statusTone(status: string): Severity { // skipcq: JS-0067, JS-R1005
+function statusTone(status: string): Severity {
   const normalized = status.toUpperCase();
   for (const [keyword, tone] of Object.entries(STATUS_KEYWORD_TONE)) {
     if (normalized.includes(keyword)) return tone;
@@ -151,7 +151,7 @@ function statusTone(status: string): Severity { // skipcq: JS-0067, JS-R1005
  * assistive tech. Channel rows carry no separate API human label, so the helper
  * falls back to its prefix map for these.
  */
-function ConfidenceBadge({ code }: { code: string }) { // skipcq: JS-0067
+function ConfidenceBadge({ code }: { code: string }) {
   const { label, tone } = confidenceDisplay(code);
   return (
     <span title={code} aria-label={`Confidence: ${code}`}>
@@ -162,7 +162,7 @@ function ConfidenceBadge({ code }: { code: string }) { // skipcq: JS-0067
 
 // Map an alert severity to a design-system badge tone (HIGH -> red, MEDIUM ->
 // amber, LOW -> blue). Unknown severities fall back to blue.
-function severityTone(severity: SmartAlertSeverity | string): Severity { // skipcq: JS-0067
+function severityTone(severity: SmartAlertSeverity | string): Severity {
   switch (severity) {
     case "HIGH":
       return "red";
@@ -176,12 +176,12 @@ function severityTone(severity: SmartAlertSeverity | string): Severity { // skip
 }
 
 /** Human-facing label for a channel row (its YouTube channel id for now). */
-function channelDisplayName(channel: ChannelNetRevenue): string { // skipcq: JS-0067
+function channelDisplayName(channel: ChannelNetRevenue): string {
   return channel.youtube_channel_id;
 }
 
 /** Two-letter avatar initials derived from a channel's id. */
-function channelAvatar(channel: ChannelNetRevenue): string { // skipcq: JS-0067
+function channelAvatar(channel: ChannelNetRevenue): string {
   const id = channel.youtube_channel_id.replace(/[^a-zA-Z0-9]/g, "");
   return (id.slice(-2) || "--").toUpperCase();
 }
@@ -190,7 +190,7 @@ function channelAvatar(channel: ChannelNetRevenue): string { // skipcq: JS-0067
  * Command Center screen: month/scope filters, the real net-revenue status strip
  * and channel table, the smart-alerts panel, and the per-channel explanation.
  */
-export default function CommandView({ // skipcq: JS-0067, JS-R1005
+export default function CommandView({
   canViewFinance,
   canViewAnalytics = false,
 }: {
@@ -355,7 +355,7 @@ export default function CommandView({ // skipcq: JS-0067, JS-R1005
  * close, explanation, and export-readiness panels. Splits into named panels so
  * each JSX subtree stays shallow.
  */
-function CommandWorkspace({ // skipcq: JS-0067
+function CommandWorkspace({
   data,
   loading,
   error,
@@ -415,7 +415,7 @@ function CommandWorkspace({ // skipcq: JS-0067
 }
 
 /** Channel Revenue Table panel: header badge plus the real net-revenue table. */
-function ChannelRevenuePanel({ // skipcq: JS-0067
+function ChannelRevenuePanel({
   data,
   loading,
   error,
@@ -457,7 +457,7 @@ function ChannelRevenuePanel({ // skipcq: JS-0067
 }
 
 /** Mock Issue Queue panel (not yet wired to the API). */
-function IssueQueuePanel() { // skipcq: JS-0067
+function IssueQueuePanel() {
   return (
     <section className="panel" aria-labelledby="issuesTitle">
       <div className="panel-header">
@@ -483,7 +483,7 @@ function IssueQueuePanel() { // skipcq: JS-0067
 }
 
 /** Mock Month Close Controls panel (not yet wired to the API). */
-function MonthCloseControlsPanel() { // skipcq: JS-0067
+function MonthCloseControlsPanel() {
   return (
     <section className="panel" aria-labelledby="closeTitle">
       <div className="panel-header">
@@ -510,7 +510,7 @@ function MonthCloseControlsPanel() { // skipcq: JS-0067
 }
 
 /** Trailing control for a close step: a status badge or an action button. */
-function CloseStepAction({ step }: { step: (typeof CLOSE_STEPS)[number] }) { // skipcq: JS-0067
+function CloseStepAction({ step }: { step: (typeof CLOSE_STEPS)[number] }) {
   if (step.badge) {
     return <Badge tone={step.badge.tone}>{step.badge.text}</Badge>;
   }
@@ -522,7 +522,7 @@ function CloseStepAction({ step }: { step: (typeof CLOSE_STEPS)[number] }) { // 
 }
 
 /** Net-revenue explanation card for the selected channel (or an empty state). */
-function ExplainCard({ // skipcq: JS-0067
+function ExplainCard({
   selectedChannel,
   canViewFinance,
   currency,
@@ -573,7 +573,7 @@ function ExplainCard({ // skipcq: JS-0067
 }
 
 /** Mock Export Readiness panel (not yet wired to the API). */
-function ExportReadinessPanel() { // skipcq: JS-0067
+function ExportReadinessPanel() {
   return (
     <section className="panel">
       <div className="panel-header">
@@ -603,7 +603,7 @@ function ExportReadinessPanel() { // skipcq: JS-0067
 //   message (matches the finance fail-closed model); other ApiError -> the
 //   typed status + message; non-ApiError -> generic network failure.
 // ============================================================================
-function describeError(error: ApiError | Error): { title: string; detail: string } { // skipcq: JS-0067, JS-R1005
+function describeError(error: ApiError | Error): { title: string; detail: string } {
   if (error instanceof ApiError) {
     if (error.status === 403) {
       return {
@@ -645,7 +645,7 @@ function describeError(error: ApiError | Error): { title: string; detail: string
 //   - File: frontend/src/lib/api/types.ts -> SmartAlertsSummary contract.
 //   - File: backend/ums_smart_revenue/api/revenue.py:844 get_month_smart_alerts.
 // ============================================================================
-function SmartAlertsPanel({ month }: { month: string }) { // skipcq: JS-0067
+function SmartAlertsPanel({ month }: { month: string }) {
   const { data, loading, error, reload } = useSmartAlerts({ month });
 
   return (
@@ -673,7 +673,7 @@ function SmartAlertsPanel({ month }: { month: string }) { // skipcq: JS-0067
 
 // Header badge: surfaces the overall status + highest severity at a glance, and
 // degrades to Loading / Error / No permission without breaking the panel header.
-function SmartAlertsHeaderBadge({ // skipcq: JS-0067, JS-R1005
+function SmartAlertsHeaderBadge({
   data,
   loading,
   error,
@@ -703,7 +703,7 @@ function SmartAlertsHeaderBadge({ // skipcq: JS-0067, JS-R1005
 }
 
 /** Body of the smart-alerts panel: error, loading, empty, and alert-row states. */
-function SmartAlertsBody({ // skipcq: JS-0067, JS-R1005
+function SmartAlertsBody({
   data,
   loading,
   error,
@@ -775,7 +775,7 @@ function SmartAlertsBody({ // skipcq: JS-0067, JS-R1005
 }
 
 /** Top metric strip summarising the month's gross, net, deductions, and allocation source. */
-function NetRevenueStatusStrip({ // skipcq: JS-0067, JS-R1005
+function NetRevenueStatusStrip({
   data,
   loading,
   error,
@@ -936,7 +936,7 @@ function NetRevenueStatusStrip({ // skipcq: JS-0067, JS-R1005
 }
 
 /** Selectable per-channel revenue table with error, loading, and empty states. */
-function NetRevenueChannelTable({ // skipcq: JS-0067, JS-R1005
+function NetRevenueChannelTable({
   data,
   loading,
   error,
@@ -1008,7 +1008,7 @@ function NetRevenueChannelTable({ // skipcq: JS-0067, JS-R1005
 }
 
 /** Static header row for the channel revenue table. */
-function ChannelTableHead() { // skipcq: JS-0067
+function ChannelTableHead() {
   return (
     <thead>
       <tr>
@@ -1025,7 +1025,7 @@ function ChannelTableHead() { // skipcq: JS-0067
 }
 
 /** Single selectable channel row: name, status, permission-gated money, and issues. */
-function ChannelRow({ // skipcq: JS-0067
+function ChannelRow({
   channel,
   canViewFinance,
   currency,
@@ -1083,7 +1083,7 @@ function ChannelRow({ // skipcq: JS-0067
 }
 
 /** Avatar + name + source-kind cell for a channel row. */
-function ChannelNameCell({ channel }: { channel: ChannelNetRevenue }) { // skipcq: JS-0067
+function ChannelNameCell({ channel }: { channel: ChannelNetRevenue }) {
   return (
     <span className="channel-cell">
       <span className="avatar">{channelAvatar(channel)}</span>
@@ -1096,7 +1096,7 @@ function ChannelNameCell({ channel }: { channel: ChannelNetRevenue }) { // skipc
 }
 
 /** Explanation rows for the selected channel: gross, deductions, and resulting net. */
-function ChannelExplainRows({ // skipcq: JS-0067
+function ChannelExplainRows({
   channel,
   canViewFinance,
   currency,
@@ -1178,7 +1178,7 @@ function ChannelExplainRows({ // skipcq: JS-0067
 //   - File: frontend/src/lib/api/types.ts -> OutsideCmsResponse/ChannelIssuesResponse.
 //   - File: backend/ums_smart_revenue/api/channels.py -> the two monitor routes.
 // ============================================================================
-function OutsideCmsMonitorPanel({ // skipcq: JS-0067
+function OutsideCmsMonitorPanel({
   canViewAnalytics,
 }: {
   canViewAnalytics: boolean;
@@ -1208,7 +1208,7 @@ function OutsideCmsMonitorPanel({ // skipcq: JS-0067
 }
 
 /** Restricted placeholder: NO hook mounted, NO request fired (fail-closed). */
-function OutsideCmsRestrictedBand() { // skipcq: JS-0067
+function OutsideCmsRestrictedBand() {
   return (
     <div className="permission-band" role="note">
       <ItemRow
@@ -1226,7 +1226,7 @@ function OutsideCmsRestrictedBand() { // skipcq: JS-0067
  * cannot blank the issues half (and vice-versa). Only mounted when permitted, so
  * both hooks stay rules-of-hooks safe and fire exactly once at this view root.
  */
-function OutsideCmsMonitorBody() { // skipcq: JS-0067
+function OutsideCmsMonitorBody() {
   const outsideCms = useOutsideCmsChannels();
   const issues = useChannelIssues();
   return (
@@ -1252,7 +1252,7 @@ function OutsideCmsMonitorBody() { // skipcq: JS-0067
 }
 
 /** Summary tiles: outside-CMS count, missing-official-revenue, open issues. */
-function OutsideCmsSummaryTiles({ // skipcq: JS-0067
+function OutsideCmsSummaryTiles({
   outsideCms,
   issues,
 }: {
@@ -1288,7 +1288,7 @@ function OutsideCmsSummaryTiles({ // skipcq: JS-0067
 }
 
 /** Outside-CMS half: loading / error / empty / row states (fails on its own). */
-function OutsideCmsHalf({ // skipcq: JS-0067, JS-R1005
+function OutsideCmsHalf({
   data,
   loading,
   error,
@@ -1323,7 +1323,7 @@ function OutsideCmsHalf({ // skipcq: JS-0067, JS-R1005
 }
 
 /** One outside-CMS row: distinguishes "covered" from "missing source". */
-function OutsideCmsRow({ item }: { item: OutsideCmsItem }) { // skipcq: JS-0067
+function OutsideCmsRow({ item }: { item: OutsideCmsItem }) {
   const tone: Severity = item.missing_official_revenue ? "amber" : "green";
   const status = item.missing_official_revenue
     ? "Missing official revenue"
@@ -1339,7 +1339,7 @@ function OutsideCmsRow({ item }: { item: OutsideCmsItem }) { // skipcq: JS-0067
 }
 
 /** Channel-issues half: loading / error / empty / row states (fails on its own). */
-function ChannelIssuesHalf({ // skipcq: JS-0067, JS-R1005
+function ChannelIssuesHalf({
   data,
   loading,
   error,
@@ -1382,7 +1382,7 @@ function ChannelIssuesHalf({ // skipcq: JS-0067, JS-R1005
 }
 
 /** Map a channel-issue severity string to a design-system badge tone. */
-function issueSeverityTone(severity: string): Severity { // skipcq: JS-0067
+function issueSeverityTone(severity: string): Severity {
   const normalized = severity.toLowerCase();
   if (normalized === "high") return "red";
   if (normalized === "medium") return "amber";
@@ -1390,7 +1390,7 @@ function issueSeverityTone(severity: string): Severity { // skipcq: JS-0067
 }
 
 /** One channel-issue row. */
-function ChannelIssueRow({ issue }: { issue: ChannelIssue }) { // skipcq: JS-0067
+function ChannelIssueRow({ issue }: { issue: ChannelIssue }) {
   const tone = issueSeverityTone(issue.severity);
   return (
     <ItemRow
@@ -1407,7 +1407,7 @@ function ChannelIssueRow({ issue }: { issue: ChannelIssue }) { // skipcq: JS-006
  * copy, never masked as "no issues"), a loading state, an empty state, or the
  * caller's rows. Keeps each half's JSX subtree shallow and consistent.
  */
-function MonitorList({ // skipcq: JS-0067, JS-R1005
+function MonitorList({
   error,
   loading,
   empty,
@@ -1481,7 +1481,7 @@ function MonitorList({ // skipcq: JS-0067, JS-R1005
 //   - File: frontend/src/lib/api/types.ts -> MonthRankingsResponse/RankedEntry.
 //   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_rankings.
 // ============================================================================
-function RankingsPanel({ // skipcq: JS-0067
+function RankingsPanel({
   month,
   canViewFinance,
   scopeType,
@@ -1536,7 +1536,7 @@ function RankingsPanel({ // skipcq: JS-0067
 }
 
 /** Metric selector for the rankings panel (gross / net / deduction). */
-function RankingMetricToggle({ // skipcq: JS-0067
+function RankingMetricToggle({
   metric,
   onChange,
   disabled,
@@ -1561,7 +1561,7 @@ function RankingMetricToggle({ // skipcq: JS-0067
 }
 
 /** Restricted placeholder: NO hook mounted, NO request fired (fail-closed). */
-function RankingsRestrictedBand() { // skipcq: JS-0067
+function RankingsRestrictedBand() {
   return (
     <div className="permission-band" role="note">
       <ItemRow
@@ -1578,7 +1578,7 @@ function RankingsRestrictedBand() { // skipcq: JS-0067
  * Live rankings body: owns useRankings (only mounted when canViewFinance) and
  * renders the three ranked dimensions plus the allocation-source provenance.
  */
-function RankingsBody({ // skipcq: JS-0067, JS-R1005
+function RankingsBody({
   month,
   metric,
   canViewFinance,
@@ -1632,7 +1632,7 @@ function RankingsBody({ // skipcq: JS-0067, JS-R1005
 }
 
 /** Resolved rankings content: allocation source + the three ranked dimensions. */
-function RankingsContent({ // skipcq: JS-0067
+function RankingsContent({
   data,
   metric,
   canViewFinance,
@@ -1688,7 +1688,7 @@ function RankingsContent({ // skipcq: JS-0067
 }
 
 /** Select the money value for the active metric from a ranked entry. */
-function rankingMetricValue( // skipcq: JS-0067
+function rankingMetricValue(
   row: RankedEntry,
   metric: RankingMetric,
 ): string | null {
@@ -1698,7 +1698,7 @@ function rankingMetricValue( // skipcq: JS-0067
 }
 
 /** One ranked dimension (companies / sectors / channels): rows or empty state. */
-function RankingDimension({ // skipcq: JS-0067
+function RankingDimension({
   title,
   rows,
   metric,

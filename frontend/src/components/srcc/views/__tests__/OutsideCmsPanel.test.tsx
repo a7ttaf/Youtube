@@ -16,7 +16,7 @@ const ORIGINAL_FETCH = globalThis.fetch;
 // while preserving the spy for assertion. Using a named function (rather than
 // `() => {}`) keeps the JS-0321 / arrow-empty lint family happy and the call
 // site readable.
-function noop() { // skipcq: JS-0067
+function noop() {
   return undefined;
 }
 
@@ -169,14 +169,14 @@ const CHANNEL_ISSUES_MULTI: ChannelIssuesResponse = {
   },
 };
 
-function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
+function jsonResponse(body: unknown, status = 200) {
   return new Response(JSON.stringify(body), {
     status,
     headers: { "Content-Type": "application/json" },
   });
 }
 
-type RouteOptions = { // skipcq: JS-0067
+type RouteOptions = {
   outsideCms?: () => Response;
   issues?: () => Response;
 };
@@ -190,7 +190,7 @@ const DEFAULT_NET_REVENUE: () => Response = () => jsonResponse(NET_REVENUE_BODY)
 // the response builder. Keeping the lookup in a table (rather than chained
 // `if`s in `routeFetch`) drops the function's cyclomatic complexity below the
 // JS-R1005 medium-risk threshold.
-const URL_RESPONDERS: Array<{ // skipcq: JS-0067
+const URL_RESPONDERS: Array<{
   match: (url: string) => boolean;
   build: (opts: RouteOptions) => () => Response;
 }> = [
@@ -214,7 +214,7 @@ const URL_RESPONDERS: Array<{ // skipcq: JS-0067
 
 // Route each fetch by URL so the monitor panel's two reads (outside-cms +
 // issues) can be driven independently from the net-revenue + smart-alerts reads.
-function routeFetch(opts: RouteOptions = {}) { // skipcq: JS-0067
+function routeFetch(opts: RouteOptions = {}) {
   const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = String(input);
@@ -228,7 +228,7 @@ function routeFetch(opts: RouteOptions = {}) { // skipcq: JS-0067
   return fetchMock;
 }
 
-function renderCommandView(opts: { // skipcq: JS-0067
+function renderCommandView(opts: {
   canViewFinance?: boolean;
   canViewAnalytics?: boolean;
 } = {}) {

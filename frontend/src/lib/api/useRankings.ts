@@ -42,7 +42,7 @@ export type RankingsQuery = {
 // Optional query parameters accepted by the rankings endpoint. Each entry is
 // (query-param name, value-to-set-if-present). Keeping the mapping in a table
 // drops the per-render branch count below the JS-R1005 medium-risk threshold.
-const QUERY_PARAM_BUILDERS: ReadonlyArray<{ // skipcq: JS-0067
+const QUERY_PARAM_BUILDERS: ReadonlyArray<{
   key: string;
   pick: (q: RankingsQuery) => string | undefined;
 }> = [
@@ -52,7 +52,7 @@ const QUERY_PARAM_BUILDERS: ReadonlyArray<{ // skipcq: JS-0067
   { key: "limit", pick: (q) => (q.limit !== undefined ? String(q.limit) : undefined) },
 ];
 
-const buildRankingsPath = (query: RankingsQuery): string => { // skipcq: JS-0067
+const buildRankingsPath = (query: RankingsQuery): string => {
   const params = new URLSearchParams();
   for (const { key, pick } of QUERY_PARAM_BUILDERS) {
     const value = pick(query);
@@ -64,7 +64,7 @@ const buildRankingsPath = (query: RankingsQuery): string => { // skipcq: JS-0067
   }`;
 };
 
-export function useRankings( // skipcq: JS-0067
+export function useRankings(
   query: RankingsQuery,
 ): AsyncState<MonthRankingsResponse> {
   const client = useApiClient();
