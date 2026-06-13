@@ -240,10 +240,15 @@ def test_disabled_principal_is_forbidden(tmp_path):
     assert response.json()["detail"] == "Missing permission: finance.view_revenue"
 
 
-def test_raw_id_fallback_when_company_name_deactivated(tmp_path):
-    """When a company unit is deactivated its name drops from the reader, so the
-    option falls back to the raw id (the sector grant still expands to it via the
-    access index, which is built from the still-active channel mapping).
+def test_deactivated_company_excluded_from_scope_options(tmp_path):
+    """A deactivated company is EXCLUDED from the scope options (fail-closed),
+    not raw-id-fallback-listed. Deactivating the unit drops it from BOTH the
+    org-unit name map AND the access index (build_org_access_index walks active
+    units only), so the sector grant cannot expand to it: it has no id and no
+    name in the response. API-layer raw-id fallback for a company is therefore
+    unreachable (company_names and company_sector share the active-units source);
+    the pure-service fallback path is covered by
+    tests/finance/test_revenue_scopes.py::test_raw_id_fallback_when_name_missing.
     """
     database_url = build_database_url(tmp_path)
     seed_database(database_url)
@@ -265,9 +270,15 @@ def test_raw_id_fallback_when_company_name_deactivated(tmp_path):
     assert response.status_code == 200
     scopes = response.json()["scopes"]
     by_id = {s["scope_id"]: s["label"] for s in scopes}
-    # company-tv-a stays named; the sector keeps its name.
+    # The still-active sibling company stays named; the sector keeps its name.
     assert by_id[str(COMPANY_TV_A_ID)] == "TV A"
     assert by_id[str(SECTOR_TV_ID)] == "TV"
+    # Fail-closed exclusion / no-leak: the deactivated company's id is absent and
+    # its name never appears as any option's label (not even via a raw-id label).
+    ids = {s["scope_id"] for s in scopes}
+    labels = {s["label"] for s in scopes}
+    assert str(COMPANY_TV_B_ID) not in ids
+    assert "TV B" not in labels
 
 
 def test_scopes_endpoint_emits_no_audit_event(tmp_path):

@@ -727,7 +727,9 @@ operator-asserted (tenant_id, month, bank_reference)→account(s) receipt model
   CUSTOM_GROUP etc.) is not a finance `scope_type` today — it needs a
   `ScopeType.GROUP`, a group_id → member channel_ids resolver, and per-channel
   authorization as the AND of `AccessScope.channel(cid)` checks; the exports
-  path (`api/exports.py` `_access_scopes_for_export_scope`) is the precedent.
+  path is the precedent (`api/exports.py` `_require_export_scope_permissions`,
+  which loops the resolved channels asserting `AccessScope.channel(cid)`, plus
+  `_access_scope_from_export_scope` for the non-group scope→AccessScope mapping).
   Optional display conversion is later work and must be labeled non-official
   unless it is the currency reported by Google/AdSense.
 

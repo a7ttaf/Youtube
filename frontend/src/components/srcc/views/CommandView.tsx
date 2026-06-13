@@ -263,7 +263,13 @@ export default function CommandView({ // skipcq: JS-0067, JS-R1005
         <select
           className="control"
           aria-label="Scope"
-          value={selectedScopeKey}
+          // Drive the shown option from the RESOLVED active scope, not the raw
+          // selectedScopeKey: after a /revenue/scopes reload returns a different
+          // authorized set, the stored key may name an option no longer present.
+          // `scope` already falls back to the first option (global while
+          // loading), so the displayed option always matches the scope being read
+          // — no desynced selection that reads one scope but shows another.
+          value={scopeOptionKey(scope.scopeType, scope.scopeId)}
           onChange={(e) => {
             // Store the stable scope key; the active {scopeType, scopeId} is
             // resolved from it against the current option list. Reset the

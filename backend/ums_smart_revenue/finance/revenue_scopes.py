@@ -76,11 +76,11 @@ def build_authorized_revenue_scopes(
     company_ids: set[str] = set()
 
     if has_global:
-        # A global grant authorizes the entire active universe; the name maps
-        # carry exactly the tenant's active sectors/companies.
+        # A global grant authorizes the entire active universe. company_names
+        # (from the active org-unit reader) is the authoritative active-company
+        # set; the name maps carry exactly the tenant's active sectors/companies.
         sector_ids.update(sector_names.keys())
         company_ids.update(company_names.keys())
-        company_ids.update(org_index.company_sector.keys())
     else:
         for scope in granted:
             if scope.id is None:

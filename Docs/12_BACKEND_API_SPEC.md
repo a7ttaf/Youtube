@@ -251,9 +251,15 @@ and is fail-closed: a disabled principal, or one with no active
 takes no path or query parameters and performs **no audit write** (it is a
 metadata helper like `GET /org-units`, not a revenue-number disclosure). The
 response is `{"scopes": [{"scope_type", "scope_id", "label"}, ...]}` and
-contains **only** the rollup scopes the caller is authorized to aggregate, so
-the selector can never offer an out-of-scope org unit (org-structure leak) or a
-dead option that would `403` on the rollup read. A global `finance.view_revenue`
+contains **only** the rollup scopes the caller's `finance.view_revenue` grants
+authorize, so the selector can never offer an out-of-scope org unit
+(org-structure leak). These scopes are readable for the standard finance roles,
+which couple `finance.view_revenue` with the `finance.view_confidence` (at the
+scope) and `finance.view_finalized_payments` (at the finance month) that the
+rollup read also requires. (A hand-crafted `finance.view_revenue`-only grant
+could be offered a scope whose rollup read then `403`s; the Command Center
+degrades that to an in-card "No permission" state — it is not a leak.) A global
+`finance.view_revenue`
 grant yields the `global` option (`scope_id: null`) plus every active sector and
 company; a sector grant yields that sector plus its member companies; a company
 grant yields that company only (it does not confer the sector). The `global`

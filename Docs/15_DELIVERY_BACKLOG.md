@@ -817,7 +817,10 @@ single P-tier above.
     CUSTOM_GROUP etc.) is not a finance `scope_type` today — it needs a
     `ScopeType.GROUP`, a group_id -> member channel_ids resolver, and
     per-channel authorization as the AND of `AccessScope.channel(cid)` checks;
-    `api/exports.py` `_access_scopes_for_export_scope` is the precedent.
+    the exports path is the precedent (`api/exports.py`
+    `_require_export_scope_permissions`, which loops the resolved channels
+    asserting `AccessScope.channel(cid)`, plus `_access_scope_from_export_scope`
+    for the non-group scope->AccessScope mapping).
 
 ## Hard problems to solve early
 

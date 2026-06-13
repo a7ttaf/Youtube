@@ -22,9 +22,16 @@ that scope. Grounded in the 3-agent understanding sweep (`wx6108zdl`); anchors v
 ## The security decision (why a new endpoint, not just useOrgUnits)
 `GET /org-units` returns **all** active units in the tenant and is VIEW_ANALYTICS-gated. Populating
 the selector from it would (a) **over-list** every company/sector to a scoped viewer (org-structure
-leak), and (b) offer **dead options** that 403 on selection because the rollup read needs
+leak), and (b) offer options the viewer cannot actually roll up, because the rollup read needs
 VIEW_REVENUE, not VIEW_ANALYTICS. So the selector's options MUST be the viewer's
 **VIEW_REVENUE-authorized** scopes. No existing endpoint returns that. → new endpoint.
+
+Scope: `/revenue/scopes` returns the viewer's **VIEW_REVENUE-authorized** scopes. Those are readable
+for the standard finance roles, which couple VIEW_REVENUE with VIEW_CONFIDENCE@scope +
+VIEW_FINALIZED_PAYMENTS@finance_month (the rollup read's other gates). It is not an absolute "never a
+dead option" guarantee: a hand-crafted VIEW_REVENUE-only grant could be offered a scope whose rollup
+read then 403s — the FE degrades that to an in-card "No permission" (not a leak). The role model
+couples the three perms, so refactoring the endpoint for that unreachable case is not warranted.
 
 ---
 
