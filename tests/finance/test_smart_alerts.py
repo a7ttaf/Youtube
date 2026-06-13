@@ -158,10 +158,14 @@ def test_smart_alerts_flag_missing_channel_revenue_facts():
         "PAYMENT_NOT_MATCHED"
     )
     coverage_alert = next(
-        alert
-        for alert in summary.alerts
-        if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
+        (
+            alert
+            for alert in summary.alerts
+            if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
+        ),
+        None,
     )
+    assert coverage_alert is not None, "expected CHANNELS_MISSING_REVENUE_FACTS alert"
     assert coverage_alert.severity == "HIGH"
     assert coverage_alert.confidence == "E_MISSING"
     assert coverage_alert.details == {
@@ -178,10 +182,14 @@ def test_smart_alerts_cap_missing_channel_sample_at_twenty():
     )
 
     coverage_alert = next(
-        alert
-        for alert in summary.alerts
-        if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
+        (
+            alert
+            for alert in summary.alerts
+            if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
+        ),
+        None,
     )
+    assert coverage_alert is not None, "expected CHANNELS_MISSING_REVENUE_FACTS alert"
     assert coverage_alert.details["channel_count"] == 25
     assert coverage_alert.details["sample_channel_ids"] == sorted(sample)[:20]
 
