@@ -114,6 +114,8 @@ function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   });
 }
 
+const DEFAULT_RANKINGS: () => Response = () => jsonResponse(RANKINGS_BODY);
+
 // Route each fetch by URL. The rankings read is captured so the metric-toggle
 // test can assert the query param changed across renders.
 function routeFetch(opts: { rankings?: () => Response } = {}) { // skipcq: JS-0067
@@ -121,9 +123,7 @@ function routeFetch(opts: { rankings?: () => Response } = {}) { // skipcq: JS-00
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes("/rankings")) {
-      return Promise.resolve(
-        (opts.rankings ?? (() => jsonResponse(RANKINGS_BODY)))(),
-      );
+      return Promise.resolve((opts.rankings ?? DEFAULT_RANKINGS)());
     }
     if (url.includes("/smart-alerts")) {
       return Promise.resolve(jsonResponse(SMART_ALERTS_CLEAR));

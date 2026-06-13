@@ -258,6 +258,13 @@ def build_monthly_smart_alert_summary(
     )
 
 
+def _gap_above_threshold(
+    gap_usd: Decimal | None, threshold_usd: Decimal
+) -> bool:
+    """True when the absolute gap is at or above the threshold."""
+    return gap_usd is not None and abs(gap_usd) >= threshold_usd
+
+
 def _high_gap_details(
     *,
     payment_gap_usd: Decimal | None,
@@ -276,15 +283,15 @@ def _high_gap_details(
         ValueError: If threshold_usd is negative.
 
     Returns:
-        A dictionary with gap details if any gaps exceed the threshold,
+        A dictionary containing gap details if any gaps exceed the threshold,
         otherwise an empty dict.
     """
     if threshold_usd < 0:
         raise ValueError("high_gap_threshold_usd must be non-negative")
     details: dict[str, object] = {"threshold_usd": _decimal_to_api(threshold_usd)}
-    if payment_gap_usd is not None and abs(payment_gap_usd) >= threshold_usd:
+    if _gap_above_threshold(payment_gap_usd, threshold_usd):
         details["payment_gap_usd"] = _decimal_to_api(payment_gap_usd)
-    if bank_gap_usd is not None and abs(bank_gap_usd) >= threshold_usd:
+    if _gap_above_threshold(bank_gap_usd, threshold_usd):
         details["bank_gap_usd"] = _decimal_to_api(bank_gap_usd)
     return details if len(details) > 1 else {}
 
@@ -316,36 +323,46 @@ def _revenue_trend_anomaly_details(
     # month are still surfaced as a 100% drop. Skipping them would silently
     # mask one of the highest-signal regressions for revenue trend alerts.
     for channel_id in sorted(previous_by_channel):
-        current = current_by_channel.get(channel_id)
-        previous = previous_by_channel[channel_id]
-        if previous.gross_revenue_usd == 0:
-            continue
-        current_gross_revenue_usd = (
-            current.gross_revenue_usd if current is not None else Decimal("0")
+        detail = _channel_trend_detail(
+            channel_id=channel_id,
+            current=current_by_channel.get(channel_id),
+            previous=previous_by_channel[channel_id],
+            threshold_percent=threshold_percent,
         )
-        change_ratio = (
-            current_gross_revenue_usd - previous.gross_revenue_usd
-        ) / previous.gross_revenue_usd
-        if abs(change_ratio) <= threshold_percent:
-            continue
-        channels.append(
-            {
-                "youtube_channel_id": channel_id,
-                "current_gross_revenue_usd": _decimal_to_api(
-                    current_gross_revenue_usd
-                ),
-                "previous_gross_revenue_usd": _decimal_to_api(
-                    previous.gross_revenue_usd
-                ),
-                "change_percent": _decimal_to_api(_to_percent(change_ratio)),
-            }
-        )
+        if detail is not None:
+            channels.append(detail)
     if not channels:
         return {}
     return {
         "threshold_percent": _decimal_to_api(_to_percent(threshold_percent)),
         "channel_count": len(channels),
         "channels": channels,
+    }
+
+
+def _channel_trend_detail(
+    *,
+    channel_id: str,
+    current: RevenueFactEntry | None,
+    previous: RevenueFactEntry,
+    threshold_percent: Decimal,
+) -> dict[str, object] | None:
+    """Return the trend anomaly detail for one channel, or None when not anomalous."""
+    if previous.gross_revenue_usd == 0:
+        return None
+    current_gross_revenue_usd = (
+        current.gross_revenue_usd if current is not None else Decimal("0")
+    )
+    change_ratio = (
+        current_gross_revenue_usd - previous.gross_revenue_usd
+    ) / previous.gross_revenue_usd
+    if abs(change_ratio) <= threshold_percent:
+        return None
+    return {
+        "youtube_channel_id": channel_id,
+        "current_gross_revenue_usd": _decimal_to_api(current_gross_revenue_usd),
+        "previous_gross_revenue_usd": _decimal_to_api(previous.gross_revenue_usd),
+        "change_percent": _decimal_to_api(_to_percent(change_ratio)),
     }
 
 

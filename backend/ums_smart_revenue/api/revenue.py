@@ -2215,19 +2215,38 @@ def _authorized_channel_ids_for_permission(
     return channel_ids
 
 
+def _direct_scopes_for_permission(
+    user: UserPrincipal, permission: Permission
+) -> list[AccessScope]:
+    """Yield active direct scopes granting the permission."""
+    return [
+        grant.scope
+        for grant in user.direct_permissions
+        if grant.active and grant.permission == permission
+    ]
+
+
+def _role_scopes_for_permission(
+    user: UserPrincipal, permission: Permission
+) -> list[AccessScope]:
+    """Yield active role-derived scopes granting the permission."""
+    return [
+        assignment.scope
+        for assignment in user.role_assignments
+        if assignment.active
+        and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset())
+    ]
+
+
 def _granted_scopes_for_permission(
     user: UserPrincipal,
     permission: Permission,
 ) -> tuple[AccessScope, ...]:
     """Collect all active direct or role scopes granting a permission."""
-    scopes: list[AccessScope] = []
-    for grant in user.direct_permissions:
-        if grant.active and grant.permission == permission:
-            scopes.append(grant.scope)
-    for assignment in user.role_assignments:
-        if assignment.active and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset()):
-            scopes.append(assignment.scope)
-    return tuple(scopes)
+    return tuple(
+        _direct_scopes_for_permission(user, permission)
+        + _role_scopes_for_permission(user, permission)
+    )
 
 
 def _intersect_channel_sets(left: set[str] | None, right: set[str] | None) -> set[str] | None:

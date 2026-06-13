@@ -176,6 +176,16 @@ function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   });
 }
 
+type RouteOptions = { // skipcq: JS-0067
+  outsideCms?: () => Response;
+  issues?: () => Response;
+};
+
+const DEFAULT_OUTSIDE_CMS: () => Response = () => jsonResponse(OUTSIDE_CMS_BODY);
+const DEFAULT_ISSUES: () => Response = () => jsonResponse(CHANNEL_ISSUES_BODY);
+const DEFAULT_SMART_ALERTS: () => Response = () => jsonResponse(SMART_ALERTS_CLEAR);
+const DEFAULT_NET_REVENUE: () => Response = () => jsonResponse(NET_REVENUE_BODY);
+
 // Per-URL response strategy. Keyed by the URL substring to match, value is
 // the response builder. Keeping the lookup in a table (rather than chained
 // `if`s in `routeFetch`) drops the function's cyclomatic complexity below the
@@ -185,19 +195,14 @@ const URL_RESPONDERS: Array<{ // skipcq: JS-0067
   build: (opts: RouteOptions) => () => Response;
 }> = [
   { match: (url) => url.includes("/channels/outside-cms"),
-    build: (o) => o.outsideCms ?? (() => jsonResponse(OUTSIDE_CMS_BODY)) },
+    build: (o) => o.outsideCms ?? DEFAULT_OUTSIDE_CMS },
   { match: (url) => url.includes("/channels/issues"),
-    build: (o) => o.issues ?? (() => jsonResponse(CHANNEL_ISSUES_BODY)) },
+    build: (o) => o.issues ?? DEFAULT_ISSUES },
   { match: (url) => url.includes("/smart-alerts"),
-    build: () => () => jsonResponse(SMART_ALERTS_CLEAR) },
+    build: () => DEFAULT_SMART_ALERTS },
   { match: (url) => url.includes("/net-revenue"),
-    build: () => () => jsonResponse(NET_REVENUE_BODY) },
+    build: () => DEFAULT_NET_REVENUE },
 ];
-
-type RouteOptions = { // skipcq: JS-0067
-  outsideCms?: () => Response;
-  issues?: () => Response;
-};
 
 // Route each fetch by URL so the monitor panel's two reads (outside-cms +
 // issues) can be driven independently from the net-revenue + smart-alerts reads.

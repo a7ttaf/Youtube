@@ -294,19 +294,34 @@ def _authorized_channel_ids_for_analytics(
     return channel_ids
 
 
+def _direct_scopes_for_permission(
+    user: UserPrincipal, permission: Permission
+) -> list[AccessScope]:
+    return [
+        grant.scope
+        for grant in user.direct_permissions
+        if grant.active and grant.permission == permission
+    ]
+
+
+def _role_scopes_for_permission(
+    user: UserPrincipal, permission: Permission
+) -> list[AccessScope]:
+    return [
+        assignment.scope
+        for assignment in user.role_assignments
+        if assignment.active
+        and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset())
+    ]
+
+
 def _granted_scopes_for_permission(
     user: UserPrincipal, permission: Permission
 ) -> tuple[AccessScope, ...]:
-    scopes: list[AccessScope] = []
-    for grant in user.direct_permissions:
-        if grant.active and grant.permission == permission:
-            scopes.append(grant.scope)
-    for assignment in user.role_assignments:
-        if assignment.active and permission in ROLE_PERMISSIONS.get(
-            assignment.role, frozenset()
-        ):
-            scopes.append(assignment.scope)
-    return tuple(scopes)
+    return tuple(
+        _direct_scopes_for_permission(user, permission)
+        + _role_scopes_for_permission(user, permission)
+    )
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)

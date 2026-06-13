@@ -71,6 +71,29 @@ def _require_analytics_view_permission(user: UserPrincipal) -> None:
         )
 
 
+def _direct_scopes_for_permission(
+    user: UserPrincipal, permission: Permission
+) -> list[AccessScope]:
+    """Yield active direct scopes granting the permission."""
+    return [
+        grant.scope
+        for grant in user.direct_permissions
+        if grant.active and grant.permission == permission
+    ]
+
+
+def _role_scopes_for_permission(
+    user: UserPrincipal, permission: Permission
+) -> list[AccessScope]:
+    """Yield active role-derived scopes granting the permission."""
+    return [
+        assignment.scope
+        for assignment in user.role_assignments
+        if assignment.active
+        and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset())
+    ]
+
+
 def _granted_scopes_for_permission(
     user: UserPrincipal, permission: Permission
 ) -> tuple[AccessScope, ...]:
@@ -80,13 +103,7 @@ def _granted_scopes_for_permission(
     role assignments carrying the permission are included. Returns an empty
     tuple if no grant exists (falsy → caller should 403).
     """
-    scopes: list[AccessScope] = []
-    for grant in user.direct_permissions:
-        if grant.active and grant.permission == permission:
-            scopes.append(grant.scope)
-    for assignment in user.role_assignments:
-        if assignment.active and permission in ROLE_PERMISSIONS.get(
-            assignment.role, frozenset()
-        ):
-            scopes.append(assignment.scope)
-    return tuple(scopes)
+    return tuple(
+        _direct_scopes_for_permission(user, permission)
+        + _role_scopes_for_permission(user, permission)
+    )
