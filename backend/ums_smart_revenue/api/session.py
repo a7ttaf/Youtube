@@ -12,6 +12,7 @@ from ums_smart_revenue.api.dependencies import current_principal_from_headers
 from ums_smart_revenue.auth.models import UserPrincipal
 from ums_smart_revenue.auth.permissions import Permission
 from ums_smart_revenue.auth.policy import (
+    analytics_view_granted_any_scope,
     connector_health_connector_ids,
     has_permission,
 )
@@ -50,14 +51,16 @@ class SessionCapabilities(BaseModel):
 
     Python attributes stay snake_case (lint-clean); the wire/JSON keys are
     camelCase via the alias generator so the SPA consumes canViewRevenue etc.
-    Most capabilities are global-scope checks; connector health is scope-aware
-    so scoped users can open the run-history panel without over-broadening it.
+    Most capabilities are global-scope checks; connector health and analytics
+    are scope-aware so scoped users can open their panels (run-history /
+    analytics) without over-broadening the underlying grant.
     """
 
     model_config = ConfigDict(alias_generator=to_camel, populate_by_name=True)
 
     can_view_revenue: bool
     can_view_confidence: bool
+    can_view_analytics: bool
     can_view_payments: bool
     can_view_bank_reconciliation: bool
     can_close_month: bool
@@ -115,6 +118,12 @@ def _derive_capabilities(principal: UserPrincipal) -> SessionCapabilities:
     return SessionCapabilities(
         can_view_revenue=_can(Permission.VIEW_REVENUE),
         can_view_confidence=_can(Permission.VIEW_CONFIDENCE),
+        # Scope-aware (NOT the global-only _can): VIEW_ANALYTICS is held by
+        # nearly every role, many only at company/sector/channel scope. A
+        # global-only check would hide the analytics panel from a legitimately
+        # scoped analytics user. The analytics routes still re-check the grant
+        # per requested scope, so this stays a render hint, not the boundary.
+        can_view_analytics=analytics_view_granted_any_scope(principal),
         can_view_payments=_can(Permission.VIEW_FINALIZED_PAYMENTS),
         can_view_bank_reconciliation=_can(Permission.VIEW_BANK_RECONCILIATION),
         can_close_month=_can(Permission.LOCK_FINANCE_MONTH),

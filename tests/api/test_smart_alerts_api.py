@@ -275,6 +275,120 @@ def test_month_smart_alerts_include_month_over_month_revenue_anomaly(tmp_path):
     ]
 
 
+def test_month_smart_alerts_flag_channel_missing_revenue_facts(tmp_path):
+    """A 2nd active revenue-required channel with no fact surfaces the coverage alert."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add(
+            YouTubeChannelORM(
+                id=UUID("00000000-0000-0000-0000-00000000b302"),
+                youtube_channel_id="channel-tv-b",
+                channel_name="TV B",
+                primary_org_unit_id=COMPANY_ID,
+                cms_status="INSIDE_CMS",
+                revenue_required=True,
+                active=True,
+            )
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/smart-alerts",
+        headers=auth_headers("finance_viewer", "global"),
+    )
+
+    assert response.status_code == 200
+    coverage = next(
+        (
+            alert
+            for alert in response.json()["alerts"]
+            if alert["code"] == "CHANNELS_MISSING_REVENUE_FACTS"
+        ),
+        None,
+    )
+    assert coverage is not None
+    assert coverage["severity"] == "HIGH"
+    assert coverage["confidence"] == "E_MISSING"
+    assert coverage["details"] == {
+        "channel_count": 1,
+        "sample_channel_ids": ["channel-tv-b"],
+    }
+    # The pre-existing audit shape stays stable (no new audit events).
+    assert [event["event_type"] for event in response.json()["audit_events"]] == [
+        "REVENUE_VIEWED",
+        "PAYMENT_VIEWED",
+        "BANK_RECONCILIATION_VIEWED",
+    ]
+
+
+def test_coverage_alert_excludes_inactive_and_non_required_channels(tmp_path):
+    """Only active AND revenue_required factless channels surface in the alert."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    engine = create_engine(database_url)
+    with Session(engine) as session:
+        session.add_all(
+            [
+                # Flagged: active + revenue_required + no fact.
+                YouTubeChannelORM(
+                    id=UUID("00000000-0000-0000-0000-00000000b302"),
+                    youtube_channel_id="channel-tv-b",
+                    channel_name="TV B",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+                # Not flagged: archived (active=False), factless.
+                YouTubeChannelORM(
+                    id=UUID("00000000-0000-0000-0000-00000000b303"),
+                    youtube_channel_id="channel-tv-archived",
+                    channel_name="TV Archived",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=False,
+                ),
+                # Not flagged: revenue not required, factless.
+                YouTubeChannelORM(
+                    id=UUID("00000000-0000-0000-0000-00000000b304"),
+                    youtube_channel_id="channel-tv-optional",
+                    channel_name="TV Optional",
+                    primary_org_unit_id=COMPANY_ID,
+                    cms_status="INSIDE_CMS",
+                    revenue_required=False,
+                    active=True,
+                ),
+            ]
+        )
+        session.commit()
+    client = TestClient(create_app(database_url=database_url))
+
+    response = client.get(
+        "/revenue/months/2026-03/smart-alerts",
+        headers=auth_headers("finance_viewer", "global"),
+    )
+
+    assert response.status_code == 200
+    coverage = next(
+        (
+            alert
+            for alert in response.json()["alerts"]
+            if alert["code"] == "CHANNELS_MISSING_REVENUE_FACTS"
+        ),
+        None,
+    )
+    assert coverage is not None
+    # Only the active, revenue-required, factless channel is flagged.
+    assert coverage["details"]["channel_count"] == 1
+    assert coverage["details"]["sample_channel_ids"] == ["channel-tv-b"]
+    assert "channel-tv-archived" not in coverage["details"]["sample_channel_ids"]
+    assert "channel-tv-optional" not in coverage["details"]["sample_channel_ids"]
+
+
 def test_assistant_cannot_read_month_smart_alerts(tmp_path):
     """
     Test that an assistant_analyst user without finance.view_revenue permission

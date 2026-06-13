@@ -1,13 +1,34 @@
-from fastapi.testclient import TestClient
+from uuid import UUID, uuid4
 
-from ums_smart_revenue.api.channels import current_channel_registry
+from fastapi.testclient import TestClient
+from sqlalchemy import create_engine
+from sqlalchemy.orm import Session
+
+from ums_smart_revenue.api.channels import (
+    current_audit_sink,
+    current_channel_registry,
+    sql_channel_registry_from_session,
+)
 from ums_smart_revenue.api.registry_dependencies import sql_group_registry_from_session
 from ums_smart_revenue.api.revenue import current_org_access_index
 from ums_smart_revenue.app import create_app
+from ums_smart_revenue.auth.audit_service import InMemoryAuditSink
+from ums_smart_revenue.db.finance_models import (
+    FinanceBase,
+    FinanceMonthCloseORM,
+    MonthlyChannelRevenueFactORM,
+)
+from ums_smart_revenue.db.org_models import (
+    OrgBase,
+    OrgUnitORM,
+    YouTubeChannelORM,
+)
+from ums_smart_revenue.db.security_models import SecurityBase, UserORM
 from ums_smart_revenue.org.bootstrap_registry import (
     BOOTSTRAP_COMPANY_NEWS_ID,
     BOOTSTRAP_COMPANY_TV_ID,
     BOOTSTRAP_ORG_INDEX,
+    BOOTSTRAP_SECTOR_TV_ID,
 )
 from ums_smart_revenue.org.channel_groups import ChannelGroupEntry, ChannelGroupRegistry
 from ums_smart_revenue.org.channel_registry import (
@@ -535,6 +556,132 @@ def test_registry_factory_returns_fresh_state_per_app():
     assert registry_two.get_channel("channel-temp") is None
 
 
+MAPPING_USER_ID = UUID("00000000-0000-0000-0000-0000000c0401")
+MAPPING_CHANNEL_ID = "channel-tv-a"
+
+
+def _sql_mapping_auth_headers() -> dict[str, str]:
+    """Return super_owner global headers for the SQL-backed mapping app."""
+    return {
+        "x-user-id": str(MAPPING_USER_ID),
+        "x-user-email": "map-admin@example.com",
+        "x-role": "super_owner",
+        "x-scope-type": "global",
+        "x-ums-trusted-gateway-token": "pytest-trusted-gateway-token",
+    }
+
+
+def _seed_sql_mapping_app(tmp_path, *, month: str, month_status: str):
+    """Create a SQL-backed app whose channel-tv-a has one fact in ``month``.
+
+    Returns a TestClient wired so PATCH /channels/{id}/mapping hits the SQL
+    registry guard (org index pinned to the bootstrap index for the gate).
+    """
+    database_url = f"sqlite+pysqlite:///{(tmp_path / f'{uuid4()}.db').as_posix()}"
+    engine = create_engine(database_url)
+    OrgBase.metadata.create_all(engine)
+    SecurityBase.metadata.create_all(engine)
+    FinanceBase.metadata.create_all(engine)
+    with Session(engine) as session:
+        session.add(
+            UserORM(
+                id=MAPPING_USER_ID,
+                email="map-admin@example.com",
+                display_name="Map Admin",
+            )
+        )
+        session.add_all(
+            [
+                OrgUnitORM(
+                    id=UUID(BOOTSTRAP_SECTOR_TV_ID),
+                    parent_id=None,
+                    type="SECTOR",
+                    name="TV",
+                    active=True,
+                ),
+                OrgUnitORM(
+                    id=UUID(BOOTSTRAP_COMPANY_TV_ID),
+                    parent_id=UUID(BOOTSTRAP_SECTOR_TV_ID),
+                    type="COMPANY",
+                    name="TV Company",
+                    active=True,
+                ),
+                OrgUnitORM(
+                    id=UUID(BOOTSTRAP_COMPANY_NEWS_ID),
+                    parent_id=UUID(BOOTSTRAP_SECTOR_TV_ID),
+                    type="COMPANY",
+                    name="News Company",
+                    active=True,
+                ),
+                YouTubeChannelORM(
+                    id=uuid4(),
+                    youtube_channel_id=MAPPING_CHANNEL_ID,
+                    channel_name="TV A",
+                    primary_org_unit_id=UUID(BOOTSTRAP_COMPANY_TV_ID),
+                    cms_status="INSIDE_CMS",
+                    revenue_required=True,
+                    active=True,
+                ),
+            ]
+        )
+        session.add(FinanceMonthCloseORM(month=month, status=month_status))
+        session.add(
+            MonthlyChannelRevenueFactORM(
+                id=uuid4(),
+                month=month,
+                youtube_channel_id=MAPPING_CHANNEL_ID,
+                source_kind="YOUTUBE_CMS",
+                gross_revenue_usd=100,
+            )
+        )
+        session.commit()
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_channel_registry] = (
+        sql_channel_registry_from_session
+    )
+    app.dependency_overrides[current_org_access_index] = lambda: BOOTSTRAP_ORG_INDEX
+    return TestClient(app)
+
+
+def test_mapping_change_rejected_for_locked_month_fact_without_audit(tmp_path):
+    """Re-parenting a channel with a LOCKED-month fact returns 409 and is not audited."""
+    client = _seed_sql_mapping_app(tmp_path, month="2026-09", month_status="LOCKED")
+    audit_sink = InMemoryAuditSink()
+    client.app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+
+    response = client.patch(
+        f"/channels/{MAPPING_CHANNEL_ID}/mapping",
+        headers=_sql_mapping_auth_headers(),
+        json={
+            "primary_company_id": BOOTSTRAP_COMPANY_NEWS_ID,
+            "reason": "attempt remap on locked month",
+        },
+    )
+
+    assert response.status_code == 409
+    assert "locked" in response.json()["detail"].lower()
+    # A rejected mapping change must not be audited as an applied update.
+    assert audit_sink.records == []
+
+
+def test_mapping_change_allowed_for_open_month_fact(tmp_path):
+    """Re-parenting a channel whose only fact is in an OPEN month returns 200."""
+    client = _seed_sql_mapping_app(tmp_path, month="2026-09", month_status="OPEN")
+
+    response = client.patch(
+        f"/channels/{MAPPING_CHANNEL_ID}/mapping",
+        headers=_sql_mapping_auth_headers(),
+        json={
+            "primary_company_id": BOOTSTRAP_COMPANY_NEWS_ID,
+            "reason": "remap on open month",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["primary_company_id"] == BOOTSTRAP_COMPANY_NEWS_ID
+    assert response.json()["audit_event"]["event_type"] == "CHANNEL_UPDATED"
+
+
 def test_mapping_change_preserves_404_if_channel_disappears_before_update():
     """Test that a 404 is preserved if the channel is removed before mapping update."""
     app = create_bootstrap_app()
@@ -552,3 +699,29 @@ def test_mapping_change_preserves_404_if_channel_disappears_before_update():
 
     assert response.status_code == 404
     assert response.json()["detail"] == "Channel not found"
+
+
+def test_no_op_mapping_change_returns_200_without_audit(tmp_path):
+    """Idempotent / no-op PATCH (same primary_company_id) returns 200 and is not audited.
+
+    Pairs with test_mapping_change_rejected_for_locked_month_fact_without_audit
+    to prove the audit decision lives at the route boundary and that safe
+    retries do not produce a misleading CHANNEL_UPDATED audit event.
+    """
+    client = _seed_sql_mapping_app(tmp_path, month="2026-09", month_status="LOCKED")
+    audit_sink = InMemoryAuditSink()
+    client.app.dependency_overrides[current_audit_sink] = lambda: audit_sink
+
+    response = client.patch(
+        f"/channels/{MAPPING_CHANNEL_ID}/mapping",
+        headers=_sql_mapping_auth_headers(),
+        json={
+            "primary_company_id": BOOTSTRAP_COMPANY_TV_ID,  # matches existing
+            "reason": "resubmit current mapping value",
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["primary_company_id"] == BOOTSTRAP_COMPANY_TV_ID
+    assert response.json()["audit_event"] is None
+    assert audit_sink.records == []

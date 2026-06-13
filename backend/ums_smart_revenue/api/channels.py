@@ -30,6 +30,7 @@ from ums_smart_revenue.org.channel_issues import (
     summarize_channel_registry_issues,
 )
 from ums_smart_revenue.org.channel_registry import (
+    ChannelMappingLockedMonthError,
     ChannelRegistry,
     ChannelRegistryConflictError,
     ChannelRegistryEntry,
@@ -293,19 +294,34 @@ def _authorized_channel_ids_for_analytics(
     return channel_ids
 
 
+def _direct_scopes_for_permission(
+    user: UserPrincipal, permission: Permission
+) -> list[AccessScope]:
+    return [
+        grant.scope
+        for grant in user.direct_permissions
+        if grant.active and grant.permission == permission
+    ]
+
+
+def _role_scopes_for_permission(
+    user: UserPrincipal, permission: Permission
+) -> list[AccessScope]:
+    return [
+        assignment.scope
+        for assignment in user.role_assignments
+        if assignment.active
+        and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset())
+    ]
+
+
 def _granted_scopes_for_permission(
     user: UserPrincipal, permission: Permission
 ) -> tuple[AccessScope, ...]:
-    scopes: list[AccessScope] = []
-    for grant in user.direct_permissions:
-        if grant.active and grant.permission == permission:
-            scopes.append(grant.scope)
-    for assignment in user.role_assignments:
-        if assignment.active and permission in ROLE_PERMISSIONS.get(
-            assignment.role, frozenset()
-        ):
-            scopes.append(assignment.scope)
-    return tuple(scopes)
+    return tuple(
+        _direct_scopes_for_permission(user, permission)
+        + _role_scopes_for_permission(user, permission)
+    )
 
 
 @router.post("", status_code=status.HTTP_201_CREATED)
@@ -386,6 +402,14 @@ def update_channel_mapping(
             status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found"
         )
 
+    # FIX: Detect a no-op PATCH at the route boundary so the audit decision
+    # (suppress CHANNEL_UPDATED) lives with actor + reason, not the registry.
+    # The registry short-circuits the locked-month guard for the same case
+    # (no re-parenting occurs), so the returned entry still reflects the
+    # existing mapping — we must not audit a non-change (review #98 T1:
+    # idempotent retries should not produce false audit events).
+    is_no_op = current_channel.primary_company_id == payload.primary_company_id
+
     try:
         updated = registry.update_mapping(
             youtube_channel_id=youtube_channel_id,
@@ -395,6 +419,13 @@ def update_channel_mapping(
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND, detail="Channel not found"
         ) from exc
+    # Placed before the audit write below: a mapping change rejected because the
+    # channel has facts in a LOCKED finance month must NOT be recorded as an
+    # applied CHANNEL_UPDATED event.
+    except ChannelMappingLockedMonthError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail=str(exc)
+        ) from exc
     except ChannelRegistryValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)
@@ -403,6 +434,10 @@ def update_channel_mapping(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT, detail="Channel already exists"
         ) from exc
+    response = updated.to_api()
+    if is_no_op:
+        response["audit_event"] = None
+        return response
     record = record_audit_event(
         sink=audit_sink,
         actor=user,
@@ -416,6 +451,5 @@ def update_channel_mapping(
             "new_primary_company_id": payload.primary_company_id,
         },
     )
-    response = updated.to_api()
     response["audit_event"] = audit_record_to_api(record)
     return response

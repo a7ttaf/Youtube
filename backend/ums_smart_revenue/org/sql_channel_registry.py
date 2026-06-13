@@ -4,8 +4,13 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.db.finance_models import (
+    FinanceMonthCloseORM,
+    MonthlyChannelRevenueFactORM,
+)
 from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.org.channel_registry import (
+    ChannelMappingLockedMonthError,
     ChannelRegistryConflictError,
     ChannelRegistryEntry,
     ChannelRegistryValidationError,
@@ -112,13 +117,53 @@ class SqlAlchemyChannelRegistry:
     def update_mapping(
         self, *, youtube_channel_id: str, primary_company_id: str | None
     ) -> ChannelRegistryEntry:
+        # ====================================================================
+        # Purpose: Re-parent a channel's primary org unit, but first reject the
+        #   change when the channel has any revenue fact in a LOCKED finance
+        #   month — re-parenting would silently rewrite that closed month's
+        #   company/sector attribution.
+        # Database/ORM: YouTubeChannelORM (write), MonthlyChannelRevenueFactORM +
+        #   FinanceMonthCloseORM (read-only lock check).
+        # Standards: Read-only guard (no row creation -> RLS-safe, no platform
+        #   write lane); tenant-scoped; raises a typed domain error mapped to 409
+        #   at the route. The concurrent-close race (a month locking between the
+        #   check and flush) is a narrow documented limitation (PR #57 N9).
+        #   No-op PATCH (requested mapping equals the current value) is a
+        #   fail-fast idempotency path: the lock check is skipped, no row is
+        #   written, and the route treats the return value as a no-change marker
+        #   so the audit layer does not record a CHANNEL_UPDATED event for a
+        #   non-change. The concurrent-close race (a month locking between the
+        #   check and flush) is a narrow documented limitation (PR #57 N9).
+        # Blast Radius: Finance attribution integrity, month locks, audit (a
+        #   rejected change must not be audited; a no-op change must not be
+        #   audited either). No Neo4j, no exports.
+        # Connections:
+        #   - File: backend/ums_smart_revenue/api/channels.py -> 409 boundary +
+        #     no-op audit suppression.
+        # ====================================================================
         row = self._get_row(youtube_channel_id)
         if row is None:
             raise KeyError(f"Channel not found: {youtube_channel_id}")
 
-        row.primary_org_unit_id = _parse_optional_uuid(
+        # FIX: Compare the parsed target to the row's current primary_org_unit_id
+        # BEFORE the locked-month guard. An idempotent PATCH (same mapping value)
+        # is a safe retry: no re-parenting would occur, so the lock check is
+        # unnecessary and would otherwise wrongly return 409 to legitimate
+        # clients that resubmit the current value.
+        parsed_primary_company_id = _parse_optional_uuid(
             primary_company_id, "primary_company_id"
         )
+        if parsed_primary_company_id == row.primary_org_unit_id:
+            return self._to_entry(row)
+
+        locked_months = self._locked_months_for_channel(youtube_channel_id)
+        if locked_months:
+            raise ChannelMappingLockedMonthError(
+                "Channel mapping cannot change: revenue facts exist in locked "
+                f"finance month(s): {', '.join(locked_months)}"
+            )
+
+        row.primary_org_unit_id = parsed_primary_company_id
         try:
             self._session.flush()
         except IntegrityError as exc:
@@ -134,6 +179,32 @@ class SqlAlchemyChannelRegistry:
                 YouTubeChannelORM.youtube_channel_id == youtube_channel_id,
             )
         ).one_or_none()
+
+    def _locked_months_for_channel(self, youtube_channel_id: str) -> list[str]:
+        """Return the sorted LOCKED finance months this channel has facts in.
+
+        Read-only, tenant-scoped: joins the channel's revenue facts to the
+        finance-month close rows and keeps only months whose close status is
+        LOCKED. No row creation, so this stays on the read lane (RLS-safe).
+        """
+        rows = self._session.scalars(
+            select(MonthlyChannelRevenueFactORM.month)
+            .distinct()
+            .join(
+                FinanceMonthCloseORM,
+                (FinanceMonthCloseORM.tenant_id
+                 == MonthlyChannelRevenueFactORM.tenant_id)
+                & (FinanceMonthCloseORM.month
+                   == MonthlyChannelRevenueFactORM.month),
+            )
+            .where(
+                MonthlyChannelRevenueFactORM.tenant_id == self._tenant_id,
+                MonthlyChannelRevenueFactORM.youtube_channel_id
+                == youtube_channel_id,
+                FinanceMonthCloseORM.status == "LOCKED",
+            )
+        ).all()
+        return sorted(rows)
 
     @staticmethod
     def _to_entry(row: YouTubeChannelORM) -> ChannelRegistryEntry:

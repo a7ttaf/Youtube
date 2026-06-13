@@ -1,8 +1,9 @@
 # Implementation Plan
 
-## Status (2026-06-05)
+## Status (2026-06-13)
 
-Mainline merge status is reconciled through PR #36 (S2 multi-tenant
+Mainline merge status is reconciled through PR #97 (executor Bucket-A audit RLS
+fix). Mainline integration was reconciled through PR #36 (S2 multi-tenant
 integration merged onto `main` at commit `96dbe73`), and the roadmap notes
 now include the stacked PR #47 Google live connector foundation state. The
 original Phase 0–7 product cut below is the durable roadmap; status markers
@@ -56,17 +57,25 @@ of this is required for any phase below to work end-to-end.
   Connectors; the Audit page is wired to `GET /audit/events` (PR #71,
   31a7641) and Registry to `GET /channels` (PR #73/#78), so all dashboard
   pages are wired to live APIs).
-- ✅ Connector-jobs executor: `POST /connectors/jobs` now EXECUTES (submits a
-  real ingest pull to a bounded in-process `ConnectorJobExecutor`, returns 202
-  `submitted`; the old `recorded_not_executed` no-op is retired). Fail-closed
-  `connector_job_executor_enabled` setting (default OFF -> 503), in-process +
-  DB duplicate guard with stale-orphan supersede, one route-owned audit row, a
-  worker Bucket-A `job_failed_before_start` audit, and a frontend "Run pull"
-  control. Part 2 adds four `api_connector_credentials` refresh-telemetry
-  columns + CHECK (migration `20260612_0001`) stamped at the single
-  `resolve_connector_credentials` chokepoint. See
+- ✅ PR #95 — Connector-jobs executor: `POST /connectors/jobs` now EXECUTES
+  (submits a real ingest pull to a bounded in-process `ConnectorJobExecutor`,
+  returns 202 `submitted`; the old `recorded_not_executed` no-op is retired).
+  Fail-closed `connector_job_executor_enabled` setting (default OFF -> 503),
+  in-process + DB duplicate guard with stale-orphan supersede, one route-owned
+  audit row, a worker Bucket-A `job_failed_before_start` audit, and a frontend
+  "Run pull" control. Part 2 adds four `api_connector_credentials`
+  refresh-telemetry columns + CHECK (migration `20260612_0001`) stamped at the
+  single `resolve_connector_credentials` chokepoint. Prerequisite PR #94
+  (ingestion RLS lane fix) made the merged ingest->normalize pipeline executable
+  on RLS-enforced Postgres (the `db.lane.platform_lane` elevation). See
   `Docs/15_DELIVERY_BACKLOG.md` for the full scope + deferrals.
-- ✅ Executor Bucket-A audit RLS fix: post-#95 reverts dropped the
+- ✅ PR #96 — Alembic env.py URL-precedence hardening: an ambient
+  `UMS_DATABASE_URL` can no longer silently override an in-code-injected
+  `sqlalchemy.url`, closing the wrong-DB footgun for migration round-trip tests.
+  The precedence logic is extracted to `db/migration_url.py::resolve_database_url`
+  (re-reads the ini on-disk url; differing configured value wins; ini-placeholder
+  preserves the prod env-var-wins contract). No schema change.
+- ✅ PR #97 — Executor Bucket-A audit RLS fix: post-#95 reverts dropped the
   `TENANT_CTX` minimal-tenant set in `executor.py::_audit_failed_before_start`,
   so `app_current_tenant_id()` was NULL and the `audit_logs`
   `WITH CHECK (tenant_id = app_current_tenant_id())` RLS policy denied the
@@ -151,11 +160,20 @@ running on the operator's workstation.
   keys + `app_tenant` / `app_platform` Postgres roles.
     - ✅ Track E (2026-06-08): **RLS enforcement DONE.** Migration
       `20260608_0001` creates the `app_tenant`/`app_platform` roles and an
-      isolation policy on all 25 tenant-scoped tables; a single-pool
-      `SET LOCAL ROLE` realization with a Postgres-only, context-gated
-      `after_begin` hook in `db/session.py` plus `build_platform_session_factory`
-      and the `assert_tenant_match` write-path helper. Composite FKs /
-      tenant-scoped unique keys / `FORCE ROW LEVEL SECURITY` remain follow-ups.
+      isolation policy on all 25 tenant-scoped tables. The tenant context is
+      held in an `app_tenant_context` table keyed by `backend_pid` (NOT a
+      Postgres GUC): a SECURITY DEFINER `set_app_current_tenant_id(uuid)` writes
+      the row, the RLS policies read it through `app_current_tenant_id()`, and a
+      SECURITY DEFINER `clear_app_current_tenant_id()` (migration
+      `20260609_0002`) clears it — the app lanes hold only SELECT on the table,
+      so a tenant lane cannot forge its own context. A single-pool
+      `SET LOCAL ROLE` realization: a Postgres-only, context-gated `after_begin`
+      hook in `db/session.py` first switches to `app_platform`, writes/clears the
+      trusted context row, then switches a tenant-lane session to the restricted
+      `app_tenant` role (fail-closed: missing context => no rows). Plus
+      `build_platform_session_factory` and the `assert_tenant_match` write-path
+      helper. Composite FKs / tenant-scoped unique keys / `FORCE ROW LEVEL
+      SECURITY` remain follow-ups.
 - **Source-reported currency foundation.**
   `Docs/18_MULTI_CURRENCY_ENGINE.md` was revised on 2026-05-23 to make
   Google/YouTube/AdSense reported money the official finance source. The next
@@ -351,10 +369,14 @@ on real ingestion (Phase 2) and the inventory load workflow.
   (PR #25); hierarchy assignment workflow / UI not built.
 - ✅ Channel registry (tenant-scoped, PR #25).
 - ⏳ CMS status: inside / outside / unknown — remaining: status column
-  exists in the registry; outside-CMS revenue sourcing is unresolved
-  (Hard Problem #1 in `15_DELIVERY_BACKLOG.md`).
-- ⏳ Revenue-required flag — remaining: column exists in the registry;
-  UI surfacing not built.
+  exists in the registry; Track F (PR #87) attributes outside-CMS revenue for
+  the single verified account->channel link case (1:1 ALLOCATION), so
+  outside-CMS revenue sourcing is partially resolved — many-link and zero-link
+  channels stay open (Hard Problem #1 in `15_DELIVERY_BACKLOG.md`).
+- ⏳ Revenue-required flag — remaining: column exists in the registry and is
+  surfaced in the Registry table source label (PR #73/#78); finance-fact
+  coverage of revenue-required channels is now flagged by the
+  `CHANNELS_MISSING_REVENUE_FACTS` smart alert (this PR).
 - ✅ Group builder (tenant-scoped channel group registry, PR #25 + direct
   tests in PR #30).
 - ✅ Role model (PRs #3, #4, #24 — tenant-scoped roles & permission grants).
@@ -363,10 +385,16 @@ on real ingestion (Phase 2) and the inventory load workflow.
 
 - ⏳ Channel master table — remaining: schema exists; bulk inventory load
   not yet driven.
-- ⏳ Company/sector/group mapping — remaining: registries exist; assignment
-  workflow not built.
-- ⏳ Outside-CMS monitor — remaining: status column exists; monitor UI and
-  alerts not built.
+- ⏳ Company/sector/group mapping — remaining: registries exist and the
+  Registry page now drives live re-parenting via `PATCH /channels/{id}/mapping`
+  (Registry Phase 2, PR #78), now month-lock-guarded (this PR rejects a mapping
+  change that would rewrite a LOCKED month's attribution); bulk inventory
+  assignment workflow still not built.
+- ⏳ Outside-CMS monitor — remaining: status column exists and the CommandView
+  outside-CMS / channel-issues monitor panel is wired to
+  `GET /channels/outside-cms` + `GET /channels/issues` (this PR,
+  VIEW_ANALYTICS-gated, no-fetch-when-restricted); proactive alerting beyond the
+  panel + the `CHANNELS_MISSING_REVENUE_FACTS` smart alert is not built.
 
 ### Acceptance gate
 
@@ -385,16 +413,25 @@ unmapped-channel report are the remaining gaps.
 
 ### Build
 
-- ⏳ YouTube Reporting API jobs — remaining: credentials repository
-  (PRs #33, #34); no real ingestion run.
-- ⏳ YouTube Analytics API targeted queries — remaining: same; no real
-  query layer.
-- ⏳ YouTube Data API metadata sync — remaining: same; no real sync.
-- ⏳ Raw report storage — remaining: ORM + repository tests (PR #32);
-  ingestion pipeline not built.
-- ⏳ Normalized monthly channel facts — remaining: revenue facts foundation
-  (PR #2); ingestion source not wired.
-- ⏳ Missing report alerts — remaining: not started.
+- ⏳ YouTube Reporting API jobs — remaining: client + `run_one` orchestrator +
+  CLI built and mock-tested (PR #47); blocked only on real OAuth credentials.
+- ⏳ YouTube Analytics API targeted queries — remaining: targeted CMS-channel
+  query layer built and mock-tested (PR #48, B2.5); blocked only on real OAuth
+  credentials.
+- ⏳ YouTube Data API metadata sync — remaining: same credentials block; no
+  real sync.
+- ⏳ Raw report storage — remaining: ORM + repository (PR #32) + blob backends
+  + raw-file lifecycle (PR #47) wired into the ingest pipeline; runs only on
+  mock fixtures (no live creds).
+- ⏳ Normalized monthly channel facts — remaining: the C1 normalizer
+  (`GoogleSourceNormalizer.normalize_month`, PR #44) is now WIRED into `run_one`
+  as a post-run step (PR #90, refactored into
+  `connectors/runs/normalization.py` by PR #93), so a run projects source rows
+  to `MonthlyChannelRevenueFactORM`; blocked only on real OAuth credentials.
+- ⏳ Missing report alerts — remaining: per-channel coverage is now flagged by
+  the `CHANNELS_MISSING_REVENUE_FACTS` smart alert (this PR); a stored
+  expected-connectors/accounts baseline (missing-REPORT detection) is deferred
+  (`connector_runs` carries no channel dimension).
 
 ### Outputs
 
@@ -409,13 +446,18 @@ unmapped-channel report are the remaining gaps.
 - ⏳ Dashboard can show gross monthly revenue and performance for
   CMS-linked channels — not yet met.
 
-### Status (2026-05-22)
+### Status (2026-06-13)
 
-Scaffolding only. This is the single largest gap between doc-claimed state
-and reality: the entire phase depends on real YouTube API ingestion, which
-has not been started. Credentials and raw-storage substrates exist to plug
-into. The ingestion work must store Google-reported monetary values and
-currencies as source evidence before any finance facts consume them.
+Engine-complete, credentials-blocked. The live pull engine is fully built and
+mock-tested end-to-end (OAuth refresh wrapper + httpx client + YouTube Reporting
+/ YouTube Analytics / AdSense Management clients + `run_one` orchestrator +
+CLI, PRs #47-#50); the C1 normalizer is wired into `run_one` (PRs #90/#93) so a
+run projects source rows to monthly facts; and `POST /connectors/jobs` now
+executes a real ingest via the in-process `ConnectorJobExecutor` (PR #95, the
+RLS lanes fixed by PRs #94/#97). The single remaining blocker is real Google
+OAuth credentials — no live pull has run against the real APIs. The pipeline
+stores Google-reported monetary values and currencies as source evidence before
+finance facts consume them.
 
 ---
 
@@ -640,8 +682,16 @@ operator-asserted (tenant_id, month, bank_reference)→account(s) receipt model
 - ✅ Smart problem panel — shipped (PR #69): smart-alerts problem panel
   wired into the Command Center from GET
   /revenue/months/{month}/smart-alerts.
-- ⏳ Company/sector/channel ranking — remaining: not started.
-- ⏳ Outside-CMS issue monitor — remaining: not started.
+- ✅ Company/sector/channel ranking — shipped (this PR): finance-gated,
+  scope-safe `GET /revenue/months/{month}/rankings` (pure `build_month_rankings`
+  rolls the per-channel net-revenue summary up to company/sector, ranks each
+  dimension by gross|net|deduction with None-sink + stable id tie-break, top-N)
+  + a CommandView rankings panel (own hook, money gated on `canViewFinance`,
+  metric toggle, surfaces `allocation_source`).
+- ✅ Outside-CMS issue monitor — shipped (this PR): CommandView monitor panel
+  wired to `GET /channels/outside-cms` + `GET /channels/issues`
+  (VIEW_ANALYTICS-gated, no-fetch-when-restricted; 403 -> denied copy, never
+  "no issues").
 - ✅ Month-close status — shipped (PR #69): CloseView wired to
   GET/POST /finance-close (status, readiness checklist, lock/unlock with
   audited reason).
@@ -658,9 +708,11 @@ operator-asserted (tenant_id, month, bank_reference)→account(s) receipt model
 - ⏳ A user can select month + group and receive source-backed gross,
   deduction, net, currency, and explanation — partially met by PR #69
   (month + channel selection with source-backed gross/deduction/net and
-  explanations); group/sector rollup selection is not built. Optional
-  display conversion is later work and must be labeled non-official unless
-  it is the currency reported by Google/AdSense.
+  explanations); company/sector rollup is now produced by the rankings endpoint
+  (`GET /revenue/months/{month}/rankings`, this PR), but a group-scoped
+  net-revenue selector in the dashboard is still not built. Optional display
+  conversion is later work and must be labeled non-official unless it is the
+  currency reported by Google/AdSense.
 
 ### Status (2026-06-05)
 
@@ -683,6 +735,15 @@ now wired to `GET /audit/events` (see below).
   closed to `AccessDenied`; connector controls require `canRunConnectorJobs`;
   the smoke asserts the contract. Live ingestion needs real connector
   credentials.
+- ✅ `canViewAnalytics` session capability — shipped (this PR): `/session/me`
+  `SessionCapabilities` gains `can_view_analytics`, derived **scope-aware** (true
+  if the principal holds ANY active `VIEW_ANALYTICS` grant — direct or via role
+  — at any scope, mirroring `connector_health`; NOT the global-only `_can()`
+  helper, so a legitimately company/sector-scoped analytics user still sees the
+  panel). Fail-closed (disabled -> false). The FE `SessionCapabilities` gains
+  `canViewAnalytics`, mapped through `AppShell` `capabilitiesToPermissions` and
+  threaded to CommandView; it gates the outside-CMS / channel-issues monitor
+  panel (no-fetch-when-restricted).
 - ✅ Production Audit view wiring — merged to main as PR #71 (31a7641): the
   dashboard Audit page reads the real
   `GET /audit/events` feed (tenant-scoped audit log from PR #22) instead of the
@@ -712,15 +773,15 @@ now wired to `GET /audit/events` (see below).
   200 with `status` field (`ok` / `inactive_credential` / `auth_failed` / `error`) and
   string `detail` otherwise. `CONNECTOR_TESTED` audit event. 5 TDD tests, `MANAGE_CONNECTORS`
   gate. Backend only; no migration. Merged to main as PR #72 (28da1a6).
-- ⏳ Connector run history + Test Connection (Track D buildable chunk, branch
-  `feat/connector-run-history`): read-only `GET /connectors/runs`
-  (`VIEW_CONNECTOR_HEALTH` gate, tenant-scoped, connector_key/account_id filters,
-  newest-first cursor pagination, no audit write) + new `list_runs` repository
-  read; ConnectorsView run-history panel replaces the placeholder (status/counts/
-  error_summary + Load More id-dedupe); per-credential Test Connection button
-  surfaces the existing probe; `/session/me` gains `canViewConnectorHealth` so the
-  SPA gate mirrors the route. No migration. Rest of Track D (OAuth consent, live
-  pulls, token-expiry schema + background monitoring) stays creds/schema-blocked.
+- ✅ Connector run history + Test Connection — merged to main as PR #81 (Track D
+  buildable chunk): read-only `GET /connectors/runs` (`VIEW_CONNECTOR_HEALTH`
+  gate, tenant-scoped, connector_key/account_id filters, newest-first cursor
+  pagination, no audit write) + new `list_runs` repository read; ConnectorsView
+  run-history panel replaces the placeholder (status/counts/error_summary + Load
+  More id-dedupe); per-credential Test Connection button surfaces the existing
+  probe; `/session/me` gains `canViewConnectorHealth` so the SPA gate mirrors the
+  route. No migration. Remaining Track D (OAuth consent, live pulls, token-expiry
+  schema + background monitoring) stays creds/schema-blocked.
 - ✅ Registry Phase 1 wiring — merged to main as PR #73 (56bf9a8): the Channel
   Registry table is wired to `GET /channels` (replacing `REGISTRY_ROWS` mock).
   Client-side derivation: avatar initials, CMS badge tone from `cms_status`,
@@ -800,18 +861,29 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
 ### Build
 
 - ✅ Audit logs (tenant-scoped per PR #22; foundation in PR #1).
-- ⏳ Failure alerts — remaining: not started.
+- ⏳ Failure alerts — remaining: month-level smart alerts ship
+  (`GET /revenue/months/{month}/smart-alerts`) and now include a per-channel
+  `CHANNELS_MISSING_REVENUE_FACTS` HIGH coverage alert (this PR); proactive
+  push/notification delivery is not built.
 - ⏳ Data quality checks — remaining: revenue-fact required-field gate
-  (PR #8); broader quality checks not built.
+  (PR #8) plus the `CHANNELS_MISSING_REVENUE_FACTS` per-channel coverage check
+  (this PR, active+revenue_required channels with no monthly fact); broader
+  quality checks not built.
 - ⏳ Backup/export retention — remaining: not started.
-- ⏳ OAuth token monitoring — remaining: credentials repo (PRs #33, #34);
-  monitoring not built.
+- ⏳ OAuth token monitoring — remaining: credentials repo (PRs #33, #34) +
+  four `api_connector_credentials` refresh-telemetry columns (last-attempt,
+  token-expiry, last-status, last-error-class) stamped at the
+  `resolve_connector_credentials` chokepoint (PR #95 Part 2, migration
+  `20260612_0001`) + a per-credential Test Connection probe (PR #72); active
+  background expiry monitoring + auto-flip on refresh failure not built.
 - ✅ Month locking — shipped: explicit POST /finance-close/{month}/lock +
   /unlock workflow (readiness-gated, audited MONTH_LOCKED/MONTH_UNLOCKED).
-- ✅ Migration target-DB safety — alembic env.py no longer lets an ambient
-  `UMS_DATABASE_URL` silently override an in-code-injected `sqlalchemy.url`,
-  closing the wrong-DB footgun where migration round-trip tests could
-  drop/upgrade whatever DB the env var named. The resolver
+  Strengthened this PR: `PATCH /channels/{id}/mapping` now rejects (409) a
+  re-parenting that would rewrite a LOCKED month's company/sector attribution.
+- ✅ Migration target-DB safety (PR #96) — alembic env.py no longer lets an
+  ambient `UMS_DATABASE_URL` silently override an in-code-injected
+  `sqlalchemy.url`, closing the wrong-DB footgun where migration round-trip tests
+  could drop/upgrade whatever DB the env var named. The resolver
   (`db/migration_url.py::resolve_database_url`) re-reads the ini's on-disk url and
   honors any differing configured value (a deliberate in-code injection) over the
   env var; production's ini-placeholder + env-var-wins contract is preserved. 8
@@ -820,10 +892,15 @@ and the reconciled-net content (Phase 4 allocation/tax) feeding report bodies.
 ### Acceptance gate
 
 - ⏳ Detect missing channels, missing reports, unmatched payments,
-  manually overridden values — not yet met.
+  manually overridden values — partially met: missing channel-fact coverage
+  (`CHANNELS_MISSING_REVENUE_FACTS`, this PR) and unmatched payments
+  (PAYMENT_VARIANCE smart alert + payment-match) are detected; missing-REPORT
+  detection is deferred (no expected-connectors baseline).
 
-### Status (2026-05-22)
+### Status (2026-06-13)
 
-Audit-log infrastructure shipped end-to-end and tenant-scoped. Other
-hardening items remain ungroomed until the ingestion + allocation phases
-produce real signals to monitor.
+Audit-log infrastructure shipped end-to-end and tenant-scoped, and the
+smart-alerts surface now flags per-channel missing-revenue-fact coverage
+(`CHANNELS_MISSING_REVENUE_FACTS`, this PR). Remaining hardening (report-coverage
+baseline, backup/retention, live OAuth token monitoring) awaits the ingestion +
+expectation-model work that produces the underlying signals.

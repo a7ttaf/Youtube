@@ -41,6 +41,24 @@ class ChannelRegistryValidationError(ChannelRegistryError):
     pass
 
 
+class ChannelMappingLockedMonthError(ChannelRegistryError):
+    # ========================================================================
+    # Purpose: Signal that a channel mapping change is blocked because the
+    #   channel carries revenue facts in a LOCKED finance month, so re-parenting
+    #   it would silently rewrite that closed month's company/sector attribution.
+    # Database/ORM: None (raised by the SQL registry after a read-only check on
+    #   MonthlyChannelRevenueFactORM x FinanceMonthCloseORM).
+    # Standards: Typed domain error; the route boundary maps it to HTTP 409.
+    # Blast Radius: Finance attribution integrity, audit (a rejected change must
+    #   not be audited). No Neo4j, no exports.
+    # Connections:
+    #   - File: backend/ums_smart_revenue/org/sql_channel_registry.py ->
+    #       raised by SqlAlchemyChannelRegistry.update_mapping.
+    #   - File: backend/ums_smart_revenue/api/channels.py -> translated to 409.
+    # ========================================================================
+    pass
+
+
 class ChannelRegistryStore(Protocol):
     def list_channels(self) -> list[ChannelRegistryEntry]:
         pass

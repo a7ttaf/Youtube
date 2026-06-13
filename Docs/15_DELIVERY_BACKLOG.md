@@ -1,8 +1,8 @@
 # Delivery Backlog
 
-## Status (2026-06-05)
+## Status (2026-06-13)
 
-Reconciled through PR #71 (31a7641). Marker conventions
+Reconciled through PR #97 (executor Bucket-A audit RLS fix). Marker conventions
 match `01_IMPLEMENTATION_PLAN.md`:
 
 - `✅ PR #N` — shipped end-to-end at the layer being marked.
@@ -25,12 +25,16 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
 - ⏳ Dynamic org hierarchy — remaining: ORG models (PR #25); hierarchy
   assignment workflow not built.
 - ✅ Channel registry (tenant-scoped, PR #25).
-- ⏳ CMS/outside-CMS status — remaining: schema column (PR #25);
-  outside-CMS revenue sourcing unresolved (Hard Problem #1).
+- ⏳ CMS/outside-CMS status — remaining: schema column (PR #25); outside-CMS
+  revenue sourcing partially resolved (Track F 1:1 attribution, PR #87) and the
+  outside-CMS monitor panel surfaces the rest (this PR); many/zero-link channels
+  stay open (Hard Problem #1).
 - ✅ Group builder (tenant-scoped channel group registry, PR #25 + tests
   in PR #30).
-- ⏳ YouTube report ingestion — remaining: credentials repo (PRs #33,
-  #34); real ingestion not built.
+- ⏳ YouTube report ingestion — remaining: the live pull engine + `run_one`
+  orchestrator + C1 normalizer wiring + executing `POST /connectors/jobs` are all
+  built and mock-tested (PRs #47-#50, #90/#93, #94/#95/#97); blocked only on real
+  OAuth credentials.
     - ✅ PR #47 — Google live connector foundation (B2.1-B2.4 in one
       stack, merged 2026-05-27 as commit 52734a3): credential foundation (secret resolver dispatch +
       gcp-secret-manager:// + local-secret:// + OAuth refresh wrapper);
@@ -139,9 +143,9 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
   normalization bridge from google_revenue_source_rows shipped in PR #44;
   run_one now wires the post-run normalizer (PR #90) behind the adapter
   (PR #93).
-    - ✅ Connector-job executor — POST /connectors/jobs now EXECUTES: it submits
-      a real ingest pull to a bounded in-process `ConnectorJobExecutor` and
-      returns 202 `submitted` (the old `recorded_not_executed` no-op is retired;
+    - ✅ Connector-job executor (PR #95) — POST /connectors/jobs now EXECUTES: it
+      submits a real ingest pull to a bounded in-process `ConnectorJobExecutor`
+      and returns 202 `submitted` (the old `recorded_not_executed` no-op is retired;
       the CLI `scripts/run_google_connector.py` remains a valid trigger). The
       worker runs the CLI pattern on its own session under
       `connector_tenant_context` -> `run_one`. Fail-closed setting
@@ -160,8 +164,9 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
       index on RUNNING runs (TOCTOU is code-level, accepted at max_workers=1);
       no live-OAuth credentials; no auto-flip of credential `status` to
       `failed_auth` on refresh failure.
-    - ✅ Executor Bucket-A audit RLS regression fix — three post-#95 reverts
-      (`bdf5b71`/`15c0818`/`06af2ed`) dropped the `TENANT_CTX` minimal-tenant set
+    - ✅ Executor Bucket-A audit RLS regression fix (PR #97) — three post-#95
+      reverts (`bdf5b71`/`15c0818`/`06af2ed`) dropped the `TENANT_CTX`
+      minimal-tenant set
       in `_audit_failed_before_start`, leaving `app_current_tenant_id()` NULL so
       the `audit_logs` `WITH CHECK (tenant_id = app_current_tenant_id())` RLS
       policy denied the failure-audit INSERT on Postgres (main red gate on
@@ -171,9 +176,10 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
       `finally`, so the `after_begin` hook writes the trusted context row. Only
       the Bucket-A path was restored (dry-run path stayed on
       `connector_tenant_context`, which already passes); SQLite tier unaffected.
-    - ✅ PR #93 (ingestion RLS lane fix) — made the merged ingest→normalize
-      pipeline executable on RLS-enforced Postgres (it previously composed only
-      on SQLite). New db.lane.platform_lane elevates every run-path
+    - ✅ PR #94 (ingestion RLS lane fix; branched off main `82fd67f` = PR #93) —
+      made the merged ingest→normalize pipeline executable on RLS-enforced
+      Postgres (it previously composed only on SQLite). New
+      db.lane.platform_lane elevates every run-path
       platform-only-write transaction (audit_logs lifecycle/REPORT_IMPORTED/
       PROJECTION_FAILED emits, monthly_channel_revenue_facts upserts,
       finance_month_close creation) to app_platform. Only the credential read,
@@ -190,8 +196,8 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
       a3a584a; the docstrings already promised it). New PG-tier proof
       tests/connectors/runs/test_run_one_rls_postgres.py (5 obligations); no
       grant/policy/migration change.
-- ✅ Alembic env.py URL-precedence hardening — `get_database_url()` no longer lets
-  an ambient `UMS_DATABASE_URL` silently override an in-code-injected
+- ✅ Alembic env.py URL-precedence hardening (PR #96) — `get_database_url()` no
+  longer lets an ambient `UMS_DATABASE_URL` silently override an in-code-injected
   `sqlalchemy.url`. That footgun meant any box with `UMS_DATABASE_URL` exported
   (a dev/staging DB) would run migration round-trip tests' schema drops + upgrades
   against that ambient DB — data-destructive and nondeterministic. The precedence
@@ -241,7 +247,9 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
   drawer UI remains unbuilt (Phase 5).
 - ✅ Smart issue panel — shipped (PR #69): smart-alerts problem panel wired
   into the Command Center from GET /revenue/months/{month}/smart-alerts
-  (build_monthly_smart_alert_summary).
+  (build_monthly_smart_alert_summary). Extended this PR with a per-channel
+  `CHANNELS_MISSING_REVENUE_FACTS` HIGH coverage alert (active+revenue_required
+  channels with no monthly fact).
 - ✅ Excel export — shipped: GET /exports/{export_id}/finance-workbook.xlsx
   (+ preview) via build_finance_workbook_xlsx; tenant-scoped export jobs,
   persisted + audited. Final column template/branding may iterate.
@@ -255,11 +263,20 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
   /exports/{export_id}/branded-slide-pack.pptx (build_branded_slide_pack_pptx;
   cover + content slides with brand bar/footer, persisted + audited). Final
   theming may iterate.
-- ⏳ Outside-CMS monitor — remaining: not started.
-- ✅ Recalculation by allocation method dry-run foundation — shipped: POST
-  /revenue/recalculate (build_recalculation_preview; dry-run-only
-  allocation-method preview with blocking-issue detection; committed writes
-  intentionally rejected as not-yet-implemented).
+- ✅ Outside-CMS monitor — shipped (this PR): CommandView monitor panel wired to
+  `GET /channels/outside-cms` + `GET /channels/issues` (both VIEW_ANALYTICS-gated,
+  scope-filtered, `{items, summary}`, no money/audit), gated on `canViewAnalytics`
+  with no-fetch-when-restricted; summary tiles (outside-CMS / missing-official-
+  revenue / open-issues), distinguishing "outside CMS but covered" from "outside
+  CMS + missing source". Track F (PR #87) already attributes outside-CMS revenue
+  for the single verified link case.
+- ✅ Recalculation by allocation method — shipped: POST /revenue/recalculate.
+  `dry_run=true` returns `build_recalculation_preview` (allocation-method preview
+  with blocking-issue detection); `dry_run=false` now performs a real committed
+  allocation through the same service path (PR #76 — same advisory lock /
+  idempotency / version chain; preview as a pre-flight BLOCKED_BY_ISSUES 409
+  gate; write-only VIEW_FINALIZED_PAYMENTS gate; manual redirected to the commit
+  endpoint). See the manual-method + recalculate write-path entry below.
 - ✅ Channel↔account map — shipped (PR #57): two-layer canonical map
   (`adsense_content_owner_links` operator-verified + `content_owner_channel_links`
   derived from source rows), audited propose/verify/reject API behind dual
@@ -491,19 +508,25 @@ failures/hangs (see `Docs/superpowers/specs/2026-06-11-pg-migration-test-lock-ti
   CSV route (same gate/filters/redaction as the list route; 10,000-row cap
   with `X-Truncated` surfaced in the UI; snapshot-before-audit
   `EXPORT_DOWNLOADED` emission; deterministic, formula-injection-guarded CSV).
-  Summary tiles + coverage panel stay static context (no aggregate-count
-  route).
+  The summary tiles are now wired to the live `GET /audit/summary` aggregate-count
+  route (see the audit summary endpoint entry below); the Retention tile stays a
+  static policy constant.
 
 ## P2 — Advanced features
 
-- ⏳ Display-only currency conversion foundation — remaining:
-  official finance ingestion must first preserve Google/YouTube/AdSense
-  reported amounts and currencies per `Docs/18`. Public/provider FX rates are
-  not an official source for monthly revenue, tax, deduction, AdSense payment,
-  or reconciliation values.
+- ⏳ Display-only currency conversion foundation — remaining: display-only
+  conversion is not started. Note the distinction: bank-side FX + transfer-fee
+  effects ARE derived as evidence-only `deduction_components` by Track F
+  reconciliation (PR #87, AdSense->bank fee+FX, attributed ∝ CMS gross; only TAX
+  feeds `net_revenue_usd`). Official finance ingestion must still preserve
+  Google/YouTube/AdSense reported amounts and currencies per `Docs/18`;
+  public/provider FX rates are not an official source for monthly revenue, tax,
+  deduction, AdSense payment, or reconciliation values.
 - ⏳ Anomaly detection foundation for source-backed month-over-month
   revenue movement — remaining: not started.
 - ⏳ Detailed Shorts revenue handling foundation — remaining: not started.
+  Shorts revenue currently flows undifferentiated through the same monthly
+  channel facts; no Shorts-specific split or attribution exists.
 - ⏳ Custom report builder — remaining: not started.
 - ⏳ Saved dashboard views — remaining: not started.
 - ⏳ User-level favorite groups — remaining: not started.
@@ -605,8 +628,8 @@ single P-tier above.
   event, `MANAGE_CONNECTORS@connector(connector_key)` gate, reason required).
   5 TDD tests (ok, not-found, inactive, oauth-error, 403). Backend only; no migration.
   Merged to main as PR #72 (28da1a6).
-- ⏳ Connector run history + Test Connection (Track D buildable chunk, branch
-  `feat/connector-run-history`) — new read-only `GET /connectors/runs`
+- ✅ Connector run history + Test Connection — merged to main as PR #81 (Track D
+  buildable chunk) — new read-only `GET /connectors/runs`
   (`VIEW_CONNECTOR_HEALTH` gate, tenant-scoped, optional connector_key/account_id
   filters, newest-first `(started_at, id)` cursor pagination, no audit write)
   backed by a new `list_runs`/`ConnectorRunPage` repository read method; the
@@ -617,7 +640,7 @@ single P-tier above.
   exposes `canViewConnectorHealth` so the SPA gate mirrors the route gate exactly.
   No migration; no live credentials needed. Remaining Track D is creds/schema
   blocked: OAuth consent flow, live pulls, token-expiry/last-error schema +
-  background monitoring.
+  background monitoring (the refresh-telemetry columns landed in PR #95 Part 2).
 - ✅ Channel Registry Phase 1 wiring — merged to main as PR #73 (56bf9a8): the
   Registry table is wired to `GET /channels` (replacing the `REGISTRY_ROWS`
   mock). All display fields derived client-side (avatar, CMS badge, source
@@ -640,9 +663,10 @@ single P-tier above.
   (UNVERIFIED OPERATOR_ASSERTED proposal; verify/reject stays the admin API
   flow); Review → Trace navigation preselected on the channel. Backend +5 TDD
   org-units tests; frontend 189 Vitest green (10 new RegistryView + 5 hook).
-  Remaining (definition-blocked): bulk inventory import format; "Scoped
-  changes" tile; mapping-route month-lock enforcement (pre-existing gap,
-  named follow-up).
+  Mapping-route month-lock enforcement (the pre-existing gap named here) is now
+  CLOSED by this PR — `PATCH /channels/{id}/mapping` rejects (409) a re-parenting
+  that would rewrite a LOCKED month's attribution. Remaining (definition-blocked):
+  bulk inventory import format; "Scoped changes" tile.
 - ⏳ Google source-reported revenue ingestion foundation: `currencies`
   reference table, tenant-scoped `google_revenue_source_rows` with idempotent
   source-row keys (full 64-char SHA-256 hex), storage repository, synthetic-
@@ -666,19 +690,32 @@ single P-tier above.
   `SqlAlchemyRevenueFactRepository.record_fact()`. No schema delta, no new
   exception classes, no Alembic migration. 26 named SQLite tests + 5-test
   PostgreSQL companion (verifies the real `pg_advisory_xact_lock` + `SELECT
-  ... FOR UPDATE` lock path executes against a live engine). Remaining: live
-  OAuth/API connector (B2), FX/conversion (B3). Marked ⏳ (not ✅) per
-  scaffolding-only honesty rule — no live data source yet. See
+  ... FOR UPDATE` lock path executes against a live engine). The bridge now has
+  a production caller: `run_one` runs `GoogleSourceNormalizer.normalize_month`
+  as a post-run step (PR #90, refactored into
+  `connectors/runs/normalization.py` by PR #93), so a connector run projects
+  source rows to `MonthlyChannelRevenueFactORM`. Remaining: live OAuth/API
+  connector creds (B2), FX/conversion (B3). Marked ⏳ (not ✅) — the wiring is
+  done but no live data source has produced facts yet. See
   `Docs/superpowers/specs/2026-05-25-spec-c1-google-source-normalizer-design.md`
   and `Docs/superpowers/plans/2026-05-25-spec-c1-google-source-normalizer.md`.
 - ✅ Track E (2026-06-08) — **Postgres RLS enforcement DONE** (S3 storage-layer
   hardening). Migration `20260608_0001` creates the `app_tenant`/`app_platform`
   roles and a `<table>_tenant_isolation` policy on all 25 tenant-scoped tables
-  (allowlist drift-checked against live `information_schema`). Single-pool
+  (allowlist drift-checked against live `information_schema`). The tenant
+  context is held in an `app_tenant_context` table keyed by `backend_pid` (NOT a
+  Postgres GUC): a SECURITY DEFINER `set_app_current_tenant_id(uuid)` writes the
+  row while `app_platform` is active, the RLS policies read it through
+  `app_current_tenant_id()`, and a SECURITY DEFINER `clear_app_current_tenant_id()`
+  (migration `20260609_0002`) clears it; the app lanes hold only SELECT on the
+  table, so a tenant lane cannot forge its own context. Single-pool
   `SET LOCAL ROLE` realization (not dual-pool) via a Postgres-only,
-  context-gated `after_begin` hook in `db/session.py` (no-op on SQLite and on
-  tenant-lane sessions without tenant context), `build_platform_session_factory`,
-  and the `assert_tenant_match` write-path helper (write-path classification =
+  context-gated `after_begin` hook in `db/session.py` that switches to
+  `app_platform`, sets/clears the trusted context row, then drops a tenant-lane
+  session to the restricted `app_tenant` role (no-op on SQLite and on
+  tenant-lane sessions without tenant context — missing context is the
+  fail-closed RLS signal), `build_platform_session_factory`, and the
+  `assert_tenant_match` write-path helper (write-path classification =
   all COVERED-ELSEWHERE). Runtime login needs
   `GRANT app_tenant/app_platform TO <login> WITH INHERIT FALSE, SET TRUE`;
   migration is idempotent and does not assume superuser. `FORCE ROW LEVEL
@@ -718,11 +755,47 @@ single P-tier above.
   keeping metadata; additive `purged_at`/`purged_by` columns + CHECK swap.
   ⏳ Refine-later: real US-view-share feed, withholding-rate calibration, and
   multi-API-key ingestion scaling.
+- ✅ Phase 5 analytics & monitoring surface (2026-06-13, branch
+  `feat/phase5-analytics-monitoring`) — one combined PR closing the
+  highest-value Phase 1 / 5 / 7 acceptance-gate gaps plus this doc
+  reconciliation:
+  - **Company/sector/channel rankings** — finance-gated, scope-safe
+    `GET /revenue/months/{month}/rankings` (pure `finance/rankings.py`
+    `build_month_rankings` rolls the per-channel net-revenue summary up to
+    company/sector, ranks each dimension by gross|net|deduction with None-sink +
+    stable id tie-break, top-N; money via `decimal_to_api`, None preserved) +
+    CommandView rankings panel (own hook, money gated on `canViewFinance`,
+    metric toggle, surfaces `allocation_source`). Copies `get_month_net_revenue`'s
+    VIEW_REVENUE + VIEW_CONFIDENCE + VIEW_FINALIZED_PAYMENTS gates and dual
+    REVENUE_VIEWED + PAYMENT_VIEWED audit; scoped read restricts the channel set
+    before ranking (zero channels -> empty, not 403).
+  - **`CHANNELS_MISSING_REVENUE_FACTS` coverage alert** — pure `smart_alerts.py`
+    emits a per-channel coverage gap (severity HIGH, confidence E_MISSING,
+    `{channel_count, sample_channel_ids capped 20}`) for active+revenue_required
+    channels with no monthly fact; the route pre-reads the id list with the same
+    query shape as close-readiness (no new permission). Missing-REPORT detection
+    deferred (no expected-connectors baseline).
+  - **Mapping-route month-lock** — `PATCH /channels/{id}/mapping` now rejects
+    (409) a re-parenting that would rewrite a LOCKED month's attribution
+    (read-only locked-fact guard in `org/sql_channel_registry.py`, typed
+    `ChannelMappingLockedMonthError`; SQL-path only — the in-memory registry is
+    unchanged).
+  - **Outside-CMS / channel-issues monitor panel** — CommandView panel wired to
+    `GET /channels/outside-cms` + `GET /channels/issues` (VIEW_ANALYTICS,
+    no-fetch-when-restricted; 403 -> denied, 503 -> unavailable).
+  - **`canViewAnalytics` session capability** — `/session/me` gains a
+    scope-aware `can_view_analytics` (any active VIEW_ANALYTICS grant at any
+    scope; fail-closed disabled -> false) threaded through the FE AppShell to
+    gate the monitor panel.
 
 ## Hard problems to solve early
 
-1. ⏳ Revenue source for 70 outside-CMS channels — still open; not solved
-   by any shipped PR.
+1. ⏳ Revenue source for 70 outside-CMS channels — partially solved: Track F
+   (PR #87) attributes outside-CMS revenue via the single verified
+   account->channel link (1:1 ALLOCATION writes the gross fact; many-link ->
+   skip + warn). Channels with zero or multiple verified links remain open, and
+   the CommandView outside-CMS monitor panel (this PR) now surfaces the
+   outstanding "outside CMS + missing source" set.
 2. ⏳ System-managed report availability and retention — remaining: raw
    report file ORM + repo (PR #32); ingestion + retention policy not
    built.

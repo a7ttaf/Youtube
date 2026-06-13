@@ -2,7 +2,11 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import CommandView from "@/components/srcc/views/CommandView";
-import type { NetRevenueResponse, SmartAlertsSummary } from "@/lib/api/types";
+import type {
+  MonthRankingsResponse,
+  NetRevenueResponse,
+  SmartAlertsSummary,
+} from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
 
 const ORIGINAL_FETCH = globalThis.fetch;
@@ -68,6 +72,21 @@ const SMART_ALERTS_CLEAR: SmartAlertsSummary = {
   audit_events: [],
 };
 
+// CommandView also mounts a finance-gated rankings panel (canViewFinance=true in
+// these tests), so it fires a THIRD request to /rankings. Default it to an empty
+// rankings body with NO allocation_source so it never collides with the
+// net-revenue assertions below; the rankings panel's own behaviour is covered in
+// RankingsPanel.test. (The analytics monitor stays unmounted — canViewAnalytics
+// defaults to false here — so no /channels/* monitor request fires.)
+const RANKINGS_EMPTY: MonthRankingsResponse = {
+  month: "2026-03",
+  metric: "gross",
+  channels: [],
+  companies: [],
+  sectors: [],
+  committed_run: null,
+};
+
 function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   return new Response(JSON.stringify(body), {
     status,
@@ -77,7 +96,8 @@ function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
 
 // Route each fetch by URL and return a FRESH Response per call (a Response body
 // can only be read once, so the net-revenue + smart-alerts requests cannot share
-// one). net-revenue is driven by the test; smart-alerts defaults to CLEAR.
+// one). net-revenue is driven by the test; smart-alerts + rankings default to a
+// quiet body so this suite isolates net-revenue behaviour.
 function routeFetch(netRevenue: () => Response, smartAlerts?: () => Response) { // skipcq: JS-0067
   (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
     (input: RequestInfo | URL) => {
@@ -86,6 +106,9 @@ function routeFetch(netRevenue: () => Response, smartAlerts?: () => Response) { 
         return Promise.resolve(
           (smartAlerts ?? (() => jsonResponse(SMART_ALERTS_CLEAR)))(),
         );
+      }
+      if (url.includes("/rankings")) {
+        return Promise.resolve(jsonResponse(RANKINGS_EMPTY));
       }
       return Promise.resolve(netRevenue());
     },

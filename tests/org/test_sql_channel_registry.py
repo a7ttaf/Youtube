@@ -1,14 +1,20 @@
 from datetime import UTC, datetime
-from uuid import UUID
+from uuid import UUID, uuid4
 
 import pytest
 from sqlalchemy import create_engine, event, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from ums_smart_revenue.db.finance_models import (
+    FinanceBase,
+    FinanceMonthCloseORM,
+    MonthlyChannelRevenueFactORM,
+)
 from ums_smart_revenue.db.org_models import OrgBase, OrgUnitORM, YouTubeChannelORM
 from ums_smart_revenue.org.access_index import load_org_access_index_from_session
 from ums_smart_revenue.org.channel_registry import (
+    ChannelMappingLockedMonthError,
     ChannelRegistryConflictError,
     ChannelRegistryValidationError,
 )
@@ -51,11 +57,27 @@ def build_session() -> Session:
     engine = create_engine("sqlite+pysqlite:///:memory:")
 
     @event.listens_for(engine, "connect")
-    def _enable_foreign_keys(dbapi_connection, connection_record):
-        del connection_record
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
         dbapi_connection.execute("PRAGMA foreign_keys=ON")
 
     OrgBase.metadata.create_all(engine)
+    return Session(engine)
+
+
+def build_finance_session() -> Session:
+    """Build an in-memory session with both org and finance tables created.
+
+    The mapping month-lock guard reads finance tables, so the unit tests for it
+    need the finance schema in addition to the org schema.
+    """
+    engine = create_engine("sqlite+pysqlite:///:memory:")
+
+    @event.listens_for(engine, "connect")
+    def _enable_foreign_keys(dbapi_connection, _connection_record):
+        dbapi_connection.execute("PRAGMA foreign_keys=ON")
+
+    OrgBase.metadata.create_all(engine)
+    FinanceBase.metadata.create_all(engine)
     return Session(engine)
 
 
@@ -136,7 +158,7 @@ def seed_org(session: Session) -> None:
 
 
 def test_sql_channel_registry_reads_and_writes_channel_rows():
-    session = build_session()
+    session = build_finance_session()
     seed_org(session)
     registry = SqlAlchemyChannelRegistry(session)
 
@@ -247,7 +269,6 @@ def test_sql_channel_registry_does_not_mask_non_duplicate_integrity_error(
         nonlocal lookups
         assert channel_id == "channel-racing-failure"
         lookups += 1
-        return None
 
     def _raise_foreign_key_failure():
         raise IntegrityError(
@@ -433,3 +454,106 @@ def test_load_org_access_index_from_session_requires_tenant_context():
 
     with pytest.raises(TenantContextMissing):
         load_org_access_index_from_session(session)
+
+
+def _seed_channel_fact(session: Session, *, month: str) -> None:
+    """Persist a single revenue fact for channel-tv-a in the given month."""
+    session.add(
+        MonthlyChannelRevenueFactORM(
+            id=uuid4(),
+            month=month,
+            youtube_channel_id="channel-tv-a",
+            source_kind="YOUTUBE_CMS",
+            gross_revenue_usd=100,
+        )
+    )
+    session.commit()
+
+
+def test_update_mapping_rejected_when_channel_has_locked_month_fact():
+    session = build_finance_session()
+    seed_org(session)
+    session.add(FinanceMonthCloseORM(month="2026-09", status="LOCKED"))
+    _seed_channel_fact(session, month="2026-09")
+    registry = SqlAlchemyChannelRegistry(session)
+
+    with pytest.raises(ChannelMappingLockedMonthError, match="2026-09"):
+        registry.update_mapping(
+            youtube_channel_id="channel-tv-a",
+            primary_company_id=str(COMPANY_NEWS_ID),
+        )
+
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-tv-a",
+        )
+    ).one()
+    assert persisted.primary_org_unit_id == COMPANY_TV_ID
+
+
+def test_update_mapping_allowed_when_channel_only_has_open_month_fact():
+    session = build_finance_session()
+    seed_org(session)
+    session.add(FinanceMonthCloseORM(month="2026-09", status="OPEN"))
+    _seed_channel_fact(session, month="2026-09")
+    registry = SqlAlchemyChannelRegistry(session)
+
+    updated = registry.update_mapping(
+        youtube_channel_id="channel-tv-a",
+        primary_company_id=str(COMPANY_NEWS_ID),
+    )
+
+    assert updated.primary_company_id == str(COMPANY_NEWS_ID)
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-tv-a",
+        )
+    ).one()
+    assert persisted.primary_org_unit_id == COMPANY_NEWS_ID
+
+
+def test_update_mapping_no_op_returns_entry_without_locked_month_check():
+    """Idempotent / no-op PATCH must not raise on a channel with LOCKED-month facts.
+
+    The guard is meant to prevent re-parenting that would rewrite a closed
+    month's attribution; a request that doesn't change the mapping cannot
+    rewrite anything and must short-circuit BEFORE the locked-month lookup.
+    """
+    session = build_finance_session()
+    seed_org(session)
+    session.add(FinanceMonthCloseORM(month="2026-09", status="LOCKED"))
+    _seed_channel_fact(session, month="2026-09")
+    registry = SqlAlchemyChannelRegistry(session)
+
+    updated = registry.update_mapping(
+        youtube_channel_id="channel-tv-a",
+        primary_company_id=str(COMPANY_TV_ID),  # matches existing primary
+    )
+
+    assert updated.primary_company_id == str(COMPANY_TV_ID)
+    persisted = session.scalars(
+        select(YouTubeChannelORM).where(
+            YouTubeChannelORM.tenant_id == DEFAULT_TENANT_ID,
+            YouTubeChannelORM.youtube_channel_id == "channel-tv-a",
+        )
+    ).one()
+    assert persisted.primary_org_unit_id == COMPANY_TV_ID
+
+
+def test_update_mapping_no_op_skips_locked_month_query():
+    """No-op PATCH must not hit the finance schema; an org-only session works."""
+    session = build_session()
+    seed_org(session)
+    registry = SqlAlchemyChannelRegistry(session)
+
+    # The locked-month guard would raise OperationalError on this session
+    # (no finance schema); the no-op short-circuit must return the entry
+    # without ever touching the finance tables.
+    updated = registry.update_mapping(
+        youtube_channel_id="channel-tv-a",
+        primary_company_id=str(COMPANY_TV_ID),  # matches existing primary
+    )
+
+    assert updated.primary_company_id == str(COMPANY_TV_ID)

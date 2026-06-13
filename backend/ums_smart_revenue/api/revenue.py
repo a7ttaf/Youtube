@@ -2,9 +2,11 @@ import re
 from datetime import date
 from decimal import Decimal
 from typing import Annotated
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ums_smart_revenue.api.dependencies import (
@@ -38,6 +40,8 @@ from ums_smart_revenue.auth.policy import has_permission
 from ums_smart_revenue.auth.scopes import AccessScope, OrgAccessIndex, ScopeType
 from ums_smart_revenue.auth.seed import ROLE_PERMISSIONS
 from ums_smart_revenue.auth.sql_audit_sink import SqlAlchemyAuditSink
+from ums_smart_revenue.db.finance_models import MonthlyChannelRevenueFactORM
+from ums_smart_revenue.db.org_models import YouTubeChannelORM
 from ums_smart_revenue.finance.account_allocation_read import (
     allocation_provenance_to_api,
     resolve_month_account_allocation,
@@ -97,6 +101,10 @@ from ums_smart_revenue.finance.payment_matching import (
     build_monthly_payment_match_summary,
     normalize_payment_match_currency,
 )
+from ums_smart_revenue.finance.rankings import (
+    RankingsValidationError,
+    build_month_rankings,
+)
 from ums_smart_revenue.finance.recalculation import (
     RevenueRecalculationValidationError,
     build_recalculation_preview,
@@ -118,6 +126,9 @@ from ums_smart_revenue.finance.revenue_summary import build_adjusted_revenue_sum
 from ums_smart_revenue.finance.smart_alerts import (
     build_monthly_smart_alert_summary,
 )
+from ums_smart_revenue.org.org_units_read import SqlAlchemyOrgUnitReader
+from ums_smart_revenue.tenancy.constants import UMS_TENANT_ID
+from ums_smart_revenue.tenancy.context import get_current_tenant
 
 router = APIRouter(prefix="/revenue", tags=["revenue"])
 MONTH_VALUE_PATTERN = re.compile(r"^\d{4}-\d{2}$")
@@ -1077,6 +1088,7 @@ def get_month_smart_alerts(
         SqlAlchemyFinanceMonthCloseRepository,
         Depends(current_finance_month_close_repository),
     ],
+    session: Annotated[Session, Depends(current_db_session)],
     audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
 ) -> dict[str, object]:
     """Aggregate cross-domain health signals for a month into a prioritized smart-alert summary."""
@@ -1095,6 +1107,17 @@ def get_month_smart_alerts(
         bank_entries = bank_repository.list_month_entries(month=month)
         manual_overrides = override_repository.list_month_overrides(month=month)
         close = close_repository.get(month)
+        # FIX: Bounded coverage query — total count plus an ordered, capped
+        # sample. The previous shape materialized the full id list, which
+        # turns the alert endpoint into an unbounded scan/transfer on bad
+        # ingestion months. The alert details (channel_count + sample) keep
+        # the same wire shape; only the source of the sample changed.
+        (
+            missing_fact_channel_count,
+            missing_fact_channel_sample,
+        ) = missing_revenue_fact_channel_count_and_sample(
+            session, month=month
+        )
         payment_match = build_monthly_payment_match_summary(
             month=month,
             facts=facts,
@@ -1123,6 +1146,8 @@ def get_month_smart_alerts(
         bank_reconciliation=bank_reconciliation,
         close_status=close.status if close else "OPEN",
         manual_overrides=manual_overrides,
+        missing_revenue_fact_channel_count=missing_fact_channel_count,
+        missing_revenue_fact_channel_sample=missing_fact_channel_sample,
         current_revenue_facts=facts,
         previous_revenue_facts=previous_facts,
     )
@@ -1435,6 +1460,213 @@ def get_month_net_revenue(
         audit_record_to_api(payment_record),
     ]
     return summary_api
+
+
+# ============================================================================
+# Purpose: Return finance-gated, scope-safe company/sector/channel rankings for
+#   a month, rolled up from the per-channel net-revenue summary.
+# Database/ORM: Reads revenue facts, manual overrides, deduction components,
+#   channel-account links (committed snapshot for LOCKED months), and org-unit
+#   names; no writes.
+# Standards: Thin route — enforce VIEW_REVENUE@target + VIEW_CONFIDENCE@target +
+#   VIEW_FINALIZED_PAYMENTS@finance_month BEFORE any read; restrict the channel
+#   set to the authorized scope BEFORE ranking; logic lives in build_month_rankings
+#   and build_month_net_revenue_summary; dual REVENUE_VIEWED/PAYMENT_VIEWED audit;
+#   typed errors -> HTTP 422 at the boundary only.
+# Blast Radius: Finance read path only. No persistence, no auth weakening, no
+#   graph impact. A scoped read with no in-scope channels returns empty rankings
+#   (NOT 403); cross-scope channels/companies/sectors never leak into the result.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/rankings.py -> build_month_rankings.
+#   - File: backend/ums_smart_revenue/finance/net_revenue.py ->
+#       build_month_net_revenue_summary / filter_account_allocations_to_scope.
+#   - File: backend/ums_smart_revenue/finance/account_allocation_read.py ->
+#       resolve_month_account_allocation (committed snapshot for LOCKED months).
+# ============================================================================
+@router.get("/months/{month}/rankings")
+def get_month_rankings(
+    month: str,
+    user: Annotated[UserPrincipal, Depends(current_principal_from_headers)],
+    org_index: Annotated[OrgAccessIndex, Depends(current_org_access_index)],
+    revenue_repository: Annotated[
+        SqlAlchemyRevenueFactRepository,
+        Depends(current_revenue_fact_repository),
+    ],
+    override_repository: Annotated[
+        SqlAlchemyManualOverrideRepository,
+        Depends(current_manual_override_repository),
+    ],
+    deduction_component_repository: Annotated[
+        SqlAlchemyDeductionComponentRepository,
+        Depends(current_deduction_component_repository),
+    ],
+    link_repository: Annotated[
+        SqlAlchemyChannelAccountLinkRepository,
+        Depends(current_channel_account_link_repository),
+    ],
+    committed_repository: Annotated[
+        SqlAlchemyCommittedAllocationRepository,
+        Depends(current_committed_allocation_repository),
+    ],
+    session: Annotated[Session, Depends(current_db_session)],
+    audit_sink: Annotated[AuditSink, Depends(current_revenue_audit_sink)],
+    scope_type: Annotated[str, Query(min_length=1)] = "global",
+    scope_id: str | None = None,
+    metric: Annotated[str, Query(min_length=1)] = "gross",
+    limit: Annotated[int, Query(ge=1, le=100)] = 10,
+) -> dict[str, object]:
+    """Return scoped month rankings for an authorized finance viewer."""
+    target_scope, channel_ids = _revenue_read_scope_to_channel_ids(
+        scope_type=scope_type,
+        scope_id=scope_id,
+        org_index=org_index,
+    )
+    _require_permission(user, Permission.VIEW_REVENUE, target_scope, org_index)
+    _require_permission(user, Permission.VIEW_CONFIDENCE, target_scope, org_index)
+    _require_permission(
+        user, Permission.VIEW_FINALIZED_PAYMENTS, AccessScope.finance_month(month)
+    )
+    normalized_scope_type = target_scope.type.value
+    normalized_scope_id = target_scope.id or "global"
+    try:
+        facts = revenue_repository.list_month_facts(
+            month=month,
+            youtube_channel_ids=channel_ids,
+        )
+        overrides = override_repository.list_month_overrides(
+            month=month,
+            youtube_channel_ids=channel_ids,
+        )
+        deduction_components = deduction_component_repository.list_month_components(
+            month=month,
+            youtube_channel_ids=channel_ids,
+            component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
+        )
+        account_result, allocation_provenance = resolve_month_account_allocation(
+            month=month,
+            session=session,
+            deduction_repository=deduction_component_repository,
+            revenue_repository=revenue_repository,
+            link_repository=link_repository,
+            committed_repository=committed_repository,
+        )
+        # Scope-leak guard: account allocation resolves month-wide, so drop lines
+        # for channels outside the authorized channel_ids before they reach the
+        # summary builder. channel_ids is None for global reads (no restriction).
+        scoped_account_lines = filter_account_allocations_to_scope(
+            account_result.lines, channel_ids
+        )
+        summary = build_month_net_revenue_summary(
+            month=month,
+            facts=facts,
+            manual_overrides=overrides,
+            deduction_components=deduction_components,
+            account_allocations=scoped_account_lines,
+            # Rankings never surface the global unallocated-account diagnostic: it
+            # is a month-wide-only list, not a ranked dimension, so it is
+            # intentionally None on every scope (global and scoped) here. Omitting
+            # it is strictly safer than leaking a month-wide diagnostic into a
+            # scoped ranking response.
+            unallocated_account_issues=None,
+        )
+        company_names, sector_names = _org_unit_name_maps(session)
+        channel_names = _channel_name_map(session)
+        rankings = build_month_rankings(
+            summary=summary,
+            channel_company=org_index.channel_company,
+            channel_sector=org_index.channel_sector,
+            company_names=company_names,
+            sector_names=sector_names,
+            channel_names=channel_names,
+            metric=metric,
+            limit=limit,
+        )
+    except (
+        DeductionComponentValidationError,
+        ManualOverrideValidationError,
+        NetRevenueValidationError,
+        RankingsValidationError,
+        RevenueFactValidationError,
+    ) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=str(exc),
+        ) from exc
+
+    response = rankings.to_api()
+    response.update(allocation_provenance_to_api(allocation_provenance))
+    entity_id = f"{month}:{normalized_scope_type}:{normalized_scope_id}"
+    revenue_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.REVENUE_VIEWED,
+        entity_type="monthly_rankings",
+        entity_id=entity_id,
+        scope=target_scope,
+        details={
+            "metric": rankings.metric,
+            "channel_count": len(rankings.channels),
+            "company_count": len(rankings.companies),
+            "sector_count": len(rankings.sectors),
+        },
+    )
+    payment_record = record_audit_event(
+        sink=audit_sink,
+        actor=user,
+        event_type=AuditEventType.PAYMENT_VIEWED,
+        entity_type="monthly_rankings",
+        entity_id=entity_id,
+        scope=AccessScope.finance_month(month),
+        details={"metric": rankings.metric},
+    )
+    response["audit_events"] = [
+        audit_record_to_api(revenue_record),
+        audit_record_to_api(payment_record),
+    ]
+    return response
+
+
+def _org_unit_name_maps(
+    session: Session,
+) -> tuple[dict[str, str], dict[str, str]]:
+    """Return (company_id->name, sector_id->name) maps for the current tenant."""
+    company_names: dict[str, str] = {}
+    sector_names: dict[str, str] = {}
+    for unit in SqlAlchemyOrgUnitReader(session).list_active_units():
+        if unit.type == "COMPANY":
+            company_names[unit.id] = unit.name
+        elif unit.type == "SECTOR":
+            sector_names[unit.id] = unit.name
+    return company_names, sector_names
+
+
+# ============================================================================
+# Purpose: Return {youtube_channel_id -> channel_name} for the current tenant's
+#   ACTIVE channels so channel rankings show real names (raw-id fallback applied
+#   by build_month_rankings when a channel is missing from this map).
+# Database/ORM: Read-only SELECT on YouTubeChannelORM, tenant-scoped, no lock.
+# Standards: Tenant resolved exactly like the smart-alert reader
+#   (_resolve_smart_alert_tenant_id -> get_current_tenant, UMS_TENANT_ID
+#   fallback); never hardcoded. Read surface only — no write/auth/audit.
+# Blast Radius: Finance read display only; names never feed totals or ordering.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/rankings.py -> build_month_rankings
+#       consumes channel_names for RankedEntry.entity_name on channel rows.
+# ============================================================================
+def _channel_name_map(session: Session) -> dict[str, str]:
+    """Return active channel id->name for the current tenant (raw-id fallback)."""
+    tenant_id = _resolve_smart_alert_tenant_id()
+    statement = (
+        select(
+            YouTubeChannelORM.youtube_channel_id,
+            YouTubeChannelORM.channel_name,
+        )
+        .where(
+            YouTubeChannelORM.tenant_id == tenant_id,
+            YouTubeChannelORM.active.is_(True),
+        )
+    )
+    return dict(session.execute(statement).all())
 
 
 @router.post(
@@ -1983,19 +2215,38 @@ def _authorized_channel_ids_for_permission(
     return channel_ids
 
 
+def _direct_scopes_for_permission(
+    user: UserPrincipal, permission: Permission
+) -> list[AccessScope]:
+    """Yield active direct scopes granting the permission."""
+    return [
+        grant.scope
+        for grant in user.direct_permissions
+        if grant.active and grant.permission == permission
+    ]
+
+
+def _role_scopes_for_permission(
+    user: UserPrincipal, permission: Permission
+) -> list[AccessScope]:
+    """Yield active role-derived scopes granting the permission."""
+    return [
+        assignment.scope
+        for assignment in user.role_assignments
+        if assignment.active
+        and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset())
+    ]
+
+
 def _granted_scopes_for_permission(
     user: UserPrincipal,
     permission: Permission,
 ) -> tuple[AccessScope, ...]:
     """Collect all active direct or role scopes granting a permission."""
-    scopes: list[AccessScope] = []
-    for grant in user.direct_permissions:
-        if grant.active and grant.permission == permission:
-            scopes.append(grant.scope)
-    for assignment in user.role_assignments:
-        if assignment.active and permission in ROLE_PERMISSIONS.get(assignment.role, frozenset()):
-            scopes.append(assignment.scope)
-    return tuple(scopes)
+    return tuple(
+        _direct_scopes_for_permission(user, permission)
+        + _role_scopes_for_permission(user, permission)
+    )
 
 
 def _intersect_channel_sets(left: set[str] | None, right: set[str] | None) -> set[str] | None:
@@ -2032,6 +2283,94 @@ def _previous_month(month: str) -> str:
             )
         return f"{year - 1:04d}-12"
     return f"{year:04d}-{month_number - 1:02d}"
+
+
+# ============================================================================
+# Purpose: Read the active, revenue-required channels that have no revenue fact
+#   for the month, so the smart-alert builder can emit per-channel coverage
+#   gaps. Bounded: returns the total COUNT plus an ordered sample capped at
+#   `MISSING_FACT_CHANNEL_SAMPLE_LIMIT` ids, so a bad ingestion month cannot
+#   turn the alert endpoint into an unbounded scan/transfer.
+# Database/ORM: Read-only LEFT JOIN of YouTubeChannelORM x
+#   MonthlyChannelRevenueFactORM (no FOR UPDATE), tenant-scoped, source of
+#   truth in PostgreSQL. The count uses `func.count()` server-side; the
+#   sample is a separate ordered `LIMIT 20` SELECT.
+# Standards: Mirrors month_close_readiness._missing_required_revenue_fact_count
+#   exactly (active.is_(True) AND revenue_required.is_(True) AND fact.id IS NULL).
+#   No write, no lock, no Neo4j.
+# Blast Radius: Finance read surface only; no auth/audit/finance mutation.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/month_close_readiness.py ->
+#     shared query shape (count there; count + bounded sample here).
+#   - File: backend/ums_smart_revenue/finance/smart_alerts.py -> consumes
+#     (count, sample) for the coverage alert details.
+# ============================================================================
+def missing_revenue_fact_channel_count_and_sample(
+    session: Session,
+    *,
+    month: str,
+    youtube_channel_ids: set[str] | None = None,
+) -> tuple[int, list[str]]:
+    """Return (count, sample) of active revenue-required channels with no fact for the month.
+
+    `count` is the total matching channels; `sample` is a sorted list of at
+    most `MISSING_FACT_CHANNEL_SAMPLE_LIMIT` channel ids. The two values are
+    read by two independent queries so a large factless set never materializes
+    a full id list on the application side.
+
+    When `youtube_channel_ids` is provided (non-None), the read is scoped to
+    those channels — used by the export helper so a company/sector/group
+    export never leaks factless channel ids outside the exported scope. When
+    omitted (None), the read is tenant-global — the smart-alerts API
+    endpoint stays global by design.
+    """
+    from ums_smart_revenue.finance.smart_alerts import MISSING_FACT_CHANNEL_SAMPLE_LIMIT
+
+    tenant_id = _resolve_smart_alert_tenant_id()
+    join_predicates = (
+        (MonthlyChannelRevenueFactORM.tenant_id == YouTubeChannelORM.tenant_id)
+        & (
+            MonthlyChannelRevenueFactORM.youtube_channel_id
+            == YouTubeChannelORM.youtube_channel_id
+        )
+        & (MonthlyChannelRevenueFactORM.tenant_id == tenant_id)
+        & (MonthlyChannelRevenueFactORM.month == month),
+    )
+    where_predicates = [
+        YouTubeChannelORM.tenant_id == tenant_id,
+        YouTubeChannelORM.active.is_(True),
+        YouTubeChannelORM.revenue_required.is_(True),
+        MonthlyChannelRevenueFactORM.id.is_(None),
+    ]
+    if youtube_channel_ids is not None:
+        where_predicates.append(
+            YouTubeChannelORM.youtube_channel_id.in_(youtube_channel_ids)
+        )
+    count_statement = (
+        select(func.count())
+        .select_from(YouTubeChannelORM)
+        .outerjoin(MonthlyChannelRevenueFactORM, *join_predicates)
+        .where(*where_predicates)
+    )
+    sample_statement = (
+        select(YouTubeChannelORM.youtube_channel_id)
+        .select_from(YouTubeChannelORM)
+        .outerjoin(MonthlyChannelRevenueFactORM, *join_predicates)
+        .where(*where_predicates)
+        .order_by(YouTubeChannelORM.youtube_channel_id)
+        .limit(MISSING_FACT_CHANNEL_SAMPLE_LIMIT)
+    )
+    count_value = int(session.execute(count_statement).scalar_one())
+    sample_ids = list(session.scalars(sample_statement).all())
+    return count_value, sample_ids
+
+
+def _resolve_smart_alert_tenant_id() -> UUID:
+    """Resolve the request tenant id, mirroring the finance repositories."""
+    current_tenant = get_current_tenant()
+    if current_tenant is not None:
+        return current_tenant.id
+    return UUID(UMS_TENANT_ID)
 
 
 def _revenue_read_scope_to_channel_ids(

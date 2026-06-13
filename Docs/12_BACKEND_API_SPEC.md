@@ -218,10 +218,15 @@ state. It requires global `finance.view_revenue`, global
 `analytics.view_confidence`, `finance.view_finalized_payments` for the requested
 finance-month scope, and `finance.view_bank_reconciliation` for the requested
 finance-month scope. The response includes alert codes such as
-`MISSING_REVENUE_SOURCE`, `PAYMENT_NOT_MATCHED`, `BANK_AMOUNT_MISSING`,
-`UNEXPLAINED_GAP_HIGH`, `REVENUE_TREND_ANOMALY`, `MONTH_NOT_LOCKED`, and
-`MANUAL_OVERRIDE_USED`. `REVENUE_TREND_ANOMALY` compares each channel's selected
-primary current-month SQL revenue fact with the selected primary previous-month
+`MISSING_REVENUE_SOURCE`, `CHANNELS_MISSING_REVENUE_FACTS`,
+`PAYMENT_NOT_MATCHED`, `BANK_AMOUNT_MISSING`, `UNEXPLAINED_GAP_HIGH`,
+`REVENUE_TREND_ANOMALY`, `MONTH_NOT_LOCKED`, and `MANUAL_OVERRIDE_USED`.
+`CHANNELS_MISSING_REVENUE_FACTS` flags active, revenue-required channels that
+have no revenue fact for the month (per-channel coverage, distinct from the
+month-level `MISSING_REVENUE_SOURCE`); its details report `channel_count` and a
+sorted `sample_channel_ids` list capped at 20. `REVENUE_TREND_ANOMALY` compares
+each channel's selected primary current-month SQL revenue fact with the
+selected primary previous-month
 SQL revenue fact and reports only channel ids plus current/prior gross revenue
 and percent movement. Reads are audited as `REVENUE_VIEWED`, `PAYMENT_VIEWED`, and
 `BANK_RECONCILIATION_VIEWED`. This endpoint does not calculate net revenue or
@@ -350,7 +355,7 @@ GET /connectors/credentials
 POST /connectors/credentials
 POST /connectors/credentials/{connector_key}/{account_id}/test
 POST /connectors/jobs
-GET /connectors/runs?connector_key=youtube-reporting&account_id=acct-1&limit=50
+GET /connectors/runs?connector_key=youtube-reporting&limit=50&account=<placeholder-id>
 GET /connectors/runs?limit=50&cursor_started_at=2026-05-10T12:00:00Z&cursor_id=<uuid>
 ```
 
