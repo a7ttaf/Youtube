@@ -1,10 +1,12 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import CommandView from "@/components/srcc/views/CommandView";
 import type {
   MonthRankingsResponse,
   NetRevenueResponse,
+  RevenueScopeOption,
   SmartAlertsSummary,
 } from "@/lib/api/types";
 import { TenantProvider } from "@/contexts/TenantContext";
@@ -87,6 +89,13 @@ const RANKINGS_EMPTY: MonthRankingsResponse = {
   committed_run: null,
 };
 
+// Authorized rollup scopes for the selector: the guaranteed global option plus a
+// single company so the dynamic-selector tests can drive a scoped read.
+const SCOPES_GLOBAL_AND_COMPANY: RevenueScopeOption[] = [
+  { scope_type: "global", scope_id: null, label: "Global" },
+  { scope_type: "company", scope_id: "company-a", label: "Company Alpha" },
+];
+
 function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   return new Response(JSON.stringify(body), {
     status,
@@ -96,23 +105,33 @@ function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
 
 // Route each fetch by URL and return a FRESH Response per call (a Response body
 // can only be read once, so the net-revenue + smart-alerts requests cannot share
-// one). net-revenue is driven by the test; smart-alerts + rankings default to a
-// quiet body so this suite isolates net-revenue behaviour.
-function routeFetch(netRevenue: () => Response, smartAlerts?: () => Response) { // skipcq: JS-0067
-  (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
-    (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes("/smart-alerts")) {
-        return Promise.resolve(
-          (smartAlerts ?? (() => jsonResponse(SMART_ALERTS_CLEAR)))(),
-        );
-      }
-      if (url.includes("/rankings")) {
-        return Promise.resolve(jsonResponse(RANKINGS_EMPTY));
-      }
-      return Promise.resolve(netRevenue());
-    },
-  );
+// one). net-revenue is driven by the test; smart-alerts + rankings + scopes
+// default to a quiet body so this suite isolates net-revenue behaviour. The
+// scope selector defaults to global-only so the existing assertions are unchanged.
+function routeFetch( // skipcq: JS-0067
+  netRevenue: () => Response,
+  smartAlerts?: () => Response,
+  scopes?: () => Response,
+) {
+  const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
+  fetchMock.mockImplementation((input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes("/revenue/scopes")) {
+      return Promise.resolve(
+        (scopes ?? (() => jsonResponse({ scopes: [] })))(),
+      );
+    }
+    if (url.includes("/smart-alerts")) {
+      return Promise.resolve(
+        (smartAlerts ?? (() => jsonResponse(SMART_ALERTS_CLEAR)))(),
+      );
+    }
+    if (url.includes("/rankings")) {
+      return Promise.resolve(jsonResponse(RANKINGS_EMPTY));
+    }
+    return Promise.resolve(netRevenue());
+  });
+  return fetchMock;
 }
 
 function renderCommandView(canViewFinance: boolean) { // skipcq: JS-0067
@@ -207,5 +226,89 @@ describe("CommandView wired to net-revenue", () => {
     await waitFor(() =>
       expect(screen.getAllByText("$1,000.00").length).toBeGreaterThan(0),
     );
+  });
+});
+
+describe("CommandView dynamic scope selector", () => {
+  it("populates the scope selector from GET /revenue/scopes", async () => {
+    routeFetch(
+      () => jsonResponse(NET_REVENUE_BODY),
+      undefined,
+      () => jsonResponse({ scopes: SCOPES_GLOBAL_AND_COMPANY }),
+    );
+    renderCommandView(true);
+
+    const selector = await screen.findByLabelText("Scope");
+    // Both the global option and the authorized company option are listed.
+    await waitFor(() =>
+      expect(
+        within(selector).getByRole("option", { name: "Global" }),
+      ).toBeInTheDocument(),
+    );
+    expect(
+      within(selector).getByRole("option", { name: "Company Alpha" }),
+    ).toBeInTheDocument();
+  });
+
+  it("threads the selected company scope into BOTH the net-revenue and rankings reads", async () => {
+    const fetchMock = routeFetch(
+      () => jsonResponse(NET_REVENUE_BODY),
+      undefined,
+      () => jsonResponse({ scopes: SCOPES_GLOBAL_AND_COMPANY }),
+    );
+    renderCommandView(true);
+
+    // Wait for the options to load, then select the company scope by its label.
+    const selector = await screen.findByLabelText("Scope");
+    await waitFor(() =>
+      expect(
+        within(selector).getByRole("option", { name: "Company Alpha" }),
+      ).toBeInTheDocument(),
+    );
+    await userEvent.selectOptions(selector, "Company Alpha");
+
+    // The scoped read params must appear on BOTH the net-revenue and the
+    // rankings request URLs (the regression guard the rankings test established
+    // for global, now exercised for a real non-global scope).
+    await waitFor(() => {
+      const calledUrls = fetchMock.mock.calls.map((c) => String(c[0]));
+      const netCall = calledUrls.find(
+        (u) => u.includes("/net-revenue") && u.includes("scope_type=company"),
+      );
+      const rankingCall = calledUrls.find(
+        (u) => u.includes("/rankings") && u.includes("scope_type=company"),
+      );
+      expect(netCall).toMatch(/scope_id=company-a/);
+      expect(rankingCall).toMatch(/scope_id=company-a/);
+    });
+  });
+
+  it("degrades to global-only and still renders when /revenue/scopes 403s", async () => {
+    routeFetch(
+      () => jsonResponse(NET_REVENUE_BODY),
+      undefined,
+      () =>
+        jsonResponse({ detail: "Missing permission: finance.view_revenue" }, 403),
+    );
+    renderCommandView(true);
+
+    // The screen still renders the net-revenue content despite the scopes 403.
+    await waitFor(() =>
+      expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0),
+    );
+    // The selector degrades to a guaranteed global-only option (no scoped leak).
+    const selector = screen.getByLabelText("Scope");
+    expect(
+      within(selector).getByRole("option", { name: /global/i }),
+    ).toBeInTheDocument();
+    expect(
+      within(selector).queryByRole("option", { name: "Company Alpha" }),
+    ).not.toBeInTheDocument();
+    // The default (global) read sends NO scope_id.
+    const netCalls = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => String(c[0]))
+      .filter((u) => u.includes("/net-revenue"));
+    expect(netCalls.length).toBeGreaterThan(0);
+    expect(netCalls.every((u) => !u.includes("scope_id="))).toBe(true);
   });
 });

@@ -12,6 +12,7 @@ import type {
   OutsideCmsResponse,
   RankedEntry,
   RankingMetric,
+  RevenueScopeOption,
   SmartAlert,
   SmartAlertSeverity,
   SmartAlertsSummary,
@@ -20,6 +21,7 @@ import { useChannelIssues } from "@/lib/api/useChannelIssues";
 import { useNetRevenue } from "@/lib/api/useNetRevenue";
 import { useOutsideCmsChannels } from "@/lib/api/useOutsideCmsChannels";
 import { useRankings } from "@/lib/api/useRankings";
+import { useRevenueScopes } from "@/lib/api/useRevenueScopes";
 import { useSmartAlerts } from "@/lib/api/useSmartAlerts";
 import {
   CLOSE_STEPS,
@@ -63,12 +65,55 @@ type ScopeOption = {
   scopeId: string | null;
 };
 
-// Global to start (per the task). Scoped options are listed so the selector
-// shape matches the eventual org hierarchy; they pass scope_type/scope_id
-// straight through to the backend, which resolves + authorizes them.
-const SCOPE_OPTIONS: ScopeOption[] = [
-  { label: "UMS Holding (global)", scopeType: "global", scopeId: null },
-];
+// ============================================================================
+// Purpose: Build a stable identity key for a scope selection so the selector and
+//   the scope state can survive an async option-list change (the fetched option
+//   set arrives after the first render). The key is the scope_type alone for the
+//   global option (no id) and `type:id` otherwise — this is the <option> value
+//   AND the lookup key when an onChange fires.
+// Standards: Pure helper; no money, no authorization. Global carries no scope_id.
+// Blast Radius: None detected (UI selection identity only).
+// ============================================================================
+function scopeOptionKey(scopeType: string, scopeId: string | null): string { // skipcq: JS-0067
+  return scopeId ? `${scopeType}:${scopeId}` : scopeType;
+}
+
+// The guaranteed fallback when the authorized-scope fetch is loading, errors, or
+// returns nothing: a single GLOBAL option. A scoped viewer with no global grant
+// never sees this injected on top of a successful response — it is ONLY the
+// fail-open default so the screen renders while the real, fail-closed option set
+// (which the backend returns with global present ONLY when authorized) loads. The
+// panels themselves fail-closed on the actual scoped reads.
+const GLOBAL_SCOPE_FALLBACK: ScopeOption = {
+  label: "Global",
+  scopeType: "global",
+  scopeId: null,
+};
+
+// ============================================================================
+// Purpose: Resolve the scope selector's options from the authorized-scopes hook
+//   state. On a successful, non-empty fetch the options ARE the viewer's
+//   authorized scopes verbatim (the backend already includes global only when
+//   authorized, so a scoped viewer correctly gets no global option — the
+//   anti-scope-leak guarantee). While loading, on a 403/error, or on an empty
+//   list, fall back to global-only so the screen never blocks.
+// Standards: Pure mapping; no client-side authorization invented — the fetched
+//   set is the fail-closed source of truth. No money handling here.
+// Blast Radius: Authorization (the selector's option source). No mutation.
+// Connections:
+//   - File: frontend/src/lib/api/useRevenueScopes.ts -> the option source.
+//   - File: frontend/src/lib/api/types.ts -> RevenueScopeOption.
+// ============================================================================
+function resolveScopeOptions(scopes: RevenueScopeOption[] | null): ScopeOption[] { // skipcq: JS-0067
+  if (!scopes || scopes.length === 0) {
+    return [GLOBAL_SCOPE_FALLBACK];
+  }
+  return scopes.map((scope) => ({
+    label: scope.label,
+    scopeType: scope.scope_type,
+    scopeId: scope.scope_id,
+  }));
+}
 
 const ALLOCATION_SOURCE_COPY: Record<
   NetRevenueResponse["allocation_source"],
@@ -156,17 +201,33 @@ export default function CommandView({ // skipcq: JS-0067, JS-R1005
   canViewAnalytics?: boolean;
 }) {
   const [month, setMonth] = useState<string>(DEFAULT_MONTH);
-  const [scopeIndex, setScopeIndex] = useState<number>(0);
+  // Stable {scopeType, scopeId} identity instead of a positional index: the
+  // option list arrives asynchronously, so an index would point at the wrong
+  // (or a vanished) scope once the fetched set replaces the global-only fallback.
+  const [selectedScopeKey, setSelectedScopeKey] = useState<string>(
+    scopeOptionKey(GLOBAL_SCOPE_FALLBACK.scopeType, GLOBAL_SCOPE_FALLBACK.scopeId),
+  );
   const [selectedChannelId, setSelectedChannelId] = useState<string | null>(null);
 
-  // FIX: Replaced the non-null assertion on SCOPE_OPTIONS[0] with explicit
-  // narrowing; the selected index may be out of range, and the fallback is the
-  // first option, which must exist (the constant is defined non-empty above).
-  const fallbackScope = SCOPE_OPTIONS[0];
-  if (!fallbackScope) {
-    throw new Error("SCOPE_OPTIONS must define at least one scope option");
-  }
-  const scope = SCOPE_OPTIONS[scopeIndex] ?? fallbackScope;
+  // Fetch the viewer's VIEW_REVENUE-authorized scopes ONCE at the view root. The
+  // selector is populated ONLY from these (fail-closed against an org-structure
+  // leak); while loading or on a 403/error it degrades to global-only so the
+  // screen never blocks (the panels fail-closed on the actual scoped reads).
+  const { data: scopesData } = useRevenueScopes();
+  const scopeOptions = useMemo(
+    () => resolveScopeOptions(scopesData),
+    [scopesData],
+  );
+  // Resolve the active scope from the stable key, falling back to the first
+  // option (always present — resolveScopeOptions guarantees >=1) when the key is
+  // not in the current list (e.g. before the fetch resolves). The fallback is
+  // global while loading, never an out-of-scope unit.
+  const scope =
+    scopeOptions.find(
+      (option) => scopeOptionKey(option.scopeType, option.scopeId) === selectedScopeKey,
+    ) ??
+    scopeOptions[0] ??
+    GLOBAL_SCOPE_FALLBACK;
   const { data, loading, error, reload } = useNetRevenue({
     month,
     scopeType: scope.scopeType,
@@ -202,14 +263,21 @@ export default function CommandView({ // skipcq: JS-0067, JS-R1005
         <select
           className="control"
           aria-label="Scope"
-          value={scopeIndex}
+          value={selectedScopeKey}
           onChange={(e) => {
-            setScopeIndex(Number(e.target.value));
+            // Store the stable scope key; the active {scopeType, scopeId} is
+            // resolved from it against the current option list. Reset the
+            // selected channel so the explain card never shows a channel from
+            // the prior scope.
+            setSelectedScopeKey(e.target.value);
             setSelectedChannelId(null);
           }}
         >
-          {SCOPE_OPTIONS.map((s, index) => (
-            <option key={s.label} value={index}>
+          {scopeOptions.map((s) => (
+            <option
+              key={scopeOptionKey(s.scopeType, s.scopeId)}
+              value={scopeOptionKey(s.scopeType, s.scopeId)}
+            >
               {s.label}
             </option>
           ))}
