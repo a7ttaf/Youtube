@@ -123,6 +123,7 @@ def build_month_rankings(
     channel_sector: Mapping[str, str],
     company_names: Mapping[str, str],
     sector_names: Mapping[str, str],
+    channel_names: Mapping[str, str],
     metric: str,
     limit: int,
 ) -> MonthRankingsSummary:
@@ -141,7 +142,9 @@ def build_month_rankings(
         RankedEntry(
             rank=0,
             entity_id=channel.youtube_channel_id,
-            entity_name=channel.youtube_channel_id,
+            entity_name=channel_names.get(
+                channel.youtube_channel_id, channel.youtube_channel_id
+            ),
             gross_revenue_usd=channel.adjusted_gross_revenue_usd,
             net_revenue_usd=channel.net_revenue_usd,
             deduction_amount_usd=channel.deduction_amount_usd,

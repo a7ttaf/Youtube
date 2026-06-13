@@ -77,6 +77,7 @@ def test_rolls_channel_metrics_up_to_company_and_sector():
         channel_sector={"ch-a": "sec-1", "ch-b": "sec-1"},
         company_names={"co-1": "Company One"},
         sector_names={"sec-1": "Sector One"},
+        channel_names={},
         metric="gross",
         limit=10,
     )
@@ -107,6 +108,7 @@ def test_ranks_descending_by_selected_metric_with_rank_numbers():
         channel_sector={},
         company_names={},
         sector_names={},
+        channel_names={},
         metric="gross",
         limit=10,
     )
@@ -130,6 +132,7 @@ def test_metric_net_selects_net_for_ordering():
         channel_sector={},
         company_names={},
         sector_names={},
+        channel_names={},
         metric="net",
         limit=10,
     )
@@ -154,6 +157,7 @@ def test_ties_break_by_entity_id_ascending():
         channel_sector={},
         company_names={},
         sector_names={},
+        channel_names={},
         metric="gross",
         limit=10,
     )
@@ -175,6 +179,7 @@ def test_none_metric_sinks_to_bottom():
         channel_sector={},
         company_names={},
         sector_names={},
+        channel_names={},
         metric="net",
         limit=10,
     )
@@ -202,6 +207,7 @@ def test_group_metric_is_none_only_when_all_members_none():
         channel_sector={},
         company_names={"co-1": "One", "co-2": "Two"},
         sector_names={},
+        channel_names={},
         metric="gross",
         limit=10,
     )
@@ -226,6 +232,7 @@ def test_top_limit_truncates_each_dimension():
         channel_sector={},
         company_names={},
         sector_names={},
+        channel_names={},
         metric="gross",
         limit=3,
     )
@@ -245,6 +252,7 @@ def test_company_name_falls_back_to_raw_id():
         channel_sector={},
         company_names={},
         sector_names={},
+        channel_names={},
         metric="gross",
         limit=10,
     )
@@ -261,8 +269,66 @@ def test_bad_metric_raises_validation_error():
             channel_sector={},
             company_names={},
             sector_names={},
+            channel_names={},
             metric="profit",
             limit=10,
+        )
+
+
+def test_channel_name_resolves_from_map_and_falls_back_to_raw_id():
+    """Channel entity_name resolves from channel_names; missing id falls back."""
+    summary = _summary(
+        [
+            _channel("ch-named", gross=Decimal("100"), net=Decimal("90"),
+                     deduction=Decimal("10")),
+            _channel("ch-unnamed", gross=Decimal("50"), net=Decimal("40"),
+                     deduction=Decimal("10")),
+        ]
+    )
+    result = build_month_rankings(
+        summary=summary,
+        channel_company={},
+        channel_sector={},
+        company_names={},
+        sector_names={},
+        channel_names={"ch-named": "Channel Named"},
+        metric="gross",
+        limit=10,
+    )
+    by_id = {e.entity_id: e for e in result.channels}
+    # Resolved name from the map.
+    assert by_id["ch-named"].entity_name == "Channel Named"
+    # No map entry -> raw youtube_channel_id fallback.
+    assert by_id["ch-unnamed"].entity_name == "ch-unnamed"
+
+
+def test_out_of_range_limit_raises_validation_error():
+    """The service limit guard rejects limit<1 and limit>MAX independently."""
+    summary = _summary(
+        [_channel("ch-a", gross=Decimal("10"), net=Decimal("10"),
+                  deduction=Decimal("0"))]
+    )
+    with pytest.raises(RankingsValidationError):
+        build_month_rankings(
+            summary=summary,
+            channel_company={},
+            channel_sector={},
+            company_names={},
+            sector_names={},
+            channel_names={},
+            metric="gross",
+            limit=0,
+        )
+    with pytest.raises(RankingsValidationError):
+        build_month_rankings(
+            summary=summary,
+            channel_company={},
+            channel_sector={},
+            company_names={},
+            sector_names={},
+            channel_names={},
+            metric="gross",
+            limit=101,
         )
 
 
@@ -277,6 +343,7 @@ def test_to_api_serializes_money_as_strings_and_preserves_none():
         channel_sector={},
         company_names={},
         sector_names={},
+        channel_names={},
         metric="gross",
         limit=10,
     )

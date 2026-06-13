@@ -1533,7 +1533,7 @@ def get_month_rankings(
             youtube_channel_ids=channel_ids,
             component_kinds=NET_APPLICABLE_COMPONENT_KINDS,
         )
-        account_result, _allocation_provenance = resolve_month_account_allocation(
+        account_result, allocation_provenance = resolve_month_account_allocation(
             month=month,
             session=session,
             deduction_repository=deduction_component_repository,
@@ -1553,15 +1553,22 @@ def get_month_rankings(
             manual_overrides=overrides,
             deduction_components=deduction_components,
             account_allocations=scoped_account_lines,
+            # Rankings never surface the global unallocated-account diagnostic: it
+            # is a month-wide-only list, not a ranked dimension, so it is
+            # intentionally None on every scope (global and scoped) here. Omitting
+            # it is strictly safer than leaking a month-wide diagnostic into a
+            # scoped ranking response.
             unallocated_account_issues=None,
         )
         company_names, sector_names = _org_unit_name_maps(session)
+        channel_names = _channel_name_map(session)
         rankings = build_month_rankings(
             summary=summary,
             channel_company=org_index.channel_company,
             channel_sector=org_index.channel_sector,
             company_names=company_names,
             sector_names=sector_names,
+            channel_names=channel_names,
             metric=metric,
             limit=limit,
         )
@@ -1578,6 +1585,7 @@ def get_month_rankings(
         ) from exc
 
     response = rankings.to_api()
+    response.update(allocation_provenance_to_api(allocation_provenance))
     entity_id = f"{month}:{normalized_scope_type}:{normalized_scope_id}"
     revenue_record = record_audit_event(
         sink=audit_sink,
@@ -1621,6 +1629,38 @@ def _org_unit_name_maps(
         elif unit.type == "SECTOR":
             sector_names[unit.id] = unit.name
     return company_names, sector_names
+
+
+# ============================================================================
+# Purpose: Return {youtube_channel_id -> channel_name} for the current tenant's
+#   ACTIVE channels so channel rankings show real names (raw-id fallback applied
+#   by build_month_rankings when a channel is missing from this map).
+# Database/ORM: Read-only SELECT on YouTubeChannelORM, tenant-scoped, no lock.
+# Standards: Tenant resolved exactly like the smart-alert reader
+#   (_resolve_smart_alert_tenant_id -> get_current_tenant, UMS_TENANT_ID
+#   fallback); never hardcoded. Read surface only — no write/auth/audit.
+# Blast Radius: Finance read display only; names never feed totals or ordering.
+# Connections:
+#   - File: backend/ums_smart_revenue/finance/rankings.py -> build_month_rankings
+#       consumes channel_names for RankedEntry.entity_name on channel rows.
+# ============================================================================
+def _channel_name_map(session: Session) -> dict[str, str]:
+    """Return active channel id->name for the current tenant (raw-id fallback)."""
+    tenant_id = _resolve_smart_alert_tenant_id()
+    statement = (
+        select(
+            YouTubeChannelORM.youtube_channel_id,
+            YouTubeChannelORM.channel_name,
+        )
+        .where(
+            YouTubeChannelORM.tenant_id == tenant_id,
+            YouTubeChannelORM.active.is_(True),
+        )
+    )
+    return {
+        channel_id: channel_name
+        for channel_id, channel_name in session.execute(statement).all()
+    }
 
 
 @router.post(

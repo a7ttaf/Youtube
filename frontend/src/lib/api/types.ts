@@ -981,7 +981,10 @@ export type RankedEntry = {
   rank: number;
   entity_id: string;
   entity_name: string;
-  gross_revenue_usd: MoneyString | null;
+  // Backend RankedEntry.gross_revenue_usd is a non-optional Decimal that is
+  // never None (channels carry a non-None Decimal; rolled-up groups start at 0),
+  // so it is a non-null MoneyString. Net/deduction stay nullable (None preserved).
+  gross_revenue_usd: MoneyString;
   net_revenue_usd: MoneyString | null;
   deduction_amount_usd: MoneyString | null;
 };
@@ -997,4 +1000,7 @@ export type MonthRankingsResponse = {
   // Route-level additions (committed snapshot provenance for LOCKED months).
   allocation_source?: AllocationSource;
   committed_run?: CommittedRun | null;
+  // Route emits the dual REVENUE_VIEWED/PAYMENT_VIEWED echo like every other
+  // finance response (revenue.py get_month_rankings audit_events assignment).
+  audit_events?: NetRevenueAuditEvent[];
 };

@@ -458,3 +458,49 @@ def test_rankings_locked_month_serves_committed_snapshot(tmp_path):
     channels_by_id = {e["entity_id"]: e for e in body["channels"]}
     # Snapshot froze pub-7's 70.00 allocation for channel-tv-d; live=999.00.
     assert channels_by_id["channel-tv-d"]["deduction_amount_usd"] == "70"
+    # The route surfaces the committed-snapshot provenance so the FE badge can
+    # distinguish a frozen LOCKED snapshot from a live_fallback.
+    assert body["allocation_source"] == "committed_snapshot"
+    assert body["committed_run"] is not None
+
+
+def test_rankings_open_month_reports_live_allocation_source(tmp_path):
+    """An OPEN month (no close row) reads live_compute, never committed_snapshot."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
+    client = TestClient(app)
+
+    response = client.get(
+        f"/revenue/months/2026-03/rankings?scope_type=company&scope_id={COMPANY_ID}",
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["allocation_source"] in {"live_compute", "live_fallback"}
+    assert body["committed_run"] is None
+
+
+def test_rankings_allocation_source_matches_net_revenue(tmp_path):
+    """Rankings allocation_source agrees with net-revenue for the same scope."""
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = _company_finance_principal
+    client = TestClient(app)
+
+    rankings = client.get(
+        f"/revenue/months/2026-03/rankings?scope_type=company&scope_id={COMPANY_ID}",
+    )
+    net_revenue = client.get(
+        f"/revenue/months/2026-03/net-revenue"
+        f"?scope_type=company&scope_id={COMPANY_ID}",
+    )
+
+    assert rankings.status_code == 200
+    assert net_revenue.status_code == 200
+    assert (
+        rankings.json()["allocation_source"]
+        == net_revenue.json()["allocation_source"]
+    )

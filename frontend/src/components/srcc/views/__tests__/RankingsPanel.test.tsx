@@ -172,6 +172,10 @@ describe("RankingsPanel in CommandView", () => {
     await waitFor(() =>
       expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0),
     );
+    // The RankingsRestrictedBand renders for a non-finance viewer (positive
+    // assertion that the Restricted copy/band is shown, not just absent money).
+    expect(screen.getByText("Rankings restricted")).toBeInTheDocument();
+    expect(screen.getAllByText(/Restricted/i).length).toBeGreaterThan(0);
     // No rankings request fires for a non-finance viewer (panel shows money).
     const calledUrls = fetchMock.mock.calls.map((c) => String(c[0]));
     expect(calledUrls.some((u) => u.includes("/rankings"))).toBe(false);
