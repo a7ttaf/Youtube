@@ -26,6 +26,10 @@ import { ApiError } from "@/lib/api/client";
 //   - File: frontend/src/lib/api/client.ts -> the thrown ApiError this surfaces.
 //   - File: frontend/src/lib/api/useNetRevenue.ts -> first consumer.
 // ============================================================================
+
+// Gated calls reuse this no-op cleanup so the disabled early-return is uniform.
+const NOOP_CLEANUP = () => {};
+
 export type AsyncState<T> = {
   data: T | null;
   loading: boolean;
@@ -39,11 +43,19 @@ export type AsyncState<T> = {
  * newer one. data is reset to null at the start of each fetch (dep change or
  * reload) so stale finance values never show under a new filter. `reload()`
  * re-runs the same `run` reference.
+ *
+ * `enabled` (default true) gates the fetch: while false the effect fires NO
+ * request and loading stays at its initial true (so callers render their loading
+ * state instead of acting on a not-yet-decided scope). The Command Center uses
+ * this to hold net-revenue/rankings reads until the authorized-scope verdict is
+ * in, preventing an initial unauthorized global read for a scoped viewer.
  */
 export function useAsync<T>( // skipcq: JS-0067
   // The fetch must be a stable reference (memoize the caller's closure with
   // useCallback) so the effect does not re-run on every render.
   run: () => Promise<T>,
+  // When false, no fetch is issued; loading remains true until enabled flips.
+  enabled: boolean = true,
 ): AsyncState<T> {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -63,6 +75,12 @@ export function useAsync<T>( // skipcq: JS-0067
   const reload = useCallback(() => setNonce((value) => value + 1), []);
 
   useEffect(() => { // skipcq: JS-R1005
+    // FIX (review #102): gate the fetch on `enabled`. While disabled the effect
+    // issues NO request and leaves loading at its initial true so callers render
+    // their loading state instead of acting on a not-yet-decided scope (e.g. the
+    // Command Center holds net-revenue/rankings reads until the authorized-scope
+    // fetch resolves, preventing an initial unauthorized global read).
+    if (!enabled) return NOOP_CLEANUP;
     let active = true;
     // FIX: clear data at fetch start so a slow request under a NEW month/scope
     // filter falls back to the loading state instead of briefly showing the
@@ -114,7 +132,7 @@ export function useAsync<T>( // skipcq: JS-0067
       });
     // Supersede: a newer run (dep change or reload) must win.
     return cleanup;
-  }, [run, nonce]);
+  }, [run, nonce, enabled]);
 
   return { data, loading, error, reload };
 }

@@ -1360,6 +1360,15 @@ def list_authorized_revenue_scopes(
         sector_names=sector_names,
         company_names=company_names,
     )
+    if not options:
+        # FIX (review #102): Fail-closed when a viewer's VIEW_REVENUE grants
+        # produce NO rollup options (e.g. only channel/connector/finance-month
+        # scope types, which the builder deliberately drops). Returning an empty
+        # list with HTTP 200 would let the frontend treat the success as a signal
+        # to fall back to a synthetic GLOBAL option and fire an unauthorized
+        # global read. 403 keeps this rollup-scope listing authoritative and
+        # matches the no-rollup-scope -> no-permission contract.
+        _raise_missing_permission(Permission.VIEW_REVENUE)
     return {"scopes": [option.to_api() for option in options]}
 
 

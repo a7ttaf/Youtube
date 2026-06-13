@@ -240,6 +240,32 @@ def test_disabled_principal_is_forbidden(tmp_path):
     assert response.json()["detail"] == "Missing permission: finance.view_revenue"
 
 
+def test_non_rollup_only_grant_is_forbidden(tmp_path):
+    """A viewer whose VIEW_REVENUE grants are all NON-rollup scope types (e.g.
+    a channel-level grant) is fail-closed 403, NOT an empty HTTP 200.
+
+    The pure builder deliberately drops channel/connector/finance-month scope
+    types (only global/sector/company are rollup dimensions). Without this guard
+    the route would return `{scopes: []}` with 200, and the Command Center would
+    misread the success as "fall back to global" and fire an unauthorized global
+    read. 403 keeps the rollup-scope listing authoritative (review #102 Qodo #2).
+    """
+    database_url = build_database_url(tmp_path)
+    seed_database(database_url)
+    app = create_app(database_url=database_url)
+    app.dependency_overrides[current_principal_from_headers] = lambda: _principal(
+        PermissionGrant(
+            Permission.VIEW_REVENUE, AccessScope.channel("channel-tv-a")
+        ),
+    )
+    client = TestClient(app)
+
+    response = client.get("/revenue/scopes")
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == "Missing permission: finance.view_revenue"
+
+
 def test_deactivated_company_excluded_from_scope_options(tmp_path):
     """A deactivated company is EXCLUDED from the scope options (fail-closed),
     not raw-id-fallback-listed. Deactivating the unit drops it from BOTH the

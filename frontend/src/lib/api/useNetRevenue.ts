@@ -10,6 +10,10 @@ export type NetRevenueQuery = {
   scopeType?: string;
   scopeId?: string | null;
   currency?: string;
+  // When false, the hook issues NO request (defaults true). The Command Center
+  // uses this to hold the read until the authorized-scope verdict resolves,
+  // preventing an initial unauthorized global read for a scoped viewer.
+  enabled?: boolean;
 };
 
 // ============================================================================
@@ -28,7 +32,7 @@ export type NetRevenueQuery = {
 // ============================================================================
 export function useNetRevenue(query: NetRevenueQuery): AsyncState<NetRevenueResponse> { // skipcq: JS-0067
   const client = useApiClient();
-  const { month, scopeType, scopeId, currency } = query;
+  const { month, scopeType, scopeId, currency, enabled = true } = query;
 
   const run = useCallback(() => {
     const params = new URLSearchParams();
@@ -42,5 +46,5 @@ export function useNetRevenue(query: NetRevenueQuery): AsyncState<NetRevenueResp
     return client.get<NetRevenueResponse>(path);
   }, [client, month, scopeType, scopeId, currency]);
 
-  return useAsync(run);
+  return useAsync(run, enabled);
 }

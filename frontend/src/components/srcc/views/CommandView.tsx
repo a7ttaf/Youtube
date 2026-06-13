@@ -213,7 +213,15 @@ export default function CommandView({ // skipcq: JS-0067, JS-R1005
   // selector is populated ONLY from these (fail-closed against an org-structure
   // leak); while loading or on a 403/error it degrades to global-only so the
   // screen never blocks (the panels fail-closed on the actual scoped reads).
-  const { data: scopesData } = useRevenueScopes();
+  const { data: scopesData, error: scopesError } = useRevenueScopes();
+  // FIX (review #102 Qodo #3): Hold the net-revenue + rankings reads until the
+  // authorized-scope fetch has a verdict (data OR error). While it is still
+  // loading, scopesData is null and `scope` resolves to the global fallback —
+  // firing it immediately would trigger an unauthorized global read (likely a
+  // noisy 403) for a scoped viewer before their real options arrive. Once the
+  // scopes fetch resolves (success -> real options, or error -> global fallback),
+  // the gated reads fire with the correct scope.
+  const scopesReady = scopesData !== null || scopesError !== null;
   const scopeOptions = useMemo(
     () => resolveScopeOptions(scopesData),
     [scopesData],
@@ -232,6 +240,7 @@ export default function CommandView({ // skipcq: JS-0067, JS-R1005
     month,
     scopeType: scope.scopeType,
     scopeId: scope.scopeId,
+    enabled: scopesReady,
   });
 
   const currency = data?.currency ?? "USD";
@@ -316,12 +325,13 @@ export default function CommandView({ // skipcq: JS-0067, JS-R1005
       <OutsideCmsMonitorPanel canViewAnalytics={canViewAnalytics} />
 
       {/* company/sector/channel rankings — REAL data, fails independently,
-          finance-gated (shows money; mounts only when canViewFinance) */}
+           finance-gated (shows money; mounts only when canViewFinance) */}
       <RankingsPanel
         month={month}
         canViewFinance={canViewFinance}
         scopeType={scope.scopeType}
         scopeId={scope.scopeId}
+        scopesReady={scopesReady}
       />
 
       <CommandWorkspace
@@ -1476,6 +1486,7 @@ function RankingsPanel({ // skipcq: JS-0067
   canViewFinance,
   scopeType,
   scopeId,
+  scopesReady,
 }: {
   month: string;
   canViewFinance: boolean;
@@ -1486,6 +1497,10 @@ function RankingsPanel({ // skipcq: JS-0067
   // (review #98 T2).
   scopeType: string;
   scopeId: string | null;
+  // FIX (review #102 Qodo #3): Gate the rankings read until the authorized-scope
+  // verdict resolves so the panel does not fire a global read during the load
+  // window (mirrors the net-revenue gate above).
+  scopesReady: boolean;
 }) {
   const [metric, setMetric] = useState<RankingMetric>("gross");
   return (
@@ -1511,6 +1526,7 @@ function RankingsPanel({ // skipcq: JS-0067
           canViewFinance={canViewFinance}
           scopeType={scopeType}
           scopeId={scopeId}
+          scopesReady={scopesReady}
         />
       ) : (
         <RankingsRestrictedBand />
@@ -1568,6 +1584,7 @@ function RankingsBody({ // skipcq: JS-0067, JS-R1005
   canViewFinance,
   scopeType,
   scopeId,
+  scopesReady,
 }: {
   month: string;
   metric: RankingMetric;
@@ -1580,8 +1597,17 @@ function RankingsBody({ // skipcq: JS-0067, JS-R1005
   // consistency + out-of-scope leak).
   scopeType: string;
   scopeId: string | null;
+  // FIX (review #102 Qodo #3): Gate the rankings read until the authorized-scope
+  // verdict resolves (see CommandView.scopesReady).
+  scopesReady: boolean;
 }) {
-  const { data, loading, error } = useRankings({ month, metric, scopeType, scopeId });
+  const { data, loading, error } = useRankings({
+    month,
+    metric,
+    scopeType,
+    scopeId,
+    enabled: scopesReady,
+  });
   if (error) {
     const { title, detail } = describeError(error);
     return (

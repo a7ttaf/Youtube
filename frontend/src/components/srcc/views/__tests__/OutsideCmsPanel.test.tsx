@@ -200,6 +200,14 @@ const URL_RESPONDERS: Array<{ // skipcq: JS-0067
     build: (o) => o.issues ?? DEFAULT_ISSUES },
   { match: (url) => url.includes("/smart-alerts"),
     build: () => DEFAULT_SMART_ALERTS },
+  // Resolve the authorized-scope listing so CommandView's scopesReady gate
+  // flips promptly and the gated net-revenue read fires (review #102 Qodo #3).
+  { match: (url) => url.includes("/revenue/scopes"),
+    build: () =>
+      () =>
+        jsonResponse({
+          scopes: [{ scope_type: "global", scope_id: null, label: "Global" }],
+        }) },
   { match: (url) => url.includes("/net-revenue"),
     build: () => DEFAULT_NET_REVENUE },
 ];
@@ -315,8 +323,8 @@ describe("OutsideCmsMonitorPanel in CommandView", () => {
 
     // Outside-cms half renders despite the issues 500.
     expect(await screen.findByText("Outside Channel One")).toBeInTheDocument();
-    // Net-revenue keeps rendering.
-    expect(screen.getAllByText("UC-DRAMA-01").length).toBeGreaterThan(0);
+    // Net-revenue keeps rendering (await: the read is gated on scopesReady).
+    expect((await screen.findAllByText("UC-DRAMA-01")).length).toBeGreaterThan(0);
     // The issues half surfaces the typed request-failed copy.
     expect(screen.getByText(/Request failed \(500\)/)).toBeInTheDocument();
   });

@@ -108,28 +108,30 @@ function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
 // one). net-revenue is driven by the test; smart-alerts + rankings + scopes
 // default to a quiet body so this suite isolates net-revenue behaviour. The
 // scope selector defaults to global-only so the existing assertions are unchanged.
+// Dispatch is a URL-substring -> responder table (data-driven) rather than a
+// chain of if/else branches to keep the routing function's cyclomatic complexity
+// below DeepSource's medium-risk threshold.
 function routeFetch( // skipcq: JS-0067
   netRevenue: () => Response,
   smartAlerts?: () => Response,
   scopes?: () => Response,
 ) {
+  const routes: ReadonlyArray<{ match: string; respond: () => Response }> = [
+    {
+      match: "/revenue/scopes",
+      respond: scopes ?? (() => jsonResponse({ scopes: [] })),
+    },
+    {
+      match: "/smart-alerts",
+      respond: smartAlerts ?? (() => jsonResponse(SMART_ALERTS_CLEAR)),
+    },
+    { match: "/rankings", respond: () => jsonResponse(RANKINGS_EMPTY) },
+  ];
   const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = String(input);
-    if (url.includes("/revenue/scopes")) {
-      return Promise.resolve(
-        (scopes ?? (() => jsonResponse({ scopes: [] })))(),
-      );
-    }
-    if (url.includes("/smart-alerts")) {
-      return Promise.resolve(
-        (smartAlerts ?? (() => jsonResponse(SMART_ALERTS_CLEAR)))(),
-      );
-    }
-    if (url.includes("/rankings")) {
-      return Promise.resolve(jsonResponse(RANKINGS_EMPTY));
-    }
-    return Promise.resolve(netRevenue());
+    const route = routes.find((entry) => url.includes(entry.match));
+    return Promise.resolve(route ? route.respond() : netRevenue());
   });
   return fetchMock;
 }
@@ -212,6 +214,14 @@ describe("CommandView wired to net-revenue", () => {
         if (url.includes("/smart-alerts")) {
           return Promise.resolve(jsonResponse(SMART_ALERTS_CLEAR));
         }
+        // Resolve scopes + rankings immediately so scopesReady flips and the
+        // gated net-revenue read can fire — the load-under-test is net-revenue's.
+        if (url.includes("/revenue/scopes")) {
+          return Promise.resolve(jsonResponse({ scopes: [] }));
+        }
+        if (url.includes("/rankings")) {
+          return Promise.resolve(jsonResponse(RANKINGS_EMPTY));
+        }
         return new Promise<Response>((resolve) => {
           resolveNetRevenue = resolve;
         });
@@ -220,8 +230,13 @@ describe("CommandView wired to net-revenue", () => {
     renderCommandView(true);
 
     // Loading badges render while the net-revenue request is in flight.
-    expect(screen.getAllByText("Loading").length).toBeGreaterThan(0);
-
+    await waitFor(() =>
+      expect(screen.getAllByText("Loading").length).toBeGreaterThan(0),
+    );
+    // The net-revenue read is gated on scopesReady; await its in-flight promise
+    // (assigned once the scopes fetch resolves and flips the gate) before
+    // resolving it.
+    await waitFor(() => expect(resolveNetRevenue).toBeDefined());
     resolveNetRevenue?.(jsonResponse(NET_REVENUE_BODY));
     await waitFor(() =>
       expect(screen.getAllByText("$1,000.00").length).toBeGreaterThan(0),
@@ -258,14 +273,17 @@ describe("CommandView dynamic scope selector", () => {
     );
     renderCommandView(true);
 
-    // Wait for the options to load, then select the company scope by its label.
+    // Wait for the options to load, then select the company scope. selectOptions
+    // matches by the option's VALUE (a stable "scopeType:scopeId" key from
+    // scopeOptionKey), NOT its visible label — passing the label string would be
+    // a no-op against the real <option value=...>, weakening the regression guard
+    // (review #102 Qodo #1). Select by the option element so the assertion stays
+    // robust regardless of the key format.
     const selector = await screen.findByLabelText("Scope");
-    await waitFor(() =>
-      expect(
-        within(selector).getByRole("option", { name: "Company Alpha" }),
-      ).toBeInTheDocument(),
+    const companyOption = await waitFor(() =>
+      within(selector).getByRole("option", { name: "Company Alpha" }),
     );
-    await userEvent.selectOptions(selector, "Company Alpha");
+    await userEvent.selectOptions(selector, companyOption);
 
     // The scoped read params must appear on BOTH the net-revenue and the
     // rankings request URLs (the regression guard the rankings test established
@@ -310,5 +328,45 @@ describe("CommandView dynamic scope selector", () => {
       .filter((u) => u.includes("/net-revenue"));
     expect(netCalls.length).toBeGreaterThan(0);
     expect(netCalls.every((u) => !u.includes("scope_id="))).toBe(true);
+  });
+
+  it("holds the net-revenue + rankings reads until /revenue/scopes resolves", async () => {
+    // While the authorized-scope fetch is still pending, CommandView must NOT
+    // fire a net-revenue or rankings read (review #102 Qodo #3): the scope
+    // resolves to the global fallback during the load window, so firing
+    // immediately would trigger an unauthorized global read for a scoped viewer.
+    let resolveScopes: ((value: Response) => void) | undefined;
+    (globalThis.fetch as ReturnType<typeof vi.fn>).mockImplementation(
+      (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/revenue/scopes")) {
+          return new Promise<Response>((resolve) => {
+            resolveScopes = resolve;
+          });
+        }
+        // Any other read (net-revenue / rankings / smart-alerts) is recorded if
+        // it fires; it should NOT fire until the scopes promise resolves.
+        return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
+      },
+    );
+    renderCommandView(true);
+
+    // Before the scopes verdict, NO net-revenue or rankings request has fired.
+    const callsBefore = (globalThis.fetch as ReturnType<typeof vi.fn>).mock.calls.map(
+      (c) => String(c[0]),
+    );
+    expect(callsBefore.some((u) => u.includes("/net-revenue"))).toBe(false);
+    expect(callsBefore.some((u) => u.includes("/rankings"))).toBe(false);
+
+    // Resolve the scopes fetch (the authorized set arrives) — now the gated
+    // reads fire against the resolved scope.
+    resolveScopes?.(jsonResponse({ scopes: SCOPES_GLOBAL_AND_COMPANY }));
+    await waitFor(() => {
+      const callsAfter = (
+        globalThis.fetch as ReturnType<typeof vi.fn>
+      ).mock.calls.map((c) => String(c[0]));
+      expect(callsAfter.some((u) => u.includes("/net-revenue"))).toBe(true);
+      expect(callsAfter.some((u) => u.includes("/rankings"))).toBe(true);
+    });
   });
 });
