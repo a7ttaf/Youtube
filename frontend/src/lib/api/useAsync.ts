@@ -101,7 +101,7 @@ export const useAsync = <T,>(
     // Command Center holds net-revenue/rankings reads until the authorized-scope
     // fetch resolves, preventing an initial unauthorized global read). Returning
     // a no-op cleanup keeps the return type consistent across all branches.
-    if (!enabled) return () => {};
+    if (!enabled) return () => { return; };
     let active = true;
     // FIX: clear data at fetch start so a slow request under a NEW month/scope
     // filter falls back to the loading state instead of briefly showing the
