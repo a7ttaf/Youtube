@@ -76,11 +76,19 @@ def build_authorized_revenue_scopes(
     company_ids: set[str] = set()
 
     if has_global:
-        # A global grant authorizes the entire active universe. company_names
-        # (from the active org-unit reader) is the authoritative active-company
-        # set; the name maps carry exactly the tenant's active sectors/companies.
+        # A global grant authorizes the entire active universe. The sector set
+        # comes from the org-unit reader's active sector names.  For companies,
+        # we intersect with org_index.company_sector so the selector only offers
+        # companies whose parent sector is also active — matching the access
+        # index used by _revenue_read_scope_to_channel_ids on the read path.
+        # Without this intersection, a company whose parent sector is inactive
+        # would appear in the selector but 403 on selection (empty channel set).
         sector_ids.update(sector_names.keys())
-        company_ids.update(company_names.keys())
+        company_ids.update(
+            company_id
+            for company_id in company_names
+            if company_id in org_index.company_sector
+        )
     else:
         for scope in granted:
             if scope.id is None:

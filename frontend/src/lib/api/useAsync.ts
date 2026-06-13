@@ -71,7 +71,7 @@ export function useAsync<T>( // skipcq: JS-0067
 
   const reload = useCallback(() => setNonce((value) => value + 1), []);
 
-  useEffect(() => { // skipcq: JS-R1005
+  useEffect(function () { // skipcq: JS-R1005
     // FIX (review #102): gate the fetch on `enabled`. While disabled the effect
     // issues NO request and leaves loading at its initial true so callers render
     // their loading state instead of acting on a not-yet-decided scope (e.g. the
