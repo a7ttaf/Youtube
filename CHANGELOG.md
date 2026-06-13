@@ -16,6 +16,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   persisted rows should read `.entries`; connector-run accounting should use
   `.created`, `.updated`, and `.unchanged` for source-row classification.
 
+### Fixed
+- `ConnectorJobExecutor._audit_failed_before_start` now sets `TENANT_CTX` to a
+  minimal `Tenant` (id-only) before opening the audit session, so the
+  `after_begin` hook in `db/session.py` writes the trusted tenant-context row
+  and the `audit_logs` RLS `WITH CHECK (tenant_id = app_current_tenant_id())`
+  policy admits the Bucket-A failure-audit INSERT on Postgres. Without this,
+  `app_platform` (which is `NOBYPASSRLS`) could not satisfy the policy and
+  every pre-start connector failure was silently lost. The contextvar is
+  reset in a `finally` block so the prior tenant is always restored.
+- Centralized the placeholder-tenant fabrication in
+  `tenancy.models.make_placeholder_tenant` (with `PLACEHOLDER_TENANT_EPOCH` and
+  `DEFAULT_PRIMARY_CURRENCY` module constants). Both
+  `ConnectorJobExecutor._audit_failed_before_start` and the test-only branch
+  of `connector_tenant_context` now route through the same factory, so the
+  placeholder shape can no longer drift between the audit and the unit-test
+  paths.
+
 ### Removed
 - *(planned)* Neo4j component dropped entirely — `backend/ums_smart_revenue/graph/`, `tests/graph/`, `neo4j==6.2.0` dependency, related auth permissions, retired specs archived to `Docs/_archived/`.
 

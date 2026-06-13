@@ -28,6 +28,13 @@ from uuid import UUID
 # synthetic if it ever leaks into a log.
 PLACEHOLDER_TENANT_EPOCH: datetime = datetime(1970, 1, 1, tzinfo=UTC)
 
+# Default currency for the placeholder tenant. Mirrors the ``tenants.primary_currency``
+# schema default so the fabricated dataclass stays valid without the caller
+# having to know the schema default. Promoted to a module constant so a future
+# schema-default change (or a test that needs a non-USD placeholder) does not
+# have to edit the factory body.
+DEFAULT_PRIMARY_CURRENCY: str = "USD"
+
 
 class TenantStatus(StrEnum):
     """Lifecycle states for a tenant — mirrors the SQL CHECK constraint."""
@@ -94,7 +101,7 @@ def make_placeholder_tenant(
     *,
     slug: str,
     display_name: str,
-    primary_currency: str = "USD",
+    primary_currency: str = DEFAULT_PRIMARY_CURRENCY,
 ) -> Tenant:
     """Return a minimal ``Tenant`` carrying only the id needed by the RLS hook.
 
@@ -106,9 +113,9 @@ def make_placeholder_tenant(
         Caller-supplied placeholders so the audit / test branch can
         self-identify the fabrication in logs.
     primary_currency:
-        Defaults to ``"USD"`` (the schema's NOT NULL default) so the
-        dataclass stays valid without the caller having to know the
-        schema default.
+        Defaults to ``DEFAULT_PRIMARY_CURRENCY`` (mirrors the
+        ``tenants.primary_currency`` schema default) so the dataclass
+        stays valid without the caller having to know the schema default.
     """
     return Tenant(
         id=tenant_id,

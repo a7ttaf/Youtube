@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from ums_smart_revenue.tenancy.models import (
+    DEFAULT_PRIMARY_CURRENCY,
     PLACEHOLDER_TENANT_EPOCH,
     Tenant,
     TenantStatus,
@@ -54,12 +55,13 @@ def test_make_placeholder_tenant_uses_shared_epoch_sentinel() -> None:
 
 
 def test_make_placeholder_tenant_defaults_to_usd() -> None:
-    """The default primary currency is the schema's NOT NULL default ``USD``."""
+    """The default primary currency is the module-level constant (``USD``)."""
     tenant = make_placeholder_tenant(
         tenant_id=uuid4(),
         slug="placeholder-slug",
         display_name="placeholder display",
     )
+    assert tenant.primary_currency == DEFAULT_PRIMARY_CURRENCY
     assert tenant.primary_currency == "USD"
 
 
