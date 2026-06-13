@@ -66,6 +66,15 @@ of this is required for any phase below to work end-to-end.
   columns + CHECK (migration `20260612_0001`) stamped at the single
   `resolve_connector_credentials` chokepoint. See
   `Docs/15_DELIVERY_BACKLOG.md` for the full scope + deferrals.
+- ✅ Executor Bucket-A audit RLS fix: post-#95 reverts dropped the
+  `TENANT_CTX` minimal-tenant set in `executor.py::_audit_failed_before_start`,
+  so `app_current_tenant_id()` was NULL and the `audit_logs`
+  `WITH CHECK (tenant_id = app_current_tenant_id())` RLS policy denied the
+  Bucket-A failure-audit INSERT on Postgres (red gate
+  `test_bucket_a_audit_persists_under_platform_lane_on_postgres`). Restored the
+  fabricated-`Tenant` contextvar bridge (id-only; reset via `finally`) so the
+  `after_begin` hook writes the trusted context row and the INSERT satisfies the
+  policy. SQLite tier unaffected (RLS not enforced there).
 
 ### S1 — Governance, infra, scope freeze (2026-05-16)
 
