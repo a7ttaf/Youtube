@@ -334,52 +334,6 @@ const SmartAlertsHeaderBadge = ({
   return <Badge {...alertDataBadge(data)} />;
 };
 
-// ============================================================================
-// Purpose: Smart Alerts / Problem Panel for the Command Center. Fetches the
-//   monthly smart-alerts summary (overall status + highest severity + the
-//   prioritized alert rows) via its OWN useSmartAlerts hook so it fails
-//   INDEPENDENTLY of the net-revenue content: a 403 (the panel is gated behind
-//   four finance-month permissions the net-revenue read does not all require) or
-//   any other error renders inside this card only — the channel table, status
-//   strip, and explain panel keep rendering. Loading / error / 403 / empty
-//   states mirror the rest of CommandView and reuse describeError.
-// Database/ORM: None (frontend) — consumes GET /revenue/months/{month}/smart-alerts.
-// Standards: No money is rendered here (alerts carry messages, not gated finance
-//   cells), so no canViewFinance gating is needed; severity drives the badge
-//   tone only. Read-only — no mutation.
-// Blast Radius: None detected (read-only finance health display). The panel does
-//   NOT block the surrounding net-revenue render on its own 403/error.
-// Connections:
-//   - File: frontend/src/lib/api/useSmartAlerts.ts -> the fetch hook.
-//   - File: frontend/src/lib/api/types.ts -> SmartAlertsSummary contract.
-//   - File: backend/ums_smart_revenue/api/revenue.py:844 get_month_smart_alerts.
-// ============================================================================
-const SmartAlertsPanel = ({ month }: { month: string }) => {
-  const { data, loading, error, reload } = useSmartAlerts({ month });
-
-  return (
-    <section className="panel" aria-labelledby="smartAlertsTitle" style={{ marginBottom: 16 }}>
-      <div className="panel-header">
-        <div className="panel-title">
-          <strong id="smartAlertsTitle">Smart Alerts / Problem Panel</strong>
-          <span>Cross-domain finance health signals for {month}</span>
-        </div>
-        <SmartAlertsHeaderBadge data={data} loading={loading} error={error} />
-        <button
-          type="button"
-          className="icon-button"
-          aria-label="Refresh smart alerts"
-          title="Refresh smart alerts"
-          onClick={reload}
-        >
-          ↻
-        </button>
-      </div>
-      <SmartAlertsBody data={data} loading={loading} error={error} />
-    </section>
-  );
-};
-
 // Read alerts defensively: a missing/non-array field is treated as "no alerts"
 // rather than throwing inside the panel. Extracted to keep SmartAlertsBody's
 // cyclomatic complexity below the DeepSource medium-risk threshold.
@@ -461,6 +415,52 @@ const SmartAlertsBody = ({
         />
       ))}
     </div>
+  );
+};
+
+// ============================================================================
+// Purpose: Smart Alerts / Problem Panel for the Command Center. Fetches the
+//   monthly smart-alerts summary (overall status + highest severity + the
+//   prioritized alert rows) via its OWN useSmartAlerts hook so it fails
+//   INDEPENDENTLY of the net-revenue content: a 403 (the panel is gated behind
+//   four finance-month permissions the net-revenue read does not all require) or
+//   any other error renders inside this card only — the channel table, status
+//   strip, and explain panel keep rendering. Loading / error / 403 / empty
+//   states mirror the rest of CommandView and reuse describeError.
+// Database/ORM: None (frontend) — consumes GET /revenue/months/{month}/smart-alerts.
+// Standards: No money is rendered here (alerts carry messages, not gated finance
+//   cells), so no canViewFinance gating is needed; severity drives the badge
+//   tone only. Read-only — no mutation.
+// Blast Radius: None detected (read-only finance health display). The panel does
+//   NOT block the surrounding net-revenue render on its own 403/error.
+// Connections:
+//   - File: frontend/src/lib/api/useSmartAlerts.ts -> the fetch hook.
+//   - File: frontend/src/lib/api/types.ts -> SmartAlertsSummary contract.
+//   - File: backend/ums_smart_revenue/api/revenue.py:844 get_month_smart_alerts.
+// ============================================================================
+const SmartAlertsPanel = ({ month }: { month: string }) => {
+  const { data, loading, error, reload } = useSmartAlerts({ month });
+
+  return (
+    <section className="panel" aria-labelledby="smartAlertsTitle" style={{ marginBottom: 16 }}>
+      <div className="panel-header">
+        <div className="panel-title">
+          <strong id="smartAlertsTitle">Smart Alerts / Problem Panel</strong>
+          <span>Cross-domain finance health signals for {month}</span>
+        </div>
+        <SmartAlertsHeaderBadge data={data} loading={loading} error={error} />
+        <button
+          type="button"
+          className="icon-button"
+          aria-label="Refresh smart alerts"
+          title="Refresh smart alerts"
+          onClick={reload}
+        >
+          ↻
+        </button>
+      </div>
+      <SmartAlertsBody data={data} loading={loading} error={error} />
+    </section>
   );
 };
 
