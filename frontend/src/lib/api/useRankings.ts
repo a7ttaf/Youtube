@@ -34,24 +34,40 @@ export type RankingsQuery = {
 //   - File: frontend/src/lib/api/types.ts -> MonthRankingsResponse.
 //   - File: backend/ums_smart_revenue/api/revenue.py -> get_month_rankings.
 // ============================================================================
+
+// Optional query parameters accepted by the rankings endpoint. Each entry is
+// (query-param name, value-to-set-if-present). Keeping the mapping in a table
+// drops the per-render branch count below the JS-R1005 medium-risk threshold.
+const QUERY_PARAM_BUILDERS: ReadonlyArray<{ // skipcq: JS-0067
+  key: string;
+  pick: (q: RankingsQuery) => string | undefined;
+}> = [
+  { key: "scope_type", pick: (q) => q.scopeType },
+  { key: "scope_id", pick: (q) => q.scopeId ?? undefined },
+  { key: "metric", pick: (q) => q.metric },
+  { key: "limit", pick: (q) => (q.limit !== undefined ? String(q.limit) : undefined) },
+];
+
+function buildRankingsPath(query: RankingsQuery): string {
+  const params = new URLSearchParams();
+  for (const { key, pick } of QUERY_PARAM_BUILDERS) {
+    const value = pick(query);
+    if (value) params.set(key, value);
+  }
+  const qs = params.toString();
+  return `/revenue/months/${encodeURIComponent(query.month)}/rankings${
+    qs ? `?${qs}` : ""
+  }`;
+}
+
 export function useRankings( // skipcq: JS-0067
   query: RankingsQuery,
 ): AsyncState<MonthRankingsResponse> {
   const client = useApiClient();
-  const { month, scopeType, scopeId, metric, limit } = query;
-
-  const run = useCallback(() => {
-    const params = new URLSearchParams();
-    if (scopeType) params.set("scope_type", scopeType);
-    if (scopeId) params.set("scope_id", scopeId);
-    if (metric) params.set("metric", metric);
-    if (limit !== undefined) params.set("limit", String(limit));
-    const qs = params.toString();
-    const path = `/revenue/months/${encodeURIComponent(month)}/rankings${
-      qs ? `?${qs}` : ""
-    }`;
-    return client.get<MonthRankingsResponse>(path);
-  }, [client, month, scopeType, scopeId, metric, limit]);
-
+  const path = buildRankingsPath(query);
+  const run = useCallback(
+    () => client.get<MonthRankingsResponse>(path),
+    [client, path],
+  );
   return useAsync(run);
 }

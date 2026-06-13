@@ -428,9 +428,10 @@ def test_export_bundle_includes_coverage_alert_for_factless_channels(tmp_path):
     ]
     assert "CHANNELS_MISSING_REVENUE_FACTS" in coverage_codes
     coverage = next(
-        alert
-        for alert in summaries.smart_alerts.alerts
-        if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"
+        (alert for alert in summaries.smart_alerts.alerts
+         if alert.code == "CHANNELS_MISSING_REVENUE_FACTS"),
+        None,
     )
+    assert coverage is not None
     assert coverage.details["channel_count"] == 1
     assert coverage.details["sample_channel_ids"] == ["chB"]

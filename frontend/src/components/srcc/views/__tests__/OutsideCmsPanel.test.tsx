@@ -12,6 +12,14 @@ import { TenantProvider } from "@/contexts/TenantContext";
 
 const ORIGINAL_FETCH = globalThis.fetch;
 
+// No-op function used to suppress console.error / fetch during a specific test
+// while preserving the spy for assertion. Using a named function (rather than
+// `() => {}`) keeps the JS-0321 / arrow-empty lint family happy and the call
+// site readable.
+function noop() { // skipcq: JS-0067
+  return undefined;
+}
+
 beforeEach(() => {
   vi.stubGlobal("fetch", vi.fn());
 });
@@ -168,30 +176,39 @@ function jsonResponse(body: unknown, status = 200) { // skipcq: JS-0067
   });
 }
 
-// Route each fetch by URL so the monitor panel's two reads (outside-cms +
-// issues) can be driven independently from the net-revenue + smart-alerts reads.
-function routeFetch(opts: { // skipcq: JS-0067
+// Per-URL response strategy. Keyed by the URL substring to match, value is
+// the response builder. Keeping the lookup in a table (rather than chained
+// `if`s in `routeFetch`) drops the function's cyclomatic complexity below the
+// JS-R1005 medium-risk threshold.
+const URL_RESPONDERS: Array<{ // skipcq: JS-0067
+  match: (url: string) => boolean;
+  build: (opts: RouteOptions) => () => Response;
+}> = [
+  { match: (url) => url.includes("/channels/outside-cms"),
+    build: (o) => o.outsideCms ?? (() => jsonResponse(OUTSIDE_CMS_BODY)) },
+  { match: (url) => url.includes("/channels/issues"),
+    build: (o) => o.issues ?? (() => jsonResponse(CHANNEL_ISSUES_BODY)) },
+  { match: (url) => url.includes("/smart-alerts"),
+    build: () => () => jsonResponse(SMART_ALERTS_CLEAR) },
+  { match: (url) => url.includes("/net-revenue"),
+    build: () => () => jsonResponse(NET_REVENUE_BODY) },
+];
+
+type RouteOptions = { // skipcq: JS-0067
   outsideCms?: () => Response;
   issues?: () => Response;
-}) {
+};
+
+// Route each fetch by URL so the monitor panel's two reads (outside-cms +
+// issues) can be driven independently from the net-revenue + smart-alerts reads.
+function routeFetch(opts: RouteOptions = {}) { // skipcq: JS-0067
   const fetchMock = globalThis.fetch as ReturnType<typeof vi.fn>;
   fetchMock.mockImplementation((input: RequestInfo | URL) => {
     const url = String(input);
-    if (url.includes("/channels/outside-cms")) {
-      return Promise.resolve(
-        (opts.outsideCms ?? (() => jsonResponse(OUTSIDE_CMS_BODY)))(),
-      );
-    }
-    if (url.includes("/channels/issues")) {
-      return Promise.resolve(
-        (opts.issues ?? (() => jsonResponse(CHANNEL_ISSUES_BODY)))(),
-      );
-    }
-    if (url.includes("/smart-alerts")) {
-      return Promise.resolve(jsonResponse(SMART_ALERTS_CLEAR));
-    }
-    if (url.includes("/net-revenue")) {
-      return Promise.resolve(jsonResponse(NET_REVENUE_BODY));
+    for (const responder of URL_RESPONDERS) {
+      if (responder.match(url)) {
+        return Promise.resolve(responder.build(opts)());
+      }
     }
     return Promise.resolve(jsonResponse({}, 404));
   });
@@ -302,7 +319,8 @@ describe("OutsideCmsMonitorPanel in CommandView", () => {
   it("renders two issues for the same channel with distinct keys (no duplicate-key warning)", async () => {
     // Capture React's duplicate-key warnings so the regression guard catches
     // a future revert back to keying on youtube_channel_id alone.
-    const consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const consoleErrorSpy = vi.spyOn(console, "error");
+    consoleErrorSpy.mockImplementation(noop);
     try {
       routeFetch({ issues: () => jsonResponse(CHANNEL_ISSUES_MULTI) });
       renderCommandView({ canViewAnalytics: true });
