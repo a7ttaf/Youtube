@@ -27,9 +27,6 @@ import { ApiError } from "@/lib/api/client";
 //   - File: frontend/src/lib/api/useNetRevenue.ts -> first consumer.
 // ============================================================================
 
-// Gated calls reuse this no-op cleanup so the disabled early-return is uniform.
-const NOOP_CLEANUP = () => {};
-
 export type AsyncState<T> = {
   data: T | null;
   loading: boolean;
@@ -55,7 +52,7 @@ export function useAsync<T>( // skipcq: JS-0067
   // useCallback) so the effect does not re-run on every render.
   run: () => Promise<T>,
   // When false, no fetch is issued; loading remains true until enabled flips.
-  enabled: boolean = true,
+  enabled = true,
 ): AsyncState<T> {
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
@@ -79,8 +76,9 @@ export function useAsync<T>( // skipcq: JS-0067
     // issues NO request and leaves loading at its initial true so callers render
     // their loading state instead of acting on a not-yet-decided scope (e.g. the
     // Command Center holds net-revenue/rankings reads until the authorized-scope
-    // fetch resolves, preventing an initial unauthorized global read).
-    if (!enabled) return NOOP_CLEANUP;
+    // fetch resolves, preventing an initial unauthorized global read). Returning
+    // undefined (no cleanup) is valid for a gated useEffect branch.
+    if (!enabled) return;
     let active = true;
     // FIX: clear data at fetch start so a slow request under a NEW month/scope
     // filter falls back to the loading state instead of briefly showing the
